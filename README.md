@@ -39,48 +39,82 @@ Still intentionally **not** implemented:
 ## What the wizard manages
 
 ```mermaid
-flowchart TD
-    A[Guided Install or Env File] --> B[Desired State Resolution]
-    B --> C[Lifecycle Engine]
+stateDiagram-v2
+    [*] --> Input: guided install or env file
+    Input --> DesiredState: resolve target model
+    DesiredState --> Preflight
+    Preflight --> DokployBootstrap
+    DokployBootstrap --> Tailscale
+    Tailscale --> CloudflareNetworking
+    CloudflareNetworking --> CloudflareAccess
+    CloudflareAccess --> SharedCore
+    SharedCore --> Headscale
+    Headscale --> Matrix
+    Matrix --> NextcloudOnlyOffice
+    NextcloudOnlyOffice --> SeaweedFS
+    SeaweedFS --> OpenClaw
+    OpenClaw --> MyFarmAdvisor
+    MyFarmAdvisor --> Installed
 
-    C --> P1[Preflight]
-    P1 --> P2[Dokploy Bootstrap]
-    P2 --> P3[Tailscale]
-    P3 --> P4[Cloudflare Networking]
-    P4 --> P5[Cloudflare Access<br/>OpenClaw + My Farm Advisor only]
-    P5 --> P6[Shared Core]
-    P6 --> P7[Headscale]
-    P7 --> P8[Matrix]
-    P8 --> P9[Nextcloud + OnlyOffice]
-    P9 --> P10[SeaweedFS]
-    P10 --> P11[OpenClaw]
-    P11 --> P12[My Farm Advisor]
+    Installed --> Modify
+    Installed --> Resume
+    Installed --> Uninstall
 
-    C --> S[(State Dir)]
-    S --> R[Modify / Resume / Uninstall]
+    Modify --> DesiredState
+    Resume --> Preflight
+    Uninstall --> [*]
+
+    note right of Installed
+        Every successful phase updates:
+        - raw-input.json
+        - desired-state.json
+        - applied-state.json
+        - ownership-ledger.json
+    end note
 ```
 
 ## Ingress and security model
 
 ```mermaid
 flowchart LR
-    Internet[Public Internet] --> CF[Cloudflare Tunnel]
-    CF --> PublicApps[Public Service Hostnames]
+    subgraph PublicIngress[Public ingress]
+        Internet[Public Internet] --> Tunnel[Cloudflare Tunnel]
+    end
 
-    TNet[Tailscale Tailnet] --> Host[Private/Admin Host Access]
+    subgraph PrivateAdmin[Private / admin access]
+        Tailnet[Tailscale Tailnet] --> HostAccess[Host and private admin access]
+    end
 
-    PublicApps --> Dokploy[Dokploy]
-    PublicApps --> Matrix[Matrix]
-    PublicApps --> Headscale[Headscale]
-    PublicApps --> Nextcloud[Nextcloud]
-    PublicApps --> OnlyOffice[OnlyOffice]
-    PublicApps --> S3[SeaweedFS / S3]
-    PublicApps --> OpenClaw[OpenClaw]
-    PublicApps --> MFA[My Farm Advisor]
+    subgraph PublicSurfaces[Public service hostnames]
+        DokployHost[Dokploy]
+        MatrixHost[Matrix]
+        HeadscaleHost[Headscale]
+        NextcloudHost[Nextcloud]
+        OnlyOfficeHost[OnlyOffice]
+        SeaweedHost[SeaweedFS / S3]
+        OpenClawHost[OpenClaw]
+        FarmHost[My Farm Advisor]
+    end
 
-    CF --> Access[Cloudflare Access]
-    Access --> OpenClaw
-    Access --> MFA
+    subgraph AccessWrapped[Cloudflare Access wrapped apps]
+        OpenClawAccess[OpenClaw]
+        FarmAccess[My Farm Advisor]
+    end
+
+    Tunnel --> DokployHost
+    Tunnel --> MatrixHost
+    Tunnel --> HeadscaleHost
+    Tunnel --> NextcloudHost
+    Tunnel --> OnlyOfficeHost
+    Tunnel --> SeaweedHost
+    Tunnel --> OpenClawHost
+    Tunnel --> FarmHost
+
+    HostAccess --> DokployHost
+    HostAccess --> HeadscaleHost
+
+    OpenClawHost --> OpenClawAccess
+    FarmHost --> FarmAccess
 ```
 
 ### Cloudflare Access scope today
@@ -322,12 +356,12 @@ That said, there are still practical follow-ups you should expect before calling
 
 ```mermaid
 flowchart TD
-    subgraph ControlPlane[Control Plane]
+    subgraph ControlPlane[Control plane]
         Dokploy[Dokploy]
         SharedCore[Shared Core<br/>network + postgres + redis]
     end
 
-    subgraph CoreServices[Core Services]
+    subgraph CoreServices[Core services]
         Headscale[Headscale]
         Matrix[Matrix]
         Nextcloud[Nextcloud]
@@ -335,16 +369,24 @@ flowchart TD
         SeaweedFS[SeaweedFS / S3]
     end
 
-    subgraph AdvisorApps[Advisor Apps]
+    subgraph AdvisorApps[Advisor apps]
         OpenClaw[OpenClaw]
         MFA[My Farm Advisor]
     end
 
     Dokploy --> SharedCore
+    Dokploy --> Headscale
+    Dokploy --> Matrix
+    Dokploy --> Nextcloud
+    Dokploy --> SeaweedFS
+    Dokploy --> OpenClaw
+    Dokploy --> MFA
+
     SharedCore --> Matrix
     SharedCore --> Nextcloud
     SharedCore --> OpenClaw
     SharedCore --> MFA
+
     Nextcloud --> OnlyOffice
 ```
 
