@@ -54,7 +54,7 @@ def reconcile_networking(
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
 ) -> NetworkingPhase:
-    credentials = _resolve_credentials(raw_env, desired_state)
+    credentials = _resolve_credentials(raw_env, desired_state, backend)
     backend.validate_account_access(credentials.account_id)
     backend.validate_zone_access(credentials.zone_id)
 
@@ -149,7 +149,7 @@ def reconcile_cloudflare_access(
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
 ) -> AccessPhase:
-    credentials = _resolve_credentials(raw_env, desired_state)
+    credentials = _resolve_credentials(raw_env, desired_state, backend)
     emails = desired_state.cloudflare_access_otp_emails
     target_hostnames = tuple(
         desired_state.hostnames[key]
@@ -290,11 +290,18 @@ def build_access_ledger(
 
 
 def _resolve_credentials(
-    raw_env: RawEnvInput, desired_state: DesiredState
+    raw_env: RawEnvInput, desired_state: DesiredState, backend: CloudflareBackend
 ) -> CloudflareCredentials:
     values = raw_env.values
     account_id = _require_env_value(values, "CLOUDFLARE_ACCOUNT_ID")
-    zone_id = _require_env_value(values, "CLOUDFLARE_ZONE_ID")
+    zone_id = values.get("CLOUDFLARE_ZONE_ID")
+    if zone_id is None:
+        zone_id = backend.resolve_zone_id(account_id, desired_state.root_domain)
+        if zone_id is None:
+            raise CloudflareError(
+                "Cloudflare could not find a matching zone for the root domain. "
+                "Use the root domain managed in Cloudflare or provide an explicit Zone ID."
+            )
     tunnel_name = values.get("CLOUDFLARE_TUNNEL_NAME", f"{desired_state.stack_name}-tunnel")
     return CloudflareCredentials(account_id=account_id, zone_id=zone_id, tunnel_name=tunnel_name)
 

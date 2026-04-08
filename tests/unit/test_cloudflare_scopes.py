@@ -44,6 +44,11 @@ class FakeCloudflareBackend:
         if not self.zone_ok:
             raise CloudflareError(f"zone scope failed for {zone_id}")
 
+    def resolve_zone_id(self, account_id: str, zone_name: str) -> str | None:
+        if not self.zone_ok:
+            raise CloudflareError(f"zone scope failed for {zone_name}")
+        return f"resolved-{zone_name}"
+
     def get_tunnel(self, account_id: str, tunnel_id: str) -> CloudflareTunnel | None:
         if self.existing_tunnel is not None and self.existing_tunnel.tunnel_id == tunnel_id:
             return self.existing_tunnel
