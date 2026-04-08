@@ -11,8 +11,17 @@ from dokploy_wizard.state import RawEnvInput, resolve_desired_state
 def test_catalog_exposes_expected_pack_metadata() -> None:
     names = [pack.name for pack in iter_pack_catalog()]
 
-    assert names == ["headscale", "matrix", "nextcloud", "openclaw", "my-farm-advisor"]
+    assert names == [
+        "headscale",
+        "matrix",
+        "nextcloud",
+        "seaweedfs",
+        "openclaw",
+        "my-farm-advisor",
+    ]
     assert get_pack_definition("headscale").default_enabled is True
+    assert get_pack_definition("seaweedfs").slot is None
+    assert get_pack_definition("seaweedfs").hostnames[0].key == "s3"
     assert get_pack_definition("openclaw").slot is None
     assert get_pack_definition("my-farm-advisor").slot is None
     assert get_pack_definition("openclaw").mutable_resource_keys == ("OPENCLAW_REPLICAS",)

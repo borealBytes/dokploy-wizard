@@ -385,6 +385,8 @@ def _desired_state() -> DesiredState:
             "dokploy": "dokploy.example.com",
             "headscale": "headscale.example.com",
         },
+        seaweedfs_access_key=None,
+        seaweedfs_secret_key=None,
         openclaw_channels=(),
         openclaw_replicas=None,
         my_farm_advisor_channels=(),
