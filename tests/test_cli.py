@@ -889,6 +889,75 @@ def test_install_bootstraps_missing_docker_before_strict_preflight_rerun(
     }
 
 
+def test_install_bootstraps_missing_docker_on_supported_ubuntu_patch_release(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_env = parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env")
+    initial_host = _host_facts(
+        distribution_id="ubuntu",
+        version_id="24.04.2",
+        docker_installed=False,
+        docker_daemon_reachable=False,
+    )
+    remediated_host = _host_facts(
+        distribution_id="ubuntu",
+        version_id="24.04.2",
+        docker_installed=True,
+        docker_daemon_reachable=True,
+    )
+    remediation_calls: list[tuple[str, ...]] = []
+
+    class FakeHostPrereqBackend:
+        def package_installed(self, package_name: str) -> bool:
+            return package_name != "docker.io"
+
+        def docker_daemon_reachable(self) -> bool:
+            return False
+
+    host_fact_sequence = iter((initial_host, remediated_host))
+    monkeypatch.setattr(cli, "collect_host_facts", lambda _: next(host_fact_sequence))
+    monkeypatch.setattr(cli, "UbuntuAptHostPrerequisiteBackend", lambda _: FakeHostPrereqBackend())
+    monkeypatch.setattr(
+        cli,
+        "remediate_host_prerequisites",
+        lambda *, assessment, backend: remediation_calls.append(assessment.missing_packages),
+    )
+    monkeypatch.setattr(cli, "persist_install_scaffold", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    monkeypatch.setattr(cli, "write_target_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "ShellTailscaleBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "ShellOpenClawBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(
+        cli,
+        "run_preflight",
+        lambda desired_state, host_facts, *, allow_memory_shortfall=False: PreflightReport(
+            host_facts=host_facts,
+            required_profile=derive_required_profile(resolve_desired_state(raw_env)),
+            checks=(PreflightCheck(name="preflight", status="pass", detail="passed"),),
+            advisories=(),
+        ),
+    )
+
+    summary = cli.run_install_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    assert remediation_calls == [("docker.io",)]
+    assert summary["host_prerequisites"]["post_remediation_host_facts"]["version_id"] == "24.04.2"
+
+
 def test_install_on_unsupported_host_refuses_remediation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

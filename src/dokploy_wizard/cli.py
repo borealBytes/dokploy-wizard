@@ -955,7 +955,13 @@ def _prepare_install_host_prerequisites(
 def _host_supports_prerequisite_remediation(host_facts: Any) -> bool:
     distribution_id = getattr(host_facts, "distribution_id", None)
     version_id = getattr(host_facts, "version_id", None)
-    return bool(distribution_id == SUPPORTED_OS_ID and version_id == SUPPORTED_OS_VERSION)
+    return bool(
+        distribution_id == SUPPORTED_OS_ID
+        and isinstance(version_id, str)
+        and (
+            version_id == SUPPORTED_OS_VERSION or version_id.startswith(f"{SUPPORTED_OS_VERSION}.")
+        )
+    )
 
 
 def _run_preflight_report(
