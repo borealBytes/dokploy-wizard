@@ -314,6 +314,40 @@ def test_guided_install_can_emit_cloudflare_help(capsys: pytest.CaptureFixture[s
     assert "Zone -> DNS -> Edit" in captured.out
 
 
+def test_guided_install_sanitizes_bracketed_paste_sequences() -> None:
+    responses = iter(
+        [
+            "example.com",
+            "",
+            "",
+            "",
+            "secret-123",
+            "",
+            "n",
+            "\x1b[200~cf-token\x1b[201~",
+            "\x1b[200~account-123\x1b[201~",
+            "\x1b[200~zone-123\x1b[201~",
+        ]
+    )
+
+    values = prompt_for_initial_install_values(lambda _: next(responses))
+
+    assert values.cloudflare_api_token == "cf-token"
+    assert values.cloudflare_account_id == "account-123"
+    assert values.cloudflare_zone_id == "zone-123"
+
+
+def test_guided_state_dir_sanitizes_bracketed_paste(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pasted = f"\x1b[200~{tmp_path / 'guided-state'}\x1b[201~"
+    monkeypatch.setattr("builtins.input", lambda _: pasted)
+
+    assert (
+        cli._prompt_for_guided_state_dir(Path(".dokploy-wizard-state")) == tmp_path / "guided-state"
+    )
+
+
 def test_guided_install_generates_seaweedfs_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     responses = iter(["n", "n", "y", "n", "n"])
     monkeypatch.setattr(

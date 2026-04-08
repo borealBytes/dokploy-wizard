@@ -79,6 +79,7 @@ from dokploy_wizard.packs.prompts import (
     apply_prompt_selection,
     prompt_for_initial_install_values,
     prompt_for_pack_selection,
+    sanitize_prompt_response,
 )
 from dokploy_wizard.packs.resolver import has_explicit_pack_selection
 from dokploy_wizard.packs.seaweedfs import (
@@ -422,8 +423,8 @@ def _prompt_for_initial_install_raw_env(
 
 
 def _prompt_for_guided_state_dir(state_dir: Path) -> Path:
-    response = input(
-        f"Wizard state directory (install.env + state docs only; default: {state_dir}): "
+    response = sanitize_prompt_response(
+        input(f"Wizard state directory (install.env + state docs only; default: {state_dir}): ")
     ).strip()
     if response == "":
         return state_dir
@@ -1027,7 +1028,7 @@ def _require_install_memory_shortfall_override(
         check.detail for check in preflight_report.warning_checks() if check.name == "memory"
     )
     if prompt_for_memory_shortfall:
-        response = input("Proceed anyway? [y/N] ").strip().lower()
+        response = sanitize_prompt_response(input("Proceed anyway? [y/N] ")).strip().lower()
         if response in {"y", "yes"}:
             return
         raise PreflightError("Preflight failed: " + warning_detail)
