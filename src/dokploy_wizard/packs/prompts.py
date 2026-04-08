@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -10,6 +11,9 @@ from dokploy_wizard.packs.catalog import get_pack_definition
 from dokploy_wizard.state.models import RawEnvInput, StateValidationError
 
 PromptFn = Callable[[str], str]
+
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)")
 
 
 @dataclass(frozen=True)
@@ -112,8 +116,9 @@ def prompt_for_pack_selection(
             selected.append("matrix")
     if _prompt_yes_no(prompt, "Enable My Farm Advisor? [y/N]: ", default=False):
         selected.append("my-farm-advisor")
-        raw_channels = prompt(
-            "My Farm Advisor channels [telegram/matrix] (comma separated, optional): "
+        raw_channels = _read_prompt(
+            prompt,
+            "My Farm Advisor channels [telegram/matrix] (comma separated, optional): ",
         ).strip()
         if raw_channels != "":
             my_farm_advisor_channels = tuple(
@@ -189,12 +194,18 @@ def prompt_for_initial_install_values(
             "Enable Tailscale SSH for this host? [y/N]: ",
             default=False,
         )
-        raw_tags = prompt("Tailscale tags (comma separated tag:... values, optional): ").strip()
+        raw_tags = _read_prompt(
+            prompt,
+            "Tailscale tags (comma separated tag:... values, optional): ",
+        ).strip()
         if raw_tags != "":
             tailscale_tags = tuple(
                 sorted({item.strip() for item in raw_tags.split(",") if item.strip()})
             )
-        raw_routes = prompt("Tailscale subnet routes (comma separated CIDRs, optional): ").strip()
+        raw_routes = _read_prompt(
+            prompt,
+            "Tailscale subnet routes (comma separated CIDRs, optional): ",
+        ).strip()
         if raw_routes != "":
             tailscale_subnet_routes = tuple(
                 sorted({item.strip() for item in raw_routes.split(",") if item.strip()})
@@ -230,7 +241,7 @@ def prompt_for_initial_install_values(
 
 
 def _prompt_yes_no(prompt: PromptFn, message: str, *, default: bool) -> bool:
-    response = prompt(message).strip().lower()
+    response = _read_prompt(prompt, message).strip().lower()
     if response == "":
         return default
     if response in {"y", "yes"}:
@@ -247,7 +258,7 @@ def _prompt_choice(
     choices: tuple[str, ...],
     default: str,
 ) -> str:
-    response = prompt(message).strip().lower()
+    response = _read_prompt(prompt, message).strip().lower()
     if response == "":
         return default
     if response not in choices:
@@ -256,22 +267,36 @@ def _prompt_choice(
 
 
 def _prompt_non_empty(prompt: PromptFn, message: str) -> str:
-    response = prompt(message).strip()
+    response = _read_prompt(prompt, message).strip()
     if response == "":
         raise StateValidationError(f"Prompted value for {message.strip()!r} cannot be empty.")
     return response
 
 
 def _prompt_optional(prompt: PromptFn, message: str) -> str | None:
-    response = prompt(message).strip()
+    response = _read_prompt(prompt, message).strip()
     return response or None
 
 
 def _prompt_default(prompt: PromptFn, message: str, *, default: str) -> str:
-    response = prompt(message).strip()
+    response = _read_prompt(prompt, message).strip()
     if response == "":
         return default
     return response
+
+
+def _read_prompt(prompt: PromptFn, message: str) -> str:
+    return sanitize_prompt_response(prompt(message))
+
+
+def sanitize_prompt_response(response: str) -> str:
+    sanitized = response.replace("\x1b[200~", "").replace("\x1b[201~", "")
+    sanitized = _ANSI_OSC_RE.sub("", sanitized)
+    sanitized = _ANSI_CSI_RE.sub("", sanitized)
+    sanitized = "".join(
+        character for character in sanitized if character >= " " or character == "\t"
+    )
+    return sanitized
 
 
 def _generate_credential(*, prefix: str) -> str:
