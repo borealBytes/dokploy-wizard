@@ -47,6 +47,21 @@ def test_supported_core_host_passes_preflight_with_local_advisory() -> None:
     )
 
 
+def test_ubuntu_24_04_patch_release_is_supported() -> None:
+    raw_env = parse_env_file(FIXTURES_DIR / "core-low-resource.env")
+    desired_state = resolve_desired_state(raw_env)
+    values = dict(raw_env.values)
+    values["HOST_OS_VERSION_ID"] = "24.04.2"
+    host_facts = collect_host_facts(
+        type(raw_env)(format_version=raw_env.format_version, values=values)
+    )
+
+    report = run_preflight(desired_state, host_facts)
+
+    assert report.checks[0].name == "os_support"
+    assert report.checks[0].status == "pass"
+
+
 def test_disk_override_can_include_explicit_storage_path(tmp_path: Path) -> None:
     env_file = tmp_path / "disk-path.env"
     env_file.write_text(

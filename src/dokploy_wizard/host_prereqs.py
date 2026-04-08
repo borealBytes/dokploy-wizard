@@ -12,6 +12,7 @@ from dokploy_wizard.preflight import (
     SUPPORTED_OS_ID,
     SUPPORTED_OS_VERSION,
     HostFacts,
+    _is_supported_ubuntu_version,
 )
 from dokploy_wizard.state import RawEnvInput, StateValidationError
 
@@ -235,7 +236,7 @@ def _os_support_check(host_facts: HostFacts) -> HostPrerequisiteCheck:
                 f"expected Ubuntu {SUPPORTED_OS_VERSION} LTS"
             ),
         )
-    if host_facts.version_id != SUPPORTED_OS_VERSION:
+    if not _is_supported_ubuntu_version(host_facts.version_id):
         return HostPrerequisiteCheck(
             name="os_support",
             status="fail",
