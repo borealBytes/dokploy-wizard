@@ -105,7 +105,7 @@ class ShellTailscaleBackend:
             command.append(f"--advertise-tags={','.join(tags)}")
         if subnet_routes:
             command.append(f"--advertise-routes={','.join(subnet_routes)}")
-        result = self._runner(command)
+        result = self._run_tailscale_command(command)
         if result.returncode != 0:
             stderr = result.stderr.strip()
             msg = "tailscale up failed"
@@ -124,7 +124,7 @@ class ShellTailscaleBackend:
         )
 
     def get_status(self, resource_name: str) -> TailscaleNodeStatus | None:
-        status_result = self._runner(["tailscale", "status", "--json"])
+        status_result = self._run_tailscale_command(["tailscale", "status", "--json"])
         if status_result.returncode != 0:
             return None
         try:
@@ -143,8 +143,8 @@ class ShellTailscaleBackend:
         login_name = self_payload.get("LoginName")
         if login_name is not None and not isinstance(login_name, str):
             login_name = None
-        ipv4 = _command_stdout_or_none(self._runner(["tailscale", "ip", "-4"]))
-        ipv6 = _command_stdout_or_none(self._runner(["tailscale", "ip", "-6"]))
+        ipv4 = _command_stdout_or_none(self._run_tailscale_command(["tailscale", "ip", "-4"]))
+        ipv6 = _command_stdout_or_none(self._run_tailscale_command(["tailscale", "ip", "-6"]))
         return TailscaleNodeStatus(
             hostname=hostname,
             online=online,
@@ -154,7 +154,7 @@ class ShellTailscaleBackend:
         )
 
     def disconnect(self) -> None:
-        result = self._runner(["tailscale", "down"])
+        result = self._run_tailscale_command(["tailscale", "down"])
         if result.returncode != 0:
             stderr = result.stderr.strip()
             msg = "tailscale down failed"
@@ -174,13 +174,30 @@ class ShellTailscaleBackend:
             if forced.lower() in {"1", "true", "yes", "on"}:
                 return
             raise TailscaleError("tailscale install command failed.")
-        result = self._runner(["sh", "-c", TAILSCALE_INSTALL_COMMAND])
+        result = self._run_install_command(["sh", "-c", TAILSCALE_INSTALL_COMMAND])
         if result.returncode != 0:
             stderr = result.stderr.strip()
             msg = "tailscale install command failed"
             if stderr:
                 msg = f"{msg}: {stderr}"
             raise TailscaleError(msg)
+
+    def _run_tailscale_command(self, command: list[str]) -> CommandResult:
+        try:
+            return self._runner(command)
+        except FileNotFoundError as error:
+            raise TailscaleError(
+                "tailscale command could not be executed because the tailscale "
+                "binary was not found on PATH."
+            ) from error
+
+    def _run_install_command(self, command: list[str]) -> CommandResult:
+        try:
+            return self._runner(command)
+        except FileNotFoundError as error:
+            raise TailscaleError(
+                "tailscale install command could not be executed on this host."
+            ) from error
 
 
 def reconcile_tailscale(
