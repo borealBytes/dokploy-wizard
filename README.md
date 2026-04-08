@@ -179,6 +179,7 @@ The wizard will prompt for:
   - Account ID lookup
   - Zone ID lookup
   - minimum token permissions
+- Cloudflare zone ID is optional in guided mode; if left blank, the wizard uses your root domain and looks the Zone ID up automatically
 - optional Tailscale settings only when `tailscale` mode is chosen
 - pack selection
 
@@ -194,13 +195,15 @@ The beginner path is:
 
 1. Open: https://dash.cloudflare.com/profile/api-tokens
 2. Click: **Create Token** → **Create Custom Token**
-3. Use these permissions exactly:
+   Minimum token permissions for this wizard:
    - `Account -> Cloudflare Tunnel -> Edit`
    - `Zone -> DNS -> Edit`
    - `Account -> Access: Apps and Policies -> Edit`
    - `Account -> Access: Organizations, Identity Providers, and Groups -> Edit`
-4. Scope the zone to your root domain
-   - example: use `openmerge.me`
+3. Find the Zone ID for your root domain
+   - Cloudflare dashboard → your domain → **Overview** → **API** section → **Zone ID**
+   - if you are unsure which zone to use, use the root domain itself
+   - good: `openmerge.me`
    - do **not** use `dokploy.openmerge.me`
 
 Cloudflare values in the wizard mean:
@@ -208,7 +211,6 @@ Cloudflare values in the wizard mean:
 - **Cloudflare account ID** = the Cloudflare account that owns tunnel and Access resources
   - find it in Cloudflare dashboard → **Account home** → your account row → **Copy account ID**
 - **Cloudflare zone ID** = the DNS zone ID for your root domain
-  - find it in Cloudflare dashboard → your domain → **Overview** → **API** section → **Zone ID**
 
 If you still need official references after that, the wizard/README points to:
 
@@ -307,8 +309,10 @@ Use this to confirm the first-run prompt path works and writes a reusable env fi
   - optional subnet routes
 - Guided first-run install no longer asks for a Dokploy API key up front. It bootstraps Dokploy first and generates that key automatically.
 - If you enable SeaweedFS, guided install asks for:
-  - SeaweedFS access key
-  - SeaweedFS secret key
+  - no manual keys up front
+  - the wizard generates the SeaweedFS access key and secret key for you
+  - it prints them clearly at the end and saves them into the generated `install.env`
+- If you enable OpenClaw and leave channels at the default, it defaults to `matrix`
 
 ### Focused test modules
 
