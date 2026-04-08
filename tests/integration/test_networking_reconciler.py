@@ -1,0 +1,454 @@
+# pyright: reportMissingImports=false
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pytest
+
+from dokploy_wizard.cli import run_install_flow
+from dokploy_wizard.networking import (
+    CloudflareAccessApplication,
+    CloudflareAccessIdentityProvider,
+    CloudflareAccessPolicy,
+    CloudflareDnsRecord,
+    CloudflareError,
+    CloudflareTunnel,
+)
+from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
+from dokploy_wizard.packs.openclaw import OpenClawResourceRecord
+from dokploy_wizard.state import load_state_dir
+
+FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
+
+
+@dataclass
+class FakeDokployBackend:
+    healthy_before_install: bool
+    healthy_after_install: bool
+    install_calls: int = 0
+
+    def is_healthy(self) -> bool:
+        if self.install_calls == 0:
+            return self.healthy_before_install
+        return self.healthy_after_install
+
+    def install(self) -> None:
+        self.install_calls += 1
+
+
+@dataclass
+class FakeCloudflareBackend:
+    account_ok: bool = True
+    zone_ok: bool = True
+    existing_tunnel: CloudflareTunnel | None = None
+    dns_records: dict[str, CloudflareDnsRecord] = field(default_factory=dict)
+    access_provider: CloudflareAccessIdentityProvider | None = None
+    access_apps: dict[str, CloudflareAccessApplication] = field(default_factory=dict)
+    access_policies: dict[str, CloudflareAccessPolicy] = field(default_factory=dict)
+    create_tunnel_calls: int = 0
+    create_dns_calls: int = 0
+
+    def validate_account_access(self, account_id: str) -> None:
+        if not self.account_ok:
+            raise CloudflareError("account scope validation failed")
+
+    def validate_zone_access(self, zone_id: str) -> None:
+        if not self.zone_ok:
+            raise CloudflareError("zone scope validation failed")
+
+    def get_tunnel(self, account_id: str, tunnel_id: str) -> CloudflareTunnel | None:
+        if self.existing_tunnel is not None and self.existing_tunnel.tunnel_id == tunnel_id:
+            return self.existing_tunnel
+        return None
+
+    def find_tunnel_by_name(self, account_id: str, tunnel_name: str) -> CloudflareTunnel | None:
+        if self.existing_tunnel is not None and self.existing_tunnel.name == tunnel_name:
+            return self.existing_tunnel
+        return None
+
+    def create_tunnel(self, account_id: str, tunnel_name: str) -> CloudflareTunnel:
+        self.create_tunnel_calls += 1
+        self.existing_tunnel = CloudflareTunnel(tunnel_id="tunnel-created", name=tunnel_name)
+        return self.existing_tunnel
+
+    def list_dns_records(
+        self,
+        zone_id: str,
+        *,
+        hostname: str,
+        record_type: str,
+        content: str | None,
+    ) -> tuple[CloudflareDnsRecord, ...]:
+        record = self.dns_records.get(hostname)
+        if record is None:
+            return ()
+        if content is not None and record.content != content:
+            return ()
+        return (record,)
+
+    def create_dns_record(
+        self,
+        zone_id: str,
+        *,
+        hostname: str,
+        content: str,
+        proxied: bool,
+    ) -> CloudflareDnsRecord:
+        self.create_dns_calls += 1
+        record = CloudflareDnsRecord(
+            record_id=f"dns-{hostname}",
+            name=hostname,
+            record_type="CNAME",
+            content=content,
+            proxied=proxied,
+        )
+        self.dns_records[hostname] = record
+        return record
+
+    def get_access_identity_provider(
+        self, account_id: str, provider_id: str
+    ) -> CloudflareAccessIdentityProvider | None:
+        if self.access_provider is not None and self.access_provider.provider_id == provider_id:
+            return self.access_provider
+        return None
+
+    def find_access_identity_provider_by_name(
+        self, account_id: str, name: str
+    ) -> CloudflareAccessIdentityProvider | None:
+        if self.access_provider is not None and self.access_provider.name == name:
+            return self.access_provider
+        return None
+
+    def create_access_identity_provider(
+        self, account_id: str, name: str
+    ) -> CloudflareAccessIdentityProvider:
+        self.access_provider = CloudflareAccessIdentityProvider(
+            provider_id="otp-provider-1",
+            name=name,
+            provider_type="onetimepin",
+        )
+        return self.access_provider
+
+    def get_access_application(
+        self, account_id: str, app_id: str
+    ) -> CloudflareAccessApplication | None:
+        return next((item for item in self.access_apps.values() if item.app_id == app_id), None)
+
+    def find_access_application_by_domain(
+        self, account_id: str, domain: str
+    ) -> CloudflareAccessApplication | None:
+        return self.access_apps.get(domain)
+
+    def create_access_application(
+        self,
+        account_id: str,
+        *,
+        name: str,
+        domain: str,
+        allowed_identity_provider_ids: tuple[str, ...],
+    ) -> CloudflareAccessApplication:
+        app = CloudflareAccessApplication(
+            app_id=f"app-{domain}",
+            name=name,
+            domain=domain,
+            app_type="self_hosted",
+            allowed_identity_provider_ids=allowed_identity_provider_ids,
+        )
+        self.access_apps[domain] = app
+        return app
+
+    def get_access_policy(
+        self, account_id: str, app_id: str, policy_id: str
+    ) -> CloudflareAccessPolicy | None:
+        return self.access_policies.get(app_id)
+
+    def find_access_policy_by_name(
+        self, account_id: str, app_id: str, name: str
+    ) -> CloudflareAccessPolicy | None:
+        policy = self.access_policies.get(app_id)
+        if policy is not None and policy.name == name:
+            return policy
+        return None
+
+    def create_access_policy(
+        self,
+        account_id: str,
+        *,
+        app_id: str,
+        name: str,
+        emails: tuple[str, ...],
+    ) -> CloudflareAccessPolicy:
+        policy = CloudflareAccessPolicy(
+            policy_id=f"policy-{app_id}",
+            app_id=app_id,
+            name=name,
+            decision="allow",
+            emails=emails,
+        )
+        self.access_policies[app_id] = policy
+        return policy
+
+
+@dataclass
+class FakeHeadscaleBackend:
+    existing_service: HeadscaleResourceRecord | None = None
+
+    def get_service(self, resource_id: str) -> HeadscaleResourceRecord | None:
+        if self.existing_service is not None and self.existing_service.resource_id == resource_id:
+            return self.existing_service
+        return None
+
+    def find_service_by_name(self, resource_name: str) -> HeadscaleResourceRecord | None:
+        if (
+            self.existing_service is not None
+            and self.existing_service.resource_name == resource_name
+        ):
+            return self.existing_service
+        return None
+
+    def create_service(
+        self,
+        *,
+        resource_name: str,
+        hostname: str,
+        secret_refs: tuple[str, ...],
+    ) -> HeadscaleResourceRecord:
+        del hostname, secret_refs
+        self.existing_service = HeadscaleResourceRecord(
+            resource_id="headscale-service-1",
+            resource_name=resource_name,
+        )
+        return self.existing_service
+
+    def check_health(self, *, service: HeadscaleResourceRecord, url: str) -> bool:
+        del service, url
+        return True
+
+
+@dataclass
+class FakeOpenClawBackend:
+    existing_service: OpenClawResourceRecord | None = None
+
+    def get_service(self, resource_id: str) -> OpenClawResourceRecord | None:
+        if self.existing_service is not None and self.existing_service.resource_id == resource_id:
+            return self.existing_service
+        return None
+
+    def find_service_by_name(self, resource_name: str) -> OpenClawResourceRecord | None:
+        if (
+            self.existing_service is not None
+            and self.existing_service.resource_name == resource_name
+        ):
+            return self.existing_service
+        return None
+
+    def create_service(
+        self,
+        *,
+        resource_name: str,
+        hostname: str,
+        template_path: object,
+        variant: str,
+        channels: tuple[str, ...],
+        replicas: int,
+        secret_refs: tuple[str, ...],
+    ) -> OpenClawResourceRecord:
+        del hostname, template_path, variant, channels, replicas, secret_refs
+        self.existing_service = OpenClawResourceRecord(
+            resource_id="openclaw-service-1",
+            resource_name=resource_name,
+            replicas=1,
+        )
+        return self.existing_service
+
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        template_path: object,
+        variant: str,
+        channels: tuple[str, ...],
+        replicas: int,
+        secret_refs: tuple[str, ...],
+    ) -> OpenClawResourceRecord:
+        del hostname, template_path, variant, channels, replicas, secret_refs
+        self.existing_service = OpenClawResourceRecord(
+            resource_id=resource_id,
+            resource_name=resource_name,
+            replicas=1,
+        )
+        return self.existing_service
+
+    def check_health(self, *, service: OpenClawResourceRecord, url: str) -> bool:
+        del service, url
+        return True
+
+
+def test_install_non_dry_run_reconciles_networking_and_persists_ledger(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    bootstrap_backend = FakeDokployBackend(healthy_before_install=True, healthy_after_install=True)
+    networking_backend = FakeCloudflareBackend()
+
+    summary = run_install_flow(
+        env_file=FIXTURES_DIR / "cloudflare-valid.env",
+        state_dir=state_dir,
+        dry_run=False,
+        bootstrap_backend=bootstrap_backend,
+        networking_backend=networking_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+    )
+
+    loaded_state = load_state_dir(state_dir)
+    assert summary["networking"]["outcome"] == "applied"
+    assert summary["networking"]["tunnel"]["action"] == "create"
+    assert networking_backend.create_tunnel_calls == 1
+    assert networking_backend.create_dns_calls == 2
+    assert loaded_state.applied_state is not None
+    assert loaded_state.applied_state.completed_steps == (
+        "preflight",
+        "dokploy_bootstrap",
+        "networking",
+        "shared_core",
+        "headscale",
+    )
+    assert loaded_state.ownership_ledger is not None
+    assert {
+        (resource.resource_type, resource.scope)
+        for resource in loaded_state.ownership_ledger.resources
+    } == {
+        ("cloudflare_tunnel", "account:account-123"),
+        ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
+        ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
+        ("headscale_service", "stack:wizard-stack:headscale"),
+    }
+
+
+def test_install_rerun_uses_ledger_owned_networking_resources(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    bootstrap_backend = FakeDokployBackend(healthy_before_install=True, healthy_after_install=True)
+    first_networking_backend = FakeCloudflareBackend()
+    headscale_backend = FakeHeadscaleBackend()
+    run_install_flow(
+        env_file=FIXTURES_DIR / "cloudflare-valid.env",
+        state_dir=state_dir,
+        dry_run=False,
+        bootstrap_backend=bootstrap_backend,
+        networking_backend=first_networking_backend,
+        headscale_backend=headscale_backend,
+    )
+
+    second_networking_backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-created", name="wizard-stack-tunnel"),
+        dns_records={
+            "dokploy.example.com": CloudflareDnsRecord(
+                record_id="dns-dokploy.example.com",
+                name="dokploy.example.com",
+                record_type="CNAME",
+                content="tunnel-created.cfargotunnel.com",
+                proxied=True,
+            ),
+            "headscale.example.com": CloudflareDnsRecord(
+                record_id="dns-headscale.example.com",
+                name="headscale.example.com",
+                record_type="CNAME",
+                content="tunnel-created.cfargotunnel.com",
+                proxied=True,
+            ),
+        },
+    )
+
+    summary = run_install_flow(
+        env_file=FIXTURES_DIR / "cloudflare-valid.env",
+        state_dir=state_dir,
+        dry_run=False,
+        bootstrap_backend=bootstrap_backend,
+        networking_backend=second_networking_backend,
+        headscale_backend=headscale_backend,
+    )
+
+    assert summary["networking"]["outcome"] == "already_present"
+    assert summary["networking"]["tunnel"]["action"] == "reuse_owned"
+    assert second_networking_backend.create_tunnel_calls == 0
+    assert second_networking_backend.create_dns_calls == 0
+
+
+def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "access.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "DOKPLOY_BOOTSTRAP_MOCK_API_KEY=dokp-test-key",
+                "ENABLE_OPENCLAW=true",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,ops@example.com",
+                "HOST_OS_ID=ubuntu",
+                "HOST_OS_VERSION_ID=24.04",
+                "HOST_CPU_COUNT=4",
+                "HOST_MEMORY_GB=12",
+                "HOST_DISK_GB=150",
+                "HOST_DOCKER_INSTALLED=true",
+                "HOST_DOCKER_DAEMON_REACHABLE=true",
+                "HOST_PORT_80_IN_USE=false",
+                "HOST_PORT_443_IN_USE=false",
+                "HOST_PORT_3000_IN_USE=false",
+                "HOST_ENVIRONMENT=local",
+                "DOKPLOY_BOOTSTRAP_HEALTHY=true",
+                "CLOUDFLARE_API_TOKEN=token-123",
+                "CLOUDFLARE_ACCOUNT_ID=account-123",
+                "CLOUDFLARE_ZONE_ID=zone-123",
+                "CLOUDFLARE_MOCK_ACCOUNT_OK=true",
+                "CLOUDFLARE_MOCK_ZONE_OK=true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    backend = FakeCloudflareBackend()
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        openclaw_backend=FakeOpenClawBackend(),
+    )
+
+    loaded_state = load_state_dir(state_dir)
+    assert summary["cloudflare_access"]["outcome"] == "applied"
+    assert [item["hostname"] for item in summary["cloudflare_access"]["applications"]] == [
+        "openclaw.example.com"
+    ]
+    assert loaded_state.applied_state is not None
+    assert loaded_state.applied_state.completed_steps[:5] == (
+        "preflight",
+        "dokploy_bootstrap",
+        "networking",
+        "cloudflare_access",
+        "shared_core",
+    )
+    assert loaded_state.ownership_ledger is not None
+    assert {resource.resource_type for resource in loaded_state.ownership_ledger.resources} >= {
+        "cloudflare_access_otp_provider",
+        "cloudflare_access_application",
+        "cloudflare_access_policy",
+    }
+
+
+def test_install_fails_closed_when_zone_scope_is_wrong(tmp_path: Path) -> None:
+    with pytest.raises(CloudflareError, match="zone scope validation failed"):
+        run_install_flow(
+            env_file=FIXTURES_DIR / "cloudflare-valid.env",
+            state_dir=tmp_path / "state",
+            dry_run=False,
+            bootstrap_backend=FakeDokployBackend(True, True),
+            networking_backend=FakeCloudflareBackend(zone_ok=False),
+            headscale_backend=FakeHeadscaleBackend(),
+        )

@@ -1,0 +1,273 @@
+"""Dokploy-backed Headscale runtime backend."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from dokploy_wizard.dokploy.client import (
+    DokployApiClient,
+    DokployApiError,
+    DokployComposeRecord,
+    DokployCreatedProject,
+    DokployDeployResult,
+    DokployEnvironmentSummary,
+    DokployProjectSummary,
+)
+from dokploy_wizard.packs.headscale.models import HeadscaleResourceRecord
+from dokploy_wizard.packs.headscale.reconciler import HeadscaleError, _http_health_check
+
+
+class DokployHeadscaleApi(Protocol):
+    def list_projects(self) -> tuple[DokployProjectSummary, ...]: ...
+
+    def create_project(
+        self, *, name: str, description: str | None, env: str | None
+    ) -> DokployCreatedProject: ...
+
+    def create_compose(
+        self, *, name: str, environment_id: str, compose_file: str, app_name: str
+    ) -> DokployComposeRecord: ...
+
+    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord: ...
+
+    def deploy_compose(
+        self, *, compose_id: str, title: str | None, description: str | None
+    ) -> DokployDeployResult: ...
+
+
+HealthCheckFn = Protocol
+
+
+@dataclass(frozen=True)
+class _ComposeLocator:
+    project_id: str
+    environment_id: str
+    compose_id: str
+
+
+class DokployHeadscaleBackend:
+    def __init__(
+        self,
+        *,
+        api_url: str,
+        api_key: str,
+        stack_name: str,
+        hostname: str,
+        client: DokployHeadscaleApi | None = None,
+    ) -> None:
+        self._stack_name = stack_name
+        self._hostname = hostname
+        self._service_name = f"{stack_name}-headscale"
+        self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
+        self._applied_locator: _ComposeLocator | None = None
+
+    def get_service(self, resource_id: str) -> HeadscaleResourceRecord | None:
+        locator = self._lookup_locator(resource_id)
+        if locator is None:
+            return None
+        return HeadscaleResourceRecord(resource_id=resource_id, resource_name=self._service_name)
+
+    def find_service_by_name(self, resource_name: str) -> HeadscaleResourceRecord | None:
+        if resource_name != self._service_name:
+            return None
+        locator = self._find_compose_locator()
+        if locator is None:
+            return None
+        return HeadscaleResourceRecord(
+            resource_id=_resource_id(locator.compose_id),
+            resource_name=self._service_name,
+        )
+
+    def create_service(
+        self,
+        *,
+        resource_name: str,
+        hostname: str,
+        secret_refs: tuple[str, ...],
+    ) -> HeadscaleResourceRecord:
+        if resource_name != self._service_name:
+            raise HeadscaleError("Headscale service name does not match the active Dokploy plan.")
+        self._hostname = hostname
+        locator = self._ensure_compose_applied(secret_refs=secret_refs)
+        return HeadscaleResourceRecord(
+            resource_id=_resource_id(locator.compose_id),
+            resource_name=self._service_name,
+        )
+
+    def check_health(self, *, service: HeadscaleResourceRecord, url: str) -> bool:
+        del service
+        return _http_health_check(url)
+
+    def _lookup_locator(self, resource_id: str) -> _ComposeLocator | None:
+        compose_id = _parse_resource_id(resource_id)
+        if compose_id is None:
+            return None
+        locator = self._find_compose_locator()
+        if locator is None or locator.compose_id != compose_id:
+            return None
+        return locator
+
+    def _find_compose_locator(self) -> _ComposeLocator | None:
+        if self._applied_locator is not None:
+            return self._applied_locator
+        try:
+            projects = self._client.list_projects()
+        except DokployApiError as error:
+            raise HeadscaleError(str(error)) from error
+        for project in projects:
+            if project.name != self._stack_name:
+                continue
+            environment = _pick_environment(project)
+            if environment is None:
+                continue
+            for compose in environment.composes:
+                if compose.name == self._service_name:
+                    locator = _ComposeLocator(
+                        project_id=project.project_id,
+                        environment_id=environment.environment_id,
+                        compose_id=compose.compose_id,
+                    )
+                    self._applied_locator = locator
+                    return locator
+        return None
+
+    def _ensure_compose_applied(self, *, secret_refs: tuple[str, ...]) -> _ComposeLocator:
+        try:
+            projects = self._client.list_projects()
+            for project in projects:
+                if project.name != self._stack_name:
+                    continue
+                environment = _pick_environment(project)
+                if environment is None:
+                    break
+                for compose in environment.composes:
+                    if compose.name == self._service_name:
+                        locator = _ComposeLocator(
+                            project_id=project.project_id,
+                            environment_id=environment.environment_id,
+                            compose_id=compose.compose_id,
+                        )
+                        self._applied_locator = locator
+                        return locator
+
+                created = self._client.create_compose(
+                    name=self._service_name,
+                    environment_id=environment.environment_id,
+                    compose_file=_render_compose_file(
+                        self._service_name, self._hostname, secret_refs
+                    ),
+                    app_name=self._service_name,
+                )
+                self._client.deploy_compose(
+                    compose_id=created.compose_id,
+                    title="dokploy-wizard headscale reconcile",
+                    description="Create Headscale compose app",
+                )
+                locator = _ComposeLocator(
+                    project_id=project.project_id,
+                    environment_id=environment.environment_id,
+                    compose_id=created.compose_id,
+                )
+                self._applied_locator = locator
+                return locator
+
+            created_project = self._client.create_project(
+                name=self._stack_name,
+                description="Managed by dokploy-wizard",
+                env=None,
+            )
+            created_compose = self._client.create_compose(
+                name=self._service_name,
+                environment_id=created_project.environment_id,
+                compose_file=_render_compose_file(self._service_name, self._hostname, secret_refs),
+                app_name=self._service_name,
+            )
+            self._client.deploy_compose(
+                compose_id=created_compose.compose_id,
+                title="dokploy-wizard headscale reconcile",
+                description="Create Headscale compose app",
+            )
+        except DokployApiError as error:
+            raise HeadscaleError(str(error)) from error
+        locator = _ComposeLocator(
+            project_id=created_project.project_id,
+            environment_id=created_project.environment_id,
+            compose_id=created_compose.compose_id,
+        )
+        self._applied_locator = locator
+        return locator
+
+
+def _resource_id(compose_id: str) -> str:
+    return f"dokploy-compose:{compose_id}:headscale"
+
+
+def _parse_resource_id(resource_id: str) -> str | None:
+    prefix = "dokploy-compose:"
+    suffix = ":headscale"
+    if not resource_id.startswith(prefix) or not resource_id.endswith(suffix):
+        return None
+    compose_id = resource_id.removeprefix(prefix).removesuffix(suffix)
+    return compose_id or None
+
+
+def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSummary | None:
+    if not project.environments:
+        return None
+    for environment in project.environments:
+        if environment.is_default:
+            return environment
+    return project.environments[0]
+
+
+def _render_compose_file(service_name: str, hostname: str, secret_refs: tuple[str, ...]) -> str:
+    admin_secret_ref, noise_secret_ref = secret_refs
+    volume_name = f"{service_name}-data"
+    return (
+        "services:\n"
+        f"  {service_name}:\n"
+        "    image: headscale/headscale:latest\n"
+        "    restart: unless-stopped\n"
+        "    command: >-\n"
+        '      sh -c "mkdir -p /var/lib/headscale /etc/headscale &&\n'
+        "      cat <<'EOF' > /etc/headscale/config.yaml\n"
+        f"      server_url: https://{hostname}\n"
+        "      listen_addr: 0.0.0.0:8080\n"
+        "      metrics_listen_addr: 0.0.0.0:9090\n"
+        "      noise:\n"
+        "        private_key_path: /var/lib/headscale/noise_private.key\n"
+        "      prefixes:\n"
+        "        v4: 100.64.0.0/10\n"
+        "        allocation: sequential\n"
+        "      derp:\n"
+        "        server:\n"
+        "          enabled: false\n"
+        "      disable_check_updates: true\n"
+        "      database:\n"
+        "        type: sqlite\n"
+        "        sqlite:\n"
+        "          path: /var/lib/headscale/db.sqlite\n"
+        "      unix_socket: /var/run/headscale/headscale.sock\n"
+        "      log:\n"
+        "        format: text\n"
+        "        level: info\n"
+        "EOF\n"
+        f"      export HEADSCALE_ADMIN_API_KEY=${{{admin_secret_ref}:-change-me}} &&\n"
+        f"      export HEADSCALE_NOISE_PRIVATE_KEY=${{{noise_secret_ref}:-change-me}} &&\n"
+        '      headscale serve"\n'
+        "    expose:\n"
+        "      - '8080'\n"
+        "    healthcheck:\n"
+        "      test: ['CMD-SHELL', 'wget -q -O- http://127.0.0.1:8080/health >/dev/null']\n"
+        "      interval: 30s\n"
+        "      timeout: 5s\n"
+        "      retries: 5\n"
+        f"    volumes:\n      - {volume_name}:/var/lib/headscale\n"
+        "      - /var/run/headscale:/var/run/headscale\n"
+        "      - /etc/headscale:/etc/headscale\n"
+        "    networks:\n"
+        "      - default\n"
+        "volumes:\n"
+        f"  {volume_name}:\n"
+    )

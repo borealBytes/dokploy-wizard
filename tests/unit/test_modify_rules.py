@@ -1,0 +1,421 @@
+# pyright: reportMissingImports=false
+
+from __future__ import annotations
+
+import pytest
+
+from dokploy_wizard.lifecycle import classify_modify_request
+from dokploy_wizard.packs.catalog import (
+    get_mutable_pack_env_keys,
+    get_mutable_pack_resource_keys,
+)
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    OwnershipLedger,
+    RawEnvInput,
+    resolve_desired_state,
+)
+
+
+def _raw(values: dict[str, str]) -> RawEnvInput:
+    return RawEnvInput(format_version=1, values=values)
+
+
+def _applied(completed_steps: tuple[str, ...]) -> AppliedStateCheckpoint:
+    desired = resolve_desired_state(
+        _raw(
+            {
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+            }
+        )
+    )
+    return AppliedStateCheckpoint(
+        format_version=1,
+        desired_state_fingerprint=desired.fingerprint(),
+        completed_steps=completed_steps,
+    )
+
+
+def test_modify_domain_change_starts_at_networking() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_NEXTCLOUD": "true",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.net",
+            "ENABLE_NEXTCLOUD": "true",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "headscale",
+                "nextcloud",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert plan.start_phase == "networking"
+    assert plan.initial_completed_steps == ("preflight", "dokploy_bootstrap")
+    assert plan.phases_to_run == ("networking", "headscale", "nextcloud")
+
+
+def test_modify_cloudflare_auth_rotation_only_reruns_networking() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "CLOUDFLARE_API_TOKEN": "old-token",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "CLOUDFLARE_API_TOKEN": "new-token",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "headscale",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.start_phase == "networking"
+    assert plan.phases_to_run == ("networking",)
+
+
+def test_modify_access_email_change_reruns_access_phase() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com,ops@example.com",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "cloudflare_access",
+                "shared_core",
+                "headscale",
+                "openclaw",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.start_phase == "cloudflare_access"
+    assert plan.phases_to_run == ("cloudflare_access",)
+
+
+def test_modify_rejects_stack_name_change() -> None:
+    existing_raw = _raw({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})
+    requested_raw = _raw({"STACK_NAME": "other-stack", "ROOT_DOMAIN": "example.com"})
+
+    with pytest.raises(ValueError, match="STACK_NAME changes are unsupported"):
+        classify_modify_request(
+            existing_raw=existing_raw,
+            existing_desired=resolve_desired_state(existing_raw),
+            existing_applied=AppliedStateCheckpoint(
+                format_version=1,
+                desired_state_fingerprint=resolve_desired_state(existing_raw).fingerprint(),
+                completed_steps=(
+                    "preflight",
+                    "dokploy_bootstrap",
+                    "networking",
+                    "shared_core",
+                    "headscale",
+                ),
+            ),
+            existing_ledger=OwnershipLedger(format_version=1, resources=()),
+            requested_raw=requested_raw,
+            requested_desired=resolve_desired_state(requested_raw),
+        )
+
+
+def test_modify_disabling_nextcloud_is_supported_via_networking_only() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_NEXTCLOUD": "true",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_NEXTCLOUD": "false",
+        }
+    )
+
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "headscale",
+                "nextcloud",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert plan.start_phase == "networking"
+    assert plan.phases_to_run == ("networking",)
+    assert plan.initial_completed_steps == ("preflight", "dokploy_bootstrap")
+
+
+def test_modify_disabling_headscale_is_supported_via_networking_only() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_HEADSCALE": "true",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_HEADSCALE": "false",
+        }
+    )
+
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "headscale",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert plan.start_phase == "networking"
+    assert plan.phases_to_run == ("networking", "headscale")
+
+
+def test_modify_rejects_unmodeled_env_changes() -> None:
+    existing_raw = _raw({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "HEADSCALE_ADMIN_EMAIL": "admin@example.com",
+        }
+    )
+
+    with pytest.raises(ValueError, match="Unsupported mutable env keys"):
+        classify_modify_request(
+            existing_raw=existing_raw,
+            existing_desired=resolve_desired_state(existing_raw),
+            existing_applied=AppliedStateCheckpoint(
+                format_version=1,
+                desired_state_fingerprint=resolve_desired_state(existing_raw).fingerprint(),
+                completed_steps=(
+                    "preflight",
+                    "dokploy_bootstrap",
+                    "networking",
+                    "shared_core",
+                    "headscale",
+                ),
+            ),
+            existing_ledger=OwnershipLedger(format_version=1, resources=()),
+            requested_raw=requested_raw,
+            requested_desired=resolve_desired_state(requested_raw),
+        )
+
+
+def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
+    assert get_mutable_pack_env_keys() == (
+        "MY_FARM_ADVISOR_CHANNELS",
+        "OPENCLAW_CHANNELS",
+    )
+
+
+def test_modify_uses_explicit_pack_mutable_resource_contract() -> None:
+    assert get_mutable_pack_resource_keys() == (
+        "MY_FARM_ADVISOR_REPLICAS",
+        "OPENCLAW_REPLICAS",
+    )
+
+
+def test_modify_openclaw_replicas_change_uses_pack_mutable_resource_contract() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_REPLICAS": "1",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_REPLICAS": "3",
+        }
+    )
+
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "cloudflare_access",
+                "shared_core",
+                "headscale",
+                "openclaw",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert "OPENCLAW_REPLICAS" in plan.reasons[0]
+    assert plan.start_phase == "openclaw"
+    assert plan.phases_to_run == ("openclaw",)
+
+
+def test_modify_openclaw_channels_change_uses_pack_mutable_contract() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_CHANNELS": "matrix,telegram",
+            "ENABLE_MATRIX": "true",
+        }
+    )
+
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "cloudflare_access",
+                "shared_core",
+                "headscale",
+                "openclaw",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert "OPENCLAW_CHANNELS" in plan.reasons[0]
+    assert plan.phases_to_run == ("networking", "shared_core", "matrix", "openclaw")
