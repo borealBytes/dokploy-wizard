@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -235,7 +236,13 @@ def _os_check(host_facts: HostFacts) -> PreflightCheck:
 
 
 def _is_supported_ubuntu_version(version_id: str) -> bool:
-    return version_id == SUPPORTED_OS_VERSION or version_id.startswith(f"{SUPPORTED_OS_VERSION}.")
+    normalized = version_id.strip()
+    if normalized == SUPPORTED_OS_VERSION:
+        return True
+    version_match = re.match(r"^(\d+\.\d+)(?:\.\d+)?(?:\s+.*)?$", normalized)
+    if version_match is None:
+        return False
+    return version_match.group(1) == SUPPORTED_OS_VERSION
 
 
 def _docker_installation_check(host_facts: HostFacts) -> PreflightCheck:

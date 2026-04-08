@@ -47,11 +47,11 @@ def test_supported_core_host_passes_preflight_with_local_advisory() -> None:
     )
 
 
-def test_ubuntu_24_04_patch_release_is_supported() -> None:
+def test_ubuntu_24_04_patch_release_with_suffix_is_supported() -> None:
     raw_env = parse_env_file(FIXTURES_DIR / "core-low-resource.env")
     desired_state = resolve_desired_state(raw_env)
     values = dict(raw_env.values)
-    values["HOST_OS_VERSION_ID"] = "24.04.2"
+    values["HOST_OS_VERSION_ID"] = "24.04.2 LTS"
     host_facts = collect_host_facts(
         type(raw_env)(format_version=raw_env.format_version, values=values)
     )
