@@ -185,6 +185,25 @@ The wizard will prompt for:
 
 Then it writes a reusable env file, bootstraps Dokploy locally, mints the Dokploy API key automatically, and runs the same install flow as env-file mode.
 
+Current first-VPS contract for this guided path:
+
+- start from a fresh Ubuntu 24.04 host
+- Docker must already be installed and the local Docker daemon must be reachable
+- Dokploy reuse detection is intentionally narrow in this pass: the wizard only treats Dokploy as already present when the host has a local Docker Swarm service named `dokploy` and local HTTP health succeeds on `http://127.0.0.1:3000`
+- already-installed Dokploy on nonstandard topologies, reverse-proxied layouts, or remote/non-local control-plane setups is out of scope for this pass
+
+Sizing guidance for operators:
+
+- **Core**: 2 vCPU, 4 GB RAM, 40 GB disk
+- **Recommended**: 4 vCPU, 8 GB RAM, 100 GB disk
+- **Full Pack Set**: 6 vCPU, 12 GB RAM, 150 GB disk
+
+Treat those tiers as planning targets, not auto-negotiated hints. If your host is underprovisioned, reduce the selected scope or pack profile before install. Do not expect the wizard to silently downgrade CPU, disk, or enabled packs to make the host fit.
+
+Memory is the only explicit install-time continuation path below the recommended threshold. If preflight reports only a memory shortfall, you can continue by confirming the prompt in guided mode or by passing `--allow-memory-shortfall` in non-interactive mode. That override means you are choosing to proceed below the recommended production target, not that the host is now treated as equivalent to meeting it. There is no matching CPU or disk override.
+
+Treat the generated `install.env` as sensitive: it contains credentials, the wizard writes it with owner-only permissions (`0600`), and you should keep it out of version control.
+
 The wizard state directory stores only wizard metadata and the generated `install.env`. It does **not** decide where Docker or Dokploy store deployed service data.
 
 ### Cloudflare prerequisites for guided install
@@ -222,6 +241,8 @@ If you still need official references after that, the wizard/README points to:
 ```bash
 ./bin/dokploy-wizard install --env-file path/to/install.env --non-interactive
 ```
+
+`install.env` is a sensitive operator file. Keep it private, keep it out of git, and expect the CLI to warn on non-dry-run `install`/`modify` runs if its permissions are broader than owner-only.
 
 #### 3. Dry-run install
 
@@ -312,6 +333,7 @@ Use this to confirm the first-run prompt path works and writes a reusable env fi
   - no manual keys up front
   - the wizard generates the SeaweedFS access key and secret key for you
   - it prints them clearly at the end and saves them into the generated `install.env`
+- If you do not want generated secrets echoed to stdout during install, add `--no-print-secrets`; the wizard still saves the generated values into `install.env`.
 - If you enable OpenClaw and leave channels at the default, it defaults to `matrix`
 
 ### Focused test modules
@@ -335,6 +357,23 @@ pytest tests/e2e/test_destroy_confirmation.py -q
 ## Fresh-VPS reality check
 
 As of the current repo state, the wizard now has real deployment paths for the major core services, not just planner mocks.
+
+This is still a first-VPS workflow, not a general Dokploy adoption or migration tool. The current contract is:
+
+- the host is expected to be a fresh Ubuntu 24.04 VPS
+- Docker must already be installed and reachable before `dokploy-wizard install` runs
+- existing Dokploy is only recognized when Docker can inspect a local Swarm service named `dokploy` and the wizard can reach Dokploy locally at `127.0.0.1:3000`
+- hosts with pre-existing Dokploy installs wired up some other way are out of scope for this pass
+
+Resource planning for that contract is explicit:
+
+- **Core**: 2 vCPU, 4 GB RAM, 40 GB disk
+- **Recommended**: 4 vCPU, 8 GB RAM, 100 GB disk
+- **Full Pack Set**: 6 vCPU, 12 GB RAM, 150 GB disk
+
+If a host falls short, the operator should scale back the selected scope or profile. The wizard does not silently reduce enabled packs, CPU expectations, or disk requirements at runtime.
+
+The only explicit continuation below the recommended target is install-time memory override. When preflight finds only a memory warning, guided install can continue after confirmation and non-interactive install can continue with `--allow-memory-shortfall`. That is an explicit operator choice to proceed below the recommended production floor. CPU and disk shortfalls still stop the run.
 
 Implemented as real Dokploy-backed or host-backed behavior:
 
