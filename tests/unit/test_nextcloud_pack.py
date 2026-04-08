@@ -318,6 +318,8 @@ def test_reconcile_nextcloud_fails_closed_without_required_shared_core_allocatio
         selected_packs=desired_state.selected_packs,
         enabled_packs=desired_state.enabled_packs,
         hostnames=desired_state.hostnames,
+        seaweedfs_access_key=desired_state.seaweedfs_access_key,
+        seaweedfs_secret_key=desired_state.seaweedfs_secret_key,
         openclaw_channels=desired_state.openclaw_channels,
         openclaw_replicas=desired_state.openclaw_replicas,
         my_farm_advisor_channels=desired_state.my_farm_advisor_channels,

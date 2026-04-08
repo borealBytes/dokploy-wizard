@@ -29,6 +29,7 @@ from dokploy_wizard.dokploy import (
     DokployHeadscaleBackend,
     DokployMatrixBackend,
     DokployNextcloudBackend,
+    DokploySeaweedFsBackend,
     DokploySharedCoreBackend,
 )
 from dokploy_wizard.lifecycle import (
@@ -71,6 +72,11 @@ from dokploy_wizard.packs.prompts import (
     prompt_for_pack_selection,
 )
 from dokploy_wizard.packs.resolver import has_explicit_pack_selection
+from dokploy_wizard.packs.seaweedfs import (
+    SeaweedFsBackend,
+    SeaweedFsError,
+    ShellSeaweedFsBackend,
+)
 from dokploy_wizard.preflight import PreflightError, collect_host_facts, run_preflight
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
@@ -263,6 +269,7 @@ def _handle_install(args: argparse.Namespace) -> int:
         MatrixError,
         NextcloudError,
         OpenClawError,
+        SeaweedFsError,
     ) as error:
         raise SystemExit(str(error)) from error
 
@@ -391,6 +398,7 @@ def _handle_modify(args: argparse.Namespace) -> int:
         MatrixError,
         NextcloudError,
         OpenClawError,
+        SeaweedFsError,
     ) as error:
         raise SystemExit(str(error)) from error
 
@@ -447,6 +455,7 @@ def run_install_flow(
     headscale_backend: HeadscaleBackend | None = None,
     matrix_backend: MatrixBackend | None = None,
     nextcloud_backend: NextcloudBackend | None = None,
+    seaweedfs_backend: SeaweedFsBackend | None = None,
     openclaw_backend: OpenClawBackend | None = None,
 ) -> dict[str, Any]:
     return _run_lifecycle_flow(
@@ -461,6 +470,7 @@ def run_install_flow(
         headscale_backend=headscale_backend,
         matrix_backend=matrix_backend,
         nextcloud_backend=nextcloud_backend,
+        seaweedfs_backend=seaweedfs_backend,
         openclaw_backend=openclaw_backend,
         allow_modify=False,
     )
@@ -479,6 +489,7 @@ def run_modify_flow(
     headscale_backend: HeadscaleBackend | None = None,
     matrix_backend: MatrixBackend | None = None,
     nextcloud_backend: NextcloudBackend | None = None,
+    seaweedfs_backend: SeaweedFsBackend | None = None,
     openclaw_backend: OpenClawBackend | None = None,
 ) -> dict[str, Any]:
     return _run_lifecycle_flow(
@@ -493,6 +504,7 @@ def run_modify_flow(
         headscale_backend=headscale_backend,
         matrix_backend=matrix_backend,
         nextcloud_backend=nextcloud_backend,
+        seaweedfs_backend=seaweedfs_backend,
         openclaw_backend=openclaw_backend,
         allow_modify=True,
     )
@@ -653,6 +665,7 @@ def _run_lifecycle_flow(
             headscale_backend=headscale_backend,
             matrix_backend=matrix_backend,
             nextcloud_backend=nextcloud_backend,
+            seaweedfs_backend=seaweedfs_backend,
         ),
     )
     desired_state = resolve_desired_state(raw_env)
@@ -703,6 +716,7 @@ def _run_lifecycle_flow(
         headscale_backend=headscale_phase_backend,
         matrix_backend=matrix_phase_backend,
         nextcloud_backend=nextcloud_phase_backend,
+        seaweedfs_backend=seaweedfs_phase_backend,
         openclaw_backend=openclaw_phase_backend,
     )
 
@@ -908,6 +922,7 @@ def _dokploy_api_auth_required(
     headscale_backend: HeadscaleBackend | None,
     matrix_backend: MatrixBackend | None,
     nextcloud_backend: NextcloudBackend | None,
+    seaweedfs_backend: SeaweedFsBackend | None,
 ) -> bool:
     if shared_core_backend is None and desired_state.shared_core.requires_reconciliation():
         return True
@@ -916,6 +931,8 @@ def _dokploy_api_auth_required(
     if matrix_backend is None and "matrix" in desired_state.enabled_packs:
         return True
     if nextcloud_backend is None and "nextcloud" in desired_state.enabled_packs:
+        return True
+    if seaweedfs_backend is None and "seaweedfs" in desired_state.enabled_packs:
         return True
     return False
 
