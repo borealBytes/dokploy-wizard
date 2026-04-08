@@ -23,6 +23,7 @@ This repo is now beyond a mock CLI scaffold. The following pieces are implemente
   - Headscale
   - Matrix
   - Nextcloud + OnlyOffice
+  - SeaweedFS
 - Tailscale host-level phase
 - Cloudflare Access hardening for:
   - OpenClaw
@@ -51,8 +52,9 @@ flowchart TD
     P6 --> P7[Headscale]
     P7 --> P8[Matrix]
     P8 --> P9[Nextcloud + OnlyOffice]
-    P9 --> P10[OpenClaw]
-    P10 --> P11[My Farm Advisor]
+    P9 --> P10[SeaweedFS]
+    P10 --> P11[OpenClaw]
+    P11 --> P12[My Farm Advisor]
 
     C --> S[(State Dir)]
     S --> R[Modify / Resume / Uninstall]
@@ -72,6 +74,7 @@ flowchart LR
     PublicApps --> Headscale[Headscale]
     PublicApps --> Nextcloud[Nextcloud]
     PublicApps --> OnlyOffice[OnlyOffice]
+    PublicApps --> S3[SeaweedFS / S3]
     PublicApps --> OpenClaw[OpenClaw]
     PublicApps --> MFA[My Farm Advisor]
 
@@ -94,6 +97,7 @@ Not wrapped by Access in the current implementation:
 - `headscale.<root-domain>`
 - `nextcloud.<root-domain>`
 - `office.<root-domain>`
+- `s3.<root-domain>`
 
 Why:
 
@@ -101,6 +105,7 @@ Why:
 - **Headscale** is a control-plane endpoint, not a browser login surface
 - **OnlyOffice** must interoperate directly with Nextcloud
 - **Nextcloud** also serves non-browser clients in the general case
+- **SeaweedFS / S3** is a protocol endpoint, not a browser login surface
 - **Dokploy** still shares its browser/API surface from the wizard’s point of view
 
 ## CLI commands
@@ -149,21 +154,32 @@ The wizard state directory stores only wizard metadata and the generated `instal
 
 ### Cloudflare prerequisites for guided install
 
-If you answer **yes** to the Cloudflare help prompt, the wizard prints the exact links a new user needs:
+If you answer **yes** to the Cloudflare help prompt, the wizard now prints direct setup instructions instead of just sending you to docs.
 
-- Create token: https://dash.cloudflare.com/profile/api-tokens
-- Token docs: https://developers.cloudflare.com/fundamentals/api/get-started/create-token/
-- Find Account ID / Zone ID: https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/
+The beginner path is:
 
-Minimum recommended token permissions for the current wizard:
-
-- **DNS Write** on the target **Zone**
-- add **Zone Read** when zone lookup/validation is needed
+1. Open: https://dash.cloudflare.com/profile/api-tokens
+2. Click: **Create Token** → **Create Custom Token**
+3. Use these permissions exactly:
+   - `Account -> Cloudflare Tunnel -> Edit`
+   - `Zone -> DNS -> Edit`
+   - `Account -> Access: Apps and Policies -> Edit`
+   - `Account -> Access: Organizations, Identity Providers, and Groups -> Edit`
+4. Scope the zone to your root domain
+   - example: use `openmerge.me`
+   - do **not** use `dokploy.openmerge.me`
 
 Cloudflare values in the wizard mean:
 
-- **Cloudflare account ID** = the Cloudflare account that owns tunnel / Access resources
-- **Cloudflare zone ID** = the DNS zone for your chosen root domain
+- **Cloudflare account ID** = the Cloudflare account that owns tunnel and Access resources
+  - find it in Cloudflare dashboard → **Account home** → your account row → **Copy account ID**
+- **Cloudflare zone ID** = the DNS zone ID for your root domain
+  - find it in Cloudflare dashboard → your domain → **Overview** → **API** section → **Zone ID**
+
+If you still need official references after that, the wizard/README points to:
+
+- Token docs: https://developers.cloudflare.com/fundamentals/api/get-started/create-token/
+- Account ID / Zone ID docs: https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/
 
 #### 2. Reusable env-file install
 
@@ -256,6 +272,9 @@ Use this to confirm the first-run prompt path works and writes a reusable env fi
   - optional tags
   - optional subnet routes
 - Guided first-run install no longer asks for a Dokploy API key up front. It bootstraps Dokploy first and generates that key automatically.
+- If you enable SeaweedFS, guided install asks for:
+  - SeaweedFS access key
+  - SeaweedFS secret key
 
 ### Focused test modules
 
@@ -286,6 +305,7 @@ Implemented as real Dokploy-backed or host-backed behavior:
 - Headscale
 - Matrix
 - Nextcloud + OnlyOffice
+- SeaweedFS
 - Tailscale host access
 - Cloudflare Tunnel + DNS
 - Cloudflare Access for advisor apps
@@ -312,6 +332,7 @@ flowchart TD
         Matrix[Matrix]
         Nextcloud[Nextcloud]
         OnlyOffice[OnlyOffice]
+        SeaweedFS[SeaweedFS / S3]
     end
 
     subgraph AdvisorApps[Advisor Apps]
