@@ -80,7 +80,7 @@ class HostFacts:
 @dataclass(frozen=True)
 class PreflightCheck:
     name: str
-    status: Literal["pass", "fail"]
+    status: Literal["pass", "warn", "fail"]
     detail: str
 
     def to_dict(self) -> dict[str, str]:
@@ -101,6 +101,20 @@ class PreflightReport:
             "host_facts": self.host_facts.to_dict(),
             "required_profile": self.required_profile.to_dict(),
         }
+
+    def failed_checks(self) -> tuple[PreflightCheck, ...]:
+        return tuple(check for check in self.checks if check.status == "fail")
+
+    def warning_checks(self) -> tuple[PreflightCheck, ...]:
+        return tuple(check for check in self.checks if check.status == "warn")
+
+    def has_only_memory_shortfall_warning(self) -> bool:
+        warning_checks = self.warning_checks()
+        return (
+            bool(warning_checks)
+            and not self.failed_checks()
+            and all(check.name == "memory" for check in warning_checks)
+        )
 
 
 def derive_required_profile(desired_state: DesiredState) -> ResourceProfile:
@@ -161,7 +175,11 @@ def collect_host_facts(raw_env: RawEnvInput) -> HostFacts:
     )
 
 
-def run_preflight(desired_state: DesiredState, host_facts: HostFacts) -> PreflightReport:
+def run_preflight(
+    desired_state: DesiredState,
+    host_facts: HostFacts,
+    allow_memory_shortfall: bool = False,
+) -> PreflightReport:
     required_profile = derive_required_profile(desired_state)
     checks = (
         _os_check(host_facts),
@@ -180,7 +198,9 @@ def run_preflight(desired_state: DesiredState, host_facts: HostFacts) -> Preflig
         advisories=advisories,
     )
 
-    failures = [check.detail for check in checks if check.status == "fail"]
+    failures = [check.detail for check in report.failed_checks()]
+    if not allow_memory_shortfall:
+        failures.extend(check.detail for check in report.warning_checks())
     if failures:
         msg = "Preflight failed: " + "; ".join(failures)
         raise PreflightError(msg)
@@ -263,7 +283,7 @@ def _memory_check(host_facts: HostFacts, required_profile: ResourceProfile) -> P
     if host_facts.memory_gb < required_profile.minimum_memory_gb:
         return PreflightCheck(
             name="memory",
-            status="fail",
+            status="warn",
             detail=(
                 f"insufficient memory for {required_profile.name}: need "
                 f"{required_profile.minimum_memory_gb} GB, found {host_facts.memory_gb} GB"
