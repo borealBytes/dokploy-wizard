@@ -14,6 +14,7 @@ PromptFn = Callable[[str], str]
 
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ANSI_OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)")
+_CARET_CSI_RE = re.compile(r"\^\[\[[0-?]*[ -/]*[@-~]")
 
 
 @dataclass(frozen=True)
@@ -293,6 +294,7 @@ def sanitize_prompt_response(response: str) -> str:
     sanitized = response.replace("\x1b[200~", "").replace("\x1b[201~", "")
     sanitized = _ANSI_OSC_RE.sub("", sanitized)
     sanitized = _ANSI_CSI_RE.sub("", sanitized)
+    sanitized = _CARET_CSI_RE.sub("", sanitized)
     sanitized = "".join(
         character for character in sanitized if character >= " " or character == "\t"
     )
