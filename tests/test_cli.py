@@ -8,6 +8,7 @@ import pytest
 
 from dokploy_wizard import cli
 from dokploy_wizard.dokploy import DokployBootstrapAuthError, DokployBootstrapAuthResult
+from dokploy_wizard.packs import prompts as prompt_module
 from dokploy_wizard.packs.prompts import (
     GuidedInstallValues,
     PromptSelection,
@@ -76,7 +77,7 @@ def test_guided_install_prompts_include_dokploy_guidance() -> None:
             "n",
             "cf-token",
             "account-123",
-            "zone-123",
+            "",
         ]
     )
 
@@ -97,6 +98,7 @@ def test_guided_install_prompts_include_dokploy_guidance() -> None:
     assert "create the first admin and mint an API key" in combined
     assert "Private network mode" in combined
     assert "Need help finding your Cloudflare token" in combined
+    assert "Cloudflare zone ID (optional; press Enter to look up from example.com)" in combined
     assert "Tailscale auth key" not in combined
 
 
@@ -144,7 +146,7 @@ def test_guided_install_writes_env_file_and_runs_install(
             enable_headscale=True,
             cloudflare_api_token="token-123",
             cloudflare_account_id="account-123",
-            cloudflare_zone_id="zone-123",
+            cloudflare_zone_id=None,
             enable_tailscale=False,
             tailscale_auth_key=None,
             tailscale_hostname=None,
@@ -161,6 +163,7 @@ def test_guided_install_writes_env_file_and_runs_install(
             disabled_packs=(),
             seaweedfs_access_key=None,
             seaweedfs_secret_key=None,
+            generated_secrets={},
             openclaw_channels=("telegram",),
             my_farm_advisor_channels=(),
         ),
@@ -185,6 +188,7 @@ def test_guided_install_writes_env_file_and_runs_install(
     assert "DOKPLOY_ADMIN_PASSWORD=secret-123" in env_contents
     assert "ENABLE_HEADSCALE=true" in env_contents
     assert "CLOUDFLARE_API_TOKEN=token-123" in env_contents
+    assert "CLOUDFLARE_ZONE_ID" not in env_contents
     assert "PACKS=openclaw" in env_contents
     assert "OPENCLAW_CHANNELS=telegram" in env_contents
     assert captured["env_file"] == env_file
@@ -207,7 +211,7 @@ def test_guided_dry_run_does_not_require_dokploy_admin_password() -> None:
             "n",
             "cf-token",
             "account-123",
-            "zone-123",
+            "",
         ]
     )
 
@@ -237,7 +241,7 @@ def test_guided_install_tailscale_mode_prompts_for_auth_key() -> None:
             "n",
             "cf-token",
             "account-123",
-            "zone-123",
+            "",
         ]
     )
 
@@ -271,7 +275,7 @@ def test_guided_install_can_emit_cloudflare_help(capsys: pytest.CaptureFixture[s
             "y",
             "cf-token",
             "account-123",
-            "zone-123",
+            "",
         ]
     )
 
@@ -281,6 +285,44 @@ def test_guided_install_can_emit_cloudflare_help(capsys: pytest.CaptureFixture[s
     captured = capsys.readouterr()
     assert "https://dash.cloudflare.com/profile/api-tokens" in captured.out
     assert "Zone -> DNS -> Edit" in captured.out
+
+
+def test_guided_install_generates_seaweedfs_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = iter(["n", "n", "y", "n", "n"])
+    monkeypatch.setattr(
+        prompt_module,
+        "_generate_credential",
+        lambda prefix: f"{prefix}-generated",
+    )
+
+    selection = prompt_module.prompt_for_pack_selection(
+        lambda _: next(responses),
+        include_headscale_prompt=False,
+    )
+
+    assert selection.seaweedfs_access_key == "seaweed-generated"
+    assert selection.seaweedfs_secret_key == "seaweed-secret-generated"
+    assert selection.generated_secrets == {
+        "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
+        "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
+    }
+
+
+def test_guided_install_prints_generated_seaweedfs_credentials(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli._emit_generated_secrets(
+        {
+            "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
+            "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
+        },
+        Path("/tmp/install.env"),
+    )
+
+    captured = capsys.readouterr()
+    assert "Generated credentials" in captured.out
+    assert "SEAWEEDFS_ACCESS_KEY=seaweed-generated" in captured.out
+    assert "SEAWEEDFS_SECRET_KEY=seaweed-secret-generated" in captured.out
 
 
 def test_ensure_dokploy_api_auth_rewrites_env_with_generated_key(

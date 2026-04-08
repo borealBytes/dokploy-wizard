@@ -243,7 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _handle_install(args: argparse.Namespace) -> int:
     try:
-        env_file, raw_env, resolved_state_dir = _resolve_install_input(
+        env_file, raw_env, resolved_state_dir, generated_secrets = _resolve_install_input(
             env_file=args.env_file,
             state_dir=args.state_dir,
             non_interactive=args.non_interactive,
@@ -274,6 +274,7 @@ def _handle_install(args: argparse.Namespace) -> int:
         raise SystemExit(str(error)) from error
 
     print(json.dumps(summary, indent=2, sort_keys=True))
+    _emit_generated_secrets(generated_secrets, env_file)
     return 0
 
 
@@ -283,9 +284,14 @@ def _resolve_install_input(
     state_dir: Path,
     non_interactive: bool,
     dry_run: bool,
-) -> tuple[Path, RawEnvInput, Path]:
+) -> tuple[Path, RawEnvInput, Path, dict[str, str]]:
     if env_file is not None:
-        return env_file, _load_install_raw_env(env_file, non_interactive=non_interactive), state_dir
+        return (
+            env_file,
+            _load_install_raw_env(env_file, non_interactive=non_interactive),
+            state_dir,
+            {},
+        )
     if non_interactive:
         raise StateValidationError(
             "--env-file is required when --non-interactive is set for install."
@@ -295,10 +301,12 @@ def _resolve_install_input(
             "Interactive install requires a TTY when --env-file is not provided."
         )
     resolved_state_dir = _prompt_for_guided_state_dir(state_dir)
-    raw_env = _prompt_for_initial_install_raw_env(require_dokploy_auth=not dry_run)
+    raw_env, generated_secrets = _prompt_for_initial_install_raw_env(
+        require_dokploy_auth=not dry_run
+    )
     guided_env_file = _guided_install_env_file(resolved_state_dir)
     _write_reusable_env_file(guided_env_file, raw_env)
-    return guided_env_file, raw_env, resolved_state_dir
+    return guided_env_file, raw_env, resolved_state_dir, generated_secrets
 
 
 def _load_install_raw_env(env_file: Path, *, non_interactive: bool) -> RawEnvInput:
@@ -319,7 +327,9 @@ def _stdin_is_interactive() -> bool:
         return False
 
 
-def _prompt_for_initial_install_raw_env(*, require_dokploy_auth: bool) -> RawEnvInput:
+def _prompt_for_initial_install_raw_env(
+    *, require_dokploy_auth: bool
+) -> tuple[RawEnvInput, dict[str, str]]:
     guided_values = prompt_for_initial_install_values(require_dokploy_auth=require_dokploy_auth)
     raw_env = RawEnvInput(
         format_version=1,
@@ -331,7 +341,6 @@ def _prompt_for_initial_install_raw_env(*, require_dokploy_auth: bool) -> RawEnv
             "ENABLE_HEADSCALE": "true" if guided_values.enable_headscale else "false",
             "CLOUDFLARE_API_TOKEN": guided_values.cloudflare_api_token,
             "CLOUDFLARE_ACCOUNT_ID": guided_values.cloudflare_account_id,
-            "CLOUDFLARE_ZONE_ID": guided_values.cloudflare_zone_id,
             "ENABLE_TAILSCALE": "true" if guided_values.enable_tailscale else "false",
         },
     )
@@ -351,10 +360,13 @@ def _prompt_for_initial_install_raw_env(*, require_dokploy_auth: bool) -> RawEnv
             raw_env.values["TAILSCALE_SUBNET_ROUTES"] = ",".join(
                 guided_values.tailscale_subnet_routes
             )
+    if guided_values.cloudflare_zone_id is not None:
+        raw_env.values["CLOUDFLARE_ZONE_ID"] = guided_values.cloudflare_zone_id
+    selection = prompt_for_pack_selection(include_headscale_prompt=False)
     return apply_prompt_selection(
         raw_env,
-        prompt_for_pack_selection(include_headscale_prompt=False),
-    )
+        selection,
+    ), selection.generated_secrets
 
 
 def _prompt_for_guided_state_dir(state_dir: Path) -> Path:
@@ -374,6 +386,15 @@ def _write_reusable_env_file(path: Path, raw_env: RawEnvInput) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{key}={value}" for key, value in sorted(raw_env.values.items())]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _emit_generated_secrets(generated_secrets: dict[str, str], env_file: Path) -> None:
+    if not generated_secrets:
+        return
+    print("")
+    print(f"Generated credentials (saved to {env_file}):")
+    for key, value in sorted(generated_secrets.items()):
+        print(f"  {key}={value}")
 
 
 def _handle_modify(args: argparse.Namespace) -> int:
