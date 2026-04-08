@@ -61,6 +61,8 @@ class CloudflareAccessPolicy:
 class CloudflareBackend(Protocol):
     def validate_account_access(self, account_id: str) -> None: ...
 
+    def resolve_zone_id(self, account_id: str, zone_name: str) -> str | None: ...
+
     def validate_zone_access(self, zone_id: str) -> None: ...
 
     def get_tunnel(self, account_id: str, tunnel_id: str) -> CloudflareTunnel | None: ...
@@ -179,6 +181,32 @@ class CloudflareApiBackend:
         self.list_dns_records(
             zone_id, hostname="validation.invalid", record_type="CNAME", content=None
         )
+
+    def resolve_zone_id(self, account_id: str, zone_name: str) -> str | None:
+        if self._mock_zone_ok is not None:
+            return _mock_zone_id(zone_name)
+
+        payload = self._request_json(
+            method="GET",
+            path="/zones",
+            params={"name": zone_name, "account.id": account_id, "per_page": "100"},
+        )
+        zones = payload.get("result")
+        if not isinstance(zones, list):
+            raise CloudflareError("Cloudflare returned an invalid zone list response.")
+        exact_matches = [
+            item for item in zones if isinstance(item, dict) and item.get("name") == zone_name
+        ]
+        if not exact_matches:
+            return None
+        if len(exact_matches) > 1:
+            raise CloudflareError(
+                "Cloudflare returned multiple matching zones for the requested root domain."
+            )
+        zone_id = exact_matches[0].get("id")
+        if not isinstance(zone_id, str) or zone_id == "":
+            raise CloudflareError("Cloudflare zone payload is missing a valid id.")
+        return zone_id
 
     def get_tunnel(self, account_id: str, tunnel_id: str) -> CloudflareTunnel | None:
         if self._mock_account_ok is not None:
@@ -734,3 +762,7 @@ def _mock_access_app_id(hostname: str) -> str:
 
 def _mock_access_policy_id(app_id: str) -> str:
     return f"access-policy-{app_id}"
+
+
+def _mock_zone_id(zone_name: str) -> str:
+    return f"zone-{zone_name.lower()}"
