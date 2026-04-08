@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from dokploy_wizard import cli
 from dokploy_wizard.cli import run_install_flow
+from dokploy_wizard.dokploy import DokployBootstrapAuthError, DokployBootstrapAuthResult
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,
     CloudflareAccessIdentityProvider,
@@ -17,7 +19,13 @@ from dokploy_wizard.networking import (
     CloudflareTunnel,
 )
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
-from dokploy_wizard.state import StateValidationError, load_state_dir
+from dokploy_wizard.state import (
+    RAW_INPUT_FILE,
+    STATE_DOCUMENT_FILES,
+    RawEnvInput,
+    StateValidationError,
+    load_state_dir,
+)
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -235,6 +243,20 @@ class FakeHeadscaleBackend:
         return True
 
 
+def _auth_required_raw_env() -> RawEnvInput:
+    return RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "guided-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "secret-123",
+            "ENABLE_HEADSCALE": "true",
+        },
+    )
+
+
 def test_install_dry_run_produces_plan_without_writing_state(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     backend = FakeDokployBackend(healthy_before_install=False, healthy_after_install=False)
@@ -340,6 +362,121 @@ def test_install_reuses_existing_matching_state_and_detects_already_present(tmp_
     assert summary["networking"]["outcome"] == "already_present"
     assert summary["headscale"]["outcome"] == "already_present"
     assert second_backend.install_calls == 0
+
+
+def test_install_auth_failure_leaves_fresh_scaffold_on_disk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "install.env"
+    raw_env = _auth_required_raw_env()
+
+    class FakeAuthClient:
+        def __init__(self, *, base_url: str) -> None:
+            assert base_url == "http://127.0.0.1:3000"
+
+        def ensure_api_key(
+            self, *, admin_email: str, admin_password: str, key_name: str = "dokploy-wizard"
+        ) -> DokployBootstrapAuthResult:
+            del admin_email, admin_password, key_name
+            raise DokployBootstrapAuthError("no working auth endpoint")
+
+    monkeypatch.setattr(cli, "collect_host_facts", lambda _: object())
+    monkeypatch.setattr(
+        cli,
+        "_prepare_install_host_prerequisites",
+        lambda **kwargs: (kwargs["host_facts"], {}),
+    )
+    monkeypatch.setattr(cli, "run_preflight", lambda *_: object())
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    monkeypatch.setattr(
+        cli,
+        "execute_lifecycle_plan",
+        lambda **_: (_ for _ in ()).throw(AssertionError("execute_lifecycle_plan should not run")),
+    )
+    monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
+
+    with pytest.raises(DokployBootstrapAuthError, match="no working auth endpoint"):
+        run_install_flow(
+            env_file=env_file,
+            state_dir=state_dir,
+            dry_run=False,
+            raw_env=raw_env,
+            bootstrap_backend=FakeDokployBackend(True, True),
+        )
+
+    loaded_state = load_state_dir(state_dir)
+
+    assert state_dir.exists()
+    assert sorted(path.name for path in state_dir.iterdir()) == sorted(STATE_DOCUMENT_FILES)
+    assert loaded_state.raw_input is not None
+    assert loaded_state.desired_state is not None
+    assert loaded_state.applied_state is not None
+    assert loaded_state.ownership_ledger is not None
+    assert loaded_state.applied_state.completed_steps == ()
+    assert "DOKPLOY_API_KEY" not in loaded_state.raw_input.values
+
+
+def test_install_auth_success_refreshes_persisted_target_state_before_execution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "install.env"
+    raw_env = _auth_required_raw_env()
+
+    class FakeAuthClient:
+        def __init__(self, *, base_url: str) -> None:
+            assert base_url == "http://127.0.0.1:3000"
+
+        def ensure_api_key(
+            self, *, admin_email: str, admin_password: str, key_name: str = "dokploy-wizard"
+        ) -> DokployBootstrapAuthResult:
+            assert admin_email == "admin@example.com"
+            assert admin_password == "secret-123"
+            assert key_name == "dokploy-wizard"
+            return DokployBootstrapAuthResult(
+                api_key="dokp-key-123",
+                api_url="http://127.0.0.1:3000",
+                admin_email=admin_email,
+                organization_id="org-1",
+                used_sign_up=False,
+                auth_path="/api/auth/sign-in/email",
+                session_path="/api/user.session",
+            )
+
+    monkeypatch.setattr(cli, "collect_host_facts", lambda _: object())
+    monkeypatch.setattr(
+        cli,
+        "_prepare_install_host_prerequisites",
+        lambda **kwargs: (kwargs["host_facts"], {}),
+    )
+    monkeypatch.setattr(cli, "run_preflight", lambda *_: object())
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **_: {"state_status": "fresh"})
+    monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+    )
+
+    loaded_state = load_state_dir(state_dir)
+    persisted_raw_input = json.loads((state_dir / RAW_INPUT_FILE).read_text(encoding="utf-8"))
+
+    assert summary["state_status"] == "fresh"
+    assert loaded_state.raw_input is not None
+    assert loaded_state.desired_state is not None
+    assert loaded_state.applied_state is not None
+    assert loaded_state.raw_input.values["DOKPLOY_API_KEY"] == "dokp-key-123"
+    assert loaded_state.raw_input.values["DOKPLOY_API_URL"] == "https://dokploy.example.com"
+    assert loaded_state.desired_state.dokploy_api_url == "https://dokploy.example.com"
+    assert loaded_state.applied_state.completed_steps == ()
+    assert persisted_raw_input["values"]["DOKPLOY_API_KEY"] == "dokp-key-123"
+    assert "DOKPLOY_API_KEY=dokp-key-123" in env_file.read_text(encoding="utf-8")
 
 
 def test_install_rejects_partial_existing_state(tmp_path: Path) -> None:
