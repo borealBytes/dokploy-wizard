@@ -113,6 +113,8 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
         lambda **kwargs: PromptSelection(
             selected_packs=("openclaw",),
             disabled_packs=(),
+            seaweedfs_access_key=None,
+            seaweedfs_secret_key=None,
             openclaw_channels=("telegram",),
             my_farm_advisor_channels=(),
         ),

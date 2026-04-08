@@ -159,6 +159,8 @@ def test_guided_install_writes_env_file_and_runs_install(
         lambda **kwargs: PromptSelection(
             selected_packs=("openclaw",),
             disabled_packs=(),
+            seaweedfs_access_key=None,
+            seaweedfs_secret_key=None,
             openclaw_channels=("telegram",),
             my_farm_advisor_channels=(),
         ),
@@ -278,7 +280,7 @@ def test_guided_install_can_emit_cloudflare_help(capsys: pytest.CaptureFixture[s
     assert values.cloudflare_api_token == "cf-token"
     captured = capsys.readouterr()
     assert "https://dash.cloudflare.com/profile/api-tokens" in captured.out
-    assert "DNS Write" in captured.out
+    assert "Zone -> DNS -> Edit" in captured.out
 
 
 def test_ensure_dokploy_api_auth_rewrites_env_with_generated_key(

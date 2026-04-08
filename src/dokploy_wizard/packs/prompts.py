@@ -258,20 +258,48 @@ def _prompt_default(prompt: PromptFn, message: str, *, default: str) -> str:
 def _emit_cloudflare_help(output: Callable[[str], None]) -> None:
     output("")
     output("Cloudflare setup help")
-    output("- Create your API token here: https://dash.cloudflare.com/profile/api-tokens")
+    output("1. Create the token")
+    output("   URL: https://dash.cloudflare.com/profile/api-tokens")
+    output("   Click path:")
+    output("     Create Token")
+    output("     Create Custom Token")
+    output("")
+    output("2. Account ID")
+    output("   What it is:")
+    output("     The Cloudflare account that owns tunnel and Access resources.")
+    output("   Where to find it:")
+    output("     Cloudflare dashboard")
+    output("     Account home")
+    output("     Your account row")
+    output("     Copy account ID")
+    output("")
+    output("3. Zone ID")
+    output("   What it is:")
+    output("     The DNS zone ID for your root domain.")
+    output("   Where to find it:")
+    output("     Cloudflare dashboard")
+    output("     Your domain")
+    output("     Overview")
+    output("     API section")
+    output("     Zone ID")
+    output("")
+    output("4. Which zone to choose if you are unsure")
+    output("   Use the root domain itself.")
+    output("   Good: openmerge.me")
+    output("   Not this: dokploy.openmerge.me")
+    output("")
+    output("5. Minimum token permissions for this wizard")
+    output("   Account -> Cloudflare Tunnel -> Edit")
+    output("   Zone -> DNS -> Edit")
+    output("   Account -> Access: Apps and Policies -> Edit")
+    output("   Account -> Access: Organizations, Identity Providers, and Groups -> Edit")
+    output("")
+    output("6. Official help if you still need it")
     output(
-        "- Token docs: https://developers.cloudflare.com/fundamentals/api/get-started/create-token/"
+        "   Token docs: https://developers.cloudflare.com/fundamentals/api/get-started/create-token/"
     )
     output(
-        "- Find Account ID and Zone ID: https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/"
-    )
-    output(
-        "- Minimum recommended token permissions: DNS Write on the specific Zone; "
-        "add Zone Read if zone lookup/validation is needed."
-    )
-    output(
-        "- Account ID = the Cloudflare account that will own tunnel/access resources. "
-        "Zone ID = the DNS zone for your root domain."
+        "   Account ID / Zone ID docs: https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/"
     )
     output("")
 
