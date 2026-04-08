@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -17,6 +18,7 @@ class PromptSelection:
     disabled_packs: tuple[str, ...]
     seaweedfs_access_key: str | None
     seaweedfs_secret_key: str | None
+    generated_secrets: dict[str, str]
     openclaw_channels: tuple[str, ...]
     my_farm_advisor_channels: tuple[str, ...]
 
@@ -31,7 +33,7 @@ class GuidedInstallValues:
     enable_headscale: bool
     cloudflare_api_token: str
     cloudflare_account_id: str
-    cloudflare_zone_id: str
+    cloudflare_zone_id: str | None
     enable_tailscale: bool
     tailscale_auth_key: str | None
     tailscale_hostname: str | None
@@ -86,22 +88,28 @@ def prompt_for_pack_selection(
         selected.append("nextcloud")
     seaweedfs_access_key: str | None = None
     seaweedfs_secret_key: str | None = None
+    generated_secrets: dict[str, str] = {}
     if _prompt_yes_no(prompt, "Enable SeaweedFS object storage? [y/N]: ", default=False):
         selected.append("seaweedfs")
-        seaweedfs_access_key = _prompt_non_empty(prompt, "SeaweedFS access key: ")
-        seaweedfs_secret_key = _prompt_non_empty(prompt, "SeaweedFS secret key: ")
+        seaweedfs_access_key = _generate_credential(prefix="seaweed")
+        seaweedfs_secret_key = _generate_credential(prefix="seaweed-secret")
+        generated_secrets["SEAWEEDFS_ACCESS_KEY"] = seaweedfs_access_key
+        generated_secrets["SEAWEEDFS_SECRET_KEY"] = seaweedfs_secret_key
 
     openclaw_channels: tuple[str, ...] = ()
     my_farm_advisor_channels: tuple[str, ...] = ()
     if _prompt_yes_no(prompt, "Enable OpenClaw? [y/N]: ", default=False):
         selected.append("openclaw")
-        raw_channels = prompt(
-            "OpenClaw channels [telegram/matrix] (comma separated, optional): "
-        ).strip()
-        if raw_channels != "":
-            openclaw_channels = tuple(
-                sorted({item.strip() for item in raw_channels.split(",") if item.strip()})
-            )
+        raw_channels = _prompt_default(
+            prompt,
+            "OpenClaw channels [telegram/matrix] (comma separated, default: matrix): ",
+            default="matrix",
+        )
+        openclaw_channels = tuple(
+            sorted({item.strip() for item in raw_channels.split(",") if item.strip()})
+        )
+        if "matrix" in openclaw_channels and "matrix" not in selected:
+            selected.append("matrix")
     if _prompt_yes_no(prompt, "Enable My Farm Advisor? [y/N]: ", default=False):
         selected.append("my-farm-advisor")
         raw_channels = prompt(
@@ -111,12 +119,15 @@ def prompt_for_pack_selection(
             my_farm_advisor_channels = tuple(
                 sorted({item.strip() for item in raw_channels.split(",") if item.strip()})
             )
+            if "matrix" in my_farm_advisor_channels and "matrix" not in selected:
+                selected.append("matrix")
 
     return PromptSelection(
         selected_packs=tuple(sorted(selected)),
         disabled_packs=tuple(sorted(disabled)),
         seaweedfs_access_key=seaweedfs_access_key,
         seaweedfs_secret_key=seaweedfs_secret_key,
+        generated_secrets=dict(sorted(generated_secrets.items())),
         openclaw_channels=openclaw_channels,
         my_farm_advisor_channels=my_farm_advisor_channels,
     )
@@ -205,7 +216,10 @@ def prompt_for_initial_install_values(
         enable_headscale=enable_headscale,
         cloudflare_api_token=_prompt_non_empty(prompt, "Cloudflare API token: "),
         cloudflare_account_id=_prompt_non_empty(prompt, "Cloudflare account ID: "),
-        cloudflare_zone_id=_prompt_non_empty(prompt, "Cloudflare zone ID: "),
+        cloudflare_zone_id=_prompt_optional(
+            prompt,
+            f"Cloudflare zone ID (optional; press Enter to look up from {root_domain}): ",
+        ),
         enable_tailscale=enable_tailscale,
         tailscale_auth_key=tailscale_auth_key,
         tailscale_hostname=tailscale_hostname,
@@ -248,11 +262,20 @@ def _prompt_non_empty(prompt: PromptFn, message: str) -> str:
     return response
 
 
+def _prompt_optional(prompt: PromptFn, message: str) -> str | None:
+    response = prompt(message).strip()
+    return response or None
+
+
 def _prompt_default(prompt: PromptFn, message: str, *, default: str) -> str:
     response = prompt(message).strip()
     if response == "":
         return default
     return response
+
+
+def _generate_credential(*, prefix: str) -> str:
+    return f"{prefix}-{secrets.token_urlsafe(12)}"
 
 
 def _emit_cloudflare_help(output: Callable[[str], None]) -> None:
@@ -263,6 +286,11 @@ def _emit_cloudflare_help(output: Callable[[str], None]) -> None:
     output("   Click path:")
     output("     Create Token")
     output("     Create Custom Token")
+    output("   Minimum token permissions for this wizard:")
+    output("     Account -> Cloudflare Tunnel -> Edit")
+    output("     Zone -> DNS -> Edit")
+    output("     Account -> Access: Apps and Policies -> Edit")
+    output("     Account -> Access: Organizations, Identity Providers, and Groups -> Edit")
     output("")
     output("2. Account ID")
     output("   What it is:")
@@ -282,19 +310,12 @@ def _emit_cloudflare_help(output: Callable[[str], None]) -> None:
     output("     Overview")
     output("     API section")
     output("     Zone ID")
+    output("   If you are unsure which zone to use:")
+    output("     Use the root domain itself.")
+    output("     Good: openmerge.me")
+    output("     Not this: dokploy.openmerge.me")
     output("")
-    output("4. Which zone to choose if you are unsure")
-    output("   Use the root domain itself.")
-    output("   Good: openmerge.me")
-    output("   Not this: dokploy.openmerge.me")
-    output("")
-    output("5. Minimum token permissions for this wizard")
-    output("   Account -> Cloudflare Tunnel -> Edit")
-    output("   Zone -> DNS -> Edit")
-    output("   Account -> Access: Apps and Policies -> Edit")
-    output("   Account -> Access: Organizations, Identity Providers, and Groups -> Edit")
-    output("")
-    output("6. Official help if you still need it")
+    output("4. Official help if you still need it")
     output(
         "   Token docs: https://developers.cloudflare.com/fundamentals/api/get-started/create-token/"
     )

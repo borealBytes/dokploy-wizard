@@ -98,7 +98,7 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
             enable_headscale=True,
             cloudflare_api_token="token-123",
             cloudflare_account_id="account-123",
-            cloudflare_zone_id="zone-123",
+            cloudflare_zone_id=None,
             enable_tailscale=False,
             tailscale_auth_key=None,
             tailscale_hostname=None,
@@ -115,6 +115,7 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
             disabled_packs=(),
             seaweedfs_access_key=None,
             seaweedfs_secret_key=None,
+            generated_secrets={},
             openclaw_channels=("telegram",),
             my_farm_advisor_channels=(),
         ),
@@ -136,5 +137,6 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
     assert raw_env.values["DOKPLOY_SUBDOMAIN"] == "dokploy"
     assert raw_env.values["DOKPLOY_ADMIN_EMAIL"] == "admin@example.com"
     assert raw_env.values["ENABLE_HEADSCALE"] == "true"
+    assert "CLOUDFLARE_ZONE_ID" not in raw_env.values
     assert raw_env.values["PACKS"] == "openclaw"
     assert raw_env.values["OPENCLAW_CHANNELS"] == "telegram"
