@@ -337,10 +337,44 @@ def test_guided_install_sanitizes_bracketed_paste_sequences() -> None:
     assert values.cloudflare_zone_id == "zone-123"
 
 
+def test_guided_install_sanitizes_caret_notation_paste_sequences() -> None:
+    responses = iter(
+        [
+            "example.com",
+            "",
+            "",
+            "",
+            "secret-123",
+            "",
+            "n",
+            "^[[200~cf-token^[[201~",
+            "^[[200~account-123^[[201~",
+            "^[[200~zone-123^[[201~",
+        ]
+    )
+
+    values = prompt_for_initial_install_values(lambda _: next(responses))
+
+    assert values.cloudflare_api_token == "cf-token"
+    assert values.cloudflare_account_id == "account-123"
+    assert values.cloudflare_zone_id == "zone-123"
+
+
 def test_guided_state_dir_sanitizes_bracketed_paste(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     pasted = f"\x1b[200~{tmp_path / 'guided-state'}\x1b[201~"
+    monkeypatch.setattr("builtins.input", lambda _: pasted)
+
+    assert (
+        cli._prompt_for_guided_state_dir(Path(".dokploy-wizard-state")) == tmp_path / "guided-state"
+    )
+
+
+def test_guided_state_dir_sanitizes_caret_notation_arrow_and_paste(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pasted = f"^[[A^[[200~{tmp_path / 'guided-state'}^[[201~"
     monkeypatch.setattr("builtins.input", lambda _: pasted)
 
     assert (
