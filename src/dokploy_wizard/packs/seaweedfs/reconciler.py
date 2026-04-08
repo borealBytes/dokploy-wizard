@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+from collections.abc import Callable
 from typing import Protocol
 
 from dokploy_wizard.packs.seaweedfs.models import (
@@ -22,9 +23,9 @@ class SeaweedFsError(RuntimeError):
 
 
 class SeaweedFsBackend(Protocol):
-    def get_service(self, resource_id: str) -> object | None: ...
+    def get_service(self, resource_id: str) -> SeaweedFsResourceRecord | None: ...
 
-    def find_service_by_name(self, resource_name: str) -> object | None: ...
+    def find_service_by_name(self, resource_name: str) -> SeaweedFsResourceRecord | None: ...
 
     def create_service(
         self,
@@ -34,15 +35,17 @@ class SeaweedFsBackend(Protocol):
         access_key: str,
         secret_key: str,
         data_resource_name: str,
-    ) -> object: ...
+    ) -> SeaweedFsResourceRecord: ...
 
-    def get_persistent_data(self, resource_id: str) -> object | None: ...
+    def get_persistent_data(self, resource_id: str) -> SeaweedFsResourceRecord | None: ...
 
-    def find_persistent_data_by_name(self, resource_name: str) -> object | None: ...
+    def find_persistent_data_by_name(
+        self, resource_name: str
+    ) -> SeaweedFsResourceRecord | None: ...
 
-    def create_persistent_data(self, resource_name: str) -> object: ...
+    def create_persistent_data(self, resource_name: str) -> SeaweedFsResourceRecord: ...
 
-    def check_health(self, *, service: object, url: str) -> bool: ...
+    def check_health(self, *, service: SeaweedFsResourceRecord, url: str) -> bool: ...
 
 
 class SeaweedFsResourceRecord:
@@ -201,7 +204,8 @@ def reconcile_seaweedfs(
                 health_check=SeaweedFsHealthCheck(url=health_url, passed=None),
                 notes=(
                     f"SeaweedFS service '{service_name}' will expose S3 at '{hostname}'.",
-                    "SeaweedFS success in non-dry-run mode is gated on an S3 endpoint health check.",
+                    "SeaweedFS success in non-dry-run mode is gated on an S3 "
+                    "endpoint health check.",
                 ),
             ),
             service_resource_id=None,
@@ -227,7 +231,8 @@ def reconcile_seaweedfs(
             health_check=SeaweedFsHealthCheck(url=health_url, passed=True),
             notes=(
                 f"SeaweedFS runtime '{service_name}' is reconciled and healthy.",
-                "SeaweedFS credentials are provided from desired state only; no integrations are wired yet.",
+                "SeaweedFS credentials are provided from desired state only; "
+                "no integrations are wired yet.",
             ),
         ),
         service_resource_id=service_id,
@@ -283,16 +288,17 @@ def _resolve_owned_resource(
     resource_name: str,
     resource_type: str,
     owned_resource: OwnedResource | None,
-    get_resource: callable,
-    find_by_name: callable,
-    create_resource: callable,
+    get_resource: Callable[[str], SeaweedFsResourceRecord | None],
+    find_by_name: Callable[[str], SeaweedFsResourceRecord | None],
+    create_resource: Callable[[str], SeaweedFsResourceRecord],
     collision_message: str,
 ) -> tuple[SeaweedFsManagedResource, str]:
     if owned_resource is not None:
         existing = get_resource(owned_resource.resource_id)
         if existing is None:
             raise SeaweedFsError(
-                f"Ownership ledger says the {resource_type} resource exists, but the backend could not find it."
+                f"Ownership ledger says the {resource_type} resource exists, "
+                "but the backend could not find it."
             )
         if existing.resource_name != resource_name:
             raise SeaweedFsError(
