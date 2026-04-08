@@ -1282,7 +1282,12 @@ def test_install_prompts_before_continuing_on_memory_only_shortfall(
         prompt_for_memory_shortfall=True,
     )
 
-    assert prompts == ["Proceed anyway? [y/N] "]
+    assert prompts == [
+        "Memory shortfall warning: insufficient memory for Core: need 4 GB, found 3 GB. "
+        "This host is below the recommended memory target for the selected scope "
+        "and may be unstable or underprovisioned. "
+        "Proceed anyway? [y/N] "
+    ]
     assert summary["ok"] is True
 
 
