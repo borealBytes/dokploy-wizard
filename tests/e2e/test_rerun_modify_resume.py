@@ -4,6 +4,18 @@ import json
 import subprocess
 from pathlib import Path
 
+from dokploy_wizard.lifecycle import applicable_phases_for
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    OwnedResource,
+    OwnershipLedger,
+    parse_env_file,
+    resolve_desired_state,
+    write_applied_checkpoint,
+    write_ownership_ledger,
+    write_target_state,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI = REPO_ROOT / "bin" / "dokploy-wizard"
 FIXTURES_DIR = REPO_ROOT / "fixtures"
@@ -34,50 +46,72 @@ def _replace_line(content: str, key: str, value: str) -> str:
     return content + f"\n{key}={value}\n"
 
 
-def _seed_mock_existing_state(
+def _seed_lifecycle_state(
     state_dir: Path,
     *,
-    root_domain: str,
-    headscale_healthy: str | None = None,
-    include_headscale_service: bool = True,
+    env_path: Path,
+    completed_steps: tuple[str, ...] | None = None,
 ) -> None:
-    raw_input_path = state_dir / "raw-input.json"
-    payload = json.loads(raw_input_path.read_text(encoding="utf-8"))
-    values = payload["values"]
-    values["CLOUDFLARE_MOCK_EXISTING_HOSTNAMES"] = f"dokploy.{root_domain},headscale.{root_domain}"
-    if include_headscale_service:
-        values["HEADSCALE_MOCK_EXISTING_SERVICE_ID"] = "lifecycle-stack-headscale"
-    else:
-        values.pop("HEADSCALE_MOCK_EXISTING_SERVICE_ID", None)
-    if headscale_healthy is not None:
-        values["HEADSCALE_MOCK_HEALTHY"] = headscale_healthy
-    raw_input_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    raw_input = parse_env_file(env_path)
+    desired_state = resolve_desired_state(raw_input)
+    write_target_state(state_dir, raw_input, desired_state)
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=desired_state.format_version,
+            desired_state_fingerprint=desired_state.fingerprint(),
+            completed_steps=completed_steps or applicable_phases_for(desired_state),
+        ),
+    )
+    write_ownership_ledger(
+        state_dir,
+        OwnershipLedger(format_version=desired_state.format_version, resources=()),
     )
 
 
 def test_cli_install_then_rerun_surfaces_explicit_noop(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
-    base_env = (FIXTURES_DIR / "lifecycle-headscale.env").read_text(encoding="utf-8")
-    install_env = _write_env(tmp_path / "install.env", base_env)
-    rerun_env = _write_env(tmp_path / "rerun.env", base_env)
-
-    first = _run_cli(
-        "install",
-        "--env-file",
-        str(install_env),
-        "--state-dir",
-        str(state_dir),
-        "--non-interactive",
-    )
-    _seed_mock_existing_state(state_dir, root_domain="example.com", headscale_healthy="true")
-    rerun_env = _write_env(
-        tmp_path / "rerun.env",
-        base_env
+    base_env = (
+        _replace_line(
+            (FIXTURES_DIR / "lifecycle-headscale.env").read_text(encoding="utf-8"),
+            "CLOUDFLARE_MOCK_EXISTING_TUNNEL_ID",
+            "lifecycle-stack-tunnel",
+        )
         + "\nCLOUDFLARE_MOCK_EXISTING_HOSTNAMES=dokploy.example.com,headscale.example.com"
-        + "\nHEADSCALE_MOCK_EXISTING_SERVICE_ID=lifecycle-stack-headscale\n",
+        + "\nHEADSCALE_MOCK_EXISTING_SERVICE_ID=lifecycle-stack-headscale\n"
     )
-    second = _run_cli(
+    rerun_env = _write_env(tmp_path / "rerun.env", base_env)
+    _seed_lifecycle_state(state_dir, env_path=rerun_env)
+    write_ownership_ledger(
+        state_dir,
+        OwnershipLedger(
+            format_version=1,
+            resources=(
+                OwnedResource(
+                    "cloudflare_tunnel",
+                    "lifecycle-stack-tunnel",
+                    "account:account-123",
+                ),
+                OwnedResource(
+                    "cloudflare_dns_record",
+                    "dokploy-example-com",
+                    "zone:zone-123:dokploy.example.com",
+                ),
+                OwnedResource(
+                    "cloudflare_dns_record",
+                    "headscale-example-com",
+                    "zone:zone-123:headscale.example.com",
+                ),
+                OwnedResource(
+                    "headscale_service",
+                    "lifecycle-stack-headscale",
+                    "stack:lifecycle-stack:headscale",
+                ),
+            ),
+        ),
+    )
+
+    result = _run_cli(
         "install",
         "--env-file",
         str(rerun_env),
@@ -86,28 +120,19 @@ def test_cli_install_then_rerun_surfaces_explicit_noop(tmp_path: Path) -> None:
         "--non-interactive",
     )
 
-    assert first.returncode == 0, first.stderr
-    assert second.returncode == 0, second.stderr
-    second_payload = json.loads(second.stdout)
-    assert second_payload["lifecycle"]["mode"] == "noop"
-    assert second_payload["state_status"] == "existing"
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["lifecycle"]["mode"] == "noop"
+    assert payload["state_status"] == "existing"
 
 
-def test_cli_modify_domain_reconciles_supported_change(tmp_path: Path) -> None:
+def test_cli_modify_domain_rejects_mock_contamination_for_live_run(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     install_env = _write_env(
         tmp_path / "install.env",
         (FIXTURES_DIR / "lifecycle-headscale.env").read_text(encoding="utf-8"),
     )
-
-    installed = _run_cli(
-        "install",
-        "--env-file",
-        str(install_env),
-        "--state-dir",
-        str(state_dir),
-        "--non-interactive",
-    )
+    _seed_lifecycle_state(state_dir, env_path=install_env)
     modify_env = _write_env(
         tmp_path / "modify.env",
         _replace_line(
@@ -125,41 +150,28 @@ def test_cli_modify_domain_reconciles_supported_change(tmp_path: Path) -> None:
         "--non-interactive",
     )
 
-    assert installed.returncode == 0, installed.stderr
-    assert modified.returncode == 0, modified.stderr
-    modified_payload = json.loads(modified.stdout)
-    assert modified_payload["lifecycle"]["mode"] == "modify"
-    assert modified_payload["lifecycle"]["start_phase"] == "networking"
-    assert modified_payload["headscale"]["outcome"] in {"already_present", "applied"}
+    assert modified.returncode != 0
+    assert "live/pre-live runs require real integrations" in modified.stderr
+    assert "CLOUDFLARE_MOCK_ACCOUNT_OK" in modified.stderr
+    assert "DOKPLOY_MOCK_API_MODE" in modified.stderr
 
 
-def test_cli_resume_continues_from_failed_headscale_phase(tmp_path: Path) -> None:
+def test_cli_resume_rejects_persisted_mock_reuse_before_mutation(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     base_env = (FIXTURES_DIR / "lifecycle-headscale.env").read_text(encoding="utf-8")
-    failing_env = _write_env(
-        tmp_path / "failing.env",
-        _replace_line(base_env, "HEADSCALE_MOCK_HEALTHY", "false"),
-    )
     resume_env = _write_env(
         tmp_path / "resume.env",
-        _replace_line(base_env, "HEADSCALE_MOCK_HEALTHY", "true")
-        + "\nCLOUDFLARE_MOCK_EXISTING_HOSTNAMES=dokploy.example.com,headscale.example.com\n",
+        base_env,
     )
-
-    failed = _run_cli(
-        "install",
-        "--env-file",
-        str(failing_env),
-        "--state-dir",
-        str(state_dir),
-        "--non-interactive",
-    )
-    _seed_mock_existing_state(
+    _seed_lifecycle_state(
         state_dir,
-        root_domain="example.com",
-        headscale_healthy="true",
-        include_headscale_service=False,
+        env_path=resume_env,
+        completed_steps=("preflight", "dokploy_bootstrap", "networking"),
     )
+    raw_input_before = (state_dir / "raw-input.json").read_text(encoding="utf-8")
+    desired_before = (state_dir / "desired-state.json").read_text(encoding="utf-8")
+    applied_before = (state_dir / "applied-state.json").read_text(encoding="utf-8")
+
     resumed = _run_cli(
         "install",
         "--env-file",
@@ -169,25 +181,21 @@ def test_cli_resume_continues_from_failed_headscale_phase(tmp_path: Path) -> Non
         "--non-interactive",
     )
 
-    assert failed.returncode != 0
-    assert "headscale health check failed" in failed.stderr.lower()
-    assert resumed.returncode == 0, resumed.stderr
-    resumed_payload = json.loads(resumed.stdout)
-    assert resumed_payload["lifecycle"]["mode"] == "resume"
-    assert resumed_payload["lifecycle"]["start_phase"] == "headscale"
+    assert resumed.returncode != 0
+    assert "live/pre-live runs require real integrations" in resumed.stderr
+    assert "HEADSCALE_MOCK_HEALTHY" in resumed.stderr
+    assert (state_dir / "raw-input.json").read_text(encoding="utf-8") == raw_input_before
+    assert (state_dir / "desired-state.json").read_text(encoding="utf-8") == desired_before
+    assert (state_dir / "applied-state.json").read_text(encoding="utf-8") == applied_before
 
 
 def test_cli_modify_rejects_unsupported_stack_name_change(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
-    installed = _run_cli(
-        "install",
-        "--env-file",
-        str(FIXTURES_DIR / "lifecycle-headscale.env"),
-        "--state-dir",
-        str(state_dir),
-        "--non-interactive",
+    install_env = _write_env(
+        tmp_path / "install.env",
+        (FIXTURES_DIR / "lifecycle-headscale.env").read_text(encoding="utf-8"),
     )
-    _seed_mock_existing_state(state_dir, root_domain="example.com")
+    _seed_lifecycle_state(state_dir, env_path=install_env)
     modified = _run_cli(
         "modify",
         "--env-file",
@@ -197,6 +205,5 @@ def test_cli_modify_rejects_unsupported_stack_name_change(tmp_path: Path) -> Non
         "--non-interactive",
     )
 
-    assert installed.returncode == 0, installed.stderr
     assert modified.returncode != 0
     assert "STACK_NAME changes are unsupported" in modified.stderr

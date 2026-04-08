@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
+import stat
+import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -31,6 +34,11 @@ from dokploy_wizard.dokploy import (
     DokployNextcloudBackend,
     DokploySeaweedFsBackend,
     DokploySharedCoreBackend,
+)
+from dokploy_wizard.host_prereqs import (
+    UbuntuAptHostPrerequisiteBackend,
+    assess_host_prerequisites,
+    remediate_host_prerequisites,
 )
 from dokploy_wizard.lifecycle import (
     LifecycleBackends,
@@ -77,7 +85,13 @@ from dokploy_wizard.packs.seaweedfs import (
     SeaweedFsError,
     ShellSeaweedFsBackend,
 )
-from dokploy_wizard.preflight import PreflightError, collect_host_facts, run_preflight
+from dokploy_wizard.preflight import (
+    SUPPORTED_OS_ID,
+    SUPPORTED_OS_VERSION,
+    PreflightError,
+    collect_host_facts,
+    run_preflight,
+)
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     DesiredState,
@@ -106,6 +120,14 @@ from dokploy_wizard.uninstall import (
     execute_uninstall_plan,
 )
 
+_LIVE_RUN_MOCK_CONTAMINATION_PREFIXES = (
+    "DOKPLOY_BOOTSTRAP_",
+    "DOKPLOY_MOCK_",
+    "CLOUDFLARE_MOCK_",
+    "TAILSCALE_MOCK_",
+    "HEADSCALE_MOCK_",
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -118,14 +140,18 @@ def build_parser() -> argparse.ArgumentParser:
         "install",
         help="install the wizard-managed stack",
         description=(
-            "Install the wizard-managed stack. Provide --env-file for reusable env-file mode, "
-            "or omit it for a guided first-run install in an interactive terminal."
+            "Install the wizard-managed stack. Provide --env-file for reusable env-file mode "
+            "with a sensitive install.env operator file, or omit it for a guided first-run "
+            "install in an interactive terminal."
         ),
     )
     install_parser.add_argument(
         "--env-file",
         type=Path,
-        help="path to the reusable env file (optional for guided first-run install)",
+        help=(
+            "path to the sensitive reusable install.env operator file "
+            "(optional for guided first-run install)"
+        ),
     )
     install_parser.add_argument(
         "--state-dir",
@@ -142,6 +168,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--non-interactive",
         action="store_true",
         help="disable interactive pack-selection prompts",
+    )
+    install_parser.add_argument(
+        "--allow-memory-shortfall",
+        action="store_true",
+        help="allow install to continue when memory is the only preflight shortfall",
+    )
+    install_parser.add_argument(
+        "--no-print-secrets",
+        action="store_true",
+        help="persist generated secrets without printing them to stdout",
     )
     install_parser.set_defaults(handler=_handle_install)
 
@@ -254,6 +290,9 @@ def _handle_install(args: argparse.Namespace) -> int:
             state_dir=resolved_state_dir,
             dry_run=args.dry_run,
             raw_env=raw_env,
+            allow_memory_shortfall=getattr(args, "allow_memory_shortfall", False),
+            prompt_for_memory_shortfall=not args.non_interactive and _stdin_is_interactive(),
+            enforce_live_run_contamination_check=True,
         )
     except (
         OSError,
@@ -274,7 +313,8 @@ def _handle_install(args: argparse.Namespace) -> int:
         raise SystemExit(str(error)) from error
 
     print(json.dumps(summary, indent=2, sort_keys=True))
-    _emit_generated_secrets(generated_secrets, env_file)
+    if not getattr(args, "no_print_secrets", False):
+        _emit_generated_secrets(generated_secrets, env_file)
     return 0
 
 
@@ -288,7 +328,11 @@ def _resolve_install_input(
     if env_file is not None:
         return (
             env_file,
-            _load_install_raw_env(env_file, non_interactive=non_interactive),
+            _load_install_raw_env(
+                env_file,
+                non_interactive=non_interactive,
+                warn_on_broad_permissions=not dry_run,
+            ),
             state_dir,
             {},
         )
@@ -309,8 +353,12 @@ def _resolve_install_input(
     return guided_env_file, raw_env, resolved_state_dir, generated_secrets
 
 
-def _load_install_raw_env(env_file: Path, *, non_interactive: bool) -> RawEnvInput:
+def _load_install_raw_env(
+    env_file: Path, *, non_interactive: bool, warn_on_broad_permissions: bool = False
+) -> RawEnvInput:
     raw_env = parse_env_file(env_file)
+    if warn_on_broad_permissions:
+        _warn_if_broad_env_file_permissions(env_file)
     if (
         non_interactive
         or has_explicit_pack_selection(raw_env.values)
@@ -386,6 +434,20 @@ def _write_reusable_env_file(path: Path, raw_env: RawEnvInput) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{key}={value}" for key, value in sorted(raw_env.values.items())]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _warn_if_broad_env_file_permissions(path: Path) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077 == 0:
+        return
+    print(
+        (
+            f"Warning: {path} permissions are broader than owner-only "
+            f"({mode:o}); install.env files may contain secrets, so prefer 0600."
+        ),
+        file=sys.stderr,
+    )
 
 
 def _emit_generated_secrets(generated_secrets: dict[str, str], env_file: Path) -> None:
@@ -399,12 +461,17 @@ def _emit_generated_secrets(generated_secrets: dict[str, str], env_file: Path) -
 
 def _handle_modify(args: argparse.Namespace) -> int:
     try:
-        raw_env = _load_install_raw_env(args.env_file, non_interactive=args.non_interactive)
+        raw_env = _load_install_raw_env(
+            args.env_file,
+            non_interactive=args.non_interactive,
+            warn_on_broad_permissions=not args.dry_run,
+        )
         summary = run_modify_flow(
             env_file=args.env_file,
             state_dir=args.state_dir,
             dry_run=args.dry_run,
             raw_env=raw_env,
+            enforce_live_run_contamination_check=True,
         )
     except (
         OSError,
@@ -478,6 +545,9 @@ def run_install_flow(
     nextcloud_backend: NextcloudBackend | None = None,
     seaweedfs_backend: SeaweedFsBackend | None = None,
     openclaw_backend: OpenClawBackend | None = None,
+    allow_memory_shortfall: bool = False,
+    prompt_for_memory_shortfall: bool = False,
+    enforce_live_run_contamination_check: bool = False,
 ) -> dict[str, Any]:
     return _run_lifecycle_flow(
         env_file=env_file,
@@ -494,6 +564,10 @@ def run_install_flow(
         seaweedfs_backend=seaweedfs_backend,
         openclaw_backend=openclaw_backend,
         allow_modify=False,
+        remediate_install_host_prereqs=True,
+        allow_memory_shortfall=allow_memory_shortfall,
+        prompt_for_memory_shortfall=prompt_for_memory_shortfall,
+        enforce_live_run_contamination_check=enforce_live_run_contamination_check,
     )
 
 
@@ -512,6 +586,7 @@ def run_modify_flow(
     nextcloud_backend: NextcloudBackend | None = None,
     seaweedfs_backend: SeaweedFsBackend | None = None,
     openclaw_backend: OpenClawBackend | None = None,
+    enforce_live_run_contamination_check: bool = False,
 ) -> dict[str, Any]:
     return _run_lifecycle_flow(
         env_file=env_file,
@@ -528,6 +603,10 @@ def run_modify_flow(
         seaweedfs_backend=seaweedfs_backend,
         openclaw_backend=openclaw_backend,
         allow_modify=True,
+        remediate_install_host_prereqs=False,
+        allow_memory_shortfall=False,
+        prompt_for_memory_shortfall=False,
+        enforce_live_run_contamination_check=enforce_live_run_contamination_check,
     )
 
 
@@ -613,13 +692,15 @@ def _run_lifecycle_flow(
     seaweedfs_backend: SeaweedFsBackend | None,
     openclaw_backend: OpenClawBackend | None,
     allow_modify: bool,
+    remediate_install_host_prereqs: bool,
+    allow_memory_shortfall: bool,
+    prompt_for_memory_shortfall: bool,
+    enforce_live_run_contamination_check: bool,
 ) -> dict[str, Any]:
     loaded_state = load_state_dir(state_dir)
     existing_state = validate_existing_state(loaded_state)
     raw_env = raw_env or parse_env_file(env_file)
     desired_state = resolve_desired_state(raw_env)
-    host_facts = collect_host_facts(raw_env)
-    preflight_report = run_preflight(desired_state, host_facts)
     backend = bootstrap_backend or ShellDokployBootstrapBackend(raw_env)
     ownership_ledger = loaded_state.ownership_ledger or OwnershipLedger(
         format_version=desired_state.format_version,
@@ -674,6 +755,33 @@ def _run_lifecycle_flow(
             desired_equivalent=False,
         )
 
+    if enforce_live_run_contamination_check:
+        _validate_live_run_env_for_mutation(
+            raw_env=raw_env,
+            lifecycle_plan=lifecycle_plan,
+            dry_run=dry_run,
+        )
+    host_facts = collect_host_facts(raw_env)
+    host_prerequisite_summary: dict[str, Any] | None = None
+    if remediate_install_host_prereqs and _host_supports_prerequisite_remediation(host_facts):
+        host_facts, host_prerequisite_summary = _prepare_install_host_prerequisites(
+            raw_env=raw_env,
+            host_facts=host_facts,
+            dry_run=dry_run,
+        )
+    preflight_report = _run_preflight_report(
+        desired_state=desired_state,
+        host_facts=host_facts,
+        allow_memory_shortfall=not allow_modify,
+    )
+    if not allow_modify:
+        _require_install_memory_shortfall_override(
+            preflight_report=preflight_report,
+            allow_memory_shortfall=allow_memory_shortfall,
+            prompt_for_memory_shortfall=prompt_for_memory_shortfall,
+        )
+    if not dry_run and not existing_state:
+        persist_install_scaffold(state_dir, raw_env, desired_state)
     raw_env = _ensure_dokploy_api_auth(
         env_file=env_file,
         raw_env=raw_env,
@@ -742,10 +850,8 @@ def _run_lifecycle_flow(
     )
 
     if not dry_run:
-        if not existing_state:
-            persist_install_scaffold(state_dir, raw_env, desired_state)
-        else:
-            write_target_state(state_dir, raw_env, desired_state)
+        write_target_state(state_dir, raw_env, desired_state)
+        if existing_state:
             if loaded_state.applied_state is None or (
                 loaded_state.applied_state.completed_steps != lifecycle_plan.initial_completed_steps
                 or loaded_state.applied_state.desired_state_fingerprint
@@ -803,8 +909,114 @@ def _run_lifecycle_flow(
         }
         if disable_execution is not None:
             summary["disable_teardown"]["executed"] = disable_execution
+    if host_prerequisite_summary is not None:
+        summary["host_prerequisites"] = host_prerequisite_summary
     summary["state_dir"] = str(state_dir)
     return summary
+
+
+def _prepare_install_host_prerequisites(
+    *,
+    raw_env: RawEnvInput,
+    host_facts: Any,
+    dry_run: bool,
+) -> tuple[Any, dict[str, Any]]:
+    backend = UbuntuAptHostPrerequisiteBackend(raw_env)
+    assessment = assess_host_prerequisites(host_facts=host_facts, backend=backend)
+    summary: dict[str, Any] = {
+        "assessment": assessment.to_dict(),
+        "remediation_actions": [],
+        "remediation_attempted": False,
+    }
+    if dry_run:
+        return host_facts, summary
+    if assessment.outcome != "missing_prerequisites" or not assessment.remediation_eligible:
+        return host_facts, summary
+
+    remediation_actions: list[dict[str, Any]] = []
+    if assessment.missing_packages:
+        remediation_actions.append(
+            {
+                "action": "apt_install",
+                "packages": list(assessment.missing_packages),
+            }
+        )
+    if any(check.name == "docker_daemon" and check.status == "fail" for check in assessment.checks):
+        remediation_actions.append({"action": "ensure_docker_daemon"})
+
+    remediate_host_prerequisites(assessment=assessment, backend=backend)
+    updated_host_facts = collect_host_facts(raw_env)
+    summary["post_remediation_host_facts"] = updated_host_facts.to_dict()
+    summary["remediation_actions"] = remediation_actions
+    summary["remediation_attempted"] = True
+    return updated_host_facts, summary
+
+
+def _host_supports_prerequisite_remediation(host_facts: Any) -> bool:
+    distribution_id = getattr(host_facts, "distribution_id", None)
+    version_id = getattr(host_facts, "version_id", None)
+    return bool(distribution_id == SUPPORTED_OS_ID and version_id == SUPPORTED_OS_VERSION)
+
+
+def _run_preflight_report(
+    *,
+    desired_state: DesiredState,
+    host_facts: Any,
+    allow_memory_shortfall: bool,
+) -> Any:
+    if "allow_memory_shortfall" in inspect.signature(run_preflight).parameters:
+        return run_preflight(
+            desired_state,
+            host_facts,
+            allow_memory_shortfall=allow_memory_shortfall,
+        )
+    return run_preflight(desired_state, host_facts)
+
+
+def _require_install_memory_shortfall_override(
+    *,
+    preflight_report: Any,
+    allow_memory_shortfall: bool,
+    prompt_for_memory_shortfall: bool,
+) -> None:
+    if not hasattr(preflight_report, "has_only_memory_shortfall_warning"):
+        return
+    if not preflight_report.has_only_memory_shortfall_warning():
+        return
+    if allow_memory_shortfall:
+        return
+
+    warning_detail = "; ".join(
+        check.detail for check in preflight_report.warning_checks() if check.name == "memory"
+    )
+    if prompt_for_memory_shortfall:
+        response = input("Proceed anyway? [y/N] ").strip().lower()
+        if response in {"y", "yes"}:
+            return
+        raise PreflightError("Preflight failed: " + warning_detail)
+
+    raise PreflightError(
+        "Preflight failed: "
+        + warning_detail
+        + ". Rerun install with --allow-memory-shortfall to continue non-interactively."
+    )
+
+
+def _validate_live_run_env_for_mutation(
+    *, raw_env: RawEnvInput, lifecycle_plan: LifecyclePlan, dry_run: bool
+) -> None:
+    if dry_run or not lifecycle_plan.phases_to_run:
+        return
+    offending_keys = sorted(
+        key for key in raw_env.values if key.startswith(_LIVE_RUN_MOCK_CONTAMINATION_PREFIXES)
+    )
+    if not offending_keys:
+        return
+    raise StateValidationError(
+        "Mock/test env contamination is not allowed for mutating live/pre-live runs; "
+        "live/pre-live runs require real integrations. "
+        f"Offending keys: {offending_keys}."
+    )
 
 
 def _build_shared_core_backend(
