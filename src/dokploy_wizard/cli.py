@@ -1028,7 +1028,13 @@ def _require_install_memory_shortfall_override(
         check.detail for check in preflight_report.warning_checks() if check.name == "memory"
     )
     if prompt_for_memory_shortfall:
-        response = sanitize_prompt_response(input("Proceed anyway? [y/N] ")).strip().lower()
+        prompt_message = (
+            "Memory shortfall warning: "
+            + warning_detail
+            + ". This host is below the recommended memory target for the selected scope "
+            + "and may be unstable or underprovisioned. Proceed anyway? [y/N] "
+        )
+        response = sanitize_prompt_response(input(prompt_message)).strip().lower()
         if response in {"y", "yes"}:
             return
         raise PreflightError("Preflight failed: " + warning_detail)
