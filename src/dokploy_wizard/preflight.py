@@ -218,7 +218,7 @@ def _os_check(host_facts: HostFacts) -> PreflightCheck:
                 f"expected Ubuntu {SUPPORTED_OS_VERSION} LTS"
             ),
         )
-    if host_facts.version_id != SUPPORTED_OS_VERSION:
+    if not _is_supported_ubuntu_version(host_facts.version_id):
         return PreflightCheck(
             name="os_support",
             status="fail",
@@ -232,6 +232,10 @@ def _os_check(host_facts: HostFacts) -> PreflightCheck:
         status="pass",
         detail=f"Ubuntu {SUPPORTED_OS_VERSION} host detected.",
     )
+
+
+def _is_supported_ubuntu_version(version_id: str) -> bool:
+    return version_id == SUPPORTED_OS_VERSION or version_id.startswith(f"{SUPPORTED_OS_VERSION}.")
 
 
 def _docker_installation_check(host_facts: HostFacts) -> PreflightCheck:
