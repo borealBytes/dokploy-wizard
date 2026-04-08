@@ -10,6 +10,7 @@ import json
 import os
 import stat
 import sys
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -87,8 +88,8 @@ from dokploy_wizard.packs.seaweedfs import (
 )
 from dokploy_wizard.preflight import (
     SUPPORTED_OS_ID,
-    SUPPORTED_OS_VERSION,
     PreflightError,
+    _is_supported_ubuntu_version,
     collect_host_facts,
     run_preflight,
 )
@@ -127,6 +128,9 @@ _LIVE_RUN_MOCK_CONTAMINATION_PREFIXES = (
     "TAILSCALE_MOCK_",
     "HEADSCALE_MOCK_",
 )
+
+_HOST_PREREQ_RECHECK_ATTEMPTS = 10
+_HOST_PREREQ_RECHECK_DELAY_SECONDS = 1.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -945,11 +949,40 @@ def _prepare_install_host_prerequisites(
         remediation_actions.append({"action": "ensure_docker_daemon"})
 
     remediate_host_prerequisites(assessment=assessment, backend=backend)
-    updated_host_facts = collect_host_facts(raw_env)
+    updated_host_facts = _collect_post_remediation_host_facts(
+        raw_env=raw_env,
+        assessment=assessment,
+    )
     summary["post_remediation_host_facts"] = updated_host_facts.to_dict()
     summary["remediation_actions"] = remediation_actions
     summary["remediation_attempted"] = True
     return updated_host_facts, summary
+
+
+def _collect_post_remediation_host_facts(*, raw_env: RawEnvInput, assessment: Any) -> Any:
+    updated_host_facts = collect_host_facts(raw_env)
+    if not _requires_post_remediation_docker_wait(assessment):
+        return updated_host_facts
+
+    attempts_remaining = _HOST_PREREQ_RECHECK_ATTEMPTS - 1
+    while attempts_remaining > 0 and (
+        not getattr(updated_host_facts, "docker_installed", False)
+        or not getattr(updated_host_facts, "docker_daemon_reachable", False)
+    ):
+        time.sleep(_HOST_PREREQ_RECHECK_DELAY_SECONDS)
+        updated_host_facts = collect_host_facts(raw_env)
+        attempts_remaining -= 1
+    return updated_host_facts
+
+
+def _requires_post_remediation_docker_wait(assessment: Any) -> bool:
+    if getattr(assessment, "missing_packages", ()):
+        if "docker.io" in assessment.missing_packages:
+            return True
+    return any(
+        getattr(check, "name", None) == "docker_daemon" and getattr(check, "status", None) == "fail"
+        for check in getattr(assessment, "checks", ())
+    )
 
 
 def _host_supports_prerequisite_remediation(host_facts: Any) -> bool:
@@ -958,9 +991,7 @@ def _host_supports_prerequisite_remediation(host_facts: Any) -> bool:
     return bool(
         distribution_id == SUPPORTED_OS_ID
         and isinstance(version_id, str)
-        and (
-            version_id == SUPPORTED_OS_VERSION or version_id.startswith(f"{SUPPORTED_OS_VERSION}.")
-        )
+        and _is_supported_ubuntu_version(version_id)
     )
 
 
