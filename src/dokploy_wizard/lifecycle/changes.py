@@ -1,0 +1,381 @@
+"""Lifecycle change classification for rerun, resume, and modify flows."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from dokploy_wizard.packs.catalog import (
+    get_mutable_pack_env_keys,
+    get_mutable_pack_resource_keys,
+)
+from dokploy_wizard.state.models import (
+    AppliedStateCheckpoint,
+    DesiredState,
+    OwnershipLedger,
+    RawEnvInput,
+    StateValidationError,
+)
+
+PHASE_ORDER: tuple[str, ...] = (
+    "preflight",
+    "dokploy_bootstrap",
+    "tailscale",
+    "networking",
+    "cloudflare_access",
+    "shared_core",
+    "headscale",
+    "matrix",
+    "nextcloud",
+    "seaweedfs",
+    "openclaw",
+    "my-farm-advisor",
+)
+
+_SUPPORTED_AUTH_KEYS = {
+    "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_ACCOUNT_ID",
+    "CLOUDFLARE_ZONE_ID",
+}
+_SUPPORTED_TAILSCALE_KEYS = {
+    "ENABLE_TAILSCALE",
+    "TAILSCALE_AUTH_KEY",
+    "TAILSCALE_HOSTNAME",
+    "TAILSCALE_ENABLE_SSH",
+    "TAILSCALE_TAGS",
+    "TAILSCALE_SUBNET_ROUTES",
+}
+_SUPPORTED_ACCESS_KEYS = {"CLOUDFLARE_ACCESS_OTP_EMAILS"}
+_SUPPORTED_HOSTNAME_KEYS = {
+    "ROOT_DOMAIN",
+    "DOKPLOY_SUBDOMAIN",
+    "HEADSCALE_SUBDOMAIN",
+    "MATRIX_SUBDOMAIN",
+    "NEXTCLOUD_SUBDOMAIN",
+    "ONLYOFFICE_SUBDOMAIN",
+    "OPENCLAW_SUBDOMAIN",
+    "MY_FARM_ADVISOR_SUBDOMAIN",
+}
+_SUPPORTED_ENABLEMENT_KEYS = {
+    "PACKS",
+    "ENABLE_HEADSCALE",
+    "ENABLE_MATRIX",
+    "ENABLE_NEXTCLOUD",
+    "ENABLE_OPENCLAW",
+    "ENABLE_MY_FARM_ADVISOR",
+}
+_SUPPORTED_MUTABLE_PACK_ENV_KEYS = set(get_mutable_pack_env_keys())
+_SUPPORTED_MUTABLE_PACK_RESOURCE_KEYS = set(get_mutable_pack_resource_keys())
+_IGNORED_RAW_ENV_KEYS = {
+    "DOKPLOY_API_URL",
+    "DOKPLOY_API_KEY",
+    "DOKPLOY_ADMIN_PASSWORD",
+    "DOKPLOY_BOOTSTRAP_MOCK_API_KEY",
+    "DOKPLOY_MOCK_API_MODE",
+}
+_SUPPORTED_MODIFY_KEYS = (
+    _SUPPORTED_AUTH_KEYS
+    | _SUPPORTED_TAILSCALE_KEYS
+    | _SUPPORTED_ACCESS_KEYS
+    | _SUPPORTED_HOSTNAME_KEYS
+    | _SUPPORTED_ENABLEMENT_KEYS
+    | _SUPPORTED_MUTABLE_PACK_ENV_KEYS
+    | _SUPPORTED_MUTABLE_PACK_RESOURCE_KEYS
+)
+_HOSTNAME_PHASES = {
+    "dokploy": ("networking",),
+    "headscale": ("networking", "headscale"),
+    "matrix": ("networking", "matrix"),
+    "nextcloud": ("networking", "nextcloud"),
+    "onlyoffice": ("networking", "nextcloud"),
+    "s3": ("networking", "seaweedfs"),
+    "openclaw": ("networking", "openclaw"),
+    "my-farm-advisor": ("networking", "my-farm-advisor"),
+}
+_OPTIONAL_PHASE_PACKS = {
+    "matrix": "matrix",
+    "nextcloud": "nextcloud",
+    "seaweedfs": "seaweedfs",
+    "openclaw": "openclaw",
+    "my-farm-advisor": "my-farm-advisor",
+}
+
+
+@dataclass(frozen=True)
+class LifecyclePlan:
+    mode: str
+    reasons: tuple[str, ...]
+    applicable_phases: tuple[str, ...]
+    phases_to_run: tuple[str, ...]
+    preserved_phases: tuple[str, ...]
+    initial_completed_steps: tuple[str, ...]
+    start_phase: str | None
+    raw_equivalent: bool
+    desired_equivalent: bool
+
+
+def applicable_phases_for(desired_state: DesiredState) -> tuple[str, ...]:
+    phases = [
+        "preflight",
+        "dokploy_bootstrap",
+    ]
+    if desired_state.enable_tailscale:
+        phases.append("tailscale")
+    phases.append("networking")
+    if _access_enabled(desired_state):
+        phases.append("cloudflare_access")
+    phases.extend(["shared_core", "headscale"])
+    if "matrix" in desired_state.enabled_packs:
+        phases.append("matrix")
+    if "nextcloud" in desired_state.enabled_packs:
+        phases.append("nextcloud")
+    if "seaweedfs" in desired_state.enabled_packs:
+        phases.append("seaweedfs")
+    if "openclaw" in desired_state.enabled_packs:
+        phases.append("openclaw")
+    if "my-farm-advisor" in desired_state.enabled_packs:
+        phases.append("my-farm-advisor")
+    return tuple(phases)
+
+
+def validate_completed_steps(
+    completed_steps: tuple[str, ...], applicable_phases: tuple[str, ...]
+) -> None:
+    expected_prefix = applicable_phases[: len(completed_steps)]
+    if completed_steps != expected_prefix:
+        msg = (
+            "Applied checkpoint does not match the supported lifecycle phase order. "
+            f"Expected prefix {list(expected_prefix)}, found {list(completed_steps)}."
+        )
+        raise StateValidationError(msg)
+
+
+def classify_install_request(
+    *,
+    existing_raw: RawEnvInput,
+    existing_desired: DesiredState,
+    existing_applied: AppliedStateCheckpoint,
+    requested_raw: RawEnvInput,
+    requested_desired: DesiredState,
+) -> LifecyclePlan:
+    if _normalized_raw_values(existing_raw) != _normalized_raw_values(requested_raw) or (
+        existing_desired.to_dict() != requested_desired.to_dict()
+    ):
+        raise StateValidationError(
+            "Existing install state does not match this install request. "
+            "Use 'modify' for supported lifecycle changes."
+        )
+    return _classify_same_target(
+        existing_applied=existing_applied,
+        desired_state=requested_desired,
+        raw_equivalent=True,
+        desired_equivalent=True,
+    )
+
+
+def classify_modify_request(
+    *,
+    existing_raw: RawEnvInput,
+    existing_desired: DesiredState,
+    existing_applied: AppliedStateCheckpoint,
+    existing_ledger: OwnershipLedger,
+    requested_raw: RawEnvInput,
+    requested_desired: DesiredState,
+) -> LifecyclePlan:
+    old_applicable = applicable_phases_for(existing_desired)
+    validate_completed_steps(existing_applied.completed_steps, old_applicable)
+    raw_equivalent = _normalized_raw_values(existing_raw) == _normalized_raw_values(requested_raw)
+    desired_equivalent = existing_desired.to_dict() == requested_desired.to_dict()
+    if raw_equivalent and desired_equivalent:
+        return _classify_same_target(
+            existing_applied=existing_applied,
+            desired_state=requested_desired,
+            raw_equivalent=True,
+            desired_equivalent=True,
+        )
+
+    reasons: list[str] = []
+    changed_keys = _changed_env_keys(existing_raw, requested_raw)
+    removed_packs = sorted(
+        set(existing_desired.enabled_packs) - set(requested_desired.enabled_packs)
+    )
+    unsupported_keys = sorted(changed_keys - _SUPPORTED_MODIFY_KEYS - {"STACK_NAME"})
+    if existing_desired.stack_name != requested_desired.stack_name:
+        reasons.append("STACK_NAME changes are unsupported in Task 11.")
+    if unsupported_keys:
+        reasons.append(f"Unsupported mutable env keys for Task 11: {unsupported_keys}.")
+
+    if reasons:
+        raise StateValidationError(" ".join(reasons))
+
+    phases_to_run: set[str] = set()
+    tailscale_disable_only = (
+        existing_desired.enable_tailscale and not requested_desired.enable_tailscale
+    )
+    if changed_keys & _SUPPORTED_TAILSCALE_KEYS and requested_desired.enable_tailscale:
+        phases_to_run.add("tailscale")
+    if changed_keys & _SUPPORTED_AUTH_KEYS:
+        phases_to_run.add("networking")
+    if changed_keys & (_SUPPORTED_AUTH_KEYS | _SUPPORTED_ACCESS_KEYS) and _access_enabled(
+        requested_desired
+    ):
+        phases_to_run.add("cloudflare_access")
+    if existing_desired.openclaw_channels != requested_desired.openclaw_channels:
+        phases_to_run.add("openclaw")
+    if existing_desired.openclaw_replicas != requested_desired.openclaw_replicas:
+        phases_to_run.add("openclaw")
+    if existing_desired.my_farm_advisor_channels != requested_desired.my_farm_advisor_channels:
+        phases_to_run.add("my-farm-advisor")
+    if existing_desired.my_farm_advisor_replicas != requested_desired.my_farm_advisor_replicas:
+        phases_to_run.add("my-farm-advisor")
+    if (
+        existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict()
+        and not removed_packs
+    ):
+        phases_to_run.add("shared_core")
+    phases_to_run.update(_hostname_change_phases(existing_desired, requested_desired))
+    phases_to_run.update(_new_pack_phases(existing_desired, requested_desired))
+
+    if not phases_to_run and not tailscale_disable_only:
+        raise StateValidationError(
+            "Requested modify operation changes values that are not modeled as supported "
+            "runtime mutations in Task 11."
+        )
+
+    applicable_phases = applicable_phases_for(requested_desired)
+    completed_intersection = set(existing_applied.completed_steps) & set(applicable_phases)
+    preserved_phases = tuple(
+        phase
+        for phase in applicable_phases
+        if phase in completed_intersection and phase not in phases_to_run
+    )
+    initial_completed_steps = _longest_valid_prefix(applicable_phases, set(preserved_phases))
+    start_phase = next((phase for phase in applicable_phases if phase in phases_to_run), None)
+    return LifecyclePlan(
+        mode="modify",
+        reasons=_sorted_reasons(changed_keys, phases_to_run),
+        applicable_phases=applicable_phases,
+        phases_to_run=tuple(phase for phase in applicable_phases if phase in phases_to_run),
+        preserved_phases=preserved_phases,
+        initial_completed_steps=initial_completed_steps,
+        start_phase=start_phase,
+        raw_equivalent=raw_equivalent,
+        desired_equivalent=desired_equivalent,
+    )
+
+
+def _classify_same_target(
+    *,
+    existing_applied: AppliedStateCheckpoint,
+    desired_state: DesiredState,
+    raw_equivalent: bool,
+    desired_equivalent: bool,
+) -> LifecyclePlan:
+    applicable_phases = applicable_phases_for(desired_state)
+    validate_completed_steps(existing_applied.completed_steps, applicable_phases)
+    if existing_applied.completed_steps == applicable_phases:
+        return LifecyclePlan(
+            mode="noop",
+            reasons=("Requested raw input and desired state match the persisted target.",),
+            applicable_phases=applicable_phases,
+            phases_to_run=(),
+            preserved_phases=applicable_phases,
+            initial_completed_steps=applicable_phases,
+            start_phase=None,
+            raw_equivalent=raw_equivalent,
+            desired_equivalent=desired_equivalent,
+        )
+    preserved_phases = existing_applied.completed_steps
+    remaining = applicable_phases[len(existing_applied.completed_steps) :]
+    return LifecyclePlan(
+        mode="resume",
+        reasons=(
+            "Existing checkpoint is incomplete; resuming from the last persisted successful "
+            "phase prefix.",
+        ),
+        applicable_phases=applicable_phases,
+        phases_to_run=remaining,
+        preserved_phases=preserved_phases,
+        initial_completed_steps=preserved_phases,
+        start_phase=remaining[0],
+        raw_equivalent=raw_equivalent,
+        desired_equivalent=desired_equivalent,
+    )
+
+
+def _hostname_change_phases(
+    existing_desired: DesiredState, requested_desired: DesiredState
+) -> set[str]:
+    changed: set[str] = set()
+    all_keys = set(existing_desired.hostnames) | set(requested_desired.hostnames)
+    for key in sorted(all_keys):
+        if existing_desired.hostnames.get(key) == requested_desired.hostnames.get(key):
+            continue
+        changed.update(_HOSTNAME_PHASES.get(key, ()))
+        if key in {"openclaw", "my-farm-advisor"} and _access_enabled(requested_desired):
+            changed.add("cloudflare_access")
+    return changed
+
+
+def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredState) -> set[str]:
+    phases: set[str] = set()
+    new_packs = set(requested_desired.enabled_packs) - set(existing_desired.enabled_packs)
+    if not new_packs:
+        return phases
+    if any(pack in new_packs for pack in {"matrix", "nextcloud", "openclaw", "my-farm-advisor"}):
+        phases.add("shared_core")
+    if "headscale" in new_packs:
+        phases.add("headscale")
+    if "matrix" in new_packs:
+        phases.add("matrix")
+    if "nextcloud" in new_packs:
+        phases.add("nextcloud")
+    if "seaweedfs" in new_packs:
+        phases.add("seaweedfs")
+    if "openclaw" in new_packs:
+        if _access_enabled(requested_desired):
+            phases.add("cloudflare_access")
+        phases.add("openclaw")
+    if "my-farm-advisor" in new_packs:
+        if _access_enabled(requested_desired):
+            phases.add("cloudflare_access")
+        phases.add("my-farm-advisor")
+    if (
+        "headscale" in requested_desired.enabled_packs
+        and "headscale" not in existing_desired.enabled_packs
+    ):
+        phases.add("headscale")
+    return phases
+
+
+def _changed_env_keys(existing_raw: RawEnvInput, requested_raw: RawEnvInput) -> set[str]:
+    all_keys = (set(existing_raw.values) | set(requested_raw.values)) - _IGNORED_RAW_ENV_KEYS
+    return {
+        key for key in all_keys if existing_raw.values.get(key) != requested_raw.values.get(key)
+    }
+
+
+def _normalized_raw_values(raw_env: RawEnvInput) -> dict[str, str]:
+    return {key: value for key, value in raw_env.values.items() if key not in _IGNORED_RAW_ENV_KEYS}
+
+
+def _longest_valid_prefix(
+    applicable_phases: tuple[str, ...], valid_phases: set[str]
+) -> tuple[str, ...]:
+    prefix: list[str] = []
+    for phase in applicable_phases:
+        if phase not in valid_phases:
+            break
+        prefix.append(phase)
+    return tuple(prefix)
+
+
+def _sorted_reasons(changed_keys: set[str], phases_to_run: set[str]) -> tuple[str, ...]:
+    scheduled_phases = [phase for phase in PHASE_ORDER if phase in phases_to_run]
+    return (
+        f"Supported modify keys changed: {sorted(changed_keys)}.",
+        f"Lifecycle phases scheduled in fixed order: {scheduled_phases}.",
+    )
+
+
+def _access_enabled(desired_state: DesiredState) -> bool:
+    return bool({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs))

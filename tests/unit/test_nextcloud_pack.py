@@ -1,0 +1,484 @@
+# pyright: reportMissingImports=false
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import pytest
+
+from dokploy_wizard.core.models import SharedCorePlan
+from dokploy_wizard.dokploy import (
+    DokployComposeRecord,
+    DokployComposeSummary,
+    DokployCreatedProject,
+    DokployDeployResult,
+    DokployEnvironmentSummary,
+    DokployNextcloudBackend,
+    DokployProjectSummary,
+)
+from dokploy_wizard.packs.nextcloud import (
+    NEXTCLOUD_SERVICE_RESOURCE_TYPE,
+    NEXTCLOUD_VOLUME_RESOURCE_TYPE,
+    ONLYOFFICE_SERVICE_RESOURCE_TYPE,
+    ONLYOFFICE_VOLUME_RESOURCE_TYPE,
+    NextcloudError,
+    NextcloudResourceRecord,
+    build_nextcloud_ledger,
+    reconcile_nextcloud,
+)
+from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
+
+
+@dataclass
+class FakeNextcloudBackend:
+    services: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
+    volumes: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
+    health: dict[str, bool] = field(default_factory=dict)
+    create_service_calls: int = 0
+    create_volume_calls: int = 0
+
+    def get_service(self, resource_id: str) -> NextcloudResourceRecord | None:
+        for record in self.services.values():
+            if record.resource_id == resource_id:
+                return record
+        return None
+
+    def find_service_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
+        return self.services.get(resource_name)
+
+    def create_service(
+        self,
+        *,
+        resource_name: str,
+        hostname: str,
+        data_volume_name: str,
+        config: dict[str, str],
+    ) -> NextcloudResourceRecord:
+        del hostname, data_volume_name, config
+        self.create_service_calls += 1
+        record = NextcloudResourceRecord(
+            resource_id=f"service:{resource_name}",
+            resource_name=resource_name,
+        )
+        self.services[resource_name] = record
+        return record
+
+    def get_volume(self, resource_id: str) -> NextcloudResourceRecord | None:
+        for record in self.volumes.values():
+            if record.resource_id == resource_id:
+                return record
+        return None
+
+    def find_volume_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
+        return self.volumes.get(resource_name)
+
+    def create_volume(self, *, resource_name: str) -> NextcloudResourceRecord:
+        self.create_volume_calls += 1
+        record = NextcloudResourceRecord(
+            resource_id=f"volume:{resource_name}",
+            resource_name=resource_name,
+        )
+        self.volumes[resource_name] = record
+        return record
+
+    def check_health(self, *, service: NextcloudResourceRecord, url: str) -> bool:
+        del url
+        return self.health.get(service.resource_name, True)
+
+
+@dataclass
+class FakeDokployApiClient:
+    projects: list[DokployProjectSummary] = field(default_factory=list)
+    create_project_calls: int = 0
+    create_compose_calls: int = 0
+    deploy_calls: int = 0
+
+    def list_projects(self) -> tuple[DokployProjectSummary, ...]:
+        return tuple(self.projects)
+
+    def create_project(
+        self, *, name: str, description: str | None, env: str | None
+    ) -> DokployCreatedProject:
+        del description, env
+        self.create_project_calls += 1
+        self.projects.append(
+            DokployProjectSummary(
+                project_id="proj-1",
+                name=name,
+                environments=(
+                    DokployEnvironmentSummary(
+                        environment_id="env-1",
+                        name="production",
+                        is_default=True,
+                        composes=(),
+                    ),
+                ),
+            )
+        )
+        return DokployCreatedProject(project_id="proj-1", environment_id="env-1")
+
+    def create_compose(
+        self, *, name: str, environment_id: str, compose_file: str, app_name: str
+    ) -> DokployComposeRecord:
+        del compose_file, app_name
+        self.create_compose_calls += 1
+        record = DokployComposeRecord(compose_id="cmp-1", name=name)
+        self.projects[0] = DokployProjectSummary(
+            project_id="proj-1",
+            name=self.projects[0].name,
+            environments=(
+                DokployEnvironmentSummary(
+                    environment_id=environment_id,
+                    name="production",
+                    is_default=True,
+                    composes=(
+                        DokployComposeSummary(
+                            compose_id=record.compose_id,
+                            name=record.name,
+                            status=None,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        return record
+
+    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
+        del compose_id, compose_file
+        raise AssertionError("Nextcloud backend should not update compose apps in this task")
+
+    def deploy_compose(
+        self, *, compose_id: str, title: str | None, description: str | None
+    ) -> DokployDeployResult:
+        del title, description
+        self.deploy_calls += 1
+        return DokployDeployResult(success=True, compose_id=compose_id, message="queued")
+
+
+def test_reconcile_nextcloud_plans_paired_runtime_when_enabled() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+
+    phase = reconcile_nextcloud(
+        dry_run=True,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=FakeNextcloudBackend(),
+    )
+
+    assert phase.result.outcome == "plan_only"
+    assert phase.result.enabled is True
+    assert phase.result.nextcloud is not None
+    assert phase.result.nextcloud.hostname == "nextcloud.example.com"
+    assert phase.result.nextcloud.config.onlyoffice_url == "https://office.example.com"
+    assert phase.result.nextcloud.config.postgres.database_name == "wizard_stack_nextcloud"
+    assert phase.result.nextcloud.config.redis.identity_name == "wizard-stack-nextcloud-redis"
+    assert phase.result.nextcloud.health_check.passed is None
+    assert phase.result.onlyoffice is not None
+    assert phase.result.onlyoffice.hostname == "office.example.com"
+    assert phase.result.onlyoffice.config.nextcloud_url == "https://nextcloud.example.com"
+    assert (
+        phase.result.onlyoffice.config.integration_secret_ref
+        == "wizard-stack-nextcloud-onlyoffice-jwt-secret"
+    )
+    assert phase.result.onlyoffice.health_check.passed is None
+
+
+def test_reconcile_nextcloud_skips_cleanly_when_disabled() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "false",
+            },
+        )
+    )
+
+    phase = reconcile_nextcloud(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=FakeNextcloudBackend(),
+    )
+
+    assert phase.result.outcome == "skipped"
+    assert phase.result.enabled is False
+
+
+def test_reconcile_nextcloud_reuses_owned_resources_and_requires_both_health_checks() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+    backend = FakeNextcloudBackend(
+        services={
+            "wizard-stack-nextcloud": NextcloudResourceRecord(
+                resource_id="service:wizard-stack-nextcloud",
+                resource_name="wizard-stack-nextcloud",
+            ),
+            "wizard-stack-onlyoffice": NextcloudResourceRecord(
+                resource_id="service:wizard-stack-onlyoffice",
+                resource_name="wizard-stack-onlyoffice",
+            ),
+        },
+        volumes={
+            "wizard-stack-nextcloud-data": NextcloudResourceRecord(
+                resource_id="volume:wizard-stack-nextcloud-data",
+                resource_name="wizard-stack-nextcloud-data",
+            ),
+            "wizard-stack-onlyoffice-data": NextcloudResourceRecord(
+                resource_id="volume:wizard-stack-onlyoffice-data",
+                resource_name="wizard-stack-onlyoffice-data",
+            ),
+        },
+    )
+
+    phase = reconcile_nextcloud(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(
+            format_version=1,
+            resources=(
+                OwnedResource(
+                    resource_type=NEXTCLOUD_SERVICE_RESOURCE_TYPE,
+                    resource_id="service:wizard-stack-nextcloud",
+                    scope="stack:wizard-stack:nextcloud-service",
+                ),
+                OwnedResource(
+                    resource_type=ONLYOFFICE_SERVICE_RESOURCE_TYPE,
+                    resource_id="service:wizard-stack-onlyoffice",
+                    scope="stack:wizard-stack:onlyoffice-service",
+                ),
+                OwnedResource(
+                    resource_type=NEXTCLOUD_VOLUME_RESOURCE_TYPE,
+                    resource_id="volume:wizard-stack-nextcloud-data",
+                    scope="stack:wizard-stack:nextcloud-volume",
+                ),
+                OwnedResource(
+                    resource_type=ONLYOFFICE_VOLUME_RESOURCE_TYPE,
+                    resource_id="volume:wizard-stack-onlyoffice-data",
+                    scope="stack:wizard-stack:onlyoffice-volume",
+                ),
+            ),
+        ),
+        backend=backend,
+    )
+
+    assert phase.result.outcome == "already_present"
+    assert phase.result.nextcloud is not None
+    assert phase.result.nextcloud.service.action == "reuse_owned"
+    assert phase.result.nextcloud.data_volume.action == "reuse_owned"
+    assert phase.result.onlyoffice is not None
+    assert phase.result.onlyoffice.service.action == "reuse_owned"
+    assert phase.result.onlyoffice.data_volume.action == "reuse_owned"
+    assert backend.create_service_calls == 0
+    assert backend.create_volume_calls == 0
+
+
+def test_reconcile_nextcloud_fails_closed_without_required_shared_core_allocation() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+    desired_state = desired_state.__class__(
+        format_version=desired_state.format_version,
+        stack_name=desired_state.stack_name,
+        root_domain=desired_state.root_domain,
+        dokploy_url=desired_state.dokploy_url,
+        dokploy_api_url=desired_state.dokploy_api_url,
+        enable_tailscale=desired_state.enable_tailscale,
+        tailscale_hostname=desired_state.tailscale_hostname,
+        tailscale_enable_ssh=desired_state.tailscale_enable_ssh,
+        tailscale_tags=desired_state.tailscale_tags,
+        tailscale_subnet_routes=desired_state.tailscale_subnet_routes,
+        cloudflare_access_otp_emails=desired_state.cloudflare_access_otp_emails,
+        enabled_features=desired_state.enabled_features,
+        selected_packs=desired_state.selected_packs,
+        enabled_packs=desired_state.enabled_packs,
+        hostnames=desired_state.hostnames,
+        openclaw_channels=desired_state.openclaw_channels,
+        openclaw_replicas=desired_state.openclaw_replicas,
+        my_farm_advisor_channels=desired_state.my_farm_advisor_channels,
+        my_farm_advisor_replicas=desired_state.my_farm_advisor_replicas,
+        shared_core=SharedCorePlan(
+            network_name=desired_state.shared_core.network_name,
+            postgres=desired_state.shared_core.postgres,
+            redis=desired_state.shared_core.redis,
+            allocations=(),
+        ),
+    )
+
+    with pytest.raises(NextcloudError, match="pack_name 'nextcloud' is missing"):
+        reconcile_nextcloud(
+            dry_run=True,
+            desired_state=desired_state,
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=FakeNextcloudBackend(),
+        )
+
+
+def test_reconcile_nextcloud_fails_closed_on_unowned_collision() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+    backend = FakeNextcloudBackend(
+        services={
+            "wizard-stack-nextcloud": NextcloudResourceRecord(
+                resource_id="service:collision",
+                resource_name="wizard-stack-nextcloud",
+            )
+        }
+    )
+
+    with pytest.raises(NextcloudError, match="Refusing to adopt existing unowned service"):
+        reconcile_nextcloud(
+            dry_run=False,
+            desired_state=desired_state,
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=backend,
+        )
+
+
+def test_reconcile_nextcloud_fails_when_onlyoffice_health_check_does_not_pass() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+
+    with pytest.raises(NextcloudError, match="OnlyOffice health check failed"):
+        reconcile_nextcloud(
+            dry_run=False,
+            desired_state=desired_state,
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=FakeNextcloudBackend(health={"wizard-stack-onlyoffice": False}),
+        )
+
+
+def test_build_nextcloud_ledger_persists_only_pack_owned_resources() -> None:
+    updated = build_nextcloud_ledger(
+        existing_ledger=OwnershipLedger(
+            format_version=1,
+            resources=(
+                OwnedResource(
+                    resource_type="cloudflare_tunnel",
+                    resource_id="tunnel-1",
+                    scope="account:account-123",
+                ),
+            ),
+        ),
+        stack_name="wizard-stack",
+        nextcloud_service_resource_id="service:wizard-stack-nextcloud",
+        onlyoffice_service_resource_id="service:wizard-stack-onlyoffice",
+        nextcloud_volume_resource_id="volume:wizard-stack-nextcloud-data",
+        onlyoffice_volume_resource_id="volume:wizard-stack-onlyoffice-data",
+    )
+
+    assert {(resource.resource_type, resource.scope) for resource in updated.resources} == {
+        ("cloudflare_tunnel", "account:account-123"),
+        (NEXTCLOUD_SERVICE_RESOURCE_TYPE, "stack:wizard-stack:nextcloud-service"),
+        (ONLYOFFICE_SERVICE_RESOURCE_TYPE, "stack:wizard-stack:onlyoffice-service"),
+        (NEXTCLOUD_VOLUME_RESOURCE_TYPE, "stack:wizard-stack:nextcloud-volume"),
+        (ONLYOFFICE_VOLUME_RESOURCE_TYPE, "stack:wizard-stack:onlyoffice-volume"),
+    }
+
+
+def test_dokploy_nextcloud_backend_creates_one_compose_for_pair() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient()
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        client=client,
+    )
+
+    nextcloud_volume = backend.create_volume(resource_name="wizard-stack-nextcloud-data")
+    onlyoffice_volume = backend.create_volume(resource_name="wizard-stack-onlyoffice-data")
+    nextcloud_service = backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+    onlyoffice_service = backend.create_service(
+        resource_name="wizard-stack-onlyoffice",
+        hostname="office.example.com",
+        data_volume_name="wizard-stack-onlyoffice-data",
+        config={
+            "integration_secret_ref": "wizard-stack-nextcloud-onlyoffice-jwt-secret",
+            "nextcloud_url": "https://nextcloud.example.com",
+        },
+    )
+
+    assert nextcloud_volume.resource_id == "dokploy-compose:cmp-1:nextcloud-volume"
+    assert onlyoffice_volume.resource_id == "dokploy-compose:cmp-1:onlyoffice-volume"
+    assert nextcloud_service.resource_id == "dokploy-compose:cmp-1:nextcloud-service"
+    assert onlyoffice_service.resource_id == "dokploy-compose:cmp-1:onlyoffice-service"
+    assert client.create_project_calls == 1
+    assert client.create_compose_calls == 1
+    assert client.deploy_calls == 1

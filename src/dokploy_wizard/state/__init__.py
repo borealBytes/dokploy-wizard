@@ -1,0 +1,56 @@
+"""Public state-layer interface for Task 2."""
+
+from dokploy_wizard.state.env import parse_env_file, resolve_desired_state
+from dokploy_wizard.state.models import (
+    STATE_FORMAT_VERSION,
+    AppliedStateCheckpoint,
+    DesiredState,
+    OwnedResource,
+    OwnershipLedger,
+    RawEnvInput,
+    StateValidationError,
+)
+from dokploy_wizard.state.store import (
+    APPLIED_STATE_FILE,
+    DESIRED_STATE_FILE,
+    OWNERSHIP_LEDGER_FILE,
+    RAW_INPUT_FILE,
+    STATE_DOCUMENT_FILES,
+    LoadedState,
+    clear_state_documents,
+    load_state_dir,
+    persist_install_scaffold,
+    validate_existing_state,
+    validate_install_state,
+    write_applied_checkpoint,
+    write_inspection_snapshot,
+    write_ownership_ledger,
+    write_target_state,
+)
+
+__all__ = [
+    "APPLIED_STATE_FILE",
+    "DESIRED_STATE_FILE",
+    "OWNERSHIP_LEDGER_FILE",
+    "RAW_INPUT_FILE",
+    "STATE_DOCUMENT_FILES",
+    "STATE_FORMAT_VERSION",
+    "AppliedStateCheckpoint",
+    "DesiredState",
+    "LoadedState",
+    "OwnedResource",
+    "OwnershipLedger",
+    "RawEnvInput",
+    "StateValidationError",
+    "clear_state_documents",
+    "load_state_dir",
+    "parse_env_file",
+    "persist_install_scaffold",
+    "validate_existing_state",
+    "resolve_desired_state",
+    "validate_install_state",
+    "write_applied_checkpoint",
+    "write_inspection_snapshot",
+    "write_ownership_ledger",
+    "write_target_state",
+]
