@@ -19,6 +19,7 @@ from dokploy_wizard.packs.headscale import (
     HEADSCALE_SERVICE_RESOURCE_TYPE,
     HeadscaleError,
     HeadscaleResourceRecord,
+    _http_health_check,
     build_headscale_ledger,
     reconcile_headscale,
 )
@@ -316,3 +317,38 @@ def test_dokploy_headscale_backend_creates_and_reuses_compose_service() -> None:
     assert client.create_project_calls == 1
     assert client.create_compose_calls == 1
     assert client.deploy_calls == 1
+
+
+def test_headscale_health_check_falls_back_to_loopback_with_host_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, str], bool]] = []
+
+    class FakeConnection:
+        def __init__(self, host: str, *, timeout: float, context: object | None = None) -> None:
+            del timeout
+            calls.append((host, {}, context is not None))
+            self._host = host
+
+        def request(self, method: str, path: str, headers: dict[str, str] | None = None) -> None:
+            del method, path
+            calls[-1] = (self._host, headers or {}, calls[-1][2])
+            if self._host != "127.0.0.1":
+                raise OSError("public hostname unreachable")
+
+        def getresponse(self) -> object:
+            return type("_Resp", (), {"status": 200})()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "dokploy_wizard.packs.headscale.reconciler.http.client.HTTPSConnection",
+        FakeConnection,
+    )
+
+    assert _http_health_check("https://headscale.example.com/health") is True
+    assert calls[0][0] == "headscale.example.com"
+    assert calls[1][0] == "127.0.0.1"
+    assert calls[1][1] == {"Host": "headscale.example.com"}
+    assert calls[1][2] is True

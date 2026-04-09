@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import http.client
+import ssl
 from typing import Protocol
+from urllib import parse
 
 from dokploy_wizard.packs.headscale.models import (
     HeadscaleHealthCheck,
@@ -306,11 +308,30 @@ def _optional_bool(values: dict[str, str], key: str) -> bool | None:
 def _http_health_check(url: str) -> bool:
     if not url.startswith("https://"):
         return False
-    host = url.removeprefix("https://").split("/", 1)[0]
+    parsed = parse.urlparse(url)
+    host = parsed.netloc
+    if _https_health_request(host=host, path="/health"):
+        return True
+    return _https_health_request(
+        host="127.0.0.1",
+        path="/health",
+        headers={"Host": host},
+        insecure=True,
+    )
+
+
+def _https_health_request(
+    *,
+    host: str,
+    path: str,
+    headers: dict[str, str] | None = None,
+    insecure: bool = False,
+) -> bool:
     connection: http.client.HTTPSConnection | None = None
     try:
-        connection = http.client.HTTPSConnection(host, timeout=2.0)
-        connection.request("GET", "/health")
+        context = ssl._create_unverified_context() if insecure else None
+        connection = http.client.HTTPSConnection(host, timeout=2.0, context=context)
+        connection.request("GET", path, headers=headers or {})
         response = connection.getresponse()
         return 200 <= response.status < 300
     except OSError:
