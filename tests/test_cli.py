@@ -417,6 +417,66 @@ def test_install_persists_post_auth_target_before_later_failure(
     )
 
 
+def test_install_retry_accepts_stale_state_when_only_dokploy_api_url_differs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state"
+    existing_raw = parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env")
+    existing_desired = resolve_desired_state(existing_raw)
+    write_target_state(state_dir, existing_raw, existing_desired)
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=existing_desired.format_version,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=applicable_phases_for(existing_desired),
+        ),
+    )
+    write_ownership_ledger(
+        state_dir,
+        OwnershipLedger(format_version=existing_desired.format_version, resources=()),
+    )
+    requested_raw = RawEnvInput(
+        format_version=existing_raw.format_version,
+        values={
+            **existing_raw.values,
+            "DOKPLOY_API_URL": "https://dokploy.example.com",
+            "DOKPLOY_API_KEY": "dokp-key-123",
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "_ensure_dokploy_api_auth",
+        lambda **kwargs: kwargs["raw_env"],
+    )
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    monkeypatch.setattr(cli, "write_target_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "ShellTailscaleBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "ShellOpenClawBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(
+        cli,
+        "execute_lifecycle_plan",
+        lambda **kwargs: {"lifecycle": {"mode": "noop"}, "state_status": "existing", "ok": True},
+    )
+
+    summary = cli.run_install_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=requested_raw,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    assert summary["lifecycle"]["mode"] == "noop"
+    assert summary["state_status"] == "existing"
+
+
 def test_guided_dry_run_does_not_require_dokploy_admin_password() -> None:
     responses = iter(
         [
