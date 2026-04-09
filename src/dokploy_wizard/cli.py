@@ -11,6 +11,7 @@ import os
 import stat
 import sys
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -1458,6 +1459,7 @@ def _refresh_local_dokploy_api_key(
         result = DokployBootstrapAuthClient(base_url=LOCAL_HEALTH_URL).ensure_api_key(
             admin_email=admin_email,
             admin_password=admin_password,
+            key_name=f"dokploy-wizard-{uuid.uuid4().hex[:12]}",
         )
         try:
             DokployApiClient(api_url=LOCAL_HEALTH_URL, api_key=result.api_key).list_projects()
