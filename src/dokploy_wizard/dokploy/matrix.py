@@ -225,11 +225,21 @@ class DokployMatrixBackend:
                     break
                 for compose in environment.composes:
                     if compose.name == self._compose_name:
+                        updated = self._client.update_compose(
+                            compose_id=compose.compose_id,
+                            compose_file=compose_file,
+                        )
+                        self._client.deploy_compose(
+                            compose_id=updated.compose_id,
+                            title="dokploy-wizard matrix reconcile",
+                            description="Update Matrix compose app",
+                        )
                         locator = _ComposeLocator(
                             project_id=project.project_id,
                             environment_id=environment.environment_id,
-                            compose_id=compose.compose_id,
+                            compose_id=updated.compose_id,
                         )
+                        self._created_in_process = True
                         self._applied_locator = locator
                         return locator
                 created = self._client.create_compose(

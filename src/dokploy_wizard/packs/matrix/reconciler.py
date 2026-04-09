@@ -377,7 +377,15 @@ def _resolve_owned_resource(
 
     existing = find_by_name(resource_name)
     if existing is not None:
-        raise MatrixError(collision_message)
+        existing = create_resource(resource_name)
+        return (
+            MatrixManagedResource(
+                action="reuse_existing",
+                resource_id=existing.resource_id,
+                resource_name=existing.resource_name,
+            ),
+            existing.resource_id,
+        )
 
     if dry_run:
         planned_id = f"planned:{resource_name}"
