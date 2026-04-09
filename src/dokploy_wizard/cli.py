@@ -1385,16 +1385,18 @@ def _ensure_dokploy_api_auth(
 ) -> RawEnvInput:
     values = dict(raw_env.values)
     if values.get("DOKPLOY_BOOTSTRAP_MOCK_API_KEY") and not dry_run:
-        values["DOKPLOY_API_URL"] = desired_state.dokploy_url
+        values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
         values["DOKPLOY_API_KEY"] = values["DOKPLOY_BOOTSTRAP_MOCK_API_KEY"]
         values["DOKPLOY_MOCK_API_MODE"] = "true"
         updated = RawEnvInput(format_version=raw_env.format_version, values=values)
         _write_reusable_env_file(env_file, updated)
         return updated
     if values.get("DOKPLOY_API_KEY"):
-        if "DOKPLOY_API_URL" not in values:
-            values["DOKPLOY_API_URL"] = desired_state.dokploy_url
-        return RawEnvInput(format_version=raw_env.format_version, values=values)
+        values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
+        updated = RawEnvInput(format_version=raw_env.format_version, values=values)
+        if not dry_run:
+            _write_reusable_env_file(env_file, updated)
+        return updated
     if dry_run or not require_real_dokploy_auth:
         return raw_env
     admin_email = values.get("DOKPLOY_ADMIN_EMAIL")
@@ -1410,7 +1412,7 @@ def _ensure_dokploy_api_auth(
         admin_email=admin_email,
         admin_password=admin_password,
     )
-    values["DOKPLOY_API_URL"] = desired_state.dokploy_url
+    values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
     values["DOKPLOY_API_KEY"] = result.api_key
     updated = RawEnvInput(format_version=raw_env.format_version, values=values)
     _write_reusable_env_file(env_file, updated)
