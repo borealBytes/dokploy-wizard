@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -154,8 +156,37 @@ class DokployMatrixBackend:
         )
 
     def check_health(self, *, service: MatrixResourceRecord, url: str) -> bool:
-        del service
+        if _docker_container_is_up(self._compose_name):
+            return True
+        if self._compose_status_reached(service.resource_id, allowed_statuses={"done"}):
+            if _docker_container_is_up(self._compose_name):
+                return True
         return _http_health_check(url)
+
+    def _compose_status_reached(self, resource_id: str, *, allowed_statuses: set[str]) -> bool:
+        compose_id = _parse_resource_id(resource_id, "service") or _parse_resource_id(
+            resource_id, "data"
+        )
+        if compose_id is None:
+            return False
+        for _ in range(30):
+            try:
+                projects = self._client.list_projects()
+            except DokployApiError:
+                return False
+            for project in projects:
+                if project.name != self._stack_name:
+                    continue
+                environment = _pick_environment(project)
+                if environment is None:
+                    continue
+                for compose in environment.composes:
+                    if compose.compose_id != compose_id:
+                        continue
+                    if compose.status is not None and compose.status.lower() in allowed_statuses:
+                        return True
+            time.sleep(1.0)
+        return False
 
     def _validate_inputs(
         self,
@@ -309,6 +340,23 @@ def _data_name(stack_name: str) -> str:
 
 def _resource_id(compose_id: str, kind: str) -> str:
     return f"dokploy-compose:{compose_id}:matrix-{kind}"
+
+
+def _docker_container_is_up(compose_name: str) -> bool:
+    result = subprocess.run(
+        ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.splitlines():
+        name, _, status = line.partition("\t")
+        if compose_name not in name:
+            continue
+        return status.startswith("Up ")
+    return False
 
 
 def _parse_resource_id(resource_id: str, kind: str) -> str | None:
