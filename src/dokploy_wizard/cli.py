@@ -770,13 +770,19 @@ def _run_lifecycle_flow(
         assert loaded_state.raw_input is not None
         assert loaded_state.desired_state is not None
         assert loaded_state.applied_state is not None
-        lifecycle_plan = classify_install_request(
-            existing_raw=loaded_state.raw_input,
-            existing_desired=loaded_state.desired_state,
-            existing_applied=loaded_state.applied_state,
-            requested_raw=raw_env,
-            requested_desired=desired_state,
-        )
+        try:
+            lifecycle_plan = classify_install_request(
+                existing_raw=loaded_state.raw_input,
+                existing_desired=loaded_state.desired_state,
+                existing_applied=loaded_state.applied_state,
+                requested_raw=raw_env,
+                requested_desired=desired_state,
+            )
+        except StateValidationError:
+            if _can_restart_incomplete_install(loaded_state):
+                lifecycle_plan = _build_restart_install_plan(desired_state)
+            else:
+                raise
     else:
         lifecycle_plan = LifecyclePlan(
             mode="install",
@@ -989,6 +995,32 @@ def _prepare_install_host_prerequisites(
     summary["remediation_actions"] = remediation_actions
     summary["remediation_attempted"] = True
     return updated_host_facts, summary
+
+
+def _can_restart_incomplete_install(loaded_state: Any) -> bool:
+    applied_state = getattr(loaded_state, "applied_state", None)
+    ownership_ledger = getattr(loaded_state, "ownership_ledger", None)
+    if applied_state is None or ownership_ledger is None:
+        return False
+    return bool(applied_state.completed_steps == () and ownership_ledger.resources == ())
+
+
+def _build_restart_install_plan(desired_state: DesiredState) -> LifecyclePlan:
+    applicable_phases = applicable_phases_for(desired_state)
+    return LifecyclePlan(
+        mode="install",
+        reasons=(
+            "Existing state dir only contains an incomplete scaffold with no owned resources; "
+            "restarting install from the requested env file.",
+        ),
+        applicable_phases=applicable_phases,
+        phases_to_run=applicable_phases[1:],
+        preserved_phases=(),
+        initial_completed_steps=(),
+        start_phase="dokploy_bootstrap",
+        raw_equivalent=False,
+        desired_equivalent=False,
+    )
 
 
 def _collect_post_remediation_host_facts(*, raw_env: RawEnvInput, assessment: Any) -> Any:
