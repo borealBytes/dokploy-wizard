@@ -19,10 +19,10 @@ from dokploy_wizard.packs.headscale import (
     HEADSCALE_SERVICE_RESOURCE_TYPE,
     HeadscaleError,
     HeadscaleResourceRecord,
-    _http_health_check,
     build_headscale_ledger,
     reconcile_headscale,
 )
+from dokploy_wizard.packs.headscale.reconciler import _http_health_check
 from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
 
 
@@ -254,6 +254,35 @@ def test_reconcile_headscale_reuses_owned_service_and_requires_health() -> None:
     assert phase.result.service.action == "reuse_owned"
     assert phase.result.health_check is not None
     assert phase.result.health_check.passed is True
+    assert backend.create_calls == 0
+
+
+def test_reconcile_headscale_adopts_matching_existing_service_by_name() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"},
+        )
+    )
+    backend = FakeHeadscaleBackend(
+        existing_service=HeadscaleResourceRecord(
+            resource_id="headscale-service-existing",
+            resource_name="wizard-stack-headscale",
+        ),
+        health_ok=True,
+    )
+
+    phase = reconcile_headscale(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert phase.result.outcome == "already_present"
+    assert phase.result.service is not None
+    assert phase.result.service.action == "reuse_existing"
+    assert phase.service_resource_id == "headscale-service-existing"
     assert backend.create_calls == 0
 
 
