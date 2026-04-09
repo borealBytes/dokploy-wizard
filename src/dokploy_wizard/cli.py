@@ -1388,6 +1388,12 @@ def _ensure_dokploy_api_auth(
     values = dict(raw_env.values)
     admin_email = values.get("DOKPLOY_ADMIN_EMAIL")
     admin_password = values.get("DOKPLOY_ADMIN_PASSWORD")
+    should_refresh_local_auth = bool(
+        require_real_dokploy_auth
+        and not dry_run
+        and admin_email is not None
+        and admin_password is not None
+    )
     if values.get("DOKPLOY_BOOTSTRAP_MOCK_API_KEY") and not dry_run:
         values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
         values["DOKPLOY_API_KEY"] = values["DOKPLOY_BOOTSTRAP_MOCK_API_KEY"]
@@ -1398,12 +1404,7 @@ def _ensure_dokploy_api_auth(
     if values.get("DOKPLOY_API_KEY"):
         values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
         updated = RawEnvInput(format_version=raw_env.format_version, values=values)
-        if not (
-            require_real_dokploy_auth
-            and not dry_run
-            and admin_email is not None
-            and admin_password is not None
-        ) and _can_reuse_existing_dokploy_api_key(
+        if not should_refresh_local_auth and _can_reuse_existing_dokploy_api_key(
             raw_env=updated,
             dry_run=dry_run,
             require_real_dokploy_auth=require_real_dokploy_auth,
@@ -1420,7 +1421,7 @@ def _ensure_dokploy_api_auth(
         )
 
     reconcile_dokploy(dry_run=False, backend=bootstrap_backend)
-    result = DokployBootstrapAuthClient(base_url=LOCAL_HEALTH_URL).ensure_api_key(
+    result = _refresh_local_dokploy_api_key(
         admin_email=admin_email,
         admin_password=admin_password,
     )
@@ -1447,3 +1448,22 @@ def _can_reuse_existing_dokploy_api_key(
     except DokployApiError:
         return False
     return True
+
+
+def _refresh_local_dokploy_api_key(
+    *, admin_email: str, admin_password: str, attempts: int = 3
+) -> Any:
+    last_error: Exception | None = None
+    for _ in range(attempts):
+        result = DokployBootstrapAuthClient(base_url=LOCAL_HEALTH_URL).ensure_api_key(
+            admin_email=admin_email,
+            admin_password=admin_password,
+        )
+        try:
+            DokployApiClient(api_url=LOCAL_HEALTH_URL, api_key=result.api_key).list_projects()
+            return result
+        except DokployApiError as error:
+            last_error = error
+    raise DokployBootstrapAuthError(
+        "Dokploy local API key refresh succeeded but the returned key remained unauthorized."
+    ) from last_error
