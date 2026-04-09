@@ -472,8 +472,8 @@ def test_install_auth_success_refreshes_persisted_target_state_before_execution(
     assert loaded_state.desired_state is not None
     assert loaded_state.applied_state is not None
     assert loaded_state.raw_input.values["DOKPLOY_API_KEY"] == "dokp-key-123"
-    assert loaded_state.raw_input.values["DOKPLOY_API_URL"] == "https://dokploy.example.com"
-    assert loaded_state.desired_state.dokploy_api_url == "https://dokploy.example.com"
+    assert loaded_state.raw_input.values["DOKPLOY_API_URL"] == "http://127.0.0.1:3000"
+    assert loaded_state.desired_state.dokploy_api_url == "http://127.0.0.1:3000"
     assert loaded_state.applied_state.completed_steps == ()
     assert persisted_raw_input["values"]["DOKPLOY_API_KEY"] == "dokp-key-123"
     assert "DOKPLOY_API_KEY=dokp-key-123" in env_file.read_text(encoding="utf-8")
