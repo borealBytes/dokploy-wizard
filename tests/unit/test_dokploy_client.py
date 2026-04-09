@@ -91,6 +91,10 @@ def test_dokploy_client_resets_compose_path_when_updating_raw_compose() -> None:
     assert captured["url"] == "https://dokploy.example.com/api/compose.update"
     assert body["composePath"] == "docker-compose.yml"
     assert body["sourceType"] == "raw"
+    assert body["githubId"] is None
+    assert body["repository"] is None
+    assert body["owner"] is None
+    assert body["branch"] is None
     assert record.compose_id == "cmp-1"
 
 

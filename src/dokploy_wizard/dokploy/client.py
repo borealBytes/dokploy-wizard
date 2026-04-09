@@ -128,6 +128,10 @@ class DokployApiClient:
                 "composeType": "docker-compose",
                 "sourceType": "raw",
                 "composePath": "docker-compose.yml",
+                "githubId": None,
+                "repository": None,
+                "owner": None,
+                "branch": None,
                 "composeFile": compose_file,
             },
         )
