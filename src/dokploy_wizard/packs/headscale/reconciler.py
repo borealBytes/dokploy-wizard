@@ -230,6 +230,11 @@ def _resolve_service(
 
     existing = backend.find_service_by_name(service_name)
     if existing is not None:
+        existing = backend.create_service(
+            resource_name=service_name,
+            hostname=hostname,
+            secret_refs=secret_refs,
+        )
         return (
             HeadscaleManagedResource(
                 action="reuse_existing",
