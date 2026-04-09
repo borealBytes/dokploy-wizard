@@ -354,6 +354,12 @@ def _resolve_install_input(
         require_dokploy_auth=not dry_run
     )
     guided_env_file = _guided_install_env_file(resolved_state_dir)
+    if guided_env_file.exists():
+        raw_env, generated_secrets = _reuse_existing_guided_secrets(
+            guided_env_file=guided_env_file,
+            raw_env=raw_env,
+            generated_secrets=generated_secrets,
+        )
     _write_reusable_env_file(guided_env_file, raw_env)
     return guided_env_file, raw_env, resolved_state_dir, generated_secrets
 
@@ -433,6 +439,30 @@ def _prompt_for_guided_state_dir(state_dir: Path) -> Path:
 
 def _guided_install_env_file(state_dir: Path) -> Path:
     return state_dir / "install.env"
+
+
+def _reuse_existing_guided_secrets(
+    *,
+    guided_env_file: Path,
+    raw_env: RawEnvInput,
+    generated_secrets: dict[str, str],
+) -> tuple[RawEnvInput, dict[str, str]]:
+    try:
+        existing_raw_env = parse_env_file(guided_env_file)
+    except StateValidationError:
+        return raw_env, generated_secrets
+
+    values = dict(raw_env.values)
+    reused_generated_secrets = dict(generated_secrets)
+    for key in ("SEAWEEDFS_ACCESS_KEY", "SEAWEEDFS_SECRET_KEY"):
+        existing_value = existing_raw_env.values.get(key)
+        if existing_value is None or key not in values:
+            continue
+        values[key] = existing_value
+        reused_generated_secrets.pop(key, None)
+    return RawEnvInput(
+        format_version=raw_env.format_version, values=values
+    ), reused_generated_secrets
 
 
 def _write_reusable_env_file(path: Path, raw_env: RawEnvInput) -> None:
@@ -803,6 +833,8 @@ def _run_lifecycle_flow(
         ),
     )
     desired_state = resolve_desired_state(raw_env)
+    if not dry_run:
+        write_target_state(state_dir, raw_env, desired_state)
     tailscale_phase_backend = tailscale_backend or ShellTailscaleBackend(raw_env)
     cloudflare_backend = networking_backend or CloudflareApiBackend(raw_env)
     shared_core_phase_backend = shared_core_backend or _build_shared_core_backend(
@@ -855,7 +887,6 @@ def _run_lifecycle_flow(
     )
 
     if not dry_run:
-        write_target_state(state_dir, raw_env, desired_state)
         if existing_state:
             if loaded_state.applied_state is None or (
                 loaded_state.applied_state.completed_steps != lifecycle_plan.initial_completed_steps

@@ -10,7 +10,7 @@ import pytest
 
 from dokploy_wizard import cli
 from dokploy_wizard.dokploy import DokployBootstrapAuthError, DokployBootstrapAuthResult
-from dokploy_wizard.lifecycle import applicable_phases_for
+from dokploy_wizard.lifecycle import applicable_phases_for, classify_install_request
 from dokploy_wizard.packs import prompts as prompt_module
 from dokploy_wizard.packs.prompts import (
     GuidedInstallValues,
@@ -29,6 +29,7 @@ from dokploy_wizard.state import (
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
+    load_state_dir,
     parse_env_file,
     resolve_desired_state,
     write_applied_checkpoint,
@@ -225,6 +226,195 @@ def test_guided_install_writes_env_file_and_runs_install(
     assert isinstance(raw_env, RawEnvInput)
     assert raw_env.values["STACK_NAME"] == "guided-stack"
     assert raw_env.values["DOKPLOY_SUBDOMAIN"] == "dokploy"
+
+
+def test_guided_install_reuses_existing_seaweedfs_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+    custom_state_dir = tmp_path / "custom-state"
+    custom_state_dir.mkdir(parents=True)
+    existing_env_file = custom_state_dir / "install.env"
+    existing_env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=guided-stack",
+                "ROOT_DOMAIN=example.com",
+                "DOKPLOY_SUBDOMAIN=dokploy",
+                "DOKPLOY_ADMIN_EMAIL=admin@example.com",
+                "DOKPLOY_ADMIN_PASSWORD=secret-123",
+                "ENABLE_HEADSCALE=true",
+                "CLOUDFLARE_API_TOKEN=token-123",
+                "CLOUDFLARE_ACCOUNT_ID=account-123",
+                "PACKS=seaweedfs",
+                "SEAWEEDFS_ACCESS_KEY=seaweed-existing",
+                "SEAWEEDFS_SECRET_KEY=seaweed-secret-existing",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run_install_flow(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+    monkeypatch.setattr(cli, "_prompt_for_guided_state_dir", lambda _: custom_state_dir)
+    monkeypatch.setattr(
+        cli,
+        "prompt_for_initial_install_values",
+        lambda **kwargs: GuidedInstallValues(
+            stack_name="guided-stack",
+            root_domain="example.com",
+            dokploy_subdomain="dokploy",
+            dokploy_admin_email="admin@example.com",
+            dokploy_admin_password="secret-123",
+            enable_headscale=True,
+            cloudflare_api_token="token-123",
+            cloudflare_account_id="account-123",
+            cloudflare_zone_id=None,
+            enable_tailscale=False,
+            tailscale_auth_key=None,
+            tailscale_hostname=None,
+            tailscale_enable_ssh=False,
+            tailscale_tags=(),
+            tailscale_subnet_routes=(),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "prompt_for_pack_selection",
+        lambda **kwargs: PromptSelection(
+            selected_packs=("seaweedfs",),
+            disabled_packs=(),
+            seaweedfs_access_key="seaweed-new",
+            seaweedfs_secret_key="seaweed-secret-new",
+            generated_secrets={
+                "SEAWEEDFS_ACCESS_KEY": "seaweed-new",
+                "SEAWEEDFS_SECRET_KEY": "seaweed-secret-new",
+            },
+            openclaw_channels=(),
+            my_farm_advisor_channels=(),
+        ),
+    )
+    monkeypatch.setattr(cli, "run_install_flow", fake_run_install_flow)
+
+    args = argparse.Namespace(
+        env_file=None,
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        non_interactive=False,
+        no_print_secrets=False,
+        allow_memory_shortfall=False,
+    )
+
+    assert cli._handle_install(args) == 0
+    env_contents = existing_env_file.read_text(encoding="utf-8")
+    assert "SEAWEEDFS_ACCESS_KEY=seaweed-existing" in env_contents
+    assert "SEAWEEDFS_SECRET_KEY=seaweed-secret-existing" in env_contents
+    raw_env = captured["raw_env"]
+    assert isinstance(raw_env, RawEnvInput)
+    assert raw_env.values["SEAWEEDFS_ACCESS_KEY"] == "seaweed-existing"
+    assert raw_env.values["SEAWEEDFS_SECRET_KEY"] == "seaweed-secret-existing"
+
+
+def test_install_persists_post_auth_target_before_later_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "install.env"
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "guided-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "secret-123",
+            "ENABLE_HEADSCALE": "true",
+            "CLOUDFLARE_API_TOKEN": "token-123",
+            "CLOUDFLARE_ACCOUNT_ID": "account-123",
+        },
+    )
+    state_dir = tmp_path / "state"
+
+    class FakeAuthClient:
+        def __init__(self, *, base_url: str) -> None:
+            assert base_url == "http://127.0.0.1:3000"
+
+        def ensure_api_key(
+            self, *, admin_email: str, admin_password: str, key_name: str = "dokploy-wizard"
+        ) -> DokployBootstrapAuthResult:
+            return DokployBootstrapAuthResult(
+                api_key="dokp-key-123",
+                api_url="http://127.0.0.1:3000",
+                admin_email=admin_email,
+                organization_id="org-1",
+                used_sign_up=False,
+                auth_path="/api/auth/sign-in/email",
+                session_path="/api/user.session",
+            )
+
+    class FakeHostPrereqBackend:
+        def package_installed(self, package_name: str) -> bool:
+            del package_name
+            return True
+
+        def docker_daemon_reachable(self) -> bool:
+            return True
+
+    monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
+    monkeypatch.setattr(cli, "collect_host_facts", lambda _: _host_facts())
+    monkeypatch.setattr(cli, "UbuntuAptHostPrerequisiteBackend", lambda _: FakeHostPrereqBackend())
+    monkeypatch.setattr(
+        cli,
+        "run_preflight",
+        lambda desired_state, host_facts, *, allow_memory_shortfall=False: PreflightReport(
+            host_facts=host_facts,
+            required_profile=derive_required_profile(resolve_desired_state(raw_env)),
+            checks=(PreflightCheck(name="preflight", status="pass", detail="passed"),),
+            advisories=(),
+        ),
+    )
+    monkeypatch.setattr(cli, "ShellTailscaleBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "ShellOpenClawBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(
+        cli,
+        "validate_preserved_phases",
+        lambda **_: (_ for _ in ()).throw(StateValidationError("post-auth failure")),
+    )
+
+    with pytest.raises(StateValidationError, match="post-auth failure"):
+        cli.run_install_flow(
+            env_file=env_file,
+            state_dir=state_dir,
+            dry_run=False,
+            raw_env=raw_env,
+            bootstrap_backend=_FakeBootstrapBackend(),
+        )
+
+    loaded_state = load_state_dir(state_dir)
+    assert loaded_state.raw_input is not None
+    assert loaded_state.desired_state is not None
+    assert loaded_state.applied_state is not None
+    assert loaded_state.raw_input.values["DOKPLOY_API_KEY"] == "dokp-key-123"
+    assert loaded_state.desired_state.dokploy_api_url == "https://dokploy.example.com"
+
+    requested_raw = parse_env_file(env_file)
+    requested_desired = resolve_desired_state(requested_raw)
+    classify_install_request(
+        existing_raw=loaded_state.raw_input,
+        existing_desired=loaded_state.desired_state,
+        existing_applied=loaded_state.applied_state,
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
 
 
 def test_guided_dry_run_does_not_require_dokploy_admin_password() -> None:
