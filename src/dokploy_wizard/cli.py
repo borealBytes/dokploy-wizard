@@ -1386,6 +1386,8 @@ def _ensure_dokploy_api_auth(
     require_real_dokploy_auth: bool,
 ) -> RawEnvInput:
     values = dict(raw_env.values)
+    admin_email = values.get("DOKPLOY_ADMIN_EMAIL")
+    admin_password = values.get("DOKPLOY_ADMIN_PASSWORD")
     if values.get("DOKPLOY_BOOTSTRAP_MOCK_API_KEY") and not dry_run:
         values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
         values["DOKPLOY_API_KEY"] = values["DOKPLOY_BOOTSTRAP_MOCK_API_KEY"]
@@ -1396,7 +1398,12 @@ def _ensure_dokploy_api_auth(
     if values.get("DOKPLOY_API_KEY"):
         values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
         updated = RawEnvInput(format_version=raw_env.format_version, values=values)
-        if _can_reuse_existing_dokploy_api_key(
+        if not (
+            require_real_dokploy_auth
+            and not dry_run
+            and admin_email is not None
+            and admin_password is not None
+        ) and _can_reuse_existing_dokploy_api_key(
             raw_env=updated,
             dry_run=dry_run,
             require_real_dokploy_auth=require_real_dokploy_auth,
@@ -1406,8 +1413,6 @@ def _ensure_dokploy_api_auth(
             return updated
     if dry_run or not require_real_dokploy_auth:
         return raw_env
-    admin_email = values.get("DOKPLOY_ADMIN_EMAIL")
-    admin_password = values.get("DOKPLOY_ADMIN_PASSWORD")
     if admin_email is None or admin_password is None:
         raise StateValidationError(
             "Dokploy admin email/password are required to bootstrap local "
