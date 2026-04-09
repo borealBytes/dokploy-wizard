@@ -235,6 +235,29 @@ def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSumma
 def _render_compose_file(service_name: str, hostname: str, secret_refs: tuple[str, ...]) -> str:
     admin_secret_ref, noise_secret_ref = secret_refs
     volume_name = f"{service_name}-data"
+    config_lines = (
+        f"server_url: https://{hostname}",
+        "listen_addr: 0.0.0.0:8080",
+        "metrics_listen_addr: 0.0.0.0:9090",
+        "noise:",
+        "  private_key_path: /var/lib/headscale/noise_private.key",
+        "prefixes:",
+        "  v4: 100.64.0.0/10",
+        "  allocation: sequential",
+        "derp:",
+        "  server:",
+        "    enabled: false",
+        "disable_check_updates: true",
+        "database:",
+        "  type: sqlite",
+        "  sqlite:",
+        "    path: /var/lib/headscale/db.sqlite",
+        "unix_socket: /var/run/headscale/headscale.sock",
+        "log:",
+        "  format: text",
+        "  level: info",
+    )
+    config_printf = " ".join(f"'{line}'" for line in config_lines)
     return (
         "services:\n"
         f"  {service_name}:\n"
@@ -242,28 +265,7 @@ def _render_compose_file(service_name: str, hostname: str, secret_refs: tuple[st
         "    restart: unless-stopped\n"
         "    command: >-\n"
         '      sh -c "mkdir -p /var/lib/headscale /etc/headscale &&\n'
-        "      cat <<'EOF' > /etc/headscale/config.yaml\n"
-        f"      server_url: https://{hostname}\n"
-        "      listen_addr: 0.0.0.0:8080\n"
-        "      metrics_listen_addr: 0.0.0.0:9090\n"
-        "      noise:\n"
-        "        private_key_path: /var/lib/headscale/noise_private.key\n"
-        "      prefixes:\n"
-        "        v4: 100.64.0.0/10\n"
-        "        allocation: sequential\n"
-        "      derp:\n"
-        "        server:\n"
-        "          enabled: false\n"
-        "      disable_check_updates: true\n"
-        "      database:\n"
-        "        type: sqlite\n"
-        "        sqlite:\n"
-        "          path: /var/lib/headscale/db.sqlite\n"
-        "      unix_socket: /var/run/headscale/headscale.sock\n"
-        "      log:\n"
-        "        format: text\n"
-        "        level: info\n"
-        "EOF\n"
+        f"      printf '%s\\n' {config_printf} > /etc/headscale/config.yaml &&\n"
         f"      export HEADSCALE_ADMIN_API_KEY=${{{admin_secret_ref}:-change-me}} &&\n"
         f"      export HEADSCALE_NOISE_PRIVATE_KEY=${{{noise_secret_ref}:-change-me}} &&\n"
         '      headscale serve"\n'

@@ -15,6 +15,7 @@ from dokploy_wizard.dokploy import (
     DokployHeadscaleBackend,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.headscale import _render_compose_file
 from dokploy_wizard.packs.headscale import (
     HEADSCALE_SERVICE_RESOURCE_TYPE,
     HeadscaleError,
@@ -392,6 +393,21 @@ def test_dokploy_headscale_backend_redeploys_existing_compose_service() -> None:
     assert client.create_project_calls == 0
     assert client.create_compose_calls == 0
     assert client.deploy_calls == 1
+
+
+def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
+    rendered = _render_compose_file(
+        "wizard-stack-headscale",
+        "headscale.example.com",
+        (
+            "wizard-stack-headscale-admin-api-key",
+            "wizard-stack-headscale-noise-private-key",
+        ),
+    )
+
+    assert "cat <<'EOF'" not in rendered
+    assert "printf '%s\\n'" in rendered
+    assert "level: info" in rendered
 
 
 def test_headscale_health_check_falls_back_to_loopback_with_host_header(
