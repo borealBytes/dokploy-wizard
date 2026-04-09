@@ -67,6 +67,33 @@ def test_dokploy_client_creates_compose_with_json_payload() -> None:
     assert record.compose_id == "cmp-1"
 
 
+def test_dokploy_client_resets_compose_path_when_updating_raw_compose() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_request(req: request.Request) -> object:
+        captured["url"] = req.full_url
+        body = cast(bytes | None, req.data)
+        captured["body"] = body.decode("utf-8") if body is not None else None
+        return {"data": {"composeId": "cmp-1", "name": "wizard-matrix"}}
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    record = client.update_compose(
+        compose_id="cmp-1",
+        compose_file="services:\n  app:\n    image: ghcr.io/example/app:latest\n",
+    )
+
+    body = json.loads(str(captured["body"]))
+    assert captured["url"] == "https://dokploy.example.com/api/compose.update"
+    assert body["composePath"] == "docker-compose.yml"
+    assert body["sourceType"] == "raw"
+    assert record.compose_id == "cmp-1"
+
+
 def test_dokploy_client_coerces_null_project_env_to_empty_string() -> None:
     captured: dict[str, object] = {}
 
