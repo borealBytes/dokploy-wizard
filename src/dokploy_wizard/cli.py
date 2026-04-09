@@ -1027,9 +1027,12 @@ def _rehydrate_guided_retry_keys(
 
     values = dict(raw_env.values)
     changed = False
-    for key in _PERSISTED_RETRY_KEYS:
-        persisted_value = persisted_raw.values.get(key)
-        if persisted_value is None:
+    for key, persisted_value in persisted_raw.values.items():
+        if key not in values:
+            values[key] = persisted_value
+            changed = True
+            continue
+        if key not in _PERSISTED_RETRY_KEYS:
             continue
         if values.get(key) == persisted_value:
             continue

@@ -564,6 +564,7 @@ def test_install_rehydrates_guided_retry_keys_from_persisted_state(
             "DOKPLOY_API_KEY": "dokp-key-123",
             "SEAWEEDFS_ACCESS_KEY": "seaweed-existing",
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret-existing",
+            "MY_FARM_ADVISOR_CHANNELS": "matrix",
             "PACKS": "matrix,my-farm-advisor,nextcloud,openclaw,seaweedfs",
         },
     )
@@ -650,6 +651,10 @@ def test_install_rehydrates_guided_retry_keys_from_persisted_state(
     assert healed_env.values["DOKPLOY_API_KEY"] == "dokp-key-123"
     assert healed_env.values["SEAWEEDFS_ACCESS_KEY"] == "seaweed-existing"
     assert healed_env.values["SEAWEEDFS_SECRET_KEY"] == "seaweed-secret-existing"
+    assert (
+        healed_env.values["MY_FARM_ADVISOR_CHANNELS"]
+        == existing_raw.values["MY_FARM_ADVISOR_CHANNELS"]
+    )
     assert summary["lifecycle"]["mode"] == "resume"
     assert summary["state_status"] == "existing"
 
