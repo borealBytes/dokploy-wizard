@@ -534,3 +534,52 @@ def test_dokploy_matrix_backend_redeploys_existing_compose_resources() -> None:
     assert client.create_project_calls == 0
     assert client.create_compose_calls == 0
     assert client.deploy_calls == 1
+
+
+def test_dokploy_matrix_health_prefers_local_container_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_MATRIX": "true",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "matrix"
+    )
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    backend = DokployMatrixBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        hostname=desired_state.hostnames["matrix"],
+        shared_allocation=allocation,
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        secret_refs=(
+            "wizard-stack-matrix-registration-shared-secret",
+            "wizard-stack-matrix-macaroon-secret-key",
+        ),
+        client=FakeDokployApiClient(),
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.matrix._docker_container_is_up",
+        lambda compose_name: compose_name == "wizard-stack-matrix",
+    )
+
+    assert (
+        backend.check_health(
+            service=MatrixResourceRecord(
+                resource_id="dokploy-compose:cmp-1:matrix-service",
+                resource_name="wizard-stack-matrix",
+            ),
+            url="https://matrix.example.com/_matrix/client/versions",
+        )
+        is True
+    )
