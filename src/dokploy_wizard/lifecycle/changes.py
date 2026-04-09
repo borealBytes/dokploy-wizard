@@ -157,9 +157,11 @@ def classify_install_request(
     requested_raw: RawEnvInput,
     requested_desired: DesiredState,
 ) -> LifecyclePlan:
-    if _normalized_raw_values(existing_raw) != _normalized_raw_values(requested_raw) or (
-        existing_desired.to_dict() != requested_desired.to_dict()
-    ):
+    raw_equivalent = _normalized_raw_values(existing_raw) == _normalized_raw_values(requested_raw)
+    desired_equivalent = _normalized_install_desired_values(
+        existing_desired
+    ) == _normalized_install_desired_values(requested_desired)
+    if not raw_equivalent or not desired_equivalent:
         raise StateValidationError(
             "Existing install state does not match this install request. "
             "Use 'modify' for supported lifecycle changes."
@@ -167,8 +169,8 @@ def classify_install_request(
     return _classify_same_target(
         existing_applied=existing_applied,
         desired_state=requested_desired,
-        raw_equivalent=True,
-        desired_equivalent=True,
+        raw_equivalent=raw_equivalent,
+        desired_equivalent=desired_equivalent,
     )
 
 
@@ -356,6 +358,12 @@ def _changed_env_keys(existing_raw: RawEnvInput, requested_raw: RawEnvInput) -> 
 
 def _normalized_raw_values(raw_env: RawEnvInput) -> dict[str, str]:
     return {key: value for key, value in raw_env.values.items() if key not in _IGNORED_RAW_ENV_KEYS}
+
+
+def _normalized_install_desired_values(desired_state: DesiredState) -> dict[str, object]:
+    payload = desired_state.to_dict()
+    payload["dokploy_api_url"] = None
+    return payload
 
 
 def _longest_valid_prefix(
