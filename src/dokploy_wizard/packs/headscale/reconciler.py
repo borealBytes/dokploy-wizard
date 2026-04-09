@@ -230,9 +230,13 @@ def _resolve_service(
 
     existing = backend.find_service_by_name(service_name)
     if existing is not None:
-        raise HeadscaleError(
-            f"Headscale service name collision detected for '{service_name}'. "
-            "Refusing to adopt an unowned existing runtime resource."
+        return (
+            HeadscaleManagedResource(
+                action="reuse_existing",
+                resource_id=existing.resource_id,
+                resource_name=existing.resource_name,
+            ),
+            existing.resource_id,
         )
 
     if dry_run:
