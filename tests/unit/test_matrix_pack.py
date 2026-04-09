@@ -16,6 +16,7 @@ from dokploy_wizard.dokploy import (
     DokployMatrixBackend,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.matrix import _render_compose_file
 from dokploy_wizard.packs.matrix import (
     MATRIX_DATA_RESOURCE_TYPE,
     MATRIX_SERVICE_RESOURCE_TYPE,
@@ -534,6 +535,41 @@ def test_dokploy_matrix_backend_redeploys_existing_compose_resources() -> None:
     assert client.create_project_calls == 0
     assert client.create_compose_calls == 0
     assert client.deploy_calls == 1
+
+
+def test_dokploy_matrix_compose_generates_static_config_on_first_start() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_MATRIX": "true",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "matrix"
+    )
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+
+    rendered = _render_compose_file(
+        stack_name=desired_state.stack_name,
+        hostname=desired_state.hostnames["matrix"],
+        shared_allocation=allocation,
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        secret_refs=(
+            "wizard-stack-matrix-registration-shared-secret",
+            "wizard-stack-matrix-macaroon-secret-key",
+        ),
+    )
+
+    assert 'entrypoint: ["/bin/sh", "-c"]' in rendered
+    assert "migrate_config" in rendered
+    assert "SYNAPSE_NO_TLS: 'yes'" in rendered
+    assert "SYNAPSE_CONFIG_PATH: /data/homeserver.yaml" in rendered
 
 
 def test_dokploy_matrix_health_prefers_local_container_state(
