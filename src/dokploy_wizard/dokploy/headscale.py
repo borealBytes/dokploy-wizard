@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -97,6 +98,8 @@ class DokployHeadscaleBackend:
 
     def check_health(self, *, service: HeadscaleResourceRecord, url: str) -> bool:
         del service
+        if _docker_container_is_up(self._service_name):
+            return True
         return _http_health_check(url)
 
     def _lookup_locator(self, resource_id: str) -> _ComposeLocator | None:
@@ -212,6 +215,23 @@ class DokployHeadscaleBackend:
 
 def _resource_id(compose_id: str) -> str:
     return f"dokploy-compose:{compose_id}:headscale"
+
+
+def _docker_container_is_up(service_name: str) -> bool:
+    result = subprocess.run(
+        ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.splitlines():
+        name, _, status = line.partition("\t")
+        if service_name not in name:
+            continue
+        return status.startswith("Up ")
+    return False
 
 
 def _parse_resource_id(resource_id: str) -> str | None:
