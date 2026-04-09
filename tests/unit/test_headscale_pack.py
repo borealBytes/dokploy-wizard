@@ -409,6 +409,7 @@ def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
     assert "HEADSCALE_SERVER_URL: https://headscale.example.com" in rendered
     assert "HEADSCALE_LOG_LEVEL: info" in rendered
     assert "HEADSCALE_DNS_MAGIC_DNS: 'false'" in rendered
+    assert "HEADSCALE_DERP_URLS: https://controlplane.tailscale.com/derpmap/default" in rendered
     assert "command: ['serve']" in rendered
     assert "HEADSCALE_DERP_SERVER_ENABLED" not in rendered
 

@@ -248,6 +248,7 @@ def _render_compose_file(service_name: str, hostname: str, secret_refs: tuple[st
         "      HEADSCALE_NOISE_PRIVATE_KEY_PATH: /var/lib/headscale/noise_private.key\n"
         "      HEADSCALE_PREFIXES_V4: 100.64.0.0/10\n"
         "      HEADSCALE_PREFIXES_ALLOCATION: sequential\n"
+        "      HEADSCALE_DERP_URLS: https://controlplane.tailscale.com/derpmap/default\n"
         "      HEADSCALE_DISABLE_CHECK_UPDATES: 'true'\n"
         "      HEADSCALE_DATABASE_TYPE: sqlite\n"
         "      HEADSCALE_DATABASE_SQLITE_PATH: /var/lib/headscale/db.sqlite\n"
