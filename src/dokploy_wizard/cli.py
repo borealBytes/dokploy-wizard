@@ -132,6 +132,12 @@ _LIVE_RUN_MOCK_CONTAMINATION_PREFIXES = (
 
 _HOST_PREREQ_RECHECK_ATTEMPTS = 10
 _HOST_PREREQ_RECHECK_DELAY_SECONDS = 1.0
+_PERSISTED_RETRY_KEYS = {
+    "DOKPLOY_API_URL",
+    "DOKPLOY_API_KEY",
+    "SEAWEEDFS_ACCESS_KEY",
+    "SEAWEEDFS_SECRET_KEY",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -735,6 +741,14 @@ def _run_lifecycle_flow(
     loaded_state = load_state_dir(state_dir)
     existing_state = validate_existing_state(loaded_state)
     raw_env = raw_env or parse_env_file(env_file)
+    if existing_state:
+        raw_env = _rehydrate_guided_retry_keys(
+            env_file=env_file,
+            state_dir=state_dir,
+            loaded_state=loaded_state,
+            raw_env=raw_env,
+            dry_run=dry_run,
+        )
     desired_state = resolve_desired_state(raw_env)
     backend = bootstrap_backend or ShellDokployBootstrapBackend(raw_env)
     ownership_ledger = loaded_state.ownership_ledger or OwnershipLedger(
@@ -995,6 +1009,39 @@ def _prepare_install_host_prerequisites(
     summary["remediation_actions"] = remediation_actions
     summary["remediation_attempted"] = True
     return updated_host_facts, summary
+
+
+def _rehydrate_guided_retry_keys(
+    *,
+    env_file: Path,
+    state_dir: Path,
+    loaded_state: Any,
+    raw_env: RawEnvInput,
+    dry_run: bool,
+) -> RawEnvInput:
+    if env_file != _guided_install_env_file(state_dir):
+        return raw_env
+    persisted_raw = getattr(loaded_state, "raw_input", None)
+    if persisted_raw is None:
+        return raw_env
+
+    values = dict(raw_env.values)
+    changed = False
+    for key in _PERSISTED_RETRY_KEYS:
+        persisted_value = persisted_raw.values.get(key)
+        if persisted_value is None:
+            continue
+        if values.get(key) == persisted_value:
+            continue
+        values[key] = persisted_value
+        changed = True
+    if not changed:
+        return raw_env
+
+    updated = RawEnvInput(format_version=raw_env.format_version, values=values)
+    if not dry_run:
+        _write_reusable_env_file(env_file, updated)
+    return updated
 
 
 def _can_restart_incomplete_install(loaded_state: Any) -> bool:
