@@ -406,10 +406,10 @@ def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
     )
 
     assert "cat <<'EOF'" not in rendered
-    assert "printf '%s\\n'" in rendered
-    assert "level: info" in rendered
-    assert 'entrypoint: ["/bin/sh", "-c"]' in rendered
-    assert "exec headscale serve" in rendered
+    assert "HEADSCALE_SERVER_URL: https://headscale.example.com" in rendered
+    assert "HEADSCALE_LOG_LEVEL: info" in rendered
+    assert "HEADSCALE_DNS_MAGIC_DNS: 'false'" in rendered
+    assert "command: ['serve']" in rendered
 
 
 def test_headscale_health_check_falls_back_to_loopback_with_host_header(
