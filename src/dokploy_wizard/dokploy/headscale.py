@@ -143,10 +143,21 @@ class DokployHeadscaleBackend:
                     break
                 for compose in environment.composes:
                     if compose.name == self._service_name:
+                        updated = self._client.update_compose(
+                            compose_id=compose.compose_id,
+                            compose_file=_render_compose_file(
+                                self._service_name, self._hostname, secret_refs
+                            ),
+                        )
+                        self._client.deploy_compose(
+                            compose_id=updated.compose_id,
+                            title="dokploy-wizard headscale reconcile",
+                            description="Update Headscale compose app",
+                        )
                         locator = _ComposeLocator(
                             project_id=project.project_id,
                             environment_id=environment.environment_id,
-                            compose_id=compose.compose_id,
+                            compose_id=updated.compose_id,
                         )
                         self._applied_locator = locator
                         return locator

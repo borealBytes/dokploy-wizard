@@ -123,8 +123,8 @@ class FakeDokployApiClient:
         return record
 
     def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        del compose_id, compose_file
-        raise AssertionError("Headscale backend should not update compose apps in this task")
+        del compose_file
+        return DokployComposeRecord(compose_id=compose_id, name="wizard-stack-headscale")
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -282,8 +282,8 @@ def test_reconcile_headscale_adopts_matching_existing_service_by_name() -> None:
     assert phase.result.outcome == "already_present"
     assert phase.result.service is not None
     assert phase.result.service.action == "reuse_existing"
-    assert phase.service_resource_id == "headscale-service-existing"
-    assert backend.create_calls == 0
+    assert phase.service_resource_id == "headscale-service-1"
+    assert backend.create_calls == 1
 
 
 def test_reconcile_headscale_fails_closed_on_health_check_failure() -> None:
@@ -345,6 +345,52 @@ def test_dokploy_headscale_backend_creates_and_reuses_compose_service() -> None:
     assert reused.resource_id == created.resource_id
     assert client.create_project_calls == 1
     assert client.create_compose_calls == 1
+    assert client.deploy_calls == 1
+
+
+def test_dokploy_headscale_backend_redeploys_existing_compose_service() -> None:
+    client = FakeDokployApiClient(
+        projects=[
+            DokployProjectSummary(
+                project_id="proj-1",
+                name="wizard-stack",
+                environments=(
+                    DokployEnvironmentSummary(
+                        environment_id="env-1",
+                        name="production",
+                        is_default=True,
+                        composes=(
+                            DokployComposeSummary(
+                                compose_id="cmp-existing",
+                                name="wizard-stack-headscale",
+                                status=None,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        ]
+    )
+    backend = DokployHeadscaleBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name="wizard-stack",
+        hostname="headscale.example.com",
+        client=client,
+    )
+
+    reused = backend.create_service(
+        resource_name="wizard-stack-headscale",
+        hostname="headscale.example.com",
+        secret_refs=(
+            "wizard-stack-headscale-admin-api-key",
+            "wizard-stack-headscale-noise-private-key",
+        ),
+    )
+
+    assert reused.resource_id == "dokploy-compose:cmp-existing:headscale"
+    assert client.create_project_calls == 0
+    assert client.create_compose_calls == 0
     assert client.deploy_calls == 1
 
 
