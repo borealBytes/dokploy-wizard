@@ -12,6 +12,7 @@ from dokploy_wizard.packs.headscale.reconciler import (
     HeadscaleBackend,
     HeadscaleError,
     ShellHeadscaleBackend,
+    _http_health_check,
     build_headscale_ledger,
     reconcile_headscale,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "HeadscaleResourceRecord",
     "HeadscaleResult",
     "ShellHeadscaleBackend",
+    "_http_health_check",
     "build_headscale_ledger",
     "reconcile_headscale",
 ]
