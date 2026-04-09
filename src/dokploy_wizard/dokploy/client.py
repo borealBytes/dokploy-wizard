@@ -83,7 +83,7 @@ class DokployApiClient:
             {
                 "name": name,
                 "description": description,
-                "env": env,
+                "env": env or "",
             },
         )
         if not isinstance(payload, dict):
