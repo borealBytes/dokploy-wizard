@@ -155,8 +155,8 @@ class FakeDokployApiClient:
         return record
 
     def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        del compose_id, compose_file
-        raise AssertionError("Matrix backend should not update compose apps in this task")
+        del compose_file
+        return DokployComposeRecord(compose_id=compose_id, name="wizard-stack-matrix")
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -292,7 +292,7 @@ def test_reconcile_matrix_reuses_owned_resources_and_requires_health() -> None:
     assert backend.create_data_calls == 0
 
 
-def test_reconcile_matrix_fails_closed_on_unowned_existing_service_collision() -> None:
+def test_reconcile_matrix_adopts_unowned_existing_service_by_name() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -304,18 +304,66 @@ def test_reconcile_matrix_fails_closed_on_unowned_existing_service_collision() -
         )
     )
 
-    with pytest.raises(MatrixError, match="not wizard-owned"):
-        reconcile_matrix(
-            dry_run=False,
-            desired_state=desired_state,
-            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
-            backend=FakeMatrixBackend(
-                existing_service=MatrixResourceRecord(
-                    resource_id="collision-service",
-                    resource_name="wizard-stack-matrix",
-                )
+    phase = reconcile_matrix(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=FakeMatrixBackend(
+            existing_service=MatrixResourceRecord(
+                resource_id="collision-service",
+                resource_name="wizard-stack-matrix",
             ),
+            existing_data=MatrixResourceRecord(
+                resource_id="matrix-data-existing",
+                resource_name="wizard-stack-matrix-data",
+            ),
+            health_ok=True,
+        ),
+    )
+
+    assert phase.result.service is not None
+    assert phase.result.service.action == "reuse_existing"
+
+
+def test_reconcile_matrix_adopts_matching_existing_resources_by_name() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_MATRIX": "true",
+            },
         )
+    )
+    backend = FakeMatrixBackend(
+        existing_service=MatrixResourceRecord(
+            resource_id="matrix-service-existing",
+            resource_name="wizard-stack-matrix",
+        ),
+        existing_data=MatrixResourceRecord(
+            resource_id="matrix-data-existing",
+            resource_name="wizard-stack-matrix-data",
+        ),
+        health_ok=True,
+    )
+
+    phase = reconcile_matrix(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert phase.result.outcome == "already_present"
+    assert phase.result.service is not None
+    assert phase.result.service.action == "reuse_existing"
+    assert phase.result.persistent_data is not None
+    assert phase.result.persistent_data.action == "reuse_existing"
+    assert phase.service_resource_id == "matrix-service-1"
+    assert phase.data_resource_id == "matrix-data-1"
+    assert backend.create_service_calls == 1
+    assert backend.create_data_calls == 1
 
 
 def test_reconcile_matrix_fails_closed_on_health_check_failure() -> None:
@@ -411,4 +459,78 @@ def test_dokploy_matrix_backend_creates_one_compose_for_service_and_data() -> No
     assert service.resource_id == "dokploy-compose:cmp-1:matrix-service"
     assert client.create_project_calls == 1
     assert client.create_compose_calls == 1
+    assert client.deploy_calls == 1
+
+
+def test_dokploy_matrix_backend_redeploys_existing_compose_resources() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_MATRIX": "true",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "matrix"
+    )
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient(
+        projects=[
+            DokployProjectSummary(
+                project_id="proj-1",
+                name="wizard-stack",
+                environments=(
+                    DokployEnvironmentSummary(
+                        environment_id="env-1",
+                        name="production",
+                        is_default=True,
+                        composes=(
+                            DokployComposeSummary(
+                                compose_id="cmp-existing",
+                                name="wizard-stack-matrix",
+                                status=None,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        ]
+    )
+    backend = DokployMatrixBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        hostname=desired_state.hostnames["matrix"],
+        shared_allocation=allocation,
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        secret_refs=(
+            "wizard-stack-matrix-registration-shared-secret",
+            "wizard-stack-matrix-macaroon-secret-key",
+        ),
+        client=client,
+    )
+
+    service = backend.create_service(
+        resource_name="wizard-stack-matrix",
+        hostname="matrix.example.com",
+        secret_refs=(
+            "wizard-stack-matrix-registration-shared-secret",
+            "wizard-stack-matrix-macaroon-secret-key",
+        ),
+        shared_allocation=allocation,
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        data_resource_name="wizard-stack-matrix-data",
+    )
+    data = backend.create_persistent_data("wizard-stack-matrix-data")
+
+    assert service.resource_id == "dokploy-compose:cmp-existing:matrix-service"
+    assert data.resource_id == "dokploy-compose:cmp-existing:matrix-data"
+    assert client.create_project_calls == 0
+    assert client.create_compose_calls == 0
     assert client.deploy_calls == 1
