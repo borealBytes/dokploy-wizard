@@ -235,41 +235,30 @@ def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSumma
 def _render_compose_file(service_name: str, hostname: str, secret_refs: tuple[str, ...]) -> str:
     admin_secret_ref, noise_secret_ref = secret_refs
     volume_name = f"{service_name}-data"
-    config_lines = (
-        f"server_url: https://{hostname}",
-        "listen_addr: 0.0.0.0:8080",
-        "metrics_listen_addr: 0.0.0.0:9090",
-        "noise:",
-        "  private_key_path: /var/lib/headscale/noise_private.key",
-        "prefixes:",
-        "  v4: 100.64.0.0/10",
-        "  allocation: sequential",
-        "derp:",
-        "  server:",
-        "    enabled: false",
-        "disable_check_updates: true",
-        "database:",
-        "  type: sqlite",
-        "  sqlite:",
-        "    path: /var/lib/headscale/db.sqlite",
-        "unix_socket: /var/run/headscale/headscale.sock",
-        "log:",
-        "  format: text",
-        "  level: info",
-    )
-    config_printf = " ".join(f"'{line}'" for line in config_lines)
     return (
         "services:\n"
         f"  {service_name}:\n"
         "    image: headscale/headscale:latest\n"
         "    restart: unless-stopped\n"
-        '    entrypoint: ["/bin/sh", "-c"]\n'
-        "    command: >-\n"
-        "      mkdir -p /var/lib/headscale /etc/headscale &&\n"
-        f"      printf '%s\\n' {config_printf} > /etc/headscale/config.yaml &&\n"
-        f"      export HEADSCALE_ADMIN_API_KEY=${{{admin_secret_ref}:-change-me}} &&\n"
-        f"      export HEADSCALE_NOISE_PRIVATE_KEY=${{{noise_secret_ref}:-change-me}} &&\n"
-        "      exec headscale serve\n"
+        "    command: ['serve']\n"
+        "    environment:\n"
+        f"      HEADSCALE_SERVER_URL: https://{hostname}\n"
+        "      HEADSCALE_LISTEN_ADDR: 0.0.0.0:8080\n"
+        "      HEADSCALE_METRICS_LISTEN_ADDR: 0.0.0.0:9090\n"
+        "      HEADSCALE_NOISE_PRIVATE_KEY_PATH: /var/lib/headscale/noise_private.key\n"
+        "      HEADSCALE_PREFIXES_V4: 100.64.0.0/10\n"
+        "      HEADSCALE_PREFIXES_ALLOCATION: sequential\n"
+        "      HEADSCALE_DERP_SERVER_ENABLED: 'false'\n"
+        "      HEADSCALE_DISABLE_CHECK_UPDATES: 'true'\n"
+        "      HEADSCALE_DATABASE_TYPE: sqlite\n"
+        "      HEADSCALE_DATABASE_SQLITE_PATH: /var/lib/headscale/db.sqlite\n"
+        "      HEADSCALE_UNIX_SOCKET: /var/run/headscale/headscale.sock\n"
+        "      HEADSCALE_LOG_FORMAT: text\n"
+        "      HEADSCALE_LOG_LEVEL: info\n"
+        "      HEADSCALE_DNS_OVERRIDE_LOCAL_DNS: 'false'\n"
+        "      HEADSCALE_DNS_MAGIC_DNS: 'false'\n"
+        f"      HEADSCALE_ADMIN_API_KEY: ${{{admin_secret_ref}:-change-me}}\n"
+        f"      HEADSCALE_NOISE_PRIVATE_KEY: ${{{noise_secret_ref}:-change-me}}\n"
         "    expose:\n"
         "      - '8080'\n"
         "    healthcheck:\n"
@@ -279,7 +268,6 @@ def _render_compose_file(service_name: str, hostname: str, secret_refs: tuple[st
         "      retries: 5\n"
         f"    volumes:\n      - {volume_name}:/var/lib/headscale\n"
         "      - /var/run/headscale:/var/run/headscale\n"
-        "      - /etc/headscale:/etc/headscale\n"
         "    networks:\n"
         "      - default\n"
         "volumes:\n"
