@@ -10,7 +10,6 @@ import pytest
 
 from dokploy_wizard import cli
 from dokploy_wizard.dokploy import (
-    DokployApiError,
     DokployBootstrapAuthError,
     DokployBootstrapAuthResult,
 )
@@ -369,6 +368,18 @@ def test_install_persists_post_auth_target_before_later_failure(
             return True
 
     monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
+    monkeypatch.setattr(
+        cli,
+        "DokployApiClient",
+        lambda *, api_url, api_key: type(
+            "_ValidDokployClient",
+            (),
+            {
+                "__init__": lambda self: None,
+                "list_projects": lambda self: (),
+            },
+        )(),
+    )
     monkeypatch.setattr(cli, "collect_host_facts", lambda _: _host_facts())
     monkeypatch.setattr(cli, "UbuntuAptHostPrerequisiteBackend", lambda _: FakeHostPrereqBackend())
     monkeypatch.setattr(
@@ -1155,7 +1166,16 @@ def test_ensure_dokploy_api_auth_rewrites_env_with_generated_key(
                 session_path="/api/user.session",
             )
 
+    class ValidDokployClient:
+        def __init__(self, *, api_url: str, api_key: str) -> None:
+            assert api_url == "http://127.0.0.1:3000"
+            assert api_key == "dokp-key-123"
+
+        def list_projects(self) -> tuple[object, ...]:
+            return ()
+
     monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
+    monkeypatch.setattr(cli, "DokployApiClient", ValidDokployClient)
 
     updated = cli._ensure_dokploy_api_auth(
         env_file=env_file,
@@ -1215,16 +1235,16 @@ def test_ensure_dokploy_api_auth_refreshes_invalid_existing_key(
                 session_path="/api/user.session",
             )
 
-    class FailingDokployClient:
+    class ValidatingDokployClient:
         def __init__(self, *, api_url: str, api_key: str) -> None:
             assert api_url == "http://127.0.0.1:3000"
-            assert api_key == "stale-key"
+            assert api_key == "fresh-key-123"
 
         def list_projects(self) -> tuple[object, ...]:
-            raise DokployApiError("Dokploy API request failed with status 401: Unauthorized")
+            return ()
 
     monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
-    monkeypatch.setattr(cli, "DokployApiClient", FailingDokployClient)
+    monkeypatch.setattr(cli, "DokployApiClient", ValidatingDokployClient)
 
     updated = cli._ensure_dokploy_api_auth(
         env_file=env_file,

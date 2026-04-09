@@ -454,6 +454,18 @@ def test_install_auth_success_refreshes_persisted_target_state_before_execution(
     monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
     monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **_: {"state_status": "fresh"})
     monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
+    monkeypatch.setattr(
+        cli,
+        "DokployApiClient",
+        lambda *, api_url, api_key: type(
+            "_ValidDokployClient",
+            (),
+            {
+                "__init__": lambda self: None,
+                "list_projects": lambda self: (),
+            },
+        )(),
+    )
 
     summary = run_install_flow(
         env_file=env_file,
