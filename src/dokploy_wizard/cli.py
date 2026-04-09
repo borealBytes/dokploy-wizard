@@ -90,9 +90,7 @@ from dokploy_wizard.packs.seaweedfs import (
 from dokploy_wizard.preflight import (
     REQUIRED_PORTS,
     SUPPORTED_OS_ID,
-    PreflightCheck,
     PreflightError,
-    PreflightReport,
     _is_supported_ubuntu_version,
     collect_host_facts,
     run_preflight,
@@ -831,11 +829,8 @@ def _run_lifecycle_flow(
         desired_state=desired_state,
         host_facts=host_facts,
         allow_memory_shortfall=not allow_modify,
-    )
-    preflight_report = _normalize_existing_install_port_conflicts(
-        loaded_state=loaded_state,
         lifecycle_plan=lifecycle_plan,
-        preflight_report=preflight_report,
+        loaded_state=loaded_state,
     )
     if not allow_modify:
         _require_install_memory_shortfall_override(
@@ -1019,40 +1014,11 @@ def _prepare_install_host_prerequisites(
     return updated_host_facts, summary
 
 
-def _normalize_existing_install_port_conflicts(
-    *,
-    loaded_state: Any,
-    lifecycle_plan: LifecyclePlan,
-    preflight_report: PreflightReport,
-) -> PreflightReport:
-    if not _can_treat_required_ports_as_expected(loaded_state, lifecycle_plan, preflight_report):
-        return preflight_report
-
-    normalized_checks = tuple(
-        PreflightCheck(
-            name="required_ports",
-            status="pass",
-            detail=(
-                "Ports 80, 443, and 3000 are already occupied by the "
-                "existing Dokploy install tracked in this state directory."
-            ),
-        )
-        if check.name == "required_ports" and check.status == "fail"
-        else check
-        for check in preflight_report.checks
-    )
-    return PreflightReport(
-        host_facts=preflight_report.host_facts,
-        required_profile=preflight_report.required_profile,
-        checks=normalized_checks,
-        advisories=preflight_report.advisories,
-    )
-
-
 def _can_treat_required_ports_as_expected(
     loaded_state: Any,
     lifecycle_plan: LifecyclePlan,
-    preflight_report: PreflightReport,
+    *,
+    required_ports: tuple[int, ...],
 ) -> bool:
     if lifecycle_plan.mode not in {"resume", "noop"}:
         return False
@@ -1064,11 +1030,7 @@ def _can_treat_required_ports_as_expected(
         return False
     if not ownership_ledger.resources:
         return False
-    for check in preflight_report.failed_checks():
-        if check.name != "required_ports":
-            continue
-        return set(preflight_report.host_facts.ports_in_use).issubset(set(REQUIRED_PORTS))
-    return False
+    return True
 
 
 def _rehydrate_guided_retry_keys(
@@ -1174,14 +1136,39 @@ def _run_preflight_report(
     desired_state: DesiredState,
     host_facts: Any,
     allow_memory_shortfall: bool,
+    lifecycle_plan: LifecyclePlan,
+    loaded_state: Any,
 ) -> Any:
-    if "allow_memory_shortfall" in inspect.signature(run_preflight).parameters:
-        return run_preflight(
-            desired_state,
-            host_facts,
-            allow_memory_shortfall=allow_memory_shortfall,
-        )
+    allowed_ports_in_use = _expected_ports_in_use_for_retry(loaded_state, lifecycle_plan)
+    parameters = inspect.signature(run_preflight).parameters
+    kwargs: dict[str, Any] = {}
+    if "allow_memory_shortfall" in parameters:
+        kwargs["allow_memory_shortfall"] = allow_memory_shortfall
+    if "allowed_ports_in_use" in parameters:
+        kwargs["allowed_ports_in_use"] = allowed_ports_in_use
+    if kwargs:
+        return run_preflight(desired_state, host_facts, **kwargs)
     return run_preflight(desired_state, host_facts)
+
+
+def _expected_ports_in_use_for_retry(
+    loaded_state: Any, lifecycle_plan: LifecyclePlan
+) -> tuple[int, ...]:
+    if not _can_treat_required_ports_as_expected(
+        loaded_state,
+        lifecycle_plan,
+        required_ports=REQUIRED_PORTS,
+    ):
+        return ()
+    applied_state = getattr(loaded_state, "applied_state", None)
+    if applied_state is None:
+        return ()
+    expected: list[int] = []
+    if "dokploy_bootstrap" in applied_state.completed_steps:
+        expected.append(3000)
+    if "networking" in applied_state.completed_steps:
+        expected.extend([80, 443])
+    return tuple(sorted(set(expected)))
 
 
 def _require_install_memory_shortfall_override(
