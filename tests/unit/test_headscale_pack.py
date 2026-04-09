@@ -417,6 +417,10 @@ def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
 def test_headscale_health_check_falls_back_to_loopback_with_host_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.headscale._docker_container_is_up",
+        lambda service_name: False,
+    )
     calls: list[tuple[str, dict[str, str], bool]] = []
 
     class FakeConnection:
@@ -447,3 +451,30 @@ def test_headscale_health_check_falls_back_to_loopback_with_host_header(
     assert calls[1][0] == "127.0.0.1"
     assert calls[1][1] == {"Host": "headscale.example.com"}
     assert calls[1][2] is True
+
+
+def test_dokploy_headscale_health_prefers_local_container_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployHeadscaleBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name="wizard-stack",
+        hostname="headscale.example.com",
+        client=FakeDokployApiClient(),
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.headscale._docker_container_is_up",
+        lambda service_name: service_name == "wizard-stack-headscale",
+    )
+
+    assert (
+        backend.check_health(
+            service=HeadscaleResourceRecord(
+                resource_id="dokploy-compose:cmp-1:headscale",
+                resource_name="wizard-stack-headscale",
+            ),
+            url="https://headscale.example.com/health",
+        )
+        is True
+    )
