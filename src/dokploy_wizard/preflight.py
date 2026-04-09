@@ -180,6 +180,7 @@ def run_preflight(
     desired_state: DesiredState,
     host_facts: HostFacts,
     allow_memory_shortfall: bool = False,
+    allowed_ports_in_use: tuple[int, ...] = (),
 ) -> PreflightReport:
     required_profile = derive_required_profile(desired_state)
     checks = (
@@ -189,7 +190,7 @@ def run_preflight(
         _cpu_check(host_facts, required_profile),
         _memory_check(host_facts, required_profile),
         _disk_check(host_facts, required_profile),
-        _ports_check(host_facts),
+        _ports_check(host_facts, allowed_ports_in_use=allowed_ports_in_use),
     )
     advisories = _build_advisories(host_facts)
     report = PreflightReport(
@@ -325,12 +326,26 @@ def _disk_check(host_facts: HostFacts, required_profile: ResourceProfile) -> Pre
     )
 
 
-def _ports_check(host_facts: HostFacts) -> PreflightCheck:
-    if host_facts.ports_in_use:
+def _ports_check(
+    host_facts: HostFacts, *, allowed_ports_in_use: tuple[int, ...] = ()
+) -> PreflightCheck:
+    unexpected_ports = tuple(
+        port for port in host_facts.ports_in_use if port not in set(allowed_ports_in_use)
+    )
+    if unexpected_ports:
         return PreflightCheck(
             name="required_ports",
             status="fail",
-            detail=f"required ports already in use: {list(host_facts.ports_in_use)}",
+            detail=f"required ports already in use: {list(unexpected_ports)}",
+        )
+    if host_facts.ports_in_use:
+        return PreflightCheck(
+            name="required_ports",
+            status="pass",
+            detail=(
+                "Required ports already in use by the existing tracked install: "
+                f"{list(host_facts.ports_in_use)}"
+            ),
         )
     return PreflightCheck(
         name="required_ports",
