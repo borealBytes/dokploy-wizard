@@ -67,6 +67,32 @@ def test_dokploy_client_creates_compose_with_json_payload() -> None:
     assert record.compose_id == "cmp-1"
 
 
+def test_dokploy_client_coerces_null_project_env_to_empty_string() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_request(req: request.Request) -> object:
+        body = cast(bytes | None, req.data)
+        captured["body"] = body.decode("utf-8") if body is not None else None
+        return {
+            "data": {
+                "project": {"projectId": "proj-1"},
+                "environment": {"environmentId": "env-1"},
+            }
+        }
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    created = client.create_project(name="wizard", description="Managed", env=None)
+
+    body = json.loads(str(captured["body"]))
+    assert body["env"] == ""
+    assert created.project_id == "proj-1"
+
+
 def test_dokploy_client_rejects_invalid_response_shapes() -> None:
     client = DokployApiClient(
         api_url="https://dokploy.example.com",
