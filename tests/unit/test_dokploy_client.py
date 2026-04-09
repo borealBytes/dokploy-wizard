@@ -89,7 +89,7 @@ def test_dokploy_client_resets_compose_path_when_updating_raw_compose() -> None:
 
     body = json.loads(str(captured["body"]))
     assert captured["url"] == "https://dokploy.example.com/api/compose.update"
-    assert body["composePath"] == "docker-compose.yml"
+    assert body["composePath"] == "./docker-compose.yml"
     assert body["sourceType"] == "raw"
     assert body["githubId"] is None
     assert body["repository"] is None
