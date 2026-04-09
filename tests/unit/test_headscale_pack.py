@@ -410,6 +410,7 @@ def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
     assert "HEADSCALE_LOG_LEVEL: info" in rendered
     assert "HEADSCALE_DNS_MAGIC_DNS: 'false'" in rendered
     assert "command: ['serve']" in rendered
+    assert "HEADSCALE_DERP_SERVER_ENABLED" not in rendered
 
 
 def test_headscale_health_check_falls_back_to_loopback_with_host_header(
