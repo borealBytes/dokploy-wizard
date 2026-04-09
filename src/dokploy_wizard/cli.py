@@ -88,8 +88,11 @@ from dokploy_wizard.packs.seaweedfs import (
     ShellSeaweedFsBackend,
 )
 from dokploy_wizard.preflight import (
+    REQUIRED_PORTS,
     SUPPORTED_OS_ID,
+    PreflightCheck,
     PreflightError,
+    PreflightReport,
     _is_supported_ubuntu_version,
     collect_host_facts,
     run_preflight,
@@ -829,6 +832,11 @@ def _run_lifecycle_flow(
         host_facts=host_facts,
         allow_memory_shortfall=not allow_modify,
     )
+    preflight_report = _normalize_existing_install_port_conflicts(
+        loaded_state=loaded_state,
+        lifecycle_plan=lifecycle_plan,
+        preflight_report=preflight_report,
+    )
     if not allow_modify:
         _require_install_memory_shortfall_override(
             preflight_report=preflight_report,
@@ -1009,6 +1017,58 @@ def _prepare_install_host_prerequisites(
     summary["remediation_actions"] = remediation_actions
     summary["remediation_attempted"] = True
     return updated_host_facts, summary
+
+
+def _normalize_existing_install_port_conflicts(
+    *,
+    loaded_state: Any,
+    lifecycle_plan: LifecyclePlan,
+    preflight_report: PreflightReport,
+) -> PreflightReport:
+    if not _can_treat_required_ports_as_expected(loaded_state, lifecycle_plan, preflight_report):
+        return preflight_report
+
+    normalized_checks = tuple(
+        PreflightCheck(
+            name="required_ports",
+            status="pass",
+            detail=(
+                "Ports 80, 443, and 3000 are already occupied by the "
+                "existing Dokploy install tracked in this state directory."
+            ),
+        )
+        if check.name == "required_ports" and check.status == "fail"
+        else check
+        for check in preflight_report.checks
+    )
+    return PreflightReport(
+        host_facts=preflight_report.host_facts,
+        required_profile=preflight_report.required_profile,
+        checks=normalized_checks,
+        advisories=preflight_report.advisories,
+    )
+
+
+def _can_treat_required_ports_as_expected(
+    loaded_state: Any,
+    lifecycle_plan: LifecyclePlan,
+    preflight_report: PreflightReport,
+) -> bool:
+    if lifecycle_plan.mode not in {"resume", "noop"}:
+        return False
+    applied_state = getattr(loaded_state, "applied_state", None)
+    ownership_ledger = getattr(loaded_state, "ownership_ledger", None)
+    if applied_state is None or ownership_ledger is None:
+        return False
+    if "dokploy_bootstrap" not in applied_state.completed_steps:
+        return False
+    if not ownership_ledger.resources:
+        return False
+    for check in preflight_report.failed_checks():
+        if check.name != "required_ports":
+            continue
+        return set(preflight_report.host_facts.ports_in_use).issubset(set(REQUIRED_PORTS))
+    return False
 
 
 def _rehydrate_guided_retry_keys(
