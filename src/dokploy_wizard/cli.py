@@ -28,6 +28,8 @@ from dokploy_wizard.core import (
     ShellSharedCoreBackend,
 )
 from dokploy_wizard.dokploy import (
+    DokployApiClient,
+    DokployApiError,
     DokployBootstrapAuthClient,
     DokployBootstrapAuthError,
     DokployHeadscaleBackend,
@@ -1394,9 +1396,14 @@ def _ensure_dokploy_api_auth(
     if values.get("DOKPLOY_API_KEY"):
         values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
         updated = RawEnvInput(format_version=raw_env.format_version, values=values)
-        if not dry_run:
-            _write_reusable_env_file(env_file, updated)
-        return updated
+        if _can_reuse_existing_dokploy_api_key(
+            raw_env=updated,
+            dry_run=dry_run,
+            require_real_dokploy_auth=require_real_dokploy_auth,
+        ):
+            if not dry_run:
+                _write_reusable_env_file(env_file, updated)
+            return updated
     if dry_run or not require_real_dokploy_auth:
         return raw_env
     admin_email = values.get("DOKPLOY_ADMIN_EMAIL")
@@ -1417,3 +1424,21 @@ def _ensure_dokploy_api_auth(
     updated = RawEnvInput(format_version=raw_env.format_version, values=values)
     _write_reusable_env_file(env_file, updated)
     return updated
+
+
+def _can_reuse_existing_dokploy_api_key(
+    *,
+    raw_env: RawEnvInput,
+    dry_run: bool,
+    require_real_dokploy_auth: bool,
+) -> bool:
+    if dry_run or not require_real_dokploy_auth:
+        return True
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    if api_key is None:
+        return False
+    try:
+        DokployApiClient(api_url=LOCAL_HEALTH_URL, api_key=api_key).list_projects()
+    except DokployApiError:
+        return False
+    return True
