@@ -127,6 +127,7 @@ class DokployApiClient:
                 "composeId": compose_id,
                 "composeType": "docker-compose",
                 "sourceType": "raw",
+                "composePath": "docker-compose.yml",
                 "composeFile": compose_file,
             },
         )
