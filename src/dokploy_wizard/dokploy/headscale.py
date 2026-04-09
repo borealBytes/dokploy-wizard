@@ -263,12 +263,13 @@ def _render_compose_file(service_name: str, hostname: str, secret_refs: tuple[st
         f"  {service_name}:\n"
         "    image: headscale/headscale:latest\n"
         "    restart: unless-stopped\n"
+        '    entrypoint: ["/bin/sh", "-c"]\n'
         "    command: >-\n"
-        '      sh -c "mkdir -p /var/lib/headscale /etc/headscale &&\n'
+        "      mkdir -p /var/lib/headscale /etc/headscale &&\n"
         f"      printf '%s\\n' {config_printf} > /etc/headscale/config.yaml &&\n"
         f"      export HEADSCALE_ADMIN_API_KEY=${{{admin_secret_ref}:-change-me}} &&\n"
         f"      export HEADSCALE_NOISE_PRIVATE_KEY=${{{noise_secret_ref}:-change-me}} &&\n"
-        '      headscale serve"\n'
+        "      exec headscale serve\n"
         "    expose:\n"
         "      - '8080'\n"
         "    healthcheck:\n"
