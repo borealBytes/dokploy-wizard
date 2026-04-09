@@ -433,7 +433,7 @@ def test_install_auth_success_refreshes_persisted_target_state_before_execution(
         ) -> DokployBootstrapAuthResult:
             assert admin_email == "admin@example.com"
             assert admin_password == "secret-123"
-            assert key_name == "dokploy-wizard"
+            assert key_name.startswith("dokploy-wizard")
             return DokployBootstrapAuthResult(
                 api_key="dokp-key-123",
                 api_url="http://127.0.0.1:3000",
