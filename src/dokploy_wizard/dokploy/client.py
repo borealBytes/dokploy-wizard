@@ -187,6 +187,8 @@ class DokployApiClient:
             ) from exc
         except error.URLError as exc:
             raise DokployApiError(f"Dokploy API request failed: {exc.reason}.") from exc
+        if isinstance(response, list):
+            return response
         if not isinstance(response, dict):
             raise DokployApiError("Dokploy API response must decode to a JSON object or array.")
         return response.get("data", response)

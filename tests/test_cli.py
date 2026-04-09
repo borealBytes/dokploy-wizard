@@ -405,7 +405,7 @@ def test_install_persists_post_auth_target_before_later_failure(
     assert loaded_state.desired_state is not None
     assert loaded_state.applied_state is not None
     assert loaded_state.raw_input.values["DOKPLOY_API_KEY"] == "dokp-key-123"
-    assert loaded_state.desired_state.dokploy_api_url == "https://dokploy.example.com"
+    assert loaded_state.desired_state.dokploy_api_url == "http://127.0.0.1:3000"
 
     requested_raw = parse_env_file(env_file)
     requested_desired = resolve_desired_state(requested_raw)
@@ -1163,7 +1163,7 @@ def test_ensure_dokploy_api_auth_rewrites_env_with_generated_key(
     )
 
     assert updated.values["DOKPLOY_API_KEY"] == "dokp-key-123"
-    assert updated.values["DOKPLOY_API_URL"] == "https://dokploy.example.com"
+    assert updated.values["DOKPLOY_API_URL"] == "http://127.0.0.1:3000"
     written = env_file.read_text(encoding="utf-8")
     assert "DOKPLOY_API_KEY=dokp-key-123" in written
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600

@@ -76,3 +76,15 @@ def test_dokploy_client_rejects_invalid_response_shapes() -> None:
 
     with pytest.raises(DokployApiError, match="project.all response must be a list"):
         client.list_projects()
+
+
+def test_dokploy_client_accepts_root_json_array_responses() -> None:
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        request_fn=lambda req: [{"projectId": "proj-1", "name": "wizard", "environments": []}],
+    )
+
+    projects = client.list_projects()
+
+    assert projects[0].project_id == "proj-1"
