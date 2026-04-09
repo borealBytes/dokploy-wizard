@@ -550,6 +550,129 @@ def test_install_restarts_from_empty_scaffold_when_saved_env_drifted(
     assert summary["state_status"] == "fresh"
 
 
+def test_install_resume_tolerates_required_ports_used_by_existing_dokploy_stack(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / ".dokploy-wizard-state"
+    existing_raw = RawEnvInput(
+        format_version=1,
+        values={
+            **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
+            "DOKPLOY_API_URL": "https://dokploy.example.com",
+            "DOKPLOY_API_KEY": "dokp-key-123",
+            "SEAWEEDFS_ACCESS_KEY": "seaweed-existing",
+            "SEAWEEDFS_SECRET_KEY": "seaweed-secret-existing",
+            "MY_FARM_ADVISOR_CHANNELS": "matrix",
+            "PACKS": "matrix,my-farm-advisor,nextcloud,openclaw,seaweedfs",
+        },
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    write_target_state(state_dir, existing_raw, existing_desired)
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=existing_desired.format_version,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=("preflight", "dokploy_bootstrap", "networking", "cloudflare_access"),
+        ),
+    )
+    write_ownership_ledger(
+        state_dir,
+        OwnershipLedger(
+            format_version=existing_desired.format_version,
+            resources=(OwnedResource("cloudflare_tunnel", "tunnel-1", "account:account-123"),),
+        ),
+    )
+    env_file = state_dir / "install.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                *(
+                    f"{key}={value}"
+                    for key, value in existing_raw.values.items()
+                    if key
+                    not in {
+                        "DOKPLOY_API_URL",
+                        "DOKPLOY_API_KEY",
+                        "SEAWEEDFS_ACCESS_KEY",
+                        "SEAWEEDFS_SECRET_KEY",
+                        "MY_FARM_ADVISOR_CHANNELS",
+                    }
+                ),
+                "SEAWEEDFS_ACCESS_KEY=seaweed-new",
+                "SEAWEEDFS_SECRET_KEY=seaweed-secret-new",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        cli,
+        "collect_host_facts",
+        lambda _: _host_facts(docker_installed=True, docker_daemon_reachable=True),
+    )
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    monkeypatch.setattr(cli, "write_target_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "ShellTailscaleBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "ShellOpenClawBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
+    monkeypatch.setattr(
+        cli,
+        "_run_preflight_report",
+        lambda **kwargs: PreflightReport(
+            host_facts=HostFacts(
+                distribution_id="ubuntu",
+                version_id="24.04",
+                cpu_count=8,
+                memory_gb=16,
+                disk_gb=200,
+                disk_path="/var/lib/docker",
+                docker_installed=True,
+                docker_daemon_reachable=True,
+                ports_in_use=(80, 443, 3000),
+                environment_classification="vps",
+                hostname="test-host",
+            ),
+            required_profile=derive_required_profile(existing_desired),
+            checks=(
+                PreflightCheck(
+                    name="required_ports",
+                    status="fail",
+                    detail="required ports already in use: [80, 443, 3000]",
+                ),
+            ),
+            advisories=(),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "execute_lifecycle_plan",
+        lambda **kwargs: {
+            "lifecycle": {"mode": kwargs["lifecycle_plan"].mode},
+            "state_status": "existing",
+            "ok": True,
+        },
+    )
+
+    summary = cli.run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    assert summary["lifecycle"]["mode"] == "resume"
+    assert summary["state_status"] == "existing"
+
+
 def test_install_rehydrates_guided_retry_keys_from_persisted_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
