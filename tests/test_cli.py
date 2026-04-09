@@ -9,7 +9,11 @@ from typing import Any, cast
 import pytest
 
 from dokploy_wizard import cli
-from dokploy_wizard.dokploy import DokployBootstrapAuthError, DokployBootstrapAuthResult
+from dokploy_wizard.dokploy import (
+    DokployApiError,
+    DokployBootstrapAuthError,
+    DokployBootstrapAuthResult,
+)
 from dokploy_wizard.lifecycle import applicable_phases_for, classify_install_request
 from dokploy_wizard.packs import prompts as prompt_module
 from dokploy_wizard.packs.prompts import (
@@ -1167,6 +1171,72 @@ def test_ensure_dokploy_api_auth_rewrites_env_with_generated_key(
     written = env_file.read_text(encoding="utf-8")
     assert "DOKPLOY_API_KEY=dokp-key-123" in written
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+
+
+def test_ensure_dokploy_api_auth_refreshes_invalid_existing_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "install.env"
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "guided-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "secret-123",
+            "DOKPLOY_API_KEY": "stale-key",
+            "DOKPLOY_API_URL": "http://127.0.0.1:3000",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    class FakeBootstrapBackend:
+        def is_healthy(self) -> bool:
+            return True
+
+        def install(self) -> None:
+            raise AssertionError("install should not be called")
+
+    class FakeAuthClient:
+        def __init__(self, *, base_url: str) -> None:
+            assert base_url == "http://127.0.0.1:3000"
+
+        def ensure_api_key(
+            self, *, admin_email: str, admin_password: str, key_name: str = "dokploy-wizard"
+        ) -> DokployBootstrapAuthResult:
+            return DokployBootstrapAuthResult(
+                api_key="fresh-key-123",
+                api_url="http://127.0.0.1:3000",
+                admin_email=admin_email,
+                organization_id="org-1",
+                used_sign_up=False,
+                auth_path="/api/auth/sign-in/email",
+                session_path="/api/user.session",
+            )
+
+    class FailingDokployClient:
+        def __init__(self, *, api_url: str, api_key: str) -> None:
+            assert api_url == "http://127.0.0.1:3000"
+            assert api_key == "stale-key"
+
+        def list_projects(self) -> tuple[object, ...]:
+            raise DokployApiError("Dokploy API request failed with status 401: Unauthorized")
+
+    monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
+    monkeypatch.setattr(cli, "DokployApiClient", FailingDokployClient)
+
+    updated = cli._ensure_dokploy_api_auth(
+        env_file=env_file,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        bootstrap_backend=FakeBootstrapBackend(),
+        dry_run=False,
+        require_real_dokploy_auth=True,
+    )
+
+    assert updated.values["DOKPLOY_API_KEY"] == "fresh-key-123"
+    assert updated.values["DOKPLOY_API_URL"] == "http://127.0.0.1:3000"
 
 
 def test_handle_install_warns_on_broad_env_file_permissions(
