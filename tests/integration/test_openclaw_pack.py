@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from dokploy_wizard.cli import run_install_flow
+import dokploy_wizard.cli
+from dokploy_wizard.cli import run_install_flow, run_modify_flow
 from dokploy_wizard.core import SharedCoreResourceRecord
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,
@@ -19,7 +21,7 @@ from dokploy_wizard.networking import (
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.matrix import MatrixResourceRecord
 from dokploy_wizard.packs.openclaw import OpenClawError, OpenClawResourceRecord
-from dokploy_wizard.state import RawEnvInput, load_state_dir
+from dokploy_wizard.state import RawEnvInput, load_state_dir, write_ownership_ledger
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -69,6 +71,14 @@ class FakeCloudflareBackend:
         del account_id
         self.existing_tunnel = CloudflareTunnel(tunnel_id="openclaw-tunnel", name=tunnel_name)
         return self.existing_tunnel
+
+    def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
+        return f"token-{tunnel_id}"
+
+    def update_tunnel_configuration(
+        self, account_id: str, tunnel_id: str, ingress: tuple[dict[str, object], ...]
+    ) -> None:
+        del account_id, tunnel_id, ingress
 
     def list_dns_records(
         self,
@@ -298,6 +308,9 @@ class FakeOpenClawBackend:
     existing_service: OpenClawResourceRecord | None = None
     health_ok: bool = True
     create_calls: int = 0
+    update_calls: int = 0
+    last_requested_replicas: int | None = None
+    last_health_url: str | None = None
 
     def get_service(self, resource_id: str) -> OpenClawResourceRecord | None:
         if self.existing_service is not None and self.existing_service.resource_id == resource_id:
@@ -325,6 +338,7 @@ class FakeOpenClawBackend:
     ) -> OpenClawResourceRecord:
         del hostname, template_path, variant, channels, secret_refs
         self.create_calls += 1
+        self.last_requested_replicas = replicas
         self.existing_service = OpenClawResourceRecord(
             resource_id="advisor-service-1",
             resource_name=resource_name,
@@ -345,6 +359,8 @@ class FakeOpenClawBackend:
         secret_refs: tuple[str, ...],
     ) -> OpenClawResourceRecord:
         del hostname, template_path, variant, channels, secret_refs
+        self.update_calls += 1
+        self.last_requested_replicas = replicas
         self.existing_service = OpenClawResourceRecord(
             resource_id=resource_id,
             resource_name=resource_name,
@@ -353,8 +369,14 @@ class FakeOpenClawBackend:
         return self.existing_service
 
     def check_health(self, *, service: OpenClawResourceRecord, url: str) -> bool:
-        del service, url
+        del service
+        self.last_health_url = url
         return self.health_ok
+
+
+@dataclass
+class RecordingOpenClawBackend(FakeOpenClawBackend):
+    init_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -570,10 +592,165 @@ def test_install_rerun_reuses_owned_advisor_service(tmp_path: Path) -> None:
     assert openclaw_backend.create_calls == 1
 
 
-def test_install_reconciles_my_farm_advisor_variant(tmp_path: Path) -> None:
+def test_install_modify_updates_owned_openclaw_service(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
-    summary = run_install_flow(
+    env_file = tmp_path / "modify-openclaw.env"
+    networking_backend = FakeCloudflareBackend()
+    shared_core_backend = FakeSharedCoreBackend()
+    headscale_backend = FakeHeadscaleBackend()
+    matrix_backend = FakeMatrixBackend()
+    openclaw_backend = FakeOpenClawBackend()
+
+    initial_raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "openclaw-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "ENABLE_MATRIX": "true",
+            "OPENCLAW_CHANNELS": "telegram,matrix",
+            "OPENCLAW_REPLICAS": "1",
+            "HOST_OS_ID": "ubuntu",
+            "HOST_OS_VERSION_ID": "24.04",
+            "HOST_CPU_COUNT": "4",
+            "HOST_MEMORY_GB": "8",
+            "HOST_DISK_GB": "100",
+            "HOST_DOCKER_INSTALLED": "true",
+            "HOST_DOCKER_DAEMON_REACHABLE": "true",
+            "HOST_PORT_80_IN_USE": "false",
+            "HOST_PORT_443_IN_USE": "false",
+            "HOST_PORT_3000_IN_USE": "false",
+            "HOST_ENVIRONMENT": "local",
+            "DOKPLOY_BOOTSTRAP_HEALTHY": "true",
+            "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+            "DOKPLOY_API_KEY": "api-key-123",
+            "CLOUDFLARE_API_TOKEN": "token-123",
+            "CLOUDFLARE_ACCOUNT_ID": "account-123",
+            "CLOUDFLARE_ZONE_ID": "zone-123",
+            "CLOUDFLARE_TUNNEL_NAME": "openclaw-stack-tunnel",
+            "HEADSCALE_TAILNET_DOMAIN": "tailnet.example.com",
+            "HEADSCALE_ACME_EMAIL": "admin@example.com",
+            "HEADSCALE_OIDC_ISSUER_URL": "https://auth.example.com/application/o/headscale/",
+            "HEADSCALE_OIDC_CLIENT_ID": "headscale-client",
+            "HEADSCALE_OIDC_CLIENT_SECRET": "headscale-secret",
+            "HEADSCALE_OIDC_STRIP_EMAIL_DOMAIN": "true",
+            "MATRIX_SIGNUP_SECRET": "signup-secret",
+            "MATRIX_OIDC_ISSUER_URL": "https://auth.example.com/application/o/matrix/",
+            "MATRIX_OIDC_CLIENT_ID": "matrix-client",
+            "MATRIX_OIDC_CLIENT_SECRET": "matrix-secret",
+        },
+    )
+    modified_raw_env = RawEnvInput(
+        format_version=1,
+        values={**initial_raw_env.values, "OPENCLAW_REPLICAS": "3"},
+    )
+
+    run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=initial_raw_env,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=headscale_backend,
+        matrix_backend=matrix_backend,
+        openclaw_backend=openclaw_backend,
+    )
+
+    summary = run_modify_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=modified_raw_env,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=headscale_backend,
+        matrix_backend=matrix_backend,
+        openclaw_backend=openclaw_backend,
+    )
+
+    loaded_state = load_state_dir(state_dir)
+
+    assert summary["lifecycle"]["mode"] == "modify"
+    assert summary["openclaw"]["outcome"] == "applied"
+    assert summary["openclaw"]["replicas"] == 3
+    assert summary["openclaw"]["service"]["action"] == "update_owned"
+    assert openclaw_backend.update_calls == 1
+    assert openclaw_backend.last_requested_replicas == 3
+    assert loaded_state.ownership_ledger is not None
+    assert any(
+        resource.resource_type == "openclaw_service"
+        and resource.scope == "stack:openclaw-stack:openclaw"
+        for resource in loaded_state.ownership_ledger.resources
+    )
+
+
+def test_install_rerun_fails_when_openclaw_service_is_manual_and_unowned(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    networking_backend = FakeCloudflareBackend()
+    shared_core_backend = FakeSharedCoreBackend()
+    headscale_backend = FakeHeadscaleBackend()
+    matrix_backend = FakeMatrixBackend()
+    openclaw_backend = FakeOpenClawBackend()
+
+    run_install_flow(
         env_file=FIXTURES_DIR / "openclaw-matrix.env",
+        state_dir=state_dir,
+        dry_run=False,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=headscale_backend,
+        matrix_backend=matrix_backend,
+        openclaw_backend=openclaw_backend,
+    )
+
+    loaded_state = load_state_dir(state_dir)
+    assert loaded_state.ownership_ledger is not None
+    write_ownership_ledger(
+        state_dir,
+        loaded_state.ownership_ledger.__class__(
+            format_version=loaded_state.ownership_ledger.format_version,
+            resources=tuple(
+                resource
+                for resource in loaded_state.ownership_ledger.resources
+                if resource.resource_type != "openclaw_service"
+            ),
+        ),
+    )
+
+    with pytest.raises(OpenClawError, match="requires migration"):
+        run_install_flow(
+            env_file=FIXTURES_DIR / "openclaw-matrix.env",
+            state_dir=state_dir,
+            dry_run=False,
+            bootstrap_backend=FakeDokployBackend(True, True),
+            networking_backend=networking_backend,
+            shared_core_backend=shared_core_backend,
+            headscale_backend=headscale_backend,
+            matrix_backend=matrix_backend,
+            openclaw_backend=openclaw_backend,
+        )
+
+
+def test_install_reconciles_my_farm_advisor_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "my-farm-advisor.env"
+    recording_backend = RecordingOpenClawBackend()
+
+    def _build_backend(**kwargs: Any) -> RecordingOpenClawBackend:
+        recording_backend.init_kwargs = dict(kwargs)
+        return recording_backend
+
+    monkeypatch.setattr(dokploy_wizard.cli, "DokployOpenClawBackend", _build_backend)
+    monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
+    monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    summary = run_install_flow(
+        env_file=env_file,
         state_dir=state_dir,
         dry_run=False,
         raw_env=RawEnvInput(
@@ -596,10 +773,16 @@ def test_install_reconciles_my_farm_advisor_variant(tmp_path: Path) -> None:
                 "HOST_PORT_3000_IN_USE": "false",
                 "HOST_ENVIRONMENT": "local",
                 "DOKPLOY_BOOTSTRAP_HEALTHY": "true",
+                "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+                "DOKPLOY_API_KEY": "api-key-123",
                 "CLOUDFLARE_API_TOKEN": "token-123",
                 "CLOUDFLARE_ACCOUNT_ID": "account-123",
                 "CLOUDFLARE_ZONE_ID": "zone-123",
                 "CLOUDFLARE_TUNNEL_NAME": "farm-stack-tunnel",
+                "ADVISOR_MODEL_PROVIDER": "ollama",
+                "ADVISOR_MODEL_NAME": "llama3.1:8b",
+                "ADVISOR_TRUSTED_PROXIES": "10.0.0.0/8",
+                "ADVISOR_NVIDIA_VISIBLE_DEVICES": "GPU-1",
             },
         ),
         bootstrap_backend=FakeDokployBackend(True, True),
@@ -607,14 +790,20 @@ def test_install_reconciles_my_farm_advisor_variant(tmp_path: Path) -> None:
         shared_core_backend=FakeSharedCoreBackend(),
         headscale_backend=FakeHeadscaleBackend(),
         matrix_backend=FakeMatrixBackend(),
-        openclaw_backend=FakeOpenClawBackend(),
     )
 
     assert summary["my_farm_advisor"]["variant"] == "my-farm-advisor"
     assert summary["my_farm_advisor"]["hostname"] == "farm.example.com"
+    assert summary["my_farm_advisor"]["health_check"]["url"] == "https://farm.example.com/healthz"
     assert summary["my_farm_advisor"]["template_path"].endswith(
         "templates/packs/my-farm-advisor.compose.yaml"
     )
+    assert recording_backend.init_kwargs["stack_name"] == "farm-stack"
+    assert recording_backend.init_kwargs["model_provider"] == "ollama"
+    assert recording_backend.init_kwargs["model_name"] == "llama3.1:8b"
+    assert recording_backend.init_kwargs["trusted_proxies"] == "10.0.0.0/8"
+    assert recording_backend.init_kwargs["nvidia_visible_devices"] == "GPU-1"
+    assert recording_backend.last_health_url == "https://farm.example.com/healthz"
 
 
 def test_install_fails_when_advisor_slot_health_check_does_not_pass(tmp_path: Path) -> None:

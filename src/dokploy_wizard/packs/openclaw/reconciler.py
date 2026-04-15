@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from dokploy_wizard.packs.openclaw.models import (
     OpenClawHealthCheck,
@@ -26,6 +27,15 @@ _TEMPLATE_PATHS = {
     "openclaw": "openclaw.compose.yaml",
     "my-farm-advisor": "my-farm-advisor.compose.yaml",
 }
+
+
+def _migration_required_collision_message(*, pack_name: str, service_name: str) -> str:
+    return (
+        f"Advisor service name collision detected for '{service_name}'. "
+        "Refusing to adopt an unowned existing runtime resource. "
+        f"Manual {pack_name} state requires migration into wizard-managed ownership "
+        "before install, rerun, or modify can continue."
+    )
 
 
 class OpenClawError(RuntimeError):
@@ -216,7 +226,7 @@ def _reconcile_advisor_pack(
     template_path = _resolve_template_path(pack_name)
     service_name = _service_name(desired_state.stack_name, pack_name)
     secret_refs: tuple[str, ...] = ()
-    health_url = f"https://{hostname}/health"
+    health_url = f"https://{hostname}{_health_path_for_pack(pack_name)}"
     channels = _channels_for_pack(desired_state, pack_name)
     replicas = _replicas_for_pack(desired_state, pack_name) or 1
 
@@ -384,48 +394,70 @@ def _resolve_service(
                 f"Ownership ledger {pack_name} service no longer matches "
                 "the desired naming convention."
             )
-        if existing.replicas != replicas:
-            if dry_run:
-                return (
-                    OpenClawManagedResource(
-                        action="update_owned",
-                        resource_id=existing.resource_id,
-                        resource_name=existing.resource_name,
-                    ),
-                    existing.resource_id,
-                )
-            updated = backend.update_service(
-                resource_id=existing.resource_id,
-                resource_name=service_name,
-                hostname=hostname,
-                template_path=template_path,
-                variant=variant,
-                channels=channels,
-                replicas=replicas,
-                secret_refs=secret_refs,
-            )
+        if dry_run:
+            action = "update_owned" if existing.replicas != replicas else "reuse_owned"
             return (
                 OpenClawManagedResource(
-                    action="update_owned",
-                    resource_id=updated.resource_id,
-                    resource_name=updated.resource_name,
+                    action=action,
+                    resource_id=existing.resource_id,
+                    resource_name=existing.resource_name,
                 ),
-                updated.resource_id,
+                existing.resource_id,
             )
+        updated = backend.update_service(
+            resource_id=existing.resource_id,
+            resource_name=service_name,
+            hostname=hostname,
+            template_path=template_path,
+            variant=variant,
+            channels=channels,
+            replicas=replicas,
+            secret_refs=secret_refs,
+        )
         return (
             OpenClawManagedResource(
-                action="reuse_owned",
-                resource_id=existing.resource_id,
-                resource_name=existing.resource_name,
+                action="update_owned",
+                resource_id=updated.resource_id,
+                resource_name=updated.resource_name,
             ),
-            existing.resource_id,
+            updated.resource_id,
         )
 
     existing = backend.find_service_by_name(service_name)
     if existing is not None:
+        if existing.resource_id.startswith("dokploy-compose:"):
+            if not dry_run:
+                updated = backend.update_service(
+                    resource_id=existing.resource_id,
+                    resource_name=service_name,
+                    hostname=hostname,
+                    template_path=template_path,
+                    variant=variant,
+                    channels=channels,
+                    replicas=replicas,
+                    secret_refs=secret_refs,
+                )
+                return (
+                    OpenClawManagedResource(
+                        action="reuse_existing",
+                        resource_id=updated.resource_id,
+                        resource_name=updated.resource_name,
+                    ),
+                    updated.resource_id,
+                )
+            return (
+                OpenClawManagedResource(
+                    action="reuse_existing",
+                    resource_id=existing.resource_id,
+                    resource_name=existing.resource_name,
+                ),
+                existing.resource_id,
+            )
         raise OpenClawError(
-            f"Advisor service name collision detected for '{service_name}'. "
-            "Refusing to adopt an unowned existing runtime resource."
+            _migration_required_collision_message(
+                pack_name=pack_name,
+                service_name=service_name,
+            )
         )
 
     if dry_run:
@@ -507,6 +539,14 @@ def _replicas_for_pack(desired_state: DesiredState, pack_name: str) -> int | Non
     raise OpenClawError(f"Unsupported advisor pack '{pack_name}'.")
 
 
+def _health_path_for_pack(pack_name: str) -> str:
+    if pack_name == "my-farm-advisor":
+        return "/healthz"
+    if pack_name == "openclaw":
+        return "/health"
+    raise OpenClawError(f"Unsupported advisor pack '{pack_name}'.")
+
+
 def _optional_bool(values: dict[str, str], key: str) -> bool | None:
     raw_value = values.get(key)
     if raw_value is None:
@@ -537,11 +577,13 @@ def _optional_positive_int(values: dict[str, str], key: str) -> int | None:
 def _http_health_check(url: str) -> bool:
     if not url.startswith("https://"):
         return False
-    host = url.removeprefix("https://").split("/", 1)[0]
+    parsed = urlsplit(url)
+    host = parsed.netloc
+    path = parsed.path or "/health"
     connection: http.client.HTTPSConnection | None = None
     try:
         connection = http.client.HTTPSConnection(host, timeout=2.0)
-        connection.request("GET", "/health")
+        connection.request("GET", path)
         response = connection.getresponse()
         return 200 <= response.status < 300
     except OSError:
