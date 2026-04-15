@@ -78,6 +78,14 @@ class FakeCloudflareBackend:
         self.existing_tunnel = CloudflareTunnel(tunnel_id="matrix-tunnel", name=tunnel_name)
         return self.existing_tunnel
 
+    def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
+        return f"token-{tunnel_id}"
+
+    def update_tunnel_configuration(
+        self, account_id: str, tunnel_id: str, ingress: tuple[dict[str, object], ...]
+    ) -> None:
+        del account_id, tunnel_id, ingress
+
     def list_dns_records(
         self,
         zone_id: str,
