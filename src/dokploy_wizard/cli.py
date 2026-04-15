@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from dokploy_wizard.bootstrap import (
     LOCAL_HEALTH_URL,
@@ -33,9 +33,11 @@ from dokploy_wizard.dokploy import (
     DokployApiError,
     DokployBootstrapAuthClient,
     DokployBootstrapAuthError,
+    DokployCloudflaredBackend,
     DokployHeadscaleBackend,
     DokployMatrixBackend,
     DokployNextcloudBackend,
+    DokployOpenClawBackend,
     DokploySeaweedFsBackend,
     DokploySharedCoreBackend,
 )
@@ -113,6 +115,7 @@ from dokploy_wizard.state import (
     write_inspection_snapshot,
     write_target_state,
 )
+from dokploy_wizard.state.inspection import build_live_drift_report
 from dokploy_wizard.tailscale import ShellTailscaleBackend, TailscaleBackend, TailscaleError
 from dokploy_wizard.uninstall import (
     ShellUninstallBackend,
@@ -125,6 +128,9 @@ from dokploy_wizard.uninstall import (
     collect_confirmation_lines,
     execute_uninstall_plan,
 )
+
+if TYPE_CHECKING:
+    from dokploy_wizard.dokploy import DokployProjectSummary
 
 _LIVE_RUN_MOCK_CONTAMINATION_PREFIXES = (
     "DOKPLOY_BOOTSTRAP_",
@@ -464,7 +470,7 @@ def _reuse_existing_guided_secrets(
 
     values = dict(raw_env.values)
     reused_generated_secrets = dict(generated_secrets)
-    for key in ("SEAWEEDFS_ACCESS_KEY", "SEAWEEDFS_SECRET_KEY"):
+    for key in ("SEAWEEDFS_ACCESS_KEY", "SEAWEEDFS_SECRET_KEY", "OPENCLAW_GATEWAY_TOKEN"):
         existing_value = existing_raw_env.values.get(key)
         if existing_value is None or key not in values:
             continue
@@ -563,15 +569,20 @@ def _handle_uninstall(args: argparse.Namespace) -> int:
 
 def _handle_inspect_state(args: argparse.Namespace) -> int:
     try:
-        load_state_dir(args.state_dir)
+        loaded_state = load_state_dir(args.state_dir)
         raw_env = parse_env_file(args.env_file)
         desired_state = resolve_desired_state(raw_env)
+        snapshot = desired_state.to_dict()
+        snapshot["live_drift"] = build_live_drift_report(
+            desired_state=desired_state,
+            ownership_ledger=loaded_state.ownership_ledger,
+        )
         if not args.dry_run:
-            write_inspection_snapshot(args.state_dir, raw_env, desired_state)
+            write_inspection_snapshot(args.state_dir, raw_env, snapshot)
     except (OSError, StateValidationError) as error:
         raise SystemExit(str(error)) from error
 
-    print(json.dumps(desired_state.to_dict(), indent=2, sort_keys=True))
+    print(json.dumps(snapshot, indent=2, sort_keys=True))
     return 0
 
 
@@ -820,6 +831,12 @@ def _run_lifecycle_flow(
             lifecycle_plan=lifecycle_plan,
             dry_run=dry_run,
         )
+        _validate_live_drift_for_mutation(
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            lifecycle_plan=lifecycle_plan,
+            dry_run=dry_run,
+        )
     host_facts = collect_host_facts(raw_env)
     host_prerequisite_summary: dict[str, Any] | None = None
     if remediate_install_host_prereqs and _host_supports_prerequisite_remediation(host_facts):
@@ -856,38 +873,74 @@ def _run_lifecycle_flow(
             matrix_backend=matrix_backend,
             nextcloud_backend=nextcloud_backend,
             seaweedfs_backend=seaweedfs_backend,
+            openclaw_backend=openclaw_backend,
         ),
     )
     desired_state = resolve_desired_state(raw_env)
+    _qualify_dokploy_mutation_auth(
+        raw_env=raw_env,
+        desired_state=desired_state,
+        dry_run=dry_run,
+        require_real_dokploy_auth=_dokploy_api_auth_required(
+            desired_state=desired_state,
+            shared_core_backend=shared_core_backend,
+            headscale_backend=headscale_backend,
+            matrix_backend=matrix_backend,
+            nextcloud_backend=nextcloud_backend,
+            seaweedfs_backend=seaweedfs_backend,
+            openclaw_backend=openclaw_backend,
+        ),
+    )
     if not dry_run:
         write_target_state(state_dir, raw_env, desired_state)
     tailscale_phase_backend = tailscale_backend or ShellTailscaleBackend(raw_env)
     cloudflare_backend = networking_backend or CloudflareApiBackend(raw_env)
+    dokploy_session_client = _build_dokploy_session_client(
+        raw_env=raw_env,
+        api_url=desired_state.dokploy_api_url or LOCAL_HEALTH_URL,
+    )
+    cloudflared_connector_backend = None
+    if networking_backend is None:
+        cloudflared_connector_backend = _build_cloudflared_connector_backend(
+            raw_env=raw_env,
+            desired_state=desired_state,
+            session_client=dokploy_session_client,
+        )
     shared_core_phase_backend = shared_core_backend or _build_shared_core_backend(
         raw_env=raw_env,
         desired_state=desired_state,
+        session_client=dokploy_session_client,
     )
     headscale_phase_backend = headscale_backend or _build_headscale_backend(
         raw_env=raw_env,
         desired_state=desired_state,
+        session_client=dokploy_session_client,
     )
     matrix_phase_backend = matrix_backend or _build_matrix_backend(
         raw_env=raw_env,
         desired_state=desired_state,
+        session_client=dokploy_session_client,
     )
     nextcloud_phase_backend = nextcloud_backend or _build_nextcloud_backend(
         raw_env=raw_env,
         desired_state=desired_state,
+        session_client=dokploy_session_client,
     )
     seaweedfs_phase_backend = seaweedfs_backend or _build_seaweedfs_backend(
         raw_env=raw_env,
         desired_state=desired_state,
+        session_client=dokploy_session_client,
     )
-    openclaw_phase_backend = openclaw_backend or ShellOpenClawBackend(raw_env)
+    openclaw_phase_backend = openclaw_backend or _build_openclaw_backend(
+        raw_env=raw_env,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
     lifecycle_backends = LifecycleBackends(
         bootstrap=backend,
         tailscale=tailscale_phase_backend,
         networking=cloudflare_backend,
+        cloudflared=cloudflared_connector_backend,
         shared_core=shared_core_phase_backend,
         headscale=headscale_phase_backend,
         matrix=matrix_phase_backend,
@@ -896,21 +949,27 @@ def _run_lifecycle_flow(
         openclaw=openclaw_phase_backend,
     )
 
-    validate_preserved_phases(
-        raw_env=raw_env,
-        desired_state=desired_state,
-        ownership_ledger=ownership_ledger,
-        preserved_phases=lifecycle_plan.preserved_phases,
-        bootstrap_backend=backend,
-        tailscale_backend=tailscale_phase_backend,
-        networking_backend=cloudflare_backend,
-        shared_core_backend=shared_core_phase_backend,
-        headscale_backend=headscale_phase_backend,
-        matrix_backend=matrix_phase_backend,
-        nextcloud_backend=nextcloud_phase_backend,
-        seaweedfs_backend=seaweedfs_phase_backend,
-        openclaw_backend=openclaw_phase_backend,
-    )
+    try:
+        validate_preserved_phases(
+            raw_env=raw_env,
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            preserved_phases=lifecycle_plan.preserved_phases,
+            bootstrap_backend=backend,
+            tailscale_backend=tailscale_phase_backend,
+            networking_backend=cloudflare_backend,
+            shared_core_backend=shared_core_phase_backend,
+            headscale_backend=headscale_phase_backend,
+            matrix_backend=matrix_phase_backend,
+            nextcloud_backend=nextcloud_phase_backend,
+            seaweedfs_backend=seaweedfs_phase_backend,
+            openclaw_backend=openclaw_phase_backend,
+        )
+    except LifecycleDriftError as error:
+        lifecycle_plan = _resume_plan_from_drift(
+            lifecycle_plan=lifecycle_plan,
+            drift_error=error,
+        )
 
     if not dry_run:
         if existing_state:
@@ -973,8 +1032,58 @@ def _run_lifecycle_flow(
             summary["disable_teardown"]["executed"] = disable_execution
     if host_prerequisite_summary is not None:
         summary["host_prerequisites"] = host_prerequisite_summary
+    _append_operator_links(summary, desired_state)
     summary["state_dir"] = str(state_dir)
     return summary
+
+
+def _append_operator_links(summary: dict[str, Any], desired_state: DesiredState) -> None:
+    if desired_state.openclaw_gateway_token is None or desired_state.cloudflare_access_otp_emails:
+        return
+    openclaw_hostname = desired_state.hostnames.get("openclaw")
+    openclaw_summary = summary.get("openclaw")
+    if not isinstance(openclaw_hostname, str) or openclaw_hostname == "":
+        return
+    if not isinstance(openclaw_summary, dict):
+        return
+    openclaw_summary["authorized_dashboard_url"] = (
+        f"https://{openclaw_hostname}/#token={desired_state.openclaw_gateway_token}"
+    )
+
+
+def _resume_plan_from_drift(
+    *, lifecycle_plan: LifecyclePlan, drift_error: LifecycleDriftError
+) -> LifecyclePlan:
+    drifted_entry = next(
+        (entry for entry in drift_error.report.entries if entry.status == "drift"),
+        None,
+    )
+    if drifted_entry is None:
+        raise drift_error
+    phase = drifted_entry.phase
+    if phase not in lifecycle_plan.applicable_phases:
+        raise drift_error
+    first_index = lifecycle_plan.applicable_phases.index(phase)
+    if first_index == 0:
+        raise drift_error
+    phases_to_run = lifecycle_plan.applicable_phases[first_index:]
+    preserved_phases = lifecycle_plan.applicable_phases[:first_index]
+    initial_completed_steps = lifecycle_plan.applicable_phases[:first_index]
+    reasons = tuple(lifecycle_plan.reasons) + (
+        f"Preserved phase drift detected at '{phase}'; "
+        "resuming from the first unhealthy preserved phase.",
+    )
+    return LifecyclePlan(
+        mode="resume",
+        reasons=reasons,
+        applicable_phases=lifecycle_plan.applicable_phases,
+        phases_to_run=phases_to_run,
+        preserved_phases=preserved_phases,
+        initial_completed_steps=initial_completed_steps,
+        start_phase=phase,
+        raw_equivalent=lifecycle_plan.raw_equivalent,
+        desired_equivalent=lifecycle_plan.desired_equivalent,
+    )
 
 
 def _prepare_install_host_prerequisites(
@@ -1023,15 +1132,15 @@ def _can_treat_required_ports_as_expected(
     *,
     required_ports: tuple[int, ...],
 ) -> bool:
-    if lifecycle_plan.mode not in {"resume", "noop"}:
+    if lifecycle_plan.mode not in {"resume", "noop", "modify"}:
         return False
     applied_state = getattr(loaded_state, "applied_state", None)
-    ownership_ledger = getattr(loaded_state, "ownership_ledger", None)
-    if applied_state is None or ownership_ledger is None:
+    if applied_state is None:
         return False
-    if "dokploy_bootstrap" not in applied_state.completed_steps:
-        return False
-    if not ownership_ledger.resources:
+    if (
+        "dokploy_bootstrap" not in applied_state.completed_steps
+        and lifecycle_plan.start_phase != "dokploy_bootstrap"
+    ):
         return False
     return True
 
@@ -1167,10 +1276,11 @@ def _expected_ports_in_use_for_retry(
     if applied_state is None:
         return ()
     expected: list[int] = []
-    if "dokploy_bootstrap" in applied_state.completed_steps:
-        expected.append(3000)
-    if "networking" in applied_state.completed_steps:
-        expected.extend([80, 443])
+    if (
+        "dokploy_bootstrap" in applied_state.completed_steps
+        or lifecycle_plan.start_phase == "dokploy_bootstrap"
+    ):
+        expected.extend([80, 443, 3000])
     return tuple(sorted(set(expected)))
 
 
@@ -1226,8 +1336,77 @@ def _validate_live_run_env_for_mutation(
     )
 
 
+def _validate_live_drift_for_mutation(
+    *,
+    desired_state: DesiredState,
+    ownership_ledger: OwnershipLedger,
+    lifecycle_plan: LifecyclePlan,
+    dry_run: bool,
+) -> None:
+    if dry_run or not lifecycle_plan.phases_to_run:
+        return
+    live_drift = build_live_drift_report(
+        desired_state=desired_state,
+        ownership_ledger=ownership_ledger,
+    )
+    blocking_entries = [
+        entry for entry in live_drift["entries"] if _live_drift_entry_blocks_mutation(entry)
+    ]
+    if not blocking_entries:
+        return
+    details = " ".join(
+        f"[{index}] {_live_drift_entry_message(entry)}"
+        for index, entry in enumerate(blocking_entries, start=1)
+    )
+    raise StateValidationError(
+        "Live drift is not allowed for mutating live/pre-live runs; refusing to continue "
+        "while live artifacts diverge from wizard-managed ownership. "
+        f"Blocking drift: {details}"
+    )
+
+
+def _live_drift_entry_blocks_mutation(entry: dict[str, Any]) -> bool:
+    classification = entry.get("classification")
+    if classification in {"manual_collision", "host_local_route"}:
+        return True
+    if classification != "wizard_managed":
+        return False
+    return entry.get("health") in {"unhealthy", "unknown"}
+
+
+def _live_drift_entry_message(entry: dict[str, Any]) -> str:
+    classification = entry["classification"]
+    if classification == "manual_collision":
+        pack = entry.get("pack") or "runtime"
+        live_kind = entry.get("live_kind") or "resource"
+        live_name = entry.get("live_name") or "unknown"
+        return (
+            f"manual {pack} {live_kind} '{live_name}' collides with wizard-managed state. "
+            "Migrate or remove the unowned runtime before install, rerun, or modify can continue."
+        )
+    if classification == "host_local_route":
+        pack = entry.get("pack") or "service"
+        path = entry.get("path") or "unknown path"
+        return (
+            f"host-local {pack} route file '{path}' shadows Dokploy-managed ingress. "
+            "Remove the host-local route file so the wizard is the single routing "
+            "owner, then rerun."
+        )
+    pack = entry.get("pack") or "service"
+    live_name = entry.get("live_name") or entry.get("expected_service_name") or "unknown"
+    health = entry.get("health") or "unhealthy"
+    return (
+        f"wizard-managed {pack} service '{live_name}' is {health}. "
+        "Repair or remove the unhealthy managed runtime until inspect-state "
+        "reports clean, then rerun."
+    )
+
+
 def _build_shared_core_backend(
-    *, raw_env: RawEnvInput, desired_state: DesiredState
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
 ) -> SharedCoreBackend:
     if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
         return ShellSharedCoreBackend()
@@ -1239,12 +1418,47 @@ def _build_shared_core_backend(
             api_key=api_key,
             stack_name=desired_state.stack_name,
             plan=desired_state.shared_core,
+            client=_build_dokploy_api_client(
+                raw_env=raw_env,
+                api_url=api_url,
+                api_key=api_key,
+                session_client=session_client,
+            ),
         )
     return ShellSharedCoreBackend()
 
 
+def _build_cloudflared_connector_backend(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> Any | None:
+    if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
+        return None
+    api_url = desired_state.dokploy_api_url
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    if not api_url or not api_key:
+        return None
+    return DokployCloudflaredBackend(
+        api_url=api_url,
+        api_key=api_key,
+        stack_name=desired_state.stack_name,
+        public_url=desired_state.dokploy_url,
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
+    )
+
+
 def _build_headscale_backend(
-    *, raw_env: RawEnvInput, desired_state: DesiredState
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
 ) -> HeadscaleBackend:
     if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
         return ShellHeadscaleBackend(raw_env)
@@ -1257,12 +1471,21 @@ def _build_headscale_backend(
             api_key=api_key,
             stack_name=desired_state.stack_name,
             hostname=hostname,
+            client=_build_dokploy_api_client(
+                raw_env=raw_env,
+                api_url=api_url,
+                api_key=api_key,
+                session_client=session_client,
+            ),
         )
     return ShellHeadscaleBackend(raw_env)
 
 
 def _build_nextcloud_backend(
-    *, raw_env: RawEnvInput, desired_state: DesiredState
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
 ) -> NextcloudBackend:
     if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
         return ShellNextcloudBackend(raw_env)
@@ -1285,6 +1508,8 @@ def _build_nextcloud_backend(
         or desired_state.shared_core.redis is None
     ):
         return ShellNextcloudBackend(raw_env)
+    admin_user = raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
+    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon")
     return DokployNextcloudBackend(
         api_url=api_url,
         api_key=api_key,
@@ -1296,10 +1521,23 @@ def _build_nextcloud_backend(
         postgres=allocation.postgres,
         redis=allocation.redis,
         integration_secret_ref=f"{desired_state.stack_name}-nextcloud-onlyoffice-jwt-secret",
+        admin_user=admin_user,
+        admin_password=admin_password,
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
     )
 
 
-def _build_matrix_backend(*, raw_env: RawEnvInput, desired_state: DesiredState) -> MatrixBackend:
+def _build_matrix_backend(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> MatrixBackend:
     if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
         return ShellMatrixBackend(raw_env)
     api_url = desired_state.dokploy_api_url
@@ -1330,11 +1568,20 @@ def _build_matrix_backend(*, raw_env: RawEnvInput, desired_state: DesiredState) 
             f"{desired_state.stack_name}-matrix-registration-shared-secret",
             f"{desired_state.stack_name}-matrix-macaroon-secret-key",
         ),
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
     )
 
 
 def _build_seaweedfs_backend(
-    *, raw_env: RawEnvInput, desired_state: DesiredState
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
 ) -> SeaweedFsBackend:
     api_url = desired_state.dokploy_api_url
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
@@ -1352,6 +1599,81 @@ def _build_seaweedfs_backend(
         hostname=hostname,
         access_key=access_key,
         secret_key=secret_key,
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
+    )
+
+
+def _build_openclaw_backend(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> OpenClawBackend:
+    if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
+        return ShellOpenClawBackend(raw_env)
+    api_url = desired_state.dokploy_api_url
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    if not api_url or not api_key:
+        return ShellOpenClawBackend(raw_env)
+    if not ({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs)):
+        return ShellOpenClawBackend(raw_env)
+    return DokployOpenClawBackend(
+        api_url=api_url,
+        api_key=api_key,
+        stack_name=desired_state.stack_name,
+        gateway_token=desired_state.openclaw_gateway_token,
+        trusted_proxy_emails=desired_state.cloudflare_access_otp_emails,
+        openclaw_primary_model=_advisor_primary_model(raw_env, env_prefix="OPENCLAW"),
+        openclaw_fallback_models=_advisor_model_list(raw_env, env_prefix="OPENCLAW"),
+        openclaw_openrouter_api_key=_advisor_env_optional(raw_env, "OPENCLAW_OPENROUTER_API_KEY"),
+        openclaw_nvidia_api_key=_advisor_env_optional(raw_env, "OPENCLAW_NVIDIA_API_KEY"),
+        openclaw_telegram_bot_token=_advisor_env_optional(raw_env, "OPENCLAW_TELEGRAM_BOT_TOKEN"),
+        openclaw_telegram_owner_user_id=_advisor_env_optional(
+            raw_env, "OPENCLAW_TELEGRAM_OWNER_USER_ID"
+        ),
+        my_farm_primary_model=_advisor_primary_model(raw_env, env_prefix="MY_FARM_ADVISOR"),
+        my_farm_fallback_models=_advisor_model_list(raw_env, env_prefix="MY_FARM_ADVISOR"),
+        my_farm_openrouter_api_key=_advisor_env_optional(
+            raw_env, "MY_FARM_ADVISOR_OPENROUTER_API_KEY"
+        ),
+        my_farm_nvidia_api_key=_advisor_env_optional(raw_env, "MY_FARM_ADVISOR_NVIDIA_API_KEY"),
+        my_farm_telegram_bot_token=_advisor_env_optional(
+            raw_env, "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN"
+        ),
+        my_farm_telegram_owner_user_id=_advisor_env_optional(
+            raw_env, "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID"
+        ),
+        model_provider=_advisor_env_value(
+            raw_env,
+            "ADVISOR_MODEL_PROVIDER",
+            default="openai",
+        ),
+        model_name=_advisor_env_value(
+            raw_env,
+            "ADVISOR_MODEL_NAME",
+            default="gpt-4o-mini",
+        ),
+        trusted_proxies=_advisor_env_value(
+            raw_env,
+            "ADVISOR_TRUSTED_PROXIES",
+            default="127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+        ),
+        nvidia_visible_devices=_advisor_env_value(
+            raw_env,
+            "ADVISOR_NVIDIA_VISIBLE_DEVICES",
+            default="all",
+        ),
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
     )
 
 
@@ -1363,6 +1685,7 @@ def _dokploy_api_auth_required(
     matrix_backend: MatrixBackend | None,
     nextcloud_backend: NextcloudBackend | None,
     seaweedfs_backend: SeaweedFsBackend | None,
+    openclaw_backend: OpenClawBackend | None,
 ) -> bool:
     if shared_core_backend is None and desired_state.shared_core.requires_reconciliation():
         return True
@@ -1374,7 +1697,172 @@ def _dokploy_api_auth_required(
         return True
     if seaweedfs_backend is None and "seaweedfs" in desired_state.enabled_packs:
         return True
+    if openclaw_backend is None and (
+        {"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs)
+    ):
+        return True
     return False
+
+
+def _advisor_env_value(raw_env: RawEnvInput, key: str, *, default: str) -> str:
+    value = raw_env.values.get(key)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip()
+
+
+def _advisor_env_optional(raw_env: RawEnvInput, key: str) -> str | None:
+    value = raw_env.values.get(key)
+    if value is None or value.strip() == "":
+        return None
+    return value.strip()
+
+
+def _advisor_primary_model(raw_env: RawEnvInput, *, env_prefix: str) -> str | None:
+    explicit = _advisor_env_optional(raw_env, f"{env_prefix}_PRIMARY_MODEL")
+    if explicit is not None:
+        return explicit
+    provider = _advisor_env_optional(raw_env, "ADVISOR_MODEL_PROVIDER")
+    model_name = _advisor_env_optional(raw_env, "ADVISOR_MODEL_NAME")
+    if provider is None or model_name is None:
+        return None
+    return model_name if "/" in model_name else f"{provider}/{model_name}"
+
+
+def _advisor_model_list(raw_env: RawEnvInput, *, env_prefix: str) -> tuple[str, ...]:
+    raw_value = _advisor_env_optional(raw_env, f"{env_prefix}_FALLBACK_MODELS")
+    if raw_value is None:
+        return ()
+    return tuple(item.strip() for item in raw_value.split(",") if item.strip())
+
+
+_DOKPLOY_AUTH_PROBE_DESCRIPTION = "Wizard-owned Dokploy auth qualifier"
+_DOKPLOY_AUTH_PROBE_COMPOSE = """services:
+  auth-probe:
+    image: alpine:3.20
+    command: [\"sh\", \"-c\", \"sleep 3600\"]
+    restart: unless-stopped
+"""
+
+
+def _qualify_dokploy_mutation_auth(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    dry_run: bool,
+    require_real_dokploy_auth: bool,
+) -> None:
+    if (
+        dry_run
+        or not require_real_dokploy_auth
+        or raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true"
+        or raw_env.values.get("DOKPLOY_BOOTSTRAP_MOCK_API_KEY") is not None
+    ):
+        return
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    api_url = raw_env.values.get("DOKPLOY_API_URL") or LOCAL_HEALTH_URL
+    if api_key is None:
+        raise StateValidationError(
+            "Dokploy mutation auth qualification requires a usable DOKPLOY_API_KEY."
+        )
+
+    session_client = _build_dokploy_session_client(raw_env=raw_env, api_url=api_url)
+    client = _build_dokploy_api_client(
+        raw_env=raw_env,
+        api_url=api_url,
+        api_key=api_key,
+        session_client=session_client,
+    )
+    probe_project_name = f"{desired_state.stack_name}-dokploy-wizard-auth-probe"
+    probe_compose_name = probe_project_name
+
+    projects = client.list_projects()
+    for stale_project in tuple(
+        project for project in projects if project.name == probe_project_name
+    ):
+        delete_project = getattr(client, "delete_project", None)
+        if callable(delete_project):
+            try:
+                delete_project(project_id=stale_project.project_id)
+            except DokployApiError:
+                pass
+    projects = client.list_projects()
+    project = _find_dokploy_project(projects, probe_project_name)
+    probe_project_id = project.project_id if project is not None else None
+    environment_id = _default_dokploy_environment_id(project) if project is not None else None
+
+    if project is None:
+        try:
+            created = client.create_project(
+                name=probe_project_name,
+                description=_DOKPLOY_AUTH_PROBE_DESCRIPTION,
+                env="",
+            )
+        except DokployApiError as error:
+            raise StateValidationError(
+                f"Dokploy mutation auth qualification failed during project.create: {error}"
+            ) from error
+        environment_id = created.environment_id
+        probe_project_id = created.project_id
+
+    assert environment_id is not None
+
+    compose_id = _find_dokploy_compose_id(project, probe_compose_name)
+    if compose_id is None:
+        try:
+            compose = client.create_compose(
+                name=probe_compose_name,
+                environment_id=environment_id,
+                compose_file=_DOKPLOY_AUTH_PROBE_COMPOSE,
+                app_name=probe_compose_name,
+            )
+        except DokployApiError as error:
+            projects = client.list_projects()
+            project = _find_dokploy_project(projects, probe_project_name)
+            compose_id = _find_dokploy_compose_id(project, probe_compose_name)
+            if compose_id is None or not _looks_like_duplicate_dokploy_error(error):
+                raise StateValidationError(
+                    f"Dokploy mutation auth qualification failed during compose.create: {error}"
+                ) from error
+        else:
+            compose_id = compose.compose_id
+
+    assert compose_id is not None
+
+    try:
+        client.update_compose(
+            compose_id=compose_id,
+            compose_file=_DOKPLOY_AUTH_PROBE_COMPOSE,
+        )
+    except DokployApiError as error:
+        raise StateValidationError(
+            f"Dokploy mutation auth qualification failed during compose.update: {error}"
+        ) from error
+
+    try:
+        try:
+            deploy = client.deploy_compose(
+                compose_id=compose_id,
+                title="dokploy-wizard auth qualifier",
+                description="Verifies compose mutation auth before lifecycle execution.",
+            )
+        except DokployApiError as error:
+            raise StateValidationError(
+                f"Dokploy mutation auth qualification failed during compose.deploy: {error}"
+            ) from error
+        if not deploy.success:
+            raise StateValidationError(
+                "Dokploy mutation auth qualification failed during compose.deploy: "
+                f"{deploy.message or 'deploy returned unsuccessful result.'}"
+            )
+    finally:
+        if probe_project_id is not None:
+            try:
+                delete_project = getattr(client, "delete_project", None)
+                if callable(delete_project):
+                    delete_project(project_id=probe_project_id)
+            except DokployApiError:
+                pass
 
 
 def _ensure_dokploy_api_auth(
@@ -1405,7 +1893,7 @@ def _ensure_dokploy_api_auth(
     if values.get("DOKPLOY_API_KEY"):
         values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
         updated = RawEnvInput(format_version=raw_env.format_version, values=values)
-        if not should_refresh_local_auth and _can_reuse_existing_dokploy_api_key(
+        if _can_reuse_existing_dokploy_api_key(
             raw_env=updated,
             dry_run=dry_run,
             require_real_dokploy_auth=require_real_dokploy_auth,
@@ -1449,6 +1937,188 @@ def _can_reuse_existing_dokploy_api_key(
     except DokployApiError:
         return False
     return True
+
+
+def _build_dokploy_api_client(
+    *,
+    raw_env: RawEnvInput,
+    api_url: str,
+    api_key: str,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> DokployApiClient:
+    session_client = session_client or _build_dokploy_session_client(
+        raw_env=raw_env,
+        api_url=api_url,
+    )
+    if session_client is None:
+        return DokployApiClient(api_url=api_url, api_key=api_key)
+    return DokployApiClient(
+        api_url=api_url,
+        api_key=api_key,
+        list_projects_session_fallback=_build_dokploy_session_list_projects_fallback(
+            raw_env=raw_env,
+            session_client=session_client,
+        ),
+        project_create_session_fallback=_build_dokploy_session_project_create_fallback(
+            raw_env=raw_env,
+            session_client=session_client,
+        ),
+        compose_create_session_fallback=_build_dokploy_session_compose_create_fallback(
+            raw_env=raw_env,
+            session_client=session_client,
+        ),
+        compose_update_session_fallback=_build_dokploy_session_compose_update_fallback(
+            raw_env=raw_env,
+            session_client=session_client,
+        ),
+        deploy_session_fallback=_build_dokploy_session_deploy_fallback(
+            raw_env=raw_env,
+            session_client=session_client,
+        ),
+    )
+
+
+def _build_dokploy_session_client(
+    *, raw_env: RawEnvInput, api_url: str
+) -> DokployBootstrapAuthClient | None:
+    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
+    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    if not admin_email or not admin_password:
+        return None
+    return DokployBootstrapAuthClient(base_url=api_url)
+
+
+def _build_dokploy_session_deploy_fallback(
+    *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
+) -> Callable[[str, str | None, str | None], Any] | None:
+    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
+    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    if not admin_email or not admin_password or session_client is None:
+        return None
+
+    def _fallback(compose_id: str, title: str | None, description: str | None) -> Any:
+        return session_client.deploy_compose(
+            admin_email=admin_email,
+            admin_password=admin_password,
+            compose_id=compose_id,
+            title=title,
+            description=description,
+        )
+
+    return _fallback
+
+
+def _build_dokploy_session_list_projects_fallback(
+    *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
+) -> Callable[[], Any] | None:
+    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
+    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    if not admin_email or not admin_password or session_client is None:
+        return None
+
+    def _fallback() -> Any:
+        return session_client.list_projects(
+            admin_email=admin_email,
+            admin_password=admin_password,
+        )
+
+    return _fallback
+
+
+def _build_dokploy_session_project_create_fallback(
+    *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
+) -> Callable[[str, str | None, str | None], Any] | None:
+    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
+    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    if not admin_email or not admin_password or session_client is None:
+        return None
+
+    def _fallback(name: str, description: str | None, env: str | None) -> Any:
+        return session_client.create_project(
+            admin_email=admin_email,
+            admin_password=admin_password,
+            name=name,
+            description=description,
+            env=env,
+        )
+
+    return _fallback
+
+
+def _build_dokploy_session_compose_create_fallback(
+    *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
+) -> Callable[[str, str, str, str], Any] | None:
+    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
+    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    if not admin_email or not admin_password or session_client is None:
+        return None
+
+    def _fallback(name: str, environment_id: str, compose_file: str, app_name: str) -> Any:
+        return session_client.create_compose(
+            admin_email=admin_email,
+            admin_password=admin_password,
+            name=name,
+            environment_id=environment_id,
+            compose_file=compose_file,
+            app_name=app_name,
+        )
+
+    return _fallback
+
+
+def _build_dokploy_session_compose_update_fallback(
+    *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
+) -> Callable[[str, str], Any] | None:
+    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
+    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    if not admin_email or not admin_password or session_client is None:
+        return None
+
+    def _fallback(compose_id: str, compose_file: str) -> Any:
+        return session_client.update_compose(
+            admin_email=admin_email,
+            admin_password=admin_password,
+            compose_id=compose_id,
+            compose_file=compose_file,
+        )
+
+    return _fallback
+
+
+def _find_dokploy_project(
+    projects: tuple[DokployProjectSummary, ...], name: str
+) -> DokployProjectSummary | None:
+    return next((project for project in projects if project.name == name), None)
+
+
+def _default_dokploy_environment_id(project: DokployProjectSummary) -> str:
+    default = next(
+        (environment for environment in project.environments if environment.is_default), None
+    )
+    if default is not None:
+        return default.environment_id
+    if project.environments:
+        return project.environments[0].environment_id
+    raise StateValidationError(
+        f"Dokploy mutation auth qualification project '{project.name}' has no environments."
+    )
+
+
+def _find_dokploy_compose_id(
+    project: DokployProjectSummary | None, compose_name: str
+) -> str | None:
+    if project is None:
+        return None
+    for environment in project.environments:
+        for compose in environment.composes:
+            if compose.name == compose_name:
+                return compose.compose_id
+    return None
+
+
+def _looks_like_duplicate_dokploy_error(error: DokployApiError) -> bool:
+    text = str(error).lower()
+    return any(marker in text for marker in ("already exists", "duplicate", "unique"))
 
 
 def _refresh_local_dokploy_api_key(

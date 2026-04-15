@@ -36,6 +36,10 @@ _SUPPORTED_AUTH_KEYS = {
     "CLOUDFLARE_ACCOUNT_ID",
     "CLOUDFLARE_ZONE_ID",
 }
+_SUPPORTED_DOKPLOY_ADMIN_KEYS = {
+    "DOKPLOY_ADMIN_EMAIL",
+    "DOKPLOY_ADMIN_PASSWORD",
+}
 _SUPPORTED_TAILSCALE_KEYS = {
     "ENABLE_TAILSCALE",
     "TAILSCALE_AUTH_KEY",
@@ -65,15 +69,24 @@ _SUPPORTED_ENABLEMENT_KEYS = {
 }
 _SUPPORTED_MUTABLE_PACK_ENV_KEYS = set(get_mutable_pack_env_keys())
 _SUPPORTED_MUTABLE_PACK_RESOURCE_KEYS = set(get_mutable_pack_resource_keys())
-_IGNORED_RAW_ENV_KEYS = {
+_IGNORED_INSTALL_RAW_ENV_KEYS = {
+    "CLOUDFLARE_API_TOKEN",
     "DOKPLOY_API_URL",
     "DOKPLOY_API_KEY",
+    "DOKPLOY_ADMIN_EMAIL",
     "DOKPLOY_ADMIN_PASSWORD",
+    "DOKPLOY_BOOTSTRAP_MOCK_API_KEY",
+    "DOKPLOY_MOCK_API_MODE",
+}
+_IGNORED_MODIFY_RAW_ENV_KEYS = {
+    "DOKPLOY_API_URL",
+    "DOKPLOY_API_KEY",
     "DOKPLOY_BOOTSTRAP_MOCK_API_KEY",
     "DOKPLOY_MOCK_API_MODE",
 }
 _SUPPORTED_MODIFY_KEYS = (
     _SUPPORTED_AUTH_KEYS
+    | _SUPPORTED_DOKPLOY_ADMIN_KEYS
     | _SUPPORTED_TAILSCALE_KEYS
     | _SUPPORTED_ACCESS_KEYS
     | _SUPPORTED_HOSTNAME_KEYS
@@ -97,6 +110,22 @@ _OPTIONAL_PHASE_PACKS = {
     "seaweedfs": "seaweedfs",
     "openclaw": "openclaw",
     "my-farm-advisor": "my-farm-advisor",
+}
+_OPENCLAW_RUNTIME_ENV_KEYS = {
+    "OPENCLAW_OPENROUTER_API_KEY",
+    "OPENCLAW_NVIDIA_API_KEY",
+    "OPENCLAW_PRIMARY_MODEL",
+    "OPENCLAW_FALLBACK_MODELS",
+    "OPENCLAW_TELEGRAM_BOT_TOKEN",
+    "OPENCLAW_TELEGRAM_OWNER_USER_ID",
+}
+_MY_FARM_RUNTIME_ENV_KEYS = {
+    "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
+    "MY_FARM_ADVISOR_NVIDIA_API_KEY",
+    "MY_FARM_ADVISOR_PRIMARY_MODEL",
+    "MY_FARM_ADVISOR_FALLBACK_MODELS",
+    "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
+    "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
 }
 
 
@@ -157,7 +186,9 @@ def classify_install_request(
     requested_raw: RawEnvInput,
     requested_desired: DesiredState,
 ) -> LifecyclePlan:
-    raw_equivalent = _normalized_raw_values(existing_raw) == _normalized_raw_values(requested_raw)
+    raw_equivalent = _normalized_install_raw_values(existing_raw) == _normalized_install_raw_values(
+        requested_raw
+    )
     desired_equivalent = _normalized_install_desired_values(
         existing_desired
     ) == _normalized_install_desired_values(requested_desired)
@@ -185,7 +216,9 @@ def classify_modify_request(
 ) -> LifecyclePlan:
     old_applicable = applicable_phases_for(existing_desired)
     validate_completed_steps(existing_applied.completed_steps, old_applicable)
-    raw_equivalent = _normalized_raw_values(existing_raw) == _normalized_raw_values(requested_raw)
+    raw_equivalent = _normalized_modify_raw_values(existing_raw) == _normalized_modify_raw_values(
+        requested_raw
+    )
     desired_equivalent = existing_desired.to_dict() == requested_desired.to_dict()
     if raw_equivalent and desired_equivalent:
         return _classify_same_target(
@@ -215,19 +248,38 @@ def classify_modify_request(
     )
     if changed_keys & _SUPPORTED_TAILSCALE_KEYS and requested_desired.enable_tailscale:
         phases_to_run.add("tailscale")
+    if changed_keys & {"DOKPLOY_ADMIN_EMAIL", "DOKPLOY_ADMIN_PASSWORD"}:
+        if "nextcloud" in requested_desired.enabled_packs:
+            phases_to_run.add("nextcloud")
     if changed_keys & _SUPPORTED_AUTH_KEYS:
         phases_to_run.add("networking")
     if changed_keys & (_SUPPORTED_AUTH_KEYS | _SUPPORTED_ACCESS_KEYS) and _access_enabled(
         requested_desired
     ):
         phases_to_run.add("cloudflare_access")
+    if (
+        existing_desired.cloudflare_access_otp_emails
+        != requested_desired.cloudflare_access_otp_emails
+        and _access_enabled(requested_desired)
+    ):
+        phases_to_run.add("cloudflare_access")
+        if "openclaw" in requested_desired.enabled_packs:
+            phases_to_run.add("openclaw")
+        if "my-farm-advisor" in requested_desired.enabled_packs:
+            phases_to_run.add("my-farm-advisor")
     if existing_desired.openclaw_channels != requested_desired.openclaw_channels:
         phases_to_run.add("openclaw")
+    if existing_desired.openclaw_gateway_token != requested_desired.openclaw_gateway_token:
+        phases_to_run.add("openclaw")
     if existing_desired.openclaw_replicas != requested_desired.openclaw_replicas:
+        phases_to_run.add("openclaw")
+    if changed_keys & _OPENCLAW_RUNTIME_ENV_KEYS:
         phases_to_run.add("openclaw")
     if existing_desired.my_farm_advisor_channels != requested_desired.my_farm_advisor_channels:
         phases_to_run.add("my-farm-advisor")
     if existing_desired.my_farm_advisor_replicas != requested_desired.my_farm_advisor_replicas:
+        phases_to_run.add("my-farm-advisor")
+    if changed_keys & _MY_FARM_RUNTIME_ENV_KEYS:
         phases_to_run.add("my-farm-advisor")
     if (
         existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict()
@@ -350,14 +402,26 @@ def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredS
 
 
 def _changed_env_keys(existing_raw: RawEnvInput, requested_raw: RawEnvInput) -> set[str]:
-    all_keys = (set(existing_raw.values) | set(requested_raw.values)) - _IGNORED_RAW_ENV_KEYS
+    all_keys = (set(existing_raw.values) | set(requested_raw.values)) - _IGNORED_MODIFY_RAW_ENV_KEYS
     return {
         key for key in all_keys if existing_raw.values.get(key) != requested_raw.values.get(key)
     }
 
 
-def _normalized_raw_values(raw_env: RawEnvInput) -> dict[str, str]:
-    return {key: value for key, value in raw_env.values.items() if key not in _IGNORED_RAW_ENV_KEYS}
+def _normalized_install_raw_values(raw_env: RawEnvInput) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in raw_env.values.items()
+        if key not in _IGNORED_INSTALL_RAW_ENV_KEYS
+    }
+
+
+def _normalized_modify_raw_values(raw_env: RawEnvInput) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in raw_env.values.items()
+        if key not in _IGNORED_MODIFY_RAW_ENV_KEYS
+    }
 
 
 def _normalized_install_desired_values(desired_state: DesiredState) -> dict[str, object]:

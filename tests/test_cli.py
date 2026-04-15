@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import stat
 import subprocess
 from pathlib import Path
@@ -10,10 +11,17 @@ import pytest
 
 from dokploy_wizard import cli
 from dokploy_wizard.dokploy import (
+    DokployApiError,
     DokployBootstrapAuthError,
     DokployBootstrapAuthResult,
+    DokployComposeRecord,
+    DokployComposeSummary,
+    DokployDeployResult,
+    DokployEnvironmentSummary,
+    DokployProjectSummary,
 )
-from dokploy_wizard.lifecycle import applicable_phases_for, classify_install_request
+from dokploy_wizard.lifecycle import LifecyclePlan, applicable_phases_for, classify_install_request
+from dokploy_wizard.lifecycle.drift import DriftEntry, DriftReport, LifecycleDriftError
 from dokploy_wizard.packs import prompts as prompt_module
 from dokploy_wizard.packs.prompts import (
     GuidedInstallValues,
@@ -40,6 +48,7 @@ from dokploy_wizard.state import (
     write_ownership_ledger,
     write_target_state,
 )
+from dokploy_wizard.state import inspection as inspection_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI = REPO_ROOT / "bin" / "dokploy-wizard"
@@ -75,6 +84,275 @@ def test_inspect_state_help_lists_task_two_flags() -> None:
     assert "--state-dir" in result.stdout
     assert "--dry-run" in result.stdout
     assert result.stderr == ""
+
+
+def test_handle_inspect_state_includes_live_drift_and_persists_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / "inspect.env"
+    env_file.write_text(
+        (FIXTURES_DIR / "lifecycle-headscale.env").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "state"
+    expected_live_drift = {
+        "detected": True,
+        "entries": [
+            {
+                "classification": "manual_collision",
+                "detail": "collision",
+                "expected_service_name": "wizard-stack-my-farm-advisor",
+                "live_kind": "container",
+                "live_name": "my-farm-advisor-manual",
+                "managed": False,
+                "pack": "my-farm-advisor",
+                "scope": "stack:wizard-stack:my-farm-advisor",
+                "status": "Up 2 minutes",
+            }
+        ],
+        "inspection": {
+            "docker": {"available": True, "detail": "docker inspected"},
+            "host_routes": {"available": True, "detail": "routes inspected"},
+        },
+        "status": "drift_detected",
+        "summary": {
+            "wizard_managed": 0,
+            "manual_collision": 1,
+            "host_local_route": 0,
+            "unknown_unmanaged": 0,
+        },
+    }
+    monkeypatch.setattr(
+        cli,
+        "build_live_drift_report",
+        lambda **_: expected_live_drift,
+    )
+
+    assert (
+        cli._handle_inspect_state(
+            argparse.Namespace(
+                env_file=env_file,
+                state_dir=state_dir,
+                dry_run=False,
+            )
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["live_drift"] == expected_live_drift
+    assert json.loads((state_dir / "desired-state.json").read_text(encoding="utf-8")) == payload
+    assert (state_dir / "raw-input.json").exists()
+    assert not (state_dir / "applied-state.json").exists()
+    assert not (state_dir / "ownership-ledger.json").exists()
+
+
+def test_build_live_drift_report_classifies_required_collision_types(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
+            "STACK_NAME": "openmerge",
+            "ROOT_DOMAIN": "openmerge.me",
+            "PACKS": "my-farm-advisor,nextcloud,openclaw",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+    ownership_ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                "openclaw_service",
+                "svc-openclaw",
+                f"stack:{desired_state.stack_name}:openclaw",
+            ),
+        ),
+    )
+    route_file = tmp_path / "my-farm-advisor.yaml"
+    route_file.write_text(
+        "http:\n"
+        "  routers:\n"
+        "    farm:\n"
+        f"      rule: Host(`{desired_state.hostnames['my-farm-advisor']}`)\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(inspection_module, "_docker_cli_available", lambda: True)
+    monkeypatch.setattr(
+        inspection_module,
+        "_list_docker_services",
+        lambda: (f"{desired_state.stack_name}-advisor",),
+    )
+    monkeypatch.setattr(
+        inspection_module,
+        "_list_docker_containers",
+        lambda: (
+            {"name": "openclaw-manual", "status": "Up 5 minutes"},
+            {
+                "name": f"{desired_state.stack_name}-my-farm-advisor",
+                "status": "Exited (1) 10 seconds ago",
+            },
+            {"name": f"{desired_state.stack_name}-helper", "status": "Up 1 minute"},
+        ),
+    )
+    monkeypatch.setattr(
+        inspection_module,
+        "_list_service_task_statuses",
+        lambda service_name: ("Exited (1) 5 seconds ago",)
+        if service_name == f"{desired_state.stack_name}-advisor"
+        else (),
+    )
+    monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", (tmp_path,))
+
+    report = inspection_module.build_live_drift_report(
+        desired_state=desired_state,
+        ownership_ledger=ownership_ledger,
+    )
+
+    classifications = {entry["classification"] for entry in report["entries"]}
+    assert report["summary"]["wizard_managed"] == 1
+    assert report["summary"]["manual_collision"] >= 2
+    assert report["summary"]["host_local_route"] == 1
+    assert report["summary"]["unknown_unmanaged"] == 1
+    assert classifications == {
+        "wizard_managed",
+        "manual_collision",
+        "host_local_route",
+        "unknown_unmanaged",
+    }
+    wizard_entry = next(
+        entry for entry in report["entries"] if entry["classification"] == "wizard_managed"
+    )
+    assert wizard_entry["pack"] == "openclaw"
+    assert wizard_entry["health"] == "unhealthy"
+    manual_entries = [
+        entry for entry in report["entries"] if entry["classification"] == "manual_collision"
+    ]
+    assert any(entry["live_name"] == "openclaw-manual" for entry in manual_entries)
+    assert any(
+        entry["live_name"] == f"{desired_state.stack_name}-my-farm-advisor"
+        for entry in manual_entries
+    )
+    route_entry = next(
+        entry for entry in report["entries"] if entry["classification"] == "host_local_route"
+    )
+    assert route_entry["pack"] == "my-farm-advisor"
+    unknown_entry = next(
+        entry for entry in report["entries"] if entry["classification"] == "unknown_unmanaged"
+    )
+    assert unknown_entry["live_name"] == f"{desired_state.stack_name}-helper"
+
+
+def test_build_live_drift_report_recognizes_label_backed_managed_compose_containers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
+            "STACK_NAME": "openmerge",
+            "ROOT_DOMAIN": "openmerge.me",
+            "PACKS": "my-farm-advisor,nextcloud,openclaw",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+    ownership_ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                "openclaw_service",
+                "svc-openclaw",
+                f"stack:{desired_state.stack_name}:openclaw",
+            ),
+            OwnedResource(
+                "openclaw_service",
+                "svc-my-farm",
+                f"stack:{desired_state.stack_name}:my-farm-advisor",
+            ),
+            OwnedResource(
+                "onlyoffice_service",
+                "svc-onlyoffice",
+                f"stack:{desired_state.stack_name}:onlyoffice-service",
+            ),
+        ),
+    )
+    my_farm_container = "openmerge-my-farm-advisor-jy6axb-openmerge-my-farm-advisor-1"
+    onlyoffice_container = "openmerge-nextcloud-a5izk5-openmerge-onlyoffice-1"
+    my_farm_hostname = desired_state.hostnames["my-farm-advisor"]
+    onlyoffice_hostname = desired_state.hostnames["onlyoffice"]
+
+    monkeypatch.setattr(inspection_module, "_docker_cli_available", lambda: True)
+    monkeypatch.setattr(inspection_module, "_list_docker_services", lambda: ())
+    monkeypatch.setattr(
+        inspection_module,
+        "_list_docker_containers",
+        lambda: (
+            {
+                "name": my_farm_container,
+                "status": "Up 8 seconds (health: starting)",
+                "labels": {
+                    "dokploy-wizard.slot": "advisor_suite",
+                    "dokploy-wizard.variant": "my-farm-advisor",
+                    "traefik.http.routers.openmerge-my-farm-advisor.rule": (
+                        f"Host(`{my_farm_hostname}`)"
+                    ),
+                    "traefik.http.services.openmerge-my-farm-advisor.loadbalancer.server.port": (
+                        "18789"
+                    ),
+                },
+            },
+            {
+                "name": onlyoffice_container,
+                "status": "Up 21 hours (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-onlyoffice",
+                    "com.docker.compose.project": "openmerge-nextcloud-a5izk5",
+                    "traefik.http.routers.openmerge-onlyoffice.rule": (
+                        f"Host(`{onlyoffice_hostname}`)"
+                    ),
+                    "traefik.http.services.openmerge-onlyoffice.loadbalancer.server.port": "80",
+                },
+            },
+        ),
+    )
+    monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", ())
+
+    report = inspection_module.build_live_drift_report(
+        desired_state=desired_state,
+        ownership_ledger=ownership_ledger,
+    )
+
+    wizard_entries = [
+        entry for entry in report["entries"] if entry["classification"] == "wizard_managed"
+    ]
+    manual_entries = [
+        entry for entry in report["entries"] if entry["classification"] == "manual_collision"
+    ]
+
+    assert any(
+        entry["pack"] == "my-farm-advisor"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == my_farm_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "onlyoffice"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == onlyoffice_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "openclaw"
+        and entry["health"] == "missing"
+        and entry["live_name"] == f"{desired_state.stack_name}-advisor"
+        for entry in wizard_entries
+    )
+    assert not any(entry["live_name"] == my_farm_container for entry in manual_entries)
+    assert not any(entry["live_name"] == onlyoffice_container for entry in manual_entries)
+    assert report["summary"]["wizard_managed"] == 3
+    assert report["summary"]["manual_collision"] == 0
 
 
 def test_install_help_lists_task_three_flags() -> None:
@@ -129,6 +407,28 @@ def test_guided_install_prompts_include_dokploy_guidance() -> None:
     assert "Need help finding your Cloudflare token" in combined
     assert "Cloudflare zone ID (optional; press Enter to look up from example.com)" in combined
     assert "Tailscale auth key" not in combined
+
+
+def test_guided_install_defaults_dokploy_admin_password_to_change_me_soon() -> None:
+    responses = iter(
+        [
+            "example.com",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "n",
+            "n",
+            "cf-token",
+            "account-123",
+            "",
+        ]
+    )
+
+    values = prompt_for_initial_install_values(lambda _: next(responses))
+
+    assert values.dokploy_admin_password == "ChangeMeSoon"
 
 
 def test_install_parser_allows_missing_env_file() -> None:
@@ -194,6 +494,7 @@ def test_guided_install_writes_env_file_and_runs_install(
             seaweedfs_access_key=None,
             seaweedfs_secret_key=None,
             generated_secrets={},
+            advisor_env={},
             openclaw_channels=("telegram",),
             my_farm_advisor_channels=(),
         ),
@@ -223,6 +524,7 @@ def test_guided_install_writes_env_file_and_runs_install(
     assert "CLOUDFLARE_ZONE_ID" not in env_contents
     assert "PACKS=openclaw" in env_contents
     assert "OPENCLAW_CHANNELS=telegram" in env_contents
+    assert "OPENCLAW_GATEWAY_TOKEN=" not in env_contents
     assert captured["env_file"] == env_file
     assert captured["state_dir"] == custom_state_dir
     assert captured["dry_run"] is False
@@ -298,6 +600,7 @@ def test_guided_install_reuses_existing_seaweedfs_credentials(
                 "SEAWEEDFS_ACCESS_KEY": "seaweed-new",
                 "SEAWEEDFS_SECRET_KEY": "seaweed-secret-new",
             },
+            advisor_env={},
             openclaw_channels=(),
             my_farm_advisor_channels=(),
         ),
@@ -371,7 +674,7 @@ def test_install_persists_post_auth_target_before_later_failure(
     monkeypatch.setattr(
         cli,
         "DokployApiClient",
-        lambda *, api_url, api_key: type(
+        lambda *, api_url, api_key, **kwargs: type(
             "_ValidDokployClient",
             (),
             {
@@ -400,6 +703,7 @@ def test_install_persists_post_auth_target_before_later_failure(
     monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "ShellOpenClawBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
     monkeypatch.setattr(
         cli,
         "validate_preserved_phases",
@@ -465,6 +769,61 @@ def test_install_retry_accepts_stale_state_when_only_dokploy_api_url_differs(
         "_ensure_dokploy_api_auth",
         lambda **kwargs: kwargs["raw_env"],
     )
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    monkeypatch.setattr(cli, "write_target_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "ShellTailscaleBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "ShellOpenClawBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(
+        cli,
+        "execute_lifecycle_plan",
+        lambda **kwargs: {"lifecycle": {"mode": "noop"}, "state_status": "existing", "ok": True},
+    )
+
+    summary = cli.run_install_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=requested_raw,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    assert summary["lifecycle"]["mode"] == "noop"
+    assert summary["state_status"] == "existing"
+
+
+def test_install_retry_accepts_cloudflare_token_rotation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state"
+    existing_raw = parse_env_file(FIXTURES_DIR / "cloudflare-valid.env")
+    existing_desired = resolve_desired_state(existing_raw)
+    write_target_state(state_dir, existing_raw, existing_desired)
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=existing_desired.format_version,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=applicable_phases_for(existing_desired),
+        ),
+    )
+    write_ownership_ledger(
+        state_dir,
+        OwnershipLedger(format_version=existing_desired.format_version, resources=()),
+    )
+    requested_raw = RawEnvInput(
+        format_version=existing_raw.format_version,
+        values={
+            **existing_raw.values,
+            "CLOUDFLARE_API_TOKEN": "new-token-456",
+        },
+    )
+    monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
     monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
     monkeypatch.setattr(cli, "write_target_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "ShellTailscaleBackend", lambda _: cast(Any, object()))
@@ -797,6 +1156,152 @@ def test_install_rehydrates_guided_retry_keys_from_persisted_state(
     assert summary["state_status"] == "existing"
 
 
+def test_expected_ports_in_use_for_retry_includes_80_and_443_after_bootstrap() -> None:
+    loaded_state = type(
+        "LoadedState",
+        (),
+        {
+            "applied_state": AppliedStateCheckpoint(
+                format_version=1,
+                desired_state_fingerprint="fp-1",
+                completed_steps=("preflight", "dokploy_bootstrap"),
+            ),
+            "ownership_ledger": OwnershipLedger(
+                format_version=1,
+                resources=(
+                    OwnedResource(
+                        resource_type="cloudflare_tunnel",
+                        resource_id="tunnel-1",
+                        scope="account:account-1",
+                    ),
+                ),
+            ),
+        },
+    )()
+    lifecycle_plan = LifecyclePlan(
+        mode="resume",
+        reasons=("retry",),
+        applicable_phases=("preflight", "dokploy_bootstrap", "networking"),
+        phases_to_run=("networking",),
+        preserved_phases=("dokploy_bootstrap",),
+        initial_completed_steps=("preflight", "dokploy_bootstrap"),
+        start_phase="networking",
+        raw_equivalent=True,
+        desired_equivalent=True,
+    )
+
+    assert cli._expected_ports_in_use_for_retry(loaded_state, lifecycle_plan) == (
+        80,
+        443,
+        3000,
+    )
+
+
+def test_expected_ports_in_use_for_retry_allows_bootstrap_ports_when_resuming_at_bootstrap() -> (
+    None
+):
+    loaded_state = type(
+        "LoadedState",
+        (),
+        {
+            "applied_state": AppliedStateCheckpoint(
+                format_version=1,
+                desired_state_fingerprint="fp-1",
+                completed_steps=("preflight",),
+            ),
+            "ownership_ledger": OwnershipLedger(format_version=1, resources=()),
+        },
+    )()
+    lifecycle_plan = LifecyclePlan(
+        mode="resume",
+        reasons=("incomplete",),
+        applicable_phases=("preflight", "dokploy_bootstrap", "networking"),
+        phases_to_run=("dokploy_bootstrap", "networking"),
+        preserved_phases=("preflight",),
+        initial_completed_steps=("preflight",),
+        start_phase="dokploy_bootstrap",
+        raw_equivalent=True,
+        desired_equivalent=True,
+    )
+
+    assert cli._expected_ports_in_use_for_retry(loaded_state, lifecycle_plan) == (
+        80,
+        443,
+        3000,
+    )
+
+
+def test_install_resumes_from_first_preserved_phase_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    lifecycle_plan = LifecyclePlan(
+        mode="noop",
+        reasons=("state matches",),
+        applicable_phases=(
+            "preflight",
+            "dokploy_bootstrap",
+            "networking",
+            "cloudflare_access",
+            "shared_core",
+            "headscale",
+            "nextcloud",
+            "seaweedfs",
+            "openclaw",
+        ),
+        phases_to_run=(),
+        preserved_phases=(
+            "preflight",
+            "dokploy_bootstrap",
+            "networking",
+            "cloudflare_access",
+            "shared_core",
+            "headscale",
+            "nextcloud",
+            "seaweedfs",
+            "openclaw",
+        ),
+        initial_completed_steps=(
+            "preflight",
+            "dokploy_bootstrap",
+            "networking",
+            "cloudflare_access",
+            "shared_core",
+            "headscale",
+            "nextcloud",
+            "seaweedfs",
+            "openclaw",
+        ),
+        start_phase=None,
+        raw_equivalent=True,
+        desired_equivalent=True,
+    )
+
+    resumed = cli._resume_plan_from_drift(
+        lifecycle_plan=lifecycle_plan,
+        drift_error=LifecycleDriftError(
+            "Lifecycle drift detected before mutation: nextcloud: unhealthy",
+            report=DriftReport(
+                entries=(
+                    DriftEntry(phase="preflight", status="ok", detail="ok"),
+                    DriftEntry(phase="nextcloud", status="drift", detail="unhealthy"),
+                )
+            ),
+        ),
+    )
+
+    assert resumed.mode == "resume"
+    assert resumed.start_phase == "nextcloud"
+    assert resumed.preserved_phases == (
+        "preflight",
+        "dokploy_bootstrap",
+        "networking",
+        "cloudflare_access",
+        "shared_core",
+        "headscale",
+    )
+    assert resumed.phases_to_run == ("nextcloud", "seaweedfs", "openclaw")
+    assert resumed.initial_completed_steps == resumed.preserved_phases
+    assert "resuming from the first unhealthy preserved phase" in resumed.reasons[-1]
+
+
 def test_guided_dry_run_does_not_require_dokploy_admin_password() -> None:
     responses = iter(
         [
@@ -971,6 +1476,157 @@ def test_guided_install_generates_seaweedfs_credentials(monkeypatch: pytest.Monk
         "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
         "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
     }
+
+
+def test_guided_install_defaults_openclaw_to_telegram_when_matrix_disabled() -> None:
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        prompt_module,
+        "_generate_credential",
+        lambda prefix: f"{prefix}-generated",
+    )
+    responses = iter(
+        [
+            "n",  # matrix default stays no
+            "y",  # nextcloud default yes
+            "y",  # seaweedfs default yes
+            "y",  # openclaw default yes
+            "",  # openclaw channel default telegram
+            "y",  # nvidia key default yes
+            "nv-key",
+            "y",  # openrouter key default yes
+            "or-key",
+            "",  # primary model default nvidia/moonshotai/kimi-k2.5
+            "",  # fallback model default openrouter/openrouter/free
+            "bot-token",
+            "123456789",
+            "n",  # my farm advisor default no
+        ]
+    )
+
+    selection = prompt_module.prompt_for_pack_selection(
+        lambda _: next(responses),
+        include_headscale_prompt=False,
+    )
+    monkeypatch.undo()
+
+    assert selection.selected_packs == ("nextcloud", "openclaw", "seaweedfs")
+    assert selection.openclaw_channels == ("telegram",)
+    assert selection.generated_secrets == {
+        "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
+        "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
+    }
+    assert selection.advisor_env == {
+        "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
+        "OPENCLAW_NVIDIA_API_KEY": "nv-key",
+        "OPENCLAW_OPENROUTER_API_KEY": "or-key",
+        "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
+        "OPENCLAW_TELEGRAM_BOT_TOKEN": "bot-token",
+        "OPENCLAW_TELEGRAM_OWNER_USER_ID": "123456789",
+    }
+
+
+def test_guided_install_keeps_matrix_default_for_openclaw_when_matrix_enabled() -> None:
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        prompt_module,
+        "_generate_credential",
+        lambda prefix: f"{prefix}-generated",
+    )
+    responses = iter(
+        [
+            "y",  # matrix yes
+            "y",  # nextcloud default yes
+            "y",  # seaweedfs default yes
+            "y",  # openclaw default yes
+            "",  # default channel should become matrix
+            "y",
+            "nv-key",
+            "y",
+            "or-key",
+            "",
+            "",
+            "n",  # no telegram bot prompt because channel matrix only
+        ]
+    )
+
+    selection = prompt_module.prompt_for_pack_selection(
+        lambda _: next(responses),
+        include_headscale_prompt=False,
+    )
+    monkeypatch.undo()
+
+    assert selection.selected_packs == ("matrix", "nextcloud", "openclaw", "seaweedfs")
+    assert selection.openclaw_channels == ("matrix",)
+    assert selection.generated_secrets == {
+        "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
+        "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
+    }
+    assert selection.advisor_env["OPENCLAW_PRIMARY_MODEL"] == "nvidia/moonshotai/kimi-k2.5"
+    assert selection.advisor_env["OPENCLAW_FALLBACK_MODELS"] == "openrouter/openrouter/free"
+    assert "OPENCLAW_TELEGRAM_BOT_TOKEN" not in selection.advisor_env
+
+
+def test_append_operator_links_adds_openclaw_authorized_dashboard_url() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+                "OPENCLAW_GATEWAY_TOKEN": "token-123",
+            },
+        )
+    )
+    summary = {"openclaw": {"outcome": "applied"}}
+
+    cli._append_operator_links(summary, desired_state)
+
+    assert summary["openclaw"]["authorized_dashboard_url"] == (
+        "https://openclaw.example.com/#token=token-123"
+    )
+
+
+def test_append_operator_links_skips_when_token_absent() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    summary = {"openclaw": {"outcome": "applied"}}
+
+    cli._append_operator_links(summary, desired_state)
+
+    assert "authorized_dashboard_url" not in summary["openclaw"]
+
+
+def test_append_operator_links_skips_when_access_auth_handles_openclaw() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+                "OPENCLAW_GATEWAY_TOKEN": "token-123",
+            },
+        )
+    )
+    summary = {"openclaw": {"outcome": "applied"}}
+
+    cli._append_operator_links(summary, desired_state)
+
+    assert "authorized_dashboard_url" not in summary["openclaw"]
 
 
 def test_guided_install_prints_generated_seaweedfs_credentials(
@@ -1238,9 +1894,12 @@ def test_ensure_dokploy_api_auth_refreshes_invalid_existing_key(
     class ValidatingDokployClient:
         def __init__(self, *, api_url: str, api_key: str) -> None:
             assert api_url == "http://127.0.0.1:3000"
-            assert api_key == "fresh-key-123"
+            self.api_key = api_key
 
         def list_projects(self) -> tuple[object, ...]:
+            if self.api_key == "stale-key":
+                raise cli.DokployApiError("unauthorized")
+            assert self.api_key == "fresh-key-123"
             return ()
 
     monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
@@ -1256,6 +1915,58 @@ def test_ensure_dokploy_api_auth_refreshes_invalid_existing_key(
     )
 
     assert updated.values["DOKPLOY_API_KEY"] == "fresh-key-123"
+    assert updated.values["DOKPLOY_API_URL"] == "http://127.0.0.1:3000"
+
+
+def test_ensure_dokploy_api_auth_reuses_valid_existing_key_even_when_password_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "install.env"
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "guided-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "changed-password",
+            "DOKPLOY_API_KEY": "valid-key",
+            "DOKPLOY_API_URL": "http://127.0.0.1:3000",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    class FakeBootstrapBackend:
+        def is_healthy(self) -> bool:
+            return True
+
+        def install(self) -> None:
+            raise AssertionError("install should not be called")
+
+    class ValidDokployClient:
+        def __init__(self, *, api_url: str, api_key: str) -> None:
+            assert api_url == "http://127.0.0.1:3000"
+            assert api_key == "valid-key"
+
+        def list_projects(self) -> tuple[object, ...]:
+            return ()
+
+    def fail_refresh(**_: object) -> object:
+        raise AssertionError("bootstrap auth refresh should not be called")
+
+    monkeypatch.setattr(cli, "DokployApiClient", ValidDokployClient)
+    monkeypatch.setattr(cli, "_refresh_local_dokploy_api_key", fail_refresh)
+
+    updated = cli._ensure_dokploy_api_auth(
+        env_file=env_file,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        bootstrap_backend=FakeBootstrapBackend(),
+        dry_run=False,
+        require_real_dokploy_auth=True,
+    )
+
+    assert updated.values["DOKPLOY_API_KEY"] == "valid-key"
     assert updated.values["DOKPLOY_API_URL"] == "http://127.0.0.1:3000"
 
 
@@ -1464,6 +2175,473 @@ def test_install_rejects_mock_contamination_before_auth_bootstrap(
     assert "DOKPLOY_BOOTSTRAP_MOCK_API_KEY" in message
     assert "DOKPLOY_MOCK_API_MODE" in message
     assert "HEADSCALE_MOCK_HEALTHY" in message
+
+
+def test_install_rejects_blocking_live_drift_before_auth_bootstrap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_path = tmp_path / "install.env"
+    state_dir = tmp_path / "state"
+    clean_env = "\n".join(
+        line
+        for line in (FIXTURES_DIR / "lifecycle-headscale.env")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if not line.startswith(
+            (
+                "CLOUDFLARE_MOCK_",
+                "DOKPLOY_BOOTSTRAP_",
+                "DOKPLOY_MOCK_",
+                "HEADSCALE_MOCK_",
+            )
+        )
+    )
+    env_path.write_text(
+        clean_env + "\n",
+        encoding="utf-8",
+    )
+
+    def fail_if_scaffold_called(*_: object, **__: object) -> None:
+        raise AssertionError("persist_install_scaffold should not be reached")
+
+    def fail_if_called(**_: object) -> RawEnvInput:
+        raise AssertionError("_ensure_dokploy_api_auth should not be reached")
+
+    monkeypatch.setattr(cli, "persist_install_scaffold", fail_if_scaffold_called)
+    monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", fail_if_called)
+    monkeypatch.setattr(
+        cli,
+        "build_live_drift_report",
+        lambda **_: {
+            "detected": True,
+            "entries": [
+                {
+                    "classification": "manual_collision",
+                    "detail": "manual openclaw collision",
+                    "live_kind": "container",
+                    "live_name": "openclaw-manual",
+                    "pack": "openclaw",
+                },
+                {
+                    "classification": "manual_collision",
+                    "detail": "manual my-farm collision",
+                    "live_kind": "container",
+                    "live_name": "wizard-stack-my-farm-advisor",
+                    "pack": "my-farm-advisor",
+                },
+                {
+                    "classification": "wizard_managed",
+                    "detail": "managed my-farm unhealthy",
+                    "expected_service_name": "wizard-stack-my-farm-advisor",
+                    "health": "unhealthy",
+                    "live_name": "wizard-stack-my-farm-advisor",
+                    "managed": True,
+                    "pack": "my-farm-advisor",
+                    "scope": "stack:wizard-stack:my-farm-advisor",
+                },
+            ],
+            "inspection": {
+                "docker": {"available": True, "detail": "docker inspected"},
+                "host_routes": {"available": True, "detail": "routes inspected"},
+            },
+            "status": "drift_detected",
+            "summary": {
+                "wizard_managed": 1,
+                "manual_collision": 2,
+                "host_local_route": 0,
+                "unknown_unmanaged": 0,
+            },
+        },
+    )
+
+    with pytest.raises(SystemExit, match="Live drift is not allowed") as error:
+        cli._handle_install(
+            argparse.Namespace(
+                env_file=env_path,
+                state_dir=state_dir,
+                dry_run=False,
+                non_interactive=True,
+                no_print_secrets=False,
+                allow_memory_shortfall=False,
+            )
+        )
+
+    message = str(error.value)
+    assert not state_dir.exists()
+    assert "openclaw-manual" in message
+    assert "wizard-stack-my-farm-advisor" in message
+    assert "Migrate or remove the unowned runtime" in message
+    assert "inspect-state reports clean" in message
+
+
+def test_install_allows_clean_live_drift_report_to_proceed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_env = parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env")
+    monkeypatch.setattr(cli, "collect_host_facts", lambda _: _host_facts())
+    monkeypatch.setattr(cli, "_host_supports_prerequisite_remediation", lambda _: False)
+    monkeypatch.setattr(
+        cli,
+        "build_live_drift_report",
+        lambda **_: {
+            "detected": False,
+            "entries": [],
+            "inspection": {
+                "docker": {"available": True, "detail": "docker inspected"},
+                "host_routes": {"available": True, "detail": "routes inspected"},
+            },
+            "status": "clean",
+            "summary": {
+                "wizard_managed": 0,
+                "manual_collision": 0,
+                "host_local_route": 0,
+                "unknown_unmanaged": 0,
+            },
+        },
+    )
+    _stub_install_flow_after_preflight(monkeypatch)
+
+    summary = cli.run_install_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    assert summary["ok"] is True
+
+
+def test_install_retry_accepts_temp_env_without_dokploy_admin_creds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state"
+    existing_raw = RawEnvInput(
+        format_version=1,
+        values={
+            **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "secret-123",
+            "DOKPLOY_API_URL": "http://127.0.0.1:3000",
+            "DOKPLOY_API_KEY": "dokp-key-123",
+        },
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    write_target_state(state_dir, existing_raw, existing_desired)
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=existing_desired.format_version,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=applicable_phases_for(existing_desired),
+        ),
+    )
+    write_ownership_ledger(
+        state_dir,
+        OwnershipLedger(format_version=existing_desired.format_version, resources=()),
+    )
+    requested_raw = RawEnvInput(
+        format_version=existing_raw.format_version,
+        values={
+            key: value
+            for key, value in existing_raw.values.items()
+            if key not in {"DOKPLOY_ADMIN_EMAIL", "DOKPLOY_ADMIN_PASSWORD"}
+        },
+    )
+    monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    _stub_install_flow_after_preflight(monkeypatch)
+
+    summary = cli.run_install_flow(
+        env_file=tmp_path / "install.temp-no-admin.env",
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=requested_raw,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    assert summary["ok"] is True
+
+
+def test_dokploy_mutation_auth_qualification_detects_write_auth_failure_after_list_projects() -> (
+    None
+):
+    class FailingMutationClient:
+        def __init__(self, *, api_url: str, api_key: str, **_: Any) -> None:
+            assert api_url == "http://127.0.0.1:3000"
+            assert api_key == "dokp-key-123"
+
+        def list_projects(self) -> tuple[object, ...]:
+            return ()
+
+        def create_project(self, *, name: str, description: str | None, env: str | None) -> object:
+            del name, description, env
+            raise DokployApiError(
+                'Dokploy API request failed with status 401: {"message":"Unauthorized"}.'
+            )
+
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            **{
+                key: value
+                for key, value in parse_env_file(
+                    FIXTURES_DIR / "lifecycle-headscale.env"
+                ).values.items()
+                if key not in {"DOKPLOY_BOOTSTRAP_MOCK_API_KEY", "DOKPLOY_MOCK_API_MODE"}
+            },
+            "DOKPLOY_API_URL": "http://127.0.0.1:3000",
+            "DOKPLOY_API_KEY": "dokp-key-123",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(cli, "DokployApiClient", FailingMutationClient)
+        monkeypatch.setattr(cli, "_build_dokploy_session_client", lambda **_: None)
+
+        with pytest.raises(
+            StateValidationError,
+            match="Dokploy mutation auth qualification failed during project.create",
+        ):
+            cli._qualify_dokploy_mutation_auth(
+                raw_env=raw_env,
+                desired_state=desired_state,
+                dry_run=False,
+                require_real_dokploy_auth=True,
+            )
+
+
+def test_dokploy_mutation_auth_qualification_reuses_existing_probe_when_create_conflicts() -> None:
+    recorded: list[str] = []
+
+    class DuplicateThenUpdateClient:
+        def __init__(self, *, api_url: str, api_key: str, **_: Any) -> None:
+            assert api_url == "http://127.0.0.1:3000"
+            assert api_key == "dokp-key-123"
+
+        def list_projects(self) -> tuple[object, ...]:
+            return (
+                DokployProjectSummary(
+                    project_id="proj-1",
+                    name="wizard-stack-dokploy-wizard-auth-probe",
+                    environments=(
+                        DokployEnvironmentSummary(
+                            environment_id="env-1",
+                            name="default",
+                            is_default=True,
+                            composes=(
+                                DokployComposeSummary(
+                                    compose_id="cmp-1",
+                                    name="wizard-stack-dokploy-wizard-auth-probe",
+                                    status="done",
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+        def create_project(self, *, name: str, description: str | None, env: str | None) -> object:
+            del name, description, env
+            raise DokployApiError(
+                "Dokploy API request failed with status 409: compose already exists."
+            )
+
+        def update_compose(self, *, compose_id: str, compose_file: str) -> object:
+            del compose_file
+            recorded.append(f"update:{compose_id}")
+            return DokployComposeRecord(
+                compose_id=compose_id, name="wizard-stack-dokploy-wizard-auth-probe"
+            )
+
+        def deploy_compose(
+            self, *, compose_id: str, title: str | None, description: str | None
+        ) -> object:
+            del title, description
+            recorded.append(f"deploy:{compose_id}")
+            return DokployDeployResult(success=True, compose_id=compose_id, message=None)
+
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            **{
+                key: value
+                for key, value in parse_env_file(
+                    FIXTURES_DIR / "lifecycle-headscale.env"
+                ).values.items()
+                if key not in {"DOKPLOY_BOOTSTRAP_MOCK_API_KEY", "DOKPLOY_MOCK_API_MODE"}
+            },
+            "STACK_NAME": "wizard-stack",
+            "DOKPLOY_API_URL": "http://127.0.0.1:3000",
+            "DOKPLOY_API_KEY": "dokp-key-123",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(cli, "DokployApiClient", DuplicateThenUpdateClient)
+        monkeypatch.setattr(cli, "_build_dokploy_session_client", lambda **_: None)
+        cli._qualify_dokploy_mutation_auth(
+            raw_env=raw_env,
+            desired_state=desired_state,
+            dry_run=False,
+            require_real_dokploy_auth=True,
+        )
+
+    assert recorded == ["update:cmp-1", "deploy:cmp-1"]
+
+
+def test_dokploy_mutation_auth_qualification_fails_fast_when_deploy_remains_unauthorized() -> None:
+    class DeployUnauthorizedClient:
+        def __init__(self, *, api_url: str, api_key: str, **_: Any) -> None:
+            assert api_url == "http://127.0.0.1:3000"
+            assert api_key == "dokp-key-123"
+
+        def list_projects(self) -> tuple[object, ...]:
+            return ()
+
+        def create_project(self, *, name: str, description: str | None, env: str | None) -> object:
+            del name, description, env
+            return type("_Created", (), {"project_id": "proj-1", "environment_id": "env-1"})()
+
+        def create_compose(
+            self, *, name: str, environment_id: str, compose_file: str, app_name: str
+        ) -> object:
+            del name, environment_id, compose_file, app_name
+            return DokployComposeRecord(
+                compose_id="cmp-1", name="wizard-stack-dokploy-wizard-auth-probe"
+            )
+
+        def update_compose(self, *, compose_id: str, compose_file: str) -> object:
+            del compose_file
+            return DokployComposeRecord(
+                compose_id=compose_id, name="wizard-stack-dokploy-wizard-auth-probe"
+            )
+
+        def deploy_compose(
+            self, *, compose_id: str, title: str | None, description: str | None
+        ) -> object:
+            del compose_id, title, description
+            raise DokployApiError(
+                'Dokploy API request failed with status 401: {"message":"Unauthorized"}.'
+            )
+
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            **{
+                key: value
+                for key, value in parse_env_file(
+                    FIXTURES_DIR / "lifecycle-headscale.env"
+                ).values.items()
+                if key not in {"DOKPLOY_BOOTSTRAP_MOCK_API_KEY", "DOKPLOY_MOCK_API_MODE"}
+            },
+            "STACK_NAME": "wizard-stack",
+            "DOKPLOY_API_URL": "http://127.0.0.1:3000",
+            "DOKPLOY_API_KEY": "dokp-key-123",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(cli, "DokployApiClient", DeployUnauthorizedClient)
+        monkeypatch.setattr(cli, "_build_dokploy_session_client", lambda **_: None)
+        with pytest.raises(
+            StateValidationError,
+            match="Dokploy mutation auth qualification failed during compose.deploy",
+        ):
+            cli._qualify_dokploy_mutation_auth(
+                raw_env=raw_env,
+                desired_state=desired_state,
+                dry_run=False,
+                require_real_dokploy_auth=True,
+            )
+
+
+def test_live_drift_entry_blocks_mutation_allows_missing_managed_service() -> None:
+    assert (
+        cli._live_drift_entry_blocks_mutation(
+            {
+                "classification": "wizard_managed",
+                "pack": "openclaw",
+                "health": "missing",
+                "live_name": "openmerge-advisor",
+            }
+        )
+        is False
+    )
+    assert (
+        cli._live_drift_entry_blocks_mutation(
+            {
+                "classification": "wizard_managed",
+                "pack": "openclaw",
+                "health": "unhealthy",
+                "live_name": "openmerge-advisor",
+            }
+        )
+        is True
+    )
+    assert (
+        cli._live_drift_entry_blocks_mutation(
+            {
+                "classification": "wizard_managed",
+                "pack": "openclaw",
+                "health": "unknown",
+                "live_name": "openmerge-advisor",
+            }
+        )
+        is True
+    )
+
+
+def test_install_allows_missing_managed_service_drift_to_proceed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_env = parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env")
+    monkeypatch.setattr(cli, "collect_host_facts", lambda _: _host_facts())
+    monkeypatch.setattr(cli, "_host_supports_prerequisite_remediation", lambda _: False)
+    monkeypatch.setattr(
+        cli,
+        "build_live_drift_report",
+        lambda **_: {
+            "detected": True,
+            "entries": [
+                {
+                    "classification": "wizard_managed",
+                    "detail": "managed openclaw missing",
+                    "expected_service_name": "wizard-stack-advisor",
+                    "health": "missing",
+                    "live_name": "wizard-stack-advisor",
+                    "managed": True,
+                    "pack": "openclaw",
+                    "scope": "stack:wizard-stack:openclaw",
+                }
+            ],
+            "inspection": {
+                "docker": {"available": True, "detail": "docker inspected"},
+                "host_routes": {"available": True, "detail": "routes inspected"},
+            },
+            "status": "drift_detected",
+            "summary": {
+                "wizard_managed": 1,
+                "manual_collision": 0,
+                "host_local_route": 0,
+                "unknown_unmanaged": 0,
+            },
+        },
+    )
+    _stub_install_flow_after_preflight(monkeypatch)
+
+    summary = cli.run_install_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    assert summary["ok"] is True
 
 
 def test_install_bootstraps_missing_docker_before_strict_preflight_rerun(
@@ -1937,6 +3115,94 @@ def test_install_leaves_supported_host_prerequisites_as_idempotent_noop(
     }
 
 
+def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_env = parse_env_file(FIXTURES_DIR / "full.env")
+    values = dict(raw_env.values)
+    values.pop("DOKPLOY_BOOTSTRAP_MOCK_API_KEY", None)
+    values["DOKPLOY_API_URL"] = "http://127.0.0.1:3000"
+    values["DOKPLOY_API_KEY"] = "dokp-key-123"
+    values["DOKPLOY_ADMIN_EMAIL"] = "admin@example.com"
+    values["DOKPLOY_ADMIN_PASSWORD"] = "secret-123"
+    values["ENABLE_SEAWEEDFS"] = "true"
+    values["SEAWEEDFS_ACCESS_KEY"] = "seaweed-access"
+    values["SEAWEEDFS_SECRET_KEY"] = "seaweed-secret"
+    raw_env = RawEnvInput(format_version=raw_env.format_version, values=values)
+    seen_session_clients: list[object] = []
+    sentinel_session_client = object()
+
+    class FakeLoadedState:
+        raw_input = None
+        desired_state = None
+        applied_state = None
+        ownership_ledger = None
+
+    required_profile = derive_required_profile(resolve_desired_state(raw_env))
+
+    monkeypatch.setattr(cli, "load_state_dir", lambda state_dir: FakeLoadedState())
+    monkeypatch.setattr(cli, "parse_env_file", lambda env_file: raw_env)
+    monkeypatch.setattr(cli, "collect_host_facts", lambda raw: _host_facts())
+    monkeypatch.setattr(
+        cli,
+        "_run_preflight_report",
+        lambda **_: PreflightReport(
+            host_facts=_host_facts(),
+            required_profile=required_profile,
+            checks=(PreflightCheck(name="preflight", status="pass", detail="ok"),),
+            advisories=(),
+        ),
+    )
+    monkeypatch.setattr(cli, "persist_install_scaffold", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
+    monkeypatch.setattr(cli, "_qualify_dokploy_mutation_auth", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    monkeypatch.setattr(cli, "write_target_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "ShellTailscaleBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(
+        cli,
+        "_build_dokploy_session_client",
+        lambda **kwargs: sentinel_session_client,
+    )
+
+    def record_backend(**kwargs: Any) -> object:
+        seen_session_clients.append(kwargs["session_client"])
+        return cast(Any, object())
+
+    monkeypatch.setattr(cli, "_build_shared_core_backend", record_backend)
+    monkeypatch.setattr(cli, "_build_headscale_backend", record_backend)
+    monkeypatch.setattr(cli, "_build_matrix_backend", record_backend)
+    monkeypatch.setattr(cli, "_build_nextcloud_backend", record_backend)
+    monkeypatch.setattr(cli, "_build_seaweedfs_backend", record_backend)
+    monkeypatch.setattr(cli, "_build_openclaw_backend", record_backend)
+    monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})
+
+    cli._run_lifecycle_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=_FakeBootstrapBackend(),
+        tailscale_backend=None,
+        networking_backend=None,
+        shared_core_backend=None,
+        headscale_backend=None,
+        matrix_backend=None,
+        nextcloud_backend=None,
+        seaweedfs_backend=None,
+        openclaw_backend=None,
+        allow_modify=False,
+        remediate_install_host_prereqs=False,
+        allow_memory_shortfall=True,
+        prompt_for_memory_shortfall=False,
+        enforce_live_run_contamination_check=False,
+    )
+
+    assert len(seen_session_clients) == 6
+    assert all(client is sentinel_session_client for client in seen_session_clients)
+
+
 def test_install_prompts_before_continuing_on_memory_only_shortfall(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2153,6 +3419,102 @@ def test_modify_rejects_mock_contamination_before_auth_bootstrap(
     assert "DOKPLOY_BOOTSTRAP_MOCK_API_KEY" in message
     assert "DOKPLOY_MOCK_API_MODE" in message
     assert "HEADSCALE_MOCK_HEALTHY" in message
+
+
+def test_modify_rejects_host_local_route_drift_before_auth_bootstrap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state"
+    clean_env = "\n".join(
+        line
+        for line in (FIXTURES_DIR / "lifecycle-headscale.env")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if not line.startswith(
+            (
+                "CLOUDFLARE_MOCK_",
+                "DOKPLOY_BOOTSTRAP_",
+                "DOKPLOY_MOCK_",
+                "HEADSCALE_MOCK_",
+            )
+        )
+    )
+    clean_env_path = tmp_path / "existing.env"
+    clean_env_path.write_text(clean_env + "\n", encoding="utf-8")
+    existing_raw = parse_env_file(clean_env_path)
+    existing_desired = resolve_desired_state(existing_raw)
+    write_target_state(state_dir, existing_raw, existing_desired)
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=existing_desired.format_version,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=applicable_phases_for(existing_desired),
+        ),
+    )
+    write_ownership_ledger(
+        state_dir,
+        OwnershipLedger(format_version=existing_desired.format_version, resources=()),
+    )
+    modify_env_path = tmp_path / "modify.env"
+    modify_env_path.write_text(
+        clean_env.replace("ROOT_DOMAIN=example.com", "ROOT_DOMAIN=example.net"),
+        encoding="utf-8",
+    )
+
+    def fail_if_called(**_: object) -> RawEnvInput:
+        raise AssertionError("_ensure_dokploy_api_auth should not be reached")
+
+    monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", fail_if_called)
+    monkeypatch.setattr(
+        cli,
+        "build_live_drift_report",
+        lambda **_: {
+            "detected": True,
+            "entries": [
+                {
+                    "classification": "host_local_route",
+                    "detail": "manual my-farm route file",
+                    "hostname": "farm.example.net",
+                    "pack": "my-farm-advisor",
+                    "path": "/etc/traefik/dynamic/openmerge-farm.yml",
+                },
+                {
+                    "classification": "host_local_route",
+                    "detail": "manual onlyoffice route file",
+                    "hostname": "office.example.net",
+                    "pack": "onlyoffice",
+                    "path": "/etc/traefik/dynamic/openmerge-onlyoffice.yml",
+                },
+            ],
+            "inspection": {
+                "docker": {"available": True, "detail": "docker inspected"},
+                "host_routes": {"available": True, "detail": "routes inspected"},
+            },
+            "status": "drift_detected",
+            "summary": {
+                "wizard_managed": 0,
+                "manual_collision": 0,
+                "host_local_route": 2,
+                "unknown_unmanaged": 0,
+            },
+        },
+    )
+
+    with pytest.raises(SystemExit, match="Live drift is not allowed") as error:
+        cli._handle_modify(
+            argparse.Namespace(
+                env_file=modify_env_path,
+                state_dir=state_dir,
+                dry_run=False,
+                non_interactive=True,
+            )
+        )
+
+    message = str(error.value)
+    assert "/etc/traefik/dynamic/openmerge-farm.yml" in message
+    assert "/etc/traefik/dynamic/openmerge-onlyoffice.yml" in message
+    assert "Dokploy-managed ingress" in message
 
 
 def test_modify_does_not_gain_host_prerequisite_remediation(

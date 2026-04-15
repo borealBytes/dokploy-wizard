@@ -164,7 +164,53 @@ def test_modify_access_email_change_reruns_access_phase() -> None:
     )
 
     assert plan.start_phase == "cloudflare_access"
-    assert plan.phases_to_run == ("cloudflare_access",)
+    assert plan.phases_to_run == ("cloudflare_access", "openclaw")
+
+
+def test_modify_dokploy_admin_credential_change_reruns_nextcloud() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_NEXTCLOUD": "true",
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "ChangeMeSoon",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_NEXTCLOUD": "true",
+            "DOKPLOY_ADMIN_EMAIL": "clayton@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "ChangeMeSoon",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "headscale",
+                "nextcloud",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.start_phase == "nextcloud"
+    assert plan.phases_to_run == ("nextcloud",)
 
 
 def test_modify_rejects_stack_name_change() -> None:
@@ -314,7 +360,20 @@ def test_modify_rejects_unmodeled_env_changes() -> None:
 def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
     assert get_mutable_pack_env_keys() == (
         "MY_FARM_ADVISOR_CHANNELS",
+        "MY_FARM_ADVISOR_FALLBACK_MODELS",
+        "MY_FARM_ADVISOR_NVIDIA_API_KEY",
+        "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
+        "MY_FARM_ADVISOR_PRIMARY_MODEL",
+        "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
+        "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
         "OPENCLAW_CHANNELS",
+        "OPENCLAW_FALLBACK_MODELS",
+        "OPENCLAW_GATEWAY_TOKEN",
+        "OPENCLAW_NVIDIA_API_KEY",
+        "OPENCLAW_OPENROUTER_API_KEY",
+        "OPENCLAW_PRIMARY_MODEL",
+        "OPENCLAW_TELEGRAM_BOT_TOKEN",
+        "OPENCLAW_TELEGRAM_OWNER_USER_ID",
     )
 
 
@@ -419,3 +478,53 @@ def test_modify_openclaw_channels_change_uses_pack_mutable_contract() -> None:
     assert plan.mode == "modify"
     assert "OPENCLAW_CHANNELS" in plan.reasons[0]
     assert plan.phases_to_run == ("networking", "shared_core", "matrix", "openclaw")
+
+
+def test_modify_openclaw_gateway_token_change_uses_pack_mutable_contract() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_GATEWAY_TOKEN": "token-a",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_GATEWAY_TOKEN": "token-b",
+        }
+    )
+
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "cloudflare_access",
+                "shared_core",
+                "headscale",
+                "openclaw",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert "OPENCLAW_GATEWAY_TOKEN" in plan.reasons[0]
+    assert plan.start_phase == "openclaw"
+    assert plan.phases_to_run == ("openclaw",)
