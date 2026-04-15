@@ -13,21 +13,39 @@ from dokploy_wizard.networking import (
     reconcile_cloudflare_access,
     reconcile_networking,
 )
-from dokploy_wizard.packs.headscale import HeadscaleBackend, reconcile_headscale
+from dokploy_wizard.networking.planner import _build_tunnel_ingress
+from dokploy_wizard.packs.headscale import (
+    HeadscaleBackend,
+    HeadscaleResourceRecord,
+    reconcile_headscale,
+)
 from dokploy_wizard.packs.matrix import MatrixBackend, reconcile_matrix
-from dokploy_wizard.packs.nextcloud import NextcloudBackend, reconcile_nextcloud
+from dokploy_wizard.packs.nextcloud import (
+    NextcloudBackend,
+    NextcloudResourceRecord,
+    reconcile_nextcloud,
+)
 from dokploy_wizard.packs.openclaw import (
     OpenClawBackend,
+    OpenClawResourceRecord,
     reconcile_my_farm_advisor,
     reconcile_openclaw,
 )
-from dokploy_wizard.packs.seaweedfs import SeaweedFsBackend, reconcile_seaweedfs
+from dokploy_wizard.packs.seaweedfs import (
+    SeaweedFsBackend,
+    SeaweedFsResourceRecord,
+    reconcile_seaweedfs,
+)
 from dokploy_wizard.state.models import DesiredState, OwnershipLedger, RawEnvInput
 from dokploy_wizard.tailscale import TailscaleBackend, reconcile_tailscale
 
 
 class LifecycleDriftError(RuntimeError):
     """Raised when preserved lifecycle phases drift from persisted ownership/state."""
+
+    def __init__(self, message: str, *, report: "DriftReport") -> None:
+        super().__init__(message)
+        self.report = report
 
 
 @dataclass(frozen=True)
@@ -94,7 +112,10 @@ def validate_preserved_phases(
         details = "; ".join(
             f"{entry.phase}: {entry.detail}" for entry in report.entries if entry.status == "drift"
         )
-        raise LifecycleDriftError(f"Lifecycle drift detected before mutation: {details}")
+        raise LifecycleDriftError(
+            f"Lifecycle drift detected before mutation: {details}",
+            report=report,
+        )
     return report
 
 
@@ -166,6 +187,34 @@ def _validate_phase(
                         f"Networking expected only owned reuse, found actions {sorted(actions)}."
                     ),
                 )
+            tunnel = networking_result.tunnel
+            account_id = raw_env.values.get("CLOUDFLARE_ACCOUNT_ID")
+            if not account_id:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=(
+                        "Cloudflare account id is missing, so tunnel configuration "
+                        "cannot be validated."
+                    ),
+                )
+            get_tunnel_configuration = getattr(networking_backend, "get_tunnel_configuration", None)
+            if (
+                callable(get_tunnel_configuration)
+                and raw_env.values.get("CLOUDFLARE_MOCK_ACCOUNT_OK") != "true"
+            ):
+                desired_ingress = _build_tunnel_ingress(desired_state)
+                live_ingress = get_tunnel_configuration(account_id, tunnel.tunnel_id)
+                if live_ingress != desired_ingress:
+                    return DriftEntry(
+                        phase=phase,
+                        status="drift",
+                        detail=(
+                            "Cloudflare tunnel ingress no longer matches the desired "
+                            "wizard configuration; "
+                            "rerun the networking phase."
+                        ),
+                    )
             return DriftEntry(
                 phase=phase, status="ok", detail="Networking ownership remains aligned."
             )
@@ -186,6 +235,18 @@ def _validate_phase(
                 *(item.action for item in access.applications),
                 *(item.action for item in access.policies),
             }
+            if _is_repairable_legacy_cloudflare_access_gap(
+                actions=actions,
+                ownership_ledger=ownership_ledger,
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="ok",
+                    detail=(
+                        "Cloudflare Access ownership uses the legacy no-ledger pattern; "
+                        "allowing repairable create/reuse_existing rerun for this preserved phase."
+                    ),
+                )
             if actions != {"reuse_owned"}:
                 return DriftEntry(
                     phase=phase,
@@ -219,6 +280,25 @@ def _validate_phase(
                     status="drift",
                     detail=f"Shared core expected owned reuse, found actions {sorted(actions)}.",
                 )
+            validate_allocations = getattr(
+                shared_core_backend, "validate_postgres_allocations", None
+            )
+            if callable(validate_allocations):
+                postgres_allocations = tuple(
+                    allocation.postgres
+                    for allocation in desired_state.shared_core.allocations
+                    if allocation.postgres is not None
+                )
+                if not validate_allocations(postgres_allocations):
+                    return DriftEntry(
+                        phase=phase,
+                        status="drift",
+                        detail=(
+                            "Shared-core Postgres allocations are not ready for all preserved "
+                            "packs; "
+                            "rerun the phase."
+                        ),
+                    )
             return DriftEntry(
                 phase=phase, status="ok", detail="Shared core ownership remains aligned."
             )
@@ -237,6 +317,27 @@ def _validate_phase(
                     phase=phase,
                     status="drift",
                     detail=f"Headscale expected owned reuse, found action {action!r}.",
+                )
+            if headscale.health_check is None:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="Headscale health check metadata is missing for a preserved phase.",
+                )
+            if not headscale_backend.check_health(
+                service=HeadscaleResourceRecord(
+                    resource_id=headscale.service.resource_id,
+                    resource_name=headscale.service.resource_name,
+                ),
+                url=headscale.health_check.url,
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=(
+                        f"Headscale health check no longer passes for "
+                        f"{headscale.health_check.url!r}."
+                    ),
                 )
             return DriftEntry(
                 phase=phase, status="ok", detail="Headscale ownership remains aligned."
@@ -278,6 +379,34 @@ def _validate_phase(
                     status="drift",
                     detail=f"Nextcloud expected owned reuse, found actions {sorted(actions)}.",
                 )
+            if (
+                nextcloud.nextcloud is None
+                or nextcloud.onlyoffice is None
+                or nextcloud.nextcloud.health_check is None
+                or nextcloud.onlyoffice.health_check is None
+                or not nextcloud_backend.check_health(
+                    service=NextcloudResourceRecord(
+                        resource_id=nextcloud.nextcloud.service.resource_id,
+                        resource_name=nextcloud.nextcloud.service.resource_name,
+                    ),
+                    url=nextcloud.nextcloud.health_check.url,
+                )
+                or not nextcloud_backend.check_health(
+                    service=NextcloudResourceRecord(
+                        resource_id=nextcloud.onlyoffice.service.resource_id,
+                        resource_name=nextcloud.onlyoffice.service.resource_name,
+                    ),
+                    url=nextcloud.onlyoffice.health_check.url,
+                )
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=(
+                        "Nextcloud or OnlyOffice is no longer healthy enough to "
+                        "preserve; rerun the phase."
+                    ),
+                )
             return DriftEntry(
                 phase=phase, status="ok", detail="Nextcloud ownership remains aligned."
             )
@@ -301,6 +430,27 @@ def _validate_phase(
                     status="drift",
                     detail=f"SeaweedFS expected owned reuse, found actions {sorted(actions)}.",
                 )
+            if seaweedfs.health_check is None:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="SeaweedFS health check metadata is missing for a preserved phase.",
+                )
+            if seaweedfs.service is None or not seaweedfs_backend.check_health(
+                service=SeaweedFsResourceRecord(
+                    resource_id=seaweedfs.service.resource_id,
+                    resource_name=seaweedfs.service.resource_name,
+                ),
+                url=seaweedfs.health_check.url,
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=(
+                        f"SeaweedFS health check no longer passes for "
+                        f"{seaweedfs.health_check.url!r}."
+                    ),
+                )
             return DriftEntry(
                 phase=phase, status="ok", detail="SeaweedFS ownership remains aligned."
             )
@@ -319,6 +469,27 @@ def _validate_phase(
                     phase=phase,
                     status="drift",
                     detail=f"OpenClaw expected owned reuse, found action {action!r}.",
+                )
+            if advisor.health_check is None:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="OpenClaw health check metadata is missing for a preserved phase.",
+                )
+            if not openclaw_backend.check_health(
+                service=OpenClawResourceRecord(
+                    resource_id=advisor.service.resource_id,
+                    resource_name=advisor.service.resource_name,
+                    replicas=desired_state.openclaw_replicas or 1,
+                ),
+                url=advisor.health_check.url,
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=(
+                        f"OpenClaw health check no longer passes for {advisor.health_check.url!r}."
+                    ),
                 )
             return DriftEntry(
                 phase=phase, status="ok", detail="OpenClaw ownership remains aligned."
@@ -341,6 +512,30 @@ def _validate_phase(
                     status="drift",
                     detail=f"My Farm Advisor expected owned reuse, found action {action!r}.",
                 )
+            if advisor.health_check is None:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=(
+                        "My Farm Advisor health check metadata is missing for a preserved phase."
+                    ),
+                )
+            if not openclaw_backend.check_health(
+                service=OpenClawResourceRecord(
+                    resource_id=advisor.service.resource_id,
+                    resource_name=advisor.service.resource_name,
+                    replicas=desired_state.my_farm_advisor_replicas or 1,
+                ),
+                url=advisor.health_check.url,
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=(
+                        f"My Farm Advisor health check no longer passes for "
+                        f"{advisor.health_check.url!r}."
+                    ),
+                )
             return DriftEntry(
                 phase=phase,
                 status="ok",
@@ -361,3 +556,14 @@ def _nextcloud_actions(result: Any) -> tuple[dict[str, str], ...]:
         resources.append(service.service.to_dict())
         resources.append(service.data_volume.to_dict())
     return tuple(resources)
+
+
+def _is_repairable_legacy_cloudflare_access_gap(
+    *, actions: set[str], ownership_ledger: OwnershipLedger
+) -> bool:
+    if actions != {"create", "reuse_existing"}:
+        return False
+    return not any(
+        resource.resource_type.startswith("cloudflare_access_")
+        for resource in ownership_ledger.resources
+    )

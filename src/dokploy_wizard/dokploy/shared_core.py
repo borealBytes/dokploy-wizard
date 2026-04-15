@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import shlex
+import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from dokploy_wizard.core import SharedCoreError, SharedCorePlan, SharedCoreResourceRecord
+from dokploy_wizard.core import (
+    SharedCoreError,
+    SharedCorePlan,
+    SharedCoreResourceRecord,
+    SharedPostgresAllocation,
+)
 from dokploy_wizard.dokploy.client import (
     DokployApiClient,
     DokployApiError,
@@ -51,12 +60,15 @@ class DokploySharedCoreBackend:
         stack_name: str,
         plan: SharedCorePlan,
         client: DokploySharedCoreApi | None = None,
+        allocation_provisioner: Callable[[tuple[SharedPostgresAllocation, ...]], None]
+        | None = None,
     ) -> None:
         self._stack_name = stack_name
         self._plan = plan
         self._compose_name = plan.network_name
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
+        self._allocation_provisioner = allocation_provisioner
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self._lookup_locator(resource_id, "network") is None:
@@ -112,6 +124,43 @@ class DokploySharedCoreBackend:
             resource_id=_resource_id(locator.compose_id, "postgres"),
             resource_name=resource_name,
         )
+
+    def ensure_postgres_allocations(
+        self, allocations: tuple[SharedPostgresAllocation, ...]
+    ) -> None:
+        if self._plan.postgres is None or not allocations:
+            return
+        if self._allocation_provisioner is not None:
+            self._allocation_provisioner(allocations)
+            return
+        container_name = _wait_for_container_name(self._plan.postgres.service_name)
+        if container_name is None:
+            raise SharedCoreError(
+                "Shared-core Postgres container is not running; "
+                "cannot provision per-pack databases."
+            )
+        _wait_for_postgres_ready(container_name)
+        for allocation in allocations:
+            password = _postgres_password_for_allocation(allocation)
+            _ensure_postgres_role(container_name, allocation.user_name, password)
+            _ensure_postgres_database(
+                container_name,
+                allocation.database_name,
+                allocation.user_name,
+            )
+
+    def validate_postgres_allocations(
+        self, allocations: tuple[SharedPostgresAllocation, ...]
+    ) -> bool:
+        if self._plan.postgres is None or not allocations:
+            return True
+        container_name = _find_container_name(self._plan.postgres.service_name)
+        if container_name is None:
+            return False
+        for allocation in allocations:
+            if not _can_connect_as_allocation(container_name, allocation):
+                return False
+        return True
 
     def get_redis_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self._plan.redis is None or self._lookup_locator(resource_id, "redis") is None:
@@ -311,3 +360,160 @@ def _render_compose_file(plan: SharedCorePlan) -> str:
         "volumes:\n"
         f"{volume_block or '  {}\n'}"
     )
+
+
+def _find_container_name(service_name: str) -> str | None:
+    result = subprocess.run(
+        [
+            "docker",
+            "ps",
+            "--format",
+            '{{.Names}}\t{{.Label "com.docker.compose.service"}}',
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        name, _, compose_service = line.partition("\t")
+        if compose_service == service_name:
+            return name
+    return None
+
+
+def _wait_for_container_name(
+    service_name: str, *, attempts: int = 20, delay_seconds: float = 3.0
+) -> str | None:
+    for attempt in range(attempts):
+        container_name = _find_container_name(service_name)
+        if container_name is not None:
+            return container_name
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return None
+
+
+def _wait_for_postgres_ready(
+    container_name: str, *, attempts: int = 20, delay_seconds: float = 3.0
+) -> None:
+    for attempt in range(attempts):
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                container_name,
+                "sh",
+                "-lc",
+                'PGPASSWORD="$POSTGRES_PASSWORD" pg_isready -h 127.0.0.1 -U postgres -d postgres',
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    detail = (result.stderr or result.stdout).strip()
+    raise SharedCoreError(
+        "Shared-core Postgres did not become ready for allocation provisioning: "
+        f"{detail or 'unknown error'}"
+    )
+
+
+def _postgres_password_for_allocation(allocation: SharedPostgresAllocation) -> str:
+    del allocation
+    return "change-me"
+
+
+def _ensure_postgres_role(container_name: str, user_name: str, password: str) -> None:
+    exists = _run_psql_scalar(
+        container_name,
+        f"SELECT 1 FROM pg_roles WHERE rolname = '{_sql_literal(user_name)}';",
+    )
+    if exists == "1":
+        _run_psql(
+            container_name,
+            f'ALTER ROLE "{_sql_ident(user_name)}" '
+            f"WITH LOGIN PASSWORD '{_sql_literal(password)}';",
+        )
+        return
+    _run_psql(
+        container_name,
+        f"CREATE ROLE \"{_sql_ident(user_name)}\" WITH LOGIN PASSWORD '{_sql_literal(password)}';",
+    )
+
+
+def _ensure_postgres_database(container_name: str, database_name: str, owner_name: str) -> None:
+    exists = _run_psql_scalar(
+        container_name,
+        f"SELECT 1 FROM pg_database WHERE datname = '{_sql_literal(database_name)}';",
+    )
+    if exists != "1":
+        _run_psql(
+            container_name,
+            f'CREATE DATABASE "{_sql_ident(database_name)}" OWNER "{_sql_ident(owner_name)}";',
+        )
+        return
+    _run_psql(
+        container_name,
+        f'ALTER DATABASE "{_sql_ident(database_name)}" OWNER TO "{_sql_ident(owner_name)}";',
+    )
+    _run_psql(
+        container_name,
+        f'GRANT ALL PRIVILEGES ON DATABASE "{_sql_ident(database_name)}" '
+        f'TO "{_sql_ident(owner_name)}";',
+    )
+
+
+def _can_connect_as_allocation(container_name: str, allocation: SharedPostgresAllocation) -> bool:
+    password = _postgres_password_for_allocation(allocation)
+    shell = (
+        f"PGPASSWORD={shlex.quote(password)} "
+        "psql -h 127.0.0.1 "
+        f"-U {shlex.quote(allocation.user_name)} "
+        f"-d {shlex.quote(allocation.database_name)} "
+        "-v ON_ERROR_STOP=1 -tAc 'SELECT 1'"
+    )
+    result = subprocess.run(
+        ["docker", "exec", container_name, "sh", "-lc", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "1"
+
+
+def _run_psql_scalar(container_name: str, sql: str) -> str:
+    result = _run_psql(container_name, sql)
+    return result.stdout.strip()
+
+
+def _run_psql(container_name: str, sql: str) -> subprocess.CompletedProcess[str]:
+    shell = (
+        'PGPASSWORD="$POSTGRES_PASSWORD" '
+        "psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 "
+        f"-tAc {shlex.quote(sql)}"
+    )
+    result = subprocess.run(
+        ["docker", "exec", container_name, "sh", "-lc", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise SharedCoreError(
+            f"Shared-core Postgres provisioning failed: {detail or 'unknown error'}"
+        )
+    return result
+
+
+def _sql_literal(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _sql_ident(value: str) -> str:
+    return value.replace('"', '""')

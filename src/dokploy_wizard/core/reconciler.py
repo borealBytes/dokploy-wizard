@@ -11,6 +11,7 @@ from dokploy_wizard.core.models import (
     SharedCorePlan,
     SharedCoreResourceRecord,
     SharedCoreResult,
+    SharedPostgresAllocation,
 )
 from dokploy_wizard.state.models import DesiredState, OwnedResource, OwnershipLedger
 
@@ -80,6 +81,11 @@ class ShellSharedCoreBackend:
     def create_redis_service(self, resource_name: str) -> SharedCoreResourceRecord:
         return SharedCoreResourceRecord(resource_id=resource_name, resource_name=resource_name)
 
+    def ensure_postgres_allocations(
+        self, allocations: tuple[SharedPostgresAllocation, ...]
+    ) -> None:
+        del allocations
+
 
 def reconcile_shared_core(
     *,
@@ -131,6 +137,16 @@ def reconcile_shared_core(
         find_by_name=backend.find_redis_service_by_name,
         create_resource=backend.create_redis_service,
     )
+    if not dry_run and postgres is not None:
+        ensure_postgres_allocations = getattr(backend, "ensure_postgres_allocations", None)
+        if callable(ensure_postgres_allocations):
+            ensure_postgres_allocations(
+                tuple(
+                    allocation.postgres
+                    for allocation in plan.allocations
+                    if allocation.postgres is not None
+                )
+            )
     actions = [network.action]
     if postgres is not None:
         actions.append(postgres.action)

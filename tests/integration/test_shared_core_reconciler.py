@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from dokploy_wizard.cli import run_install_flow
-from dokploy_wizard.core import SharedCoreResourceRecord
-from dokploy_wizard.core.reconciler import reconcile_shared_core
+from dokploy_wizard.core import SharedCoreResourceRecord, SharedPostgresAllocation
+from dokploy_wizard.core.reconciler import SharedCoreError, reconcile_shared_core
 from dokploy_wizard.dokploy import (
     DokployComposeRecord,
     DokployComposeSummary,
@@ -19,7 +19,6 @@ from dokploy_wizard.dokploy import (
     DokployProjectSummary,
     DokploySharedCoreBackend,
 )
-from dokploy_wizard.lifecycle import LifecycleDriftError
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,
     CloudflareAccessIdentityProvider,
@@ -82,6 +81,14 @@ class FakeCloudflareBackend:
     def create_tunnel(self, account_id: str, tunnel_name: str) -> CloudflareTunnel:
         self.existing_tunnel = CloudflareTunnel(tunnel_id="nextcloud-tunnel", name=tunnel_name)
         return self.existing_tunnel
+
+    def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
+        return f"token-{tunnel_id}"
+
+    def update_tunnel_configuration(
+        self, account_id: str, tunnel_id: str, ingress: tuple[dict[str, object], ...]
+    ) -> None:
+        del account_id, tunnel_id, ingress
 
     def list_dns_records(
         self,
@@ -217,6 +224,7 @@ class FakeSharedCoreBackend:
     create_network_calls: int = 0
     create_postgres_calls: int = 0
     create_redis_calls: int = 0
+    ensured_allocations: tuple[SharedPostgresAllocation, ...] = ()
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self.network is not None and self.network.resource_id == resource_id:
@@ -271,6 +279,11 @@ class FakeSharedCoreBackend:
             resource_name=resource_name,
         )
         return self.redis
+
+    def ensure_postgres_allocations(
+        self, allocations: tuple[SharedPostgresAllocation, ...]
+    ) -> None:
+        self.ensured_allocations = allocations
 
 
 @dataclass
@@ -409,6 +422,23 @@ class FakeNextcloudBackend:
         self.services[resource_name] = record
         return record
 
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        data_volume_name: str,
+        config: dict[str, str],
+    ) -> NextcloudResourceRecord:
+        del resource_id
+        return self.create_service(
+            resource_name=resource_name,
+            hostname=hostname,
+            data_volume_name=data_volume_name,
+            config=config,
+        )
+
     def get_volume(self, resource_id: str) -> NextcloudResourceRecord | None:
         for record in self.volumes.values():
             if record.resource_id == resource_id:
@@ -429,6 +459,9 @@ class FakeNextcloudBackend:
     def check_health(self, *, service: NextcloudResourceRecord, url: str) -> bool:
         del service, url
         return True
+
+    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+        del nextcloud_url, onlyoffice_url
 
 
 def test_install_plans_and_persists_shared_core_once_for_nextcloud(tmp_path: Path) -> None:
@@ -549,6 +582,13 @@ def test_install_rerun_reuses_owned_shared_core_resources(tmp_path: Path) -> Non
     assert shared_backend.create_network_calls == 1
     assert shared_backend.create_postgres_calls == 1
     assert shared_backend.create_redis_calls == 1
+    assert shared_backend.ensured_allocations == (
+        SharedPostgresAllocation(
+            database_name="nextcloud_stack_nextcloud",
+            user_name="nextcloud_stack_nextcloud",
+            password_secret_ref="nextcloud-stack-nextcloud-postgres-password",
+        ),
+    )
 
 
 def test_install_fails_closed_when_shared_core_owned_resource_drifted(tmp_path: Path) -> None:
@@ -565,7 +605,7 @@ def test_install_fails_closed_when_shared_core_owned_resource_drifted(tmp_path: 
         nextcloud_backend=FakeNextcloudBackend(),
     )
 
-    with pytest.raises(LifecycleDriftError, match="shared_core"):
+    with pytest.raises(SharedCoreError, match="shared-core resource 'shared_core_network' exists"):
         run_install_flow(
             env_file=FIXTURES_DIR / "nextcloud.env",
             state_dir=state_dir,
@@ -627,12 +667,14 @@ def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_re
         )
     )
     client = FakeDokployApiClient()
+    provisioned: list[tuple[SharedPostgresAllocation, ...]] = []
     backend = DokploySharedCoreBackend(
         api_url="https://dokploy.example.com",
         api_key="dokp-key-123",
         stack_name=desired_state.stack_name,
         plan=desired_state.shared_core,
         client=client,
+        allocation_provisioner=lambda allocations: provisioned.append(allocations),
     )
 
     phase = reconcile_shared_core(
@@ -649,6 +691,15 @@ def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_re
     assert client.create_project_calls == 1
     assert client.create_compose_calls == 1
     assert client.deploy_calls == 1
+    assert provisioned == [
+        (
+            SharedPostgresAllocation(
+                database_name="nextcloud_stack_nextcloud",
+                user_name="nextcloud_stack_nextcloud",
+                password_secret_ref="nextcloud-stack-nextcloud-postgres-password",
+            ),
+        )
+    ]
 
     reused = reconcile_shared_core(
         dry_run=False,
