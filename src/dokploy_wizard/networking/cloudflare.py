@@ -71,6 +71,16 @@ class CloudflareBackend(Protocol):
 
     def create_tunnel(self, account_id: str, tunnel_name: str) -> CloudflareTunnel: ...
 
+    def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str: ...
+
+    def get_tunnel_configuration(
+        self, account_id: str, tunnel_id: str
+    ) -> tuple[dict[str, object], ...]: ...
+
+    def update_tunnel_configuration(
+        self, account_id: str, tunnel_id: str, ingress: tuple[dict[str, object], ...]
+    ) -> None: ...
+
     def list_dns_records(
         self,
         zone_id: str,
@@ -262,6 +272,56 @@ class CloudflareApiBackend:
             },
         )
         return _parse_tunnel(payload)
+
+    def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
+        if self._mock_account_ok is not None:
+            return f"mock-token-{tunnel_id}"
+
+        payload = self._request_json(
+            method="GET",
+            path=f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/token",
+        )
+        result = payload.get("result")
+        if not isinstance(result, str) or result == "":
+            raise CloudflareError("Cloudflare returned an invalid tunnel token response.")
+        return result
+
+    def get_tunnel_configuration(
+        self, account_id: str, tunnel_id: str
+    ) -> tuple[dict[str, object], ...]:
+        if self._mock_account_ok is not None:
+            return ()
+        payload = self._request_json(
+            method="GET",
+            path=f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
+        )
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise CloudflareError(
+                "Cloudflare tunnel configuration response must include a result object."
+            )
+        config = result.get("config")
+        if not isinstance(config, dict):
+            raise CloudflareError(
+                "Cloudflare tunnel configuration response must include a config object."
+            )
+        ingress = config.get("ingress")
+        if not isinstance(ingress, list):
+            raise CloudflareError(
+                "Cloudflare tunnel configuration response must include an ingress list."
+            )
+        return tuple(item for item in ingress if isinstance(item, dict))
+
+    def update_tunnel_configuration(
+        self, account_id: str, tunnel_id: str, ingress: tuple[dict[str, object], ...]
+    ) -> None:
+        if self._mock_account_ok is not None:
+            return
+        self._request_json(
+            method="PUT",
+            path=f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
+            body={"config": {"ingress": list(ingress)}},
+        )
 
     def list_dns_records(
         self,
@@ -494,7 +554,7 @@ class CloudflareApiBackend:
             if "HTTP 404" in str(error_value):
                 return None
             raise
-        return _parse_access_policy(payload)
+        return _parse_access_policy(payload, app_id=app_id)
 
     def find_access_policy_by_name(
         self, account_id: str, app_id: str, name: str
@@ -512,7 +572,7 @@ class CloudflareApiBackend:
         if not isinstance(policies, list):
             raise CloudflareError("Cloudflare returned an invalid Access policy list.")
         for item in policies:
-            policy = _parse_access_policy(item)
+            policy = _parse_access_policy(item, app_id=app_id)
             if policy.name == name and policy.decision == "allow":
                 return policy
         return None
@@ -544,7 +604,7 @@ class CloudflareApiBackend:
                 "include": [{"email": {"email": email}} for email in emails],
             },
         )
-        return _parse_access_policy(payload)
+        return _parse_access_policy(payload, app_id=app_id)
 
     def _request_json(
         self,
@@ -689,18 +749,20 @@ def _parse_access_application(payload: dict[str, Any]) -> CloudflareAccessApplic
     )
 
 
-def _parse_access_policy(payload: dict[str, Any]) -> CloudflareAccessPolicy:
+def _parse_access_policy(
+    payload: dict[str, Any], *, app_id: str | None = None
+) -> CloudflareAccessPolicy:
     result = payload.get("result", payload)
     if not isinstance(result, dict):
         raise CloudflareError("Cloudflare returned an invalid Access policy payload.")
     policy_id = result.get("id")
-    app_id = result.get("app_id") or result.get("appId")
+    resolved_app_id = result.get("app_id") or result.get("appId") or app_id
     name = result.get("name")
     decision = result.get("decision")
     include = result.get("include", ())
     if not isinstance(policy_id, str) or policy_id == "":
         raise CloudflareError("Cloudflare Access policy payload is missing a valid id.")
-    if not isinstance(app_id, str) or app_id == "":
+    if not isinstance(resolved_app_id, str) or resolved_app_id == "":
         raise CloudflareError("Cloudflare Access policy payload is missing a valid app id.")
     if not isinstance(name, str) or name == "":
         raise CloudflareError("Cloudflare Access policy payload is missing a valid name.")
@@ -718,7 +780,7 @@ def _parse_access_policy(payload: dict[str, Any]) -> CloudflareAccessPolicy:
                     emails.append(email.lower())
     return CloudflareAccessPolicy(
         policy_id=policy_id,
-        app_id=app_id,
+        app_id=resolved_app_id,
         name=name,
         decision=decision,
         emails=tuple(sorted(set(emails))),

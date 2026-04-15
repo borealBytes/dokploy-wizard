@@ -17,6 +17,7 @@ from dokploy_wizard.networking import (
     reconcile_cloudflare_access,
     reconcile_networking,
 )
+from dokploy_wizard.networking.cloudflare import CloudflareApiBackend
 from dokploy_wizard.state import (
     DesiredState,
     OwnedResource,
@@ -24,6 +25,45 @@ from dokploy_wizard.state import (
     RawEnvInput,
     resolve_desired_state,
 )
+
+
+@dataclass
+class FakeConnectorRecord:
+    resource_id: str
+    resource_name: str
+
+
+@dataclass
+class FakeConnectorBackend:
+    existing_service: FakeConnectorRecord | None = None
+    created: list[tuple[str, str]] = field(default_factory=list)
+
+    def get_service(self, resource_id: str) -> FakeConnectorRecord | None:
+        if self.existing_service is not None and self.existing_service.resource_id == resource_id:
+            return self.existing_service
+        return None
+
+    def find_service_by_name(self, resource_name: str) -> FakeConnectorRecord | None:
+        if (
+            self.existing_service is not None
+            and self.existing_service.resource_name == resource_name
+        ):
+            return self.existing_service
+        return None
+
+    def create_service(self, *, resource_name: str, tunnel_token: str) -> FakeConnectorRecord:
+        self.created.append((resource_name, tunnel_token))
+        self.existing_service = FakeConnectorRecord(
+            resource_id=f"dokploy-compose:{resource_name}:cloudflared",
+            resource_name=resource_name,
+        )
+        return self.existing_service
+
+    def check_health(self, *, service: FakeConnectorRecord, url: str) -> bool:
+        return (
+            url == "https://dokploy.example.com"
+            and service.resource_name == "wizard-stack-cloudflared"
+        )
 
 
 @dataclass
@@ -61,6 +101,20 @@ class FakeCloudflareBackend:
 
     def create_tunnel(self, account_id: str, tunnel_name: str) -> CloudflareTunnel:
         return CloudflareTunnel(tunnel_id="created-tunnel", name=tunnel_name)
+
+    def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
+        return f"token-{tunnel_id}"
+
+    def get_tunnel_configuration(
+        self, account_id: str, tunnel_id: str
+    ) -> tuple[dict[str, object], ...]:
+        del account_id, tunnel_id
+        return ()
+
+    def update_tunnel_configuration(
+        self, account_id: str, tunnel_id: str, ingress: tuple[dict[str, object], ...]
+    ) -> None:
+        del account_id, tunnel_id, ingress
 
     def list_dns_records(
         self,
@@ -252,6 +306,24 @@ def test_networking_fails_closed_when_owned_tunnel_drift_is_detected() -> None:
         )
 
 
+def test_networking_creates_cloudflared_connector_for_dokploy_url() -> None:
+    connector = FakeConnectorBackend()
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=_raw_env(),
+        desired_state=_desired_state(),
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=FakeCloudflareBackend(),
+        connector_backend=connector,
+    )
+
+    assert phase.result.connector is not None
+    assert phase.result.connector.action == "create"
+    assert phase.result.connector.public_url == "https://dokploy.example.com"
+    assert phase.result.connector.passed is True
+    assert connector.created == [("wizard-stack-cloudflared", "token-created-tunnel")]
+
+
 def test_access_only_targets_advisor_hostnames() -> None:
     desired = resolve_desired_state(
         RawEnvInput(
@@ -357,6 +429,44 @@ def test_access_rerun_reuses_owned_resources() -> None:
     assert {item.action for item in phase.result.policies} == {"reuse_owned"}
 
 
+def test_cloudflare_policy_list_parsing_uses_caller_app_id_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = CloudflareApiBackend(
+        RawEnvInput(format_version=1, values={"CLOUDFLARE_API_TOKEN": "token-123"})
+    )
+    monkeypatch.setattr(
+        backend,
+        "_request_json",
+        lambda **_: {
+            "result": [
+                {
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "decision": "allow",
+                    "exclude": [],
+                    "id": "policy-123",
+                    "include": [{"email": {"email": "Clayton@SuperiorByteWorks.com"}}],
+                    "name": "Allow openclaw.example.com",
+                    "precedence": 1,
+                    "require": [],
+                    "reusable": False,
+                    "uid": "uid-123",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                }
+            ]
+        },
+    )
+
+    policy = backend.find_access_policy_by_name(
+        "account-123", "app-openclaw", "Allow openclaw.example.com"
+    )
+
+    assert policy is not None
+    assert policy.policy_id == "policy-123"
+    assert policy.app_id == "app-openclaw"
+    assert policy.emails == ("clayton@superiorbyteworks.com",)
+
+
 def _raw_env() -> RawEnvInput:
     return RawEnvInput(
         format_version=1,
@@ -398,3 +508,19 @@ def _desired_state() -> DesiredState:
         my_farm_advisor_replicas=None,
         shared_core=build_shared_core_plan("wizard-stack", ()),
     )
+
+
+def test_resolve_desired_state_defaults_access_email_to_dokploy_admin_for_openclaw() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openmerge",
+                "ROOT_DOMAIN": "openmerge.me",
+                "DOKPLOY_ADMIN_EMAIL": "clayton@superiorbyteworks.com",
+                "ENABLE_OPENCLAW": "true",
+            },
+        )
+    )
+
+    assert desired_state.cloudflare_access_otp_emails == ("clayton@superiorbyteworks.com",)

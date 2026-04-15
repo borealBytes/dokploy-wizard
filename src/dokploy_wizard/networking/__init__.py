@@ -19,6 +19,7 @@ from dokploy_wizard.networking.models import (
     PlannedAccessIdentityProvider,
     PlannedAccessPolicy,
     PlannedDnsRecord,
+    PlannedTunnelConnector,
     PlannedTunnel,
 )
 from dokploy_wizard.networking.planner import (
@@ -54,6 +55,7 @@ __all__ = [
     "PlannedAccessIdentityProvider",
     "PlannedAccessPolicy",
     "PlannedDnsRecord",
+    "PlannedTunnelConnector",
     "PlannedTunnel",
     "TUNNEL_RESOURCE_TYPE",
     "build_access_ledger",

@@ -9,6 +9,11 @@ from typing import Any
 from urllib import error, request
 
 RequestFn = Callable[[request.Request], Any]
+ListProjectsSessionFallbackFn = Callable[[], Any]
+ProjectCreateSessionFallbackFn = Callable[[str, str | None, str | None], Any]
+ComposeCreateSessionFallbackFn = Callable[[str, str, str, str], Any]
+ComposeUpdateSessionFallbackFn = Callable[[str, str], Any]
+DeploySessionFallbackFn = Callable[[str, str | None, str | None], Any]
 
 
 class DokployApiError(RuntimeError):
@@ -63,13 +68,30 @@ class DokployApiClient:
         api_url: str,
         api_key: str,
         request_fn: RequestFn | None = None,
+        list_projects_session_fallback: ListProjectsSessionFallbackFn | None = None,
+        project_create_session_fallback: ProjectCreateSessionFallbackFn | None = None,
+        compose_create_session_fallback: ComposeCreateSessionFallbackFn | None = None,
+        compose_update_session_fallback: ComposeUpdateSessionFallbackFn | None = None,
+        deploy_session_fallback: DeploySessionFallbackFn | None = None,
     ) -> None:
         self._api_url = api_url.removesuffix("/").removesuffix("/api")
         self._api_key = api_key
         self._request_fn = request_fn or _default_request
+        self._list_projects_session_fallback = list_projects_session_fallback
+        self._project_create_session_fallback = project_create_session_fallback
+        self._compose_create_session_fallback = compose_create_session_fallback
+        self._compose_update_session_fallback = compose_update_session_fallback
+        self._deploy_session_fallback = deploy_session_fallback
 
     def list_projects(self) -> tuple[DokployProjectSummary, ...]:
-        payload = self._request_json("GET", "/api/project.all")
+        try:
+            payload = self._request_json("GET", "/api/project.all")
+        except DokployApiError as error:
+            if self._list_projects_session_fallback is None or not _is_unauthorized_error(error):
+                raise
+            payload = self._list_projects_session_fallback()
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
         if not isinstance(payload, list):
             raise DokployApiError("Dokploy project.all response must be a list.")
         return tuple(_parse_project_summary(item) for item in payload)
@@ -77,15 +99,22 @@ class DokployApiClient:
     def create_project(
         self, *, name: str, description: str | None, env: str | None
     ) -> DokployCreatedProject:
-        payload = self._request_json(
-            "POST",
-            "/api/project.create",
-            {
-                "name": name,
-                "description": description,
-                "env": env or "",
-            },
-        )
+        try:
+            payload = self._request_json(
+                "POST",
+                "/api/project.create",
+                {
+                    "name": name,
+                    "description": description,
+                    "env": env or "",
+                },
+            )
+        except DokployApiError as error:
+            if self._project_create_session_fallback is None or not _is_unauthorized_error(error):
+                raise
+            payload = self._project_create_session_fallback(name, description, env)
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
         if not isinstance(payload, dict):
             raise DokployApiError("Dokploy project.create response must be an object.")
         project = payload.get("project")
@@ -98,6 +127,15 @@ class DokployApiClient:
         environment_id = _require_string(environment, "environmentId")
         return DokployCreatedProject(project_id=project_id, environment_id=environment_id)
 
+    def delete_project(self, *, project_id: str) -> None:
+        payload = self._request_json(
+            "POST",
+            "/api/project.remove",
+            {"projectId": project_id},
+        )
+        if not isinstance(payload, dict):
+            raise DokployApiError("Dokploy project.remove response must be an object.")
+
     def create_compose(
         self,
         *,
@@ -106,49 +144,72 @@ class DokployApiClient:
         compose_file: str,
         app_name: str,
     ) -> DokployComposeRecord:
-        payload = self._request_json(
-            "POST",
-            "/api/compose.create",
-            {
-                "name": name,
-                "environmentId": environment_id,
-                "composeType": "docker-compose",
-                "appName": app_name,
-                "composeFile": compose_file,
-            },
-        )
-        return _parse_compose_record(payload, "compose.create")
+        try:
+            payload = self._request_json(
+                "POST",
+                "/api/compose.create",
+                {
+                    "name": name,
+                    "environmentId": environment_id,
+                    "composeType": "docker-compose",
+                    "appName": app_name,
+                },
+            )
+        except DokployApiError as error:
+            if self._compose_create_session_fallback is None or not _is_unauthorized_error(error):
+                raise
+            payload = self._compose_create_session_fallback(
+                name, environment_id, compose_file, app_name
+            )
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
+        created = _parse_compose_record(payload, "compose.create")
+        return self.update_compose(compose_id=created.compose_id, compose_file=compose_file)
 
     def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        payload = self._request_json(
-            "POST",
-            "/api/compose.update",
-            {
-                "composeId": compose_id,
-                "composeType": "docker-compose",
-                "sourceType": "raw",
-                "composePath": "./docker-compose.yml",
-                "githubId": None,
-                "repository": None,
-                "owner": None,
-                "branch": None,
-                "composeFile": compose_file,
-            },
-        )
+        try:
+            payload = self._request_json(
+                "POST",
+                "/api/compose.update",
+                {
+                    "composeId": compose_id,
+                    "composeType": "docker-compose",
+                    "sourceType": "raw",
+                    "composePath": "./docker-compose.yml",
+                    "githubId": None,
+                    "repository": None,
+                    "owner": None,
+                    "branch": None,
+                    "composeFile": compose_file,
+                },
+            )
+        except DokployApiError as error:
+            if self._compose_update_session_fallback is None or not _is_unauthorized_error(error):
+                raise
+            payload = self._compose_update_session_fallback(compose_id, compose_file)
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
         return _parse_compose_record(payload, "compose.update")
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
     ) -> DokployDeployResult:
-        payload = self._request_json(
-            "POST",
-            "/api/compose.deploy",
-            {
-                "composeId": compose_id,
-                "title": title,
-                "description": description,
-            },
-        )
+        try:
+            payload = self._request_json(
+                "POST",
+                "/api/compose.deploy",
+                {
+                    "composeId": compose_id,
+                    "title": title,
+                    "description": description,
+                },
+            )
+        except DokployApiError as error:
+            if self._deploy_session_fallback is None or not _is_unauthorized_error(error):
+                raise
+            payload = self._deploy_session_fallback(compose_id, title, description)
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
         if payload is True:
             return DokployDeployResult(success=True, compose_id=compose_id, message=None)
         if not isinstance(payload, dict):
@@ -261,3 +322,7 @@ def _require_string(payload: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or value == "":
         raise DokployApiError(f"Dokploy API field '{key}' must be a non-empty string.")
     return value
+
+
+def _is_unauthorized_error(error: DokployApiError) -> bool:
+    return "status 401" in str(error).lower()
