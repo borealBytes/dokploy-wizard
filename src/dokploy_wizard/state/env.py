@@ -75,6 +75,9 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
         seaweedfs_secret_key=_resolve_seaweedfs_secret(
             values, enabled_packs=pack_selection.enabled_packs, key="SEAWEEDFS_SECRET_KEY"
         ),
+        openclaw_gateway_token=_resolve_openclaw_gateway_token(
+            values, enabled_packs=pack_selection.enabled_packs
+        ),
         openclaw_channels=pack_selection.openclaw_channels,
         openclaw_replicas=_resolve_openclaw_replicas(values, pack_selection.enabled_packs),
         my_farm_advisor_channels=pack_selection.my_farm_advisor_channels,
@@ -195,6 +198,10 @@ def _resolve_access_otp_emails(
 ) -> tuple[str, ...]:
     raw_value = values.get("CLOUDFLARE_ACCESS_OTP_EMAILS", "")
     if raw_value == "":
+        if {"openclaw", "my-farm-advisor"} & set(enabled_packs):
+            admin_email = values.get("DOKPLOY_ADMIN_EMAIL", "").strip().lower()
+            if admin_email != "" and "@" in admin_email:
+                return (admin_email,)
         return ()
     if not ({"openclaw", "my-farm-advisor"} & set(enabled_packs)):
         raise StateValidationError(
@@ -259,3 +266,14 @@ def _resolve_pack_replicas(
             f"OPENCLAW_REPLICAS must be a positive integer, found {raw_value!r}."
         )
     return parsed
+
+
+def _resolve_openclaw_gateway_token(
+    values: dict[str, str], *, enabled_packs: tuple[str, ...]
+) -> str | None:
+    raw_value = values.get("OPENCLAW_GATEWAY_TOKEN")
+    if "openclaw" not in enabled_packs:
+        if raw_value is not None:
+            raise StateValidationError("OPENCLAW_GATEWAY_TOKEN requires the 'openclaw' pack.")
+        return None
+    return raw_value

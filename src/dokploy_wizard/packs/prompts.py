@@ -24,8 +24,27 @@ class PromptSelection:
     seaweedfs_access_key: str | None
     seaweedfs_secret_key: str | None
     generated_secrets: dict[str, str]
+    advisor_env: dict[str, str]
     openclaw_channels: tuple[str, ...]
     my_farm_advisor_channels: tuple[str, ...]
+
+
+_ADVISOR_ENV_KEYS = (
+    "OPENCLAW_OPENROUTER_API_KEY",
+    "OPENCLAW_NVIDIA_API_KEY",
+    "OPENCLAW_PRIMARY_MODEL",
+    "OPENCLAW_FALLBACK_MODELS",
+    "OPENCLAW_TELEGRAM_BOT_TOKEN",
+    "OPENCLAW_TELEGRAM_OWNER_USER_ID",
+    "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
+    "MY_FARM_ADVISOR_NVIDIA_API_KEY",
+    "MY_FARM_ADVISOR_PRIMARY_MODEL",
+    "MY_FARM_ADVISOR_FALLBACK_MODELS",
+    "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
+    "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
+)
+_DEFAULT_NVIDIA_PRIMARY_MODEL = "nvidia/moonshotai/kimi-k2.5"
+_DEFAULT_OPENROUTER_FALLBACK_MODEL = "openrouter/openrouter/free"
 
 
 @dataclass(frozen=True)
@@ -71,6 +90,10 @@ def apply_prompt_selection(raw_env: RawEnvInput, selection: PromptSelection) -> 
         updated_values["MY_FARM_ADVISOR_CHANNELS"] = ",".join(selection.my_farm_advisor_channels)
     else:
         updated_values.pop("MY_FARM_ADVISOR_CHANNELS", None)
+    for key in _ADVISOR_ENV_KEYS:
+        updated_values.pop(key, None)
+    updated_values.update(selection.advisor_env)
+    updated_values.pop("OPENCLAW_GATEWAY_TOKEN", None)
     return RawEnvInput(format_version=raw_env.format_version, values=updated_values)
 
 
@@ -89,12 +112,13 @@ def prompt_for_pack_selection(
             disabled.append("headscale")
     if _prompt_yes_no(prompt, "Enable Matrix? [y/N]: ", default=False):
         selected.append("matrix")
-    if _prompt_yes_no(prompt, "Enable Nextcloud + OnlyOffice? [y/N]: ", default=False):
+    if _prompt_yes_no(prompt, "Enable Nextcloud + OnlyOffice? [Y/n]: ", default=True):
         selected.append("nextcloud")
     seaweedfs_access_key: str | None = None
     seaweedfs_secret_key: str | None = None
     generated_secrets: dict[str, str] = {}
-    if _prompt_yes_no(prompt, "Enable SeaweedFS object storage? [y/N]: ", default=False):
+    advisor_env: dict[str, str] = {}
+    if _prompt_yes_no(prompt, "Enable SeaweedFS object storage? [Y/n]: ", default=True):
         selected.append("seaweedfs")
         seaweedfs_access_key = _generate_credential(prefix="seaweed")
         seaweedfs_secret_key = _generate_credential(prefix="seaweed-secret")
@@ -103,18 +127,35 @@ def prompt_for_pack_selection(
 
     openclaw_channels: tuple[str, ...] = ()
     my_farm_advisor_channels: tuple[str, ...] = ()
-    if _prompt_yes_no(prompt, "Enable OpenClaw? [y/N]: ", default=False):
+    if _prompt_yes_no(prompt, "Enable OpenClaw? [Y/n]: ", default=True):
         selected.append("openclaw")
+        default_openclaw_channel = "matrix" if "matrix" in selected else "telegram"
         raw_channels = _prompt_default(
             prompt,
-            "OpenClaw channels [telegram/matrix] (comma separated, default: matrix): ",
-            default="matrix",
+            "OpenClaw channels [telegram/matrix] "
+            f"(comma separated, default: {default_openclaw_channel}): ",
+            default=default_openclaw_channel,
         )
         openclaw_channels = tuple(
             sorted({item.strip() for item in raw_channels.split(",") if item.strip()})
         )
         if "matrix" in openclaw_channels and "matrix" not in selected:
             selected.append("matrix")
+        advisor_env.update(
+            _prompt_advisor_runtime_config(
+                prompt=prompt,
+                label="OpenClaw",
+                env_prefix="OPENCLAW",
+            )
+        )
+        advisor_env.update(
+            _prompt_advisor_telegram_config(
+                prompt=prompt,
+                label="OpenClaw",
+                env_prefix="OPENCLAW",
+                channels=openclaw_channels,
+            )
+        )
     if _prompt_yes_no(prompt, "Enable My Farm Advisor? [y/N]: ", default=False):
         selected.append("my-farm-advisor")
         raw_channels = _read_prompt(
@@ -127,6 +168,21 @@ def prompt_for_pack_selection(
             )
             if "matrix" in my_farm_advisor_channels and "matrix" not in selected:
                 selected.append("matrix")
+        advisor_env.update(
+            _prompt_advisor_runtime_config(
+                prompt=prompt,
+                label="My Farm Advisor",
+                env_prefix="MY_FARM_ADVISOR",
+            )
+        )
+        advisor_env.update(
+            _prompt_advisor_telegram_config(
+                prompt=prompt,
+                label="My Farm Advisor",
+                env_prefix="MY_FARM_ADVISOR",
+                channels=my_farm_advisor_channels,
+            )
+        )
 
     return PromptSelection(
         selected_packs=tuple(sorted(selected)),
@@ -134,9 +190,69 @@ def prompt_for_pack_selection(
         seaweedfs_access_key=seaweedfs_access_key,
         seaweedfs_secret_key=seaweedfs_secret_key,
         generated_secrets=dict(sorted(generated_secrets.items())),
+        advisor_env=dict(sorted(advisor_env.items())),
         openclaw_channels=openclaw_channels,
         my_farm_advisor_channels=my_farm_advisor_channels,
     )
+
+
+def _prompt_advisor_runtime_config(
+    *, prompt: PromptFn, label: str, env_prefix: str
+) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if _prompt_yes_no(
+        prompt, f"Configure a separate NVIDIA API key for {label}? [Y/n]: ", default=True
+    ):
+        values[f"{env_prefix}_NVIDIA_API_KEY"] = _prompt_non_empty(
+            prompt, f"{label} NVIDIA API key: "
+        )
+    if _prompt_yes_no(
+        prompt, f"Configure a separate OpenRouter API key for {label}? [Y/n]: ", default=True
+    ):
+        values[f"{env_prefix}_OPENROUTER_API_KEY"] = _prompt_non_empty(
+            prompt, f"{label} OpenRouter API key: "
+        )
+    primary_default = (
+        _DEFAULT_NVIDIA_PRIMARY_MODEL if f"{env_prefix}_NVIDIA_API_KEY" in values else ""
+    )
+    primary_model = _prompt_optional(
+        prompt,
+        f"{label} primary model (provider/model; optional{f', default: {primary_default}' if primary_default else ''}): ",
+    )
+    if primary_model is None and primary_default:
+        primary_model = primary_default
+    if primary_model is not None:
+        values[f"{env_prefix}_PRIMARY_MODEL"] = primary_model
+    fallback_models = _prompt_optional(
+        prompt,
+        f"{label} backup models (comma separated provider/model refs, optional, default: {_DEFAULT_OPENROUTER_FALLBACK_MODEL}): ",
+    )
+    if fallback_models is None:
+        fallback_models = _DEFAULT_OPENROUTER_FALLBACK_MODEL
+    if fallback_models is not None:
+        values[f"{env_prefix}_FALLBACK_MODELS"] = ",".join(
+            item.strip() for item in fallback_models.split(",") if item.strip()
+        )
+    return values
+
+
+def _prompt_advisor_telegram_config(
+    *, prompt: PromptFn, label: str, env_prefix: str, channels: tuple[str, ...]
+) -> dict[str, str]:
+    if "telegram" not in channels:
+        return {}
+    values: dict[str, str] = {}
+    values[f"{env_prefix}_TELEGRAM_BOT_TOKEN"] = _prompt_non_empty(
+        prompt,
+        f"{label} Telegram bot token: ",
+    )
+    owner_id = _prompt_optional(
+        prompt,
+        f"{label} Telegram owner user ID (numeric sender id; @username resolves to id, optional): ",
+    )
+    if owner_id is not None:
+        values[f"{env_prefix}_TELEGRAM_OWNER_USER_ID"] = owner_id
+    return values
 
 
 def prompt_for_initial_install_values(
@@ -163,10 +279,11 @@ def prompt_for_initial_install_values(
     )
     dokploy_admin_password = None
     if require_dokploy_auth:
-        dokploy_admin_password = _prompt_non_empty(
+        dokploy_admin_password = _prompt_default(
             prompt,
             "Dokploy admin password (used locally to sign in or create the first admin "
-            "and mint an API key): ",
+            "and mint an API key; default: ChangeMeSoon): ",
+            default="ChangeMeSoon",
         )
 
     private_network_mode = _prompt_choice(

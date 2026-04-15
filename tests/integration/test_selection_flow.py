@@ -116,6 +116,7 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
             seaweedfs_access_key=None,
             seaweedfs_secret_key=None,
             generated_secrets={},
+            advisor_env={},
             openclaw_channels=("telegram",),
             my_farm_advisor_channels=(),
         ),
@@ -140,3 +141,4 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
     assert "CLOUDFLARE_ZONE_ID" not in raw_env.values
     assert raw_env.values["PACKS"] == "openclaw"
     assert raw_env.values["OPENCLAW_CHANNELS"] == "telegram"
+    assert "OPENCLAW_GATEWAY_TOKEN" not in raw_env.values

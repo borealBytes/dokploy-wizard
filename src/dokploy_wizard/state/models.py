@@ -132,6 +132,7 @@ class DesiredState:
     hostnames: dict[str, str]
     seaweedfs_access_key: str | None
     seaweedfs_secret_key: str | None
+    openclaw_gateway_token: str | None
     openclaw_channels: tuple[str, ...]
     openclaw_replicas: int | None
     my_farm_advisor_channels: tuple[str, ...]
@@ -190,6 +191,9 @@ class DesiredState:
         if sorted(self.openclaw_channels) != list(self.openclaw_channels):
             msg = "OpenClaw channels must be stored in sorted order."
             raise StateValidationError(msg)
+        if "openclaw" not in self.enabled_packs and self.openclaw_gateway_token is not None:
+            msg = "OpenClaw gateway token must be omitted when the OpenClaw pack is disabled."
+            raise StateValidationError(msg)
         if sorted(self.my_farm_advisor_channels) != list(self.my_farm_advisor_channels):
             msg = "My Farm Advisor channels must be stored in sorted order."
             raise StateValidationError(msg)
@@ -222,6 +226,7 @@ class DesiredState:
             "hostnames": dict(sorted(self.hostnames.items())),
             "seaweedfs_access_key": self.seaweedfs_access_key,
             "seaweedfs_secret_key": self.seaweedfs_secret_key,
+            "openclaw_gateway_token": self.openclaw_gateway_token,
             "openclaw_channels": list(self.openclaw_channels),
             "openclaw_replicas": self.openclaw_replicas,
             "my_farm_advisor_channels": list(self.my_farm_advisor_channels),
@@ -257,6 +262,7 @@ class DesiredState:
             hostnames=_require_string_map(payload, "hostnames"),
             seaweedfs_access_key=_require_optional_string(payload, "seaweedfs_access_key"),
             seaweedfs_secret_key=_require_optional_string(payload, "seaweedfs_secret_key"),
+            openclaw_gateway_token=_require_optional_string(payload, "openclaw_gateway_token"),
             openclaw_channels=_require_string_list(payload, "openclaw_channels"),
             openclaw_replicas=_require_optional_positive_int(payload, "openclaw_replicas"),
             my_farm_advisor_channels=_require_string_list(payload, "my_farm_advisor_channels"),

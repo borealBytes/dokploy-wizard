@@ -55,11 +55,11 @@ def load_state_dir(state_dir: Path) -> LoadedState:
 
 
 def write_inspection_snapshot(
-    state_dir: Path, raw_input: RawEnvInput, desired_state: DesiredState
+    state_dir: Path, raw_input: RawEnvInput, desired_state_snapshot: dict[str, Any]
 ) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     _write_document(state_dir / RAW_INPUT_FILE, raw_input.to_dict())
-    _write_document(state_dir / DESIRED_STATE_FILE, desired_state.to_dict())
+    _write_document(state_dir / DESIRED_STATE_FILE, desired_state_snapshot)
 
 
 def validate_install_state(loaded_state: LoadedState, desired_state: DesiredState) -> bool:
@@ -132,6 +132,7 @@ def _validate_state_document_set(loaded_state: LoadedState) -> None:
         "headscale",
         "matrix",
         "nextcloud",
+        "seaweedfs",
         "openclaw",
         "my-farm-advisor",
     }
