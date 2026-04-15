@@ -17,6 +17,7 @@ from dokploy_wizard.networking import (
     CloudflareTunnel,
 )
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
+from dokploy_wizard.packs.nextcloud import NextcloudResourceRecord
 from dokploy_wizard.packs.openclaw import OpenClawResourceRecord
 from dokploy_wizard.state import load_state_dir
 
@@ -49,6 +50,9 @@ class FakeCloudflareBackend:
     access_policies: dict[str, CloudflareAccessPolicy] = field(default_factory=dict)
     create_tunnel_calls: int = 0
     create_dns_calls: int = 0
+    update_tunnel_configuration_calls: list[tuple[str, str, tuple[dict[str, object], ...]]] = field(
+        default_factory=list
+    )
 
     def validate_account_access(self, account_id: str) -> None:
         if not self.account_ok:
@@ -72,6 +76,14 @@ class FakeCloudflareBackend:
         self.create_tunnel_calls += 1
         self.existing_tunnel = CloudflareTunnel(tunnel_id="tunnel-created", name=tunnel_name)
         return self.existing_tunnel
+
+    def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
+        return f"token-{tunnel_id}"
+
+    def update_tunnel_configuration(
+        self, account_id: str, tunnel_id: str, ingress: tuple[dict[str, object], ...]
+    ) -> None:
+        self.update_tunnel_configuration_calls.append((account_id, tunnel_id, ingress))
 
     def list_dns_records(
         self,
@@ -225,6 +237,78 @@ class FakeHeadscaleBackend:
     def check_health(self, *, service: HeadscaleResourceRecord, url: str) -> bool:
         del service, url
         return True
+
+
+@dataclass
+class FakeNextcloudBackend:
+    services: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
+    volumes: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
+
+    def get_service(self, resource_id: str) -> NextcloudResourceRecord | None:
+        for record in self.services.values():
+            if record.resource_id == resource_id:
+                return record
+        return None
+
+    def find_service_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
+        return self.services.get(resource_name)
+
+    def create_service(
+        self,
+        *,
+        resource_name: str,
+        hostname: str,
+        data_volume_name: str,
+        config: dict[str, str],
+    ) -> NextcloudResourceRecord:
+        del hostname, data_volume_name, config
+        record = NextcloudResourceRecord(
+            resource_id=f"service:{resource_name}",
+            resource_name=resource_name,
+        )
+        self.services[resource_name] = record
+        return record
+
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        data_volume_name: str,
+        config: dict[str, str],
+    ) -> NextcloudResourceRecord:
+        del resource_id
+        return self.create_service(
+            resource_name=resource_name,
+            hostname=hostname,
+            data_volume_name=data_volume_name,
+            config=config,
+        )
+
+    def get_volume(self, resource_id: str) -> NextcloudResourceRecord | None:
+        for record in self.volumes.values():
+            if record.resource_id == resource_id:
+                return record
+        return None
+
+    def find_volume_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
+        return self.volumes.get(resource_name)
+
+    def create_volume(self, *, resource_name: str) -> NextcloudResourceRecord:
+        record = NextcloudResourceRecord(
+            resource_id=f"volume:{resource_name}",
+            resource_name=resource_name,
+        )
+        self.volumes[resource_name] = record
+        return record
+
+    def check_health(self, *, service: NextcloudResourceRecord, url: str) -> bool:
+        del service, url
+        return True
+
+    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+        del nextcloud_url, onlyoffice_url
 
 
 @dataclass
@@ -389,6 +473,77 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
                 "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,ops@example.com",
                 "HOST_OS_ID=ubuntu",
                 "HOST_OS_VERSION_ID=24.04",
+                "HOST_CPU_COUNT=6",
+                "HOST_MEMORY_GB=12",
+                "HOST_DISK_GB=150",
+                "HOST_DOCKER_INSTALLED=true",
+                "HOST_DOCKER_DAEMON_REACHABLE=true",
+                "HOST_PORT_80_IN_USE=false",
+                "HOST_PORT_443_IN_USE=false",
+                "HOST_PORT_3000_IN_USE=false",
+                "HOST_ENVIRONMENT=local",
+                "DOKPLOY_BOOTSTRAP_HEALTHY=true",
+                "CLOUDFLARE_API_TOKEN=token-123",
+                "CLOUDFLARE_ACCOUNT_ID=account-123",
+                "CLOUDFLARE_ZONE_ID=zone-123",
+                "CLOUDFLARE_MOCK_ACCOUNT_OK=true",
+                "CLOUDFLARE_MOCK_ZONE_OK=true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    backend = FakeCloudflareBackend()
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=FakeNextcloudBackend(),
+        openclaw_backend=FakeOpenClawBackend(),
+    )
+
+    loaded_state = load_state_dir(state_dir)
+    assert summary["cloudflare_access"]["outcome"] == "applied"
+    assert [item["hostname"] for item in summary["cloudflare_access"]["applications"]] == [
+        "openclaw.example.com"
+    ]
+    assert loaded_state.applied_state is not None
+    assert loaded_state.applied_state.completed_steps[:5] == (
+        "preflight",
+        "dokploy_bootstrap",
+        "networking",
+        "cloudflare_access",
+        "shared_core",
+    )
+    assert loaded_state.ownership_ledger is not None
+    assert {resource.resource_type for resource in loaded_state.ownership_ledger.resources} >= {
+        "cloudflare_access_otp_provider",
+        "cloudflare_access_application",
+        "cloudflare_access_policy",
+    }
+
+
+def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_repo_routing(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "access-nextcloud-farm.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "DOKPLOY_BOOTSTRAP_MOCK_API_KEY=dokp-test-key",
+                "ENABLE_NEXTCLOUD=true",
+                "ENABLE_MY_FARM_ADVISOR=true",
+                "MY_FARM_ADVISOR_CHANNELS=telegram",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,ops@example.com",
+                "HOST_OS_ID=ubuntu",
+                "HOST_OS_VERSION_ID=24.04",
                 "HOST_CPU_COUNT=4",
                 "HOST_MEMORY_GB=12",
                 "HOST_DISK_GB=150",
@@ -418,28 +573,44 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=backend,
         headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=FakeNextcloudBackend(),
         openclaw_backend=FakeOpenClawBackend(),
     )
 
-    loaded_state = load_state_dir(state_dir)
-    assert summary["cloudflare_access"]["outcome"] == "applied"
-    assert [item["hostname"] for item in summary["cloudflare_access"]["applications"]] == [
-        "openclaw.example.com"
-    ]
-    assert loaded_state.applied_state is not None
-    assert loaded_state.applied_state.completed_steps[:5] == (
-        "preflight",
-        "dokploy_bootstrap",
-        "networking",
-        "cloudflare_access",
-        "shared_core",
+    dns_hostnames = [item["hostname"] for item in summary["networking"]["dns_records"]]
+    access_hostnames = [item["hostname"] for item in summary["cloudflare_access"]["applications"]]
+
+    assert "farm.example.com" in dns_hostnames
+    assert "office.example.com" in dns_hostnames
+    assert access_hostnames == ["farm.example.com"]
+    assert "office.example.com" not in access_hostnames
+
+
+def test_install_programs_tunnel_ingress_to_local_https(tmp_path: Path) -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel")
     )
-    assert loaded_state.ownership_ledger is not None
-    assert {resource.resource_type for resource in loaded_state.ownership_ledger.resources} >= {
-        "cloudflare_access_otp_provider",
-        "cloudflare_access_application",
-        "cloudflare_access_policy",
+
+    summary = run_install_flow(
+        env_file=FIXTURES_DIR / "cloudflare-valid.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=backend,
+        headscale_backend=FakeHeadscaleBackend(),
+    )
+
+    assert summary["networking"]["connector"] is None
+    assert len(backend.update_tunnel_configuration_calls) == 1
+    account_id, tunnel_id, ingress = backend.update_tunnel_configuration_calls[0]
+    assert account_id == "account-123"
+    assert tunnel_id == "tunnel-123"
+    assert ingress[0] == {
+        "hostname": "dokploy.example.com",
+        "service": "https://localhost:443",
+        "originRequest": {"noTLSVerify": True},
     }
+    assert ingress[-1] == {"service": "http_status:404"}
 
 
 def test_install_fails_closed_when_zone_scope_is_wrong(tmp_path: Path) -> None:

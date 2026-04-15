@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from email.message import Message
+from io import BytesIO
 from typing import cast
-from urllib import request
+from urllib import error, request
 
 import pytest
 
@@ -39,13 +41,17 @@ def test_dokploy_client_uses_x_api_key_and_api_paths() -> None:
 
 
 def test_dokploy_client_creates_compose_with_json_payload() -> None:
-    captured: dict[str, object] = {}
+    requests_seen: list[tuple[str, dict[str, object]]] = []
 
     def fake_request(req: request.Request) -> object:
-        captured["url"] = req.full_url
         body = cast(bytes | None, req.data)
-        captured["body"] = body.decode("utf-8") if body is not None else None
-        return {"data": {"composeId": "cmp-1", "name": "wizard-shared"}}
+        payload = json.loads(body.decode("utf-8")) if body is not None else {}
+        requests_seen.append((req.full_url, payload))
+        if req.full_url.endswith("/api/compose.create"):
+            return {"data": {"composeId": "cmp-1", "name": "wizard-shared"}}
+        if req.full_url.endswith("/api/compose.update"):
+            return {"data": {"composeId": "cmp-1", "name": "wizard-shared"}}
+        raise AssertionError(req.full_url)
 
     client = DokployApiClient(
         api_url="https://dokploy.example.com/api",
@@ -60,11 +66,44 @@ def test_dokploy_client_creates_compose_with_json_payload() -> None:
         app_name="wizard-shared",
     )
 
-    assert captured["url"] == "https://dokploy.example.com/api/compose.create"
-    body = json.loads(str(captured["body"]))
-    assert body["environmentId"] == "env-1"
-    assert body["composeType"] == "docker-compose"
+    assert requests_seen[0][0] == "https://dokploy.example.com/api/compose.create"
+    assert requests_seen[0][1] == {
+        "name": "wizard-shared",
+        "environmentId": "env-1",
+        "composeType": "docker-compose",
+        "appName": "wizard-shared",
+    }
+    assert requests_seen[1][0] == "https://dokploy.example.com/api/compose.update"
+    body = requests_seen[1][1]
+    assert body["composeId"] == "cmp-1"
+    assert body["composePath"] == "./docker-compose.yml"
+    assert body["sourceType"] == "raw"
+    assert body["githubId"] is None
+    assert body["repository"] is None
+    assert body["owner"] is None
+    assert body["branch"] is None
     assert record.compose_id == "cmp-1"
+
+
+def test_dokploy_client_deletes_project_with_json_payload() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_request(req: request.Request) -> object:
+        captured["url"] = req.full_url
+        body = cast(bytes | None, req.data)
+        captured["body"] = body.decode("utf-8") if body is not None else None
+        return {"projectId": "proj-1", "name": "wizard-probe"}
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    client.delete_project(project_id="proj-1")
+
+    assert captured["url"] == "https://dokploy.example.com/api/project.remove"
+    assert json.loads(str(captured["body"])) == {"projectId": "proj-1"}
 
 
 def test_dokploy_client_resets_compose_path_when_updating_raw_compose() -> None:
@@ -145,3 +184,230 @@ def test_dokploy_client_accepts_root_json_array_responses() -> None:
     projects = client.list_projects()
 
     assert projects[0].project_id == "proj-1"
+
+
+def test_dokploy_client_list_projects_uses_session_fallback_on_api_key_401() -> None:
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        list_projects_session_fallback=lambda: [
+            {"projectId": "proj-1", "name": "wizard", "environments": []}
+        ],
+    )
+
+    projects = client.list_projects()
+
+    assert projects[0].project_id == "proj-1"
+
+
+def test_dokploy_client_list_projects_re_raises_when_fallback_also_fails() -> None:
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        list_projects_session_fallback=lambda: (_ for _ in ()).throw(
+            DokployApiError(
+                'Dokploy API request failed with status 401: {"message":"Unauthorized"}.'
+            )
+        ),
+    )
+
+    with pytest.raises(DokployApiError, match="status 401"):
+        client.list_projects()
+
+
+def test_dokploy_client_create_project_uses_project_create_endpoint() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_request(req: request.Request) -> object:
+        captured["url"] = req.full_url
+        body = cast(bytes | None, req.data)
+        captured["body"] = body.decode("utf-8") if body is not None else None
+        return {
+            "data": {
+                "project": {"projectId": "proj-1"},
+                "environment": {"environmentId": "env-1"},
+            }
+        }
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    created = client.create_project(name="wizard-probe", description="probe", env="")
+
+    assert captured["url"] == "https://dokploy.example.com/api/project.create"
+    body = json.loads(str(captured["body"]))
+    assert body["name"] == "wizard-probe"
+    assert created.project_id == "proj-1"
+    assert created.environment_id == "env-1"
+
+
+def test_dokploy_client_deploy_compose_uses_session_fallback_on_api_key_401() -> None:
+    requests_seen: list[str] = []
+
+    def fake_request(req: request.Request) -> object:
+        requests_seen.append(req.full_url)
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        deploy_session_fallback=lambda compose_id, title, description: {
+            "data": {
+                "success": True,
+                "composeId": compose_id,
+                "message": f"{title}:{description}",
+            }
+        },
+    )
+
+    result = client.deploy_compose(
+        compose_id="cmp-1",
+        title="probe",
+        description="session-fallback",
+    )
+
+    assert requests_seen == ["https://dokploy.example.com/api/compose.deploy"]
+    assert result.success is True
+    assert result.compose_id == "cmp-1"
+    assert result.message == "probe:session-fallback"
+
+
+def test_dokploy_client_deploy_compose_re_raises_when_fallback_also_fails() -> None:
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        deploy_session_fallback=lambda compose_id, title, description: (_ for _ in ()).throw(
+            DokployApiError(
+                'Dokploy API request failed with status 401: {"message":"Unauthorized"}.'
+            )
+        ),
+    )
+
+    with pytest.raises(DokployApiError, match="status 401"):
+        client.deploy_compose(compose_id="cmp-1", title="probe", description="fallback-fails")
+
+
+def test_dokploy_client_create_project_uses_session_fallback_on_api_key_401() -> None:
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        project_create_session_fallback=lambda name, description, env: {
+            "data": {
+                "project": {"projectId": "proj-1"},
+                "environment": {"environmentId": "env-1"},
+            }
+        },
+    )
+
+    created = client.create_project(name="wizard-probe", description="probe", env="")
+
+    assert created.project_id == "proj-1"
+    assert created.environment_id == "env-1"
+
+
+def test_dokploy_client_create_compose_uses_session_fallback_on_api_key_401() -> None:
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        compose_create_session_fallback=lambda name, environment_id, compose_file, app_name: {
+            "data": {"composeId": "cmp-1", "name": name}
+        },
+        compose_update_session_fallback=lambda compose_id, compose_file: {
+            "data": {"composeId": compose_id, "name": "wizard-compose"}
+        },
+    )
+
+    record = client.create_compose(
+        name="wizard-compose",
+        environment_id="env-1",
+        compose_file="services:{}",
+        app_name="wizard-compose",
+    )
+
+    assert record.compose_id == "cmp-1"
+    assert record.name == "wizard-compose"
+
+
+def test_dokploy_client_update_compose_uses_session_fallback_on_api_key_401() -> None:
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        compose_update_session_fallback=lambda compose_id, compose_file: {
+            "data": {"composeId": compose_id, "name": "wizard-compose"}
+        },
+    )
+
+    record = client.update_compose(compose_id="cmp-1", compose_file="services:{}")
+
+    assert record.compose_id == "cmp-1"
+    assert record.name == "wizard-compose"

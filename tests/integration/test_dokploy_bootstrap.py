@@ -35,6 +35,7 @@ class FakeDokployBackend:
     healthy_before_install: bool
     healthy_after_install: bool
     install_calls: int = 0
+    ensure_public_route_calls: int = 0
 
     def is_healthy(self) -> bool:
         if self.install_calls == 0:
@@ -43,6 +44,9 @@ class FakeDokployBackend:
 
     def install(self) -> None:
         self.install_calls += 1
+
+    def ensure_public_route(self) -> None:
+        self.ensure_public_route_calls += 1
 
 
 @dataclass
@@ -75,6 +79,14 @@ class FakeCloudflareBackend:
         self.create_tunnel_calls += 1
         self.existing_tunnel = CloudflareTunnel(tunnel_id="bootstrap-tunnel", name=tunnel_name)
         return self.existing_tunnel
+
+    def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
+        return f"token-{tunnel_id}"
+
+    def update_tunnel_configuration(
+        self, account_id: str, tunnel_id: str, ingress: tuple[dict[str, object], ...]
+    ) -> None:
+        del account_id, tunnel_id, ingress
 
     def list_dns_records(
         self,
@@ -297,6 +309,7 @@ def test_install_non_dry_run_persists_scaffold_and_marks_bootstrap_steps(tmp_pat
 
     assert summary["bootstrap"]["outcome"] == "applied"
     assert backend.install_calls == 1
+    assert backend.ensure_public_route_calls == 1
     assert loaded_state.raw_input is not None
     assert loaded_state.desired_state is not None
     assert loaded_state.applied_state is not None
@@ -362,6 +375,7 @@ def test_install_reuses_existing_matching_state_and_detects_already_present(tmp_
     assert summary["networking"]["outcome"] == "already_present"
     assert summary["headscale"]["outcome"] == "already_present"
     assert second_backend.install_calls == 0
+    assert second_backend.ensure_public_route_calls == 2
 
 
 def test_install_auth_failure_leaves_fresh_scaffold_on_disk(
@@ -388,6 +402,7 @@ def test_install_auth_failure_leaves_fresh_scaffold_on_disk(
         lambda **kwargs: (kwargs["host_facts"], {}),
     )
     monkeypatch.setattr(cli, "run_preflight", lambda *_: object())
+    monkeypatch.setattr(cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
     monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
     monkeypatch.setattr(
         cli,
@@ -451,13 +466,14 @@ def test_install_auth_success_refreshes_persisted_target_state_before_execution(
         lambda **kwargs: (kwargs["host_facts"], {}),
     )
     monkeypatch.setattr(cli, "run_preflight", lambda *_: object())
+    monkeypatch.setattr(cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
     monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
     monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **_: {"state_status": "fresh"})
     monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
     monkeypatch.setattr(
         cli,
         "DokployApiClient",
-        lambda *, api_url, api_key: type(
+        lambda *, api_url, api_key, **kwargs: type(
             "_ValidDokployClient",
             (),
             {

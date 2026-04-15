@@ -41,6 +41,24 @@ class PlannedDnsRecord:
 
 
 @dataclass(frozen=True)
+class PlannedTunnelConnector:
+    action: str
+    resource_id: str | None
+    resource_name: str
+    public_url: str
+    passed: bool | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "passed": self.passed,
+            "public_url": self.public_url,
+            "resource_id": self.resource_id,
+            "resource_name": self.resource_name,
+        }
+
+
+@dataclass(frozen=True)
 class PlannedAccessIdentityProvider:
     action: str
     provider_id: str
@@ -84,11 +102,13 @@ class NetworkingResult:
     validation_checks: tuple[str, ...]
     tunnel: PlannedTunnel
     dns_records: tuple[PlannedDnsRecord, ...]
+    connector: PlannedTunnelConnector | None
     notes: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "account_id": self.account_id,
+            "connector": None if self.connector is None else self.connector.to_dict(),
             "dns_records": [record.to_dict() for record in self.dns_records],
             "notes": list(self.notes),
             "outcome": self.outcome,

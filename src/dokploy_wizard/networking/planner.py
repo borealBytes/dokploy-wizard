@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from dokploy_wizard.networking.cloudflare import (
     CloudflareAccessApplication,
@@ -23,6 +24,7 @@ from dokploy_wizard.networking.models import (
     PlannedAccessPolicy,
     PlannedDnsRecord,
     PlannedTunnel,
+    PlannedTunnelConnector,
 )
 from dokploy_wizard.state import (
     DesiredState,
@@ -53,6 +55,7 @@ def reconcile_networking(
     desired_state: DesiredState,
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
+    connector_backend: Any | None = None,
 ) -> NetworkingPhase:
     credentials = _resolve_credentials(raw_env, desired_state, backend)
     backend.validate_account_access(credentials.account_id)
@@ -92,6 +95,34 @@ def reconcile_networking(
     )
     notes.extend(dns_notes)
 
+    ingress_rules = _build_tunnel_ingress(desired_state)
+    notes.append(
+        "Planned "
+        f"{len(ingress_rules) - 1} Cloudflare Tunnel ingress route(s) "
+        "with a terminal 404 fallback."
+    )
+    if not dry_run:
+        backend.update_tunnel_configuration(
+            credentials.account_id,
+            tunnel.tunnel_id,
+            ingress_rules,
+        )
+
+    connector = _resolve_connector(
+        dry_run=dry_run,
+        desired_state=desired_state,
+        account_id=credentials.account_id,
+        tunnel=tunnel,
+        backend=backend,
+        connector_backend=connector_backend,
+    )
+    if connector is not None:
+        notes.append(
+            f"Cloudflare Tunnel connector {connector.action} for {connector.resource_name}."
+        )
+        if connector.passed:
+            notes.append(f"Dokploy is publicly reachable at {connector.public_url}.")
+
     outcome = "plan_only" if dry_run else _derive_outcome(tunnel_action, dns_records)
     return NetworkingPhase(
         result=NetworkingResult(
@@ -101,6 +132,7 @@ def reconcile_networking(
             validation_checks=validation_checks,
             tunnel=planned_tunnel,
             dns_records=dns_records,
+            connector=connector,
             notes=tuple(notes),
         ),
         tunnel_resource_id=None if dry_run else tunnel.tunnel_id,
@@ -606,6 +638,75 @@ def _derive_outcome(tunnel_action: str, dns_records: tuple[PlannedDnsRecord, ...
     if "create" in actions:
         return "applied"
     return "already_present"
+
+
+def _build_tunnel_ingress(desired_state: DesiredState) -> tuple[dict[str, object], ...]:
+    ingress: list[dict[str, object]] = [
+        {
+            "hostname": desired_state.hostnames["dokploy"],
+            "service": "https://localhost:443",
+            "originRequest": {"noTLSVerify": True},
+        },
+    ]
+    seen_hosts = {desired_state.hostnames["dokploy"]}
+    for key, hostname in desired_state.hostnames.items():
+        if hostname in seen_hosts:
+            continue
+        if key == "dokploy":
+            continue
+        ingress.append(
+            {
+                "hostname": hostname,
+                "service": "https://localhost:443",
+                "originRequest": {"noTLSVerify": True},
+            }
+        )
+        seen_hosts.add(hostname)
+    ingress.append({"service": "http_status:404"})
+    return tuple(ingress)
+
+
+def _resolve_connector(
+    *,
+    dry_run: bool,
+    desired_state: DesiredState,
+    account_id: str,
+    tunnel: CloudflareTunnel,
+    backend: CloudflareBackend,
+    connector_backend: Any | None,
+) -> PlannedTunnelConnector | None:
+    if connector_backend is None:
+        return None
+    resource_name = f"{desired_state.stack_name}-cloudflared"
+    existing = connector_backend.find_service_by_name(resource_name)
+    action = "reuse_existing" if existing is not None else "create"
+    if dry_run:
+        return PlannedTunnelConnector(
+            action=action,
+            resource_id=None if existing is None else existing.resource_id,
+            resource_name=resource_name,
+            public_url=desired_state.dokploy_url,
+            passed=None,
+        )
+
+    tunnel_token = backend.get_tunnel_token(account_id, tunnel.tunnel_id)
+    service = connector_backend.create_service(
+        resource_name=resource_name,
+        tunnel_token=tunnel_token,
+    )
+    passed = connector_backend.check_health(service=service, url=desired_state.dokploy_url)
+    if not passed:
+        raise CloudflareError(
+            "Dokploy public URL did not become reachable after starting the "
+            f"Cloudflare Tunnel connector: {desired_state.dokploy_url}"
+        )
+    return PlannedTunnelConnector(
+        action=action,
+        resource_id=service.resource_id,
+        resource_name=service.resource_name,
+        public_url=desired_state.dokploy_url,
+        passed=True,
+    )
 
 
 def _select_compatible_record(

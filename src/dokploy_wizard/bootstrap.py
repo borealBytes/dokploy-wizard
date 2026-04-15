@@ -7,8 +7,13 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
+from dokploy_wizard.dokploy.bootstrap_auth import (
+    DokployBootstrapAuthClient,
+    DokployBootstrapAuthError,
+)
 from dokploy_wizard.state import RawEnvInput, StateValidationError
 
 DOKPLOY_INSTALL_COMMAND = "curl -sSL https://dokploy.com/install.sh | sh"
@@ -45,6 +50,7 @@ class ShellDokployBootstrapBackend:
     """Default subprocess-backed Dokploy bootstrap backend."""
 
     def __init__(self, raw_env: RawEnvInput) -> None:
+        self._raw_env = raw_env
         self._forced_health = _optional_bool(raw_env.values, "DOKPLOY_BOOTSTRAP_HEALTHY")
         self._forced_health_after_install = _optional_bool(
             raw_env.values,
@@ -79,6 +85,37 @@ class ShellDokployBootstrapBackend:
                 msg = f"{msg}: {stderr}"
             raise DokployBootstrapError(msg)
 
+    def ensure_public_route(self) -> None:
+        values = self._raw_env.values
+        root_domain = values.get("ROOT_DOMAIN")
+        if not root_domain:
+            return
+        subdomain = values.get("DOKPLOY_SUBDOMAIN", "dokploy")
+        hostname = f"{subdomain}.{root_domain}"
+        route_file = Path("/etc/dokploy/traefik/dynamic/dokploy.yml")
+        if not route_file.exists():
+            return
+        desired_route = _render_dokploy_public_route(hostname)
+        current_route = route_file.read_text(encoding="utf-8")
+        route_changed = current_route != desired_route
+        if route_changed:
+            route_file.write_text(desired_route, encoding="utf-8")
+        admin_email = values.get("DOKPLOY_ADMIN_EMAIL")
+        admin_password = values.get("DOKPLOY_ADMIN_PASSWORD")
+        if not route_changed or not admin_email or not admin_password:
+            return
+        try:
+            DokployBootstrapAuthClient(base_url=LOCAL_HEALTH_URL).assign_domain_server(
+                admin_email=admin_email,
+                admin_password=admin_password,
+                host=hostname,
+                certificate_type="none",
+                lets_encrypt_email="",
+                https=True,
+            )
+        except DokployBootstrapAuthError as error:
+            raise DokployBootstrapError(str(error)) from error
+
 
 def reconcile_dokploy(
     *,
@@ -86,6 +123,7 @@ def reconcile_dokploy(
     backend: DokployBootstrapBackend,
 ) -> DokployBootstrapResult:
     if backend.is_healthy():
+        _maybe_ensure_public_route(backend)
         return DokployBootstrapResult(
             outcome="already_present",
             install_command=DOKPLOY_INSTALL_COMMAND,
@@ -108,6 +146,8 @@ def reconcile_dokploy(
     if not _wait_for_health(backend):
         msg = "Dokploy bootstrap did not become locally healthy on http://127.0.0.1:3000."
         raise DokployBootstrapError(msg)
+
+    _maybe_ensure_public_route(backend)
 
     return DokployBootstrapResult(
         outcome="applied",
@@ -163,3 +203,30 @@ def _optional_bool(values: dict[str, str], key: str) -> bool | None:
         return False
     msg = f"Invalid boolean value for '{key}': {raw_value!r}."
     raise StateValidationError(msg)
+
+
+def _render_dokploy_public_route(hostname: str) -> str:
+    return (
+        "http:\n"
+        "  routers:\n"
+        "    dokploy-router-app:\n"
+        f"      rule: Host(`{hostname}`) && PathPrefix(`/`)\n"
+        "      service: dokploy-service-app\n"
+        "      entryPoints:\n"
+        "        - web\n"
+        "        - websecure\n"
+        "      tls:\n"
+        "        certResolver: letsencrypt\n"
+        "  services:\n"
+        "    dokploy-service-app:\n"
+        "      loadBalancer:\n"
+        "        servers:\n"
+        "          - url: http://dokploy:3000\n"
+        "        passHostHeader: true\n"
+    )
+
+
+def _maybe_ensure_public_route(backend: DokployBootstrapBackend) -> None:
+    ensure_public_route = getattr(backend, "ensure_public_route", None)
+    if callable(ensure_public_route):
+        ensure_public_route()
