@@ -412,6 +412,15 @@ def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
     assert "HEADSCALE_DERP_URLS: https://controlplane.tailscale.com/derpmap/default" in rendered
     assert "command: ['serve']" in rendered
     assert "HEADSCALE_DERP_SERVER_ENABLED" not in rendered
+    assert "healthcheck:" not in rendered
+    assert (
+        'traefik.http.routers.wizard-stack-headscale.rule: "Host(`headscale.example.com`)"'
+        in rendered
+    )
+    assert (
+        'traefik.http.services.wizard-stack-headscale.loadbalancer.server.port: "8080"' in rendered
+    )
+    assert "      - dokploy-network" in rendered
 
 
 def test_headscale_health_check_falls_back_to_loopback_with_host_header(
@@ -478,3 +487,41 @@ def test_dokploy_headscale_health_prefers_local_container_state(
         )
         is True
     )
+
+
+def test_dokploy_headscale_health_retries_until_container_is_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployHeadscaleBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name="wizard-stack",
+        hostname="headscale.example.com",
+        client=FakeDokployApiClient(),
+    )
+    states = iter([False, False, True])
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.headscale._docker_container_is_up",
+        lambda service_name: next(states),
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.headscale._http_health_check",
+        lambda url: False,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.headscale.time.sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    assert (
+        backend.check_health(
+            service=HeadscaleResourceRecord(
+                resource_id="dokploy-compose:cmp-1:headscale",
+                resource_name="wizard-stack-headscale",
+            ),
+            url="https://headscale.example.com/health",
+        )
+        is True
+    )
+    assert sleep_calls == [5.0, 5.0]

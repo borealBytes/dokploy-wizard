@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -98,9 +99,7 @@ class DokployHeadscaleBackend:
 
     def check_health(self, *, service: HeadscaleResourceRecord, url: str) -> bool:
         del service
-        if _docker_container_is_up(self._service_name):
-            return True
-        return _http_health_check(url)
+        return _wait_for_headscale_health(self._service_name, url)
 
     def _lookup_locator(self, resource_id: str) -> _ComposeLocator | None:
         compose_id = _parse_resource_id(resource_id)
@@ -279,17 +278,39 @@ def _render_compose_file(service_name: str, hostname: str, secret_refs: tuple[st
         "      HEADSCALE_DNS_MAGIC_DNS: 'false'\n"
         f"      HEADSCALE_ADMIN_API_KEY: ${{{admin_secret_ref}:-change-me}}\n"
         f"      HEADSCALE_NOISE_PRIVATE_KEY: ${{{noise_secret_ref}:-change-me}}\n"
+        "    labels:\n"
+        '      traefik.enable: "true"\n'
+        f'      traefik.http.routers.{service_name}.entrypoints: "websecure"\n'
+        f'      traefik.http.routers.{service_name}.rule: "Host(`{hostname}`)"\n'
+        f'      traefik.http.routers.{service_name}.tls: "true"\n'
+        f'      traefik.http.services.{service_name}.loadbalancer.server.port: "8080"\n'
         "    expose:\n"
         "      - '8080'\n"
-        "    healthcheck:\n"
-        "      test: ['CMD-SHELL', 'wget -q -O- http://127.0.0.1:8080/health >/dev/null']\n"
-        "      interval: 30s\n"
-        "      timeout: 5s\n"
-        "      retries: 5\n"
         f"    volumes:\n      - {volume_name}:/var/lib/headscale\n"
         "      - /var/run/headscale:/var/run/headscale\n"
         "    networks:\n"
         "      - default\n"
+        "      - dokploy-network\n"
         "volumes:\n"
         f"  {volume_name}:\n"
+        "networks:\n"
+        "  dokploy-network:\n"
+        "    external: true\n"
     )
+
+
+def _wait_for_headscale_health(
+    service_name: str,
+    url: str,
+    *,
+    attempts: int = 12,
+    delay_seconds: float = 5.0,
+) -> bool:
+    for attempt in range(attempts):
+        if _docker_container_is_up(service_name):
+            return True
+        if _http_health_check(url):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return False
