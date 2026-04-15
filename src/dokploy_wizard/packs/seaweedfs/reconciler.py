@@ -37,6 +37,17 @@ class SeaweedFsBackend(Protocol):
         data_resource_name: str,
     ) -> SeaweedFsResourceRecord: ...
 
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        access_key: str,
+        secret_key: str,
+        data_resource_name: str,
+    ) -> SeaweedFsResourceRecord: ...
+
     def get_persistent_data(self, resource_id: str) -> SeaweedFsResourceRecord | None: ...
 
     def find_persistent_data_by_name(
@@ -96,6 +107,25 @@ class ShellSeaweedFsBackend:
             resource_id=resource_name, resource_name=resource_name
         )
         return self._service
+
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        access_key: str,
+        secret_key: str,
+        data_resource_name: str,
+    ) -> SeaweedFsResourceRecord:
+        del resource_id
+        return self.create_service(
+            resource_name=resource_name,
+            hostname=hostname,
+            access_key=access_key,
+            secret_key=secret_key,
+            data_resource_name=data_resource_name,
+        )
 
     def get_persistent_data(self, resource_id: str) -> SeaweedFsResourceRecord | None:
         if self._data is not None and self._data.resource_id == resource_id:
@@ -314,6 +344,15 @@ def _resolve_owned_resource(
         )
     existing = find_by_name(resource_name)
     if existing is not None:
+        if existing.resource_id.startswith("dokploy-compose:"):
+            return (
+                SeaweedFsManagedResource(
+                    action="reuse_existing",
+                    resource_id=existing.resource_id,
+                    resource_name=existing.resource_name,
+                ),
+                existing.resource_id,
+            )
         raise SeaweedFsError(collision_message)
     if dry_run:
         planned_id = f"planned:{resource_name}"
@@ -348,27 +387,101 @@ def _resolve_service(
     stack_name: str,
     backend: SeaweedFsBackend,
 ) -> tuple[SeaweedFsManagedResource, str]:
-    return _resolve_owned_resource(
-        dry_run=dry_run,
-        resource_name=service_name,
+    owned_resource = _find_owned_resource(
+        ownership_ledger=ownership_ledger,
         resource_type=SEAWEEDFS_SERVICE_RESOURCE_TYPE,
-        owned_resource=_find_owned_resource(
-            ownership_ledger=ownership_ledger,
-            resource_type=SEAWEEDFS_SERVICE_RESOURCE_TYPE,
-            scope=_service_scope(stack_name),
-        ),
-        get_resource=backend.get_service,
-        find_by_name=backend.find_service_by_name,
-        create_resource=lambda resource_name: backend.create_service(
-            resource_name=resource_name,
-            hostname=hostname,
-            access_key=access_key,
-            secret_key=secret_key,
-            data_resource_name=data_name,
-        ),
-        collision_message=(
+        scope=_service_scope(stack_name),
+    )
+    if owned_resource is not None:
+        existing = backend.get_service(owned_resource.resource_id)
+        if existing is None:
+            raise SeaweedFsError(
+                "Ownership ledger says the seaweedfs_service resource exists, "
+                "but the backend could not find it."
+            )
+        if not dry_run:
+            updated = backend.update_service(
+                resource_id=existing.resource_id,
+                resource_name=service_name,
+                hostname=hostname,
+                access_key=access_key,
+                secret_key=secret_key,
+                data_resource_name=data_name,
+            )
+            return (
+                SeaweedFsManagedResource(
+                    action="update_owned",
+                    resource_id=updated.resource_id,
+                    resource_name=updated.resource_name,
+                ),
+                updated.resource_id,
+            )
+        return (
+            SeaweedFsManagedResource(
+                action="reuse_owned",
+                resource_id=existing.resource_id,
+                resource_name=existing.resource_name,
+            ),
+            existing.resource_id,
+        )
+
+    existing = backend.find_service_by_name(service_name)
+    if existing is not None:
+        if existing.resource_id.startswith("dokploy-compose:"):
+            if not dry_run:
+                updated = backend.update_service(
+                    resource_id=existing.resource_id,
+                    resource_name=service_name,
+                    hostname=hostname,
+                    access_key=access_key,
+                    secret_key=secret_key,
+                    data_resource_name=data_name,
+                )
+                return (
+                    SeaweedFsManagedResource(
+                        action="reuse_existing",
+                        resource_id=updated.resource_id,
+                        resource_name=updated.resource_name,
+                    ),
+                    updated.resource_id,
+                )
+            return (
+                SeaweedFsManagedResource(
+                    action="reuse_existing",
+                    resource_id=existing.resource_id,
+                    resource_name=existing.resource_name,
+                ),
+                existing.resource_id,
+            )
+        raise SeaweedFsError(
             "Existing SeaweedFS service matched the desired name but is not wizard-owned."
+        )
+
+    if dry_run:
+        planned_id = f"planned:{service_name}"
+        return (
+            SeaweedFsManagedResource(
+                action="create",
+                resource_id=planned_id,
+                resource_name=service_name,
+            ),
+            planned_id,
+        )
+
+    created = backend.create_service(
+        resource_name=service_name,
+        hostname=hostname,
+        access_key=access_key,
+        secret_key=secret_key,
+        data_resource_name=data_name,
+    )
+    return (
+        SeaweedFsManagedResource(
+            action="create",
+            resource_id=created.resource_id,
+            resource_name=created.resource_name,
         ),
+        created.resource_id,
     )
 
 
