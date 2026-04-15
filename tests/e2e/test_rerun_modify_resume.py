@@ -156,6 +156,61 @@ def test_cli_modify_domain_rejects_mock_contamination_for_live_run(tmp_path: Pat
     assert "DOKPLOY_MOCK_API_MODE" in modified.stderr
 
 
+def test_cli_inspect_state_persists_live_drift_snapshot(tmp_path: Path) -> None:
+    state_dir = tmp_path / "inspect-state"
+
+    result = _run_cli(
+        "inspect-state",
+        "--env-file",
+        str(FIXTURES_DIR / "lifecycle-headscale.env"),
+        "--state-dir",
+        str(state_dir),
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["live_drift"]["status"] in {"clean", "drift_detected", "unavailable"}
+    assert payload["live_drift"]["summary"] == {
+        "wizard_managed": payload["live_drift"]["summary"]["wizard_managed"],
+        "manual_collision": payload["live_drift"]["summary"]["manual_collision"],
+        "host_local_route": payload["live_drift"]["summary"]["host_local_route"],
+        "unknown_unmanaged": payload["live_drift"]["summary"]["unknown_unmanaged"],
+    }
+    assert payload["live_drift"]["inspection"]["docker"]["available"] in {True, False}
+    assert payload["live_drift"]["inspection"]["host_routes"]["available"] in {True, False}
+    assert isinstance(payload["live_drift"]["entries"], list)
+    assert all(
+        entry["classification"]
+        in {
+            "wizard_managed",
+            "manual_collision",
+            "host_local_route",
+            "unknown_unmanaged",
+        }
+        for entry in payload["live_drift"]["entries"]
+    )
+    if payload["live_drift"]["entries"]:
+        assert all("detail" in entry for entry in payload["live_drift"]["entries"])
+        assert all("classification" in entry for entry in payload["live_drift"]["entries"])
+    assert payload["live_drift"]["detected"] == any(
+        entry["classification"] != "wizard_managed" or entry.get("health") != "healthy"
+        for entry in payload["live_drift"]["entries"]
+    )
+    assert set(payload["live_drift"]["summary"]) == {
+        "wizard_managed",
+        "manual_collision",
+        "host_local_route",
+        "unknown_unmanaged",
+    }
+    assert json.loads((state_dir / "desired-state.json").read_text(encoding="utf-8")) == payload
+    assert (
+        json.loads((state_dir / "raw-input.json").read_text(encoding="utf-8"))["format_version"]
+        == 1
+    )
+    assert not (state_dir / "applied-state.json").exists()
+    assert not (state_dir / "ownership-ledger.json").exists()
+
+
 def test_cli_resume_rejects_persisted_mock_reuse_before_mutation(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     base_env = (FIXTURES_DIR / "lifecycle-headscale.env").read_text(encoding="utf-8")

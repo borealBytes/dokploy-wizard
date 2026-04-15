@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,7 @@ class LifecycleBackends:
     bootstrap: DokployBootstrapBackend
     tailscale: TailscaleBackend
     networking: CloudflareBackend
+    cloudflared: Any | None
     shared_core: SharedCoreBackend
     headscale: HeadscaleBackend
     matrix: MatrixBackend
@@ -146,8 +148,15 @@ def execute_lifecycle_plan(
                 desired_state=desired_state,
                 ownership_ledger=current_ledger,
                 backend=backends.networking,
+                connector_backend=backends.cloudflared,
             )
             phase_results[phase] = networking.result.to_dict()
+            if (
+                not dry_run
+                and networking.result.connector is not None
+                and networking.result.connector.passed
+            ):
+                _emit_dokploy_ready_hint(networking.result.connector.public_url)
             if not dry_run:
                 if networking.tunnel_resource_id is None:
                     raise RuntimeError("Networking reconciliation did not return a tunnel id.")
@@ -345,6 +354,13 @@ def _promote_preserved_phases(
         valid_phases.add(phase)
 
 
+def _emit_dokploy_ready_hint(url: str) -> None:
+    print(
+        f"Dokploy is ready: {url} — you can open it now and watch the rest of the install.",
+        file=sys.stderr,
+    )
+
+
 def _build_summary(
     *,
     lifecycle_plan: LifecyclePlan,
@@ -410,6 +426,7 @@ def _preserved_result(
             desired_state=desired_state,
             ownership_ledger=ownership_ledger,
             backend=backends.networking,
+            connector_backend=backends.cloudflared,
         ).result.to_dict()
         result["outcome"] = "already_present"
         return result
