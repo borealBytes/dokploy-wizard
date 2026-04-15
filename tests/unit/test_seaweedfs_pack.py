@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import ssl
 from dataclasses import dataclass, field
+from urllib import request
+
+import pytest
 
 from dokploy_wizard.dokploy import (
     DokployComposeRecord,
@@ -13,6 +17,7 @@ from dokploy_wizard.dokploy import (
     DokployProjectSummary,
     DokploySeaweedFsBackend,
 )
+from dokploy_wizard.dokploy.seaweedfs import _docker_container_is_up, _local_https_health_check
 from dokploy_wizard.packs.seaweedfs import (
     SEAWEEDFS_DATA_RESOURCE_TYPE,
     SEAWEEDFS_SERVICE_RESOURCE_TYPE,
@@ -28,6 +33,7 @@ class FakeSeaweedFsBackend:
     existing_service: SeaweedFsResourceRecord | None = None
     existing_data: SeaweedFsResourceRecord | None = None
     health_ok: bool = True
+    update_service_calls: int = 0
 
     def get_service(self, resource_id: str) -> SeaweedFsResourceRecord | None:
         if self.existing_service is not None and self.existing_service.resource_id == resource_id:
@@ -58,6 +64,26 @@ class FakeSeaweedFsBackend:
         )
         return self.existing_service
 
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        access_key: str,
+        secret_key: str,
+        data_resource_name: str,
+    ) -> SeaweedFsResourceRecord:
+        del resource_id
+        self.update_service_calls += 1
+        return self.create_service(
+            resource_name=resource_name,
+            hostname=hostname,
+            access_key=access_key,
+            secret_key=secret_key,
+            data_resource_name=data_resource_name,
+        )
+
     def get_persistent_data(self, resource_id: str) -> SeaweedFsResourceRecord | None:
         if self.existing_data is not None and self.existing_data.resource_id == resource_id:
             return self.existing_data
@@ -86,6 +112,7 @@ class FakeDokployApiClient:
     create_project_calls: int = 0
     create_compose_calls: int = 0
     deploy_calls: int = 0
+    last_create_compose_file: str | None = None
 
     def list_projects(self) -> tuple[DokployProjectSummary, ...]:
         return tuple(self.projects)
@@ -114,8 +141,9 @@ class FakeDokployApiClient:
     def create_compose(
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord:
-        del compose_file, app_name
+        del app_name
         self.create_compose_calls += 1
+        self.last_create_compose_file = compose_file
         record = DokployComposeRecord(compose_id="cmp-1", name=name)
         self.projects[0] = DokployProjectSummary(
             project_id="proj-1",
@@ -224,9 +252,73 @@ def test_reconcile_seaweedfs_reuses_owned_resources() -> None:
     )
 
     assert phase.result.outcome == "already_present"
-    assert phase.result.service is not None and phase.result.service.action == "reuse_owned"
+    assert phase.result.service is not None and phase.result.service.action == "update_owned"
     assert phase.result.persistent_data is not None
     assert phase.result.persistent_data.action == "reuse_owned"
+    assert backend.update_service_calls == 1
+
+
+def test_reconcile_seaweedfs_reuses_existing_dokploy_managed_data() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_SEAWEEDFS": "true",
+                "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
+                "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
+            },
+        )
+    )
+    backend = FakeSeaweedFsBackend(
+        existing_data=SeaweedFsResourceRecord(
+            resource_id="dokploy-compose:cmp-existing:seaweedfs-data",
+            resource_name="wizard-stack-seaweedfs-data",
+        )
+    )
+
+    phase = reconcile_seaweedfs(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert phase.result.persistent_data is not None
+    assert phase.result.persistent_data.action == "reuse_existing"
+
+
+def test_reconcile_seaweedfs_reuses_existing_dokploy_managed_service() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_SEAWEEDFS": "true",
+                "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
+                "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
+            },
+        )
+    )
+    backend = FakeSeaweedFsBackend(
+        existing_service=SeaweedFsResourceRecord(
+            resource_id="dokploy-compose:cmp-existing:seaweedfs-service",
+            resource_name="wizard-stack-seaweedfs",
+        )
+    )
+
+    phase = reconcile_seaweedfs(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert phase.result.service is not None
+    assert phase.result.service.action == "reuse_existing"
+    assert backend.update_service_calls == 1
 
 
 def test_dokploy_seaweedfs_backend_creates_one_compose_for_service_and_data() -> None:
@@ -255,6 +347,13 @@ def test_dokploy_seaweedfs_backend_creates_one_compose_for_service_and_data() ->
     assert client.create_project_calls == 1
     assert client.create_compose_calls == 1
     assert client.deploy_calls == 1
+    compose = client.last_create_compose_file
+    assert compose is not None
+    assert "command: ['server', '-dir=/data', '-s3', '-ip.bind=0.0.0.0']" in compose
+    assert 'traefik.http.routers.wizard-stack-seaweedfs.rule: "Host(`s3.example.com`)"' in compose
+    assert (
+        'traefik.http.services.wizard-stack-seaweedfs.loadbalancer.server.port: "8333"' in compose
+    )
 
 
 def test_build_seaweedfs_ledger_persists_service_and_data() -> None:
@@ -269,3 +368,53 @@ def test_build_seaweedfs_ledger_persists_service_and_data() -> None:
         (SEAWEEDFS_SERVICE_RESOURCE_TYPE, "stack:wizard-stack:seaweedfs-service"),
         (SEAWEEDFS_DATA_RESOURCE_TYPE, "stack:wizard-stack:seaweedfs-data"),
     }
+
+
+def test_docker_container_is_up_matches_compose_named_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.seaweedfs.subprocess.run",
+        lambda *args, **kwargs: type(
+            "Result",
+            (),
+            {
+                "returncode": 0,
+                "stdout": "wizard-stack-seaweedfs-abc123-wizard-stack-seaweedfs-1\tUp 10 seconds\n",
+            },
+        )(),
+    )
+
+    assert _docker_container_is_up("wizard-stack-seaweedfs") is True
+
+
+def test_local_https_health_check_uses_host_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, dict[str, str], bool]] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    def fake_urlopen(
+        req: request.Request,
+        timeout: int,
+        context: ssl.SSLContext,
+    ) -> FakeResponse:
+        calls.append((req.full_url, dict(req.header_items()), context.check_hostname is False))
+        return FakeResponse()
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.seaweedfs.request.urlopen", fake_urlopen)
+
+    assert _local_https_health_check("https://s3.example.com/status") is True
+    assert calls == [
+        (
+            "https://127.0.0.1/status",
+            {"Host": "s3.example.com"},
+            True,
+        )
+    ]

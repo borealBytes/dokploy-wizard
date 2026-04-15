@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ssl
+import subprocess
 from dataclasses import dataclass
 from typing import Protocol
+from urllib import error, parse, request
 
 from dokploy_wizard.dokploy.client import (
     DokployApiClient,
@@ -116,6 +119,25 @@ class DokploySeaweedFsBackend:
             resource_name=resource_name,
         )
 
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        access_key: str,
+        secret_key: str,
+        data_resource_name: str,
+    ) -> SeaweedFsResourceRecord:
+        del resource_id
+        return self.create_service(
+            resource_name=resource_name,
+            hostname=hostname,
+            access_key=access_key,
+            secret_key=secret_key,
+            data_resource_name=data_resource_name,
+        )
+
     def get_persistent_data(self, resource_id: str) -> SeaweedFsResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "data")
         if compose_id is None:
@@ -151,9 +173,7 @@ class DokploySeaweedFsBackend:
 
     def check_health(self, *, service: SeaweedFsResourceRecord, url: str) -> bool:
         del service
-        from dokploy_wizard.packs.seaweedfs.reconciler import _http_health_check
-
-        return _http_health_check(url)
+        return _local_https_health_check(url)
 
     def _find_compose_locator(self) -> _ComposeLocator | None:
         if self._applied_locator is not None:
@@ -180,7 +200,7 @@ class DokploySeaweedFsBackend:
         return None
 
     def _ensure_compose_applied(self) -> _ComposeLocator:
-        if self._applied_locator is not None:
+        if self._applied_locator is not None and self._created_in_process:
             return self._applied_locator
         compose_file = _render_compose_file(
             stack_name=self._stack_name,
@@ -189,6 +209,23 @@ class DokploySeaweedFsBackend:
             secret_key=self._secret_key,
         )
         try:
+            if self._applied_locator is not None:
+                updated = self._client.update_compose(
+                    compose_id=self._applied_locator.compose_id,
+                    compose_file=compose_file,
+                )
+                self._client.deploy_compose(
+                    compose_id=updated.compose_id,
+                    title="dokploy-wizard seaweedfs reconcile",
+                    description="Update SeaweedFS compose app",
+                )
+                self._created_in_process = True
+                self._applied_locator = _ComposeLocator(
+                    project_id=self._applied_locator.project_id,
+                    environment_id=self._applied_locator.environment_id,
+                    compose_id=updated.compose_id,
+                )
+                return self._applied_locator
             projects = self._client.list_projects()
             for project in projects:
                 if project.name != self._stack_name:
@@ -293,11 +330,17 @@ def _render_compose_file(
         f"  {service_name}:\n"
         "    image: chrislusf/seaweedfs:latest\n"
         "    restart: unless-stopped\n"
-        "    command: ['weed', 'server', '-dir=/data', '-s3']\n"
+        "    command: ['server', '-dir=/data', '-s3', '-ip.bind=0.0.0.0']\n"
         "    environment:\n"
         f"      AWS_ACCESS_KEY_ID: {access_key}\n"
         f"      AWS_SECRET_ACCESS_KEY: {secret_key}\n"
         f"      S3_DOMAIN_NAME: {hostname}\n"
+        "    labels:\n"
+        '      traefik.enable: "true"\n'
+        f'      traefik.http.routers.{service_name}.entrypoints: "websecure"\n'
+        f'      traefik.http.routers.{service_name}.rule: "Host(`{hostname}`)"\n'
+        f'      traefik.http.routers.{service_name}.tls: "true"\n'
+        f'      traefik.http.services.{service_name}.loadbalancer.server.port: "8333"\n'
         "    expose:\n"
         "      - '8333'\n"
         "    healthcheck:\n"
@@ -306,6 +349,56 @@ def _render_compose_file(
         "      timeout: 5s\n"
         "      retries: 5\n"
         f"    volumes:\n      - {data_name}:/data\n"
+        "    networks:\n"
+        "      - default\n"
+        "      - dokploy-network\n"
         "volumes:\n"
         f"  {data_name}:\n"
+        "networks:\n"
+        "  dokploy-network:\n"
+        "    external: true\n"
     )
+
+
+def _docker_container_is_up(service_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}\t{{.Status}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.splitlines():
+        name, _, status = line.partition("\t")
+        if service_name not in name:
+            continue
+        return status.startswith("Up ")
+    return False
+
+
+def _local_https_health_check(url: str) -> bool:
+    parsed = parse.urlsplit(url)
+    if not parsed.hostname:
+        return False
+    request_path = parsed.path or "/"
+    if parsed.query:
+        request_path = f"{request_path}?{parsed.query}"
+    req = request.Request(
+        f"https://127.0.0.1{request_path}",
+        headers={"Host": parsed.hostname},
+        method="GET",
+    )
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with request.urlopen(req, timeout=15, context=context):  # noqa: S310
+            return True
+    except error.HTTPError as exc:
+        return exc.code < 500
+    except (error.URLError, TimeoutError):
+        return False
