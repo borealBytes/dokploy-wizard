@@ -9,6 +9,7 @@ import pytest
 
 from dokploy_wizard.cli import run_install_flow
 from dokploy_wizard.core import SharedCoreResourceRecord
+from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.dokploy import (
     DokployComposeRecord,
     DokployComposeSummary,
@@ -77,6 +78,14 @@ class FakeCloudflareBackend:
         del account_id
         self.existing_tunnel = CloudflareTunnel(tunnel_id="nextcloud-tunnel", name=tunnel_name)
         return self.existing_tunnel
+
+    def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
+        return f"token-{tunnel_id}"
+
+    def update_tunnel_configuration(
+        self, account_id: str, tunnel_id: str, ingress: tuple[dict[str, object], ...]
+    ) -> None:
+        del account_id, tunnel_id, ingress
 
     def list_dns_records(
         self,
@@ -258,6 +267,11 @@ class FakeSharedCoreBackend:
         self.redis = SharedCoreResourceRecord(resource_id="redis-1", resource_name=resource_name)
         return self.redis
 
+    def ensure_postgres_allocations(
+        self, allocations: tuple[SharedPostgresAllocation, ...]
+    ) -> None:
+        del allocations
+
 
 @dataclass
 class FakeHeadscaleBackend:
@@ -329,6 +343,23 @@ class FakeNextcloudBackend:
         self.services[resource_name] = record
         return record
 
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        data_volume_name: str,
+        config: dict[str, str],
+    ) -> NextcloudResourceRecord:
+        del resource_id
+        return self.create_service(
+            resource_name=resource_name,
+            hostname=hostname,
+            data_volume_name=data_volume_name,
+            config=config,
+        )
+
     def get_volume(self, resource_id: str) -> NextcloudResourceRecord | None:
         for record in self.volumes.values():
             if record.resource_id == resource_id:
@@ -350,6 +381,9 @@ class FakeNextcloudBackend:
     def check_health(self, *, service: NextcloudResourceRecord, url: str) -> bool:
         del url
         return self.health.get(service.resource_name, True)
+
+    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+        del nextcloud_url, onlyoffice_url
 
 
 @dataclass
@@ -540,12 +574,12 @@ def test_install_reconciles_nextcloud_pair_via_dokploy_backend(
     assert desired_state.shared_core.redis is not None
     client = FakeDokployApiClient()
     monkeypatch.setattr(
-        "dokploy_wizard.dokploy.nextcloud._http_health_check",
-        lambda url: url
-        in {
-            "https://nextcloud.example.com/status.php",
-            "https://office.example.com/healthcheck",
-        },
+        "dokploy_wizard.dokploy.nextcloud._nextcloud_status_ready",
+        lambda url: url == "https://nextcloud.example.com/status.php",
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._local_https_health_check",
+        lambda url: url == "https://office.example.com/healthcheck",
     )
 
     summary = run_install_flow(

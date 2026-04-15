@@ -51,11 +51,23 @@ class NextcloudBackend(Protocol):
         config: dict[str, str],
     ) -> NextcloudResourceRecord: ...
 
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        data_volume_name: str,
+        config: dict[str, str],
+    ) -> NextcloudResourceRecord: ...
+
     def get_volume(self, resource_id: str) -> NextcloudResourceRecord | None: ...
 
     def find_volume_by_name(self, resource_name: str) -> NextcloudResourceRecord | None: ...
 
     def create_volume(self, *, resource_name: str) -> NextcloudResourceRecord: ...
+
+    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None: ...
 
     def check_health(self, *, service: NextcloudResourceRecord, url: str) -> bool: ...
 
@@ -124,6 +136,23 @@ class ShellNextcloudBackend:
         self._services[resource_name] = record
         return record
 
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        data_volume_name: str,
+        config: dict[str, str],
+    ) -> NextcloudResourceRecord:
+        del resource_id
+        return self.create_service(
+            resource_name=resource_name,
+            hostname=hostname,
+            data_volume_name=data_volume_name,
+            config=config,
+        )
+
     def get_volume(self, resource_id: str) -> NextcloudResourceRecord | None:
         for record in self._volumes.values():
             if record.resource_id == resource_id:
@@ -152,6 +181,9 @@ class ShellNextcloudBackend:
         if forced is not None:
             return forced
         return _http_health_check(url)
+
+    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+        del nextcloud_url, onlyoffice_url
 
 
 def reconcile_nextcloud(
@@ -298,6 +330,11 @@ def reconcile_nextcloud(
             onlyoffice_volume_resource_id=None,
         )
 
+    backend.ensure_application_ready(
+        nextcloud_url=nextcloud_url,
+        onlyoffice_url=onlyoffice_url,
+    )
+
     nextcloud_ok = backend.check_health(
         service=NextcloudResourceRecord(
             resource_id=nextcloud_service_id,
@@ -306,7 +343,10 @@ def reconcile_nextcloud(
         url=f"{nextcloud_url}/status.php",
     )
     if not nextcloud_ok:
-        raise NextcloudError(f"Nextcloud health check failed for '{nextcloud_url}/status.php'.")
+        raise NextcloudError(
+            "Nextcloud application bootstrap did not finish cleanly for "
+            f"'{nextcloud_url}/status.php'."
+        )
     onlyoffice_ok = backend.check_health(
         service=NextcloudResourceRecord(
             resource_id=onlyoffice_service_id,
@@ -470,6 +510,22 @@ def _resolve_service(
                 "Ownership ledger resource "
                 f"'{resource_type}' no longer matches the desired naming convention."
             )
+        if not dry_run:
+            updated = backend.update_service(
+                resource_id=existing.resource_id,
+                resource_name=resource_name,
+                hostname=hostname,
+                data_volume_name=data_volume_name,
+                config=config,
+            )
+            return (
+                NextcloudManagedResource(
+                    action="update_owned",
+                    resource_id=updated.resource_id,
+                    resource_name=updated.resource_name,
+                ),
+                updated.resource_id,
+            )
         return (
             NextcloudManagedResource(
                 action="reuse_owned",
@@ -481,6 +537,31 @@ def _resolve_service(
 
     collision = backend.find_service_by_name(resource_name)
     if collision is not None:
+        if collision.resource_id.startswith("dokploy-compose:"):
+            if not dry_run:
+                updated = backend.update_service(
+                    resource_id=collision.resource_id,
+                    resource_name=resource_name,
+                    hostname=hostname,
+                    data_volume_name=data_volume_name,
+                    config=config,
+                )
+                return (
+                    NextcloudManagedResource(
+                        action="reuse_existing",
+                        resource_id=updated.resource_id,
+                        resource_name=updated.resource_name,
+                    ),
+                    updated.resource_id,
+                )
+            return (
+                NextcloudManagedResource(
+                    action="reuse_existing",
+                    resource_id=collision.resource_id,
+                    resource_name=collision.resource_name,
+                ),
+                collision.resource_id,
+            )
         raise NextcloudError(
             f"Refusing to adopt existing unowned service '{resource_name}' for '{resource_type}'."
         )
@@ -545,6 +626,15 @@ def _resolve_volume(
 
     collision = backend.find_volume_by_name(resource_name)
     if collision is not None:
+        if collision.resource_id.startswith("dokploy-compose:"):
+            return (
+                NextcloudManagedResource(
+                    action="reuse_existing",
+                    resource_id=collision.resource_id,
+                    resource_name=collision.resource_name,
+                ),
+                collision.resource_id,
+            )
         raise NextcloudError(
             f"Refusing to adopt existing unowned volume '{resource_name}' for '{resource_type}'."
         )
