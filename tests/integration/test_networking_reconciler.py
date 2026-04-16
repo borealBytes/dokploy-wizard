@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from dokploy_wizard import cli
 from dokploy_wizard.cli import run_install_flow
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,
@@ -16,6 +17,8 @@ from dokploy_wizard.networking import (
     CloudflareError,
     CloudflareTunnel,
 )
+from dokploy_wizard.preflight import HostFacts, PreflightCheck, PreflightReport, ResourceProfile
+from dokploy_wizard.packs.coder import CoderResourceRecord
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.nextcloud import NextcloudResourceRecord
 from dokploy_wizard.packs.openclaw import OpenClawResourceRecord
@@ -37,6 +40,60 @@ class FakeDokployBackend:
 
     def install(self) -> None:
         self.install_calls += 1
+
+
+@dataclass
+class FakeCoderBackend:
+    existing_service: CoderResourceRecord | None = None
+    existing_data: CoderResourceRecord | None = None
+
+    def get_service(self, resource_id: str) -> CoderResourceRecord | None:
+        if self.existing_service is not None and self.existing_service.resource_id == resource_id:
+            return self.existing_service
+        return None
+
+    def find_service_by_name(self, resource_name: str) -> CoderResourceRecord | None:
+        if (
+            self.existing_service is not None
+            and self.existing_service.resource_name == resource_name
+        ):
+            return self.existing_service
+        return None
+
+    def create_service(self, **kwargs: object) -> CoderResourceRecord:
+        resource_name = str(kwargs["resource_name"])
+        self.existing_service = CoderResourceRecord(
+            resource_id="coder-service-1",
+            resource_name=resource_name,
+        )
+        return self.existing_service
+
+    def update_service(self, **kwargs: object) -> CoderResourceRecord:
+        return self.create_service(**kwargs)
+
+    def get_persistent_data(self, resource_id: str) -> CoderResourceRecord | None:
+        if self.existing_data is not None and self.existing_data.resource_id == resource_id:
+            return self.existing_data
+        return None
+
+    def find_persistent_data_by_name(self, resource_name: str) -> CoderResourceRecord | None:
+        if self.existing_data is not None and self.existing_data.resource_name == resource_name:
+            return self.existing_data
+        return None
+
+    def create_persistent_data(self, resource_name: str) -> CoderResourceRecord:
+        self.existing_data = CoderResourceRecord(
+            resource_id="coder-data-1",
+            resource_name=resource_name,
+        )
+        return self.existing_data
+
+    def check_health(self, *, service: CoderResourceRecord, url: str) -> bool:
+        del service, url
+        return True
+
+    def ensure_application_ready(self) -> tuple[str, ...]:
+        return ()
 
 
 @dataclass
@@ -584,6 +641,79 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
     assert "office.example.com" in dns_hostnames
     assert access_hostnames == ["farm.example.com"]
     assert "office.example.com" not in access_hostnames
+
+
+def test_install_includes_coder_root_and_wildcard_dns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_file = tmp_path / "install.env"
+    state_dir = tmp_path / "state"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "ENABLE_CODER=true",
+                "CLOUDFLARE_API_TOKEN=token-123",
+                "CLOUDFLARE_ACCOUNT_ID=account-123",
+                "CLOUDFLARE_ZONE_ID=zone-123",
+                "CLOUDFLARE_MOCK_ACCOUNT_OK=true",
+                "CLOUDFLARE_MOCK_ZONE_OK=true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    backend = FakeCloudflareBackend()
+    monkeypatch.setattr(
+        cli,
+        "_prepare_install_host_prerequisites",
+        lambda **_: (None, None),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_preflight_report",
+        lambda **_: PreflightReport(
+            host_facts=HostFacts(
+                distribution_id="ubuntu",
+                version_id="24.04",
+                cpu_count=8,
+                memory_gb=16,
+                disk_gb=200,
+                disk_path="/var/lib/docker",
+                docker_installed=True,
+                docker_daemon_reachable=True,
+                ports_in_use=(),
+                environment_classification="local",
+                hostname="test-host",
+            ),
+            required_profile=ResourceProfile(
+                name="Recommended",
+                minimum_vcpu=4,
+                minimum_memory_gb=8,
+                minimum_disk_gb=100,
+            ),
+            checks=(PreflightCheck(name="preflight", status="pass", detail="ok"),),
+            advisories=(),
+        ),
+    )
+    monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
+    monkeypatch.setattr(cli, "_qualify_dokploy_mutation_auth", lambda **kwargs: None)
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        coder_backend=FakeCoderBackend(),
+    )
+
+    dns_hostnames = [item["hostname"] for item in summary["networking"]["dns_records"]]
+
+    assert "coder.example.com" in dns_hostnames
+    assert "*.coder.example.com" in dns_hostnames
 
 
 def test_install_programs_tunnel_ingress_to_local_https(tmp_path: Path) -> None:
