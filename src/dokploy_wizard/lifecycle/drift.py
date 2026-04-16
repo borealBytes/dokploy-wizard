@@ -14,6 +14,7 @@ from dokploy_wizard.networking import (
     reconcile_networking,
 )
 from dokploy_wizard.networking.planner import _build_tunnel_ingress
+from dokploy_wizard.packs.coder import CoderBackend, CoderResourceRecord, reconcile_coder
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     HeadscaleResourceRecord,
@@ -83,6 +84,7 @@ def validate_preserved_phases(
     matrix_backend: MatrixBackend,
     nextcloud_backend: NextcloudBackend,
     seaweedfs_backend: SeaweedFsBackend,
+    coder_backend: CoderBackend,
     openclaw_backend: OpenClawBackend,
 ) -> DriftReport:
     applicable = applicable_phases_for(desired_state)
@@ -104,6 +106,7 @@ def validate_preserved_phases(
                 matrix_backend=matrix_backend,
                 nextcloud_backend=nextcloud_backend,
                 seaweedfs_backend=seaweedfs_backend,
+                coder_backend=coder_backend,
                 openclaw_backend=openclaw_backend,
             )
         )
@@ -133,6 +136,7 @@ def _validate_phase(
     matrix_backend: MatrixBackend,
     nextcloud_backend: NextcloudBackend,
     seaweedfs_backend: SeaweedFsBackend,
+    coder_backend: CoderBackend,
     openclaw_backend: OpenClawBackend,
 ) -> DriftEntry:
     try:
@@ -454,6 +458,45 @@ def _validate_phase(
             return DriftEntry(
                 phase=phase, status="ok", detail="SeaweedFS ownership remains aligned."
             )
+        if phase == "coder":
+            coder = reconcile_coder(
+                dry_run=True,
+                desired_state=desired_state,
+                ownership_ledger=ownership_ledger,
+                backend=coder_backend,
+            ).result
+            if coder.outcome == "skipped":
+                return DriftEntry(phase=phase, status="ok", detail="Coder remains skipped.")
+            actions = {
+                resource.action
+                for resource in (coder.service, coder.persistent_data)
+                if resource is not None
+            }
+            if actions != {"reuse_owned"}:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=f"Coder expected owned reuse, found actions {sorted(actions)}.",
+                )
+            if coder.health_check is None:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="Coder health check metadata is missing for a preserved phase.",
+                )
+            if coder.service is None or not coder_backend.check_health(
+                service=CoderResourceRecord(
+                    resource_id=coder.service.resource_id,
+                    resource_name=coder.service.resource_name,
+                ),
+                url=coder.health_check.url,
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=f"Coder health check no longer passes for {coder.health_check.url!r}.",
+                )
+            return DriftEntry(phase=phase, status="ok", detail="Coder ownership remains aligned.")
         if phase == "openclaw":
             advisor = reconcile_openclaw(
                 dry_run=True,

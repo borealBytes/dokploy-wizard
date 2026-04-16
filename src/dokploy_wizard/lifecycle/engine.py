@@ -21,6 +21,7 @@ from dokploy_wizard.networking import (
     reconcile_cloudflare_access,
     reconcile_networking,
 )
+from dokploy_wizard.packs.coder import CoderBackend, build_coder_ledger, reconcile_coder
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     build_headscale_ledger,
@@ -67,6 +68,7 @@ class LifecycleBackends:
     matrix: MatrixBackend
     nextcloud: NextcloudBackend
     seaweedfs: SeaweedFsBackend
+    coder: CoderBackend
     openclaw: OpenClawBackend
 
 
@@ -268,6 +270,22 @@ def execute_lifecycle_plan(
                     data_resource_id=seaweedfs.data_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
+        elif phase == "coder":
+            coder = reconcile_coder(
+                dry_run=dry_run,
+                desired_state=desired_state,
+                ownership_ledger=current_ledger,
+                backend=backends.coder,
+            )
+            phase_results[phase] = coder.result.to_dict()
+            if not dry_run:
+                current_ledger = build_coder_ledger(
+                    existing_ledger=current_ledger,
+                    stack_name=desired_state.stack_name,
+                    service_resource_id=coder.service_resource_id,
+                    data_resource_id=coder.data_resource_id,
+                )
+                write_ownership_ledger(state_dir, current_ledger)
         elif phase == "openclaw":
             advisor = reconcile_openclaw(
                 dry_run=dry_run,
@@ -387,6 +405,7 @@ def _build_summary(
         "matrix": phase_results.get("matrix", {"outcome": "not_run"}),
         "my_farm_advisor": phase_results.get("my-farm-advisor", {"outcome": "not_run"}),
         "nextcloud": phase_results.get("nextcloud", {"outcome": "not_run"}),
+        "coder": phase_results.get("coder", {"outcome": "not_run"}),
         "networking": phase_results.get("networking", {"outcome": "not_run"}),
         "openclaw": phase_results.get("openclaw", {"outcome": "not_run"}),
         "preflight": preflight_report.to_dict(),
@@ -487,6 +506,16 @@ def _preserved_result(
             desired_state=desired_state,
             ownership_ledger=ownership_ledger,
             backend=backends.seaweedfs,
+        ).result.to_dict()
+        if result["outcome"] != "skipped":
+            result["outcome"] = "already_present"
+        return result
+    if phase == "coder":
+        result = reconcile_coder(
+            dry_run=True,
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            backend=backends.coder,
         ).result.to_dict()
         if result["outcome"] != "skipped":
             result["outcome"] = "already_present"
