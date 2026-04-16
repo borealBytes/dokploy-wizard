@@ -27,6 +27,7 @@ PHASE_ORDER: tuple[str, ...] = (
     "matrix",
     "nextcloud",
     "seaweedfs",
+    "coder",
     "openclaw",
     "my-farm-advisor",
 )
@@ -56,6 +57,8 @@ _SUPPORTED_HOSTNAME_KEYS = {
     "MATRIX_SUBDOMAIN",
     "NEXTCLOUD_SUBDOMAIN",
     "ONLYOFFICE_SUBDOMAIN",
+    "CODER_SUBDOMAIN",
+    "CODER_WILDCARD_SUBDOMAIN",
     "OPENCLAW_SUBDOMAIN",
     "MY_FARM_ADVISOR_SUBDOMAIN",
 }
@@ -64,6 +67,7 @@ _SUPPORTED_ENABLEMENT_KEYS = {
     "ENABLE_HEADSCALE",
     "ENABLE_MATRIX",
     "ENABLE_NEXTCLOUD",
+    "ENABLE_CODER",
     "ENABLE_OPENCLAW",
     "ENABLE_MY_FARM_ADVISOR",
 }
@@ -101,6 +105,8 @@ _HOSTNAME_PHASES = {
     "nextcloud": ("networking", "nextcloud"),
     "onlyoffice": ("networking", "nextcloud"),
     "s3": ("networking", "seaweedfs"),
+    "coder": ("networking", "coder"),
+    "coder-wildcard": ("networking", "coder"),
     "openclaw": ("networking", "openclaw"),
     "my-farm-advisor": ("networking", "my-farm-advisor"),
 }
@@ -108,6 +114,7 @@ _OPTIONAL_PHASE_PACKS = {
     "matrix": "matrix",
     "nextcloud": "nextcloud",
     "seaweedfs": "seaweedfs",
+    "coder": "coder",
     "openclaw": "openclaw",
     "my-farm-advisor": "my-farm-advisor",
 }
@@ -159,6 +166,8 @@ def applicable_phases_for(desired_state: DesiredState) -> tuple[str, ...]:
         phases.append("nextcloud")
     if "seaweedfs" in desired_state.enabled_packs:
         phases.append("seaweedfs")
+    if "coder" in desired_state.enabled_packs:
+        phases.append("coder")
     if "openclaw" in desired_state.enabled_packs:
         phases.append("openclaw")
     if "my-farm-advisor" in desired_state.enabled_packs:
@@ -375,7 +384,10 @@ def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredS
     new_packs = set(requested_desired.enabled_packs) - set(existing_desired.enabled_packs)
     if not new_packs:
         return phases
-    if any(pack in new_packs for pack in {"matrix", "nextcloud", "openclaw", "my-farm-advisor"}):
+    if any(
+        pack in new_packs
+        for pack in {"matrix", "nextcloud", "coder", "openclaw", "my-farm-advisor"}
+    ):
         phases.add("shared_core")
     if "headscale" in new_packs:
         phases.add("headscale")
@@ -385,6 +397,8 @@ def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredS
         phases.add("nextcloud")
     if "seaweedfs" in new_packs:
         phases.add("seaweedfs")
+    if "coder" in new_packs:
+        phases.add("coder")
     if "openclaw" in new_packs:
         if _access_enabled(requested_desired):
             phases.add("cloudflare_access")
