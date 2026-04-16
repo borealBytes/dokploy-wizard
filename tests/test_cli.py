@@ -3175,6 +3175,7 @@ def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
     monkeypatch.setattr(cli, "_build_matrix_backend", record_backend)
     monkeypatch.setattr(cli, "_build_nextcloud_backend", record_backend)
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", record_backend)
+    monkeypatch.setattr(cli, "_build_coder_backend", record_backend)
     monkeypatch.setattr(cli, "_build_openclaw_backend", record_backend)
     monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})
 
@@ -3191,6 +3192,7 @@ def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
         matrix_backend=None,
         nextcloud_backend=None,
         seaweedfs_backend=None,
+        coder_backend=None,
         openclaw_backend=None,
         allow_modify=False,
         remediate_install_host_prereqs=False,
@@ -3199,7 +3201,7 @@ def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
         enforce_live_run_contamination_check=False,
     )
 
-    assert len(seen_session_clients) == 6
+    assert len(seen_session_clients) == 7
     assert all(client is sentinel_session_client for client in seen_session_clients)
 
 

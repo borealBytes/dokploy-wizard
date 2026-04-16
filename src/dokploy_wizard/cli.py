@@ -34,6 +34,7 @@ from dokploy_wizard.dokploy import (
     DokployBootstrapAuthClient,
     DokployBootstrapAuthError,
     DokployCloudflaredBackend,
+    DokployCoderBackend,
     DokployHeadscaleBackend,
     DokployMatrixBackend,
     DokployNextcloudBackend,
@@ -60,6 +61,7 @@ from dokploy_wizard.networking import (
     CloudflareApiBackend,
     CloudflareError,
 )
+from dokploy_wizard.packs.coder import CoderBackend, CoderError, ShellCoderBackend
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     HeadscaleError,
@@ -324,6 +326,7 @@ def _handle_install(args: argparse.Namespace) -> int:
         SharedCoreError,
         TailscaleError,
         HeadscaleError,
+        CoderError,
         DokployBootstrapAuthError,
         LifecycleDriftError,
         MatrixError,
@@ -533,6 +536,7 @@ def _handle_modify(args: argparse.Namespace) -> int:
         SharedCoreError,
         TailscaleError,
         HeadscaleError,
+        CoderError,
         LifecycleDriftError,
         MatrixError,
         NextcloudError,
@@ -600,6 +604,7 @@ def run_install_flow(
     matrix_backend: MatrixBackend | None = None,
     nextcloud_backend: NextcloudBackend | None = None,
     seaweedfs_backend: SeaweedFsBackend | None = None,
+    coder_backend: CoderBackend | None = None,
     openclaw_backend: OpenClawBackend | None = None,
     allow_memory_shortfall: bool = False,
     prompt_for_memory_shortfall: bool = False,
@@ -618,6 +623,7 @@ def run_install_flow(
         matrix_backend=matrix_backend,
         nextcloud_backend=nextcloud_backend,
         seaweedfs_backend=seaweedfs_backend,
+        coder_backend=coder_backend,
         openclaw_backend=openclaw_backend,
         allow_modify=False,
         remediate_install_host_prereqs=True,
@@ -641,6 +647,7 @@ def run_modify_flow(
     matrix_backend: MatrixBackend | None = None,
     nextcloud_backend: NextcloudBackend | None = None,
     seaweedfs_backend: SeaweedFsBackend | None = None,
+    coder_backend: CoderBackend | None = None,
     openclaw_backend: OpenClawBackend | None = None,
     enforce_live_run_contamination_check: bool = False,
 ) -> dict[str, Any]:
@@ -657,6 +664,7 @@ def run_modify_flow(
         matrix_backend=matrix_backend,
         nextcloud_backend=nextcloud_backend,
         seaweedfs_backend=seaweedfs_backend,
+        coder_backend=coder_backend,
         openclaw_backend=openclaw_backend,
         allow_modify=True,
         remediate_install_host_prereqs=False,
@@ -746,6 +754,7 @@ def _run_lifecycle_flow(
     matrix_backend: MatrixBackend | None,
     nextcloud_backend: NextcloudBackend | None,
     seaweedfs_backend: SeaweedFsBackend | None,
+    coder_backend: CoderBackend | None,
     openclaw_backend: OpenClawBackend | None,
     allow_modify: bool,
     remediate_install_host_prereqs: bool,
@@ -873,6 +882,7 @@ def _run_lifecycle_flow(
             matrix_backend=matrix_backend,
             nextcloud_backend=nextcloud_backend,
             seaweedfs_backend=seaweedfs_backend,
+            coder_backend=coder_backend,
             openclaw_backend=openclaw_backend,
         ),
     )
@@ -888,6 +898,7 @@ def _run_lifecycle_flow(
             matrix_backend=matrix_backend,
             nextcloud_backend=nextcloud_backend,
             seaweedfs_backend=seaweedfs_backend,
+            coder_backend=coder_backend,
             openclaw_backend=openclaw_backend,
         ),
     )
@@ -931,6 +942,11 @@ def _run_lifecycle_flow(
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
+    coder_phase_backend = coder_backend or _build_coder_backend(
+        raw_env=raw_env,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
     openclaw_phase_backend = openclaw_backend or _build_openclaw_backend(
         raw_env=raw_env,
         desired_state=desired_state,
@@ -946,6 +962,7 @@ def _run_lifecycle_flow(
         matrix=matrix_phase_backend,
         nextcloud=nextcloud_phase_backend,
         seaweedfs=seaweedfs_phase_backend,
+        coder=coder_phase_backend,
         openclaw=openclaw_phase_backend,
     )
 
@@ -963,6 +980,7 @@ def _run_lifecycle_flow(
             matrix_backend=matrix_phase_backend,
             nextcloud_backend=nextcloud_phase_backend,
             seaweedfs_backend=seaweedfs_phase_backend,
+            coder_backend=coder_phase_backend,
             openclaw_backend=openclaw_phase_backend,
         )
     except LifecycleDriftError as error:
@@ -1608,6 +1626,45 @@ def _build_seaweedfs_backend(
     )
 
 
+def _build_coder_backend(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> CoderBackend:
+    api_url = desired_state.dokploy_api_url
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    if not api_url or not api_key or "coder" not in desired_state.enabled_packs:
+        return ShellCoderBackend()
+    hostname = desired_state.hostnames.get("coder")
+    wildcard_hostname = desired_state.hostnames.get("coder-wildcard")
+    allocation = next(
+        (item for item in desired_state.shared_core.allocations if item.pack_name == "coder"),
+        None,
+    )
+    if hostname is None or wildcard_hostname is None or allocation is None:
+        return ShellCoderBackend()
+    if allocation.postgres is None or desired_state.shared_core.postgres is None:
+        return ShellCoderBackend()
+    return DokployCoderBackend(
+        api_url=api_url,
+        api_key=api_key,
+        stack_name=desired_state.stack_name,
+        hostname=hostname,
+        wildcard_hostname=wildcard_hostname,
+        admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
+        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        postgres=allocation.postgres,
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
+    )
+
+
 def _build_openclaw_backend(
     *,
     raw_env: RawEnvInput,
@@ -1685,6 +1742,7 @@ def _dokploy_api_auth_required(
     matrix_backend: MatrixBackend | None,
     nextcloud_backend: NextcloudBackend | None,
     seaweedfs_backend: SeaweedFsBackend | None,
+    coder_backend: CoderBackend | None,
     openclaw_backend: OpenClawBackend | None,
 ) -> bool:
     if shared_core_backend is None and desired_state.shared_core.requires_reconciliation():
@@ -1696,6 +1754,8 @@ def _dokploy_api_auth_required(
     if nextcloud_backend is None and "nextcloud" in desired_state.enabled_packs:
         return True
     if seaweedfs_backend is None and "seaweedfs" in desired_state.enabled_packs:
+        return True
+    if coder_backend is None and "coder" in desired_state.enabled_packs:
         return True
     if openclaw_backend is None and (
         {"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs)
