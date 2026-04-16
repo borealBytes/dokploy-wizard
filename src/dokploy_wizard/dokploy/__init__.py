@@ -20,6 +20,7 @@ from dokploy_wizard.dokploy.client import (
     DokployProjectSummary,
 )
 from dokploy_wizard.dokploy.cloudflared import DokployCloudflaredBackend
+from dokploy_wizard.dokploy.coder import DokployCoderBackend
 from dokploy_wizard.dokploy.headscale import DokployHeadscaleBackend
 from dokploy_wizard.dokploy.matrix import DokployMatrixBackend
 from dokploy_wizard.dokploy.nextcloud import DokployNextcloudBackend
@@ -36,6 +37,7 @@ __all__ = [
     "DokployComposeRecord",
     "DokployComposeSummary",
     "DokployCloudflaredBackend",
+    "DokployCoderBackend",
     "DokployCreatedProject",
     "DokployDeployResult",
     "DokployHeadscaleBackend",
