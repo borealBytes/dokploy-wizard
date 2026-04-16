@@ -99,6 +99,7 @@ def test_models_round_trip_through_json() -> None:
         },
         seaweedfs_access_key=None,
         seaweedfs_secret_key=None,
+        openclaw_gateway_token=None,
         openclaw_channels=(),
         openclaw_replicas=None,
         my_farm_advisor_channels=(),

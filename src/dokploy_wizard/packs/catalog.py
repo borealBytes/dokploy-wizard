@@ -116,6 +116,31 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         resource_profile="recommended",
     ),
     PackDefinition(
+        name="coder",
+        prompt_label="Coder",
+        env_flag="ENABLE_CODER",
+        default_enabled=False,
+        depends_on=(),
+        slot=None,
+        shared_core_requirements=("postgres",),
+        hostnames=(
+            PackHostname(
+                key="coder",
+                default_subdomain="coder",
+                env_key="CODER_SUBDOMAIN",
+            ),
+            PackHostname(
+                key="coder-wildcard",
+                default_subdomain="*.coder",
+                env_key="CODER_WILDCARD_SUBDOMAIN",
+            ),
+        ),
+        mutable_env_keys=(),
+        mutable_resource_keys=(),
+        enabled_features=(),
+        resource_profile="recommended",
+    ),
+    PackDefinition(
         name="openclaw",
         prompt_label="OpenClaw",
         env_flag="ENABLE_OPENCLAW",

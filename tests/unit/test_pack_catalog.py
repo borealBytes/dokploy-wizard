@@ -16,12 +16,14 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
         "matrix",
         "nextcloud",
         "seaweedfs",
+        "coder",
         "openclaw",
         "my-farm-advisor",
     ]
     assert get_pack_definition("headscale").default_enabled is True
     assert get_pack_definition("seaweedfs").slot is None
     assert get_pack_definition("seaweedfs").hostnames[0].key == "s3"
+    assert get_pack_definition("coder").hostnames[1].key == "coder-wildcard"
     assert get_pack_definition("openclaw").slot is None
     assert get_pack_definition("my-farm-advisor").slot is None
     assert get_pack_definition("openclaw").mutable_resource_keys == ("OPENCLAW_REPLICAS",)
@@ -86,6 +88,22 @@ def test_resolver_allows_existing_tailscale_to_satisfy_headscale_dependency() ->
     assert selection.hostnames == {"matrix": "matrix.example.com"}
 
 
+def test_resolver_builds_root_and_wildcard_coder_hostnames() -> None:
+    selection = resolve_pack_selection(
+        {
+            "ENABLE_CODER": "true",
+        },
+        root_domain="example.com",
+    )
+
+    assert selection.enabled_packs == ("coder", "headscale")
+    assert selection.hostnames == {
+        "coder": "coder.example.com",
+        "coder-wildcard": "*.coder.example.com",
+        "headscale": "headscale.example.com",
+    }
+
+
 def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
@@ -108,3 +126,23 @@ def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
         build_shared_core_plan("catalog-stack", desired_state.enabled_packs)
         == desired_state.shared_core
     )
+
+
+def test_resolved_state_includes_coder_shared_core_allocation() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "coder-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_CODER": "true",
+            },
+        )
+    )
+
+    assert desired_state.enabled_packs == ("coder", "headscale")
+    assert desired_state.hostnames["coder"] == "coder.example.com"
+    assert desired_state.hostnames["coder-wildcard"] == "*.coder.example.com"
+    assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
+        "coder"
+    ]
