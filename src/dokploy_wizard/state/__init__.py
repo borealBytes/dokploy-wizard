@@ -2,6 +2,7 @@
 
 from dokploy_wizard.state.env import parse_env_file, resolve_desired_state
 from dokploy_wizard.state.models import (
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     STATE_FORMAT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
@@ -31,6 +32,7 @@ from dokploy_wizard.state.store import (
 __all__ = [
     "APPLIED_STATE_FILE",
     "DESIRED_STATE_FILE",
+    "LIFECYCLE_CHECKPOINT_CONTRACT_VERSION",
     "OWNERSHIP_LEDGER_FILE",
     "RAW_INPUT_FILE",
     "STATE_DOCUMENT_FILES",

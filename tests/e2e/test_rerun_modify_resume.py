@@ -262,3 +262,56 @@ def test_cli_modify_rejects_unsupported_stack_name_change(tmp_path: Path) -> Non
 
     assert modified.returncode != 0
     assert "STACK_NAME changes are unsupported" in modified.stderr
+
+
+def test_cli_install_rejects_legacy_checkpoint_contract_with_nonempty_progress(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    resume_env = _write_env(
+        tmp_path / "resume.env",
+        (FIXTURES_DIR / "lifecycle-headscale.env").read_text(encoding="utf-8"),
+    )
+    raw_input = parse_env_file(resume_env)
+    desired_state = resolve_desired_state(raw_input)
+    write_target_state(state_dir, raw_input, desired_state)
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=desired_state.format_version,
+            desired_state_fingerprint=desired_state.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "cloudflare_access",
+            ),
+            lifecycle_checkpoint_contract_version=1,
+        ),
+    )
+    write_ownership_ledger(
+        state_dir,
+        OwnershipLedger(
+            format_version=desired_state.format_version,
+            resources=(
+                OwnedResource(
+                    "cloudflare_tunnel",
+                    "legacy-tunnel",
+                    "account:account-123",
+                ),
+            ),
+        ),
+    )
+
+    resumed = _run_cli(
+        "install",
+        "--env-file",
+        str(resume_env),
+        "--state-dir",
+        str(state_dir),
+        "--non-interactive",
+    )
+
+    assert resumed.returncode != 0
+    assert "lifecycle checkpoint contract version 1" in resumed.stderr
+    assert "Only empty install scaffolds can be restarted" in resumed.stderr

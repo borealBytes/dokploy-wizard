@@ -70,6 +70,33 @@ def test_desired_state_resolution_is_deterministic(tmp_path: Path) -> None:
     ]
 
 
+def test_explicitly_disabled_dependency_is_not_silently_reenabled() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "my-stack",
+                "ROOT_DOMAIN": "example.com",
+                "PACKS": "nextcloud,openclaw,seaweedfs,coder",
+                "ENABLE_HEADSCALE": "false",
+                "ENABLE_TAILSCALE": "false",
+                "OPENCLAW_CHANNELS": "telegram",
+                "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
+                "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
+            },
+        )
+    )
+
+    assert desired_state.selected_packs == ("coder", "nextcloud", "openclaw", "seaweedfs")
+    assert desired_state.enabled_packs == ("coder", "nextcloud", "openclaw", "seaweedfs")
+    assert "headscale" not in desired_state.hostnames
+    assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
+        "coder",
+        "nextcloud",
+        "openclaw",
+    ]
+
+
 def test_models_round_trip_through_json() -> None:
     raw_input = RawEnvInput(
         format_version=1,

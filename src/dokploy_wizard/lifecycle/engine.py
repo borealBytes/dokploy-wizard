@@ -49,6 +49,7 @@ from dokploy_wizard.preflight import PreflightReport
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     DesiredState,
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     OwnershipLedger,
     RawEnvInput,
     write_applied_checkpoint,
@@ -83,7 +84,7 @@ def execute_lifecycle_plan(
     lifecycle_plan: LifecyclePlan,
     backends: LifecycleBackends,
 ) -> dict[str, Any]:
-    applicable_phases = applicable_phases_for(desired_state)
+    applicable_phases = lifecycle_plan.applicable_phases
     valid_phases = set(lifecycle_plan.initial_completed_steps)
     phase_results: dict[str, dict[str, Any]] = {}
     current_ledger = ownership_ledger
@@ -170,24 +171,6 @@ def execute_lifecycle_plan(
                     dns_resource_ids=networking.dns_resource_ids,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
-        elif phase == "cloudflare_access":
-            access = reconcile_cloudflare_access(
-                dry_run=dry_run,
-                raw_env=raw_env,
-                desired_state=desired_state,
-                ownership_ledger=current_ledger,
-                backend=backends.networking,
-            )
-            phase_results[phase] = access.result.to_dict()
-            if not dry_run:
-                current_ledger = build_access_ledger(
-                    existing_ledger=current_ledger,
-                    account_id=access.result.account_id,
-                    provider_resource_id=access.provider_resource_id,
-                    application_resource_ids=access.application_resource_ids,
-                    policy_resource_ids=access.policy_resource_ids,
-                )
-                write_ownership_ledger(state_dir, current_ledger)
         elif phase == "shared_core":
             shared_core = reconcile_shared_core(
                 dry_run=dry_run,
@@ -236,6 +219,22 @@ def execute_lifecycle_plan(
                     data_resource_id=matrix.data_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
+        elif phase == "seaweedfs":
+            seaweedfs = reconcile_seaweedfs(
+                dry_run=dry_run,
+                desired_state=desired_state,
+                ownership_ledger=current_ledger,
+                backend=backends.seaweedfs,
+            )
+            phase_results[phase] = seaweedfs.result.to_dict()
+            if not dry_run:
+                current_ledger = build_seaweedfs_ledger(
+                    existing_ledger=current_ledger,
+                    stack_name=desired_state.stack_name,
+                    service_resource_id=seaweedfs.service_resource_id,
+                    data_resource_id=seaweedfs.data_resource_id,
+                )
+                write_ownership_ledger(state_dir, current_ledger)
         elif phase == "nextcloud":
             nextcloud = reconcile_nextcloud(
                 dry_run=dry_run,
@@ -252,22 +251,6 @@ def execute_lifecycle_plan(
                     onlyoffice_service_resource_id=nextcloud.onlyoffice_service_resource_id,
                     nextcloud_volume_resource_id=nextcloud.nextcloud_volume_resource_id,
                     onlyoffice_volume_resource_id=nextcloud.onlyoffice_volume_resource_id,
-                )
-                write_ownership_ledger(state_dir, current_ledger)
-        elif phase == "seaweedfs":
-            seaweedfs = reconcile_seaweedfs(
-                dry_run=dry_run,
-                desired_state=desired_state,
-                ownership_ledger=current_ledger,
-                backend=backends.seaweedfs,
-            )
-            phase_results[phase] = seaweedfs.result.to_dict()
-            if not dry_run:
-                current_ledger = build_seaweedfs_ledger(
-                    existing_ledger=current_ledger,
-                    stack_name=desired_state.stack_name,
-                    service_resource_id=seaweedfs.service_resource_id,
-                    data_resource_id=seaweedfs.data_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "coder":
@@ -316,6 +299,24 @@ def execute_lifecycle_plan(
                     service_resource_id=advisor.service_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
+        elif phase == "cloudflare_access":
+            access = reconcile_cloudflare_access(
+                dry_run=dry_run,
+                raw_env=raw_env,
+                desired_state=desired_state,
+                ownership_ledger=current_ledger,
+                backend=backends.networking,
+            )
+            phase_results[phase] = access.result.to_dict()
+            if not dry_run:
+                current_ledger = build_access_ledger(
+                    existing_ledger=current_ledger,
+                    account_id=access.result.account_id,
+                    provider_resource_id=access.provider_resource_id,
+                    application_resource_ids=access.application_resource_ids,
+                    policy_resource_ids=access.policy_resource_ids,
+                )
+                write_ownership_ledger(state_dir, current_ledger)
         if not dry_run:
             valid_phases.add(phase)
             _promote_preserved_phases(
@@ -346,6 +347,7 @@ def _write_checkpoint(
             format_version=desired_state.format_version,
             desired_state_fingerprint=desired_state.fingerprint(),
             completed_steps=completed_steps,
+            lifecycle_checkpoint_contract_version=LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
         ),
     )
 
@@ -449,17 +451,6 @@ def _preserved_result(
         ).result.to_dict()
         result["outcome"] = "already_present"
         return result
-    if phase == "cloudflare_access":
-        result = reconcile_cloudflare_access(
-            dry_run=True,
-            raw_env=raw_env,
-            desired_state=desired_state,
-            ownership_ledger=ownership_ledger,
-            backend=backends.networking,
-        ).result.to_dict()
-        if result["outcome"] != "skipped":
-            result["outcome"] = "already_present"
-        return result
     if phase == "shared_core":
         result = reconcile_shared_core(
             dry_run=True,
@@ -490,22 +481,22 @@ def _preserved_result(
         if result["outcome"] != "skipped":
             result["outcome"] = "already_present"
         return result
-    if phase == "nextcloud":
-        result = reconcile_nextcloud(
-            dry_run=True,
-            desired_state=desired_state,
-            ownership_ledger=ownership_ledger,
-            backend=backends.nextcloud,
-        ).result.to_dict()
-        if result["outcome"] != "skipped":
-            result["outcome"] = "already_present"
-        return result
     if phase == "seaweedfs":
         result = reconcile_seaweedfs(
             dry_run=True,
             desired_state=desired_state,
             ownership_ledger=ownership_ledger,
             backend=backends.seaweedfs,
+        ).result.to_dict()
+        if result["outcome"] != "skipped":
+            result["outcome"] = "already_present"
+        return result
+    if phase == "nextcloud":
+        result = reconcile_nextcloud(
+            dry_run=True,
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            backend=backends.nextcloud,
         ).result.to_dict()
         if result["outcome"] != "skipped":
             result["outcome"] = "already_present"
@@ -536,6 +527,17 @@ def _preserved_result(
             desired_state=desired_state,
             ownership_ledger=ownership_ledger,
             backend=backends.openclaw,
+        ).result.to_dict()
+        if result["outcome"] != "skipped":
+            result["outcome"] = "already_present"
+        return result
+    if phase == "cloudflare_access":
+        result = reconcile_cloudflare_access(
+            dry_run=True,
+            raw_env=raw_env,
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            backend=backends.networking,
         ).result.to_dict()
         if result["outcome"] != "skipped":
             result["outcome"] = "already_present"

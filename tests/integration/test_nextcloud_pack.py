@@ -28,6 +28,11 @@ from dokploy_wizard.networking import (
 )
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.nextcloud import NextcloudError, NextcloudResourceRecord
+from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudBundleVerification,
+    NextcloudCommandCheck,
+    TalkRuntime,
+)
 from dokploy_wizard.state import RawEnvInput, load_state_dir, resolve_desired_state
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
@@ -382,8 +387,36 @@ class FakeNextcloudBackend:
         del url
         return self.health.get(service.resource_name, True)
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification:
         del nextcloud_url, onlyoffice_url
+        return NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        )
 
 
 @dataclass
@@ -521,6 +554,13 @@ def test_install_reconciles_nextcloud_pair_and_persists_runtime_ledger(tmp_path:
     )
     assert summary["nextcloud"]["nextcloud"]["health_check"]["passed"] is True
     assert summary["nextcloud"]["onlyoffice"]["health_check"]["passed"] is True
+    assert summary["nextcloud"]["onlyoffice"]["document_server_check"]["passed"] is True
+    assert summary["nextcloud"]["talk"]["app_id"] == "spreed"
+    assert summary["nextcloud"]["talk"]["enabled"] is True
+    assert summary["nextcloud"]["talk"]["enabled_check"]["passed"] is True
+    assert summary["nextcloud"]["talk"]["signaling_check"]["passed"] is True
+    assert summary["nextcloud"]["talk"]["stun_check"]["passed"] is True
+    assert summary["nextcloud"]["talk"]["turn_check"]["passed"] is True
     assert loaded_state.applied_state is not None
     assert loaded_state.applied_state.completed_steps == (
         "preflight",
@@ -581,6 +621,55 @@ def test_install_reconciles_nextcloud_pair_via_dokploy_backend(
         "dokploy_wizard.dokploy.nextcloud._local_https_health_check",
         lambda url: url == "https://office.example.com/healthcheck",
     )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._find_container_name",
+        lambda service_name: "nextcloud-container",
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_admin_user",
+        lambda container_name, admin_user, admin_password: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_trusted_domain",
+        lambda container_name, hostname: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_onlyoffice_app_config",
+        lambda container_name,
+        document_server_url,
+        document_server_internal_url,
+        storage_url,
+        jwt_secret: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._verify_nextcloud_bundle",
+        lambda container_name: NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        ),
+    )
 
     summary = run_install_flow(
         env_file=FIXTURES_DIR / "nextcloud.env",
@@ -613,6 +702,7 @@ def test_install_reconciles_nextcloud_pair_via_dokploy_backend(
     assert summary["nextcloud"]["onlyoffice"]["service"]["resource_id"] == (
         "dokploy-compose:cmp-1:onlyoffice-service"
     )
+    assert summary["nextcloud"]["talk"]["enabled"] is True
     assert client.create_project_calls == 1
     assert client.create_compose_calls == 1
     assert client.deploy_calls == 1
@@ -669,6 +759,7 @@ def test_install_rerun_reuses_owned_nextcloud_resources(tmp_path: Path) -> None:
     assert summary["nextcloud"]["onlyoffice"]["service"]["action"] == "reuse_owned"
     assert summary["nextcloud"]["nextcloud"]["data_volume"]["action"] == "reuse_owned"
     assert summary["nextcloud"]["onlyoffice"]["data_volume"]["action"] == "reuse_owned"
+    assert summary["nextcloud"]["talk"]["app_id"] == "spreed"
     assert nextcloud_backend.create_service_calls == 2
     assert nextcloud_backend.create_volume_calls == 2
 
@@ -688,6 +779,61 @@ def test_install_fails_before_nextcloud_checkpoint_when_onlyoffice_health_fails(
             shared_core_backend=FakeSharedCoreBackend(),
             headscale_backend=FakeHeadscaleBackend(),
             nextcloud_backend=FakeNextcloudBackend(health={"nextcloud-stack-onlyoffice": False}),
+        )
+
+    loaded_state = load_state_dir(state_dir)
+    assert loaded_state.applied_state is not None
+    assert "nextcloud" not in loaded_state.applied_state.completed_steps
+
+
+def test_install_fails_before_nextcloud_checkpoint_when_talk_verification_fails(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+
+    @dataclass
+    class TalkDisabledBackend(FakeNextcloudBackend):
+        def ensure_application_ready(
+            self, *, nextcloud_url: str, onlyoffice_url: str
+        ) -> NextcloudBundleVerification:
+            del nextcloud_url, onlyoffice_url
+            return NextcloudBundleVerification(
+                onlyoffice_document_server_check=NextcloudCommandCheck(
+                    command="php occ onlyoffice:documentserver --check",
+                    passed=True,
+                ),
+                talk=TalkRuntime(
+                    app_id="spreed",
+                    enabled=False,
+                    enabled_check=NextcloudCommandCheck(
+                        command="php occ app:list --output=json",
+                        passed=False,
+                    ),
+                    signaling_check=NextcloudCommandCheck(
+                        command="php occ talk:signaling:list --output=json",
+                        passed=True,
+                    ),
+                    stun_check=NextcloudCommandCheck(
+                        command="php occ talk:stun:list --output=json",
+                        passed=True,
+                    ),
+                    turn_check=NextcloudCommandCheck(
+                        command="php occ talk:turn:list --output=json",
+                        passed=True,
+                    ),
+                ),
+            )
+
+    with pytest.raises(NextcloudError, match="Talk app 'spreed' is not enabled"):
+        run_install_flow(
+            env_file=FIXTURES_DIR / "nextcloud.env",
+            state_dir=state_dir,
+            dry_run=False,
+            bootstrap_backend=FakeDokployBackend(True, True),
+            networking_backend=FakeCloudflareBackend(),
+            shared_core_backend=FakeSharedCoreBackend(),
+            headscale_backend=FakeHeadscaleBackend(),
+            nextcloud_backend=TalkDisabledBackend(),
         )
 
     loaded_state = load_state_dir(state_dir)

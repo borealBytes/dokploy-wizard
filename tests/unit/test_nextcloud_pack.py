@@ -19,19 +19,25 @@ from dokploy_wizard.dokploy import (
     DokployProjectSummary,
 )
 from dokploy_wizard.dokploy.nextcloud import (
+    _ensure_spreed_app_enabled,
     _ensure_trusted_domain,
+    _platform_version_spec_matches_major,
     _ensure_onlyoffice_app_config,
     _local_https_health_check,
     _nextcloud_status_ready,
+    _resolve_compatible_app_release_download_url,
     _with_trailing_slash,
 )
 from dokploy_wizard.packs.nextcloud import (
     NEXTCLOUD_SERVICE_RESOURCE_TYPE,
     NEXTCLOUD_VOLUME_RESOURCE_TYPE,
+    NextcloudBundleVerification,
+    NextcloudCommandCheck,
     ONLYOFFICE_SERVICE_RESOURCE_TYPE,
     ONLYOFFICE_VOLUME_RESOURCE_TYPE,
     NextcloudError,
     NextcloudResourceRecord,
+    TalkRuntime,
     build_nextcloud_ledger,
     reconcile_nextcloud,
 )
@@ -113,8 +119,36 @@ class FakeNextcloudBackend:
         del url
         return self.health.get(service.resource_name, True)
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification:
         del nextcloud_url, onlyoffice_url
+        return NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        )
 
 
 @dataclass
@@ -226,6 +260,14 @@ def test_reconcile_nextcloud_plans_paired_runtime_when_enabled() -> None:
         == "wizard-stack-nextcloud-onlyoffice-jwt-secret"
     )
     assert phase.result.onlyoffice.health_check.passed is None
+    assert phase.result.onlyoffice.document_server_check.passed is None
+    assert phase.result.talk is not None
+    assert phase.result.talk.app_id == "spreed"
+    assert phase.result.talk.enabled is None
+    assert phase.result.talk.enabled_check.command == "php occ app:list --output=json"
+    assert phase.result.talk.signaling_check.passed is None
+    assert phase.result.talk.stun_check.passed is None
+    assert phase.result.talk.turn_check.passed is None
 
 
 def test_reconcile_nextcloud_skips_cleanly_when_disabled() -> None:
@@ -323,6 +365,8 @@ def test_reconcile_nextcloud_reuses_owned_resources_and_requires_both_health_che
     assert phase.result.onlyoffice is not None
     assert phase.result.onlyoffice.service.action == "update_owned"
     assert phase.result.onlyoffice.data_volume.action == "reuse_owned"
+    assert phase.result.talk is not None
+    assert phase.result.talk.enabled is True
     assert backend.create_service_calls == 0
     assert backend.update_service_calls == 2
     assert backend.create_volume_calls == 0
@@ -442,6 +486,7 @@ def test_reconcile_nextcloud_reuses_existing_dokploy_managed_volumes() -> None:
     assert phase.result.outcome == "applied"
     assert phase.result.nextcloud is not None
     assert phase.result.onlyoffice is not None
+    assert phase.result.talk is not None
     assert phase.result.nextcloud.service.action == "create"
     assert phase.result.onlyoffice.service.action == "create"
     assert phase.result.nextcloud.data_volume.action == "reuse_existing"
@@ -492,6 +537,7 @@ def test_reconcile_nextcloud_reuses_existing_dokploy_managed_services() -> None:
     assert phase.result.outcome == "already_present"
     assert phase.result.nextcloud is not None
     assert phase.result.onlyoffice is not None
+    assert phase.result.talk is not None
     assert phase.result.nextcloud.service.action == "reuse_existing"
     assert phase.result.onlyoffice.service.action == "reuse_existing"
     assert phase.result.nextcloud.data_volume.action == "reuse_existing"
@@ -517,6 +563,59 @@ def test_reconcile_nextcloud_fails_when_onlyoffice_health_check_does_not_pass() 
             desired_state=desired_state,
             ownership_ledger=OwnershipLedger(format_version=1, resources=()),
             backend=FakeNextcloudBackend(health={"wizard-stack-onlyoffice": False}),
+        )
+
+
+def test_reconcile_nextcloud_fails_when_talk_is_not_enabled() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+
+    class TalkDisabledBackend(FakeNextcloudBackend):
+        def ensure_application_ready(
+            self, *, nextcloud_url: str, onlyoffice_url: str
+        ) -> NextcloudBundleVerification:
+            del nextcloud_url, onlyoffice_url
+            return NextcloudBundleVerification(
+                onlyoffice_document_server_check=NextcloudCommandCheck(
+                    command="php occ onlyoffice:documentserver --check",
+                    passed=True,
+                ),
+                talk=TalkRuntime(
+                    app_id="spreed",
+                    enabled=False,
+                    enabled_check=NextcloudCommandCheck(
+                        command="php occ app:list --output=json",
+                        passed=False,
+                    ),
+                    signaling_check=NextcloudCommandCheck(
+                        command="php occ talk:signaling:list --output=json",
+                        passed=True,
+                    ),
+                    stun_check=NextcloudCommandCheck(
+                        command="php occ talk:stun:list --output=json",
+                        passed=True,
+                    ),
+                    turn_check=NextcloudCommandCheck(
+                        command="php occ talk:turn:list --output=json",
+                        passed=True,
+                    ),
+                ),
+            )
+
+    with pytest.raises(NextcloudError, match="Talk app 'spreed' is not enabled"):
+        reconcile_nextcloud(
+            dry_run=False,
+            desired_state=desired_state,
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=TalkDisabledBackend(),
         )
 
 
@@ -786,7 +885,6 @@ def test_ensure_onlyoffice_app_config_sets_internal_urls_and_jwt(
     )
 
     assert commands == [
-        "php occ app:install onlyoffice || true",
         "php occ app:enable --force onlyoffice",
         "php occ config:system:set allow_local_remote_servers --value=true --type=bool",
         "php occ config:system:set onlyoffice jwt_secret --value=change-me",
@@ -801,6 +899,176 @@ def test_ensure_onlyoffice_app_config_sets_internal_urls_and_jwt(
         "php occ config:app:set onlyoffice preview --value=true",
         "php occ onlyoffice:documentserver --check",
     ]
+
+
+def test_platform_version_spec_matches_major_handles_compound_constraints() -> None:
+    assert _platform_version_spec_matches_major(">=33.0.0 <34.0.0", 33) is True
+    assert _platform_version_spec_matches_major(">=33.0.0 <34.0.0", 32) is False
+    assert _platform_version_spec_matches_major(">=33.0.0 <34.0.0", 34) is False
+
+
+def test_resolve_compatible_app_release_download_url_matches_nextcloud_major(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        def __init__(self, payload: str) -> None:
+            self._payload = payload
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self._payload.encode("utf-8")
+
+    requested_urls: list[str] = []
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._read_occ_www_data_output",
+        lambda container_name, args: '{"versionstring":"33.0.2"}',
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud.request.urlopen",
+        lambda req, timeout: (
+            requested_urls.append(req.full_url)
+            or FakeResponse(
+                """[
+                {"id":"spreed","releases":[
+                    {"version":"9.0.9","platformVersionSpec":">=9.0.0 <10.0.0","download":"https://github.com/nextcloud/spreed/releases/download/v9.0.9/spreed-9.0.9.tar.gz"},
+                    {"version":"23.0.3","platformVersionSpec":">=33.0.0 <34.0.0","download":"https://github.com/nextcloud-releases/spreed/releases/download/v23.0.3/spreed-v23.0.3.tar.gz"}
+                ]},
+                {"id":"onlyoffice","releases":[
+                    {"version":"9.9.0","platformVersionSpec":">=9.0.0 <10.0.0","download":"https://github.com/ONLYOFFICE/onlyoffice-nextcloud/releases/download/v9.9.0/onlyoffice.tar.gz"},
+                    {"version":"10.0.0","platformVersionSpec":">=33.0.0 <34.0.0","download":"https://github.com/ONLYOFFICE/onlyoffice-nextcloud/releases/download/v10.0.0/onlyoffice.tar.gz"}
+                ]}
+                ]"""
+            )
+        ),
+    )
+
+    assert _resolve_compatible_app_release_download_url("nextcloud-container", "spreed") == (
+        "https://github.com/nextcloud-releases/spreed/releases/download/v23.0.3/spreed-v23.0.3.tar.gz"
+    )
+    assert _resolve_compatible_app_release_download_url("nextcloud-container", "onlyoffice") == (
+        "https://github.com/ONLYOFFICE/onlyoffice-nextcloud/releases/download/v10.0.0/onlyoffice.tar.gz"
+    )
+    assert requested_urls == [
+        "https://apps.nextcloud.com/api/v1/apps.json",
+        "https://apps.nextcloud.com/api/v1/apps.json",
+    ]
+
+
+def test_ensure_onlyoffice_app_config_falls_back_to_manual_release_install_when_enable_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+    enable_attempts = 0
+
+    def fake_run_occ_shell(container_name: str, shell_command: str) -> None:
+        nonlocal enable_attempts
+        assert container_name == "nextcloud-container"
+        commands.append(shell_command)
+        if shell_command == "php occ app:enable --force onlyoffice" and enable_attempts == 0:
+            enable_attempts += 1
+            raise NextcloudError(
+                "Nextcloud OCC command failed (php occ app:enable --force onlyoffice): onlyoffice is not installed"
+            )
+        if shell_command == "php occ app:enable --force onlyoffice":
+            enable_attempts += 1
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        fake_run_occ_shell,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._resolve_compatible_app_release_download_url",
+        lambda container_name,
+        app_id: "https://github.com/ONLYOFFICE/onlyoffice-nextcloud/releases/download/v9.9.0/onlyoffice.tar.gz",
+    )
+
+    _ensure_onlyoffice_app_config(
+        "nextcloud-container",
+        document_server_url="https://office.example.com",
+        document_server_internal_url="http://wizard-stack-onlyoffice",
+        storage_url="http://wizard-stack-nextcloud",
+        jwt_secret="change-me",
+    )
+
+    assert commands[0:3] == [
+        "php occ app:enable --force onlyoffice",
+        'export NEXTCLOUD_APP_TMP_DIR="$(mktemp -d)" && '
+        "trap 'rm -rf \"$NEXTCLOUD_APP_TMP_DIR\"' EXIT && "
+        'php -r \'if (!copy("https://github.com/ONLYOFFICE/onlyoffice-nextcloud/releases/download/v9.9.0/onlyoffice.tar.gz", getenv("NEXTCLOUD_APP_TMP_DIR") . "/app-release.tar.gz")) { fwrite(STDERR, "Failed to download ONLYOFFICE app release\\n"); exit(1); }\' && '
+        "rm -rf apps/onlyoffice && "
+        'tar -xzf "$NEXTCLOUD_APP_TMP_DIR/app-release.tar.gz" -C apps && '
+        "test -d apps/onlyoffice",
+        "php occ app:enable --force onlyoffice",
+    ]
+    assert commands[-1] == "php occ onlyoffice:documentserver --check"
+    assert enable_attempts == 2
+
+
+def test_ensure_spreed_app_enabled_keeps_happy_path_minimal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_run_occ_shell(container_name: str, shell_command: str) -> None:
+        assert container_name == "nextcloud-container"
+        commands.append(shell_command)
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        fake_run_occ_shell,
+    )
+
+    _ensure_spreed_app_enabled("nextcloud-container")
+
+    assert commands == ["php occ app:enable spreed"]
+
+
+def test_ensure_spreed_app_enabled_falls_back_to_manual_release_install_when_enable_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+    enable_attempts = 0
+
+    def fake_run_occ_shell(container_name: str, shell_command: str) -> None:
+        nonlocal enable_attempts
+        assert container_name == "nextcloud-container"
+        commands.append(shell_command)
+        if shell_command == "php occ app:enable spreed" and enable_attempts == 0:
+            enable_attempts += 1
+            raise NextcloudError(
+                "Nextcloud OCC command failed (php occ app:enable spreed): Could not download app spreed, it was not found on the appstore"
+            )
+        if shell_command == "php occ app:enable spreed":
+            enable_attempts += 1
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        fake_run_occ_shell,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._resolve_compatible_app_release_download_url",
+        lambda container_name,
+        app_id: "https://github.com/nextcloud/spreed/releases/download/v21.0.0/spreed-21.0.0.tar.gz",
+    )
+
+    _ensure_spreed_app_enabled("nextcloud-container")
+
+    assert commands == [
+        "php occ app:enable spreed",
+        'export NEXTCLOUD_APP_TMP_DIR="$(mktemp -d)" && '
+        "trap 'rm -rf \"$NEXTCLOUD_APP_TMP_DIR\"' EXIT && "
+        'php -r \'if (!copy("https://github.com/nextcloud/spreed/releases/download/v21.0.0/spreed-21.0.0.tar.gz", getenv("NEXTCLOUD_APP_TMP_DIR") . "/app-release.tar.gz")) { fwrite(STDERR, "Failed to download Talk app release\\n"); exit(1); }\' && '
+        "rm -rf apps/spreed && "
+        'tar -xzf "$NEXTCLOUD_APP_TMP_DIR/app-release.tar.gz" -C apps && '
+        "test -d apps/spreed",
+        "php occ app:enable spreed",
+    ]
+    assert enable_attempts == 2
 
 
 def test_with_trailing_slash_adds_missing_separator() -> None:

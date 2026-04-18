@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from dokploy_wizard.state.models import (
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
     OwnershipLedger,
@@ -125,16 +126,17 @@ def _validate_state_document_set(loaded_state: LoadedState) -> None:
     allowed_steps = {
         "preflight",
         "dokploy_bootstrap",
-        "tailscale",
         "networking",
-        "cloudflare_access",
         "shared_core",
+        "seaweedfs",
         "headscale",
+        "tailscale",
         "matrix",
         "nextcloud",
-        "seaweedfs",
+        "coder",
         "openclaw",
         "my-farm-advisor",
+        "cloudflare_access",
     }
     unexpected_steps = sorted(
         step for step in loaded_state.applied_state.completed_steps if step not in allowed_steps
@@ -158,6 +160,7 @@ def persist_install_scaffold(
             format_version=desired_state.format_version,
             desired_state_fingerprint=desired_state.fingerprint(),
             completed_steps=(),
+            lifecycle_checkpoint_contract_version=LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
         ).to_dict(),
     )
     _write_document(
