@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from dokploy_wizard.host_prereqs import (
+    APT_LOCK_TIMEOUT_SECONDS,
     DOCKER_APT_PACKAGES,
     DOCKER_APT_REPOSITORY_URL,
     DOCKER_APT_SOURCE_PATH,
+    _apt_get_command,
     _docker_apt_source_line,
     assess_host_prerequisites,
     remediate_host_prerequisites,
@@ -101,6 +103,23 @@ def test_docker_apt_source_line_uses_concrete_architecture_token(
     )
     assert install_command.install_command is not None
     assert f"sudo tee {DOCKER_APT_SOURCE_PATH}" in install_command.install_command
+
+
+def test_apt_get_command_uses_dpkg_lock_timeout() -> None:
+    assert _apt_get_command("update") == (
+        "apt-get",
+        "-o",
+        f"DPkg::Lock::Timeout={APT_LOCK_TIMEOUT_SECONDS}",
+        "update",
+    )
+    assert _apt_get_command("install", "-y", "docker-ce") == (
+        "apt-get",
+        "-o",
+        f"DPkg::Lock::Timeout={APT_LOCK_TIMEOUT_SECONDS}",
+        "install",
+        "-y",
+        "docker-ce",
+    )
 
 
 def _host_facts(*, docker_installed: bool, docker_daemon_reachable: bool) -> HostFacts:
