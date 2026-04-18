@@ -75,7 +75,7 @@ class FakeOpenClawBackend:
         self.create_calls += 1
         self.last_requested_replicas = replicas
         self.existing_service = OpenClawResourceRecord(
-            resource_id="advisor-service-1",
+            resource_id="openclaw-service-1",
             resource_name=resource_name,
             replicas=replicas,
         )
@@ -146,7 +146,7 @@ def test_reconcile_openclaw_plans_slot_runtime_for_openclaw_variant() -> None:
     assert phase.result.template_path is not None
     assert phase.result.template_path.endswith("templates/packs/openclaw.compose.yaml")
     assert phase.result.service is not None
-    assert phase.result.service.resource_name == "wizard-stack-advisor"
+    assert phase.result.service.resource_name == "wizard-stack-openclaw"
     assert phase.result.health_check is not None
     assert phase.result.health_check.passed is None
 
@@ -326,8 +326,8 @@ def test_reconcile_openclaw_reuses_owned_service_and_requires_health() -> None:
     )
     backend = FakeOpenClawBackend(
         existing_service=OpenClawResourceRecord(
-            resource_id="advisor-service-1",
-            resource_name="wizard-stack-advisor",
+            resource_id="openclaw-service-1",
+            resource_name="wizard-stack-openclaw",
             replicas=1,
         ),
         health_ok=True,
@@ -341,7 +341,7 @@ def test_reconcile_openclaw_reuses_owned_service_and_requires_health() -> None:
             resources=(
                 OwnedResource(
                     resource_type=OPENCLAW_SERVICE_RESOURCE_TYPE,
-                    resource_id="advisor-service-1",
+                    resource_id="openclaw-service-1",
                     scope="stack:wizard-stack:openclaw",
                 ),
             ),
@@ -372,8 +372,8 @@ def test_reconcile_openclaw_updates_owned_service_when_replicas_change() -> None
     )
     backend = FakeOpenClawBackend(
         existing_service=OpenClawResourceRecord(
-            resource_id="advisor-service-1",
-            resource_name="wizard-stack-advisor",
+            resource_id="openclaw-service-1",
+            resource_name="wizard-stack-openclaw",
             replicas=1,
         ),
         health_ok=True,
@@ -387,7 +387,7 @@ def test_reconcile_openclaw_updates_owned_service_when_replicas_change() -> None
             resources=(
                 OwnedResource(
                     resource_type=OPENCLAW_SERVICE_RESOURCE_TYPE,
-                    resource_id="advisor-service-1",
+                    resource_id="openclaw-service-1",
                     scope="stack:wizard-stack:openclaw",
                 ),
             ),
@@ -423,8 +423,8 @@ def test_reconcile_openclaw_fails_closed_on_unowned_name_collision() -> None:
             ownership_ledger=OwnershipLedger(format_version=1, resources=()),
             backend=FakeOpenClawBackend(
                 existing_service=OpenClawResourceRecord(
-                    resource_id="advisor-service-1",
-                    resource_name="wizard-stack-advisor",
+                    resource_id="openclaw-service-1",
+                    resource_name="wizard-stack-openclaw",
                     replicas=1,
                 )
             ),
@@ -488,13 +488,13 @@ def test_build_openclaw_ledger_persists_pack_specific_scope() -> None:
     updated = build_openclaw_ledger(
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
         stack_name="wizard-stack",
-        service_resource_id="advisor-service-1",
+        service_resource_id="openclaw-service-1",
     )
 
     assert updated.resources == (
         OwnedResource(
             resource_type=OPENCLAW_SERVICE_RESOURCE_TYPE,
-            resource_id="advisor-service-1",
+            resource_id="openclaw-service-1",
             scope="stack:wizard-stack:openclaw",
         ),
     )
@@ -564,6 +564,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
         api_url="https://dokploy.example.com/api",
         api_key="key-123",
         stack_name="wizard-stack",
+        openclaw_gateway_password="openclaw-ui-generated",
         trusted_proxy_emails=("admin@example.com",),
         model_provider="anthropic",
         model_name="claude-3-7-sonnet",
@@ -573,7 +574,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
     )
 
     record = backend.create_service(
-        resource_name="wizard-stack-advisor",
+        resource_name="wizard-stack-openclaw",
         hostname="openclaw.example.com",
         template_path=None,
         variant="openclaw",
@@ -584,7 +585,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
 
     compose = api.last_create_compose_file
     assert compose is not None
-    assert record.resource_name == "wizard-stack-advisor"
+    assert record.resource_name == "wizard-stack-openclaw"
     assert record.resource_id == "dokploy-compose:compose-1:openclaw:replicas:2"
     assert "image: ghcr.io/openclaw/openclaw:latest" in compose
     assert "exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" in compose
@@ -601,13 +602,19 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
     assert seeded["gateway"]["auth"]["trustedProxy"]["requiredHeaders"] == [
         "cf-access-jwt-assertion"
     ]
+    assert seeded["gateway"]["auth"]["password"] == "openclaw-ui-generated"
     assert seeded["gateway"]["auth"]["trustedProxy"]["allowUsers"] == ["admin@example.com"]
     assert seeded["gateway"]["trustedProxies"] == ["10.0.0.0/8", "172.16.0.0/12"]
+    assert seeded["gateway"]["controlUi"]["allowInsecureAuth"] is False
     assert "agents" not in seeded
-    assert 'traefik.http.services.wizard-stack-advisor.loadbalancer.server.port: "18789"' in compose
     assert (
-        'traefik.http.routers.wizard-stack-advisor.rule: "Host(`openclaw.example.com`)"' in compose
+        'traefik.http.services.wizard-stack-openclaw.loadbalancer.server.port: "18789"' in compose
     )
+    assert (
+        'traefik.http.routers.wizard-stack-openclaw.rule: "Host(`openclaw.example.com`)"' in compose
+    )
+    assert "wizard-stack-openclaw-data:/home/node/.openclaw" in compose
+    assert "  wizard-stack-openclaw-data:" in compose
     assert "replicas: 2" in compose
 
 
@@ -618,11 +625,12 @@ def test_dokploy_openclaw_backend_keeps_token_mode_without_access_emails() -> No
         api_key="key-123",
         stack_name="wizard-stack",
         gateway_token="fixed-token-123",
+        openclaw_gateway_password="openclaw-ui-generated",
         client=api,
     )
 
     backend.create_service(
-        resource_name="wizard-stack-advisor",
+        resource_name="wizard-stack-openclaw",
         hostname="openclaw.example.com",
         template_path=None,
         variant="openclaw",
@@ -636,6 +644,7 @@ def test_dokploy_openclaw_backend_keeps_token_mode_without_access_emails() -> No
     assert 'OPENCLAW_GATEWAY_TOKEN: "fixed-token-123"' in compose
     seeded = _decode_seeded_gateway_payload(compose)
     assert seeded["gateway"]["auth"]["mode"] == "token"
+    assert seeded["gateway"]["controlUi"]["allowInsecureAuth"] is True
     assert "payload.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;" in compose
 
 
@@ -659,7 +668,7 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
     )
 
     backend.create_service(
-        resource_name="wizard-stack-advisor",
+        resource_name="wizard-stack-openclaw",
         hostname="openclaw.example.com",
         template_path=None,
         variant="openclaw",
@@ -769,7 +778,7 @@ def test_dokploy_openclaw_backend_accepts_legacy_advisor_service_resource_id() -
         composes=(
             DokployComposeSummary(
                 compose_id="YEGn1TjLLuRP7rPLSh22y",
-                name="openmerge-advisor",
+                name="openmerge-openclaw",
                 status="done",
             ),
         ),
@@ -790,7 +799,7 @@ def test_dokploy_openclaw_backend_accepts_legacy_advisor_service_resource_id() -
 
     assert record is not None
     assert record.resource_id == "dokploy-compose:YEGn1TjLLuRP7rPLSh22y:advisor-service"
-    assert record.resource_name == "openmerge-advisor"
+    assert record.resource_name == "openmerge-openclaw"
     assert record.replicas == 1
 
 
@@ -813,6 +822,6 @@ def test_control_ui_origin_ready_requires_public_origin_in_seeded_config(
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw.subprocess.run", fake_run)
 
     assert (
-        _control_ui_origin_ready("wizard-stack-advisor", "https://openclaw.example.com/health")
+        _control_ui_origin_ready("wizard-stack-openclaw", "https://openclaw.example.com/health")
         is True
     )

@@ -1,7 +1,7 @@
 version: "3.9"
 services:
-  advisor:
+  openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     labels:
       dokploy-wizard.variant: openclaw
-      dokploy-wizard.slot: advisor_suite
+      dokploy-wizard.slot: openclaw_suite
