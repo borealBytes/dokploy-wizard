@@ -17,6 +17,7 @@ from dokploy_wizard.preflight import (
 from dokploy_wizard.state import RawEnvInput, StateValidationError
 
 APT_INSTALL_PREFIX = "sudo apt-get update && sudo apt-get install -y"
+APT_LOCK_TIMEOUT_SECONDS = "600"
 UBUNTU_BASELINE_PACKAGES = ("git", "curl", "ca-certificates")
 DOCKER_APT_PACKAGES = (
     "docker-ce",
@@ -138,11 +139,11 @@ class UbuntuAptHostPrerequisiteBackend:
         if not package_names:
             return
         self._run_privileged_command(
-            ("apt-get", "update"),
+            _apt_get_command("update"),
             failure_detail="refreshing apt package indexes",
         )
         self._run_privileged_command(
-            ("apt-get", "install", "-y", *package_names),
+            _apt_get_command("install", "-y", *package_names),
             failure_detail=(f"installing baseline host prerequisites ({', '.join(package_names)})"),
         )
 
@@ -165,11 +166,11 @@ class UbuntuAptHostPrerequisiteBackend:
             input_text=_docker_apt_source_line() + "\n",
         )
         self._run_privileged_command(
-            ("apt-get", "update"),
+            _apt_get_command("update"),
             failure_detail="refreshing apt package indexes after configuring the Docker repository",
         )
         self._run_privileged_command(
-            ("apt-get", "install", "-y", *DOCKER_APT_PACKAGES),
+            _apt_get_command("install", "-y", *DOCKER_APT_PACKAGES),
             failure_detail=(
                 f"installing Docker Engine packages ({', '.join(DOCKER_APT_PACKAGES)})"
             ),
@@ -401,6 +402,15 @@ def _build_install_command(
     if not commands:
         return None
     return " && ".join(commands)
+
+
+def _apt_get_command(*args: str) -> tuple[str, ...]:
+    return (
+        "apt-get",
+        "-o",
+        f"DPkg::Lock::Timeout={APT_LOCK_TIMEOUT_SECONDS}",
+        *args,
+    )
 
 
 def _docker_apt_source_line() -> str:
