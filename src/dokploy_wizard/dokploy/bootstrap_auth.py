@@ -285,6 +285,120 @@ class DokployBootstrapAuthClient:
             )
         return payload
 
+    def list_compose_schedules(
+        self,
+        *,
+        admin_email: str,
+        admin_password: str,
+        compose_id: str,
+    ) -> list[dict[str, Any]]:
+        self._authenticate(admin_email=admin_email, admin_password=admin_password)
+        self._resolve_session()
+        payload = self._request_json(
+            "GET",
+            f"/api/schedule.list?id={compose_id}&scheduleType=compose",
+            None,
+        )
+        if not isinstance(payload, list):
+            raise DokployBootstrapAuthError(
+                "Dokploy session schedule.list response must decode to a JSON array."
+            )
+        return payload
+
+    def create_schedule(
+        self,
+        *,
+        admin_email: str,
+        admin_password: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        self._authenticate(admin_email=admin_email, admin_password=admin_password)
+        self._resolve_session()
+        payload = self._request_json(
+            "POST",
+            "/api/schedule.create",
+            {
+                "name": name,
+                "composeId": compose_id,
+                "serviceName": service_name,
+                "cronExpression": cron_expression,
+                "timezone": timezone,
+                "shellType": shell_type,
+                "command": command,
+                "scheduleType": "compose",
+                "enabled": enabled,
+            },
+        )
+        if not isinstance(payload, dict):
+            raise DokployBootstrapAuthError(
+                "Dokploy session schedule.create response must decode to a JSON object."
+            )
+        return payload
+
+    def update_schedule(
+        self,
+        *,
+        admin_email: str,
+        admin_password: str,
+        schedule_id: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        self._authenticate(admin_email=admin_email, admin_password=admin_password)
+        self._resolve_session()
+        payload = self._request_json(
+            "POST",
+            "/api/schedule.update",
+            {
+                "scheduleId": schedule_id,
+                "name": name,
+                "composeId": compose_id,
+                "serviceName": service_name,
+                "cronExpression": cron_expression,
+                "timezone": timezone,
+                "shellType": shell_type,
+                "command": command,
+                "scheduleType": "compose",
+                "enabled": enabled,
+            },
+        )
+        if not isinstance(payload, dict):
+            raise DokployBootstrapAuthError(
+                "Dokploy session schedule.update response must decode to a JSON object."
+            )
+        return payload
+
+    def delete_schedule(
+        self,
+        *,
+        admin_email: str,
+        admin_password: str,
+        schedule_id: str,
+    ) -> bool:
+        self._authenticate(admin_email=admin_email, admin_password=admin_password)
+        self._resolve_session()
+        payload = self._request_json("POST", "/api/schedule.delete", {"scheduleId": schedule_id})
+        if payload is True:
+            return True
+        if not isinstance(payload, bool):
+            raise DokployBootstrapAuthError(
+                "Dokploy session schedule.delete response must decode to a boolean."
+            )
+        return payload
+
     def _authenticate(self, *, admin_email: str, admin_password: str) -> tuple[str, bool]:
         if self._authenticated:
             return "cached-session", False

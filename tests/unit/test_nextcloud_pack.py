@@ -23,6 +23,7 @@ from dokploy_wizard.dokploy import (
     DokployEnvironmentSummary,
     DokployNextcloudBackend,
     DokployProjectSummary,
+    DokployScheduleRecord,
 )
 from dokploy_wizard.dokploy.nextcloud import (
     _ensure_spreed_app_enabled,
@@ -60,6 +61,7 @@ class FakeNextcloudBackend:
     create_service_calls: int = 0
     update_service_calls: int = 0
     create_volume_calls: int = 0
+    refresh_calls: list[str] = field(default_factory=list)
 
     def get_service(self, resource_id: str) -> NextcloudResourceRecord | None:
         for record in self.services.values():
@@ -158,6 +160,9 @@ class FakeNextcloudBackend:
             ),
         )
 
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        self.refresh_calls.append(admin_user)
+
 
 @dataclass
 class FakeDokployApiClient:
@@ -166,6 +171,7 @@ class FakeDokployApiClient:
     create_compose_calls: int = 0
     update_compose_calls: int = 0
     deploy_calls: int = 0
+    schedules: list[DokployScheduleRecord] = field(default_factory=list)
     last_create_compose_file: str | None = None
     last_update_compose_file: str | None = None
 
@@ -231,6 +237,64 @@ class FakeDokployApiClient:
         del title, description
         self.deploy_calls += 1
         return DokployDeployResult(success=True, compose_id=compose_id, message="queued")
+
+    def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
+        del compose_id
+        return tuple(self.schedules)
+
+    def create_schedule(
+        self,
+        *,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        record = DokployScheduleRecord(
+            schedule_id="sch-1",
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+        self.schedules = [record]
+        return record
+
+    def update_schedule(
+        self,
+        *,
+        schedule_id: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        record = DokployScheduleRecord(
+            schedule_id=schedule_id,
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+        self.schedules = [record]
+        return record
+
+    def delete_schedule(self, *, schedule_id: str) -> None:
+        self.schedules = [item for item in self.schedules if item.schedule_id != schedule_id]
 
 
 def test_reconcile_nextcloud_plans_paired_runtime_when_enabled() -> None:
@@ -796,6 +860,175 @@ def test_dokploy_nextcloud_backend_mounts_openclaw_volume_when_enabled() -> None
     assert "    name: wizard-stack-openclaw-data" in compose
 
 
+def test_dokploy_nextcloud_backend_creates_openclaw_rescan_schedule() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    client = FakeDokployApiClient()
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        admin_user="clayton@superiorbyteworks.com",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        nextcloud_module, "_find_container_name", lambda service_name: "nextcloud-container"
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_files_external_app",
+        lambda container_name: None,
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_openclaw_external_storage",
+        lambda container_name, *, admin_user: None,
+    )
+    backend.refresh_openclaw_external_storage(admin_user="clayton@superiorbyteworks.com")
+    monkeypatch.undo()
+
+    assert client.schedules == [
+        DokployScheduleRecord(
+            schedule_id="sch-1",
+            name="wizard-stack-openclaw-rescan",
+            service_name="wizard-stack-nextcloud",
+            cron_expression="*/15 * * * *",
+            timezone="UTC",
+            shell_type="bash",
+            command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/OpenClaw"',
+            enabled=True,
+        )
+    ]
+
+
+def test_dokploy_nextcloud_backend_updates_existing_openclaw_rescan_schedule() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    client = FakeDokployApiClient(
+        schedules=[
+            DokployScheduleRecord(
+                schedule_id="sch-1",
+                name="wizard-stack-openclaw-rescan",
+                service_name="wizard-stack-nextcloud",
+                cron_expression="0 * * * *",
+                timezone="America/Detroit",
+                shell_type="bash",
+                command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/OpenClaw"',
+                enabled=True,
+            )
+        ]
+    )
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        admin_user="clayton@superiorbyteworks.com",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        openclaw_rescan_cron="*/5 * * * *",
+        openclaw_rescan_timezone="UTC",
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        nextcloud_module, "_find_container_name", lambda service_name: "nextcloud-container"
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_files_external_app",
+        lambda container_name: None,
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_openclaw_external_storage",
+        lambda container_name, *, admin_user: None,
+    )
+    backend.refresh_openclaw_external_storage(admin_user="clayton@superiorbyteworks.com")
+    monkeypatch.undo()
+
+    assert client.schedules == [
+        DokployScheduleRecord(
+            schedule_id="sch-1",
+            name="wizard-stack-openclaw-rescan",
+            service_name="wizard-stack-nextcloud",
+            cron_expression="*/5 * * * *",
+            timezone="UTC",
+            shell_type="bash",
+            command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/OpenClaw"',
+            enabled=True,
+        )
+    ]
+
+
 def test_dokploy_nextcloud_backend_updates_existing_compose_to_keep_onlyoffice_route_managed() -> (
     None
 ):
@@ -1140,6 +1373,10 @@ def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
     assert ("files_external:option", "17", "readonly", "false") in commands
     assert ("files_external:verify", "17") in commands
     assert ("files_external:scan", "17") in commands
+    assert (
+        "files:scan",
+        "--path=clayton@example.com/files/OpenClaw",
+    ) in commands
 
 
 def test_ensure_onlyoffice_app_config_waits_for_transient_documentserver_warmup(

@@ -21,6 +21,7 @@ from dokploy_wizard.dokploy.client import (
     DokployDeployResult,
     DokployEnvironmentSummary,
     DokployProjectSummary,
+    DokployScheduleRecord,
 )
 from dokploy_wizard.packs.nextcloud.models import (
     NextcloudBundleVerification,
@@ -36,6 +37,8 @@ _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD = "ChangeMeSoon"
 _DEFAULT_SHARED_SERVICE_PASSWORD = "change-me"
 _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME = "/OpenClaw"
 _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH = "/mnt/openclaw"
+_DEFAULT_OPENCLAW_RESCAN_CRON = "*/15 * * * *"
+_DEFAULT_OPENCLAW_RESCAN_TIMEZONE = "UTC"
 _DEFAULT_ONLYOFFICE_DEF_FORMATS = {
     "docx": True,
     "xlsx": True,
@@ -71,6 +74,37 @@ class DokployNextcloudApi(Protocol):
         self, *, compose_id: str, title: str | None, description: str | None
     ) -> DokployDeployResult: ...
 
+    def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]: ...
+
+    def create_schedule(
+        self,
+        *,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord: ...
+
+    def update_schedule(
+        self,
+        *,
+        schedule_id: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord: ...
+
+    def delete_schedule(self, *, schedule_id: str) -> None: ...
+
 
 @dataclass(frozen=True)
 class _ComposeLocator:
@@ -96,6 +130,8 @@ class DokployNextcloudBackend:
         admin_user: str = _DEFAULT_NEXTCLOUD_ADMIN_USER,
         admin_password: str = _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD,
         openclaw_volume_name: str | None = None,
+        openclaw_rescan_cron: str = _DEFAULT_OPENCLAW_RESCAN_CRON,
+        openclaw_rescan_timezone: str = _DEFAULT_OPENCLAW_RESCAN_TIMEZONE,
         client: DokployNextcloudApi | None = None,
     ) -> None:
         self._stack_name = stack_name
@@ -110,6 +146,8 @@ class DokployNextcloudBackend:
         self._admin_user = admin_user
         self._admin_password = admin_password
         self._openclaw_volume_name = openclaw_volume_name
+        self._openclaw_rescan_cron = openclaw_rescan_cron
+        self._openclaw_rescan_timezone = openclaw_rescan_timezone
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
@@ -268,6 +306,7 @@ class DokployNextcloudBackend:
                 openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
                 admin_user=self._admin_user,
             )
+            self._ensure_openclaw_rescan_schedule()
             return _verify_nextcloud_bundle(container)
         container = _wait_for_container_name(_nextcloud_service_name(self._stack_name))
         if container is None:
@@ -291,7 +330,71 @@ class DokployNextcloudBackend:
             openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
             admin_user=self._admin_user,
         )
+        self._ensure_openclaw_rescan_schedule()
         return _verify_nextcloud_bundle(container)
+
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        if self._openclaw_volume_name is None:
+            return
+        container = _find_container_name(_nextcloud_service_name(self._stack_name))
+        if container is None:
+            raise NextcloudError(
+                "Nextcloud container could not be located for OpenClaw external storage refresh."
+            )
+        _ensure_files_external_app(container)
+        _ensure_openclaw_external_storage(container, admin_user=admin_user)
+        self._ensure_openclaw_rescan_schedule()
+
+    def _ensure_openclaw_rescan_schedule(self) -> None:
+        if self._openclaw_volume_name is None:
+            return
+        locator = self._find_compose_locator()
+        if locator is None:
+            raise NextcloudError(
+                "Nextcloud compose locator is unavailable for schedule reconciliation."
+            )
+        schedule_name = f"{self._stack_name}-openclaw-rescan"
+        service_name = _nextcloud_service_name(self._stack_name)
+        command = f'php /var/www/html/occ files:scan --path="{self._admin_user}/files{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME}"'
+        existing = next(
+            (
+                item
+                for item in self._client.list_compose_schedules(compose_id=locator.compose_id)
+                if item.name == schedule_name
+            ),
+            None,
+        )
+        if existing is None:
+            self._client.create_schedule(
+                name=schedule_name,
+                compose_id=locator.compose_id,
+                service_name=service_name,
+                cron_expression=self._openclaw_rescan_cron,
+                timezone=self._openclaw_rescan_timezone,
+                shell_type="bash",
+                command=command,
+                enabled=True,
+            )
+            return
+        if (
+            existing.service_name != service_name
+            or existing.cron_expression != self._openclaw_rescan_cron
+            or existing.timezone != self._openclaw_rescan_timezone
+            or existing.shell_type != "bash"
+            or existing.command != command
+            or existing.enabled is not True
+        ):
+            self._client.update_schedule(
+                schedule_id=existing.schedule_id,
+                name=schedule_name,
+                compose_id=locator.compose_id,
+                service_name=service_name,
+                cron_expression=self._openclaw_rescan_cron,
+                timezone=self._openclaw_rescan_timezone,
+                shell_type="bash",
+                command=command,
+                enabled=True,
+            )
 
     def _validate_service_inputs(
         self,
@@ -1081,6 +1184,10 @@ def _ensure_openclaw_external_storage(container_name: str, *, admin_user: str) -
     _run_occ(container_name, ["files_external:option", mount_id, "readonly", "false"])
     _run_occ(container_name, ["files_external:verify", mount_id])
     _run_occ(container_name, ["files_external:scan", mount_id])
+    _run_occ(
+        container_name,
+        ["files:scan", f"--path={admin_user}/files{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME}"],
+    )
 
 
 def _ensure_spreed_app_enabled(container_name: str) -> None:
