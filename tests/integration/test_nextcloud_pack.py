@@ -33,7 +33,9 @@ from dokploy_wizard.packs.nextcloud.models import (
     NextcloudCommandCheck,
     TalkRuntime,
 )
+from dokploy_wizard.packs.openclaw import OpenClawResourceRecord
 from dokploy_wizard.state import RawEnvInput, load_state_dir, resolve_desired_state
+from tests.integration.test_networking_reconciler import FakeCoderBackend
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -321,6 +323,7 @@ class FakeNextcloudBackend:
     health: dict[str, bool] = field(default_factory=dict)
     create_service_calls: int = 0
     create_volume_calls: int = 0
+    refresh_calls: list[str] = field(default_factory=list)
 
     def get_service(self, resource_id: str) -> NextcloudResourceRecord | None:
         for record in self.services.values():
@@ -417,6 +420,88 @@ class FakeNextcloudBackend:
                 ),
             ),
         )
+
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        self.refresh_calls.append(admin_user)
+
+
+@dataclass
+class FakeSeaweedFsBackend:
+    def get_service(self, resource_id: str):
+        del resource_id
+        return None
+
+    def find_service_by_name(self, resource_name: str):
+        del resource_name
+        return None
+
+    def create_service(self, *, resource_name: str, template_path: Path):
+        del template_path
+        return NextcloudResourceRecord(
+            resource_id=f"service:{resource_name}", resource_name=resource_name
+        )
+
+    def update_service(self, *, resource_id: str, resource_name: str, template_path: Path):
+        del resource_id
+        return self.create_service(resource_name=resource_name, template_path=template_path)
+
+    def get_persistent_data(self, resource_id: str):
+        del resource_id
+        return None
+
+    def find_persistent_data_by_name(self, resource_name: str):
+        del resource_name
+        return None
+
+    def create_persistent_data(self, *, resource_name: str):
+        return NextcloudResourceRecord(
+            resource_id=f"volume:{resource_name}", resource_name=resource_name
+        )
+
+    def check_health(self, *, service, url: str) -> bool:
+        del service, url
+        return True
+
+
+@dataclass
+class FakeOpenClawBackend:
+    services: dict[str, OpenClawResourceRecord] = field(default_factory=dict)
+
+    def get_service(self, resource_id: str) -> OpenClawResourceRecord | None:
+        for record in self.services.values():
+            if record.resource_id == resource_id:
+                return record
+        return None
+
+    def find_service_by_name(self, resource_name: str) -> OpenClawResourceRecord | None:
+        return self.services.get(resource_name)
+
+    def create_service(
+        self,
+        *,
+        resource_name: str,
+        hostname: str,
+        template_path: object,
+        variant: str,
+        channels: tuple[str, ...],
+        replicas: int,
+        secret_refs: tuple[str, ...],
+    ) -> OpenClawResourceRecord:
+        del hostname, template_path, variant, channels, replicas, secret_refs
+        record = OpenClawResourceRecord(
+            resource_id=f"service:{resource_name}",
+            resource_name=resource_name,
+            replicas=1,
+        )
+        self.services[resource_name] = record
+        return record
+
+    def update_service(self, **kwargs: object) -> OpenClawResourceRecord:
+        return self.create_service(**kwargs)
+
+    def check_health(self, *, service: OpenClawResourceRecord, url: str) -> bool:
+        del service, url
+        return True
 
 
 @dataclass
@@ -842,3 +927,23 @@ def test_install_fails_before_nextcloud_checkpoint_when_talk_verification_fails(
     loaded_state = load_state_dir(state_dir)
     assert loaded_state.applied_state is not None
     assert "nextcloud" not in loaded_state.applied_state.completed_steps
+
+
+def test_openclaw_phase_refreshes_nextcloud_external_storage(tmp_path: Path) -> None:
+    nextcloud_backend = FakeNextcloudBackend()
+
+    run_install_flow(
+        env_file=FIXTURES_DIR / "full.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=nextcloud_backend,
+        seaweedfs_backend=FakeSeaweedFsBackend(),
+        coder_backend=FakeCoderBackend(),
+        openclaw_backend=FakeOpenClawBackend(),
+    )
+
+    assert nextcloud_backend.refresh_calls == ["admin"]
