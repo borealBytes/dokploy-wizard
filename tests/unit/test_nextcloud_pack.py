@@ -739,6 +739,63 @@ def test_dokploy_nextcloud_backend_creates_one_compose_for_pair() -> None:
     assert 'traefik.http.services.wizard-stack-onlyoffice.loadbalancer.server.port: "80"' in compose
 
 
+def test_dokploy_nextcloud_backend_mounts_openclaw_volume_when_enabled() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient()
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+
+    compose = client.last_create_compose_file
+    assert compose is not None
+    assert "wizard-stack-openclaw-data:/mnt/openclaw" in compose
+    assert "  wizard-stack-openclaw-data:" in compose
+    assert "    name: wizard-stack-openclaw-data" in compose
+
+
 def test_dokploy_nextcloud_backend_updates_existing_compose_to_keep_onlyoffice_route_managed() -> (
     None
 ):
@@ -1033,6 +1090,58 @@ def test_ensure_onlyoffice_app_config_sets_internal_urls_and_jwt(
     ]
 
 
+def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    mount_id_calls = 0
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        lambda container_name, shell_command: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ",
+        lambda container_name, args: commands.append(tuple(args)),
+    )
+
+    def fake_find_mount_id(container_name: str, *, mount_point: str, datadir: str) -> str | None:
+        nonlocal mount_id_calls
+        mount_id_calls += 1
+        assert mount_point == "/OpenClaw"
+        assert datadir == "/mnt/openclaw"
+        return None if mount_id_calls == 1 else "17"
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._find_external_storage_mount_id",
+        fake_find_mount_id,
+    )
+
+    _ensure_onlyoffice_app_config(
+        "nextcloud-container",
+        document_server_url="https://office.example.com",
+        document_server_internal_url="http://wizard-stack-onlyoffice",
+        storage_url="http://wizard-stack-nextcloud",
+        jwt_secret="change-me",
+        openclaw_external_storage_enabled=True,
+        admin_user="clayton@example.com",
+    )
+
+    assert ("app:enable", "files_external") in commands
+    assert (
+        "files_external:create",
+        "/OpenClaw",
+        "local",
+        "null::null",
+        "-c",
+        "datadir=/mnt/openclaw",
+    ) in commands
+    assert ("files_external:applicable", "17", "--add-user=clayton@example.com") in commands
+    assert ("files_external:option", "17", "readonly", "false") in commands
+    assert ("files_external:verify", "17") in commands
+    assert ("files_external:scan", "17") in commands
+
+
 def test_ensure_onlyoffice_app_config_waits_for_transient_documentserver_warmup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1111,8 +1220,8 @@ def test_ensure_onlyoffice_app_config_fails_closed_after_documentserver_warmup_e
             wait_for_documentserver_check=True,
         )
 
-    assert documentserver_attempts == 72
-    assert sleep_calls == [5.0] * 71
+    assert documentserver_attempts == 180
+    assert sleep_calls == [5.0] * 179
 
 
 def test_platform_version_spec_matches_major_handles_compound_constraints() -> None:
