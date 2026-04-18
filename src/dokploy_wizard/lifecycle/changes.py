@@ -11,6 +11,7 @@ from dokploy_wizard.packs.catalog import (
 from dokploy_wizard.state.models import (
     AppliedStateCheckpoint,
     DesiredState,
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
@@ -19,17 +20,17 @@ from dokploy_wizard.state.models import (
 PHASE_ORDER: tuple[str, ...] = (
     "preflight",
     "dokploy_bootstrap",
-    "tailscale",
     "networking",
-    "cloudflare_access",
     "shared_core",
+    "seaweedfs",
     "headscale",
+    "tailscale",
     "matrix",
     "nextcloud",
-    "seaweedfs",
     "coder",
     "openclaw",
     "my-farm-advisor",
+    "cloudflare_access",
 )
 
 _SUPPORTED_AUTH_KEYS = {
@@ -150,29 +151,31 @@ class LifecyclePlan:
 
 
 def applicable_phases_for(desired_state: DesiredState) -> tuple[str, ...]:
-    phases = [
+    phases = {
         "preflight",
         "dokploy_bootstrap",
-    ]
-    if desired_state.enable_tailscale:
-        phases.append("tailscale")
-    phases.append("networking")
-    if _access_enabled(desired_state):
-        phases.append("cloudflare_access")
-    phases.extend(["shared_core", "headscale"])
-    if "matrix" in desired_state.enabled_packs:
-        phases.append("matrix")
-    if "nextcloud" in desired_state.enabled_packs:
-        phases.append("nextcloud")
+        "networking",
+        "shared_core",
+    }
     if "seaweedfs" in desired_state.enabled_packs:
-        phases.append("seaweedfs")
+        phases.add("seaweedfs")
+    if "headscale" in desired_state.selected_packs:
+        phases.add("headscale")
+    if desired_state.enable_tailscale:
+        phases.add("tailscale")
+    if "matrix" in desired_state.enabled_packs:
+        phases.add("matrix")
+    if "nextcloud" in desired_state.enabled_packs:
+        phases.add("nextcloud")
     if "coder" in desired_state.enabled_packs:
-        phases.append("coder")
+        phases.add("coder")
     if "openclaw" in desired_state.enabled_packs:
-        phases.append("openclaw")
+        phases.add("openclaw")
     if "my-farm-advisor" in desired_state.enabled_packs:
-        phases.append("my-farm-advisor")
-    return tuple(phases)
+        phases.add("my-farm-advisor")
+    if _access_enabled(desired_state):
+        phases.add("cloudflare_access")
+    return tuple(phase for phase in PHASE_ORDER if phase in phases)
 
 
 def validate_completed_steps(
@@ -185,6 +188,21 @@ def validate_completed_steps(
             f"Expected prefix {list(expected_prefix)}, found {list(completed_steps)}."
         )
         raise StateValidationError(msg)
+
+
+def validate_checkpoint_contract(
+    applied_state: AppliedStateCheckpoint, applicable_phases: tuple[str, ...]
+) -> None:
+    if applied_state.lifecycle_checkpoint_contract_version != LIFECYCLE_CHECKPOINT_CONTRACT_VERSION:
+        msg = (
+            "Applied checkpoint uses lifecycle checkpoint contract version "
+            f"{applied_state.lifecycle_checkpoint_contract_version}, but the current "
+            f"contract version is {LIFECYCLE_CHECKPOINT_CONTRACT_VERSION}. "
+            "Only empty install scaffolds can be restarted across contract versions; "
+            "existing non-empty checkpoints must not be resumed or modified under the new order."
+        )
+        raise StateValidationError(msg)
+    validate_completed_steps(applied_state.completed_steps, applicable_phases)
 
 
 def classify_install_request(
@@ -224,7 +242,7 @@ def classify_modify_request(
     requested_desired: DesiredState,
 ) -> LifecyclePlan:
     old_applicable = applicable_phases_for(existing_desired)
-    validate_completed_steps(existing_applied.completed_steps, old_applicable)
+    validate_checkpoint_contract(existing_applied, old_applicable)
     raw_equivalent = _normalized_modify_raw_values(existing_raw) == _normalized_modify_raw_values(
         requested_raw
     )
@@ -334,7 +352,7 @@ def _classify_same_target(
     desired_equivalent: bool,
 ) -> LifecyclePlan:
     applicable_phases = applicable_phases_for(desired_state)
-    validate_completed_steps(existing_applied.completed_steps, applicable_phases)
+    validate_checkpoint_contract(existing_applied, applicable_phases)
     if existing_applied.completed_steps == applicable_phases:
         return LifecyclePlan(
             mode="noop",
@@ -408,8 +426,8 @@ def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredS
             phases.add("cloudflare_access")
         phases.add("my-farm-advisor")
     if (
-        "headscale" in requested_desired.enabled_packs
-        and "headscale" not in existing_desired.enabled_packs
+        "headscale" in requested_desired.selected_packs
+        and "headscale" not in existing_desired.selected_packs
     ):
         phases.add("headscale")
     return phases

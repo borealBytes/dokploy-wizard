@@ -30,3 +30,4 @@ dist/
 .idea/
 .vscode/
 .install.env
+.fresh-vps-validation.env

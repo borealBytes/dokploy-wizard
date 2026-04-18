@@ -66,7 +66,6 @@ def test_modify_domain_change_starts_at_networking() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "headscale",
                 "nextcloud",
             ),
         ),
@@ -78,7 +77,7 @@ def test_modify_domain_change_starts_at_networking() -> None:
     assert plan.mode == "modify"
     assert plan.start_phase == "networking"
     assert plan.initial_completed_steps == ("preflight", "dokploy_bootstrap")
-    assert plan.phases_to_run == ("networking", "headscale", "nextcloud")
+    assert plan.phases_to_run == ("networking", "nextcloud")
 
 
 def test_modify_cloudflare_auth_rotation_only_reruns_networking() -> None:
@@ -110,7 +109,6 @@ def test_modify_cloudflare_auth_rotation_only_reruns_networking() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "headscale",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -152,10 +150,9 @@ def test_modify_access_email_change_reruns_access_phase() -> None:
                 "preflight",
                 "dokploy_bootstrap",
                 "networking",
-                "cloudflare_access",
                 "shared_core",
-                "headscale",
                 "openclaw",
+                "cloudflare_access",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -163,8 +160,42 @@ def test_modify_access_email_change_reruns_access_phase() -> None:
         requested_desired=requested_desired,
     )
 
-    assert plan.start_phase == "cloudflare_access"
-    assert plan.phases_to_run == ("cloudflare_access", "openclaw")
+    assert plan.start_phase == "openclaw"
+    assert plan.phases_to_run == ("openclaw", "cloudflare_access")
+
+
+def test_modify_rejects_legacy_checkpoint_contract_even_when_steps_match_old_prefix() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+
+    with pytest.raises(ValueError, match="lifecycle checkpoint contract version 1"):
+        classify_modify_request(
+            existing_raw=existing_raw,
+            existing_desired=existing_desired,
+            existing_applied=AppliedStateCheckpoint(
+                format_version=1,
+                desired_state_fingerprint=existing_desired.fingerprint(),
+                completed_steps=(
+                    "preflight",
+                    "dokploy_bootstrap",
+                    "networking",
+                    "cloudflare_access",
+                    "shared_core",
+                    "openclaw",
+                ),
+                lifecycle_checkpoint_contract_version=1,
+            ),
+            existing_ledger=OwnershipLedger(format_version=1, resources=()),
+            requested_raw=existing_raw,
+            requested_desired=existing_desired,
+        )
 
 
 def test_modify_dokploy_admin_credential_change_reruns_nextcloud() -> None:
@@ -200,7 +231,6 @@ def test_modify_dokploy_admin_credential_change_reruns_nextcloud() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "headscale",
                 "nextcloud",
             ),
         ),
@@ -229,7 +259,6 @@ def test_modify_rejects_stack_name_change() -> None:
                     "dokploy_bootstrap",
                     "networking",
                     "shared_core",
-                    "headscale",
                 ),
             ),
             existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -268,7 +297,6 @@ def test_modify_disabling_nextcloud_is_supported_via_networking_only() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "headscale",
                 "nextcloud",
             ),
         ),
@@ -323,7 +351,7 @@ def test_modify_disabling_headscale_is_supported_via_networking_only() -> None:
 
     assert plan.mode == "modify"
     assert plan.start_phase == "networking"
-    assert plan.phases_to_run == ("networking", "headscale")
+    assert plan.phases_to_run == ("networking",)
 
 
 def test_modify_rejects_unmodeled_env_changes() -> None:
@@ -348,7 +376,6 @@ def test_modify_rejects_unmodeled_env_changes() -> None:
                     "dokploy_bootstrap",
                     "networking",
                     "shared_core",
-                    "headscale",
                 ),
             ),
             existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -415,10 +442,9 @@ def test_modify_openclaw_replicas_change_uses_pack_mutable_resource_contract() -
                 "preflight",
                 "dokploy_bootstrap",
                 "networking",
-                "cloudflare_access",
                 "shared_core",
-                "headscale",
                 "openclaw",
+                "cloudflare_access",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -464,10 +490,9 @@ def test_modify_openclaw_channels_change_uses_pack_mutable_contract() -> None:
                 "preflight",
                 "dokploy_bootstrap",
                 "networking",
-                "cloudflare_access",
                 "shared_core",
-                "headscale",
                 "openclaw",
+                "cloudflare_access",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -513,10 +538,9 @@ def test_modify_openclaw_gateway_token_change_uses_pack_mutable_contract() -> No
                 "preflight",
                 "dokploy_bootstrap",
                 "networking",
-                "cloudflare_access",
                 "shared_core",
-                "headscale",
                 "openclaw",
+                "cloudflare_access",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),

@@ -10,6 +10,7 @@ from typing import Protocol
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     DesiredState,
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     OwnershipLedger,
     RawEnvInput,
     clear_state_documents,
@@ -143,6 +144,7 @@ def execute_uninstall_plan(
                 format_version=desired_state.format_version,
                 desired_state_fingerprint=desired_state.fingerprint(),
                 completed_steps=remaining_completed_steps,
+                lifecycle_checkpoint_contract_version=LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
             ),
         )
 

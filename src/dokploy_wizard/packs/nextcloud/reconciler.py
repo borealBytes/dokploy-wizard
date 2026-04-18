@@ -13,6 +13,8 @@ from dokploy_wizard.core.models import (
     SharedRedisAllocation,
 )
 from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudBundleVerification,
+    NextcloudCommandCheck,
     NextcloudHealthCheck,
     NextcloudManagedResource,
     NextcloudPhase,
@@ -24,6 +26,7 @@ from dokploy_wizard.packs.nextcloud.models import (
     NextcloudServiceRuntime,
     OnlyofficeServiceConfig,
     OnlyofficeServiceRuntime,
+    TalkRuntime,
 )
 from dokploy_wizard.state.models import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput
 
@@ -67,7 +70,9 @@ class NextcloudBackend(Protocol):
 
     def create_volume(self, *, resource_name: str) -> NextcloudResourceRecord: ...
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None: ...
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification: ...
 
     def check_health(self, *, service: NextcloudResourceRecord, url: str) -> bool: ...
 
@@ -182,8 +187,36 @@ class ShellNextcloudBackend:
             return forced
         return _http_health_check(url)
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification:
         del nextcloud_url, onlyoffice_url
+        return NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        )
 
 
 def reconcile_nextcloud(
@@ -200,6 +233,7 @@ def reconcile_nextcloud(
                 enabled=False,
                 nextcloud=None,
                 onlyoffice=None,
+                talk=None,
                 notes=("Nextcloud + OnlyOffice pack is explicitly disabled for this install.",),
             ),
             nextcloud_service_resource_id=None,
@@ -308,6 +342,25 @@ def reconcile_nextcloud(
             nextcloud_url=nextcloud_url,
             integration_secret_ref=integration_secret_ref,
         ),
+        document_server_check=NextcloudCommandCheck(
+            command="php occ onlyoffice:documentserver --check",
+            passed=None,
+        ),
+    )
+    talk_runtime = TalkRuntime(
+        app_id="spreed",
+        enabled=None,
+        enabled_check=NextcloudCommandCheck(command="php occ app:list --output=json", passed=None),
+        signaling_check=NextcloudCommandCheck(
+            command="php occ talk:signaling:list --output=json",
+            passed=None,
+        ),
+        stun_check=NextcloudCommandCheck(
+            command="php occ talk:stun:list --output=json", passed=None
+        ),
+        turn_check=NextcloudCommandCheck(
+            command="php occ talk:turn:list --output=json", passed=None
+        ),
     )
 
     if dry_run:
@@ -317,11 +370,13 @@ def reconcile_nextcloud(
                 enabled=True,
                 nextcloud=nextcloud_runtime,
                 onlyoffice=onlyoffice_runtime,
+                talk=talk_runtime,
                 notes=(
                     "Nextcloud reuses the shared-core postgres and redis allocation "
                     "for pack_name='nextcloud'.",
                     "OnlyOffice is deployed only as the paired office runtime for Nextcloud in v1.",
-                    "Non-dry-run success is gated on both Nextcloud and OnlyOffice health checks.",
+                    "Non-dry-run success is gated on Nextcloud health, OnlyOffice health, "
+                    "OnlyOffice document-server validation, and Talk verification.",
                 ),
             ),
             nextcloud_service_resource_id=None,
@@ -330,7 +385,7 @@ def reconcile_nextcloud(
             onlyoffice_volume_resource_id=None,
         )
 
-    backend.ensure_application_ready(
+    bundle_verification = backend.ensure_application_ready(
         nextcloud_url=nextcloud_url,
         onlyoffice_url=onlyoffice_url,
     )
@@ -378,15 +433,30 @@ def reconcile_nextcloud(
         data_volume=onlyoffice_runtime.data_volume,
         health_check=NextcloudHealthCheck(url=onlyoffice_runtime.health_check.url, passed=True),
         config=onlyoffice_runtime.config,
+        document_server_check=bundle_verification.onlyoffice_document_server_check,
     )
+    talk_runtime = bundle_verification.talk
+    if talk_runtime.enabled is not True:
+        raise NextcloudError("Nextcloud Talk app 'spreed' is not enabled after bootstrap.")
+    if talk_runtime.enabled_check.passed is not True:
+        raise NextcloudError("Nextcloud Talk verification failed while checking app:list output.")
+    if talk_runtime.signaling_check.passed is not True:
+        raise NextcloudError("Nextcloud Talk signaling verification failed.")
+    if talk_runtime.stun_check.passed is not True:
+        raise NextcloudError("Nextcloud Talk STUN verification failed.")
+    if talk_runtime.turn_check.passed is not True:
+        raise NextcloudError("Nextcloud Talk TURN verification failed.")
+    if onlyoffice_runtime.document_server_check.passed is not True:
+        raise NextcloudError("OnlyOffice document-server verification failed.")
     return NextcloudPhase(
         result=NextcloudResult(
             outcome="applied" if "create" in actions else "already_present",
             enabled=True,
             nextcloud=nextcloud_runtime,
             onlyoffice=onlyoffice_runtime,
+            talk=talk_runtime,
             notes=(
-                "Nextcloud and OnlyOffice are reconciled together and both reported healthy.",
+                "Nextcloud, OnlyOffice, and Talk are reconciled together and all verification checks passed.",
                 "Secret refs are deterministic names only; secret values are not persisted.",
             ),
         ),

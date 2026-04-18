@@ -17,6 +17,19 @@ from dokploy_wizard.preflight import (
 from dokploy_wizard.state import RawEnvInput, StateValidationError
 
 APT_INSTALL_PREFIX = "sudo apt-get update && sudo apt-get install -y"
+UBUNTU_BASELINE_PACKAGES = ("git", "curl", "ca-certificates")
+DOCKER_APT_PACKAGES = (
+    "docker-ce",
+    "docker-ce-cli",
+    "containerd.io",
+    "docker-buildx-plugin",
+    "docker-compose-plugin",
+)
+DOCKER_APT_REPOSITORY_URL = "https://download.docker.com/linux/ubuntu"
+DOCKER_APT_GPG_URL = f"{DOCKER_APT_REPOSITORY_URL}/gpg"
+DOCKER_APT_GPG_KEYRING_PATH = "/etc/apt/keyrings/docker.asc"
+DOCKER_APT_SOURCE_PATH = "/etc/apt/sources.list.d/docker.list"
+DOCKER_APT_SUPPORTED_CODENAME = "noble"
 
 
 @dataclass(frozen=True)
@@ -41,12 +54,14 @@ class HostPrerequisiteResult:
     remediation_eligible: bool
     install_command: str | None
     missing_packages: tuple[str, ...]
+    docker_bootstrap_required: bool
     checks: tuple[HostPrerequisiteCheck, ...]
     notes: tuple[str, ...]
 
     def to_dict(self) -> dict[str, object]:
         return {
             "checks": [check.to_dict() for check in self.checks],
+            "docker_bootstrap_required": self.docker_bootstrap_required,
             "install_command": self.install_command,
             "missing_packages": list(self.missing_packages),
             "notes": list(self.notes),
@@ -62,6 +77,8 @@ class HostPrerequisiteBackend(Protocol):
 
     def install_packages(self, package_names: tuple[str, ...]) -> None: ...
 
+    def bootstrap_docker_engine(self) -> None: ...
+
     def ensure_docker_daemon(self) -> None: ...
 
 
@@ -74,12 +91,14 @@ class UbuntuAptHostPrerequisiteBackend:
             "git": _optional_bool(values, "HOST_PREREQ_GIT_INSTALLED"),
             "curl": _optional_bool(values, "HOST_PREREQ_CURL_INSTALLED"),
             "ca-certificates": _optional_bool(values, "HOST_PREREQ_CA_CERTIFICATES_INSTALLED"),
-            "docker.io": _optional_bool(values, "HOST_PREREQ_DOCKER_IO_INSTALLED"),
         }
-        if self._forced_package_state["docker.io"] is None:
-            self._forced_package_state["docker.io"] = _optional_bool(
-                values, "HOST_DOCKER_INSTALLED"
+        self._forced_docker_installed = _optional_bool(values, "HOST_PREREQ_DOCKER_INSTALLED")
+        if self._forced_docker_installed is None:
+            self._forced_docker_installed = _optional_bool(
+                values, "HOST_PREREQ_DOCKER_IO_INSTALLED"
             )
+        if self._forced_docker_installed is None:
+            self._forced_docker_installed = _optional_bool(values, "HOST_DOCKER_INSTALLED")
         self._forced_docker_daemon = _optional_bool(values, "HOST_PREREQ_DOCKER_DAEMON_REACHABLE")
         if self._forced_docker_daemon is None:
             self._forced_docker_daemon = _optional_bool(values, "HOST_DOCKER_DAEMON_REACHABLE")
@@ -127,17 +146,53 @@ class UbuntuAptHostPrerequisiteBackend:
             failure_detail=(f"installing baseline host prerequisites ({', '.join(package_names)})"),
         )
 
+    def bootstrap_docker_engine(self) -> None:
+        self._run_privileged_command(
+            ("install", "-m", "0755", "-d", "/etc/apt/keyrings"),
+            failure_detail="creating /etc/apt/keyrings for the Docker apt repository",
+        )
+        self._run_privileged_command(
+            ("curl", "-fsSL", DOCKER_APT_GPG_URL, "-o", DOCKER_APT_GPG_KEYRING_PATH),
+            failure_detail="downloading the Docker apt repository signing key",
+        )
+        self._run_privileged_command(
+            ("chmod", "a+r", DOCKER_APT_GPG_KEYRING_PATH),
+            failure_detail="setting Docker apt repository key permissions",
+        )
+        self._run_privileged_command(
+            ("tee", DOCKER_APT_SOURCE_PATH),
+            failure_detail="writing the Docker apt repository source list",
+            input_text=_docker_apt_source_line() + "\n",
+        )
+        self._run_privileged_command(
+            ("apt-get", "update"),
+            failure_detail="refreshing apt package indexes after configuring the Docker repository",
+        )
+        self._run_privileged_command(
+            ("apt-get", "install", "-y", *DOCKER_APT_PACKAGES),
+            failure_detail=(
+                f"installing Docker Engine packages ({', '.join(DOCKER_APT_PACKAGES)})"
+            ),
+        )
+
     def ensure_docker_daemon(self) -> None:
         self._run_privileged_command(
             ("systemctl", "enable", "--now", "docker"),
             failure_detail="starting and enabling the Docker daemon",
         )
 
-    def _run_privileged_command(self, command: tuple[str, ...], *, failure_detail: str) -> None:
+    def _run_privileged_command(
+        self,
+        command: tuple[str, ...],
+        *,
+        failure_detail: str,
+        input_text: str | None = None,
+    ) -> None:
         result = subprocess.run(
             list(_privileged_command(command)),
             check=False,
             capture_output=True,
+            input=input_text,
             text=True,
         )
         if result.returncode == 0:
@@ -170,27 +225,36 @@ def assess_host_prerequisites(
             remediation_eligible=False,
             install_command=None,
             missing_packages=(),
+            docker_bootstrap_required=False,
             checks=(os_check,),
             notes=("Baseline apt remediation is only supported for Ubuntu 24.04 hosts.",),
         )
 
     checks = [os_check]
     missing_packages: list[str] = []
-    for package_name in ("git", "curl", "ca-certificates", "docker.io"):
+    for package_name in UBUNTU_BASELINE_PACKAGES:
         package_check = _package_check(package_name, backend)
         checks.append(package_check)
         if package_check.status == "fail":
             missing_packages.append(package_name)
 
+    docker_cli_check = _docker_cli_check(host_facts)
+    checks.append(docker_cli_check)
     docker_daemon_check = _docker_daemon_check(backend)
     checks.append(docker_daemon_check)
+    docker_bootstrap_required = docker_cli_check.status == "fail"
 
-    if not missing_packages and docker_daemon_check.status == "pass":
+    if (
+        not missing_packages
+        and not docker_bootstrap_required
+        and docker_daemon_check.status == "pass"
+    ):
         return HostPrerequisiteResult(
             outcome="noop",
             remediation_eligible=True,
             install_command=None,
             missing_packages=(),
+            docker_bootstrap_required=False,
             checks=tuple(checks),
             notes=("Baseline Ubuntu 24.04 host prerequisites are already satisfied.",),
         )
@@ -198,16 +262,25 @@ def assess_host_prerequisites(
     notes = []
     install_command: str | None = None
     if missing_packages:
-        install_command = f"{APT_INSTALL_PREFIX} {' '.join(missing_packages)}"
         notes.append("Missing apt-managed baseline packages can be remediated on this host.")
+    if docker_bootstrap_required:
+        notes.append(
+            "Docker Engine can be bootstrapped with the official Ubuntu apt repository on this host."
+        )
     if docker_daemon_check.status == "fail":
         notes.append("Docker daemon reachability is required before install can proceed.")
+    install_command = _build_install_command(
+        missing_packages=tuple(missing_packages),
+        docker_bootstrap_required=docker_bootstrap_required,
+        docker_daemon_unreachable=docker_daemon_check.status == "fail",
+    )
 
     return HostPrerequisiteResult(
         outcome="missing_prerequisites",
         remediation_eligible=True,
         install_command=install_command,
         missing_packages=tuple(missing_packages),
+        docker_bootstrap_required=docker_bootstrap_required,
         checks=tuple(checks),
         notes=tuple(notes),
     )
@@ -222,6 +295,8 @@ def remediate_host_prerequisites(
         return
     if assessment.missing_packages:
         backend.install_packages(assessment.missing_packages)
+    if assessment.docker_bootstrap_required:
+        backend.bootstrap_docker_engine()
     if any(check.name == "docker_daemon" and check.status == "fail" for check in assessment.checks):
         backend.ensure_docker_daemon()
 
@@ -268,20 +343,94 @@ def _package_check(package_name: str, backend: HostPrerequisiteBackend) -> HostP
     )
 
 
+def _docker_cli_check(host_facts: HostFacts) -> HostPrerequisiteCheck:
+    if not host_facts.docker_installed:
+        return HostPrerequisiteCheck(
+            name="docker_cli",
+            status="fail",
+            detail="Docker CLI is not installed on the host",
+        )
+    return HostPrerequisiteCheck(
+        name="docker_cli",
+        status="pass",
+        detail="Docker CLI is available.",
+    )
+
+
 def _docker_daemon_check(backend: HostPrerequisiteBackend) -> HostPrerequisiteCheck:
     if not backend.docker_daemon_reachable():
         return HostPrerequisiteCheck(
             name="docker_daemon",
             status="fail",
             detail="Docker daemon is unavailable or unreachable",
-            package_name="docker.io",
+            package_name="docker",
         )
     return HostPrerequisiteCheck(
         name="docker_daemon",
         status="pass",
         detail="Docker daemon responded successfully.",
-        package_name="docker.io",
+        package_name="docker",
     )
+
+
+def _build_install_command(
+    *,
+    missing_packages: tuple[str, ...],
+    docker_bootstrap_required: bool,
+    docker_daemon_unreachable: bool,
+) -> str | None:
+    commands: list[str] = []
+    if missing_packages:
+        commands.append(f"{APT_INSTALL_PREFIX} {' '.join(missing_packages)}")
+    if docker_bootstrap_required:
+        commands.extend(
+            [
+                "sudo install -m 0755 -d /etc/apt/keyrings",
+                f"sudo curl -fsSL {DOCKER_APT_GPG_URL} -o {DOCKER_APT_GPG_KEYRING_PATH}",
+                f"sudo chmod a+r {DOCKER_APT_GPG_KEYRING_PATH}",
+                (
+                    "sudo tee "
+                    f"{DOCKER_APT_SOURCE_PATH} >/dev/null <<'EOF'\n{_docker_apt_source_line()}\nEOF"
+                ),
+                "sudo apt-get update",
+                f"sudo apt-get install -y {' '.join(DOCKER_APT_PACKAGES)}",
+            ]
+        )
+    if docker_daemon_unreachable:
+        commands.append("sudo systemctl enable --now docker")
+    if not commands:
+        return None
+    return " && ".join(commands)
+
+
+def _docker_apt_source_line() -> str:
+    return (
+        f"deb [arch={_docker_apt_architecture()} "
+        f"signed-by={DOCKER_APT_GPG_KEYRING_PATH}] "
+        f"{DOCKER_APT_REPOSITORY_URL} {DOCKER_APT_SUPPORTED_CODENAME} stable"
+    )
+
+
+def _docker_apt_architecture() -> str:
+    dpkg_binary = shutil.which("dpkg")
+    if dpkg_binary is not None:
+        result = subprocess.run(
+            [dpkg_binary, "--print-architecture"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        architecture = result.stdout.strip()
+        if result.returncode == 0 and architecture and " " not in architecture:
+            return architecture
+
+    machine = os.uname().machine.lower()
+    return {
+        "x86_64": "amd64",
+        "amd64": "amd64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+    }.get(machine, machine)
 
 
 def _optional_bool(values: dict[str, str], key: str) -> bool | None:

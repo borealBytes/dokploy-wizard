@@ -6,6 +6,7 @@ from dokploy_wizard.lifecycle.changes import (
     applicable_phases_for,
     classify_install_request,
     classify_modify_request,
+    validate_checkpoint_contract,
     validate_completed_steps,
 )
 from dokploy_wizard.lifecycle.drift import (
@@ -27,6 +28,7 @@ __all__ = [
     "classify_install_request",
     "classify_modify_request",
     "execute_lifecycle_plan",
+    "validate_checkpoint_contract",
     "validate_completed_steps",
     "validate_preserved_phases",
 ]

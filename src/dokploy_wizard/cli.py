@@ -43,6 +43,7 @@ from dokploy_wizard.dokploy import (
     DokploySharedCoreBackend,
 )
 from dokploy_wizard.host_prereqs import (
+    DOCKER_APT_PACKAGES,
     UbuntuAptHostPrerequisiteBackend,
     assess_host_prerequisites,
     remediate_host_prerequisites,
@@ -105,6 +106,7 @@ from dokploy_wizard.preflight import (
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     DesiredState,
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
@@ -765,14 +767,6 @@ def _run_lifecycle_flow(
     loaded_state = load_state_dir(state_dir)
     existing_state = validate_existing_state(loaded_state)
     raw_env = raw_env or parse_env_file(env_file)
-    if existing_state:
-        raw_env = _rehydrate_guided_retry_keys(
-            env_file=env_file,
-            state_dir=state_dir,
-            loaded_state=loaded_state,
-            raw_env=raw_env,
-            dry_run=dry_run,
-        )
     desired_state = resolve_desired_state(raw_env)
     backend = bootstrap_backend or ShellDokployBootstrapBackend(raw_env)
     ownership_ledger = loaded_state.ownership_ledger or OwnershipLedger(
@@ -834,6 +828,20 @@ def _run_lifecycle_flow(
             desired_equivalent=False,
         )
 
+    if existing_state and lifecycle_plan.mode != "noop":
+        raw_env = _rehydrate_guided_retry_keys(
+            env_file=env_file,
+            state_dir=state_dir,
+            loaded_state=loaded_state,
+            raw_env=raw_env,
+            dry_run=dry_run,
+        )
+        desired_state = resolve_desired_state(raw_env)
+        ownership_ledger = loaded_state.ownership_ledger or OwnershipLedger(
+            format_version=desired_state.format_version,
+            resources=(),
+        )
+
     if enforce_live_run_contamination_check:
         _validate_live_run_env_for_mutation(
             raw_env=raw_env,
@@ -869,40 +877,33 @@ def _run_lifecycle_flow(
         )
     if not dry_run and not existing_state:
         persist_install_scaffold(state_dir, raw_env, desired_state)
-    raw_env = _ensure_dokploy_api_auth(
-        env_file=env_file,
-        raw_env=raw_env,
+    require_real_dokploy_auth = _dokploy_api_auth_required(
         desired_state=desired_state,
-        bootstrap_backend=backend,
-        dry_run=dry_run,
-        require_real_dokploy_auth=_dokploy_api_auth_required(
-            desired_state=desired_state,
-            shared_core_backend=shared_core_backend,
-            headscale_backend=headscale_backend,
-            matrix_backend=matrix_backend,
-            nextcloud_backend=nextcloud_backend,
-            seaweedfs_backend=seaweedfs_backend,
-            coder_backend=coder_backend,
-            openclaw_backend=openclaw_backend,
-        ),
+        shared_core_backend=shared_core_backend,
+        headscale_backend=headscale_backend,
+        matrix_backend=matrix_backend,
+        nextcloud_backend=nextcloud_backend,
+        seaweedfs_backend=seaweedfs_backend,
+        coder_backend=coder_backend,
+        openclaw_backend=openclaw_backend,
     )
-    desired_state = resolve_desired_state(raw_env)
-    _qualify_dokploy_mutation_auth(
-        raw_env=raw_env,
-        desired_state=desired_state,
-        dry_run=dry_run,
-        require_real_dokploy_auth=_dokploy_api_auth_required(
+    if lifecycle_plan.mode != "noop":
+        raw_env = _ensure_dokploy_api_auth(
+            env_file=env_file,
+            raw_env=raw_env,
             desired_state=desired_state,
-            shared_core_backend=shared_core_backend,
-            headscale_backend=headscale_backend,
-            matrix_backend=matrix_backend,
-            nextcloud_backend=nextcloud_backend,
-            seaweedfs_backend=seaweedfs_backend,
-            coder_backend=coder_backend,
-            openclaw_backend=openclaw_backend,
-        ),
-    )
-    if not dry_run:
+            bootstrap_backend=backend,
+            dry_run=dry_run,
+            require_real_dokploy_auth=require_real_dokploy_auth,
+        )
+        desired_state = resolve_desired_state(raw_env)
+        _qualify_dokploy_mutation_auth(
+            raw_env=raw_env,
+            desired_state=desired_state,
+            dry_run=dry_run,
+            require_real_dokploy_auth=require_real_dokploy_auth,
+        )
+    if not dry_run and lifecycle_plan.mode != "noop":
         write_target_state(state_dir, raw_env, desired_state)
     tailscale_phase_backend = tailscale_backend or ShellTailscaleBackend(raw_env)
     cloudflare_backend = networking_backend or CloudflareApiBackend(raw_env)
@@ -1002,6 +1003,9 @@ def _run_lifecycle_flow(
                         format_version=desired_state.format_version,
                         desired_state_fingerprint=desired_state.fingerprint(),
                         completed_steps=lifecycle_plan.initial_completed_steps,
+                        lifecycle_checkpoint_contract_version=(
+                            LIFECYCLE_CHECKPOINT_CONTRACT_VERSION
+                        ),
                     ),
                 )
 
@@ -1130,6 +1134,14 @@ def _prepare_install_host_prerequisites(
                 "packages": list(assessment.missing_packages),
             }
         )
+    if getattr(assessment, "docker_bootstrap_required", False):
+        remediation_actions.append(
+            {
+                "action": "bootstrap_docker_engine",
+                "packages": list(DOCKER_APT_PACKAGES),
+                "repository": "official_docker_apt_repository",
+            }
+        )
     if any(check.name == "docker_daemon" and check.status == "fail" for check in assessment.checks):
         remediation_actions.append({"action": "ensure_docker_daemon"})
 
@@ -1242,9 +1254,8 @@ def _collect_post_remediation_host_facts(*, raw_env: RawEnvInput, assessment: An
 
 
 def _requires_post_remediation_docker_wait(assessment: Any) -> bool:
-    if getattr(assessment, "missing_packages", ()):
-        if "docker.io" in assessment.missing_packages:
-            return True
+    if getattr(assessment, "docker_bootstrap_required", False):
+        return True
     return any(
         getattr(check, "name", None) == "docker_daemon" and getattr(check, "status", None) == "fail"
         for check in getattr(assessment, "checks", ())
