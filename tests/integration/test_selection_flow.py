@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 
 from dokploy_wizard import cli
-from dokploy_wizard.packs.prompts import GuidedInstallValues, PromptSelection
+from dokploy_wizard.packs.prompts import (
+    GuidedInstallValues,
+    PromptSelection,
+    apply_prompt_selection,
+)
 from dokploy_wizard.state import RawEnvInput, resolve_desired_state
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
@@ -93,7 +97,7 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
             stack_name="selection-stack",
             root_domain="example.com",
             dokploy_subdomain="dokploy",
-            dokploy_admin_email="admin@example.com",
+            dokploy_admin_email="clayton@superiorbyteworks.com",
             dokploy_admin_password=None,
             enable_headscale=True,
             cloudflare_api_token="token-123",
@@ -136,9 +140,83 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
     raw_env = captured["raw_env"]
     assert isinstance(raw_env, RawEnvInput)
     assert raw_env.values["DOKPLOY_SUBDOMAIN"] == "dokploy"
-    assert raw_env.values["DOKPLOY_ADMIN_EMAIL"] == "admin@example.com"
+    assert raw_env.values["DOKPLOY_ADMIN_EMAIL"] == "clayton@superiorbyteworks.com"
     assert raw_env.values["ENABLE_HEADSCALE"] == "true"
     assert "CLOUDFLARE_ZONE_ID" not in raw_env.values
     assert raw_env.values["PACKS"] == "openclaw"
     assert raw_env.values["OPENCLAW_CHANNELS"] == "telegram"
+    assert raw_env.values["CLOUDFLARE_ACCESS_OTP_EMAILS"] == "clayton@superiorbyteworks.com"
     assert "OPENCLAW_GATEWAY_TOKEN" not in raw_env.values
+
+
+def test_apply_prompt_selection_preserves_existing_advisor_secrets_when_pack_stays_enabled() -> (
+    None
+):
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "PACKS": "openclaw",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_OPENROUTER_API_KEY": "or-key-existing",
+            "OPENCLAW_NVIDIA_API_KEY": "nv-key-existing",
+            "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
+            "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
+            "OPENCLAW_GATEWAY_TOKEN": "token-123",
+        },
+    )
+
+    updated = apply_prompt_selection(
+        raw_env,
+        PromptSelection(
+            selected_packs=("openclaw",),
+            disabled_packs=(),
+            seaweedfs_access_key=None,
+            seaweedfs_secret_key=None,
+            generated_secrets={},
+            advisor_env={},
+            openclaw_channels=("telegram",),
+            my_farm_advisor_channels=(),
+        ),
+    )
+
+    assert updated.values["OPENCLAW_OPENROUTER_API_KEY"] == "or-key-existing"
+    assert updated.values["OPENCLAW_NVIDIA_API_KEY"] == "nv-key-existing"
+    assert updated.values["OPENCLAW_PRIMARY_MODEL"] == "nvidia/moonshotai/kimi-k2.5"
+    assert updated.values["OPENCLAW_FALLBACK_MODELS"] == "openrouter/openrouter/free"
+    assert updated.values["OPENCLAW_GATEWAY_TOKEN"] == "token-123"
+
+
+def test_apply_prompt_selection_removes_openclaw_secrets_when_pack_is_disabled() -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "PACKS": "openclaw",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_OPENROUTER_API_KEY": "or-key-existing",
+            "OPENCLAW_NVIDIA_API_KEY": "nv-key-existing",
+            "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
+            "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
+            "OPENCLAW_GATEWAY_TOKEN": "token-123",
+        },
+    )
+
+    updated = apply_prompt_selection(
+        raw_env,
+        PromptSelection(
+            selected_packs=(),
+            disabled_packs=("openclaw",),
+            seaweedfs_access_key=None,
+            seaweedfs_secret_key=None,
+            generated_secrets={},
+            advisor_env={},
+            openclaw_channels=(),
+            my_farm_advisor_channels=(),
+        ),
+    )
+
+    assert "OPENCLAW_CHANNELS" not in updated.values
+    assert "OPENCLAW_OPENROUTER_API_KEY" not in updated.values
+    assert "OPENCLAW_NVIDIA_API_KEY" not in updated.values
+    assert "OPENCLAW_PRIMARY_MODEL" not in updated.values
+    assert "OPENCLAW_FALLBACK_MODELS" not in updated.values
+    assert "OPENCLAW_GATEWAY_TOKEN" not in updated.values

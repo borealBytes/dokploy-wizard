@@ -46,6 +46,8 @@ _DEFAULT_ONLYOFFICE_EDIT_FORMATS = {
     "csv": True,
     "txt": True,
 }
+_ONLYOFFICE_DOCUMENTSERVER_CHECK_ATTEMPTS = 72
+_ONLYOFFICE_DOCUMENTSERVER_CHECK_DELAY_SECONDS = 5.0
 _NEXTCLOUD_APPSTORE_APPS_JSON_URL = "https://apps.nextcloud.com/api/v1/apps.json"
 
 
@@ -225,6 +227,14 @@ class DokployNextcloudBackend:
                     return False
                 return _nextcloud_user_exists(container, self._admin_user)
             return True
+        if service.resource_name == _onlyoffice_service_name(self._stack_name):
+            if _local_https_health_check(url):
+                return True
+            if _public_https_health_check(url):
+                return True
+            if self._created_in_process:
+                return _wait_for_public_https_health(url)
+            return False
         return _local_https_health_check(url)
 
     def ensure_application_ready(
@@ -249,6 +259,7 @@ class DokployNextcloudBackend:
                 document_server_internal_url=document_server_internal_url,
                 storage_url=storage_url,
                 jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
+                wait_for_documentserver_check=self._created_in_process,
             )
             return _verify_nextcloud_bundle(container)
         container = _wait_for_container_name(_nextcloud_service_name(self._stack_name))
@@ -269,6 +280,7 @@ class DokployNextcloudBackend:
             document_server_internal_url=document_server_internal_url,
             storage_url=storage_url,
             jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
+            wait_for_documentserver_check=self._created_in_process,
         )
         return _verify_nextcloud_bundle(container)
 
@@ -672,6 +684,26 @@ def _local_https_health_check(url: str) -> bool:
         return False
 
 
+def _public_https_health_check(url: str) -> bool:
+    try:
+        context = ssl._create_unverified_context()
+        with request.urlopen(url, timeout=10, context=context):  # noqa: S310
+            return True
+    except (error.HTTPError, error.URLError, OSError, TimeoutError):
+        return False
+
+
+def _wait_for_public_https_health(
+    url: str, *, attempts: int = 10, delay_seconds: float = 5.0
+) -> bool:
+    for attempt in range(attempts):
+        if _public_https_health_check(url):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return False
+
+
 def _nextcloud_status_ready(url: str) -> bool:
     parsed = parse.urlsplit(url)
     if not parsed.hostname:
@@ -713,7 +745,14 @@ def _wait_for_nextcloud_status_ready(
 def _find_container_name(service_name: str) -> str | None:
     try:
         result = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}"],
+            [
+                "docker",
+                "ps",
+                "--filter",
+                f"label=com.docker.compose.service={service_name}",
+                "--format",
+                "{{.Names}}",
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -722,10 +761,18 @@ def _find_container_name(service_name: str) -> str | None:
         return None
     if result.returncode != 0:
         return None
-    for line in result.stdout.splitlines():
-        if service_name in line:
-            return line
-    return None
+    container_names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not container_names:
+        return None
+    if service_name in container_names:
+        return service_name
+    if len(container_names) == 1:
+        return container_names[0]
+    preferred_suffix = f"-{service_name}-1"
+    for container_name in container_names:
+        if container_name.endswith(preferred_suffix):
+            return container_name
+    return sorted(container_names)[0]
 
 
 def _wait_for_container_name(
@@ -832,6 +879,7 @@ def _ensure_onlyoffice_app_config(
     document_server_internal_url: str,
     storage_url: str,
     jwt_secret: str,
+    wait_for_documentserver_check: bool = False,
 ) -> None:
     def_formats = json.dumps(_DEFAULT_ONLYOFFICE_DEF_FORMATS, separators=(",", ":"), sort_keys=True)
     edit_formats = json.dumps(
@@ -883,7 +931,26 @@ def _ensure_onlyoffice_app_config(
     )
     _run_occ_shell(container_name, "php occ config:app:set onlyoffice sameTab --value=true")
     _run_occ_shell(container_name, "php occ config:app:set onlyoffice preview --value=true")
+    if wait_for_documentserver_check:
+        _wait_for_onlyoffice_documentserver_check(container_name)
+        return
     _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
+
+
+def _wait_for_onlyoffice_documentserver_check(
+    container_name: str,
+    *,
+    attempts: int = _ONLYOFFICE_DOCUMENTSERVER_CHECK_ATTEMPTS,
+    delay_seconds: float = _ONLYOFFICE_DOCUMENTSERVER_CHECK_DELAY_SECONDS,
+) -> None:
+    for attempt in range(attempts):
+        try:
+            _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
+            return
+        except NextcloudError:
+            if attempt >= attempts - 1:
+                raise
+            time.sleep(delay_seconds)
 
 
 def _verify_nextcloud_bundle(container_name: str) -> NextcloudBundleVerification:
@@ -1067,9 +1134,11 @@ def _talk_app_enabled(container_name: str) -> bool:
     if not isinstance(payload, dict):
         raise NextcloudError("Nextcloud app:list did not return a JSON object.")
     enabled = payload.get("enabled")
-    if not isinstance(enabled, list):
-        raise NextcloudError("Nextcloud app:list did not include an enabled app list.")
-    return "spreed" in enabled
+    if isinstance(enabled, list):
+        return "spreed" in enabled
+    if isinstance(enabled, dict):
+        return "spreed" in enabled
+    raise NextcloudError("Nextcloud app:list did not include an enabled app collection.")
 
 
 def _command_check(container_name: str, *, command: str) -> NextcloudCommandCheck:

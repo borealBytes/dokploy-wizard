@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -269,6 +270,29 @@ def _auth_required_raw_env() -> RawEnvInput:
     )
 
 
+def _auth_email_only_raw_env() -> RawEnvInput:
+    return RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "openmerge",
+            "ROOT_DOMAIN": "openmerge.me",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "DOKPLOY_ADMIN_EMAIL": "clayton@superiorbyteworks.com",
+            "ENABLE_HEADSCALE": "true",
+            "PACKS": "nextcloud,openclaw,seaweedfs,coder",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
+            "OPENCLAW_FALLBACK_MODELS": (
+                "openrouter/openrouter/free,openrouter/google/gemma-4-31b-it:free"
+            ),
+            "OPENCLAW_NVIDIA_API_KEY": "nvapi-test-key",
+            "OPENCLAW_OPENROUTER_API_KEY": "sk-or-test-key",
+            "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
+            "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
+        },
+    )
+
+
 def test_install_dry_run_produces_plan_without_writing_state(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     backend = FakeDokployBackend(healthy_before_install=False, healthy_after_install=False)
@@ -505,6 +529,88 @@ def test_install_auth_success_refreshes_persisted_target_state_before_execution(
     assert loaded_state.applied_state.completed_steps == ()
     assert persisted_raw_input["values"]["DOKPLOY_API_KEY"] == "dokp-key-123"
     assert "DOKPLOY_API_KEY=dokp-key-123" in env_file.read_text(encoding="utf-8")
+
+
+def test_install_auth_success_defaults_missing_admin_password_for_env_file_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "install.env"
+    raw_env = _auth_email_only_raw_env()
+    captured_execute_raw_env: RawEnvInput | None = None
+
+    class FakeAuthClient:
+        def __init__(self, *, base_url: str) -> None:
+            assert base_url == "http://127.0.0.1:3000"
+
+        def ensure_api_key(
+            self, *, admin_email: str, admin_password: str, key_name: str = "dokploy-wizard"
+        ) -> DokployBootstrapAuthResult:
+            assert admin_email == "clayton@superiorbyteworks.com"
+            assert admin_password == "ChangeMeSoon"
+            assert key_name.startswith("dokploy-wizard")
+            return DokployBootstrapAuthResult(
+                api_key="dokp-key-defaulted",
+                api_url="http://127.0.0.1:3000",
+                admin_email=admin_email,
+                organization_id="org-1",
+                used_sign_up=False,
+                auth_path="/api/auth/sign-in/email",
+                session_path="/api/user.session",
+            )
+
+    def _fake_execute_lifecycle_plan(**kwargs: object) -> dict[str, str]:
+        nonlocal captured_execute_raw_env
+        captured_execute_raw_env = cast(RawEnvInput, kwargs["raw_env"])
+        return {"state_status": "fresh"}
+
+    monkeypatch.setattr(cli, "collect_host_facts", lambda _: object())
+    monkeypatch.setattr(
+        cli,
+        "_prepare_install_host_prerequisites",
+        lambda **kwargs: (kwargs["host_facts"], {}),
+    )
+    monkeypatch.setattr(cli, "run_preflight", lambda *_: object())
+    monkeypatch.setattr(cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    monkeypatch.setattr(cli, "execute_lifecycle_plan", _fake_execute_lifecycle_plan)
+    monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
+    monkeypatch.setattr(
+        cli,
+        "DokployApiClient",
+        lambda *, api_url, api_key, **kwargs: type(
+            "_ValidDokployClient",
+            (),
+            {
+                "__init__": lambda self: None,
+                "list_projects": lambda self: (),
+            },
+        )(),
+    )
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+    )
+
+    loaded_state = load_state_dir(state_dir)
+    persisted_raw_input = json.loads((state_dir / RAW_INPUT_FILE).read_text(encoding="utf-8"))
+
+    assert summary["state_status"] == "fresh"
+    assert captured_execute_raw_env is not None
+    assert captured_execute_raw_env.values["DOKPLOY_ADMIN_PASSWORD"] == "ChangeMeSoon"
+    assert captured_execute_raw_env.values["DOKPLOY_API_KEY"] == "dokp-key-defaulted"
+    assert loaded_state.raw_input is not None
+    assert loaded_state.raw_input.values["DOKPLOY_ADMIN_PASSWORD"] == "ChangeMeSoon"
+    assert loaded_state.raw_input.values["DOKPLOY_API_KEY"] == "dokp-key-defaulted"
+    assert persisted_raw_input["values"]["DOKPLOY_ADMIN_PASSWORD"] == "ChangeMeSoon"
+    env_contents = env_file.read_text(encoding="utf-8")
+    assert "DOKPLOY_ADMIN_EMAIL=clayton@superiorbyteworks.com" in env_contents
+    assert "DOKPLOY_ADMIN_PASSWORD=ChangeMeSoon" in env_contents
 
 
 def test_install_rejects_partial_existing_state(tmp_path: Path) -> None:

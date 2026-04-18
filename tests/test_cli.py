@@ -396,7 +396,7 @@ def test_guided_install_prompts_include_dokploy_guidance() -> None:
 
     assert values.stack_name == "example"
     assert values.dokploy_subdomain == "dokploy"
-    assert values.dokploy_admin_email == "admin@example.com"
+    assert values.dokploy_admin_email == "clayton@superiorbyteworks.com"
     assert values.dokploy_admin_password == "secret-123"
     assert values.enable_headscale is True
     assert values.enable_tailscale is False
@@ -471,7 +471,7 @@ def test_guided_install_writes_env_file_and_runs_install(
             stack_name="guided-stack",
             root_domain="example.com",
             dokploy_subdomain="dokploy",
-            dokploy_admin_email="admin@example.com",
+            dokploy_admin_email="clayton@superiorbyteworks.com",
             dokploy_admin_password="secret-123",
             enable_headscale=True,
             cloudflare_api_token="token-123",
@@ -517,13 +517,14 @@ def test_guided_install_writes_env_file_and_runs_install(
     assert "STACK_NAME=guided-stack" in env_contents
     assert "ROOT_DOMAIN=example.com" in env_contents
     assert "DOKPLOY_SUBDOMAIN=dokploy" in env_contents
-    assert "DOKPLOY_ADMIN_EMAIL=admin@example.com" in env_contents
+    assert "DOKPLOY_ADMIN_EMAIL=clayton@superiorbyteworks.com" in env_contents
     assert "DOKPLOY_ADMIN_PASSWORD=secret-123" in env_contents
     assert "ENABLE_HEADSCALE=true" in env_contents
     assert "CLOUDFLARE_API_TOKEN=token-123" in env_contents
     assert "CLOUDFLARE_ZONE_ID" not in env_contents
     assert "PACKS=openclaw" in env_contents
     assert "OPENCLAW_CHANNELS=telegram" in env_contents
+    assert "CLOUDFLARE_ACCESS_OTP_EMAILS=clayton@superiorbyteworks.com" in env_contents
     assert "OPENCLAW_GATEWAY_TOKEN=" not in env_contents
     assert captured["env_file"] == env_file
     assert captured["state_dir"] == custom_state_dir
@@ -574,7 +575,7 @@ def test_guided_install_reuses_existing_seaweedfs_credentials(
             stack_name="guided-stack",
             root_domain="example.com",
             dokploy_subdomain="dokploy",
-            dokploy_admin_email="admin@example.com",
+            dokploy_admin_email="clayton@superiorbyteworks.com",
             dokploy_admin_password="secret-123",
             enable_headscale=True,
             cloudflare_api_token="token-123",
@@ -947,7 +948,7 @@ def test_install_resume_tolerates_required_ports_used_by_existing_dokploy_stack(
         AppliedStateCheckpoint(
             format_version=existing_desired.format_version,
             desired_state_fingerprint=existing_desired.fingerprint(),
-            completed_steps=("preflight", "dokploy_bootstrap", "networking", "cloudflare_access"),
+            completed_steps=("preflight", "dokploy_bootstrap", "networking", "shared_core"),
         ),
     )
     write_ownership_ledger(
@@ -1072,7 +1073,7 @@ def test_install_rehydrates_guided_retry_keys_from_persisted_state(
         AppliedStateCheckpoint(
             format_version=existing_desired.format_version,
             desired_state_fingerprint=existing_desired.fingerprint(),
-            completed_steps=("preflight", "dokploy_bootstrap", "networking", "cloudflare_access"),
+            completed_steps=("preflight", "dokploy_bootstrap", "networking", "shared_core"),
         ),
     )
     write_ownership_ledger(
@@ -1627,6 +1628,24 @@ def test_append_operator_links_skips_when_access_auth_handles_openclaw() -> None
     cli._append_operator_links(summary, desired_state)
 
     assert "authorized_dashboard_url" not in summary["openclaw"]
+
+
+def test_advisor_model_normalization_maps_legacy_nvidia_kimi_id() -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshot/kimi-k2.5",
+            "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free,nvidia/moonshot/kimi-k2.5",
+        },
+    )
+
+    assert cli._advisor_primary_model(raw_env, env_prefix="OPENCLAW") == (
+        "nvidia/moonshotai/kimi-k2.5"
+    )
+    assert cli._advisor_model_list(raw_env, env_prefix="OPENCLAW") == (
+        "openrouter/openrouter/free",
+        "nvidia/moonshotai/kimi-k2.5",
+    )
 
 
 def test_guided_install_prints_generated_seaweedfs_credentials(
@@ -2718,66 +2737,30 @@ def test_install_bootstraps_missing_docker_before_strict_preflight_rerun(
     assert remediation_calls == [
         {
             "backend": remediation_calls[0]["backend"],
-            "missing_packages": ("docker.io",),
+            "missing_packages": (),
             "outcome": "missing_prerequisites",
         }
     ]
-    assert summary["host_prerequisites"] == {
-        "assessment": {
-            "checks": [
-                {
-                    "detail": "Ubuntu 24.04 host detected for apt-backed prerequisite checks.",
-                    "name": "os_support",
-                    "package_name": None,
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'git' is installed.",
-                    "name": "git",
-                    "package_name": "git",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'curl' is installed.",
-                    "name": "curl",
-                    "package_name": "curl",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'ca-certificates' is installed.",
-                    "name": "ca_certificates",
-                    "package_name": "ca-certificates",
-                    "status": "pass",
-                },
-                {
-                    "detail": "required Ubuntu package 'docker.io' is not installed",
-                    "name": "docker_io",
-                    "package_name": "docker.io",
-                    "status": "fail",
-                },
-                {
-                    "detail": "Docker daemon is unavailable or unreachable",
-                    "name": "docker_daemon",
-                    "package_name": "docker.io",
-                    "status": "fail",
-                },
+    assessment = summary["host_prerequisites"]["assessment"]
+    assert assessment["outcome"] == "missing_prerequisites"
+    assert assessment["docker_bootstrap_required"] is True
+    assert assessment["missing_packages"] == []
+    assert summary["host_prerequisites"]["post_remediation_host_facts"] == remediated_host.to_dict()
+    assert summary["host_prerequisites"]["remediation_actions"] == [
+        {
+            "action": "bootstrap_docker_engine",
+            "packages": [
+                "docker-ce",
+                "docker-ce-cli",
+                "containerd.io",
+                "docker-buildx-plugin",
+                "docker-compose-plugin",
             ],
-            "install_command": "sudo apt-get update && sudo apt-get install -y docker.io",
-            "missing_packages": ["docker.io"],
-            "notes": [
-                "Missing apt-managed baseline packages can be remediated on this host.",
-                "Docker daemon reachability is required before install can proceed.",
-            ],
-            "outcome": "missing_prerequisites",
-            "remediation_eligible": True,
+            "repository": "official_docker_apt_repository",
         },
-        "post_remediation_host_facts": remediated_host.to_dict(),
-        "remediation_actions": [
-            {"action": "apt_install", "packages": ["docker.io"]},
-            {"action": "ensure_docker_daemon"},
-        ],
-        "remediation_attempted": True,
-    }
+        {"action": "ensure_docker_daemon"},
+    ]
+    assert summary["host_prerequisites"]["remediation_attempted"] is True
 
 
 def test_install_bootstraps_missing_docker_on_supported_ubuntu_patch_release(
@@ -2845,7 +2828,7 @@ def test_install_bootstraps_missing_docker_on_supported_ubuntu_patch_release(
         bootstrap_backend=_FakeBootstrapBackend(),
     )
 
-    assert remediation_calls == [("docker.io",)]
+    assert remediation_calls == [()]
     assert (
         summary["host_prerequisites"]["post_remediation_host_facts"]["version_id"] == "24.04.2 LTS"
     )
@@ -3064,55 +3047,22 @@ def test_install_leaves_supported_host_prerequisites_as_idempotent_noop(
 
     assert collect_calls == [raw_env]
     assert preflight_hosts == [ready_host]
-    assert summary["host_prerequisites"] == {
-        "assessment": {
-            "checks": [
-                {
-                    "detail": "Ubuntu 24.04 host detected for apt-backed prerequisite checks.",
-                    "name": "os_support",
-                    "package_name": None,
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'git' is installed.",
-                    "name": "git",
-                    "package_name": "git",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'curl' is installed.",
-                    "name": "curl",
-                    "package_name": "curl",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'ca-certificates' is installed.",
-                    "name": "ca_certificates",
-                    "package_name": "ca-certificates",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'docker.io' is installed.",
-                    "name": "docker_io",
-                    "package_name": "docker.io",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Docker daemon responded successfully.",
-                    "name": "docker_daemon",
-                    "package_name": "docker.io",
-                    "status": "pass",
-                },
-            ],
-            "install_command": None,
-            "missing_packages": [],
-            "notes": ["Baseline Ubuntu 24.04 host prerequisites are already satisfied."],
-            "outcome": "noop",
-            "remediation_eligible": True,
-        },
-        "remediation_actions": [],
-        "remediation_attempted": False,
-    }
+    assert summary["host_prerequisites"]["assessment"]["outcome"] == "noop"
+    assert summary["host_prerequisites"]["assessment"]["missing_packages"] == []
+    assert summary["host_prerequisites"]["assessment"]["notes"] == [
+        "Baseline Ubuntu 24.04 host prerequisites are already satisfied."
+    ]
+    assert summary["host_prerequisites"]["assessment"]["docker_bootstrap_required"] is False
+    assert [check["name"] for check in summary["host_prerequisites"]["assessment"]["checks"]] == [
+        "os_support",
+        "git",
+        "curl",
+        "ca_certificates",
+        "docker_cli",
+        "docker_daemon",
+    ]
+    assert summary["host_prerequisites"]["remediation_actions"] == []
+    assert summary["host_prerequisites"]["remediation_attempted"] is False
 
 
 def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(

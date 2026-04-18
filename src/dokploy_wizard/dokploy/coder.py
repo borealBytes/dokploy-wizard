@@ -7,7 +7,9 @@ import json
 import re
 import ssl
 import subprocess
+import time
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Protocol
 from urllib import parse
@@ -155,16 +157,24 @@ class DokployCoderBackend:
 
     def check_health(self, *, service: CoderResourceRecord, url: str) -> bool:
         del service
-        return _local_https_health_check(url)
+        if _local_https_health_check(url):
+            return True
+        if _public_https_health_check(url):
+            return True
+        if self._created_in_process:
+            return _wait_for_public_https_health(url)
+        return False
 
     def ensure_application_ready(self) -> tuple[str, ...]:
         notes: list[str] = []
+        first_user_provisioned = False
         if not _coder_first_user_exists(self._hostname):
             _create_coder_first_user(
                 hostname=self._hostname,
                 email=self._admin_email,
                 password=self._admin_password,
             )
+            first_user_provisioned = True
             notes.append(f"Provisioned initial Coder admin for '{self._admin_email}'.")
         session_token = _coder_login(
             hostname=self._hostname,
@@ -185,6 +195,20 @@ class DokployCoderBackend:
             template_name=_default_template_name(),
         )
         notes.append(f"Seeded default Coder template '{_default_template_name()}'.")
+        workspace_name = _default_workspace_name(self._hostname)
+        if _ensure_default_workspace(
+            container_name=container_name,
+            hostname=self._hostname,
+            session_token=session_token,
+            workspace_name=workspace_name,
+            template_name=_default_template_name(),
+        ):
+            if first_user_provisioned:
+                notes.append(
+                    f"Created default Coder workspace '{workspace_name}' for '{self._admin_email}'."
+                )
+            else:
+                notes.append(f"Created missing default Coder workspace '{workspace_name}'.")
         return tuple(notes)
 
     def _find_compose_locator(self) -> _ComposeLocator | None:
@@ -433,6 +457,27 @@ def _local_https_health_check(url: str) -> bool:
         connection.close()
 
 
+def _public_https_health_check(url: str) -> bool:
+    try:
+        context = ssl._create_unverified_context()
+        with urlrequest.urlopen(url, timeout=10, context=context) as response:  # noqa: S310
+            response.read()
+            return response.status == 200
+    except (urlerror.HTTPError, urlerror.URLError, OSError, TimeoutError):
+        return False
+
+
+def _wait_for_public_https_health(
+    url: str, *, attempts: int = 19, delay_seconds: float = 5.0
+) -> bool:
+    for attempt in range(attempts):
+        if _public_https_health_check(url):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return False
+
+
 def _yaml_quote(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
@@ -542,6 +587,18 @@ def _default_template_name() -> str:
     return "ubuntu-vscode"
 
 
+def _default_workspace_name(hostname: str, *, today: date | None = None) -> str:
+    root_domain = (
+        hostname.split(".", 1)[1] if hostname.startswith("coder.") and "." in hostname else hostname
+    )
+    root_token = re.sub(r"[^a-z0-9]+", "", root_domain.lower())
+    effective_date = (today or date.today()).isoformat()
+    suffix = f"-workspace-{effective_date}"
+    max_root_length = max(1, 32 - len(suffix))
+    normalized_root = (root_token or "workspace")[:max_root_length]
+    return f"{normalized_root}{suffix}"
+
+
 def _copy_template_into_container(*, container_name: str, template_dir: Path) -> None:
     if not template_dir.exists():
         raise CoderError(f"Default Coder template directory is missing: {template_dir}")
@@ -591,6 +648,105 @@ def _push_default_template(
         raise CoderError(
             f"Unable to push default Coder template: {(result.stderr or result.stdout).strip()}"
         )
+
+
+def _list_workspaces(*, container_name: str, hostname: str, session_token: str) -> tuple[str, ...]:
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL=https://{hostname}/",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "list",
+            "--output",
+            "json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise CoderError(
+            f"Unable to list Coder workspaces: {(result.stderr or result.stdout).strip()}"
+        )
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise CoderError("Coder workspace list returned invalid JSON.") from exc
+    if not isinstance(payload, list):
+        raise CoderError("Coder workspace list returned an unexpected payload shape.")
+    names: list[str] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return tuple(names)
+
+
+def _create_default_workspace(
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+    workspace_name: str,
+    template_name: str,
+) -> None:
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL=https://{hostname}/",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "create",
+            workspace_name,
+            "--template",
+            template_name,
+            "--use-parameter-defaults",
+            "--yes",
+            "--no-wait",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise CoderError(
+            f"Unable to create default Coder workspace '{workspace_name}': {(result.stderr or result.stdout).strip()}"
+        )
+
+
+def _ensure_default_workspace(
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+    workspace_name: str,
+    template_name: str,
+) -> bool:
+    if workspace_name in _list_workspaces(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+    ):
+        return False
+    _create_default_workspace(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+        workspace_name=workspace_name,
+        template_name=template_name,
+    )
+    return True
 
 
 def _username_from_email(email: str) -> str:
