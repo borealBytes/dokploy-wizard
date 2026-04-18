@@ -34,7 +34,7 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         name="headscale",
         prompt_label="Headscale",
         env_flag="ENABLE_HEADSCALE",
-        default_enabled=True,
+        default_enabled=False,
         depends_on=(),
         slot=None,
         shared_core_requirements=(),
@@ -55,7 +55,7 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         prompt_label="Matrix",
         env_flag="ENABLE_MATRIX",
         default_enabled=False,
-        depends_on=("headscale",),
+        depends_on=(),
         slot=None,
         shared_core_requirements=("postgres", "redis"),
         hostnames=(
@@ -75,7 +75,7 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         prompt_label="Nextcloud + OnlyOffice",
         env_flag="ENABLE_NEXTCLOUD",
         default_enabled=False,
-        depends_on=("headscale",),
+        depends_on=(),
         slot=None,
         shared_core_requirements=("postgres", "redis"),
         hostnames=(
@@ -145,7 +145,7 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         prompt_label="OpenClaw",
         env_flag="ENABLE_OPENCLAW",
         default_enabled=False,
-        depends_on=("headscale",),
+        depends_on=(),
         slot=None,
         shared_core_requirements=("postgres",),
         hostnames=(
@@ -156,6 +156,7 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
             ),
         ),
         mutable_env_keys=(
+            "OPENCLAW_GATEWAY_PASSWORD",
             "OPENCLAW_CHANNELS",
             "OPENCLAW_GATEWAY_TOKEN",
             "OPENCLAW_OPENROUTER_API_KEY",
@@ -185,6 +186,7 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
             ),
         ),
         mutable_env_keys=(
+            "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
             "MY_FARM_ADVISOR_CHANNELS",
             "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
             "MY_FARM_ADVISOR_NVIDIA_API_KEY",
