@@ -58,6 +58,7 @@ class _ComposeLocator:
 @dataclass(frozen=True)
 class _AdvisorRuntimeConfig:
     gateway_token: str | None
+    gateway_password: str | None
     trusted_proxy_emails: tuple[str, ...]
     primary_model: str | None
     fallback_models: tuple[str, ...]
@@ -79,6 +80,8 @@ class DokployOpenClawBackend:
         api_key: str,
         stack_name: str,
         gateway_token: str | None = None,
+        openclaw_gateway_password: str | None = None,
+        my_farm_gateway_password: str | None = None,
         trusted_proxy_emails: tuple[str, ...] = (),
         openclaw_primary_model: str | None = None,
         openclaw_fallback_models: tuple[str, ...] = (),
@@ -102,6 +105,7 @@ class DokployOpenClawBackend:
         self._runtime_configs = {
             "openclaw": _AdvisorRuntimeConfig(
                 gateway_token=gateway_token,
+                gateway_password=openclaw_gateway_password,
                 trusted_proxy_emails=trusted_proxy_emails,
                 primary_model=openclaw_primary_model,
                 fallback_models=openclaw_fallback_models,
@@ -116,6 +120,7 @@ class DokployOpenClawBackend:
             ),
             "my-farm-advisor": _AdvisorRuntimeConfig(
                 gateway_token=gateway_token,
+                gateway_password=my_farm_gateway_password,
                 trusted_proxy_emails=trusted_proxy_emails,
                 primary_model=my_farm_primary_model,
                 fallback_models=my_farm_fallback_models,
@@ -348,7 +353,7 @@ class DokployOpenClawBackend:
 
 
 def _service_name(stack_name: str, variant: str) -> str:
-    suffix = "advisor" if variant == "openclaw" else "my-farm-advisor"
+    suffix = "openclaw" if variant == "openclaw" else "my-farm-advisor"
     return f"{stack_name}-{suffix}"
 
 
@@ -357,6 +362,8 @@ def _shared_network_name(stack_name: str) -> str:
 
 
 def _variant_from_service_name(stack_name: str, resource_name: str) -> str | None:
+    if resource_name == f"{stack_name}-openclaw":
+        return "openclaw"
     if resource_name == f"{stack_name}-advisor":
         return "openclaw"
     if resource_name == f"{stack_name}-my-farm-advisor":
@@ -503,13 +510,18 @@ def _render_compose_file(
     runtime_config: _AdvisorRuntimeConfig,
 ) -> str:
     app_port = _app_port_for_variant(variant)
-    stack_name = service_name.removesuffix("-advisor").removesuffix("-my-farm-advisor")
+    stack_name = (
+        service_name.removesuffix("-openclaw")
+        .removesuffix("-advisor")
+        .removesuffix("-my-farm-advisor")
+    )
     shared_network = _shared_network_name(stack_name)
     channel_list = ",".join(channels)
     startup_mode = "advisor" if variant == "openclaw" else "my-farm-advisor"
     image = _image_for_variant(variant)
+    slot_name = "openclaw_suite" if variant == "openclaw" else "my-farm-advisor_suite"
     labels = {
-        "dokploy-wizard.slot": "advisor_suite",
+        "dokploy-wizard.slot": slot_name,
         "dokploy-wizard.variant": variant,
         "traefik.enable": "true",
         f"traefik.http.routers.{service_name}.entrypoints": "websecure",
@@ -582,6 +594,15 @@ def _render_compose_file(
                 f"      - {volume_name}:/data",
             ]
         )
+    elif variant == "openclaw":
+        volume_name = _openclaw_data_volume_name(stack_name)
+        lines.extend(
+            [
+                '    user: "0:0"',
+                "    volumes:",
+                f"      - {volume_name}:/home/node/.openclaw",
+            ]
+        )
     lines.extend(
         [
             "    networks:",
@@ -594,6 +615,14 @@ def _render_compose_file(
     )
     if variant == "my-farm-advisor":
         lines.extend(["volumes:", f"  {service_name}-data:"])
+    elif variant == "openclaw":
+        lines.extend(
+            [
+                "volumes:",
+                f"  {_openclaw_data_volume_name(stack_name)}:",
+                f"    name: {_openclaw_data_volume_name(stack_name)}",
+            ]
+        )
     lines.extend(
         [
             "networks:",
@@ -618,6 +647,10 @@ def _image_for_variant(variant: str) -> str:
     return "ghcr.io/openclaw/openclaw:latest"
 
 
+def _openclaw_data_volume_name(stack_name: str) -> str:
+    return f"{stack_name}-openclaw-data"
+
+
 def _health_path_for_variant(variant: str) -> str:
     del variant
     return "/healthz"
@@ -626,6 +659,7 @@ def _health_path_for_variant(variant: str) -> str:
 def _command_for_variant(
     *, variant: str, hostname: str, app_port: int, runtime_config: _AdvisorRuntimeConfig
 ) -> str:
+    trusted_proxy_mode = bool(runtime_config.trusted_proxy_emails)
     gateway_payload: dict[str, object] = {
         "bind": "lan",
         "mode": "local",
@@ -635,17 +669,17 @@ def _command_for_variant(
                 f"http://localhost:{app_port}",
                 f"https://{hostname}",
             ],
-            "allowInsecureAuth": True,
+            "allowInsecureAuth": not trusted_proxy_mode,
             "dangerouslyAllowHostHeaderOriginFallback": False,
         },
     }
-    trusted_proxy_mode = bool(runtime_config.trusted_proxy_emails)
     if trusted_proxy_mode:
         gateway_payload["trustedProxies"] = [
             item.strip() for item in runtime_config.trusted_proxies.split(",") if item.strip()
         ]
         gateway_payload["auth"] = {
             "mode": "trusted-proxy",
+            "password": runtime_config.gateway_password,
             "trustedProxy": {
                 "userHeader": "cf-access-authenticated-user-email",
                 "requiredHeaders": ["cf-access-jwt-assertion"],
@@ -716,7 +750,7 @@ def _command_for_variant(
             ]
         )
     seed_command = (
-        "mkdir -p /home/node/.openclaw && "
+        "mkdir -p /home/node/.openclaw /home/node/.openclaw/workspace && "
         "node -e \"const fs=require('fs');"
         f"const payload=JSON.parse(Buffer.from('{seeded_payload_b64}','base64').toString('utf8'));"
         f"{token_injection}"
@@ -727,8 +761,8 @@ def _command_for_variant(
         [
             "sh",
             "-lc",
-            f"{seed_command} && exec node openclaw.mjs gateway "
-            f"--bind lan --port {app_port} --allow-unconfigured",
+            f"umask 0000 && {seed_command} && chown -R node:node /home/node/.openclaw && chmod -R a+rwX /home/node/.openclaw && (while true; do chmod -R a+rwX /home/node/.openclaw 2>/dev/null || true; sleep 5; done) & "
+            f"exec su -s /bin/sh node -c {json.dumps(f'umask 0000 && exec node openclaw.mjs gateway --bind lan --port {app_port} --allow-unconfigured')}",
         ]
     )
 
