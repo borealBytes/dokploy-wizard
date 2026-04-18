@@ -183,7 +183,7 @@ def test_build_live_drift_report_classifies_required_collision_types(
     monkeypatch.setattr(
         inspection_module,
         "_list_docker_services",
-        lambda: (f"{desired_state.stack_name}-advisor",),
+        lambda: (f"{desired_state.stack_name}-openclaw",),
     )
     monkeypatch.setattr(
         inspection_module,
@@ -201,7 +201,7 @@ def test_build_live_drift_report_classifies_required_collision_types(
         inspection_module,
         "_list_service_task_statuses",
         lambda service_name: ("Exited (1) 5 seconds ago",)
-        if service_name == f"{desired_state.stack_name}-advisor"
+        if service_name == f"{desired_state.stack_name}-openclaw"
         else (),
     )
     monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", (tmp_path,))
@@ -293,7 +293,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                 "name": my_farm_container,
                 "status": "Up 8 seconds (health: starting)",
                 "labels": {
-                    "dokploy-wizard.slot": "advisor_suite",
+                    "dokploy-wizard.slot": "my-farm-advisor_suite",
                     "dokploy-wizard.variant": "my-farm-advisor",
                     "traefik.http.routers.openmerge-my-farm-advisor.rule": (
                         f"Host(`{my_farm_hostname}`)"
@@ -346,7 +346,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     assert any(
         entry["pack"] == "openclaw"
         and entry["health"] == "missing"
-        and entry["live_name"] == f"{desired_state.stack_name}-advisor"
+        and entry["live_name"] == f"{desired_state.stack_name}-openclaw"
         for entry in wizard_entries
     )
     assert not any(entry["live_name"] == my_farm_container for entry in manual_entries)
@@ -1514,10 +1514,12 @@ def test_guided_install_defaults_openclaw_to_telegram_when_matrix_disabled() -> 
     assert selection.selected_packs == ("nextcloud", "openclaw", "seaweedfs")
     assert selection.openclaw_channels == ("telegram",)
     assert selection.generated_secrets == {
+        "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
         "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
         "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
     }
     assert selection.advisor_env == {
+        "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
         "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
         "OPENCLAW_NVIDIA_API_KEY": "nv-key",
         "OPENCLAW_OPENROUTER_API_KEY": "or-key",
@@ -1560,9 +1562,11 @@ def test_guided_install_keeps_matrix_default_for_openclaw_when_matrix_enabled() 
     assert selection.selected_packs == ("matrix", "nextcloud", "openclaw", "seaweedfs")
     assert selection.openclaw_channels == ("matrix",)
     assert selection.generated_secrets == {
+        "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
         "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
         "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
     }
+    assert selection.advisor_env["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
     assert selection.advisor_env["OPENCLAW_PRIMARY_MODEL"] == "nvidia/moonshotai/kimi-k2.5"
     assert selection.advisor_env["OPENCLAW_FALLBACK_MODELS"] == "openrouter/openrouter/free"
     assert "OPENCLAW_TELEGRAM_BOT_TOKEN" not in selection.advisor_env
@@ -2585,7 +2589,7 @@ def test_live_drift_entry_blocks_mutation_allows_missing_managed_service() -> No
                 "classification": "wizard_managed",
                 "pack": "openclaw",
                 "health": "missing",
-                "live_name": "openmerge-advisor",
+                "live_name": "openmerge-openclaw",
             }
         )
         is False
@@ -2596,7 +2600,7 @@ def test_live_drift_entry_blocks_mutation_allows_missing_managed_service() -> No
                 "classification": "wizard_managed",
                 "pack": "openclaw",
                 "health": "unhealthy",
-                "live_name": "openmerge-advisor",
+                "live_name": "openmerge-openclaw",
             }
         )
         is True
@@ -2607,7 +2611,7 @@ def test_live_drift_entry_blocks_mutation_allows_missing_managed_service() -> No
                 "classification": "wizard_managed",
                 "pack": "openclaw",
                 "health": "unknown",
-                "live_name": "openmerge-advisor",
+                "live_name": "openmerge-openclaw",
             }
         )
         is True
@@ -2629,9 +2633,9 @@ def test_install_allows_missing_managed_service_drift_to_proceed(
                 {
                     "classification": "wizard_managed",
                     "detail": "managed openclaw missing",
-                    "expected_service_name": "wizard-stack-advisor",
+                    "expected_service_name": "wizard-stack-openclaw",
                     "health": "missing",
-                    "live_name": "wizard-stack-advisor",
+                    "live_name": "wizard-stack-openclaw",
                     "managed": True,
                     "pack": "openclaw",
                     "scope": "stack:wizard-stack:openclaw",

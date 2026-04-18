@@ -1566,6 +1566,11 @@ def _build_nextcloud_backend(
         integration_secret_ref=f"{desired_state.stack_name}-nextcloud-onlyoffice-jwt-secret",
         admin_user=admin_user,
         admin_password=admin_password,
+        openclaw_volume_name=(
+            f"{desired_state.stack_name}-openclaw-data"
+            if "openclaw" in desired_state.enabled_packs
+            else None
+        ),
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,
@@ -1709,6 +1714,10 @@ def _build_openclaw_backend(
         api_key=api_key,
         stack_name=desired_state.stack_name,
         gateway_token=desired_state.openclaw_gateway_token,
+        openclaw_gateway_password=_advisor_env_optional(raw_env, "OPENCLAW_GATEWAY_PASSWORD")
+        or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        my_farm_gateway_password=_advisor_env_optional(raw_env, "MY_FARM_ADVISOR_GATEWAY_PASSWORD")
+        or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         trusted_proxy_emails=desired_state.cloudflare_access_otp_emails,
         openclaw_primary_model=_advisor_primary_model(raw_env, env_prefix="OPENCLAW"),
         openclaw_fallback_models=_advisor_model_list(raw_env, env_prefix="OPENCLAW"),
