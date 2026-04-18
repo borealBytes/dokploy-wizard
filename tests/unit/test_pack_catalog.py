@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from dokploy_wizard.core import build_shared_core_plan
 from dokploy_wizard.packs.catalog import get_pack_definition, iter_pack_catalog
 from dokploy_wizard.packs.resolver import resolve_pack_selection
+from dokploy_wizard.state.models import StateValidationError
 from dokploy_wizard.state import RawEnvInput, resolve_desired_state
 
 
@@ -86,6 +89,20 @@ def test_resolver_allows_existing_tailscale_to_satisfy_headscale_dependency() ->
 
     assert selection.enabled_packs == ("matrix",)
     assert selection.hostnames == {"matrix": "matrix.example.com"}
+
+
+def test_resolver_rejects_explicitly_disabled_required_dependency() -> None:
+    with pytest.raises(
+        StateValidationError,
+        match="Pack 'openclaw' requires 'headscale', but 'headscale' was explicitly disabled.",
+    ):
+        resolve_pack_selection(
+            {
+                "ENABLE_OPENCLAW": "true",
+                "ENABLE_HEADSCALE": "false",
+            },
+            root_domain="example.com",
+        )
 
 
 def test_resolver_builds_root_and_wildcard_coder_hostnames() -> None:

@@ -639,7 +639,8 @@ def test_install_reconciles_nextcloud_pair_via_dokploy_backend(
         document_server_url,
         document_server_internal_url,
         storage_url,
-        jwt_secret: None,
+        jwt_secret,
+        wait_for_documentserver_check=False: None,
     )
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.nextcloud._verify_nextcloud_bundle",

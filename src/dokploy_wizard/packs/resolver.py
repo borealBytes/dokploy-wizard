@@ -123,7 +123,9 @@ def _expand_dependencies(
             if dependency == "headscale" and _uses_existing_tailscale_control_plane(values):
                 continue
             if dependency in explicit_disabled:
-                continue
+                raise StateValidationError(
+                    f"Pack '{pack_name}' requires '{dependency}', but '{dependency}' was explicitly disabled."
+                )
             if dependency not in enabled:
                 enabled.add(dependency)
                 pending.append(dependency)

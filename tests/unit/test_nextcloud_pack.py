@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import ssl
+import subprocess
 from dataclasses import dataclass, field
 from urllib import request
 
 import pytest
 
-from dokploy_wizard.core.models import SharedCorePlan
+import dokploy_wizard.dokploy.nextcloud as nextcloud_module
+from dokploy_wizard.core.models import (
+    SharedCorePlan,
+    SharedPostgresAllocation,
+    SharedRedisAllocation,
+)
 from dokploy_wizard.dokploy import (
     DokployComposeRecord,
     DokployComposeSummary,
@@ -21,11 +27,13 @@ from dokploy_wizard.dokploy import (
 from dokploy_wizard.dokploy.nextcloud import (
     _ensure_spreed_app_enabled,
     _ensure_trusted_domain,
+    _find_container_name,
     _platform_version_spec_matches_major,
     _ensure_onlyoffice_app_config,
     _local_https_health_check,
     _nextcloud_status_ready,
     _resolve_compatible_app_release_download_url,
+    _talk_app_enabled,
     _with_trailing_slash,
 )
 from dokploy_wizard.packs.nextcloud import (
@@ -830,6 +838,130 @@ def test_dokploy_nextcloud_backend_updates_existing_compose_to_keep_onlyoffice_r
     assert 'traefik.http.services.wizard-stack-onlyoffice.loadbalancer.server.port: "80"' in compose
 
 
+def test_dokploy_nextcloud_onlyoffice_health_accepts_immediate_public_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        nextcloud_hostname="nextcloud.example.com",
+        onlyoffice_hostname="office.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        redis_service_name="wizard-stack-shared-redis",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_nextcloud",
+            user_name="wizard_stack_nextcloud",
+            password_secret_ref="wizard-stack-nextcloud-postgres-password",
+        ),
+        redis=SharedRedisAllocation(
+            identity_name="wizard-stack-nextcloud-redis",
+            password_secret_ref="wizard-stack-nextcloud-redis-password",
+        ),
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        client=FakeDokployApiClient(),
+    )
+    monkeypatch.setattr(nextcloud_module, "_local_https_health_check", lambda url: False)
+    monkeypatch.setattr(nextcloud_module, "_public_https_health_check", lambda url: True)
+    wait_calls: list[str] = []
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_wait_for_public_https_health",
+        lambda url: wait_calls.append(url) or False,
+    )
+
+    ok = backend.check_health(
+        service=NextcloudResourceRecord("onlyoffice-service-1", "wizard-stack-onlyoffice"),
+        url="https://office.example.com/healthcheck",
+    )
+
+    assert ok is True
+    assert wait_calls == []
+
+
+def test_dokploy_nextcloud_onlyoffice_health_waits_for_public_route_on_first_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        nextcloud_hostname="nextcloud.example.com",
+        onlyoffice_hostname="office.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        redis_service_name="wizard-stack-shared-redis",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_nextcloud",
+            user_name="wizard_stack_nextcloud",
+            password_secret_ref="wizard-stack-nextcloud-postgres-password",
+        ),
+        redis=SharedRedisAllocation(
+            identity_name="wizard-stack-nextcloud-redis",
+            password_secret_ref="wizard-stack-nextcloud-redis-password",
+        ),
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        client=FakeDokployApiClient(),
+    )
+    backend._created_in_process = True
+    monkeypatch.setattr(nextcloud_module, "_local_https_health_check", lambda url: False)
+    monkeypatch.setattr(nextcloud_module, "_public_https_health_check", lambda url: False)
+    waited_urls: list[str] = []
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_wait_for_public_https_health",
+        lambda url: waited_urls.append(url) or True,
+    )
+
+    ok = backend.check_health(
+        service=NextcloudResourceRecord("onlyoffice-service-1", "wizard-stack-onlyoffice"),
+        url="https://office.example.com/healthcheck",
+    )
+
+    assert ok is True
+    assert waited_urls == ["https://office.example.com/healthcheck"]
+
+
+def test_dokploy_nextcloud_onlyoffice_health_fails_closed_without_first_apply_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        nextcloud_hostname="nextcloud.example.com",
+        onlyoffice_hostname="office.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        redis_service_name="wizard-stack-shared-redis",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_nextcloud",
+            user_name="wizard_stack_nextcloud",
+            password_secret_ref="wizard-stack-nextcloud-postgres-password",
+        ),
+        redis=SharedRedisAllocation(
+            identity_name="wizard-stack-nextcloud-redis",
+            password_secret_ref="wizard-stack-nextcloud-redis-password",
+        ),
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        client=FakeDokployApiClient(),
+    )
+    monkeypatch.setattr(nextcloud_module, "_local_https_health_check", lambda url: False)
+    monkeypatch.setattr(nextcloud_module, "_public_https_health_check", lambda url: False)
+    wait_calls: list[str] = []
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_wait_for_public_https_health",
+        lambda url: wait_calls.append(url) or True,
+    )
+
+    ok = backend.check_health(
+        service=NextcloudResourceRecord("onlyoffice-service-1", "wizard-stack-onlyoffice"),
+        url="https://office.example.com/healthcheck",
+    )
+
+    assert ok is False
+    assert wait_calls == []
+
+
 def test_local_https_health_check_uses_host_header(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, dict[str, str], bool]] = []
 
@@ -899,6 +1031,88 @@ def test_ensure_onlyoffice_app_config_sets_internal_urls_and_jwt(
         "php occ config:app:set onlyoffice preview --value=true",
         "php occ onlyoffice:documentserver --check",
     ]
+
+
+def test_ensure_onlyoffice_app_config_waits_for_transient_documentserver_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+    documentserver_attempts = 0
+    sleep_calls: list[float] = []
+
+    def fake_run_occ_shell(container_name: str, shell_command: str) -> None:
+        nonlocal documentserver_attempts
+        assert container_name == "nextcloud-container"
+        commands.append(shell_command)
+        if shell_command == "php occ onlyoffice:documentserver --check":
+            documentserver_attempts += 1
+            if documentserver_attempts < 3:
+                raise NextcloudError(
+                    "Nextcloud OCC command failed (php occ onlyoffice:documentserver --check): 502 Bad Gateway"
+                )
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        fake_run_occ_shell,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud.time.sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    _ensure_onlyoffice_app_config(
+        "nextcloud-container",
+        document_server_url="https://office.example.com",
+        document_server_internal_url="http://wizard-stack-onlyoffice",
+        storage_url="http://wizard-stack-nextcloud",
+        jwt_secret="change-me",
+        wait_for_documentserver_check=True,
+    )
+
+    assert commands[-3:] == [
+        "php occ onlyoffice:documentserver --check",
+        "php occ onlyoffice:documentserver --check",
+        "php occ onlyoffice:documentserver --check",
+    ]
+    assert sleep_calls == [5.0, 5.0]
+
+
+def test_ensure_onlyoffice_app_config_fails_closed_after_documentserver_warmup_exhausts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    documentserver_attempts = 0
+    sleep_calls: list[float] = []
+
+    def fake_run_occ_shell(container_name: str, shell_command: str) -> None:
+        nonlocal documentserver_attempts
+        assert container_name == "nextcloud-container"
+        if shell_command == "php occ onlyoffice:documentserver --check":
+            documentserver_attempts += 1
+            raise NextcloudError(
+                "Nextcloud OCC command failed (php occ onlyoffice:documentserver --check): 502 Bad Gateway"
+            )
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        fake_run_occ_shell,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud.time.sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    with pytest.raises(NextcloudError, match="502 Bad Gateway"):
+        _ensure_onlyoffice_app_config(
+            "nextcloud-container",
+            document_server_url="https://office.example.com",
+            document_server_internal_url="http://wizard-stack-onlyoffice",
+            storage_url="http://wizard-stack-nextcloud",
+            jwt_secret="change-me",
+            wait_for_documentserver_check=True,
+        )
+
+    assert documentserver_attempts == 72
+    assert sleep_calls == [5.0] * 71
 
 
 def test_platform_version_spec_matches_major_handles_compound_constraints() -> None:
@@ -1071,11 +1285,74 @@ def test_ensure_spreed_app_enabled_falls_back_to_manual_release_install_when_ena
     assert enable_attempts == 2
 
 
+def test_talk_app_enabled_accepts_real_object_shaped_enabled_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._read_occ_www_data_output",
+        lambda container_name, args: (
+            '{"enabled":{"onlyoffice":"10.0.0","spreed":"23.0.3"},"disabled":{"files_pdfviewer":"3.1.0"}}'
+        ),
+    )
+
+    assert _talk_app_enabled("nextcloud-container") is True
+
+
+def test_talk_app_enabled_rejects_missing_enabled_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._read_occ_www_data_output",
+        lambda container_name, args: '{"disabled":{"spreed":"23.0.3"}}',
+    )
+
+    with pytest.raises(NextcloudError, match="enabled app collection"):
+        _talk_app_enabled("nextcloud-container")
+
+
 def test_with_trailing_slash_adds_missing_separator() -> None:
     assert _with_trailing_slash("https://office.example.com") == "https://office.example.com/"
     assert (
         _with_trailing_slash("http://wizard-stack-onlyoffice/") == "http://wizard-stack-onlyoffice/"
     )
+
+
+def test_find_container_name_prefers_exact_compose_service_label_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded_commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        recorded_commands.append(command)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=(
+                "openmerge-nextcloud-08k3b3-openmerge-nextcloud-1\n"
+                "openmerge-nextcloud-08k3b3-openmerge-nextcloud-2\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.nextcloud.subprocess.run", fake_run)
+
+    assert (
+        _find_container_name("openmerge-nextcloud")
+        == "openmerge-nextcloud-08k3b3-openmerge-nextcloud-1"
+    )
+    assert recorded_commands == [
+        [
+            "docker",
+            "ps",
+            "--filter",
+            "label=com.docker.compose.service=openmerge-nextcloud",
+            "--format",
+            "{{.Names}}",
+        ]
+    ]
 
 
 def test_ensure_trusted_domain_adds_internal_service_hostname(

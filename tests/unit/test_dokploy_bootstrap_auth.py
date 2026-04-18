@@ -85,6 +85,43 @@ def test_bootstrap_auth_tries_fallback_auth_routes_on_404() -> None:
     assert seen[1].endswith("/api/auth/sign-in")
 
 
+def test_bootstrap_auth_retries_rate_limited_signin(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    sleep_calls: list[float] = []
+    attempts = {"count": 0}
+
+    def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
+        del jar
+        seen.append(req.full_url)
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise error.HTTPError(
+                    req.full_url,
+                    429,
+                    "Too Many Requests",
+                    hdrs=Message(),
+                    fp=None,
+                )
+            return {"ok": True}
+        if req.full_url.endswith("/api/user.session"):
+            return {"session": {"activeOrganizationId": "org-1"}}
+        if req.full_url.endswith("/api/user.createApiKey"):
+            return {"apiKey": "dokp-key-123"}
+        raise AssertionError(req.full_url)
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.bootstrap_auth.time.sleep", sleep_calls.append)
+
+    result = DokployBootstrapAuthClient(
+        base_url="http://127.0.0.1:3000",
+        request_fn=fake_request,
+    ).ensure_api_key(admin_email="admin@example.com", admin_password="secret-123")
+
+    assert result.api_key == "dokp-key-123"
+    assert attempts["count"] == 3
+    assert sleep_calls == [5.0, 5.0]
+
+
 def test_bootstrap_auth_fails_clearly_when_no_auth_routes_work() -> None:
     def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
         del jar

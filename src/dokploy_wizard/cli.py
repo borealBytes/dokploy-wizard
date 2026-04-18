@@ -146,6 +146,7 @@ _LIVE_RUN_MOCK_CONTAMINATION_PREFIXES = (
 
 _HOST_PREREQ_RECHECK_ATTEMPTS = 10
 _HOST_PREREQ_RECHECK_DELAY_SECONDS = 1.0
+_DEFAULT_DOKPLOY_ADMIN_PASSWORD = "ChangeMeSoon"
 _PERSISTED_RETRY_KEYS = {
     "DOKPLOY_API_URL",
     "DOKPLOY_API_KEY",
@@ -443,10 +444,15 @@ def _prompt_for_initial_install_raw_env(
     if guided_values.cloudflare_zone_id is not None:
         raw_env.values["CLOUDFLARE_ZONE_ID"] = guided_values.cloudflare_zone_id
     selection = prompt_for_pack_selection(include_headscale_prompt=False)
-    return apply_prompt_selection(
+    updated_raw_env = apply_prompt_selection(
         raw_env,
         selection,
-    ), selection.generated_secrets
+    )
+    if {"openclaw", "my-farm-advisor"} & set(selection.selected_packs):
+        admin_email = updated_raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "").strip().lower()
+        if admin_email:
+            updated_raw_env.values["CLOUDFLARE_ACCESS_OTP_EMAILS"] = admin_email
+    return updated_raw_env, selection.generated_secrets
 
 
 def _prompt_for_guided_state_dir(state_dir: Path) -> Path:
@@ -802,6 +808,14 @@ def _run_lifecycle_flow(
         assert loaded_state.raw_input is not None
         assert loaded_state.desired_state is not None
         assert loaded_state.applied_state is not None
+        raw_env = _rehydrate_guided_retry_keys(
+            env_file=env_file,
+            state_dir=state_dir,
+            loaded_state=loaded_state,
+            raw_env=raw_env,
+            dry_run=dry_run,
+        )
+        desired_state = resolve_desired_state(raw_env)
         try:
             lifecycle_plan = classify_install_request(
                 existing_raw=loaded_state.raw_input,
@@ -828,7 +842,7 @@ def _run_lifecycle_flow(
             desired_equivalent=False,
         )
 
-    if existing_state and lifecycle_plan.mode != "noop":
+    if allow_modify and existing_state and lifecycle_plan.mode != "noop":
         raw_env = _rehydrate_guided_retry_keys(
             env_file=env_file,
             state_dir=state_dir,
@@ -1792,19 +1806,31 @@ def _advisor_env_optional(raw_env: RawEnvInput, key: str) -> str | None:
 def _advisor_primary_model(raw_env: RawEnvInput, *, env_prefix: str) -> str | None:
     explicit = _advisor_env_optional(raw_env, f"{env_prefix}_PRIMARY_MODEL")
     if explicit is not None:
-        return explicit
+        return _normalize_advisor_model_ref(explicit)
     provider = _advisor_env_optional(raw_env, "ADVISOR_MODEL_PROVIDER")
     model_name = _advisor_env_optional(raw_env, "ADVISOR_MODEL_NAME")
     if provider is None or model_name is None:
         return None
-    return model_name if "/" in model_name else f"{provider}/{model_name}"
+    return _normalize_advisor_model_ref(
+        model_name if "/" in model_name else f"{provider}/{model_name}"
+    )
 
 
 def _advisor_model_list(raw_env: RawEnvInput, *, env_prefix: str) -> tuple[str, ...]:
     raw_value = _advisor_env_optional(raw_env, f"{env_prefix}_FALLBACK_MODELS")
     if raw_value is None:
         return ()
-    return tuple(item.strip() for item in raw_value.split(",") if item.strip())
+    return tuple(
+        _normalize_advisor_model_ref(item.strip()) for item in raw_value.split(",") if item.strip()
+    )
+
+
+def _normalize_advisor_model_ref(model_ref: str) -> str:
+    normalized = model_ref.strip()
+    legacy_aliases = {
+        "nvidia/moonshot/kimi-k2.5": "nvidia/moonshotai/kimi-k2.5",
+    }
+    return legacy_aliases.get(normalized, normalized)
 
 
 _DOKPLOY_AUTH_PROBE_DESCRIPTION = "Wizard-owned Dokploy auth qualifier"
@@ -1936,6 +1962,22 @@ def _qualify_dokploy_mutation_auth(
                 pass
 
 
+def _optional_stripped_env_value(values: dict[str, str], key: str) -> str | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _resolve_dokploy_admin_auth(values: dict[str, str]) -> tuple[str | None, str | None]:
+    admin_email = _optional_stripped_env_value(values, "DOKPLOY_ADMIN_EMAIL")
+    admin_password = _optional_stripped_env_value(values, "DOKPLOY_ADMIN_PASSWORD")
+    if admin_email is not None and admin_password is None:
+        admin_password = _DEFAULT_DOKPLOY_ADMIN_PASSWORD
+    return admin_email, admin_password
+
+
 def _ensure_dokploy_api_auth(
     *,
     env_file: Path,
@@ -1946,14 +1988,9 @@ def _ensure_dokploy_api_auth(
     require_real_dokploy_auth: bool,
 ) -> RawEnvInput:
     values = dict(raw_env.values)
-    admin_email = values.get("DOKPLOY_ADMIN_EMAIL")
-    admin_password = values.get("DOKPLOY_ADMIN_PASSWORD")
-    should_refresh_local_auth = bool(
-        require_real_dokploy_auth
-        and not dry_run
-        and admin_email is not None
-        and admin_password is not None
-    )
+    admin_email, admin_password = _resolve_dokploy_admin_auth(values)
+    if admin_email is not None and admin_password is not None:
+        values["DOKPLOY_ADMIN_PASSWORD"] = admin_password
     if values.get("DOKPLOY_BOOTSTRAP_MOCK_API_KEY") and not dry_run:
         values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
         values["DOKPLOY_API_KEY"] = values["DOKPLOY_BOOTSTRAP_MOCK_API_KEY"]
@@ -2052,8 +2089,7 @@ def _build_dokploy_api_client(
 def _build_dokploy_session_client(
     *, raw_env: RawEnvInput, api_url: str
 ) -> DokployBootstrapAuthClient | None:
-    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
-    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
     if not admin_email or not admin_password:
         return None
     return DokployBootstrapAuthClient(base_url=api_url)
@@ -2062,8 +2098,7 @@ def _build_dokploy_session_client(
 def _build_dokploy_session_deploy_fallback(
     *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
 ) -> Callable[[str, str | None, str | None], Any] | None:
-    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
-    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
     if not admin_email or not admin_password or session_client is None:
         return None
 
@@ -2082,8 +2117,7 @@ def _build_dokploy_session_deploy_fallback(
 def _build_dokploy_session_list_projects_fallback(
     *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
 ) -> Callable[[], Any] | None:
-    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
-    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
     if not admin_email or not admin_password or session_client is None:
         return None
 
@@ -2099,8 +2133,7 @@ def _build_dokploy_session_list_projects_fallback(
 def _build_dokploy_session_project_create_fallback(
     *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
 ) -> Callable[[str, str | None, str | None], Any] | None:
-    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
-    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
     if not admin_email or not admin_password or session_client is None:
         return None
 
@@ -2119,8 +2152,7 @@ def _build_dokploy_session_project_create_fallback(
 def _build_dokploy_session_compose_create_fallback(
     *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
 ) -> Callable[[str, str, str, str], Any] | None:
-    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
-    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
     if not admin_email or not admin_password or session_client is None:
         return None
 
@@ -2140,8 +2172,7 @@ def _build_dokploy_session_compose_create_fallback(
 def _build_dokploy_session_compose_update_fallback(
     *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
 ) -> Callable[[str, str], Any] | None:
-    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
-    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
     if not admin_email or not admin_password or session_client is None:
         return None
 
