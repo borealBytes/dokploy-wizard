@@ -74,6 +74,8 @@ class NextcloudBackend(Protocol):
         self, *, nextcloud_url: str, onlyoffice_url: str
     ) -> NextcloudBundleVerification: ...
 
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None: ...
+
     def check_health(self, *, service: NextcloudResourceRecord, url: str) -> bool: ...
 
 
@@ -217,6 +219,9 @@ class ShellNextcloudBackend:
                 ),
             ),
         )
+
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        del admin_user
 
 
 def reconcile_nextcloud(

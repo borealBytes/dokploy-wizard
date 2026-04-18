@@ -18,6 +18,7 @@ from dokploy_wizard.dokploy.client import (
     DokployDeployResult,
     DokployEnvironmentSummary,
     DokployProjectSummary,
+    DokployScheduleRecord,
 )
 from dokploy_wizard.dokploy.cloudflared import DokployCloudflaredBackend
 from dokploy_wizard.dokploy.coder import DokployCoderBackend
@@ -47,6 +48,7 @@ __all__ = [
     "DokploySeaweedFsBackend",
     "DokployEnvironmentSummary",
     "DokployProjectSummary",
+    "DokployScheduleRecord",
     "DokploySharedCoreBackend",
     "API_KEY_CREATE_PATH",
     "AUTH_SESSION_PATHS",

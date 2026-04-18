@@ -284,6 +284,10 @@ def execute_lifecycle_plan(
                     service_resource_id=advisor.service_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
+                if "nextcloud" in desired_state.enabled_packs:
+                    backends.nextcloud.refresh_openclaw_external_storage(
+                        admin_user=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
+                    )
         elif phase == "my-farm-advisor":
             advisor = reconcile_my_farm_advisor(
                 dry_run=dry_run,
