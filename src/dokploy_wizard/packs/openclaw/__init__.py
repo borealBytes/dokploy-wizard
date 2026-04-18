@@ -1,4 +1,4 @@
-"""Public advisor runtime interface."""
+"""Public OpenClaw/My Farm runtime interface."""
 
 from dokploy_wizard.packs.openclaw.models import (
     OpenClawHealthCheck,

@@ -1,4 +1,4 @@
-"""Typed models for the advisor-slot runtime reconciliation phase."""
+"""Typed models for the OpenClaw/My Farm runtime reconciliation phase."""
 
 from __future__ import annotations
 
