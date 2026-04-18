@@ -48,7 +48,7 @@ def test_env_driven_selection_flow_resolves_requested_and_expanded_packs(
     payload = json.loads(result.stdout)
     desired_state = payload["desired_state"]
     assert desired_state["selected_packs"] == ["openclaw"]
-    assert desired_state["enabled_packs"] == ["headscale", "openclaw"]
+    assert desired_state["enabled_packs"] == ["openclaw"]
     assert desired_state["hostnames"]["openclaw"] == "openclaw.example.com"
     assert desired_state["openclaw_channels"] == ["telegram"]
     assert payload["preflight"]["required_profile"]["name"] == "Recommended"
@@ -119,8 +119,8 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
             disabled_packs=(),
             seaweedfs_access_key=None,
             seaweedfs_secret_key=None,
-            generated_secrets={},
-            advisor_env={},
+            generated_secrets={"OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated"},
+            advisor_env={"OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated"},
             openclaw_channels=("telegram",),
             my_farm_advisor_channels=(),
         ),
@@ -146,6 +146,7 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
     assert raw_env.values["PACKS"] == "openclaw"
     assert raw_env.values["OPENCLAW_CHANNELS"] == "telegram"
     assert raw_env.values["CLOUDFLARE_ACCESS_OTP_EMAILS"] == "clayton@superiorbyteworks.com"
+    assert raw_env.values["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
     assert "OPENCLAW_GATEWAY_TOKEN" not in raw_env.values
 
 
@@ -162,6 +163,7 @@ def test_apply_prompt_selection_preserves_existing_advisor_secrets_when_pack_sta
             "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
             "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
             "OPENCLAW_GATEWAY_TOKEN": "token-123",
+            "OPENCLAW_GATEWAY_PASSWORD": "gateway-password-existing",
         },
     )
 
@@ -184,6 +186,7 @@ def test_apply_prompt_selection_preserves_existing_advisor_secrets_when_pack_sta
     assert updated.values["OPENCLAW_PRIMARY_MODEL"] == "nvidia/moonshotai/kimi-k2.5"
     assert updated.values["OPENCLAW_FALLBACK_MODELS"] == "openrouter/openrouter/free"
     assert updated.values["OPENCLAW_GATEWAY_TOKEN"] == "token-123"
+    assert updated.values["OPENCLAW_GATEWAY_PASSWORD"] == "gateway-password-existing"
 
 
 def test_apply_prompt_selection_removes_openclaw_secrets_when_pack_is_disabled() -> None:
@@ -197,6 +200,7 @@ def test_apply_prompt_selection_removes_openclaw_secrets_when_pack_is_disabled()
             "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
             "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
             "OPENCLAW_GATEWAY_TOKEN": "token-123",
+            "OPENCLAW_GATEWAY_PASSWORD": "gateway-password-existing",
         },
     )
 
@@ -220,3 +224,4 @@ def test_apply_prompt_selection_removes_openclaw_secrets_when_pack_is_disabled()
     assert "OPENCLAW_PRIMARY_MODEL" not in updated.values
     assert "OPENCLAW_FALLBACK_MODELS" not in updated.values
     assert "OPENCLAW_GATEWAY_TOKEN" not in updated.values
+    assert "OPENCLAW_GATEWAY_PASSWORD" not in updated.values
