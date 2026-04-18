@@ -56,7 +56,7 @@ def test_desired_state_resolution_is_deterministic(tmp_path: Path) -> None:
     assert desired_a.to_dict() == desired_b.to_dict()
     assert desired_a.fingerprint() == desired_b.fingerprint()
     assert desired_a.selected_packs == ("nextcloud", "openclaw")
-    assert desired_a.enabled_packs == ("headscale", "nextcloud", "openclaw")
+    assert desired_a.enabled_packs == ("nextcloud", "openclaw")
     assert desired_a.hostnames["onlyoffice"] == "office.example.com"
     assert desired_a.dokploy_api_url is None
     assert desired_a.openclaw_channels == ("telegram",)

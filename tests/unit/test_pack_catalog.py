@@ -23,7 +23,7 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
         "openclaw",
         "my-farm-advisor",
     ]
-    assert get_pack_definition("headscale").default_enabled is True
+    assert get_pack_definition("headscale").default_enabled is False
     assert get_pack_definition("seaweedfs").slot is None
     assert get_pack_definition("seaweedfs").hostnames[0].key == "s3"
     assert get_pack_definition("coder").hostnames[1].key == "coder-wildcard"
@@ -46,10 +46,9 @@ def test_resolver_keeps_explicit_selection_separate_from_expanded_packs() -> Non
     )
 
     assert selection.selected_packs == ("nextcloud",)
-    assert selection.enabled_packs == ("headscale", "nextcloud")
-    assert selection.enabled_features == ("dokploy", "headscale")
+    assert selection.enabled_packs == ("nextcloud",)
+    assert selection.enabled_features == ("dokploy",)
     assert selection.hostnames == {
-        "headscale": "headscale.example.com",
         "nextcloud": "nextcloud.example.com",
         "onlyoffice": "office.example.com",
     }
@@ -92,17 +91,15 @@ def test_resolver_allows_existing_tailscale_to_satisfy_headscale_dependency() ->
 
 
 def test_resolver_rejects_explicitly_disabled_required_dependency() -> None:
-    with pytest.raises(
-        StateValidationError,
-        match="Pack 'openclaw' requires 'headscale', but 'headscale' was explicitly disabled.",
-    ):
-        resolve_pack_selection(
-            {
-                "ENABLE_OPENCLAW": "true",
-                "ENABLE_HEADSCALE": "false",
-            },
-            root_domain="example.com",
-        )
+    selection = resolve_pack_selection(
+        {
+            "ENABLE_OPENCLAW": "true",
+            "ENABLE_HEADSCALE": "false",
+        },
+        root_domain="example.com",
+    )
+
+    assert selection.enabled_packs == ("openclaw",)
 
 
 def test_resolver_builds_root_and_wildcard_coder_hostnames() -> None:
@@ -113,11 +110,10 @@ def test_resolver_builds_root_and_wildcard_coder_hostnames() -> None:
         root_domain="example.com",
     )
 
-    assert selection.enabled_packs == ("coder", "headscale")
+    assert selection.enabled_packs == ("coder",)
     assert selection.hostnames == {
         "coder": "coder.example.com",
         "coder-wildcard": "*.coder.example.com",
-        "headscale": "headscale.example.com",
     }
 
 
@@ -157,7 +153,7 @@ def test_resolved_state_includes_coder_shared_core_allocation() -> None:
         )
     )
 
-    assert desired_state.enabled_packs == ("coder", "headscale")
+    assert desired_state.enabled_packs == ("coder",)
     assert desired_state.hostnames["coder"] == "coder.example.com"
     assert desired_state.hostnames["coder-wildcard"] == "*.coder.example.com"
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
