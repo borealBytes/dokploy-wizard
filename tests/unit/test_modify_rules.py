@@ -388,6 +388,7 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
     assert get_mutable_pack_env_keys() == (
         "MY_FARM_ADVISOR_CHANNELS",
         "MY_FARM_ADVISOR_FALLBACK_MODELS",
+        "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
         "MY_FARM_ADVISOR_NVIDIA_API_KEY",
         "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
         "MY_FARM_ADVISOR_PRIMARY_MODEL",
@@ -395,6 +396,7 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
         "OPENCLAW_CHANNELS",
         "OPENCLAW_FALLBACK_MODELS",
+        "OPENCLAW_GATEWAY_PASSWORD",
         "OPENCLAW_GATEWAY_TOKEN",
         "OPENCLAW_NVIDIA_API_KEY",
         "OPENCLAW_OPENROUTER_API_KEY",
