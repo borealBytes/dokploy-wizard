@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import ssl
 import subprocess
@@ -33,6 +34,8 @@ _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 _DEFAULT_NEXTCLOUD_ADMIN_USER = "admin"
 _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD = "ChangeMeSoon"
 _DEFAULT_SHARED_SERVICE_PASSWORD = "change-me"
+_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME = "/OpenClaw"
+_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH = "/mnt/openclaw"
 _DEFAULT_ONLYOFFICE_DEF_FORMATS = {
     "docx": True,
     "xlsx": True,
@@ -46,7 +49,7 @@ _DEFAULT_ONLYOFFICE_EDIT_FORMATS = {
     "csv": True,
     "txt": True,
 }
-_ONLYOFFICE_DOCUMENTSERVER_CHECK_ATTEMPTS = 72
+_ONLYOFFICE_DOCUMENTSERVER_CHECK_ATTEMPTS = 180
 _ONLYOFFICE_DOCUMENTSERVER_CHECK_DELAY_SECONDS = 5.0
 _NEXTCLOUD_APPSTORE_APPS_JSON_URL = "https://apps.nextcloud.com/api/v1/apps.json"
 
@@ -92,6 +95,7 @@ class DokployNextcloudBackend:
         integration_secret_ref: str,
         admin_user: str = _DEFAULT_NEXTCLOUD_ADMIN_USER,
         admin_password: str = _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD,
+        openclaw_volume_name: str | None = None,
         client: DokployNextcloudApi | None = None,
     ) -> None:
         self._stack_name = stack_name
@@ -105,6 +109,7 @@ class DokployNextcloudBackend:
         self._integration_secret_ref = integration_secret_ref
         self._admin_user = admin_user
         self._admin_password = admin_password
+        self._openclaw_volume_name = openclaw_volume_name
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
@@ -260,6 +265,8 @@ class DokployNextcloudBackend:
                 storage_url=storage_url,
                 jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
                 wait_for_documentserver_check=self._created_in_process,
+                openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
+                admin_user=self._admin_user,
             )
             return _verify_nextcloud_bundle(container)
         container = _wait_for_container_name(_nextcloud_service_name(self._stack_name))
@@ -281,6 +288,8 @@ class DokployNextcloudBackend:
             storage_url=storage_url,
             jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
             wait_for_documentserver_check=self._created_in_process,
+            openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
+            admin_user=self._admin_user,
         )
         return _verify_nextcloud_bundle(container)
 
@@ -370,6 +379,7 @@ class DokployNextcloudBackend:
             integration_secret_ref=self._integration_secret_ref,
             admin_user=self._admin_user,
             admin_password=self._admin_password,
+            openclaw_volume_name=self._openclaw_volume_name,
         )
         try:
             if self._applied_locator is not None:
@@ -491,6 +501,10 @@ def _onlyoffice_volume_name(stack_name: str) -> str:
     return f"{stack_name}-onlyoffice-data"
 
 
+def _openclaw_volume_name(stack_name: str) -> str:
+    return f"{stack_name}-openclaw-data"
+
+
 def _service_name_for_kind(stack_name: str, kind: str) -> str:
     if kind == "nextcloud":
         return _nextcloud_service_name(stack_name)
@@ -569,14 +583,26 @@ def _render_compose_file(
     integration_secret_ref: str,
     admin_user: str,
     admin_password: str,
+    openclaw_volume_name: str | None,
 ) -> str:
     nextcloud_service = _nextcloud_service_name(stack_name)
     onlyoffice_service = _onlyoffice_service_name(stack_name)
     nextcloud_volume = _nextcloud_volume_name(stack_name)
     onlyoffice_volume = _onlyoffice_volume_name(stack_name)
+    openclaw_volume = openclaw_volume_name
     shared_network = _shared_network_name(stack_name)
     nextcloud_url = f"https://{nextcloud_hostname}"
     onlyoffice_url = f"https://{onlyoffice_hostname}"
+    nextcloud_extra_mount = (
+        f"      - {openclaw_volume}:{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH}\n"
+        if openclaw_volume is not None
+        else ""
+    )
+    openclaw_volume_block = (
+        f"  {openclaw_volume}:\n    name: {openclaw_volume}\n"
+        if openclaw_volume is not None
+        else ""
+    )
     return (
         "services:\n"
         f"  {nextcloud_service}:\n"
@@ -609,6 +635,7 @@ def _render_compose_file(
         "      timeout: 10s\n"
         "      retries: 5\n"
         f"    volumes:\n      - {nextcloud_volume}:/var/www/html\n"
+        f"{nextcloud_extra_mount}"
         "    expose:\n"
         "      - '80'\n"
         "    networks:\n"
@@ -652,6 +679,7 @@ def _render_compose_file(
         "volumes:\n"
         f"  {nextcloud_volume}:\n"
         f"  {onlyoffice_volume}:\n"
+        f"{openclaw_volume_block}"
         "networks:\n"
         "  dokploy-network:\n"
         "    external: true\n"
@@ -880,6 +908,8 @@ def _ensure_onlyoffice_app_config(
     storage_url: str,
     jwt_secret: str,
     wait_for_documentserver_check: bool = False,
+    openclaw_external_storage_enabled: bool = False,
+    admin_user: str = _DEFAULT_NEXTCLOUD_ADMIN_USER,
 ) -> None:
     def_formats = json.dumps(_DEFAULT_ONLYOFFICE_DEF_FORMATS, separators=(",", ":"), sort_keys=True)
     edit_formats = json.dumps(
@@ -933,8 +963,11 @@ def _ensure_onlyoffice_app_config(
     _run_occ_shell(container_name, "php occ config:app:set onlyoffice preview --value=true")
     if wait_for_documentserver_check:
         _wait_for_onlyoffice_documentserver_check(container_name)
-        return
-    _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
+    else:
+        _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
+    if openclaw_external_storage_enabled:
+        _ensure_files_external_app(container_name)
+        _ensure_openclaw_external_storage(container_name, admin_user=admin_user)
 
 
 def _wait_for_onlyoffice_documentserver_check(
@@ -982,6 +1015,72 @@ def _verify_nextcloud_bundle(container_name: str) -> NextcloudBundleVerification
             ),
         ),
     )
+
+
+def _ensure_files_external_app(container_name: str) -> None:
+    _run_occ(container_name, ["app:enable", "files_external"])
+
+
+def _list_external_storage_mounts(container_name: str) -> tuple[dict[str, object], ...]:
+    output = _read_occ_www_data_output(
+        container_name, ["files_external:list", "--output=json"]
+    ).strip()
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise NextcloudError(
+            "Nextcloud external storage list did not return valid JSON."
+        ) from error
+    if not isinstance(payload, list):
+        raise NextcloudError(
+            "Nextcloud external storage list returned an unexpected payload shape."
+        )
+    return tuple(item for item in payload if isinstance(item, dict))
+
+
+def _find_external_storage_mount_id(
+    container_name: str, *, mount_point: str, datadir: str
+) -> str | None:
+    for mount in _list_external_storage_mounts(container_name):
+        mount_name = mount.get("mount_point") or mount.get("mountPoint") or mount.get("mount")
+        config = mount.get("configuration") or mount.get("config")
+        mount_id = mount.get("mount_id") or mount.get("mountId") or mount.get("id")
+        config_datadir = config.get("datadir") if isinstance(config, dict) else None
+        if mount_name == mount_point or config_datadir == datadir:
+            if mount_id is not None:
+                return str(mount_id)
+    return None
+
+
+def _ensure_openclaw_external_storage(container_name: str, *, admin_user: str) -> None:
+    mount_id = _find_external_storage_mount_id(
+        container_name,
+        mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+        datadir=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+    )
+    if mount_id is None:
+        _run_occ(
+            container_name,
+            [
+                "files_external:create",
+                _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+                "local",
+                "null::null",
+                "-c",
+                f"datadir={_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH}",
+            ],
+        )
+        mount_id = _find_external_storage_mount_id(
+            container_name,
+            mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+            datadir=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+        )
+        if mount_id is None:
+            raise NextcloudError("Nextcloud external storage mount for OpenClaw was not created.")
+    _run_occ(container_name, ["files_external:applicable", mount_id, f"--add-user={admin_user}"])
+    _run_occ(container_name, ["files_external:option", mount_id, "readonly", "false"])
+    _run_occ(container_name, ["files_external:verify", mount_id])
+    _run_occ(container_name, ["files_external:scan", mount_id])
 
 
 def _ensure_spreed_app_enabled(container_name: str) -> None:
