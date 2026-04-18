@@ -691,6 +691,11 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
         "openrouter/openrouter/free",
         "openrouter/google/gemma-4-31b-it:free",
     ]
+    assert seeded["agents"]["list"] == [
+        {"id": "main", "default": True},
+        {"id": "telly", "name": "Telly"},
+    ]
+    assert seeded["agents"]["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert seeded["agents"]["defaults"]["models"] == {
         "nvidia/moonshotai/kimi-k2.5": {},
         "openrouter/openrouter/free": {},

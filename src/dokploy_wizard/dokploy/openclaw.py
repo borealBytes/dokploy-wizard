@@ -703,6 +703,41 @@ def _command_for_variant(
             }
         }
     if runtime_config.telegram_bot_token is not None:
+        agents_payload = payload.setdefault("agents", {})
+        if not isinstance(agents_payload, dict):
+            agents_payload = {}
+            payload["agents"] = agents_payload
+        agents_list = agents_payload.setdefault(
+            "list",
+            [
+                {"id": "main", "default": True},
+                {"id": "telly", "name": "Telly"},
+            ],
+        )
+        if not isinstance(agents_list, list):
+            agents_list = []
+            agents_payload["list"] = agents_list
+        existing_ids = {
+            item.get("id")
+            for item in agents_list
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        if "main" not in existing_ids:
+            agents_list.insert(0, {"id": "main", "default": True})
+        if "telly" not in existing_ids:
+            agents_list.append({"id": "telly", "name": "Telly"})
+        bindings = agents_payload.setdefault("bindings", [])
+        if not isinstance(bindings, list):
+            bindings = []
+            agents_payload["bindings"] = bindings
+        if not any(
+            isinstance(item, dict)
+            and item.get("agentId") == "telly"
+            and isinstance(item.get("match"), dict)
+            and item.get("match", {}).get("channel") == "telegram"
+            for item in bindings
+        ):
+            bindings.append({"agentId": "telly", "match": {"channel": "telegram"}})
         telegram_config: dict[str, object] = {"botToken": runtime_config.telegram_bot_token}
         if runtime_config.telegram_owner_user_id is not None:
             telegram_config["dmPolicy"] = "allowlist"
