@@ -1571,6 +1571,8 @@ def _build_nextcloud_backend(
             if "openclaw" in desired_state.enabled_packs
             else None
         ),
+        openclaw_rescan_cron=raw_env.values.get("NEXTCLOUD_OPENCLAW_RESCAN_CRON", "*/15 * * * *"),
+        openclaw_rescan_timezone=raw_env.values.get("NEXTCLOUD_OPENCLAW_RESCAN_TIMEZONE", "UTC"),
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,
@@ -1715,8 +1717,10 @@ def _build_openclaw_backend(
         stack_name=desired_state.stack_name,
         gateway_token=desired_state.openclaw_gateway_token,
         openclaw_gateway_password=_advisor_env_optional(raw_env, "OPENCLAW_GATEWAY_PASSWORD")
+        or _advisor_env_optional(raw_env, "ADVISOR_GATEWAY_PASSWORD")
         or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         my_farm_gateway_password=_advisor_env_optional(raw_env, "MY_FARM_ADVISOR_GATEWAY_PASSWORD")
+        or _advisor_env_optional(raw_env, "ADVISOR_GATEWAY_PASSWORD")
         or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         trusted_proxy_emails=desired_state.cloudflare_access_otp_emails,
         openclaw_primary_model=_advisor_primary_model(raw_env, env_prefix="OPENCLAW"),
@@ -2092,6 +2096,22 @@ def _build_dokploy_api_client(
             raw_env=raw_env,
             session_client=session_client,
         ),
+        list_compose_schedules_session_fallback=_build_dokploy_session_schedule_list_fallback(
+            raw_env=raw_env,
+            session_client=session_client,
+        ),
+        create_schedule_session_fallback=_build_dokploy_session_schedule_create_fallback(
+            raw_env=raw_env,
+            session_client=session_client,
+        ),
+        update_schedule_session_fallback=_build_dokploy_session_schedule_update_fallback(
+            raw_env=raw_env,
+            session_client=session_client,
+        ),
+        delete_schedule_session_fallback=_build_dokploy_session_schedule_delete_fallback(
+            raw_env=raw_env,
+            session_client=session_client,
+        ),
     )
 
 
@@ -2191,6 +2211,108 @@ def _build_dokploy_session_compose_update_fallback(
             admin_password=admin_password,
             compose_id=compose_id,
             compose_file=compose_file,
+        )
+
+    return _fallback
+
+
+def _build_dokploy_session_schedule_list_fallback(
+    *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
+) -> Callable[[str], Any] | None:
+    admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
+    if not admin_email or not admin_password or session_client is None:
+        return None
+
+    def _fallback(compose_id: str) -> Any:
+        return session_client.list_compose_schedules(
+            admin_email=admin_email,
+            admin_password=admin_password,
+            compose_id=compose_id,
+        )
+
+    return _fallback
+
+
+def _build_dokploy_session_schedule_create_fallback(
+    *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
+) -> Callable[[str, str, str, str, str, str, str, bool], Any] | None:
+    admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
+    if not admin_email or not admin_password or session_client is None:
+        return None
+
+    def _fallback(
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> Any:
+        return session_client.create_schedule(
+            admin_email=admin_email,
+            admin_password=admin_password,
+            name=name,
+            compose_id=compose_id,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+
+    return _fallback
+
+
+def _build_dokploy_session_schedule_update_fallback(
+    *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
+) -> Callable[[str, str, str, str, str, str, str, str, bool], Any] | None:
+    admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
+    if not admin_email or not admin_password or session_client is None:
+        return None
+
+    def _fallback(
+        schedule_id: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> Any:
+        return session_client.update_schedule(
+            admin_email=admin_email,
+            admin_password=admin_password,
+            schedule_id=schedule_id,
+            name=name,
+            compose_id=compose_id,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+
+    return _fallback
+
+
+def _build_dokploy_session_schedule_delete_fallback(
+    *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
+) -> Callable[[str], Any] | None:
+    admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
+    if not admin_email or not admin_password or session_client is None:
+        return None
+
+    def _fallback(schedule_id: str) -> Any:
+        return session_client.delete_schedule(
+            admin_email=admin_email,
+            admin_password=admin_password,
+            schedule_id=schedule_id,
         )
 
     return _fallback

@@ -386,6 +386,7 @@ def test_modify_rejects_unmodeled_env_changes() -> None:
 
 def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
     assert get_mutable_pack_env_keys() == (
+        "ADVISOR_GATEWAY_PASSWORD",
         "MY_FARM_ADVISOR_CHANNELS",
         "MY_FARM_ADVISOR_FALLBACK_MODELS",
         "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
@@ -394,6 +395,8 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "MY_FARM_ADVISOR_PRIMARY_MODEL",
         "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
         "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
+        "NEXTCLOUD_OPENCLAW_RESCAN_CRON",
+        "NEXTCLOUD_OPENCLAW_RESCAN_TIMEZONE",
         "OPENCLAW_CHANNELS",
         "OPENCLAW_FALLBACK_MODELS",
         "OPENCLAW_GATEWAY_PASSWORD",

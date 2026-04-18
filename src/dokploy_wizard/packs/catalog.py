@@ -90,7 +90,10 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
                 env_key="ONLYOFFICE_SUBDOMAIN",
             ),
         ),
-        mutable_env_keys=(),
+        mutable_env_keys=(
+            "NEXTCLOUD_OPENCLAW_RESCAN_CRON",
+            "NEXTCLOUD_OPENCLAW_RESCAN_TIMEZONE",
+        ),
         mutable_resource_keys=(),
         enabled_features=(),
         resource_profile="recommended",
@@ -156,6 +159,7 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
             ),
         ),
         mutable_env_keys=(
+            "ADVISOR_GATEWAY_PASSWORD",
             "OPENCLAW_GATEWAY_PASSWORD",
             "OPENCLAW_CHANNELS",
             "OPENCLAW_GATEWAY_TOKEN",
@@ -186,6 +190,7 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
             ),
         ),
         mutable_env_keys=(
+            "ADVISOR_GATEWAY_PASSWORD",
             "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
             "MY_FARM_ADVISOR_CHANNELS",
             "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
