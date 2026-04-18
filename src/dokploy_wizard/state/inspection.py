@@ -316,11 +316,11 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "aliases": ("openclaw", "advisor"),
                 "hostname": desired_state.hostnames.get("openclaw"),
                 "managed_container_labels": {
-                    "dokploy-wizard.slot": "advisor_suite",
+                    "dokploy-wizard.slot": "openclaw_suite",
                     "dokploy-wizard.variant": "openclaw",
                 },
                 "port": "18789",
-                "expected_service_name": f"{desired_state.stack_name}-advisor",
+                "expected_service_name": f"{desired_state.stack_name}-openclaw",
                 "pack": "openclaw",
                 "scope": f"stack:{desired_state.stack_name}:openclaw",
             }
@@ -331,7 +331,7 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "aliases": ("my-farm-advisor", "my-farm", "farm-advisor"),
                 "hostname": desired_state.hostnames.get("my-farm-advisor"),
                 "managed_container_labels": {
-                    "dokploy-wizard.slot": "advisor_suite",
+                    "dokploy-wizard.slot": "my-farm-advisor_suite",
                     "dokploy-wizard.variant": "my-farm-advisor",
                 },
                 "port": "18789",

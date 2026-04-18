@@ -465,18 +465,17 @@ def test_install_reconciles_openclaw_and_persists_slot_ledger(tmp_path: Path) ->
     assert summary["openclaw"]["variant"] == "openclaw"
     assert summary["openclaw"]["hostname"] == "openclaw.example.com"
     assert summary["openclaw"]["channels"] == ["matrix", "telegram"]
-    assert summary["openclaw"]["service"]["resource_name"] == "openclaw-stack-advisor"
+    assert summary["openclaw"]["service"]["resource_name"] == "openclaw-stack-openclaw"
     assert summary["openclaw"]["health_check"]["passed"] is True
     assert loaded_state.applied_state is not None
     assert loaded_state.applied_state.completed_steps == (
         "preflight",
         "dokploy_bootstrap",
         "networking",
-        "cloudflare_access",
         "shared_core",
-        "headscale",
         "matrix",
         "openclaw",
+        "cloudflare_access",
     )
     assert loaded_state.ownership_ledger is not None
     assert {
@@ -485,13 +484,11 @@ def test_install_reconciles_openclaw_and_persists_slot_ledger(tmp_path: Path) ->
     } == {
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
-        ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:matrix.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:openclaw.example.com"),
         ("shared_core_network", "stack:openclaw-stack:shared-network"),
         ("shared_core_postgres", "stack:openclaw-stack:shared-postgres"),
         ("shared_core_redis", "stack:openclaw-stack:shared-redis"),
-        ("headscale_service", "stack:openclaw-stack:headscale"),
         ("matrix_service", "stack:openclaw-stack:matrix-service"),
         ("matrix_data", "stack:openclaw-stack:matrix-data"),
         ("openclaw_service", "stack:openclaw-stack:openclaw"),

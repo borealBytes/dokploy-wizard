@@ -10,6 +10,7 @@ import pytest
 from dokploy_wizard.lifecycle.drift import LifecycleDriftError, validate_preserved_phases
 from dokploy_wizard.networking import CloudflareDnsRecord, CloudflareTunnel
 from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudCommandCheck,
     NextcloudHealthCheck,
     NextcloudManagedResource,
     NextcloudPostgresBinding,
@@ -19,6 +20,7 @@ from dokploy_wizard.packs.nextcloud.models import (
     NextcloudServiceRuntime,
     OnlyofficeServiceConfig,
     OnlyofficeServiceRuntime,
+    TalkRuntime,
 )
 from dokploy_wizard.packs.openclaw.models import (
     OpenClawHealthCheck,
@@ -86,6 +88,7 @@ def test_validate_preserved_phases_allows_legacy_cloudflare_access_ownership_gap
         nextcloud_backend=_UNUSED_BACKEND,
         seaweedfs_backend=_UNUSED_BACKEND,
         openclaw_backend=_UNUSED_BACKEND,
+        coder_backend=_UNUSED_BACKEND,
     )
 
     assert len(report.entries) == 1
@@ -151,6 +154,7 @@ def test_validate_preserved_phases_still_rejects_cloudflare_access_drift_when_ow
             nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=_UNUSED_BACKEND,
             openclaw_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
         )
 
 
@@ -193,6 +197,10 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_nextcloud(
             nextcloud_url="https://nextcloud.openmerge.me",
             integration_secret_ref="jwt",
         ),
+        document_server_check=NextcloudCommandCheck(
+            command="php occ onlyoffice:documentserver --check",
+            passed=True,
+        ),
     )
     monkeypatch.setattr(
         "dokploy_wizard.lifecycle.drift.reconcile_nextcloud",
@@ -202,6 +210,26 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_nextcloud(
                 enabled=True,
                 nextcloud=nextcloud_runtime,
                 onlyoffice=onlyoffice_runtime,
+                talk=TalkRuntime(
+                    app_id="spreed",
+                    enabled=True,
+                    enabled_check=NextcloudCommandCheck(
+                        command="php occ app:list --output=json",
+                        passed=True,
+                    ),
+                    signaling_check=NextcloudCommandCheck(
+                        command="php occ talk:signaling:list --output=json",
+                        passed=True,
+                    ),
+                    stun_check=NextcloudCommandCheck(
+                        command="php occ talk:stun:list --output=json",
+                        passed=True,
+                    ),
+                    turn_check=NextcloudCommandCheck(
+                        command="php occ talk:turn:list --output=json",
+                        passed=True,
+                    ),
+                ),
                 notes=(),
             )
         ),
@@ -225,6 +253,7 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_nextcloud(
             nextcloud_backend=nextcloud_backend,
             seaweedfs_backend=_UNUSED_BACKEND,
             openclaw_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
         )
 
 
@@ -300,6 +329,7 @@ def test_validate_preserved_phases_rejects_invalid_shared_core_postgres_allocati
             nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=_UNUSED_BACKEND,
             openclaw_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
         )
 
 
@@ -400,6 +430,7 @@ def test_validate_preserved_phases_rejects_stale_tunnel_ingress() -> None:
             nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=_UNUSED_BACKEND,
             openclaw_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
         )
 
 
@@ -450,7 +481,9 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_ope
                 channels=("telegram",),
                 replicas=1,
                 template_path="template",
-                service=OpenClawManagedResource("reuse_owned", "svc-openclaw", "openmerge-advisor"),
+                service=OpenClawManagedResource(
+                    "reuse_owned", "svc-openclaw", "openmerge-openclaw"
+                ),
                 secret_refs=(),
                 health_check=OpenClawHealthCheck(
                     url="https://openclaw.openmerge.me/health", passed=None
@@ -479,6 +512,7 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_ope
             nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=sea_backend,
             openclaw_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
         )
 
     with pytest.raises(LifecycleDriftError, match="OpenClaw health check no longer passes"):
@@ -498,4 +532,5 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_ope
             nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=_UNUSED_BACKEND,
             openclaw_backend=openclaw_backend,
+            coder_backend=_UNUSED_BACKEND,
         )
