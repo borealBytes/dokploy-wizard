@@ -91,6 +91,28 @@ class OnlyofficeServiceConfig:
 
 
 @dataclass(frozen=True)
+class NextcloudOpenClawWorkspaceContract:
+    enabled: bool
+    external_mount_name: str
+    external_mount_path: str
+    visible_root: str
+    contract_path: str
+    runtime_state_source: str
+    notes: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract_path": self.contract_path,
+            "enabled": self.enabled,
+            "external_mount_name": self.external_mount_name,
+            "external_mount_path": self.external_mount_path,
+            "notes": list(self.notes),
+            "runtime_state_source": self.runtime_state_source,
+            "visible_root": self.visible_root,
+        }
+
+
+@dataclass(frozen=True)
 class NextcloudServiceRuntime:
     hostname: str
     url: str

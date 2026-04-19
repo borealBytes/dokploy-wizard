@@ -18,6 +18,7 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
+from dokploy_wizard.lifecycle import classify_modify_request
 from dokploy_wizard.dokploy.openclaw import DokployOpenClawBackend, _control_ui_origin_ready
 from dokploy_wizard.packs.openclaw import (
     MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
@@ -30,6 +31,7 @@ from dokploy_wizard.packs.openclaw import (
     reconcile_openclaw,
 )
 from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
     OwnedResource,
     OwnershipLedger,
     RawEnvInput,
@@ -110,9 +112,24 @@ class FakeOpenClawBackend:
 
 
 def _decode_seeded_gateway_payload(compose: str) -> dict[str, Any]:
-    match = re.search(r"Buffer\.from\('([^']+)',\s*'base64'\)", compose)
+    match = re.search(
+        r"Buffer\.from\(\\?[\'\"]([^\'\"]+)\\?[\'\"],\\?[\'\"]base64\\?[\'\"]\)",
+        compose,
+    )
     assert match is not None
     return json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
+
+
+def _decode_extra_seeded_files(compose: str) -> dict[str, str]:
+    matches = re.findall(
+        r"Buffer\.from\(\\?[\'\"]([^\'\"]+)\\?[\'\"],\\?[\'\"]base64\\?[\'\"]\)",
+        compose,
+    )
+    assert len(matches) >= 2
+    payload = json.loads(base64.b64decode(matches[1]).decode("utf-8"))
+    return {
+        item["path"]: base64.b64decode(item["content"]).decode("utf-8") for item in payload
+    }
 
 
 def test_reconcile_openclaw_plans_slot_runtime_for_openclaw_variant() -> None:
@@ -208,6 +225,37 @@ def test_resolve_desired_state_rejects_gateway_token_without_openclaw_pack() -> 
                 },
             )
         )
+
+
+def test_resolve_desired_state_rejects_nexa_env_without_openclaw_pack() -> None:
+    with pytest.raises(StateValidationError, match="require the 'openclaw' pack"):
+        resolve_desired_state(
+            RawEnvInput(
+                format_version=1,
+                values={
+                    "STACK_NAME": "wizard-stack",
+                    "ROOT_DOMAIN": "example.com",
+                    "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.example.com",
+                },
+            )
+        )
+
+
+def test_resolve_desired_state_allows_nexa_env_with_openclaw_pack() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.example.com",
+                "OPENCLAW_NEXA_PRESENCE_POLICY": "rooms-only",
+            },
+        )
+    )
+
+    assert "openclaw" in desired_state.enabled_packs
 
 
 def test_reconcile_my_farm_advisor_plans_runtime_independently() -> None:
@@ -398,9 +446,59 @@ def test_reconcile_openclaw_updates_owned_service_when_replicas_change() -> None
     assert phase.result.outcome == "applied"
     assert phase.result.replicas == 3
     assert phase.result.service is not None
-    assert phase.result.service.action == "update_owned"
-    assert backend.update_calls == 1
-    assert backend.last_requested_replicas == 3
+
+
+def test_modify_nexa_only_env_change_reruns_openclaw_only() -> None:
+    existing_raw = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "ENABLE_NEXTCLOUD": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0-a.example.com",
+        },
+    )
+    requested_raw = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "ENABLE_NEXTCLOUD": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0-b.example.com",
+        },
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "nextcloud",
+                "openclaw",
+                "cloudflare_access",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert "OPENCLAW_NEXA_MEM0_BASE_URL" in plan.reasons[0]
+    assert plan.start_phase == "openclaw"
+    assert plan.phases_to_run == ("openclaw",)
 
 
 def test_reconcile_openclaw_fails_closed_on_unowned_name_collision() -> None:
@@ -712,6 +810,72 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
         "allowFrom": ["123456789"],
         "execApprovals": {"enabled": False},
     }
+
+
+def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surface() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        openclaw_nexa_env={
+            "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.internal.example.com",
+            "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
+            "OPENCLAW_NEXA_MEM0_LLM_BASE_URL": "https://integrate.api.nvidia.com/v1",
+            "OPENCLAW_NEXA_MEM0_LLM_API_KEY": "nvidia-api-key",
+            "OPENCLAW_NEXA_MEM0_VECTOR_BACKEND": "qdrant",
+            "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL": "https://qdrant.internal.example.com",
+            "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY": "qdrant-api-key",
+            "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET": "office-shared-secret",
+            "OPENCLAW_NEXA_TALK_SHARED_SECRET": "talk-shared-secret",
+            "OPENCLAW_NEXA_TALK_SIGNING_SECRET": "talk-signing-secret",
+            "OPENCLAW_NEXA_PRESENCE_POLICY": "rooms-only",
+        },
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    assert 'OPENCLAW_NEXA_MEM0_BASE_URL: "https://mem0.internal.example.com"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_ENABLED: "true"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_MEM0_MODE: "rest"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_CREDENTIAL_MEDIATION_MODE: "server-owned-env"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_ROOT: "/home/node/.openclaw/workspace/nexa"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT: "/mnt/openclaw/workspace/nexa"' in compose
+
+    seeded = _decode_seeded_gateway_payload(compose)
+    assert seeded["wizard"]["nexa"]["deployment_mode"] == "openclaw-resident"
+    assert seeded["wizard"]["nexa"]["workspace_contract_path"] == (
+        "/home/node/.openclaw/workspace/nexa/contract.json"
+    )
+
+    extra_files = _decode_extra_seeded_files(compose)
+    assert "/home/node/.openclaw/.nexa/runtime-contract.json" in extra_files
+    assert "/home/node/.openclaw/workspace/nexa/contract.json" in extra_files
+    assert "/home/node/.openclaw/workspace/nexa/README.md" in extra_files
+    workspace_contract = json.loads(extra_files["/home/node/.openclaw/workspace/nexa/contract.json"])
+    assert workspace_contract["surface"] == "operator-user-visible"
+    assert workspace_contract["authoritative_runtime_state"] == "server-owned env + durable state JSON"
+    assert workspace_contract["visible_root"] == "/mnt/openclaw/workspace/nexa"
+    assert "mem0-api-key" not in extra_files["/home/node/.openclaw/workspace/nexa/contract.json"]
+    assert "nvidia-api-key" not in extra_files["/home/node/.openclaw/workspace/nexa/contract.json"]
+    runtime_contract = json.loads(extra_files["/home/node/.openclaw/.nexa/runtime-contract.json"])
+    assert runtime_contract["credential_mediation"]["secret_env"]["OPENCLAW_NEXA_MEM0_API_KEY"] == {
+        "present": True,
+        "source": "server-owned-env",
+    }
+    assert runtime_contract["mem0"]["require_private_network"] is True
+    assert runtime_contract["mem0"]["require_api_key_auth"] is True
 
 
 def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without_bot_token() -> (

@@ -26,6 +26,7 @@ from dokploy_wizard.dokploy.client import (
 from dokploy_wizard.packs.nextcloud.models import (
     NextcloudBundleVerification,
     NextcloudCommandCheck,
+    NextcloudOpenClawWorkspaceContract,
     NextcloudResourceRecord,
     TalkRuntime,
 )
@@ -130,6 +131,7 @@ class DokployNextcloudBackend:
         admin_user: str = _DEFAULT_NEXTCLOUD_ADMIN_USER,
         admin_password: str = _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD,
         openclaw_volume_name: str | None = None,
+        openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None = None,
         openclaw_rescan_cron: str = _DEFAULT_OPENCLAW_RESCAN_CRON,
         openclaw_rescan_timezone: str = _DEFAULT_OPENCLAW_RESCAN_TIMEZONE,
         client: DokployNextcloudApi | None = None,
@@ -146,6 +148,7 @@ class DokployNextcloudBackend:
         self._admin_user = admin_user
         self._admin_password = admin_password
         self._openclaw_volume_name = openclaw_volume_name
+        self._openclaw_workspace_contract = openclaw_workspace_contract
         self._openclaw_rescan_cron = openclaw_rescan_cron
         self._openclaw_rescan_timezone = openclaw_rescan_timezone
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
@@ -483,6 +486,7 @@ class DokployNextcloudBackend:
             admin_user=self._admin_user,
             admin_password=self._admin_password,
             openclaw_volume_name=self._openclaw_volume_name,
+            openclaw_workspace_contract=self._openclaw_workspace_contract,
         )
         try:
             if self._applied_locator is not None:
@@ -687,6 +691,7 @@ def _render_compose_file(
     admin_user: str,
     admin_password: str,
     openclaw_volume_name: str | None,
+    openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None,
 ) -> str:
     nextcloud_service = _nextcloud_service_name(stack_name)
     onlyoffice_service = _onlyoffice_service_name(stack_name)
@@ -696,6 +701,15 @@ def _render_compose_file(
     shared_network = _shared_network_name(stack_name)
     nextcloud_url = f"https://{nextcloud_hostname}"
     onlyoffice_url = f"https://{onlyoffice_hostname}"
+    nextcloud_workspace_env = ""
+    if openclaw_workspace_contract is not None:
+        nextcloud_workspace_env = (
+            f"      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface\n"
+            f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: {openclaw_workspace_contract.visible_root}\n"
+            f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: {openclaw_workspace_contract.contract_path}\n"
+            "      DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: "
+            f"{openclaw_workspace_contract.runtime_state_source}\n"
+        )
     nextcloud_extra_mount = (
         f"      - {openclaw_volume}:{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH}\n"
         if openclaw_volume is not None
@@ -726,6 +740,7 @@ def _render_compose_file(
         "      OVERWRITEPROTOCOL: https\n"
         f"      OVERWRITECLIURL: {nextcloud_url}\n"
         f"      ONLYOFFICE_URL: {onlyoffice_url}\n"
+        f"{nextcloud_workspace_env}"
         "    labels:\n"
         '      traefik.enable: "true"\n'
         f'      traefik.http.routers.{nextcloud_service}.entrypoints: "websecure"\n'

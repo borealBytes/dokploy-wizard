@@ -30,6 +30,32 @@ class OpenClawHealthCheck:
 
 
 @dataclass(frozen=True)
+class OpenClawNexaDeploymentContract:
+    enabled: bool
+    deployment_mode: str
+    mem0_mode: str
+    credential_mediation_mode: str
+    runtime_contract_path: str
+    workspace_root: str
+    workspace_contract_path: str
+    secret_env_keys: tuple[str, ...]
+    notes: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "credential_mediation_mode": self.credential_mediation_mode,
+            "deployment_mode": self.deployment_mode,
+            "enabled": self.enabled,
+            "mem0_mode": self.mem0_mode,
+            "notes": list(self.notes),
+            "runtime_contract_path": self.runtime_contract_path,
+            "secret_env_keys": list(self.secret_env_keys),
+            "workspace_contract_path": self.workspace_contract_path,
+            "workspace_root": self.workspace_root,
+        }
+
+
+@dataclass(frozen=True)
 class OpenClawResult:
     outcome: str
     enabled: bool
