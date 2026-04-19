@@ -76,6 +76,7 @@ from dokploy_wizard.packs.matrix import (
 from dokploy_wizard.packs.nextcloud import (
     NextcloudBackend,
     NextcloudError,
+    NextcloudOpenClawWorkspaceContract,
     ShellNextcloudBackend,
 )
 from dokploy_wizard.packs.openclaw import (
@@ -1553,6 +1554,7 @@ def _build_nextcloud_backend(
         return ShellNextcloudBackend(raw_env)
     admin_user = raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
     admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon")
+    nexa_enabled = _has_openclaw_nexa_env(raw_env)
     return DokployNextcloudBackend(
         api_url=api_url,
         api_key=api_key,
@@ -1569,6 +1571,11 @@ def _build_nextcloud_backend(
         openclaw_volume_name=(
             f"{desired_state.stack_name}-openclaw-data"
             if "openclaw" in desired_state.enabled_packs
+            else None
+        ),
+        openclaw_workspace_contract=(
+            _build_nextcloud_openclaw_workspace_contract(desired_state)
+            if nexa_enabled and "openclaw" in desired_state.enabled_packs
             else None
         ),
         openclaw_rescan_cron=raw_env.values.get("NEXTCLOUD_OPENCLAW_RESCAN_CRON", "*/15 * * * *"),
@@ -1711,6 +1718,12 @@ def _build_openclaw_backend(
         return ShellOpenClawBackend(raw_env)
     if not ({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs)):
         return ShellOpenClawBackend(raw_env)
+    openclaw_primary_model, openclaw_fallback_models = _advisor_model_selection(
+        raw_env, env_prefix="OPENCLAW"
+    )
+    my_farm_primary_model, my_farm_fallback_models = _advisor_model_selection(
+        raw_env, env_prefix="MY_FARM_ADVISOR"
+    )
     return DokployOpenClawBackend(
         api_url=api_url,
         api_key=api_key,
@@ -1723,16 +1736,17 @@ def _build_openclaw_backend(
         or _advisor_env_optional(raw_env, "ADVISOR_GATEWAY_PASSWORD")
         or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         trusted_proxy_emails=desired_state.cloudflare_access_otp_emails,
-        openclaw_primary_model=_advisor_primary_model(raw_env, env_prefix="OPENCLAW"),
-        openclaw_fallback_models=_advisor_model_list(raw_env, env_prefix="OPENCLAW"),
+        openclaw_primary_model=openclaw_primary_model,
+        openclaw_fallback_models=openclaw_fallback_models,
         openclaw_openrouter_api_key=_advisor_env_optional(raw_env, "OPENCLAW_OPENROUTER_API_KEY"),
         openclaw_nvidia_api_key=_advisor_env_optional(raw_env, "OPENCLAW_NVIDIA_API_KEY"),
         openclaw_telegram_bot_token=_advisor_env_optional(raw_env, "OPENCLAW_TELEGRAM_BOT_TOKEN"),
         openclaw_telegram_owner_user_id=_advisor_env_optional(
             raw_env, "OPENCLAW_TELEGRAM_OWNER_USER_ID"
         ),
-        my_farm_primary_model=_advisor_primary_model(raw_env, env_prefix="MY_FARM_ADVISOR"),
-        my_farm_fallback_models=_advisor_model_list(raw_env, env_prefix="MY_FARM_ADVISOR"),
+        openclaw_nexa_env=_openclaw_nexa_env(raw_env),
+        my_farm_primary_model=my_farm_primary_model,
+        my_farm_fallback_models=my_farm_fallback_models,
         my_farm_openrouter_api_key=_advisor_env_optional(
             raw_env, "MY_FARM_ADVISOR_OPENROUTER_API_KEY"
         ),
@@ -1768,6 +1782,36 @@ def _build_openclaw_backend(
             api_url=api_url,
             api_key=api_key,
             session_client=session_client,
+        ),
+    )
+
+
+def _openclaw_nexa_env(raw_env: RawEnvInput) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in sorted(raw_env.values.items())
+        if key.startswith("OPENCLAW_NEXA_") and value.strip() != ""
+    }
+
+
+def _has_openclaw_nexa_env(raw_env: RawEnvInput) -> bool:
+    return bool(_openclaw_nexa_env(raw_env))
+
+
+def _build_nextcloud_openclaw_workspace_contract(
+    desired_state: DesiredState,
+) -> NextcloudOpenClawWorkspaceContract:
+    stack_name = desired_state.stack_name
+    return NextcloudOpenClawWorkspaceContract(
+        enabled=True,
+        external_mount_name="/OpenClaw",
+        external_mount_path="/mnt/openclaw",
+        visible_root="/mnt/openclaw/workspace/nexa",
+        contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+        runtime_state_source="server-owned env + durable state JSON",
+        notes=(
+            "Nextcloud exposes the Nexa workspace as an operator/user surface only.",
+            "Credential values and identity-bearing fields remain server-owned and must not be overridden from workspace files.",
         ),
     )
 
@@ -1814,6 +1858,26 @@ def _advisor_env_optional(raw_env: RawEnvInput, key: str) -> str | None:
     if value is None or value.strip() == "":
         return None
     return value.strip()
+
+
+def _advisor_model_selection(
+    raw_env: RawEnvInput, *, env_prefix: str
+) -> tuple[str | None, tuple[str, ...]]:
+    """Return repo-facing model envs mapped onto current OpenClaw config semantics.
+
+    `<PREFIX>_PRIMARY_MODEL` and `<PREFIX>_FALLBACK_MODELS` are dokploy-wizard
+    conventions, not OpenClaw-native env names. We normalize them here and hand the
+    results to the Dokploy OpenClaw backend, which seeds the current OpenClaw config
+    shape at `agents.defaults.model.primary` / `fallbacks`.
+
+    Service env remains the source of truth for deployment because Dokploy/container
+    env wins over seeded config fallback values at runtime.
+    """
+
+    return (
+        _advisor_primary_model(raw_env, env_prefix=env_prefix),
+        _advisor_model_list(raw_env, env_prefix=env_prefix),
+    )
 
 
 def _advisor_primary_model(raw_env: RawEnvInput, *, env_prefix: str) -> str | None:
@@ -2100,13 +2164,19 @@ def _build_dokploy_api_client(
             raw_env=raw_env,
             session_client=session_client,
         ),
-        create_schedule_session_fallback=_build_dokploy_session_schedule_create_fallback(
-            raw_env=raw_env,
-            session_client=session_client,
+        create_schedule_session_fallback=cast(
+            Any,
+            _build_dokploy_session_schedule_create_fallback(
+                raw_env=raw_env,
+                session_client=session_client,
+            ),
         ),
-        update_schedule_session_fallback=_build_dokploy_session_schedule_update_fallback(
-            raw_env=raw_env,
-            session_client=session_client,
+        update_schedule_session_fallback=cast(
+            Any,
+            _build_dokploy_session_schedule_update_fallback(
+                raw_env=raw_env,
+                session_client=session_client,
+            ),
         ),
         delete_schedule_session_fallback=_build_dokploy_session_schedule_delete_fallback(
             raw_env=raw_env,
