@@ -1,0 +1,673 @@
+"""Queued Nexa runtime orchestration with Mem0-backed automatic memory hooks."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Callable, Literal, Mapping, Protocol
+
+from dokploy_wizard.state import DurableJobRecord
+
+from .nexa_mem0_client import (
+    NexaMem0Client,
+    NexaMem0DegradedError,
+    NexaMem0SearchHit,
+    NexaMem0WriteResult,
+)
+from .nexa_memory import (
+    NexaMemoryConfigError,
+    NexaMemoryWriteRequest,
+    build_nexa_mem0_config,
+    build_nexa_memory_scopes,
+    evaluate_memory_write_policy,
+)
+from .nexa_onlyoffice import (
+    NexaOnlyofficeAgentIdentity,
+    NexaOnlyofficeReconcileDecision,
+    NexaOnlyofficeSaveSignal,
+    build_onlyoffice_save_signal,
+    evaluate_onlyoffice_reconcile_policy,
+)
+from .nexa_retrieval import NexaCanonicalFileSnapshot, NexaUsageDecision, evaluate_retrieval_gate
+from .nexa_scope import NexaScopeContext, build_talk_scope
+from .nexa_talk_reply import NexaTalkReplyDispatch, NexaTalkReplyRequest, deliver_talk_reply
+
+NexaRuntimeStatus = Literal["completed", "failed"]
+NexaRuntimeMemoryStatus = Literal["ok", "degraded", "skipped"]
+
+
+class NexaTalkReplyPlanner(Protocol):
+    def __call__(self, payload: dict[str, Any], memory: "NexaRuntimeMemoryQueryResult") -> "NexaPlannedTalkReply": ...
+
+
+class NexaOnlyofficeReconcileExecutor(Protocol):
+    def __call__(
+        self,
+        decision: NexaOnlyofficeReconcileDecision,
+        save_signal: NexaOnlyofficeSaveSignal,
+        canonical_file: NexaCanonicalFileSnapshot,
+        memory: "NexaRuntimeMemoryQueryResult",
+    ) -> "NexaOnlyofficeActionResult": ...
+
+
+@dataclass(frozen=True)
+class NexaPlannedTalkReply:
+    """Reply generation output consumed by the real runtime worker."""
+
+    text: str
+    memory_content: str
+    memory_content_class: str = "assistant_summary"
+    memory_target_layer: Literal["shared", "durable_facts"] = "shared"
+    contains_private_memory: bool = False
+    allow_private_to_shared: bool = False
+
+
+@dataclass(frozen=True)
+class NexaOnlyofficeActionResult:
+    """Authoritative ONLYOFFICE reconcile side effect result."""
+
+    outcome: Literal["applied", "skipped"]
+    authoritative_write: bool
+    memory_content: str | None = None
+    memory_content_class: str = "durable_fact"
+    memory_target_layer: Literal["shared", "durable_facts"] = "durable_facts"
+    contains_private_memory: bool = False
+    allow_private_to_shared: bool = False
+
+
+@dataclass(frozen=True)
+class NexaRuntimeMemoryHit:
+    """Runtime-facing memory hit annotated with namespace evidence."""
+
+    memory_id: str | None
+    content: str
+    score: float | None
+    namespace: str
+    layer: str
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class NexaRuntimeMemoryQueryResult:
+    """Automatic runtime memory lookup result before downstream actions."""
+
+    status: NexaRuntimeMemoryStatus
+    query: str
+    hits: tuple[NexaRuntimeMemoryHit, ...]
+    searched_namespaces: tuple[str, ...]
+    degraded_error: NexaMem0DegradedError | None = None
+
+
+@dataclass(frozen=True)
+class NexaRuntimeMemoryWriteResult:
+    """Automatic runtime memory persistence result after downstream success."""
+
+    status: NexaRuntimeMemoryStatus
+    attempted: bool
+    target_namespace: str | None
+    memory_id: str | None
+    decision_reason: str
+    degraded_error: NexaMem0DegradedError | None = None
+
+
+@dataclass(frozen=True)
+class NexaTalkRuntimeResult:
+    """Structured result for a processed Talk job."""
+
+    kind: str
+    scope: NexaScopeContext
+    memory_read: NexaRuntimeMemoryQueryResult
+    reply_dispatch: NexaTalkReplyDispatch
+    memory_write: NexaRuntimeMemoryWriteResult
+
+
+@dataclass(frozen=True)
+class NexaOnlyofficeRuntimeResult:
+    """Structured result for a processed ONLYOFFICE reconcile job."""
+
+    kind: str
+    scope: NexaScopeContext
+    decision: NexaOnlyofficeReconcileDecision
+    retrieval_gate: NexaUsageDecision
+    memory_read: NexaRuntimeMemoryQueryResult
+    action_result: NexaOnlyofficeActionResult
+    memory_write: NexaRuntimeMemoryWriteResult
+
+
+@dataclass(frozen=True)
+class NexaQueuedJobResult:
+    """Top-level queued worker result including degraded memory evidence."""
+
+    status: NexaRuntimeStatus
+    job_id: str
+    job_kind: str
+    completed_at: str | None
+    result: NexaTalkRuntimeResult | NexaOnlyofficeRuntimeResult | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class NexaRuntimeDependencies:
+    """Injected adapters for downstream action execution."""
+
+    talk_reply_planner: NexaTalkReplyPlanner
+    talk_sender: Callable[[dict[str, Any]], Mapping[str, Any]]
+    onlyoffice_agent_identity: NexaOnlyofficeAgentIdentity
+    load_canonical_file: Callable[[NexaOnlyofficeSaveSignal], NexaCanonicalFileSnapshot]
+    onlyoffice_reconcile_executor: NexaOnlyofficeReconcileExecutor
+    mem0_client: NexaMem0Client | None = None
+
+
+def run_queued_nexa_job(
+    job: DurableJobRecord,
+    *,
+    store: Any,
+    env: Mapping[str, str],
+    dependencies: NexaRuntimeDependencies,
+    now: datetime | None = None,
+) -> NexaQueuedJobResult:
+    """Run one leased Nexa job and persist terminal queue state."""
+
+    try:
+        if job.kind == "nexa.talk.process_message":
+            result = process_talk_job(job, store=store, env=env, dependencies=dependencies, now=now)
+        elif job.kind == "nexa.onlyoffice.reconcile_saved_document":
+            result = process_onlyoffice_job(job, store=store, env=env, dependencies=dependencies)
+        else:
+            msg = f"Unsupported Nexa job kind '{job.kind}'."
+            raise ValueError(msg)
+        completed = store.mark_job_completed(job_id=job.job_id, now=now)
+        return NexaQueuedJobResult(
+            status="completed",
+            job_id=job.job_id,
+            job_kind=job.kind,
+            completed_at=completed.updated_at,
+            result=result,
+        )
+    except Exception as exc:
+        failed = store.mark_job_failed(job_id=job.job_id, error_message=str(exc), now=now)
+        return NexaQueuedJobResult(
+            status="failed",
+            job_id=job.job_id,
+            job_kind=job.kind,
+            completed_at=failed.updated_at,
+            error_message=str(exc),
+        )
+
+
+def process_talk_job(
+    job: DurableJobRecord,
+    *,
+    store: Any,
+    env: Mapping[str, str],
+    dependencies: NexaRuntimeDependencies,
+    now: datetime | None = None,
+) -> NexaTalkRuntimeResult:
+    """Run the Talk worker path with automatic memory read and post-send write."""
+
+    payload = _load_event_payload(store, source="nextcloud-talk", idempotency_key=job.idempotency_key)
+    scope = build_talk_scope(payload)
+    memory_read = _automatic_memory_search(
+        env,
+        scope=scope,
+        query=str(payload.get("message", {}).get("text", "")).strip(),
+        mem0_client=dependencies.mem0_client,
+    )
+    planned_reply = dependencies.talk_reply_planner(payload, memory_read)
+    reply_request = NexaTalkReplyRequest(
+        scope=scope,
+        delivery_key=f"talk-reply:{scope.run_id or job.job_id}",
+        conversation_id=str(payload["conversation"]["id"]),
+        conversation_token=(
+            str(payload["conversation"].get("token")).strip()
+            if payload["conversation"].get("token") is not None
+            else None
+        ),
+        reply_to_message_id=str(payload["message"]["id"]),
+        text=planned_reply.text,
+        capabilities=payload.get("capabilities", {}),
+        context=payload.get("context"),
+    )
+    dispatch = deliver_talk_reply(
+        reply_request,
+        store=store,
+        sender=dependencies.talk_sender,
+        now=now,
+    )
+    if dispatch.outcome == "sent":
+        memory_write = _automatic_memory_write(
+            env,
+            scope=scope,
+            target_layer=planned_reply.memory_target_layer,
+            content=planned_reply.memory_content,
+            content_class=planned_reply.memory_content_class,
+            contains_private_memory=planned_reply.contains_private_memory,
+            allow_private_to_shared=planned_reply.allow_private_to_shared,
+            mem0_client=dependencies.mem0_client,
+        )
+    else:
+        memory_write = NexaRuntimeMemoryWriteResult(
+            status="skipped",
+            attempted=False,
+            target_namespace=None,
+            memory_id=None,
+            decision_reason="reply_not_visibly_sent",
+        )
+    return NexaTalkRuntimeResult(
+        kind=job.kind,
+        scope=scope,
+        memory_read=memory_read,
+        reply_dispatch=dispatch,
+        memory_write=memory_write,
+    )
+
+
+def process_onlyoffice_job(
+    job: DurableJobRecord,
+    *,
+    store: Any,
+    env: Mapping[str, str],
+    dependencies: NexaRuntimeDependencies,
+) -> NexaOnlyofficeRuntimeResult:
+    """Run the ONLYOFFICE reconcile path with gated automatic memory behavior."""
+
+    payload = _load_event_payload(
+        store,
+        source="onlyoffice-document-server",
+        idempotency_key=job.idempotency_key,
+    )
+    save_signal = build_onlyoffice_save_signal(payload)
+    decision = evaluate_onlyoffice_reconcile_policy(
+        save_signal,
+        agent_identity=dependencies.onlyoffice_agent_identity,
+    )
+    if decision.action != "reconcile":
+        skipped_memory = NexaRuntimeMemoryQueryResult(
+            status="skipped",
+            query="",
+            hits=(),
+            searched_namespaces=(),
+        )
+        skipped_write = NexaRuntimeMemoryWriteResult(
+            status="skipped",
+            attempted=False,
+            target_namespace=None,
+            memory_id=None,
+            decision_reason=f"decision_{decision.action}",
+        )
+        return NexaOnlyofficeRuntimeResult(
+            kind=job.kind,
+            scope=save_signal.scope,
+            decision=decision,
+            retrieval_gate=NexaUsageDecision(
+                action="cancel",
+                reason="reconcile_not_required",
+                expected_file_version=save_signal.scope.file_version,
+                current_file_version=save_signal.scope.file_version,
+            ),
+            memory_read=skipped_memory,
+            action_result=NexaOnlyofficeActionResult(
+                outcome="skipped",
+                authoritative_write=False,
+                memory_content=None,
+            ),
+            memory_write=skipped_write,
+        )
+    canonical_file = dependencies.load_canonical_file(save_signal)
+    retrieval_gate = evaluate_retrieval_gate(save_signal.scope, canonical_file=canonical_file)
+    if retrieval_gate.action != "proceed":
+        skipped_memory = NexaRuntimeMemoryQueryResult(
+            status="skipped",
+            query="",
+            hits=(),
+            searched_namespaces=(),
+        )
+        skipped_write = NexaRuntimeMemoryWriteResult(
+            status="skipped",
+            attempted=False,
+            target_namespace=None,
+            memory_id=None,
+            decision_reason=f"retrieval_{retrieval_gate.reason}",
+        )
+        return NexaOnlyofficeRuntimeResult(
+            kind=job.kind,
+            scope=save_signal.scope,
+            decision=decision,
+            retrieval_gate=retrieval_gate,
+            memory_read=skipped_memory,
+            action_result=NexaOnlyofficeActionResult(
+                outcome="skipped",
+                authoritative_write=False,
+                memory_content=None,
+            ),
+            memory_write=skipped_write,
+        )
+    memory_read = _automatic_memory_search(
+        env,
+        scope=save_signal.scope,
+        query=_build_onlyoffice_memory_query(save_signal, canonical_file),
+        mem0_client=dependencies.mem0_client,
+    )
+    action_result = dependencies.onlyoffice_reconcile_executor(
+        decision,
+        save_signal,
+        canonical_file,
+        memory_read,
+    )
+    if action_result.outcome == "applied" and action_result.authoritative_write:
+        memory_write = _automatic_memory_write(
+            env,
+            scope=save_signal.scope,
+            target_layer=action_result.memory_target_layer,
+            content=action_result.memory_content or "",
+            content_class=action_result.memory_content_class,
+            contains_private_memory=action_result.contains_private_memory,
+            allow_private_to_shared=action_result.allow_private_to_shared,
+            mem0_client=dependencies.mem0_client,
+        )
+    else:
+        memory_write = NexaRuntimeMemoryWriteResult(
+            status="skipped",
+            attempted=False,
+            target_namespace=None,
+            memory_id=None,
+            decision_reason="authoritative_reconcile_not_applied",
+        )
+    return NexaOnlyofficeRuntimeResult(
+        kind=job.kind,
+        scope=save_signal.scope,
+        decision=decision,
+        retrieval_gate=retrieval_gate,
+        memory_read=memory_read,
+        action_result=action_result,
+        memory_write=memory_write,
+    )
+
+
+def _automatic_memory_search(
+    env: Mapping[str, str],
+    *,
+    scope: NexaScopeContext,
+    query: str,
+    mem0_client: NexaMem0Client | None,
+) -> NexaRuntimeMemoryQueryResult:
+    if query.strip() == "":
+        return NexaRuntimeMemoryQueryResult(
+            status="skipped",
+            query=query,
+            hits=(),
+            searched_namespaces=(),
+        )
+    configured_client, degraded_error = _resolve_mem0_client(env, mem0_client=mem0_client)
+    if degraded_error is not None or configured_client is None:
+        return NexaRuntimeMemoryQueryResult(
+            status="degraded",
+            query=query,
+            hits=(),
+            searched_namespaces=(),
+            degraded_error=degraded_error,
+        )
+    scopes = build_nexa_memory_scopes(scope)
+    namespaces = [
+        scopes.session_memory,
+        *(tuple() if scopes.user_memory is None else (scopes.user_memory,)),
+        *(tuple() if scopes.shared_memory is None else (scopes.shared_memory,)),
+        scopes.episodic_memory,
+        scopes.durable_facts_memory,
+    ]
+    hits: list[NexaRuntimeMemoryHit] = []
+    searched_namespaces: list[str] = []
+    for namespace in namespaces:
+        searched_namespaces.append(namespace.namespace)
+        search_result = configured_client.search_memories(
+            query=query,
+            filters=_build_mem0_filters(scope=scope, namespace=namespace.namespace, layer=namespace.layer),
+            limit=5,
+        )
+        if search_result.outcome == "degraded":
+            return NexaRuntimeMemoryQueryResult(
+                status="degraded",
+                query=query,
+                hits=tuple(hits),
+                searched_namespaces=tuple(searched_namespaces),
+                degraded_error=search_result.error,
+            )
+        hits.extend(_dedupe_search_hits(search_result.hits, namespace=namespace.namespace, layer=namespace.layer))
+    return NexaRuntimeMemoryQueryResult(
+        status="ok",
+        query=query,
+        hits=tuple(hits),
+        searched_namespaces=tuple(searched_namespaces),
+    )
+
+
+def _automatic_memory_write(
+    env: Mapping[str, str],
+    *,
+    scope: NexaScopeContext,
+    target_layer: Literal["shared", "durable_facts"],
+    content: str,
+    content_class: str,
+    contains_private_memory: bool,
+    allow_private_to_shared: bool,
+    mem0_client: NexaMem0Client | None,
+) -> NexaRuntimeMemoryWriteResult:
+    scopes = build_nexa_memory_scopes(scope)
+    namespace = scopes.shared_memory if target_layer == "shared" else scopes.durable_facts_memory
+    if namespace is None:
+        return NexaRuntimeMemoryWriteResult(
+            status="skipped",
+            attempted=False,
+            target_namespace=None,
+            memory_id=None,
+            decision_reason="target_namespace_unavailable",
+        )
+    decision = evaluate_memory_write_policy(
+        NexaMemoryWriteRequest(
+            scope=scope,
+            target_layer=target_layer,
+            content=content,
+            content_class=content_class,
+            visibility=namespace.visibility,
+            contains_private_memory=contains_private_memory,
+            allow_private_to_shared=allow_private_to_shared,
+        )
+    )
+    if decision.allowed is False:
+        return NexaRuntimeMemoryWriteResult(
+            status="skipped",
+            attempted=False,
+            target_namespace=namespace.namespace,
+            memory_id=None,
+            decision_reason=decision.reason,
+        )
+    configured_client, degraded_error = _resolve_mem0_client(env, mem0_client=mem0_client)
+    if degraded_error is not None or configured_client is None:
+        return NexaRuntimeMemoryWriteResult(
+            status="degraded",
+            attempted=True,
+            target_namespace=namespace.namespace,
+            memory_id=None,
+            decision_reason=decision.reason,
+            degraded_error=degraded_error,
+        )
+    write_result = configured_client.add_memory(
+        content=content,
+        user_id=scope.user_id,
+        agent_id=_build_agent_id(scope),
+        run_id=scope.run_id,
+        metadata=_build_mem0_metadata(
+            scope=scope,
+            namespace=namespace.namespace,
+            layer=namespace.layer,
+            content_class=content_class,
+            visibility=namespace.visibility,
+            durable=namespace.durable,
+        ),
+    )
+    return _to_runtime_write_result(write_result, namespace=namespace.namespace, decision_reason=decision.reason)
+
+
+def _resolve_mem0_client(
+    env: Mapping[str, str],
+    *,
+    mem0_client: NexaMem0Client | None,
+) -> tuple[NexaMem0Client | None, NexaMem0DegradedError | None]:
+    if mem0_client is not None:
+        return mem0_client, None
+    try:
+        config = build_nexa_mem0_config(env)
+    except NexaMemoryConfigError as exc:
+        return None, NexaMem0DegradedError(
+            operation="mem0_config",
+            reason="misconfigured",
+            detail=str(exc),
+            retryable=False,
+        )
+    return NexaMem0Client(config), None
+
+
+def _load_event_payload(store: Any, *, source: str, idempotency_key: str) -> dict[str, Any]:
+    event = store.get_incoming_event(source=source, idempotency_key=idempotency_key)
+    if event is None:
+        msg = f"Missing inbox event for {source}:{idempotency_key}."
+        raise ValueError(msg)
+    return event.parsed_payload
+
+
+def _build_mem0_filters(*, scope: NexaScopeContext, namespace: str, layer: str) -> dict[str, Any]:
+    filters: dict[str, Any] = {
+        "agent_id": _build_agent_id(scope),
+        "metadata": {
+            "app": "dokploy_wizard",
+            "workspace": "nexa",
+            "tenant_id": scope.tenant_id,
+            "integration_surface": scope.integration_surface,
+            "namespace": namespace,
+            "layer": layer,
+        },
+    }
+    if scope.user_id is not None:
+        filters["user_id"] = scope.user_id
+    if scope.run_id is not None:
+        filters["run_id"] = scope.run_id
+    if scope.room_id is not None:
+        filters["metadata"]["room_id"] = scope.room_id
+    if scope.thread_id is not None:
+        filters["metadata"]["thread_id"] = scope.thread_id
+    if scope.file_id is not None:
+        filters["metadata"]["file_id"] = scope.file_id
+    if scope.file_version is not None:
+        filters["metadata"]["file_version"] = scope.file_version
+    return filters
+
+
+def _build_mem0_metadata(
+    *,
+    scope: NexaScopeContext,
+    namespace: str,
+    layer: str,
+    content_class: str,
+    visibility: str,
+    durable: bool,
+) -> dict[str, Any]:
+    metadata = {
+        "app": "dokploy_wizard",
+        "workspace": "nexa",
+        "tenant_id": scope.tenant_id,
+        "integration_surface": scope.integration_surface,
+        "namespace": namespace,
+        "layer": layer,
+        "content_class": content_class,
+        "visibility": visibility,
+        "durable": durable,
+    }
+    if scope.room_id is not None:
+        metadata["room_id"] = scope.room_id
+    if scope.thread_id is not None:
+        metadata["thread_id"] = scope.thread_id
+    if scope.file_id is not None:
+        metadata["file_id"] = scope.file_id
+    if scope.file_version is not None:
+        metadata["file_version"] = scope.file_version
+    return metadata
+
+
+def _build_agent_id(scope: NexaScopeContext) -> str:
+    return f"nexa:{scope.integration_surface}"
+
+
+def _dedupe_search_hits(
+    hits: tuple[NexaMem0SearchHit, ...], *, namespace: str, layer: str
+) -> list[NexaRuntimeMemoryHit]:
+    seen: set[tuple[str | None, str]] = set()
+    deduped: list[NexaRuntimeMemoryHit] = []
+    for hit in hits:
+        identity = (hit.memory_id, hit.content)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(
+            NexaRuntimeMemoryHit(
+                memory_id=hit.memory_id,
+                content=hit.content,
+                score=hit.score,
+                namespace=namespace,
+                layer=layer,
+                metadata=hit.metadata,
+            )
+        )
+    return deduped
+
+
+def _to_runtime_write_result(
+    result: NexaMem0WriteResult,
+    *,
+    namespace: str,
+    decision_reason: str,
+) -> NexaRuntimeMemoryWriteResult:
+    if result.outcome == "degraded":
+        return NexaRuntimeMemoryWriteResult(
+            status="degraded",
+            attempted=True,
+            target_namespace=namespace,
+            memory_id=None,
+            decision_reason=decision_reason,
+            degraded_error=result.error,
+        )
+    return NexaRuntimeMemoryWriteResult(
+        status="ok",
+        attempted=True,
+        target_namespace=namespace,
+        memory_id=result.memory_id,
+        decision_reason=decision_reason,
+    )
+
+
+def _build_onlyoffice_memory_query(
+    save_signal: NexaOnlyofficeSaveSignal,
+    canonical_file: NexaCanonicalFileSnapshot,
+) -> str:
+    parts = [
+        f"ONLYOFFICE reconcile {save_signal.document_key}",
+        canonical_file.content,
+    ]
+    if save_signal.path is not None:
+        parts.insert(1, save_signal.path)
+    return " :: ".join(part for part in parts if part.strip() != "")
+
+
+__all__ = [
+    "NexaOnlyofficeActionResult",
+    "NexaPlannedTalkReply",
+    "NexaQueuedJobResult",
+    "NexaRuntimeDependencies",
+    "NexaRuntimeMemoryHit",
+    "NexaRuntimeMemoryQueryResult",
+    "NexaRuntimeMemoryWriteResult",
+    "NexaTalkRuntimeResult",
+    "NexaOnlyofficeRuntimeResult",
+    "process_onlyoffice_job",
+    "process_talk_job",
+    "run_queued_nexa_job",
+]

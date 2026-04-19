@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dokploy_wizard.packs.openclaw.nexa_ingress import (
     handle_onlyoffice_callback,
     handle_talk_webhook,
 )
+from dokploy_wizard.packs.openclaw.nexa_mem0_client import NexaMem0Client
 from dokploy_wizard.packs.openclaw.nexa_memory import (
     NexaMemoryWriteRequest,
+    build_nexa_mem0_config,
     build_nexa_memory_scopes,
     evaluate_memory_write_policy,
 )
@@ -31,12 +34,21 @@ from dokploy_wizard.packs.openclaw.nexa_talk_reply import (
     NexaTalkReplyRequest,
     deliver_talk_reply,
 )
+from dokploy_wizard.packs.openclaw.nexa_runtime import (
+    NexaOnlyofficeActionResult,
+    NexaOnlyofficeRuntimeResult,
+    NexaPlannedTalkReply,
+    NexaRuntimeDependencies,
+    NexaTalkRuntimeResult,
+    run_queued_nexa_job,
+)
 from dokploy_wizard.state import (
     DurableQueueStore,
     load_job_queue_state,
     load_outbound_delivery_log,
 )
 from dokploy_wizard.state.queue_policy import sweep_expired_leases
+from tests.nexa_mem0_test_server import mem0_base_url, run_recording_mem0_server
 from .nexa_e2e_helpers import (
     ONLYOFFICE_CALLBACK_SECRET,
     TALK_SHARED_SECRET,
@@ -48,6 +60,22 @@ from .nexa_e2e_helpers import (
     ts,
     write_evidence,
 )
+
+
+def _mem0_env(base_url: str) -> dict[str, str]:
+    return {
+        "OPENCLAW_NEXA_MEM0_BASE_URL": base_url,
+        "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
+        "OPENCLAW_NEXA_MEM0_LLM_BASE_URL": "https://integrate.api.nvidia.com/v1",
+        "OPENCLAW_NEXA_MEM0_LLM_API_KEY": "nvidia-api-key",
+        "OPENCLAW_NEXA_MEM0_VECTOR_BACKEND": "qdrant",
+        "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL": "http://qdrant:6333",
+        "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY": "vector-api-key",
+    }
+
+
+def _runtime_ts(hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 4, 20, hour, minute, tzinfo=UTC)
 
 
 def _fresh_canonical_file(*, file_version: str, acl_complete: bool = True) -> NexaCanonicalFileSnapshot:
@@ -99,7 +127,7 @@ def test_talk_event_runs_through_queue_memory_retrieval_and_one_visible_reply(tm
         store=store,
     )
 
-    leased = store.lease_next_job(lease_owner="worker-talk", now=ts(12, 46))
+    leased = store.lease_next_job(lease_owner="worker-talk", now=_runtime_ts(12, 46))
     assert leased is not None
     talk_scope = build_talk_scope(payload)
     memory_scopes = build_nexa_memory_scopes(talk_scope)
@@ -153,23 +181,61 @@ def test_talk_event_runs_through_queue_memory_retrieval_and_one_visible_reply(tm
         ),
     )
     sent_payloads: list[dict[str, object]] = []
-    reply_request = NexaTalkReplyRequest(
-        scope=talk_scope,
-        delivery_key="talk-reply:evt-talk-room-42-msg-845-v2",
-        conversation_id=payload["conversation"]["id"],
-        reply_to_message_id=payload["message"]["id"],
-        text="Two action items: review the Q2 edits and confirm the write-back before close.",
-        capabilities=payload["capabilities"],
-        context=payload["context"],
-    )
-
-    def sender(outbound_payload: dict[str, object]) -> dict[str, str]:
-        sent_payloads.append(outbound_payload)
-        return {"messageId": "talk-sent-900", "requestId": "request-42"}
-
-    first_dispatch = deliver_talk_reply(reply_request, store=store, sender=sender, now=ts(12, 47))
-    second_dispatch = deliver_talk_reply(reply_request, store=store, sender=sender, now=ts(12, 48))
-    store.mark_job_completed(job_id=leased.job_id, now=ts(12, 49))
+    with run_recording_mem0_server(
+        search_results=[
+            {
+                "id": "mem-room-42-1",
+                "memory": "The room expects a concise Q2 write-back summary after visible send.",
+                "score": 0.88,
+                "metadata": {
+                    "namespace": memory_scopes.shared_memory.namespace if memory_scopes.shared_memory else "",
+                    "layer": "shared",
+                },
+            }
+        ]
+    ) as mem0_server:
+        runtime_result = run_queued_nexa_job(
+            leased,
+            store=store,
+            env=_mem0_env(mem0_base_url(mem0_server)),
+            dependencies=NexaRuntimeDependencies(
+                talk_reply_planner=lambda payload, memory: NexaPlannedTalkReply(
+                    text="Two action items: review the Q2 edits and confirm the write-back before close.",
+                    memory_content="Shared room summary: review the Q2 edits and confirm the write-back before close.",
+                ),
+                talk_sender=lambda outbound_payload: (
+                    sent_payloads.append(outbound_payload) or {"messageId": "talk-sent-900", "requestId": "request-42"}
+                ),
+                onlyoffice_agent_identity=NexaOnlyofficeAgentIdentity(
+                    agent_user_id="nexa-agent",
+                    display_name="Nexa",
+                ),
+                load_canonical_file=lambda save_signal: _fresh_canonical_file(file_version="171"),
+                onlyoffice_reconcile_executor=lambda decision, save_signal, canonical_file, memory: NexaOnlyofficeActionResult(
+                    outcome="skipped",
+                    authoritative_write=False,
+                ),
+                mem0_client=NexaMem0Client(build_nexa_mem0_config(_mem0_env(mem0_base_url(mem0_server)))),
+            ),
+            now=_runtime_ts(12, 47),
+        )
+        second_dispatch = deliver_talk_reply(
+            NexaTalkReplyRequest(
+                scope=talk_scope,
+                delivery_key="talk-reply:evt-talk-room-42-msg-845-v2",
+                conversation_id=payload["conversation"]["id"],
+                conversation_token=payload["conversation"].get("token"),
+                reply_to_message_id=payload["message"]["id"],
+                text="Two action items: review the Q2 edits and confirm the write-back before close.",
+                capabilities=payload["capabilities"],
+                context=payload["context"],
+            ),
+            store=store,
+            sender=lambda outbound_payload: {"messageId": "talk-sent-901", "requestId": "request-43"},
+            now=_runtime_ts(12, 48),
+        )
+    talk_runtime_result = runtime_result.result
+    assert isinstance(talk_runtime_result, NexaTalkRuntimeResult)
     evidence_path = write_evidence(
         tmp_path,
         scenario="talk_flow",
@@ -179,8 +245,11 @@ def test_talk_event_runs_through_queue_memory_retrieval_and_one_visible_reply(tm
             "memory_namespace": memory_scopes.shared_memory.namespace if memory_scopes.shared_memory else None,
             "retrieval_reason": retrieval_plan.usage.reason,
             "retrieval_pointer_allowed": retrieval_plan.candidate_decision.allowed,
-            "reply_outcomes": [first_dispatch.outcome, second_dispatch.outcome],
+            "reply_outcomes": [talk_runtime_result.reply_dispatch.outcome, second_dispatch.outcome],
             "visible_send_count": len(sent_payloads),
+            "memory_read_status": talk_runtime_result.memory_read.status,
+            "memory_write_status": talk_runtime_result.memory_write.status,
+            "mem0_paths": [request.path for request in mem0_server.requests],
         },
     )
 
@@ -194,8 +263,11 @@ def test_talk_event_runs_through_queue_memory_retrieval_and_one_visible_reply(tm
     assert transcript_memory.reason == "raw_room_transcript_is_not_durable"
     assert retrieval_plan.usage.action == "proceed"
     assert retrieval_plan.candidate_decision.allowed is True
-    assert first_dispatch.outcome == "sent"
-    assert first_dispatch.visible_send is True
+    assert runtime_result.status == "completed"
+    assert talk_runtime_result.memory_read.status == "ok"
+    assert talk_runtime_result.memory_write.status == "ok"
+    assert talk_runtime_result.reply_dispatch.outcome == "sent"
+    assert talk_runtime_result.reply_dispatch.visible_send is True
     assert second_dispatch.outcome == "duplicate"
     assert second_dispatch.visible_send is False
     assert len(sent_payloads) == 1
@@ -227,7 +299,7 @@ def test_onlyoffice_force_save_defers_until_final_close_then_reconciles_with_pin
         store=store,
     )
 
-    authoritative_job = store.lease_next_job(lease_owner="worker-doc", now=ts(13, 0))
+    authoritative_job = store.lease_next_job(lease_owner="worker-doc", now=_runtime_ts(13, 0))
     assert authoritative_job is not None
     authoritative_signal = build_onlyoffice_save_signal(final_payload)
     authoritative_decision = evaluate_onlyoffice_reconcile_policy(
@@ -239,14 +311,49 @@ def test_onlyoffice_force_save_defers_until_final_close_then_reconciles_with_pin
         canonical_file=_fresh_canonical_file(file_version="172"),
     )
     document_actions: list[dict[str, str]] = []
-    _record_document_action(
-        document_actions,
-        gate_action=authoritative_gate.action,
-        save_reason=authoritative_decision.reason,
-        agent_identity=agent_identity,
-        target_path=authoritative_signal.path,
-    )
-    store.mark_job_completed(job_id=authoritative_job.job_id, now=ts(13, 1))
+    with run_recording_mem0_server(
+        search_results=[
+            {
+                "id": "mem-file-991-1",
+                "memory": "Project file-991 expects in-place tracked write-back for authoritative final-close saves.",
+                "score": 0.83,
+                "metadata": {"file_id": "file-991", "layer": "durable_facts"},
+            }
+        ]
+    ) as mem0_server:
+        runtime_result = run_queued_nexa_job(
+            authoritative_job,
+            store=store,
+            env=_mem0_env(mem0_base_url(mem0_server)),
+            dependencies=NexaRuntimeDependencies(
+                talk_reply_planner=lambda payload, memory: NexaPlannedTalkReply(
+                    text="unused",
+                    memory_content="unused",
+                ),
+                talk_sender=lambda outbound_payload: {"messageId": "unused"},
+                onlyoffice_agent_identity=agent_identity,
+                load_canonical_file=lambda save_signal: _fresh_canonical_file(file_version="172"),
+                onlyoffice_reconcile_executor=lambda decision, save_signal, canonical_file, memory: (
+                    _record_document_action(
+                        document_actions,
+                        gate_action="proceed",
+                        save_reason=decision.reason,
+                        agent_identity=agent_identity,
+                        target_path=save_signal.path,
+                    )
+                    or NexaOnlyofficeActionResult(
+                        outcome="applied",
+                        authoritative_write=True,
+                        memory_content="Authoritative reconcile applied to file-991 with tracked changes.",
+                    )
+                ),
+                mem0_client=NexaMem0Client(build_nexa_mem0_config(_mem0_env(mem0_base_url(mem0_server)))),
+            ),
+            now=_runtime_ts(13, 1),
+        )
+        mem0_paths = [request.path for request in mem0_server.requests]
+    onlyoffice_runtime_result = runtime_result.result
+    assert isinstance(onlyoffice_runtime_result, NexaOnlyofficeRuntimeResult)
     deferred_signal = build_onlyoffice_save_signal(force_payload)
     deferred_decision = evaluate_onlyoffice_reconcile_policy(
         deferred_signal,
@@ -255,14 +362,7 @@ def test_onlyoffice_force_save_defers_until_final_close_then_reconciles_with_pin
     )
     queue_after_final_close = sweep_expired_leases(
         load_job_queue_state(tmp_path),
-        now=ts(13, 2).isoformat(),
-    )
-    _record_document_action(
-        document_actions,
-        gate_action="deferred",
-        save_reason=deferred_decision.reason,
-        agent_identity=agent_identity,
-        target_path=deferred_signal.path,
+        now=_runtime_ts(13, 2).isoformat(),
     )
     evidence_path = write_evidence(
         tmp_path,
@@ -275,6 +375,9 @@ def test_onlyoffice_force_save_defers_until_final_close_then_reconciles_with_pin
             "deferred_reason": deferred_decision.reason,
             "deferred_queue_statuses": [job.status for job in queue_after_final_close.jobs],
             "document_actions": document_actions,
+            "memory_read_status": onlyoffice_runtime_result.memory_read.status,
+            "memory_write_status": onlyoffice_runtime_result.memory_write.status,
+            "mem0_paths": mem0_paths,
         },
     )
 
@@ -289,6 +392,9 @@ def test_onlyoffice_force_save_defers_until_final_close_then_reconciles_with_pin
     assert authoritative_decision.write_back_policy.mode == "update_original_with_track_changes"
     assert authoritative_decision.write_back_policy.agent_identity == agent_identity
     assert authoritative_decision.write_back_policy.comment_reply_attribution_source == "configured_agent_identity"
+    assert runtime_result.status == "completed"
+    assert onlyoffice_runtime_result.memory_read.status == "ok"
+    assert onlyoffice_runtime_result.memory_write.status == "ok"
     assert deferred_decision.action == "await_final_close"
     assert deferred_decision.reason == "force_save_superseded_by_final_close"
     assert [job.status for job in queue_after_final_close.jobs] == ["superseded", "completed"]
@@ -392,26 +498,26 @@ def test_queue_fairness_and_backpressure_preserve_background_turn_and_scope_seri
         store=store,
     )
 
-    lease_one = store.lease_next_job(lease_owner="worker-a", now=ts(14, 0))
-    blocked_cross_scope_while_active = store.lease_next_job(lease_owner="worker-b", now=ts(14, 1))
+    lease_one = store.lease_next_job(lease_owner="worker-a", now=_runtime_ts(14, 0))
+    blocked_cross_scope_while_active = store.lease_next_job(lease_owner="worker-b", now=_runtime_ts(14, 1))
     assert lease_one is not None
     assert blocked_cross_scope_while_active is None
 
-    store.mark_job_completed(job_id=lease_one.job_id, now=ts(14, 2))
-    lease_two = store.lease_next_job(lease_owner="worker-b", now=ts(14, 3))
+    store.mark_job_completed(job_id=lease_one.job_id, now=_runtime_ts(14, 2))
+    lease_two = store.lease_next_job(lease_owner="worker-b", now=_runtime_ts(14, 3))
     assert lease_two is not None
-    blocked_background_while_active = store.lease_next_job(lease_owner="worker-c", now=ts(14, 4))
+    blocked_background_while_active = store.lease_next_job(lease_owner="worker-c", now=_runtime_ts(14, 4))
     assert blocked_background_while_active is None
 
-    store.mark_job_completed(job_id=lease_two.job_id, now=ts(14, 5))
-    lease_three = store.lease_next_job(lease_owner="worker-c", now=ts(14, 6))
+    store.mark_job_completed(job_id=lease_two.job_id, now=_runtime_ts(14, 5))
+    lease_three = store.lease_next_job(lease_owner="worker-c", now=_runtime_ts(14, 6))
     assert lease_three is not None
     queue_after_background_turn = load_job_queue_state(tmp_path)
-    blocked_while_scope_active = store.lease_next_job(lease_owner="worker-d", now=ts(14, 7))
+    blocked_while_scope_active = store.lease_next_job(lease_owner="worker-d", now=_runtime_ts(14, 7))
     assert blocked_while_scope_active is None
 
-    store.mark_job_completed(job_id=lease_three.job_id, now=ts(14, 8))
-    resumed_same_scope = store.lease_next_job(lease_owner="worker-d", now=ts(14, 9))
+    store.mark_job_completed(job_id=lease_three.job_id, now=_runtime_ts(14, 8))
+    resumed_same_scope = store.lease_next_job(lease_owner="worker-d", now=_runtime_ts(14, 9))
     queue_state = load_job_queue_state(tmp_path)
     evidence_path = write_evidence(
         tmp_path,

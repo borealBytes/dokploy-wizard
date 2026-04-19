@@ -159,6 +159,22 @@ class DurableQueueStore:
         )
         return new_job
 
+    def get_incoming_event(
+        self,
+        *,
+        source: str,
+        idempotency_key: str,
+    ) -> InboxEventRecord | None:
+        event_log = load_inbox_event_log(self.state_dir)
+        return next(
+            (
+                event
+                for event in event_log.events
+                if event.source == source and event.idempotency_key == idempotency_key
+            ),
+            None,
+        )
+
     def get_outbound_delivery(
         self,
         *,

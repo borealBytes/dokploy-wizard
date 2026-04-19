@@ -1,4 +1,4 @@
-"""Public state-layer interface for Task 2."""
+"""Public state-layer interface for runtime and lifecycle state."""
 
 from dokploy_wizard.state.env import parse_env_file, resolve_desired_state
 from dokploy_wizard.state.models import (

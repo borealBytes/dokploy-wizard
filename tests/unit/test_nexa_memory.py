@@ -22,18 +22,18 @@ from dokploy_wizard.packs.openclaw.nexa_scope import NexaScopeContext
 def test_build_nexa_mem0_config_maps_nvidia_through_openai_compatible_settings() -> None:
     config = build_nexa_mem0_config(
         {
-            "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.internal.example.com",
+            "OPENCLAW_NEXA_MEM0_BASE_URL": "http://mem0:8000",
             "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
             "OPENCLAW_NEXA_MEM0_LLM_BASE_URL": "https://integrate.api.nvidia.com/v1",
             "OPENCLAW_NEXA_MEM0_LLM_API_KEY": "nvidia-api-key",
             "OPENCLAW_NEXA_MEM0_VECTOR_BACKEND": "qdrant",
-            "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL": "https://qdrant.internal.example.com",
+            "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL": "http://qdrant:6333",
             "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY": "vector-api-key",
             "OPENCLAW_NEXA_MEM0_VECTOR_DIMENSIONS": "384",
         }
     )
 
-    assert config.base_url == "https://mem0.internal.example.com"
+    assert config.base_url == "http://mem0:8000"
     assert config.api_key == "mem0-api-key"
     assert config.llm.provider == "openai"
     assert config.llm.base_url == "https://integrate.api.nvidia.com/v1"
@@ -48,7 +48,7 @@ def test_build_nexa_mem0_config_maps_nvidia_through_openai_compatible_settings()
 
     assert config.to_mem0_config() == {
         "api_key": "mem0-api-key",
-        "host": "https://mem0.internal.example.com",
+        "host": "http://mem0:8000",
         "llm": {
             "provider": "openai",
             "config": {
@@ -66,7 +66,7 @@ def test_build_nexa_mem0_config_maps_nvidia_through_openai_compatible_settings()
         "vector_store": {
             "provider": "qdrant",
             "config": {
-                "base_url": "https://qdrant.internal.example.com",
+                "base_url": "http://qdrant:6333",
                 "api_key": "vector-api-key",
                 "embedding_model_dims": 384,
             },
@@ -86,12 +86,12 @@ def test_build_nexa_mem0_config_rejects_non_384_dimension_contract() -> None:
     with pytest.raises(NexaMemoryConfigError, match="must stay pinned to 384"):
         build_nexa_mem0_config(
             {
-                "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.internal.example.com",
+                "OPENCLAW_NEXA_MEM0_BASE_URL": "http://mem0:8000",
                 "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
                 "OPENCLAW_NEXA_MEM0_LLM_BASE_URL": "https://integrate.api.nvidia.com/v1",
                 "OPENCLAW_NEXA_MEM0_LLM_API_KEY": "nvidia-api-key",
                 "OPENCLAW_NEXA_MEM0_VECTOR_BACKEND": "qdrant",
-                "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL": "https://qdrant.internal.example.com",
+                "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL": "http://qdrant:6333",
                 "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY": "vector-api-key",
                 "OPENCLAW_NEXA_MEM0_EMBEDDER_DIMENSIONS": "768",
             }

@@ -30,6 +30,7 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     assert get_pack_definition("openclaw").slot is None
     assert get_pack_definition("my-farm-advisor").slot is None
     assert get_pack_definition("openclaw").mutable_resource_keys == ("OPENCLAW_REPLICAS",)
+    assert "OPENCLAW_NEXA_DEPLOYMENT_MODE" in get_pack_definition("openclaw").mutable_env_keys
     assert "OPENCLAW_NEXA_MEM0_BASE_URL" in get_pack_definition("openclaw").mutable_env_keys
     assert "OPENCLAW_NEXA_PRESENCE_POLICY" in get_pack_definition("openclaw").mutable_env_keys
     assert "OPENCLAW_NEXA_TALK_SHARED_SECRET" in get_pack_definition("openclaw").mutable_env_keys

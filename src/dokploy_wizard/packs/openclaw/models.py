@@ -33,11 +33,19 @@ class OpenClawHealthCheck:
 class OpenClawNexaDeploymentContract:
     enabled: bool
     deployment_mode: str
+    topology_mode: str
     mem0_mode: str
     credential_mediation_mode: str
     runtime_contract_path: str
+    runtime_service_name: str | None
+    runtime_state_dir: str
     workspace_root: str
     workspace_contract_path: str
+    internal_network_only: bool
+    mem0_service_name: str | None
+    mem0_base_url: str | None
+    qdrant_service_name: str | None
+    qdrant_base_url: str | None
     secret_env_keys: tuple[str, ...]
     notes: tuple[str, ...]
 
@@ -46,10 +54,18 @@ class OpenClawNexaDeploymentContract:
             "credential_mediation_mode": self.credential_mediation_mode,
             "deployment_mode": self.deployment_mode,
             "enabled": self.enabled,
+            "internal_network_only": self.internal_network_only,
             "mem0_mode": self.mem0_mode,
+            "mem0_base_url": self.mem0_base_url,
+            "mem0_service_name": self.mem0_service_name,
             "notes": list(self.notes),
+            "qdrant_base_url": self.qdrant_base_url,
+            "qdrant_service_name": self.qdrant_service_name,
             "runtime_contract_path": self.runtime_contract_path,
+            "runtime_service_name": self.runtime_service_name,
+            "runtime_state_dir": self.runtime_state_dir,
             "secret_env_keys": list(self.secret_env_keys),
+            "topology_mode": self.topology_mode,
             "workspace_contract_path": self.workspace_contract_path,
             "workspace_root": self.workspace_root,
         }

@@ -37,6 +37,17 @@ _DEFAULT_NEXA_RUNTIME_CONTRACT_PATH = "/home/node/.openclaw/.nexa/runtime-contra
 _DEFAULT_NEXA_WORKSPACE_CONTRACT_PATH = f"{_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT}/contract.json"
 _DEFAULT_NEXA_WORKSPACE_README_PATH = f"{_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT}/README.md"
 _DEFAULT_NEXA_VISIBLE_WORKSPACE_ROOT = "/mnt/openclaw/workspace/nexa"
+_DEFAULT_NEXA_RUNTIME_VOLUME_ROOT = "/mnt/openclaw"
+_DEFAULT_NEXA_RUNTIME_STATE_DIR = f"{_DEFAULT_NEXA_RUNTIME_VOLUME_ROOT}/.nexa/state"
+_DEFAULT_NEXA_DEPLOYMENT_MODE = "sidecar"
+_DEFAULT_NEXA_RUNTIME_SERVICE_NAME = "nexa-runtime"
+_DEFAULT_NEXA_MEM0_SERVICE_NAME = "mem0"
+_DEFAULT_NEXA_MEM0_PORT = 8000
+_DEFAULT_NEXA_QDRANT_SERVICE_NAME = "qdrant"
+_DEFAULT_NEXA_QDRANT_PORT = 6333
+_DEFAULT_NEXA_RUNTIME_IMAGE = "local/dokploy-wizard-nexa-runtime:latest"
+_DEFAULT_NEXA_RUNTIME_BUILD_CONTEXT = "."
+_DEFAULT_NEXA_RUNTIME_DOCKERFILE = "docker/nexa-runtime/Dockerfile"
 
 
 class DokployOpenClawApi(Protocol):
@@ -113,6 +124,7 @@ class DokployOpenClawBackend:
         nvidia_visible_devices: str = _DEFAULT_NVIDIA_VISIBLE_DEVICES,
         client: DokployOpenClawApi | None = None,
     ) -> None:
+        resolved_openclaw_nexa_env = _resolve_openclaw_nexa_env(openclaw_nexa_env or {})
         self._stack_name = stack_name
         self._runtime_configs = {
             "openclaw": _AdvisorRuntimeConfig(
@@ -129,8 +141,8 @@ class DokployOpenClawBackend:
                 model_name=model_name,
                 trusted_proxies=trusted_proxies,
                 nvidia_visible_devices=nvidia_visible_devices,
-                nexa_env=dict(openclaw_nexa_env or {}),
-                nexa_contract=_build_nexa_deployment_contract(openclaw_nexa_env or {}),
+                nexa_env=resolved_openclaw_nexa_env,
+                nexa_contract=_build_nexa_deployment_contract(resolved_openclaw_nexa_env),
             ),
             "my-farm-advisor": _AdvisorRuntimeConfig(
                 gateway_token=gateway_token,
@@ -536,6 +548,7 @@ def _render_compose_file(
     startup_mode = "advisor" if variant == "openclaw" else "my-farm-advisor"
     image = _image_for_variant(variant)
     slot_name = "openclaw_suite" if variant == "openclaw" else "my-farm-advisor_suite"
+    nexa_sidecars_enabled = variant == "openclaw" and _openclaw_nexa_sidecars_enabled(runtime_config)
     labels = {
         "dokploy-wizard.slot": slot_name,
         "dokploy-wizard.variant": variant,
@@ -621,6 +634,14 @@ def _render_compose_file(
         "      timeout: 5s",
         "      retries: 5",
     ]
+    if nexa_sidecars_enabled:
+        lines.extend(
+            [
+                "    depends_on:",
+                f"      - {_DEFAULT_NEXA_MEM0_SERVICE_NAME}",
+                f"      - {_DEFAULT_NEXA_QDRANT_SERVICE_NAME}",
+            ]
+        )
     if variant == "my-farm-advisor":
         volume_name = f"{service_name}-data"
         lines.extend(
@@ -652,13 +673,17 @@ def _render_compose_file(
     if variant == "my-farm-advisor":
         lines.extend(["volumes:", f"  {service_name}-data:"])
     elif variant == "openclaw":
-        lines.extend(
-            [
-                "volumes:",
-                f"  {_openclaw_data_volume_name(stack_name)}:",
-                f"    name: {_openclaw_data_volume_name(stack_name)}",
-            ]
-        )
+        if nexa_sidecars_enabled:
+            lines.extend(
+                _render_openclaw_nexa_sidecar_services(
+                    stack_name,
+                    runtime_config,
+                    service_name=service_name,
+                )
+            )
+        lines.extend(["volumes:"])
+        for volume in _openclaw_named_volumes(stack_name, include_nexa_sidecars=nexa_sidecars_enabled):
+            lines.extend([f"  {volume}:", f"    name: {volume}"])
     lines.extend(
         [
             "networks:",
@@ -685,6 +710,237 @@ def _image_for_variant(variant: str) -> str:
 
 def _openclaw_data_volume_name(stack_name: str) -> str:
     return f"{stack_name}-openclaw-data"
+
+
+def _nexa_mem0_history_volume_name(stack_name: str) -> str:
+    return f"{stack_name}-openclaw-mem0-history"
+
+
+def _nexa_qdrant_data_volume_name(stack_name: str) -> str:
+    return f"{stack_name}-openclaw-qdrant-data"
+
+
+def _nexa_mem0_base_url() -> str:
+    return f"http://{_DEFAULT_NEXA_MEM0_SERVICE_NAME}:{_DEFAULT_NEXA_MEM0_PORT}"
+
+
+def _nexa_qdrant_base_url() -> str:
+    return f"http://{_DEFAULT_NEXA_QDRANT_SERVICE_NAME}:{_DEFAULT_NEXA_QDRANT_PORT}"
+
+
+def _nexa_runtime_volume_path(path: str) -> str:
+    openclaw_root = "/home/node/.openclaw"
+    if path == openclaw_root:
+        return _DEFAULT_NEXA_RUNTIME_VOLUME_ROOT
+    prefix = f"{openclaw_root}/"
+    if path.startswith(prefix):
+        return f"{_DEFAULT_NEXA_RUNTIME_VOLUME_ROOT}/{path.removeprefix(prefix)}"
+    return path
+
+
+def _openclaw_named_volumes(stack_name: str, *, include_nexa_sidecars: bool) -> tuple[str, ...]:
+    volumes = [_openclaw_data_volume_name(stack_name)]
+    if include_nexa_sidecars:
+        volumes.extend(
+            [
+                _nexa_qdrant_data_volume_name(stack_name),
+                _nexa_mem0_history_volume_name(stack_name),
+            ]
+        )
+    return tuple(volumes)
+
+
+def _openclaw_nexa_sidecars_enabled(runtime_config: _AdvisorRuntimeConfig) -> bool:
+    return (
+        runtime_config.nexa_contract is not None
+        and runtime_config.nexa_contract.deployment_mode == _DEFAULT_NEXA_DEPLOYMENT_MODE
+    )
+
+
+def _render_openclaw_nexa_sidecar_services(
+    stack_name: str,
+    runtime_config: _AdvisorRuntimeConfig,
+    *,
+    service_name: str,
+) -> list[str]:
+    mem0_config_json = json.dumps(_build_mem0_sidecar_config(runtime_config.nexa_env), separators=(",", ":"))
+    mem0_environment = {
+        "HISTORY_DB_PATH": "/app/history/history.db",
+        "MEM0_DEFAULT_CONFIG_JSON": mem0_config_json,
+        "PYTHONUNBUFFERED": "1",
+    }
+    mem0_api_key = runtime_config.nexa_env.get("OPENCLAW_NEXA_MEM0_API_KEY")
+    if mem0_api_key is not None:
+        mem0_environment["ADMIN_API_KEY"] = mem0_api_key
+    llm_api_key = runtime_config.nexa_env.get("OPENCLAW_NEXA_MEM0_LLM_API_KEY")
+    if llm_api_key is not None:
+        mem0_environment["OPENAI_API_KEY"] = llm_api_key
+    qdrant_environment = {}
+    qdrant_api_key = runtime_config.nexa_env.get("OPENCLAW_NEXA_MEM0_VECTOR_API_KEY")
+    if qdrant_api_key is not None:
+        qdrant_environment["QDRANT__SERVICE__API_KEY"] = qdrant_api_key
+    if runtime_config.nexa_contract is None:
+        msg = "Expected a Nexa deployment contract before rendering sidecar services."
+        raise OpenClawError(msg)
+    runtime_environment = {
+        **runtime_config.nexa_env,
+        "DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH": _nexa_runtime_volume_path(
+            runtime_config.nexa_contract.runtime_contract_path
+        ),
+        "DOKPLOY_WIZARD_NEXA_STATE_DIR": runtime_config.nexa_contract.runtime_state_dir,
+        "DOKPLOY_WIZARD_NEXA_WORKER_MODE": "queue",
+        "DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH": _nexa_runtime_volume_path(
+            runtime_config.nexa_contract.workspace_contract_path
+        ),
+        "DOKPLOY_WIZARD_NEXA_WORKSPACE_ROOT": _nexa_runtime_volume_path(
+            runtime_config.nexa_contract.workspace_root
+        ),
+        "PYTHONUNBUFFERED": "1",
+    }
+    lines = [
+        f"  {_DEFAULT_NEXA_QDRANT_SERVICE_NAME}:",
+        "    image: qdrant/qdrant",
+        "    restart: unless-stopped",
+        "    volumes:",
+        f"      - {_nexa_qdrant_data_volume_name(stack_name)}:/qdrant/storage",
+        "    networks:",
+        "      - default",
+    ]
+    if qdrant_environment:
+        lines.extend(
+            [
+                "    environment:",
+                *[
+                    f"      {key}: {_yaml_quote(value)}"
+                    for key, value in sorted(qdrant_environment.items())
+                ],
+            ]
+        )
+    lines.extend(
+        [
+            f"  {_DEFAULT_NEXA_MEM0_SERVICE_NAME}:",
+            "    image: mem0/mem0-api-server",
+            "    restart: unless-stopped",
+            "    command: "
+            f"{_render_mem0_sidecar_command()}",
+            "    environment:",
+            *[
+                f"      {key}: {_yaml_quote(value)}"
+                for key, value in sorted(mem0_environment.items())
+            ],
+            "    volumes:",
+            f"      - {_nexa_mem0_history_volume_name(stack_name)}:/app/history",
+            "    networks:",
+            "      - default",
+            "    depends_on:",
+            f"      - {_DEFAULT_NEXA_QDRANT_SERVICE_NAME}",
+            "    healthcheck:",
+            "      test: ['CMD-SHELL', 'python -c \"import urllib.request; urllib.request.urlopen(\'http://127.0.0.1:8000/openapi.json\')\"']",
+            "      interval: 30s",
+            "      timeout: 5s",
+            "      retries: 5",
+            f"  {_DEFAULT_NEXA_RUNTIME_SERVICE_NAME}:",
+            f"    image: {_DEFAULT_NEXA_RUNTIME_IMAGE}",
+            "    build:",
+            f"      context: {_DEFAULT_NEXA_RUNTIME_BUILD_CONTEXT}",
+            f"      dockerfile: {_DEFAULT_NEXA_RUNTIME_DOCKERFILE}",
+            "    restart: unless-stopped",
+            "    environment:",
+            *[
+                f"      {key}: {_yaml_quote(value)}"
+                for key, value in sorted(runtime_environment.items())
+            ],
+            "    volumes:",
+            f"      - {_openclaw_data_volume_name(stack_name)}:{_DEFAULT_NEXA_RUNTIME_VOLUME_ROOT}",
+            "    networks:",
+            "      - default",
+            "    depends_on:",
+            f"      - {service_name}",
+            f"      - {_DEFAULT_NEXA_MEM0_SERVICE_NAME}",
+            f"      - {_DEFAULT_NEXA_QDRANT_SERVICE_NAME}",
+            "    healthcheck:",
+            "      test: ['CMD-SHELL', 'python -c \"import os; from pathlib import Path; contract=Path(os.environ[\\\"DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH\\\"]); workspace=Path(os.environ[\\\"DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH\\\"]); state_dir=Path(os.environ[\\\"DOKPLOY_WIZARD_NEXA_STATE_DIR\\\"]); raise SystemExit(0 if contract.exists() and workspace.exists() and state_dir.exists() else 1)\"']",
+            "      interval: 30s",
+            "      timeout: 5s",
+            "      retries: 5",
+        ]
+    )
+    return lines
+
+
+def _build_mem0_sidecar_config(nexa_env: dict[str, str]) -> dict[str, object]:
+    vector_config: dict[str, object] = {
+        "collection_name": "mem0",
+        "embedding_model_dims": int(
+            nexa_env.get("OPENCLAW_NEXA_MEM0_VECTOR_DIMENSIONS", "384")
+        ),
+        "url": _nexa_qdrant_base_url(),
+    }
+    qdrant_api_key = nexa_env.get("OPENCLAW_NEXA_MEM0_VECTOR_API_KEY")
+    if qdrant_api_key is not None:
+        vector_config["api_key"] = qdrant_api_key
+    llm_config: dict[str, object] = {}
+    if nexa_env.get("OPENCLAW_NEXA_MEM0_LLM_API_KEY") is not None:
+        llm_config["api_key"] = nexa_env["OPENCLAW_NEXA_MEM0_LLM_API_KEY"]
+    if nexa_env.get("OPENCLAW_NEXA_MEM0_LLM_BASE_URL") is not None:
+        llm_config["base_url"] = nexa_env["OPENCLAW_NEXA_MEM0_LLM_BASE_URL"]
+    config: dict[str, object] = {
+        "version": "v1.1",
+        "vector_store": {
+            "provider": "qdrant",
+            "config": vector_config,
+        },
+        "llm": {
+            "provider": "openai",
+            "config": llm_config,
+        },
+        "embedder": {
+            "provider": "huggingface",
+            "config": {
+                "model": nexa_env.get(
+                    "OPENCLAW_NEXA_MEM0_EMBEDDER_MODEL", "BAAI/bge-small-en-v1.5"
+                ),
+                "embedding_dims": int(
+                    nexa_env.get("OPENCLAW_NEXA_MEM0_EMBEDDER_DIMENSIONS", "384")
+                ),
+            },
+        },
+        "history_db_path": "/app/history/history.db",
+    }
+    return config
+
+
+def _render_mem0_sidecar_command() -> str:
+    bootstrap_script = (
+        "import pathlib;"
+        "source=pathlib.Path('/app/main.py').read_text(encoding='utf-8');"
+        "start=source.index('DEFAULT_CONFIG = {');"
+        "marker='\\n\\n\\nMEMORY_INSTANCE = Memory.from_config(DEFAULT_CONFIG)';"
+        "end=source.index(marker);"
+        "replacement='DEFAULT_CONFIG = json.loads(os.environ[\\\"MEM0_DEFAULT_CONFIG_JSON\\\"])';"
+        "pathlib.Path('/app/sidecar_main.py').write_text(source[:start]+replacement+source[end:], encoding='utf-8')"
+    )
+    qdrant_wait_script = (
+        "import time, urllib.request;"
+        "deadline=time.time()+60;"
+        "last_error=None;"
+        "url='http://qdrant:6333/collections';"
+        "while time.time()<deadline:"
+        "\n  try: urllib.request.urlopen(url, timeout=2); raise SystemExit(0)"
+        "\n  except Exception as exc: last_error=exc; time.sleep(1)"
+        "\nraise SystemExit(f'Qdrant sidecar did not become ready: {last_error}')"
+    )
+    return json.dumps(
+        [
+            "sh",
+            "-lc",
+            (
+                f"python -c {shlex.quote(bootstrap_script)} && "
+                f"python -c {shlex.quote(qdrant_wait_script)} && "
+                "exec uvicorn sidecar_main:app --host 0.0.0.0 --port 8000"
+            ),
+        ]
+    )
 
 
 def _health_path_for_variant(variant: str) -> str:
@@ -883,17 +1139,39 @@ def _allowed_models(runtime_config: _AdvisorRuntimeConfig) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _resolve_openclaw_nexa_env(nexa_env: dict[str, str]) -> dict[str, str]:
+    if not nexa_env:
+        return {}
+    resolved = {key: value for key, value in nexa_env.items() if value.strip() != ""}
+    deployment_mode = resolved.get("OPENCLAW_NEXA_DEPLOYMENT_MODE", _DEFAULT_NEXA_DEPLOYMENT_MODE)
+    resolved["OPENCLAW_NEXA_DEPLOYMENT_MODE"] = deployment_mode
+    if deployment_mode == _DEFAULT_NEXA_DEPLOYMENT_MODE:
+        resolved["OPENCLAW_NEXA_MEM0_BASE_URL"] = _nexa_mem0_base_url()
+        resolved["OPENCLAW_NEXA_MEM0_VECTOR_BACKEND"] = "qdrant"
+        resolved["OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL"] = _nexa_qdrant_base_url()
+    return dict(sorted(resolved.items()))
+
+
 def _build_nexa_deployment_contract(
     nexa_env: dict[str, str],
 ) -> OpenClawNexaDeploymentContract | None:
     if not nexa_env:
         return None
+    deployment_mode = nexa_env.get("OPENCLAW_NEXA_DEPLOYMENT_MODE", _DEFAULT_NEXA_DEPLOYMENT_MODE)
     mem0_mode = "rest" if nexa_env.get("OPENCLAW_NEXA_MEM0_BASE_URL") else "library"
+    topology_mode = "internal-compose-sidecars" if deployment_mode == "sidecar" else "external"
     notes = [
         "Nexa stays inside the existing OpenClaw service footprint; no separate agent pack is created.",
         "Credential-bearing Nexa settings remain server-owned environment variables and are not copied into the visible workspace surface.",
         "Nextcloud-visible workspace files are operator/user surfaces only; durable state JSON docs and server-owned env stay authoritative.",
     ]
+    if deployment_mode == "sidecar":
+        notes.append(
+            "Mem0 and Qdrant run as internal-only sidecars on the same compose-default network as OpenClaw, with no Traefik labels or public port publishing."
+        )
+        notes.append(
+            "The Mem0 sidecar is bootstrapped with an explicit Qdrant-backed server config at startup so it does not fall back to the image's pgvector default."
+        )
     if mem0_mode == "rest":
         notes.append(
             "Mem0 REST mode requires private-network exposure and API-key auth; those assumptions are emitted as explicit deployment markers."
@@ -904,12 +1182,26 @@ def _build_nexa_deployment_contract(
         )
     return OpenClawNexaDeploymentContract(
         enabled=True,
-        deployment_mode="openclaw-resident",
+        deployment_mode=deployment_mode,
+        topology_mode=topology_mode,
         mem0_mode=mem0_mode,
         credential_mediation_mode="server-owned-env",
         runtime_contract_path=_DEFAULT_NEXA_RUNTIME_CONTRACT_PATH,
+        runtime_service_name=(
+            _DEFAULT_NEXA_RUNTIME_SERVICE_NAME if deployment_mode == "sidecar" else None
+        ),
+        runtime_state_dir=_DEFAULT_NEXA_RUNTIME_STATE_DIR,
         workspace_root=_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT,
         workspace_contract_path=_DEFAULT_NEXA_WORKSPACE_CONTRACT_PATH,
+        internal_network_only=deployment_mode == "sidecar",
+        mem0_service_name=(
+            _DEFAULT_NEXA_MEM0_SERVICE_NAME if deployment_mode == "sidecar" else None
+        ),
+        mem0_base_url=nexa_env.get("OPENCLAW_NEXA_MEM0_BASE_URL"),
+        qdrant_service_name=(
+            _DEFAULT_NEXA_QDRANT_SERVICE_NAME if deployment_mode == "sidecar" else None
+        ),
+        qdrant_base_url=nexa_env.get("OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL"),
         secret_env_keys=_nexa_secret_env_keys(nexa_env),
         notes=tuple(notes),
     )
@@ -919,7 +1211,10 @@ def _nexa_secret_env_keys(nexa_env: dict[str, str]) -> tuple[str, ...]:
     return tuple(
         key
         for key in sorted(nexa_env)
-        if key.endswith("_API_KEY") or key.endswith("_SECRET") or "SIGNING_SECRET" in key
+        if key.endswith("_API_KEY")
+        or key.endswith("_PASSWORD")
+        or key.endswith("_SECRET")
+        or "SIGNING_SECRET" in key
     )
 
 
@@ -937,6 +1232,24 @@ def _nexa_contract_files(
                 key: {"present": key in nexa_env, "source": "server-owned-env"}
                 for key in contract.secret_env_keys
             },
+            "server_owned_runtime_inputs": {
+                "nextcloud_base_url": {
+                    "present": "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL" in nexa_env,
+                    "source": "server-owned-env",
+                },
+                "webdav_auth_user": {
+                    "present": "OPENCLAW_NEXA_WEBDAV_AUTH_USER" in nexa_env,
+                    "source": "server-owned-env",
+                },
+                "agent_user_id": {
+                    "present": "OPENCLAW_NEXA_AGENT_USER_ID" in nexa_env,
+                    "source": "server-owned-env",
+                },
+                "agent_display_name": {
+                    "present": "OPENCLAW_NEXA_AGENT_DISPLAY_NAME" in nexa_env,
+                    "source": "server-owned-env",
+                },
+            },
             "workspace_override_blocked_fields": [
                 "agent_user_id",
                 "agent_display_name",
@@ -947,14 +1260,44 @@ def _nexa_contract_files(
         },
         "mem0": {
             "mode": contract.mem0_mode,
-            "base_url": nexa_env.get("OPENCLAW_NEXA_MEM0_BASE_URL"),
+            "base_url": contract.mem0_base_url,
+            "service_name": contract.mem0_service_name,
             "llm_base_url": nexa_env.get("OPENCLAW_NEXA_MEM0_LLM_BASE_URL"),
             "vector_backend": nexa_env.get("OPENCLAW_NEXA_MEM0_VECTOR_BACKEND"),
-            "vector_base_url": nexa_env.get("OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL"),
-            "require_private_network": contract.mem0_mode == "rest",
-            "require_api_key_auth": contract.mem0_mode == "rest",
+            "vector_base_url": contract.qdrant_base_url,
+            "vector_service_name": contract.qdrant_service_name,
+            "require_private_network": contract.internal_network_only,
+            "require_api_key_auth": "OPENCLAW_NEXA_MEM0_API_KEY" in nexa_env,
+        },
+        "topology": {
+            "mode": contract.topology_mode,
+            "internal_network_only": contract.internal_network_only,
+            "runtime_state_dir": contract.runtime_state_dir,
+            "services": {
+                "runtime": contract.runtime_service_name,
+                "mem0": contract.mem0_service_name,
+                "qdrant": contract.qdrant_service_name,
+            },
         },
         "presence_policy": nexa_env.get("OPENCLAW_NEXA_PRESENCE_POLICY"),
+        "nextcloud": {
+            "base_url": nexa_env.get("OPENCLAW_NEXA_NEXTCLOUD_BASE_URL"),
+            "talk_bot_auth": {
+                "shared_secret_present": "OPENCLAW_NEXA_TALK_SHARED_SECRET" in nexa_env,
+                "signing_secret_present": "OPENCLAW_NEXA_TALK_SIGNING_SECRET" in nexa_env,
+                "source": "server-owned-env",
+            },
+            "webdav": {
+                "auth_user_present": "OPENCLAW_NEXA_WEBDAV_AUTH_USER" in nexa_env,
+                "auth_password_present": "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD" in nexa_env,
+                "source": "server-owned-env",
+            },
+        },
+        "agent_identity": {
+            "user_id_present": "OPENCLAW_NEXA_AGENT_USER_ID" in nexa_env,
+            "display_name_present": "OPENCLAW_NEXA_AGENT_DISPLAY_NAME" in nexa_env,
+            "source": "server-owned-env",
+        },
         "workspace": {
             "visible_root": _DEFAULT_NEXA_VISIBLE_WORKSPACE_ROOT,
             "authoritative_runtime_state": "server-owned env + durable state JSON",
