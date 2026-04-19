@@ -803,6 +803,71 @@ def test_install_reconciles_my_farm_advisor_variant(
     assert recording_backend.last_health_url == "https://farm.example.com/healthz"
 
 
+def test_install_passes_nexa_env_into_dokploy_openclaw_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "openclaw-nexa.env"
+    recording_backend = RecordingOpenClawBackend()
+
+    def _build_backend(**kwargs: Any) -> RecordingOpenClawBackend:
+        recording_backend.init_kwargs = dict(kwargs)
+        return recording_backend
+
+    monkeypatch.setattr(dokploy_wizard.cli, "DokployOpenClawBackend", _build_backend)
+    monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
+    monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openclaw-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+                "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.internal.example.com",
+                "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
+                "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET": "office-shared-secret",
+                "HOST_OS_ID": "ubuntu",
+                "HOST_OS_VERSION_ID": "24.04",
+                "HOST_CPU_COUNT": "4",
+                "HOST_MEMORY_GB": "8",
+                "HOST_DISK_GB": "100",
+                "HOST_DOCKER_INSTALLED": "true",
+                "HOST_DOCKER_DAEMON_REACHABLE": "true",
+                "HOST_PORT_80_IN_USE": "false",
+                "HOST_PORT_443_IN_USE": "false",
+                "HOST_PORT_3000_IN_USE": "false",
+                "HOST_ENVIRONMENT": "local",
+                "DOKPLOY_BOOTSTRAP_HEALTHY": "true",
+                "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+                "DOKPLOY_API_KEY": "api-key-123",
+                "CLOUDFLARE_API_TOKEN": "token-123",
+                "CLOUDFLARE_ACCOUNT_ID": "account-123",
+                "CLOUDFLARE_ZONE_ID": "zone-123",
+                "CLOUDFLARE_TUNNEL_NAME": "openclaw-stack-tunnel",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "admin@example.com",
+            },
+        ),
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        openclaw_backend=None,
+    )
+
+    assert summary["openclaw"]["variant"] == "openclaw"
+    assert recording_backend.init_kwargs["openclaw_nexa_env"] == {
+        "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
+        "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.internal.example.com",
+        "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET": "office-shared-secret",
+    }
+
+
 def test_install_fails_when_advisor_slot_health_check_does_not_pass(tmp_path: Path) -> None:
     with pytest.raises(OpenClawError, match="health check failed"):
         run_install_flow(

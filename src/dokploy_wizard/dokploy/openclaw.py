@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shlex
 import ssl
 import subprocess
 from dataclasses import dataclass
@@ -19,7 +20,10 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
-from dokploy_wizard.packs.openclaw.models import OpenClawResourceRecord
+from dokploy_wizard.packs.openclaw.models import (
+    OpenClawNexaDeploymentContract,
+    OpenClawResourceRecord,
+)
 from dokploy_wizard.packs.openclaw.reconciler import OpenClawError
 
 _DEFAULT_MODEL_PROVIDER = "openai"
@@ -28,6 +32,11 @@ _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 _DEFAULT_NVIDIA_VISIBLE_DEVICES = "all"
 _DEFAULT_APP_PORT = 18789
 _MY_FARM_ADVISOR_PORT = 18789
+_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace/nexa"
+_DEFAULT_NEXA_RUNTIME_CONTRACT_PATH = "/home/node/.openclaw/.nexa/runtime-contract.json"
+_DEFAULT_NEXA_WORKSPACE_CONTRACT_PATH = f"{_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT}/contract.json"
+_DEFAULT_NEXA_WORKSPACE_README_PATH = f"{_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT}/README.md"
+_DEFAULT_NEXA_VISIBLE_WORKSPACE_ROOT = "/mnt/openclaw/workspace/nexa"
 
 
 class DokployOpenClawApi(Protocol):
@@ -70,6 +79,8 @@ class _AdvisorRuntimeConfig:
     model_name: str
     trusted_proxies: str
     nvidia_visible_devices: str
+    nexa_env: dict[str, str]
+    nexa_contract: OpenClawNexaDeploymentContract | None
 
 
 class DokployOpenClawBackend:
@@ -89,6 +100,7 @@ class DokployOpenClawBackend:
         openclaw_nvidia_api_key: str | None = None,
         openclaw_telegram_bot_token: str | None = None,
         openclaw_telegram_owner_user_id: str | None = None,
+        openclaw_nexa_env: dict[str, str] | None = None,
         my_farm_primary_model: str | None = None,
         my_farm_fallback_models: tuple[str, ...] = (),
         my_farm_openrouter_api_key: str | None = None,
@@ -117,6 +129,8 @@ class DokployOpenClawBackend:
                 model_name=model_name,
                 trusted_proxies=trusted_proxies,
                 nvidia_visible_devices=nvidia_visible_devices,
+                nexa_env=dict(openclaw_nexa_env or {}),
+                nexa_contract=_build_nexa_deployment_contract(openclaw_nexa_env or {}),
             ),
             "my-farm-advisor": _AdvisorRuntimeConfig(
                 gateway_token=gateway_token,
@@ -132,6 +146,8 @@ class DokployOpenClawBackend:
                 model_name=model_name,
                 trusted_proxies=trusted_proxies,
                 nvidia_visible_devices=nvidia_visible_devices,
+                nexa_env={},
+                nexa_contract=None,
             ),
         }
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
@@ -553,6 +569,26 @@ def _render_compose_file(
         environment["NVIDIA_API_KEY"] = runtime_config.nvidia_api_key
     if runtime_config.telegram_bot_token is not None:
         environment["TELEGRAM_BOT_TOKEN"] = runtime_config.telegram_bot_token
+    if variant == "openclaw" and runtime_config.nexa_contract is not None:
+        environment.update(runtime_config.nexa_env)
+        environment.update(
+            {
+                "DOKPLOY_WIZARD_NEXA_ENABLED": "true",
+                "DOKPLOY_WIZARD_NEXA_DEPLOYMENT_MODE": runtime_config.nexa_contract.deployment_mode,
+                "DOKPLOY_WIZARD_NEXA_MEM0_MODE": runtime_config.nexa_contract.mem0_mode,
+                "DOKPLOY_WIZARD_NEXA_CREDENTIAL_MEDIATION_MODE": (
+                    runtime_config.nexa_contract.credential_mediation_mode
+                ),
+                "DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH": (
+                    runtime_config.nexa_contract.runtime_contract_path
+                ),
+                "DOKPLOY_WIZARD_NEXA_WORKSPACE_ROOT": runtime_config.nexa_contract.workspace_root,
+                "DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH": (
+                    runtime_config.nexa_contract.workspace_contract_path
+                ),
+                "DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT": _DEFAULT_NEXA_VISIBLE_WORKSPACE_ROOT,
+            }
+        )
     if variant == "my-farm-advisor":
         environment.update(
             {
@@ -707,6 +743,13 @@ def _command_for_variant(
                 "models": {model_ref: {} for model_ref in allowed_models},
             }
         }
+    if runtime_config.nexa_contract is not None:
+        payload["wizard"] = {
+            "nexa": {
+                **runtime_config.nexa_contract.to_dict(),
+                "visible_workspace_root": _DEFAULT_NEXA_VISIBLE_WORKSPACE_ROOT,
+            }
+        }
     if "telegram" in channels:
         agents_payload = payload.setdefault("agents", {})
         if not isinstance(agents_payload, dict):
@@ -757,6 +800,21 @@ def _command_for_variant(
             channels_payload["telegram"] = telegram_config
     seeded_payload = json.dumps(payload, indent=2) + "\n"
     seeded_payload_b64 = base64.b64encode(seeded_payload.encode("utf-8")).decode("ascii")
+    extra_files = (
+        _nexa_contract_files(runtime_config.nexa_contract, runtime_config.nexa_env)
+        if variant == "openclaw"
+        else {}
+    )
+    extra_files_payload = [
+        {
+            "path": path,
+            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        }
+        for path, content in extra_files.items()
+    ]
+    extra_files_b64 = base64.b64encode(
+        json.dumps(extra_files_payload, indent=2).encode("utf-8")
+    ).decode("ascii")
     token_injection = (
         "if (process.env.OPENCLAW_GATEWAY_TOKEN) {"
         "payload.gateway = payload.gateway || {};"
@@ -766,18 +824,20 @@ def _command_for_variant(
         if runtime_config.gateway_token is not None and not trusted_proxy_mode
         else ""
     )
+    node_script = _render_seed_script(
+        seeded_payload_b64=seeded_payload_b64,
+        token_injection=token_injection,
+        extra_files_b64=extra_files_b64,
+        config_targets=(
+            ("/data/openclaw.json", "/data/.openclaw/openclaw.json")
+            if variant == "my-farm-advisor"
+            else ("/home/node/.openclaw/openclaw.json",)
+        ),
+    )
     if variant == "my-farm-advisor":
         seed_command = (
             "mkdir -p /data /data/.openclaw /data/workspace && "
-            "node -e \"const fs=require('fs');"
-            "const path=require('path');"
-            f"const payload=JSON.parse(Buffer.from('{seeded_payload_b64}','base64').toString('utf8'));"
-            f"{token_injection}"
-            "const rendered=JSON.stringify(payload, null, 2)+'\\n';"
-            "for (const target of ['/data/openclaw.json','/data/.openclaw/openclaw.json']) {"
-            "fs.mkdirSync(path.dirname(target), {recursive:true});"
-            "fs.writeFileSync(target, rendered);"
-            '}"'
+            f"node -e {shlex.quote(node_script)}"
         )
         return json.dumps(
             [
@@ -791,12 +851,9 @@ def _command_for_variant(
             ]
         )
     seed_command = (
-        "mkdir -p /home/node/.openclaw /home/node/.openclaw/workspace && "
-        "node -e \"const fs=require('fs');"
-        f"const payload=JSON.parse(Buffer.from('{seeded_payload_b64}','base64').toString('utf8'));"
-        f"{token_injection}"
-        "const rendered=JSON.stringify(payload, null, 2)+'\\n';"
-        "fs.writeFileSync('/home/node/.openclaw/openclaw.json', rendered);\""
+        "mkdir -p /home/node/.openclaw /home/node/.openclaw/workspace "
+        "/home/node/.openclaw/workspace/nexa /home/node/.openclaw/.nexa && "
+        f"node -e {shlex.quote(node_script)}"
     )
     return json.dumps(
         [
@@ -824,3 +881,156 @@ def _allowed_models(runtime_config: _AdvisorRuntimeConfig) -> tuple[str, ...]:
         seen.add(model_ref)
         ordered.append(model_ref)
     return tuple(ordered)
+
+
+def _build_nexa_deployment_contract(
+    nexa_env: dict[str, str],
+) -> OpenClawNexaDeploymentContract | None:
+    if not nexa_env:
+        return None
+    mem0_mode = "rest" if nexa_env.get("OPENCLAW_NEXA_MEM0_BASE_URL") else "library"
+    notes = [
+        "Nexa stays inside the existing OpenClaw service footprint; no separate agent pack is created.",
+        "Credential-bearing Nexa settings remain server-owned environment variables and are not copied into the visible workspace surface.",
+        "Nextcloud-visible workspace files are operator/user surfaces only; durable state JSON docs and server-owned env stay authoritative.",
+    ]
+    if mem0_mode == "rest":
+        notes.append(
+            "Mem0 REST mode requires private-network exposure and API-key auth; those assumptions are emitted as explicit deployment markers."
+        )
+    else:
+        notes.append(
+            "Mem0 REST wiring is absent, so deployment remains in library-mode assumptions until explicit REST env is provided."
+        )
+    return OpenClawNexaDeploymentContract(
+        enabled=True,
+        deployment_mode="openclaw-resident",
+        mem0_mode=mem0_mode,
+        credential_mediation_mode="server-owned-env",
+        runtime_contract_path=_DEFAULT_NEXA_RUNTIME_CONTRACT_PATH,
+        workspace_root=_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT,
+        workspace_contract_path=_DEFAULT_NEXA_WORKSPACE_CONTRACT_PATH,
+        secret_env_keys=_nexa_secret_env_keys(nexa_env),
+        notes=tuple(notes),
+    )
+
+
+def _nexa_secret_env_keys(nexa_env: dict[str, str]) -> tuple[str, ...]:
+    return tuple(
+        key
+        for key in sorted(nexa_env)
+        if key.endswith("_API_KEY") or key.endswith("_SECRET") or "SIGNING_SECRET" in key
+    )
+
+
+def _nexa_contract_files(
+    contract: OpenClawNexaDeploymentContract | None,
+    nexa_env: dict[str, str],
+) -> dict[str, str]:
+    if contract is None:
+        return {}
+    runtime_contract = {
+        "nexa": contract.to_dict(),
+        "credential_mediation": {
+            "mode": contract.credential_mediation_mode,
+            "secret_env": {
+                key: {"present": key in nexa_env, "source": "server-owned-env"}
+                for key in contract.secret_env_keys
+            },
+            "workspace_override_blocked_fields": [
+                "agent_user_id",
+                "agent_display_name",
+                "credential_values",
+                "secret_env",
+                "task_identity",
+            ],
+        },
+        "mem0": {
+            "mode": contract.mem0_mode,
+            "base_url": nexa_env.get("OPENCLAW_NEXA_MEM0_BASE_URL"),
+            "llm_base_url": nexa_env.get("OPENCLAW_NEXA_MEM0_LLM_BASE_URL"),
+            "vector_backend": nexa_env.get("OPENCLAW_NEXA_MEM0_VECTOR_BACKEND"),
+            "vector_base_url": nexa_env.get("OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL"),
+            "require_private_network": contract.mem0_mode == "rest",
+            "require_api_key_auth": contract.mem0_mode == "rest",
+        },
+        "presence_policy": nexa_env.get("OPENCLAW_NEXA_PRESENCE_POLICY"),
+        "workspace": {
+            "visible_root": _DEFAULT_NEXA_VISIBLE_WORKSPACE_ROOT,
+            "authoritative_runtime_state": "server-owned env + durable state JSON",
+            "operator_surface_only": True,
+        },
+    }
+    workspace_contract = {
+        "surface": "operator-user-visible",
+        "visible_root": _DEFAULT_NEXA_VISIBLE_WORKSPACE_ROOT,
+        "contract_path": contract.workspace_contract_path,
+        "authoritative_runtime_state": "server-owned env + durable state JSON",
+        "files": {
+            "briefing": "briefing.md",
+            "memory": "memory.md",
+            "status": "status.json",
+            "tasks": "tasks.md",
+        },
+        "notes": list(contract.notes),
+    }
+    return {
+        contract.runtime_contract_path: json.dumps(runtime_contract, indent=2) + "\n",
+        contract.workspace_contract_path: json.dumps(workspace_contract, indent=2) + "\n",
+        _DEFAULT_NEXA_WORKSPACE_README_PATH: (
+            "# Nexa workspace\n\n"
+            "This directory is a Nextcloud-visible operator/user surface for Nexa.\n"
+            "It is not the sole runtime state source. Hidden server-owned env values and durable state JSON docs remain authoritative.\n\n"
+            "User-editable files here must not override credentials, task identity, or agent identity fields.\n"
+        ),
+        f"{_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT}/briefing.md": (
+            "# Briefing\n\nUse this file for operator-visible briefings only.\n"
+        ),
+        f"{_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT}/memory.md": (
+            "# Memory surface\n\nSummaries here are optional user/operator legibility aids, not canonical memory state.\n"
+        ),
+        f"{_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT}/tasks.md": (
+            "# Task surface\n\nTrack visible tasks here without treating this file as the authoritative job queue.\n"
+        ),
+        f"{_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT}/status.json": (
+            json.dumps(
+                {
+                    "authoritative_runtime_state": "server-owned env + durable state JSON",
+                    "operator_surface_only": True,
+                    "visible_root": _DEFAULT_NEXA_VISIBLE_WORKSPACE_ROOT,
+                },
+                indent=2,
+            )
+            + "\n"
+        ),
+    }
+
+
+def _render_seed_script(
+    *,
+    seeded_payload_b64: str,
+    token_injection: str,
+    extra_files_b64: str,
+    config_targets: tuple[str, ...],
+) -> str:
+    return "".join(
+        [
+            'const fs=require("fs");',
+            'const path=require("path");',
+            (
+                f'const payload=JSON.parse(Buffer.from("{seeded_payload_b64}","base64").toString("utf8"));'
+            ),
+            token_injection,
+            'const rendered=JSON.stringify(payload, null, 2)+"\\n";',
+            f"for (const target of {json.dumps(list(config_targets))}) {{",
+            "fs.mkdirSync(path.dirname(target), {recursive:true});",
+            "fs.writeFileSync(target, rendered);",
+            "}",
+            (
+                f'for (const item of JSON.parse(Buffer.from("{extra_files_b64}","base64").toString("utf8"))) {{'
+            ),
+            "fs.mkdirSync(path.dirname(item.path), {recursive:true});",
+            'fs.writeFileSync(item.path, Buffer.from(item.content,"base64").toString("utf8"));',
+            "}",
+        ]
+    )

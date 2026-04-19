@@ -45,6 +45,7 @@ from dokploy_wizard.packs.nextcloud import (
     ONLYOFFICE_SERVICE_RESOURCE_TYPE,
     ONLYOFFICE_VOLUME_RESOURCE_TYPE,
     NextcloudError,
+    NextcloudOpenClawWorkspaceContract,
     NextcloudResourceRecord,
     TalkRuntime,
     build_nextcloud_ledger,
@@ -860,6 +861,79 @@ def test_dokploy_nextcloud_backend_mounts_openclaw_volume_when_enabled() -> None
     assert "    name: wizard-stack-openclaw-data" in compose
 
 
+def test_dokploy_nextcloud_backend_marks_nexa_workspace_as_operator_surface() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient()
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        openclaw_workspace_contract=NextcloudOpenClawWorkspaceContract(
+            enabled=True,
+            external_mount_name="/OpenClaw",
+            external_mount_path="/mnt/openclaw",
+            visible_root="/mnt/openclaw/workspace/nexa",
+            contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+            runtime_state_source="server-owned env + durable state JSON",
+            notes=(
+                "Nextcloud exposes the Nexa workspace as an operator/user surface only.",
+            ),
+        ),
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+
+    compose = client.last_create_compose_file
+    assert compose is not None
+    assert "wizard-stack-openclaw-data:/mnt/openclaw" in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface" in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: /mnt/openclaw/workspace/nexa" in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: /mnt/openclaw/workspace/nexa/contract.json" in compose
+    assert (
+        "DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: server-owned env + durable state JSON"
+        in compose
+    )
+
+
 def test_dokploy_nextcloud_backend_creates_openclaw_rescan_schedule() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
@@ -876,6 +950,10 @@ def test_dokploy_nextcloud_backend_creates_openclaw_rescan_schedule() -> None:
     allocation = next(
         item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
     )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
     client = FakeDokployApiClient()
     backend = DokployNextcloudBackend(
         api_url="https://dokploy.example.com",
@@ -953,6 +1031,10 @@ def test_dokploy_nextcloud_backend_updates_existing_openclaw_rescan_schedule() -
     allocation = next(
         item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
     )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
     client = FakeDokployApiClient(
         schedules=[
             DokployScheduleRecord(
