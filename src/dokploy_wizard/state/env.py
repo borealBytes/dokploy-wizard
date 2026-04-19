@@ -11,6 +11,23 @@ from dokploy_wizard.packs.resolver import resolve_pack_selection
 from dokploy_wizard.state.models import DesiredState, RawEnvInput, StateValidationError
 
 _ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_OPENCLAW_NEXA_ENV_KEYS = {
+    "OPENCLAW_NEXA_TALK_SHARED_SECRET",
+    "OPENCLAW_NEXA_TALK_SIGNING_SECRET",
+    "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET",
+    "OPENCLAW_NEXA_EDITOR_EVENTS_SHARED_SECRET",
+    "OPENCLAW_NEXA_MEM0_BASE_URL",
+    "OPENCLAW_NEXA_MEM0_API_KEY",
+    "OPENCLAW_NEXA_MEM0_LLM_BASE_URL",
+    "OPENCLAW_NEXA_MEM0_LLM_API_KEY",
+    "OPENCLAW_NEXA_MEM0_EMBEDDER_MODEL",
+    "OPENCLAW_NEXA_MEM0_EMBEDDER_DIMENSIONS",
+    "OPENCLAW_NEXA_MEM0_VECTOR_BACKEND",
+    "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL",
+    "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY",
+    "OPENCLAW_NEXA_MEM0_VECTOR_DIMENSIONS",
+    "OPENCLAW_NEXA_PRESENCE_POLICY",
+}
 
 
 def parse_env_file(path: Path) -> RawEnvInput:
@@ -49,6 +66,7 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
         "dokploy": _join_hostname(dokploy_subdomain, root_domain),
     }
     pack_selection = resolve_pack_selection(values, root_domain=root_domain)
+    _validate_openclaw_nexa_env(values, enabled_packs=pack_selection.enabled_packs)
     hostnames.update(pack_selection.hostnames)
 
     return DesiredState(
@@ -277,3 +295,13 @@ def _resolve_openclaw_gateway_token(
             raise StateValidationError("OPENCLAW_GATEWAY_TOKEN requires the 'openclaw' pack.")
         return None
     return raw_value
+
+
+def _validate_openclaw_nexa_env(
+    values: dict[str, str], *, enabled_packs: tuple[str, ...]
+) -> None:
+    if "openclaw" in enabled_packs:
+        return
+    unexpected = sorted(key for key in _OPENCLAW_NEXA_ENV_KEYS if key in values)
+    if unexpected:
+        raise StateValidationError(f"{unexpected} require the 'openclaw' pack.")
