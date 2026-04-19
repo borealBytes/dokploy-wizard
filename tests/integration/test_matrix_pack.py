@@ -529,6 +529,10 @@ def test_install_reconciles_matrix_via_dokploy_backend(
         "dokploy_wizard.dokploy.matrix._http_health_check",
         lambda url: url == "https://matrix.example.com/_matrix/client/versions",
     )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.matrix._docker_container_is_up",
+        lambda service_name: service_name == "matrix-stack-matrix",
+    )
 
     summary = run_install_flow(
         env_file=FIXTURES_DIR / "matrix.env",

@@ -20,7 +20,12 @@ from dokploy_wizard.networking import (
 from dokploy_wizard.preflight import HostFacts, PreflightCheck, PreflightReport, ResourceProfile
 from dokploy_wizard.packs.coder import CoderResourceRecord
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
-from dokploy_wizard.packs.nextcloud import NextcloudResourceRecord
+from dokploy_wizard.packs.nextcloud import (
+    NextcloudBundleVerification,
+    NextcloudCommandCheck,
+    NextcloudResourceRecord,
+    TalkRuntime,
+)
 from dokploy_wizard.packs.openclaw import OpenClawResourceRecord
 from dokploy_wizard.state import load_state_dir
 
@@ -364,8 +369,36 @@ class FakeNextcloudBackend:
         del service, url
         return True
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification:
         del nextcloud_url, onlyoffice_url
+        return NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        )
 
 
 @dataclass
@@ -573,8 +606,8 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
         "preflight",
         "dokploy_bootstrap",
         "networking",
-        "cloudflare_access",
         "shared_core",
+        "openclaw",
     )
     assert loaded_state.ownership_ledger is not None
     assert {resource.resource_type for resource in loaded_state.ownership_ledger.resources} >= {

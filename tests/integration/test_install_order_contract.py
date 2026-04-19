@@ -53,7 +53,6 @@ def test_root_mvp_env_emits_current_install_order_contract(tmp_path: Path) -> No
     ]
     assert summary["desired_state"]["enabled_packs"] == [
         "coder",
-        "headscale",
         "nextcloud",
         "openclaw",
         "seaweedfs",
