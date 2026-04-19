@@ -132,6 +132,16 @@ def _decode_extra_seeded_files(compose: str) -> dict[str, str]:
     }
 
 
+def _service_block(compose: str, service_name: str) -> str:
+    match = re.search(
+        rf"^  {re.escape(service_name)}:\n(?P<body>(?:    .*\n)*)",
+        compose,
+        re.MULTILINE,
+    )
+    assert match is not None
+    return match.group(0)
+
+
 def test_reconcile_openclaw_plans_slot_runtime_for_openclaw_variant() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
@@ -819,17 +829,19 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
         api_key="key-123",
         stack_name="wizard-stack",
         openclaw_nexa_env={
-            "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.internal.example.com",
+            "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
+            "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
             "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
             "OPENCLAW_NEXA_MEM0_LLM_BASE_URL": "https://integrate.api.nvidia.com/v1",
             "OPENCLAW_NEXA_MEM0_LLM_API_KEY": "nvidia-api-key",
-            "OPENCLAW_NEXA_MEM0_VECTOR_BACKEND": "qdrant",
-            "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL": "https://qdrant.internal.example.com",
             "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY": "qdrant-api-key",
+            "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL": "https://nextcloud.example.com",
             "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET": "office-shared-secret",
             "OPENCLAW_NEXA_TALK_SHARED_SECRET": "talk-shared-secret",
             "OPENCLAW_NEXA_TALK_SIGNING_SECRET": "talk-signing-secret",
             "OPENCLAW_NEXA_PRESENCE_POLICY": "rooms-only",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD": "webdav-app-password",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_USER": "nexa-agent",
         },
         client=api,
     )
@@ -846,15 +858,63 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
 
     compose = api.last_create_compose_file
     assert compose is not None
-    assert 'OPENCLAW_NEXA_MEM0_BASE_URL: "https://mem0.internal.example.com"' in compose
+    assert 'OPENCLAW_NEXA_DEPLOYMENT_MODE: "sidecar"' in compose
+    assert 'OPENCLAW_NEXA_MEM0_BASE_URL: "http://mem0:8000"' in compose
+    assert 'OPENCLAW_NEXA_MEM0_VECTOR_BACKEND: "qdrant"' in compose
+    assert 'OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL: "http://qdrant:6333"' in compose
     assert 'DOKPLOY_WIZARD_NEXA_ENABLED: "true"' in compose
     assert 'DOKPLOY_WIZARD_NEXA_MEM0_MODE: "rest"' in compose
     assert 'DOKPLOY_WIZARD_NEXA_CREDENTIAL_MEDIATION_MODE: "server-owned-env"' in compose
     assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_ROOT: "/home/node/.openclaw/workspace/nexa"' in compose
     assert 'DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT: "/mnt/openclaw/workspace/nexa"' in compose
+    assert "  mem0:\n" in compose
+    assert "  qdrant:\n" in compose
+    assert "  nexa-runtime:\n" in compose
+    assert "wizard-stack-openclaw-qdrant-data:/qdrant/storage" in compose
+    assert "wizard-stack-openclaw-mem0-history:/app/history" in compose
+    assert "wizard-stack-openclaw-data:/mnt/openclaw" in compose
+    assert "traefik.http.routers.mem0" not in compose
+    assert "traefik.http.routers.qdrant" not in compose
+    assert "traefik.http.routers.nexa-runtime" not in compose
+    assert "ports:" not in compose
+
+    mem0_block = _service_block(compose, "mem0")
+    qdrant_block = _service_block(compose, "qdrant")
+    runtime_block = _service_block(compose, "nexa-runtime")
+    assert "dokploy-network" not in mem0_block
+    assert "dokploy-network" not in qdrant_block
+    assert "dokploy-network" not in runtime_block
+    assert "wizard-stack-shared" not in mem0_block
+    assert "wizard-stack-shared" not in qdrant_block
+    assert "wizard-stack-shared" not in runtime_block
+    assert "      - default" in mem0_block
+    assert "      - default" in qdrant_block
+    assert "      - default" in runtime_block
+    assert "labels:" not in runtime_block
+    assert "expose:" not in runtime_block
+    assert 'image: local/dokploy-wizard-nexa-runtime:latest' in runtime_block
+    assert "context: ." in runtime_block
+    assert "dockerfile: docker/nexa-runtime/Dockerfile" in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH: "/mnt/openclaw/.nexa/runtime-contract.json"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH: "/mnt/openclaw/workspace/nexa/contract.json"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_STATE_DIR: "/mnt/openclaw/.nexa/state"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_WORKER_MODE: "queue"' in runtime_block
+    assert 'OPENCLAW_NEXA_MEM0_BASE_URL: "http://mem0:8000"' in runtime_block
+    assert 'OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL: "http://qdrant:6333"' in runtime_block
+    assert 'OPENCLAW_NEXA_MEM0_API_KEY: "mem0-api-key"' in runtime_block
+    assert 'OPENCLAW_NEXA_MEM0_VECTOR_API_KEY: "qdrant-api-key"' in runtime_block
+    assert "      - wizard-stack-openclaw" in runtime_block
+    assert "      - mem0" in runtime_block
+    assert "      - qdrant" in runtime_block
 
     seeded = _decode_seeded_gateway_payload(compose)
-    assert seeded["wizard"]["nexa"]["deployment_mode"] == "openclaw-resident"
+    assert seeded["wizard"]["nexa"]["deployment_mode"] == "sidecar"
+    assert seeded["wizard"]["nexa"]["topology_mode"] == "internal-compose-sidecars"
+    assert seeded["wizard"]["nexa"]["internal_network_only"] is True
+    assert seeded["wizard"]["nexa"]["runtime_service_name"] == "nexa-runtime"
+    assert seeded["wizard"]["nexa"]["runtime_state_dir"] == "/mnt/openclaw/.nexa/state"
+    assert seeded["wizard"]["nexa"]["mem0_service_name"] == "mem0"
+    assert seeded["wizard"]["nexa"]["qdrant_service_name"] == "qdrant"
     assert seeded["wizard"]["nexa"]["workspace_contract_path"] == (
         "/home/node/.openclaw/workspace/nexa/contract.json"
     )
@@ -870,10 +930,38 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
     assert "mem0-api-key" not in extra_files["/home/node/.openclaw/workspace/nexa/contract.json"]
     assert "nvidia-api-key" not in extra_files["/home/node/.openclaw/workspace/nexa/contract.json"]
     runtime_contract = json.loads(extra_files["/home/node/.openclaw/.nexa/runtime-contract.json"])
+    assert runtime_contract["nexa"]["deployment_mode"] == "sidecar"
+    assert runtime_contract["topology"] == {
+        "mode": "internal-compose-sidecars",
+        "internal_network_only": True,
+        "runtime_state_dir": "/mnt/openclaw/.nexa/state",
+        "services": {"runtime": "nexa-runtime", "mem0": "mem0", "qdrant": "qdrant"},
+    }
     assert runtime_contract["credential_mediation"]["secret_env"]["OPENCLAW_NEXA_MEM0_API_KEY"] == {
         "present": True,
         "source": "server-owned-env",
     }
+    assert runtime_contract["credential_mediation"]["server_owned_runtime_inputs"] == {
+        "nextcloud_base_url": {"present": True, "source": "server-owned-env"},
+        "webdav_auth_user": {"present": True, "source": "server-owned-env"},
+        "agent_user_id": {"present": True, "source": "server-owned-env"},
+        "agent_display_name": {"present": True, "source": "server-owned-env"},
+    }
+    assert runtime_contract["nextcloud"]["base_url"] == "https://nextcloud.example.com"
+    assert runtime_contract["nextcloud"]["webdav"] == {
+        "auth_user_present": True,
+        "auth_password_present": True,
+        "source": "server-owned-env",
+    }
+    assert runtime_contract["agent_identity"] == {
+        "user_id_present": True,
+        "display_name_present": True,
+        "source": "server-owned-env",
+    }
+    assert runtime_contract["mem0"]["base_url"] == "http://mem0:8000"
+    assert runtime_contract["mem0"]["service_name"] == "mem0"
+    assert runtime_contract["mem0"]["vector_base_url"] == "http://qdrant:6333"
+    assert runtime_contract["mem0"]["vector_service_name"] == "qdrant"
     assert runtime_contract["mem0"]["require_private_network"] is True
     assert runtime_contract["mem0"]["require_api_key_auth"] is True
 

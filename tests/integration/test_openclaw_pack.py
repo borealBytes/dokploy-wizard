@@ -11,6 +11,7 @@ import pytest
 import dokploy_wizard.cli
 from dokploy_wizard.cli import run_install_flow, run_modify_flow
 from dokploy_wizard.core import SharedCoreResourceRecord
+from dokploy_wizard.dokploy.openclaw import DokployOpenClawBackend
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,
     CloudflareAccessIdentityProvider,
@@ -22,6 +23,7 @@ from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.matrix import MatrixResourceRecord
 from dokploy_wizard.packs.openclaw import OpenClawError, OpenClawResourceRecord
 from dokploy_wizard.state import RawEnvInput, load_state_dir, write_ownership_ledger
+from tests.unit.test_openclaw_pack import FakeDokployOpenClawApi
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -817,6 +819,8 @@ def test_install_passes_nexa_env_into_dokploy_openclaw_backend(
     monkeypatch.setattr(dokploy_wizard.cli, "DokployOpenClawBackend", _build_backend)
     monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
     monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda service_name: False)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._local_https_health_check", lambda url: True)
 
     summary = run_install_flow(
         env_file=env_file,
@@ -829,7 +833,6 @@ def test_install_passes_nexa_env_into_dokploy_openclaw_backend(
                 "ROOT_DOMAIN": "example.com",
                 "ENABLE_OPENCLAW": "true",
                 "OPENCLAW_CHANNELS": "telegram",
-                "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.internal.example.com",
                 "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
                 "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET": "office-shared-secret",
                 "HOST_OS_ID": "ubuntu",
@@ -863,9 +866,84 @@ def test_install_passes_nexa_env_into_dokploy_openclaw_backend(
     assert summary["openclaw"]["variant"] == "openclaw"
     assert recording_backend.init_kwargs["openclaw_nexa_env"] == {
         "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
-        "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.internal.example.com",
         "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET": "office-shared-secret",
     }
+
+
+def test_install_renders_internal_nexa_runtime_sidecar_into_openclaw_compose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "openclaw-nexa-compose.env"
+    api = FakeDokployOpenClawApi()
+
+    def _build_backend(**kwargs: Any) -> DokployOpenClawBackend:
+        kwargs["client"] = api
+        return DokployOpenClawBackend(**kwargs)
+
+    monkeypatch.setattr(dokploy_wizard.cli, "DokployOpenClawBackend", _build_backend)
+    monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
+    monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda service_name: False)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._local_https_health_check", lambda url: True)
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openclaw-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+                "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
+                "OPENCLAW_NEXA_MEM0_LLM_BASE_URL": "https://integrate.api.nvidia.com/v1",
+                "OPENCLAW_NEXA_MEM0_LLM_API_KEY": "nvidia-api-key",
+                "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY": "qdrant-api-key",
+                "HOST_OS_ID": "ubuntu",
+                "HOST_OS_VERSION_ID": "24.04",
+                "HOST_CPU_COUNT": "4",
+                "HOST_MEMORY_GB": "8",
+                "HOST_DISK_GB": "100",
+                "HOST_DOCKER_INSTALLED": "true",
+                "HOST_DOCKER_DAEMON_REACHABLE": "true",
+                "HOST_PORT_80_IN_USE": "false",
+                "HOST_PORT_443_IN_USE": "false",
+                "HOST_PORT_3000_IN_USE": "false",
+                "HOST_ENVIRONMENT": "local",
+                "DOKPLOY_BOOTSTRAP_HEALTHY": "true",
+                "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+                "DOKPLOY_API_KEY": "api-key-123",
+                "CLOUDFLARE_API_TOKEN": "token-123",
+                "CLOUDFLARE_ACCOUNT_ID": "account-123",
+                "CLOUDFLARE_ZONE_ID": "zone-123",
+                "CLOUDFLARE_TUNNEL_NAME": "openclaw-stack-tunnel",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "admin@example.com",
+            },
+        ),
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        openclaw_backend=None,
+    )
+
+    compose = api.last_create_compose_file
+    assert summary["openclaw"]["outcome"] == "applied"
+    assert compose is not None
+    assert "  nexa-runtime:\n" in compose
+    assert 'image: local/dokploy-wizard-nexa-runtime:latest' in compose
+    assert "context: ." in compose
+    assert "dockerfile: docker/nexa-runtime/Dockerfile" in compose
+    assert "openclaw-stack-openclaw-data:/mnt/openclaw" in compose
+    assert 'DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH: "/mnt/openclaw/.nexa/runtime-contract.json"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH: "/mnt/openclaw/workspace/nexa/contract.json"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_STATE_DIR: "/mnt/openclaw/.nexa/state"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_WORKER_MODE: "queue"' in compose
+    assert "traefik.http.routers.nexa-runtime" not in compose
+    assert "ports:" not in compose
 
 
 def test_install_fails_when_advisor_slot_health_check_does_not_pass(tmp_path: Path) -> None:

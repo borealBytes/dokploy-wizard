@@ -19,6 +19,7 @@ class NexaTalkReplyRequest:
     scope: NexaScopeContext
     delivery_key: str
     conversation_id: str
+    conversation_token: str | None
     reply_to_message_id: str
     text: str
     capabilities: Mapping[str, Any]
@@ -63,6 +64,8 @@ def build_talk_reply_payload(request: NexaTalkReplyRequest) -> tuple[dict[str, A
             "messageId": request.reply_to_message_id,
         },
     }
+    if request.conversation_token is not None and request.conversation_token.strip() != "":
+        payload["conversationToken"] = request.conversation_token
     thread_id = _resolve_thread_id(request)
     if thread_id is None:
         return payload, "room"

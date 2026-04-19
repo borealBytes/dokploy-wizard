@@ -31,6 +31,7 @@ def _build_request(payload: dict[str, Any], *, delivery_key: str = "talk-reply:r
         scope=build_talk_scope(payload),
         delivery_key=delivery_key,
         conversation_id=payload["conversation"]["id"],
+        conversation_token=payload["conversation"].get("token"),
         reply_to_message_id=payload["message"]["id"],
         text="Nexa reply for the room.",
         capabilities=payload.get("capabilities", {}),
@@ -47,6 +48,7 @@ def test_build_talk_reply_payload_degrades_to_room_reply_when_thread_context_is_
     assert thread_mode == "room"
     assert reply_payload == {
         "conversationId": "room-42",
+        "conversationToken": "x9m3abp4",
         "message": "Nexa reply for the room.",
         "replyTo": {"messageId": "msg-845"},
     }
@@ -119,6 +121,7 @@ def test_deliver_talk_reply_downgrades_to_room_delivery_when_request_context_thr
         scope=build_talk_scope(payload),
         delivery_key="talk-reply:room-42:msg-845:room-mode",
         conversation_id=payload["conversation"]["id"],
+        conversation_token=payload["conversation"].get("token"),
         reply_to_message_id=payload["message"]["id"],
         text="Nexa reply for the room.",
         capabilities=payload.get("capabilities", {}),
@@ -137,6 +140,7 @@ def test_deliver_talk_reply_downgrades_to_room_delivery_when_request_context_thr
     assert dispatch.thread_mode == "room"
     assert dispatch.payload == {
         "conversationId": "room-42",
+        "conversationToken": "x9m3abp4",
         "message": "Nexa reply for the room.",
         "replyTo": {"messageId": "msg-845"},
     }
