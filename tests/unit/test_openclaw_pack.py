@@ -606,7 +606,12 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
     assert seeded["gateway"]["auth"]["trustedProxy"]["allowUsers"] == ["admin@example.com"]
     assert seeded["gateway"]["trustedProxies"] == ["10.0.0.0/8", "172.16.0.0/12"]
     assert seeded["gateway"]["controlUi"]["allowInsecureAuth"] is False
-    assert "agents" not in seeded
+    assert seeded["agents"]["list"] == [
+        {"id": "main", "default": True},
+        {"id": "telly", "name": "Telly"},
+    ]
+    assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
+    assert "defaults" not in seeded["agents"]
     assert (
         'traefik.http.services.wizard-stack-openclaw.loadbalancer.server.port: "18789"' in compose
     )
@@ -695,7 +700,7 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
         {"id": "main", "default": True},
         {"id": "telly", "name": "Telly"},
     ]
-    assert seeded["agents"]["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
+    assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert seeded["agents"]["defaults"]["models"] == {
         "nvidia/moonshotai/kimi-k2.5": {},
         "openrouter/openrouter/free": {},
@@ -707,6 +712,38 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
         "allowFrom": ["123456789"],
         "execApprovals": {"enabled": False},
     }
+
+
+def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without_bot_token() -> (
+    None
+):
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    seeded = _decode_seeded_gateway_payload(compose)
+    assert seeded["agents"]["list"] == [
+        {"id": "main", "default": True},
+        {"id": "telly", "name": "Telly"},
+    ]
+    assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
+    assert "channels" not in seeded or "telegram" not in seeded.get("channels", {})
 
 
 def test_dokploy_openclaw_backend_renders_my_farm_variant_with_same_backend_path() -> None:

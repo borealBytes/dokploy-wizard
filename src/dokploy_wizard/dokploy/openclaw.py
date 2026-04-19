@@ -568,7 +568,7 @@ def _render_compose_file(
         f"    image: {image}",
         "    restart: unless-stopped",
         "    command: "
-        f"{_command_for_variant(variant=variant, hostname=hostname, app_port=app_port, runtime_config=runtime_config)}",
+        f"{_command_for_variant(variant=variant, hostname=hostname, app_port=app_port, channels=channels, runtime_config=runtime_config)}",
         "    environment:",
         *[f"      {key}: {_yaml_quote(value)}" for key, value in environment.items()],
         "    labels:",
@@ -657,7 +657,12 @@ def _health_path_for_variant(variant: str) -> str:
 
 
 def _command_for_variant(
-    *, variant: str, hostname: str, app_port: int, runtime_config: _AdvisorRuntimeConfig
+    *,
+    variant: str,
+    hostname: str,
+    app_port: int,
+    channels: tuple[str, ...],
+    runtime_config: _AdvisorRuntimeConfig,
 ) -> str:
     trusted_proxy_mode = bool(runtime_config.trusted_proxy_emails)
     gateway_payload: dict[str, object] = {
@@ -702,7 +707,7 @@ def _command_for_variant(
                 "models": {model_ref: {} for model_ref in allowed_models},
             }
         }
-    if runtime_config.telegram_bot_token is not None:
+    if "telegram" in channels:
         agents_payload = payload.setdefault("agents", {})
         if not isinstance(agents_payload, dict):
             agents_payload = {}
@@ -726,10 +731,10 @@ def _command_for_variant(
             agents_list.insert(0, {"id": "main", "default": True})
         if "telly" not in existing_ids:
             agents_list.append({"id": "telly", "name": "Telly"})
-        bindings = agents_payload.setdefault("bindings", [])
+        bindings = payload.setdefault("bindings", [])
         if not isinstance(bindings, list):
             bindings = []
-            agents_payload["bindings"] = bindings
+            payload["bindings"] = bindings
         if not any(
             isinstance(item, dict)
             and item.get("agentId") == "telly"
@@ -738,17 +743,18 @@ def _command_for_variant(
             for item in bindings
         ):
             bindings.append({"agentId": "telly", "match": {"channel": "telegram"}})
-        telegram_config: dict[str, object] = {"botToken": runtime_config.telegram_bot_token}
-        if runtime_config.telegram_owner_user_id is not None:
-            telegram_config["dmPolicy"] = "allowlist"
-            telegram_config["allowFrom"] = [runtime_config.telegram_owner_user_id]
-        if trusted_proxy_mode:
-            telegram_config["execApprovals"] = {"enabled": False}
-        channels_payload = payload.setdefault("channels", {})
-        if not isinstance(channels_payload, dict):
-            channels_payload = {}
-            payload["channels"] = channels_payload
-        channels_payload["telegram"] = telegram_config
+        if runtime_config.telegram_bot_token is not None:
+            telegram_config: dict[str, object] = {"botToken": runtime_config.telegram_bot_token}
+            if runtime_config.telegram_owner_user_id is not None:
+                telegram_config["dmPolicy"] = "allowlist"
+                telegram_config["allowFrom"] = [runtime_config.telegram_owner_user_id]
+            if trusted_proxy_mode:
+                telegram_config["execApprovals"] = {"enabled": False}
+            channels_payload = payload.setdefault("channels", {})
+            if not isinstance(channels_payload, dict):
+                channels_payload = {}
+                payload["channels"] = channels_payload
+            channels_payload["telegram"] = telegram_config
     seeded_payload = json.dumps(payload, indent=2) + "\n"
     seeded_payload_b64 = base64.b64encode(seeded_payload.encode("utf-8")).decode("ascii")
     token_injection = (
