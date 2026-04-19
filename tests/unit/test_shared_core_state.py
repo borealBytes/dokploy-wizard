@@ -58,7 +58,7 @@ def test_shared_core_plan_is_empty_when_no_selected_pack_needs_it() -> None:
     assert desired_state.shared_core.postgres is None
     assert desired_state.shared_core.redis is None
     assert desired_state.shared_core.allocations == ()
-    assert desired_state.enabled_packs == ("headscale",)
+    assert desired_state.enabled_packs == ()
 
 
 def test_admin_credential_rejection_for_postgres_allocations() -> None:

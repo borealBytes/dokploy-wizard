@@ -139,7 +139,7 @@ def test_reconcile_headscale_plans_runtime_when_enabled() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
-            values={"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"},
+            values={"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com", "ENABLE_HEADSCALE": "true"},
         )
     )
 
@@ -223,7 +223,7 @@ def test_reconcile_headscale_reuses_owned_service_and_requires_health() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
-            values={"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"},
+            values={"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com", "ENABLE_HEADSCALE": "true"},
         )
     )
     backend = FakeHeadscaleBackend(
@@ -262,7 +262,7 @@ def test_reconcile_headscale_adopts_matching_existing_service_by_name() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
-            values={"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"},
+            values={"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com", "ENABLE_HEADSCALE": "true"},
         )
     )
     backend = FakeHeadscaleBackend(
@@ -291,7 +291,7 @@ def test_reconcile_headscale_fails_closed_on_health_check_failure() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
-            values={"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"},
+            values={"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com", "ENABLE_HEADSCALE": "true"},
         )
     )
 
