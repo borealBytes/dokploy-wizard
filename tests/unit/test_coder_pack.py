@@ -228,6 +228,52 @@ def test_reconcile_coder_runs_application_bootstrap_before_final_health_gate_on_
     assert phase.result.health_check.passed is True
 
 
+def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    backend._created_in_process = True
+
+    waits: list[str] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_wait_for_coder_bootstrap_api_ready",
+        lambda hostname: waits.append(hostname),
+    )
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-token")
+    monkeypatch.setattr(
+        coder_module, "_coder_container_name", lambda service_name: "coder-container"
+    )
+    monkeypatch.setattr(coder_module, "_copy_template_into_container", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+
+    notes = backend.ensure_application_ready()
+
+    assert waits == ["coder.example.com"]
+    assert notes == (
+        "Provisioned initial Coder admin for 'admin@example.com'.",
+        "Seeded default Coder template 'ubuntu-vscode'.",
+    )
+
+
 def test_build_coder_ledger_replaces_existing_resources() -> None:
     ledger = build_coder_ledger(
         existing_ledger=OwnershipLedger(

@@ -167,6 +167,8 @@ class DokployCoderBackend:
 
     def ensure_application_ready(self) -> tuple[str, ...]:
         notes: list[str] = []
+        if self._created_in_process:
+            _wait_for_coder_bootstrap_api_ready(self._hostname)
         first_user_provisioned = False
         if not _coder_first_user_exists(self._hostname):
             _create_coder_first_user(
@@ -476,6 +478,25 @@ def _wait_for_public_https_health(
         if attempt < attempts - 1:
             time.sleep(delay_seconds)
     return False
+
+
+def _wait_for_coder_bootstrap_api_ready(
+    hostname: str, *, attempts: int = 12, delay_seconds: float = 5.0
+) -> None:
+    for attempt in range(attempts):
+        try:
+            _coder_request(hostname=hostname, method="GET", path="/api/v2/users/first")
+            return
+        except _CoderHTTPError as exc:
+            if exc.status == 404:
+                return
+            if attempt < attempts - 1:
+                time.sleep(delay_seconds)
+                continue
+            raise CoderError(
+                f"Coder bootstrap API did not become ready before first-user setup (HTTP {exc.status})."
+            ) from exc
+    raise CoderError("Coder bootstrap API did not become ready before first-user setup.")
 
 
 def _yaml_quote(value: str) -> str:
