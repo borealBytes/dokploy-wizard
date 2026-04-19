@@ -1,0 +1,29 @@
+{
+  "key": "document-key-abc123",
+  "status": 6,
+  "forcesavetype": 1,
+  "url": "https://office.example.com/cache/files/document-key-abc123/force-save.docx",
+  "changesurl": "https://office.example.com/cache/files/document-key-abc123/force-save-changes.zip",
+  "users": [
+    "clay"
+  ],
+  "actions": [
+    {
+      "type": 2,
+      "userid": "clay"
+    }
+  ],
+  "history": {
+    "serverVersion": "172",
+    "changes": [
+      {
+        "created": "2026-04-19T12:50:07Z",
+        "user": {
+          "id": "clay",
+          "name": "Clay"
+        }
+      }
+    ]
+  },
+  "userdata": "{\"origin\":\"nextcloud\",\"fileId\":\"file-991\",\"path\":\"/Projects/Q2 Plan.docx\"}"
+}

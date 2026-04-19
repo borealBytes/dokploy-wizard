@@ -1,0 +1,43 @@
+{
+  "webhookEventId": "evt-talk-room-42-msg-845-v2",
+  "event": "message",
+  "timestamp": "2026-04-19T12:45:02Z",
+  "server": "https://nextcloud.example.com",
+  "conversation": {
+    "id": "room-42",
+    "token": "x9m3abp4",
+    "type": "room",
+    "name": "Field Ops"
+  },
+  "capabilities": {
+    "bots-v1": true,
+    "conversation-v4": true,
+    "threads": true,
+    "signaling-v3": false
+  },
+  "initiator": {
+    "id": "clay",
+    "displayName": "Clay",
+    "type": "user"
+  },
+  "message": {
+    "id": "msg-845",
+    "version": 2,
+    "text": "@Nexa can you summarize the action items from today's edits?",
+    "markdown": "**@Nexa** can you summarize the action items from today's edits?",
+    "parent": {
+      "id": "msg-840"
+    },
+    "parameters": [
+      {
+        "type": "mention",
+        "id": "nexa",
+        "name": "Nexa"
+      }
+    ]
+  },
+  "context": {
+    "threadId": "thread-room-42-msg-840",
+    "roomId": "room-42"
+  }
+}

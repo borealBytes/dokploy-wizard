@@ -1,0 +1,29 @@
+{
+  "key": "document-key-abc123",
+  "status": 2,
+  "url": "https://office.example.com/cache/files/document-key-abc123/output.docx",
+  "changesurl": "https://office.example.com/cache/files/document-key-abc123/changes.zip",
+  "users": [
+    "clay",
+    "nexa"
+  ],
+  "actions": [
+    {
+      "type": 0,
+      "userid": "clay"
+    }
+  ],
+  "history": {
+    "serverVersion": "171",
+    "changes": [
+      {
+        "created": "2026-04-19T12:44:58Z",
+        "user": {
+          "id": "clay",
+          "name": "Clay"
+        }
+      }
+    ]
+  },
+  "userdata": "{\"origin\":\"nextcloud\",\"fileId\":\"file-991\",\"path\":\"/Projects/Q2 Plan.docx\"}"
+}
