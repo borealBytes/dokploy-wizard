@@ -402,6 +402,8 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "OPENCLAW_GATEWAY_PASSWORD",
         "OPENCLAW_GATEWAY_TOKEN",
         "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
+        "OPENCLAW_NEXA_AGENT_EMAIL",
+        "OPENCLAW_NEXA_AGENT_PASSWORD",
         "OPENCLAW_NEXA_AGENT_USER_ID",
         "OPENCLAW_NEXA_DEPLOYMENT_MODE",
         "OPENCLAW_NEXA_EDITOR_EVENTS_SHARED_SECRET",
@@ -428,6 +430,52 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "OPENCLAW_TELEGRAM_BOT_TOKEN",
         "OPENCLAW_TELEGRAM_OWNER_USER_ID",
     )
+
+
+def test_modify_runs_nextcloud_when_nexa_service_account_fields_change() -> None:
+    existing_raw = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_NEXTCLOUD": "true",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
+            "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
+            "OPENCLAW_NEXA_AGENT_PASSWORD": "ChangeMeSoon",
+        },
+    )
+    requested_raw = RawEnvInput(
+        format_version=1,
+        values={
+            **existing_raw.values,
+            "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa Runtime",
+        },
+    )
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=resolve_desired_state(existing_raw),
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=resolve_desired_state(existing_raw).fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "nextcloud",
+                "openclaw",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=resolve_desired_state(requested_raw),
+    )
+
+    assert "nextcloud" in plan.phases_to_run
+    assert "openclaw" in plan.phases_to_run
 
 
 def test_modify_uses_explicit_pack_mutable_resource_contract() -> None:
@@ -576,5 +624,56 @@ def test_modify_openclaw_gateway_token_change_uses_pack_mutable_contract() -> No
 
     assert plan.mode == "modify"
     assert "OPENCLAW_GATEWAY_TOKEN" in plan.reasons[0]
+    assert plan.start_phase == "openclaw"
+    assert plan.phases_to_run == ("openclaw",)
+
+
+def test_modify_openclaw_internal_hostname_reconciles_networking_and_openclaw_only() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_INTERNAL_SUBDOMAIN": "openclaw-internal",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_INTERNAL_SUBDOMAIN": "agent-openclaw",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+        }
+    )
+
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "openclaw",
+                "cloudflare_access",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert "OPENCLAW_INTERNAL_SUBDOMAIN" in plan.reasons[0]
     assert plan.start_phase == "openclaw"
     assert plan.phases_to_run == ("openclaw",)

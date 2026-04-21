@@ -61,6 +61,7 @@ _SUPPORTED_HOSTNAME_KEYS = {
     "CODER_SUBDOMAIN",
     "CODER_WILDCARD_SUBDOMAIN",
     "OPENCLAW_SUBDOMAIN",
+    "OPENCLAW_INTERNAL_SUBDOMAIN",
     "MY_FARM_ADVISOR_SUBDOMAIN",
 }
 _SUPPORTED_ENABLEMENT_KEYS = {
@@ -109,6 +110,7 @@ _HOSTNAME_PHASES = {
     "coder": ("networking", "coder"),
     "coder-wildcard": ("networking", "coder"),
     "openclaw": ("networking", "openclaw"),
+    "openclaw-internal": ("openclaw",),
     "my-farm-advisor": ("networking", "my-farm-advisor"),
 }
 _OPTIONAL_PHASE_PACKS = {
@@ -129,6 +131,8 @@ _OPENCLAW_RUNTIME_ENV_KEYS = {
     "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD",
     "OPENCLAW_NEXA_AGENT_USER_ID",
     "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
+    "OPENCLAW_NEXA_AGENT_PASSWORD",
+    "OPENCLAW_NEXA_AGENT_EMAIL",
     "OPENCLAW_NEXA_MEM0_BASE_URL",
     "OPENCLAW_NEXA_MEM0_API_KEY",
     "OPENCLAW_NEXA_MEM0_LLM_BASE_URL",
@@ -146,6 +150,12 @@ _OPENCLAW_RUNTIME_ENV_KEYS = {
     "OPENCLAW_FALLBACK_MODELS",
     "OPENCLAW_TELEGRAM_BOT_TOKEN",
     "OPENCLAW_TELEGRAM_OWNER_USER_ID",
+}
+_NEXTCLOUD_NEXA_USER_ENV_KEYS = {
+    "OPENCLAW_NEXA_AGENT_USER_ID",
+    "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
+    "OPENCLAW_NEXA_AGENT_PASSWORD",
+    "OPENCLAW_NEXA_AGENT_EMAIL",
 }
 _MY_FARM_RUNTIME_ENV_KEYS = {
     "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
@@ -322,6 +332,8 @@ def classify_modify_request(
         phases_to_run.add("openclaw")
     if changed_keys & _OPENCLAW_RUNTIME_ENV_KEYS:
         phases_to_run.add("openclaw")
+    if changed_keys & _NEXTCLOUD_NEXA_USER_ENV_KEYS:
+        phases_to_run.add("nextcloud")
     if existing_desired.my_farm_advisor_channels != requested_desired.my_farm_advisor_channels:
         phases_to_run.add("my-farm-advisor")
     if existing_desired.my_farm_advisor_replicas != requested_desired.my_farm_advisor_replicas:

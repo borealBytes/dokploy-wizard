@@ -31,3 +31,4 @@ dist/
 .vscode/
 .install.env
 .fresh-vps-validation.env
+.gstack/

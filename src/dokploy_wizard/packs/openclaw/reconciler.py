@@ -17,6 +17,9 @@ from dokploy_wizard.packs.openclaw.models import (
 from dokploy_wizard.state.models import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput
 
 OPENCLAW_SERVICE_RESOURCE_TYPE = "openclaw_service"
+OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE = "openclaw_mem0_service"
+OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE = "openclaw_qdrant_service"
+OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE = "openclaw_runtime_service"
 MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE = "my_farm_advisor_service"
 _PACK_NAMES = ("openclaw", "my-farm-advisor")
 _RESOURCE_TYPES = {
@@ -304,11 +307,30 @@ def build_openclaw_ledger(
     stack_name: str,
     service_resource_id: str | None,
 ) -> OwnershipLedger:
-    return _build_advisor_ledger(
+    ledger = _build_advisor_ledger(
         existing_ledger=existing_ledger,
         stack_name=stack_name,
         pack_name="openclaw",
         service_resource_id=service_resource_id,
+    )
+    resources = list(ledger.resources)
+    sidecars = (
+        (OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE, _nexa_sidecar_scope(stack_name, "mem0")),
+        (OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE, _nexa_sidecar_scope(stack_name, "qdrant")),
+        (OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE, _nexa_sidecar_scope(stack_name, "nexa-runtime")),
+    )
+    for resource_type, scope in sidecars:
+        resources = [resource for resource in resources if not (resource.resource_type == resource_type and resource.scope == scope)]
+        resources.append(
+            OwnedResource(
+                resource_type=resource_type,
+                resource_id=scope,
+                scope=scope,
+            )
+        )
+    return OwnershipLedger(
+        format_version=ledger.format_version,
+        resources=tuple(resources),
     )
 
 
@@ -512,6 +534,10 @@ def _service_name(stack_name: str, pack_name: str) -> str:
 
 def _service_scope(stack_name: str, pack_name: str) -> str:
     return f"stack:{stack_name}:{pack_name}"
+
+
+def _nexa_sidecar_scope(stack_name: str, service_name: str) -> str:
+    return f"stack:{stack_name}:openclaw-sidecar:{service_name}"
 
 
 def _resource_type_for_pack(pack_name: str) -> str:

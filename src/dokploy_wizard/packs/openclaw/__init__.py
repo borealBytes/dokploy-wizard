@@ -10,6 +10,9 @@ from dokploy_wizard.packs.openclaw.models import (
 )
 from dokploy_wizard.packs.openclaw.reconciler import (
     MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
     OPENCLAW_SERVICE_RESOURCE_TYPE,
     OpenClawBackend,
     OpenClawError,
@@ -88,6 +91,9 @@ from dokploy_wizard.packs.openclaw.nexa_runtime import (  # pyright: ignore[repo
 
 __all__ = [
     "MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE",
+    "OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE",
+    "OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE",
+    "OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE",
     "DEFAULT_NEXA_MEM0_EMBEDDER_MODEL",
     "DEFAULT_NEXA_MEM0_ENTITY_COLLECTION",
     "NexaMem0Client",

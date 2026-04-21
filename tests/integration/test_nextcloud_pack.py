@@ -932,6 +932,10 @@ def test_install_passes_nexa_workspace_contract_into_dokploy_nextcloud_backend(
                 "ENABLE_OPENCLAW": "true",
                 "OPENCLAW_CHANNELS": "telegram",
                 "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.internal.example.com",
+                "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
+                "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
+                "OPENCLAW_NEXA_AGENT_PASSWORD": "nexa-secret",
+                "OPENCLAW_NEXA_AGENT_EMAIL": "nexa@example.com",
                 "HOST_OS_ID": "ubuntu",
                 "HOST_OS_VERSION_ID": "24.04",
                 "HOST_CPU_COUNT": "4",
@@ -974,6 +978,10 @@ def test_install_passes_nexa_workspace_contract_into_dokploy_nextcloud_backend(
     assert workspace_contract.visible_root == "/mnt/openclaw/workspace/nexa"
     assert workspace_contract.contract_path == "/mnt/openclaw/workspace/nexa/contract.json"
     assert workspace_contract.runtime_state_source == "server-owned env + durable state JSON"
+    assert recording_backend.init_kwargs["nexa_agent_user_id"] == "nexa-agent"
+    assert recording_backend.init_kwargs["nexa_agent_display_name"] == "Nexa"
+    assert recording_backend.init_kwargs["nexa_agent_password"] == "nexa-secret"
+    assert recording_backend.init_kwargs["nexa_agent_email"] == "nexa@example.com"
 
 
 def test_install_rerun_reuses_owned_nextcloud_resources(tmp_path: Path) -> None:

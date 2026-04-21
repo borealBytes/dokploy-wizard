@@ -883,6 +883,8 @@ def _run_lifecycle_flow(
         allow_memory_shortfall=not allow_modify,
         lifecycle_plan=lifecycle_plan,
         loaded_state=loaded_state,
+        bootstrap_backend=backend,
+        existing_state=existing_state,
     )
     if not allow_modify:
         _require_install_memory_shortfall_override(
@@ -1294,8 +1296,17 @@ def _run_preflight_report(
     allow_memory_shortfall: bool,
     lifecycle_plan: LifecyclePlan,
     loaded_state: Any,
+    bootstrap_backend: Any,
+    existing_state: bool,
 ) -> Any:
     allowed_ports_in_use = _expected_ports_in_use_for_retry(loaded_state, lifecycle_plan)
+    if (
+        not allowed_ports_in_use
+        and not existing_state
+        and lifecycle_plan.mode == "install"
+        and getattr(bootstrap_backend, "is_healthy", lambda: False)()
+    ):
+        allowed_ports_in_use = REQUIRED_PORTS
     parameters = inspect.signature(run_preflight).parameters
     kwargs: dict[str, Any] = {}
     if "allow_memory_shortfall" in parameters:
@@ -1555,6 +1566,11 @@ def _build_nextcloud_backend(
     admin_user = raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
     admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon")
     nexa_enabled = _has_openclaw_nexa_env(raw_env)
+    nexa_agent_password = None
+    if nexa_enabled:
+        nexa_agent_password = raw_env.values.get("OPENCLAW_NEXA_AGENT_PASSWORD") or raw_env.values.get(
+            "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD"
+        )
     return DokployNextcloudBackend(
         api_url=api_url,
         api_key=api_key,
@@ -1578,6 +1594,12 @@ def _build_nextcloud_backend(
             if nexa_enabled and "openclaw" in desired_state.enabled_packs
             else None
         ),
+        nexa_agent_user_id=(raw_env.values.get("OPENCLAW_NEXA_AGENT_USER_ID") if nexa_enabled else None),
+        nexa_agent_display_name=(
+            raw_env.values.get("OPENCLAW_NEXA_AGENT_DISPLAY_NAME") if nexa_enabled else None
+        ),
+        nexa_agent_password=nexa_agent_password,
+        nexa_agent_email=(raw_env.values.get("OPENCLAW_NEXA_AGENT_EMAIL") if nexa_enabled else None),
         openclaw_rescan_cron=raw_env.values.get("NEXTCLOUD_OPENCLAW_RESCAN_CRON", "*/15 * * * *"),
         openclaw_rescan_timezone=raw_env.values.get("NEXTCLOUD_OPENCLAW_RESCAN_TIMEZONE", "UTC"),
         client=_build_dokploy_api_client(
@@ -1729,6 +1751,7 @@ def _build_openclaw_backend(
         api_key=api_key,
         stack_name=desired_state.stack_name,
         gateway_token=desired_state.openclaw_gateway_token,
+        openclaw_internal_hostname=_openclaw_internal_hostname(raw_env, desired_state),
         openclaw_gateway_password=_advisor_env_optional(raw_env, "OPENCLAW_GATEWAY_PASSWORD")
         or _advisor_env_optional(raw_env, "ADVISOR_GATEWAY_PASSWORD")
         or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
@@ -1792,6 +1815,16 @@ def _openclaw_nexa_env(raw_env: RawEnvInput) -> dict[str, str]:
         for key, value in sorted(raw_env.values.items())
         if key.startswith("OPENCLAW_NEXA_") and value.strip() != ""
     }
+
+
+def _openclaw_internal_hostname(raw_env: RawEnvInput, desired_state: DesiredState) -> str | None:
+    raw_value = raw_env.values.get("OPENCLAW_INTERNAL_SUBDOMAIN")
+    if raw_value is None:
+        return None
+    normalized = raw_value.strip().lower()
+    if normalized in {"", "disabled", "off", "false", "none"}:
+        return None
+    return desired_state.hostnames.get("openclaw-internal")
 
 
 def _has_openclaw_nexa_env(raw_env: RawEnvInput) -> bool:

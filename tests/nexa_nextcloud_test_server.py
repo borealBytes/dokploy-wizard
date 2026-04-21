@@ -34,6 +34,11 @@ class RecordingNextcloudServer(ThreadingHTTPServer):
         webdav_content: bytes,
         webdav_content_type: str,
         webdav_acl_principals: tuple[str, ...] = (),
+        talk_auth_user: str | None = None,
+        talk_auth_password: str | None = None,
+        talk_conversations: tuple[dict[str, Any], ...] = (),
+        talk_messages_by_token: dict[str, tuple[dict[str, Any], ...]] | None = None,
+        public_share_base_url: str = "https://nextcloud.example.com/s/",
     ) -> None:
         super().__init__(server_address, handler_class)
         self.requests: list[RecordedNextcloudRequest] = []
@@ -46,6 +51,12 @@ class RecordingNextcloudServer(ThreadingHTTPServer):
         self.webdav_content = webdav_content
         self.webdav_content_type = webdav_content_type
         self.webdav_acl_principals = webdav_acl_principals
+        self.talk_auth_user = talk_auth_user or webdav_user
+        self.talk_auth_password = talk_auth_password or webdav_password
+        self.talk_conversations = talk_conversations
+        self.talk_messages_by_token = talk_messages_by_token or {}
+        self.public_share_base_url = public_share_base_url
+        self.webdav_files: dict[str, bytes] = {}
 
 
 class _NextcloudHandler(BaseHTTPRequestHandler):
@@ -84,12 +95,56 @@ class _NextcloudHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if self.path.startswith("/ocs/v2.php/apps/spreed/api/v1/chat/"):
+            if not self._check_talk_auth():
+                return
+            self._write_json(
+                201,
+                {
+                    "ocs": {
+                        "meta": {"status": "ok", "requestid": "request-42"},
+                        "data": {"id": 902},
+                    }
+                },
+            )
+            return
+        if self.path == "/ocs/v2.php/apps/files_sharing/api/v1/shares":
+            if not self._check_talk_auth():
+                return
+            share_request = json.loads(body.decode("utf-8"))
+            relative_path = str(share_request.get("path", "")).strip()
+            token = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()[:12]
+            self._write_json(
+                200,
+                {
+                    "ocs": {
+                        "meta": {"status": "ok", "requestid": "share-request-1"},
+                        "data": {"id": 701, "token": token, "url": server.public_share_base_url + token},
+                    }
+                },
+            )
+            return
         self._write_json(404, {"error": "unknown_path"})
 
     def do_PROPFIND(self) -> None:  # noqa: N802
         self._handle_webdav()
 
+    def do_PUT(self) -> None:  # noqa: N802
+        self._handle_webdav()
+
     def do_GET(self) -> None:  # noqa: N802
+        if self.path.startswith("/ocs/v2.php/apps/spreed/api/v4/room"):
+            if not self._check_talk_auth():
+                return
+            self._write_json(200, {"ocs": {"meta": {"status": "ok"}, "data": list(self.server.talk_conversations)}})
+            return
+        if self.path.startswith("/ocs/v2.php/apps/spreed/api/v1/chat/"):
+            if not self._check_talk_auth():
+                return
+            token = self.path.split("/chat/", 1)[1].split("?", 1)[0]
+            messages = list(self.server.talk_messages_by_token.get(token, ()))
+            self._write_json(200, {"ocs": {"meta": {"status": "ok"}, "data": messages}})
+            return
         self._handle_webdav()
 
     def _handle_webdav(self) -> None:
@@ -134,14 +189,39 @@ class _NextcloudHandler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
         if self.command == "GET":
+            stored_content = server.webdav_files.get(self.path)
+            if stored_content is not None:
+                self.send_response(200)
+                self.send_header("Content-Type", server.webdav_content_type)
+                self.send_header("Content-Length", str(len(stored_content)))
+                self.end_headers()
+                self.wfile.write(stored_content)
+                return
             self.send_response(200)
             self.send_header("Content-Type", server.webdav_content_type)
             self.send_header("Content-Length", str(len(server.webdav_content)))
             self.end_headers()
             self.wfile.write(server.webdav_content)
             return
+        if self.command == "PUT":
+            server.webdav_files[self.path] = body
+            self.send_response(201)
+            self.end_headers()
+            return
         self.send_response(405)
         self.end_headers()
+
+    def _check_talk_auth(self) -> bool:
+        server = self.server
+        assert isinstance(server, RecordingNextcloudServer)
+        expected_auth = "Basic " + base64.b64encode(
+            f"{server.talk_auth_user}:{server.talk_auth_password}".encode("utf-8")
+        ).decode("ascii")
+        if self.headers.get("Authorization") != expected_auth:
+            self.send_response(401)
+            self.end_headers()
+            return False
+        return True
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A003
         return
@@ -167,6 +247,11 @@ def run_recording_nextcloud_server(
     webdav_content: bytes,
     webdav_content_type: str,
     webdav_acl_principals: tuple[str, ...] = (),
+    talk_auth_user: str | None = None,
+    talk_auth_password: str | None = None,
+    talk_conversations: tuple[dict[str, Any], ...] = (),
+    talk_messages_by_token: dict[str, tuple[dict[str, Any], ...]] | None = None,
+    public_share_base_url: str = "https://nextcloud.example.com/s/",
 ) -> Iterator[RecordingNextcloudServer]:
     server = RecordingNextcloudServer(
         ("127.0.0.1", 0),
@@ -180,6 +265,11 @@ def run_recording_nextcloud_server(
         webdav_content=webdav_content,
         webdav_content_type=webdav_content_type,
         webdav_acl_principals=webdav_acl_principals,
+        talk_auth_user=talk_auth_user,
+        talk_auth_password=talk_auth_password,
+        talk_conversations=talk_conversations,
+        talk_messages_by_token=talk_messages_by_token,
+        public_share_base_url=public_share_base_url,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

@@ -22,6 +22,9 @@ from dokploy_wizard.lifecycle import classify_modify_request
 from dokploy_wizard.dokploy.openclaw import DokployOpenClawBackend, _control_ui_origin_ready
 from dokploy_wizard.packs.openclaw import (
     MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
     OPENCLAW_SERVICE_RESOURCE_TYPE,
     OpenClawError,
     OpenClawResourceRecord,
@@ -118,6 +121,15 @@ def _decode_seeded_gateway_payload(compose: str) -> dict[str, Any]:
     )
     assert match is not None
     return json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
+
+
+def _decode_seeded_gateway_payloads(compose: str) -> list[dict[str, Any]]:
+    matches = re.findall(
+        r"Buffer\.from\(\\?[\'\"]([^\'\"]+)\\?[\'\"],\\?[\'\"]base64\\?[\'\"]\)",
+        compose,
+    )
+    assert len(matches) >= 2
+    return [json.loads(base64.b64decode(item).decode("utf-8")) for item in matches[::2]]
 
 
 def _decode_extra_seeded_files(compose: str) -> dict[str, str]:
@@ -605,6 +617,21 @@ def test_build_openclaw_ledger_persists_pack_specific_scope() -> None:
             resource_id="openclaw-service-1",
             scope="stack:wizard-stack:openclaw",
         ),
+        OwnedResource(
+            resource_type=OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
+            resource_id="stack:wizard-stack:openclaw-sidecar:mem0",
+            scope="stack:wizard-stack:openclaw-sidecar:mem0",
+        ),
+        OwnedResource(
+            resource_type=OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
+            resource_id="stack:wizard-stack:openclaw-sidecar:qdrant",
+            scope="stack:wizard-stack:openclaw-sidecar:qdrant",
+        ),
+        OwnedResource(
+            resource_type=OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
+            resource_id="stack:wizard-stack:openclaw-sidecar:nexa-runtime",
+            scope="stack:wizard-stack:openclaw-sidecar:nexa-runtime",
+        ),
     )
 
 
@@ -673,7 +700,6 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
         api_key="key-123",
         stack_name="wizard-stack",
         openclaw_gateway_password="openclaw-ui-generated",
-        trusted_proxy_emails=("admin@example.com",),
         model_provider="anthropic",
         model_name="claude-3-7-sonnet",
         trusted_proxies="10.0.0.0/8,172.16.0.0/12",
@@ -703,23 +729,46 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
     assert 'NVIDIA_VISIBLE_DEVICES: "GPU-0"' in compose
     assert "OPENCLAW_GATEWAY_TOKEN:" not in compose
     seeded = _decode_seeded_gateway_payload(compose)
-    assert seeded["gateway"]["auth"]["mode"] == "trusted-proxy"
-    assert seeded["gateway"]["auth"]["trustedProxy"]["userHeader"] == (
-        "cf-access-authenticated-user-email"
-    )
-    assert seeded["gateway"]["auth"]["trustedProxy"]["requiredHeaders"] == [
-        "cf-access-jwt-assertion"
-    ]
-    assert seeded["gateway"]["auth"]["password"] == "openclaw-ui-generated"
-    assert seeded["gateway"]["auth"]["trustedProxy"]["allowUsers"] == ["admin@example.com"]
+    assert seeded["gateway"]["auth"]["mode"] == "token"
     assert seeded["gateway"]["trustedProxies"] == ["10.0.0.0/8", "172.16.0.0/12"]
-    assert seeded["gateway"]["controlUi"]["allowInsecureAuth"] is False
+    assert seeded["gateway"]["controlUi"]["allowInsecureAuth"] is True
+    assert seeded["tools"] == {
+        "profile": "coding",
+        "elevated": {
+            "enabled": True,
+            "allowFrom": {
+                "webchat": ["clayton@superiorbyteworks.com"],
+                "telegram": [],
+                "nextcloud-talk": ["clayton@superiorbyteworks.com", "nexa-agent"],
+            },
+        },
+    }
     assert seeded["agents"]["list"] == [
         {"id": "main", "default": True},
-        {"id": "telly", "name": "Telly"},
+        {
+            "id": "telly",
+            "name": "Telly",
+            "model": {
+                "primary": "local/unsloth-active",
+                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+            },
+            "tools": {
+                "profile": "coding",
+                "elevated": {
+                    "enabled": True,
+                    "allowFrom": {
+                        "telegram": [],
+                        "webchat": ["clayton@superiorbyteworks.com"],
+                    },
+                },
+            },
+        },
     ]
     assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
-    assert "defaults" not in seeded["agents"]
+    assert seeded["agents"]["defaults"] == {
+        "elevatedDefault": "off",
+        "workspace": "/home/node/.openclaw/workspace",
+    }
     assert (
         'traefik.http.services.wizard-stack-openclaw.loadbalancer.server.port: "18789"' in compose
     )
@@ -757,8 +806,57 @@ def test_dokploy_openclaw_backend_keeps_token_mode_without_access_emails() -> No
     assert 'OPENCLAW_GATEWAY_TOKEN: "fixed-token-123"' in compose
     seeded = _decode_seeded_gateway_payload(compose)
     assert seeded["gateway"]["auth"]["mode"] == "token"
+    assert seeded["gateway"]["remote"]["token"] == "fixed-token-123"
     assert seeded["gateway"]["controlUi"]["allowInsecureAuth"] is True
+    assert seeded["tools"] == {
+        "profile": "coding",
+        "elevated": {
+            "enabled": True,
+            "allowFrom": {
+                "webchat": ["clayton@superiorbyteworks.com"],
+                "telegram": [],
+                "nextcloud-talk": ["clayton@superiorbyteworks.com", "nexa-agent"],
+            },
+        },
+    }
     assert "payload.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;" in compose
+
+
+def test_dokploy_openclaw_backend_uses_trusted_proxy_mode_for_single_gateway_when_access_emails_present() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        trusted_proxy_emails=("admin@example.com",),
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    assert 'OPENCLAW_GATEWAY_TOKEN: "fixed-token-123"' not in compose
+    seeded = _decode_seeded_gateway_payload(compose)
+    assert seeded["gateway"]["mode"] == "local"
+    assert seeded["gateway"]["auth"] == {
+        "mode": "trusted-proxy",
+        "trustedProxy": {
+            "userHeader": "cf-access-authenticated-user-email",
+            "allowUsers": ["admin@example.com"],
+        },
+    }
+    assert "remote" not in seeded["gateway"]
+    assert "payload.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;" not in compose
 
 
 def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys() -> None:
@@ -806,10 +904,28 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
     ]
     assert seeded["agents"]["list"] == [
         {"id": "main", "default": True},
-        {"id": "telly", "name": "Telly"},
+        {
+            "id": "telly",
+            "name": "Telly",
+            "model": {
+                "primary": "local/unsloth-active",
+                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+            },
+            "tools": {
+                "profile": "coding",
+                "elevated": {
+                    "enabled": True,
+                    "allowFrom": {
+                        "telegram": ["123456789"],
+                        "webchat": ["clayton@superiorbyteworks.com"],
+                    },
+                },
+            },
+        },
     ]
     assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert seeded["agents"]["defaults"]["models"] == {
+        "local/unsloth-active": {},
         "nvidia/moonshotai/kimi-k2.5": {},
         "openrouter/openrouter/free": {},
         "openrouter/google/gemma-4-31b-it:free": {},
@@ -820,6 +936,62 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
         "allowFrom": ["123456789"],
         "execApprovals": {"enabled": False},
     }
+
+
+def test_dokploy_openclaw_backend_renders_split_public_and_internal_gateways() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        openclaw_internal_hostname="openclaw-internal.example.com",
+        trusted_proxy_emails=("admin@example.com",),
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    assert "  wizard-stack-openclaw:\n" in compose
+    assert "  wizard-stack-openclaw-public:\n" in compose
+    internal_block = _service_block(compose, "wizard-stack-openclaw")
+    public_block = _service_block(compose, "wizard-stack-openclaw-public")
+    assert "traefik.enable" not in internal_block
+    assert 'OPENCLAW_CONFIG_PATH: "/home/node/.openclaw/openclaw.json"' in internal_block
+    assert 'OPENCLAW_CONFIG_PATH: "/home/node/.openclaw-public/openclaw.json"' in public_block
+    assert 'OPENCLAW_STATE_DIR: "/home/node/.openclaw-public"' in public_block
+    assert "wizard-stack-openclaw-public-data:/home/node/.openclaw-public" in compose
+    assert "      - wizard-stack-openclaw" in public_block
+    assert 'traefik.http.routers.wizard-stack-openclaw-public.rule: "Host(`openclaw.example.com`)"' in compose
+
+    payloads = _decode_seeded_gateway_payloads(compose)
+    assert len(payloads) == 2
+    internal_payload, public_payload = payloads
+    assert internal_payload["gateway"]["mode"] == "local"
+    assert internal_payload["gateway"]["auth"]["mode"] == "token"
+    assert internal_payload["agents"]["defaults"]["workspace"] == "/home/node/.openclaw/workspace"
+    assert public_payload["gateway"]["mode"] == "remote"
+    assert public_payload["gateway"]["auth"]["mode"] == "trusted-proxy"
+    assert public_payload["gateway"]["auth"]["trustedProxy"] == {
+        "userHeader": "cf-access-authenticated-user-email",
+        "allowUsers": ["admin@example.com"],
+    }
+    assert public_payload["gateway"]["remote"] == {
+        "url": "ws://wizard-stack-openclaw:18789",
+        "token": "fixed-token-123",
+    }
+    assert public_payload["agents"]["defaults"]["workspace"] == "/home/node/.openclaw-public/workspace"
+    assert "tools" not in public_payload
 
 
 def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surface() -> None:
@@ -886,19 +1058,28 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
     assert "dokploy-network" not in runtime_block
     assert "wizard-stack-shared" not in mem0_block
     assert "wizard-stack-shared" not in qdrant_block
-    assert "wizard-stack-shared" not in runtime_block
+    assert "wizard-stack-shared" in runtime_block
     assert "      - default" in mem0_block
     assert "      - default" in qdrant_block
     assert "      - default" in runtime_block
+    assert 'image: local/dokploy-wizard-nexa-mem0:latest' in mem0_block
+    assert "build:" not in mem0_block
     assert "labels:" not in runtime_block
     assert "expose:" not in runtime_block
     assert 'image: local/dokploy-wizard-nexa-runtime:latest' in runtime_block
-    assert "context: ." in runtime_block
-    assert "dockerfile: docker/nexa-runtime/Dockerfile" in runtime_block
+    assert "build:" not in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH: "/mnt/openclaw/.nexa/runtime-contract.json"' in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH: "/mnt/openclaw/workspace/nexa/contract.json"' in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_STATE_DIR: "/mnt/openclaw/.nexa/state"' in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_WORKER_MODE: "queue"' in runtime_block
+    assert 'DOKPLOY_WIZARD_OPENCLAW_INTERNAL_URL: "http://wizard-stack-openclaw:18789"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL: "local/unsloth-active"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL_PROVIDER: "local"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL: "http://tuxdesktop.tailb12aa5.ts.net:61434/v1"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY: "sk-no-key-required"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL: "https://integrate.api.nvidia.com/v1"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL: "https://openrouter.ai/api/v1"' in runtime_block
+    assert 'OPENCLAW_NEXA_NEXTCLOUD_BASE_URL: "http://wizard-stack-nextcloud"' in runtime_block
     assert 'OPENCLAW_NEXA_MEM0_BASE_URL: "http://mem0:8000"' in runtime_block
     assert 'OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL: "http://qdrant:6333"' in runtime_block
     assert 'OPENCLAW_NEXA_MEM0_API_KEY: "mem0-api-key"' in runtime_block
@@ -908,21 +1089,81 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
     assert "      - qdrant" in runtime_block
 
     seeded = _decode_seeded_gateway_payload(compose)
-    assert seeded["wizard"]["nexa"]["deployment_mode"] == "sidecar"
-    assert seeded["wizard"]["nexa"]["topology_mode"] == "internal-compose-sidecars"
-    assert seeded["wizard"]["nexa"]["internal_network_only"] is True
-    assert seeded["wizard"]["nexa"]["runtime_service_name"] == "nexa-runtime"
-    assert seeded["wizard"]["nexa"]["runtime_state_dir"] == "/mnt/openclaw/.nexa/state"
-    assert seeded["wizard"]["nexa"]["mem0_service_name"] == "mem0"
-    assert seeded["wizard"]["nexa"]["qdrant_service_name"] == "qdrant"
-    assert seeded["wizard"]["nexa"]["workspace_contract_path"] == (
-        "/home/node/.openclaw/workspace/nexa/contract.json"
-    )
+    assert "wizard" not in seeded
+    assert seeded["tools"] == {
+        "profile": "coding",
+        "elevated": {
+            "enabled": True,
+            "allowFrom": {
+                "webchat": ["clayton@superiorbyteworks.com"],
+                "telegram": [],
+                "nextcloud-talk": ["clayton@superiorbyteworks.com", "nexa-agent"],
+            },
+        },
+    }
+    assert seeded["agents"]["list"] == [
+        {"id": "main", "default": True},
+        {
+            "id": "nexa",
+            "name": "Nexa",
+            "model": {
+                "primary": "openrouter/auto",
+                "fallbacks": ["openrouter/openrouter/free"],
+            },
+            "tools": {
+                "profile": "coding",
+                "elevated": {
+                    "enabled": True,
+                    "allowFrom": {
+                        "nextcloud-talk": ["clayton@superiorbyteworks.com", "nexa-agent"],
+                        "webchat": ["clayton@superiorbyteworks.com"],
+                    },
+                },
+            },
+        },
+        {
+            "id": "telly",
+            "name": "Telly",
+            "model": {
+                "primary": "local/unsloth-active",
+                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+            },
+            "tools": {
+                "profile": "coding",
+                "elevated": {
+                    "enabled": True,
+                    "allowFrom": {
+                        "telegram": [],
+                        "webchat": ["clayton@superiorbyteworks.com"],
+                    },
+                },
+            },
+        },
+    ]
+    assert seeded["bindings"] == [
+        {"agentId": "nexa", "match": {"channel": "nextcloud-talk"}},
+        {"agentId": "telly", "match": {"channel": "telegram"}},
+    ]
 
     extra_files = _decode_extra_seeded_files(compose)
+    assert "/home/node/.openclaw/workspace/SOUL.md" in extra_files
+    assert "/home/node/.openclaw/workspace/AGENTS.md" in extra_files
+    assert "/home/node/.openclaw/workspace/TOOLS.md" in extra_files
+    assert "/home/node/.openclaw/workspace/MCPS.md" in extra_files
+    assert "/home/node/.openclaw/workspace/SKILLS.md" in extra_files
+    assert "/home/node/.openclaw/workspace-telly/IDENTITY.md" in extra_files
+    assert "/home/node/.openclaw/workspace-telly/TOOLS.md" in extra_files
+    assert "/home/node/.openclaw/workspace-telly/MCPS.md" in extra_files
+    assert "/home/node/.openclaw/workspace-telly/SKILLS.md" in extra_files
     assert "/home/node/.openclaw/.nexa/runtime-contract.json" in extra_files
     assert "/home/node/.openclaw/workspace/nexa/contract.json" in extra_files
     assert "/home/node/.openclaw/workspace/nexa/README.md" in extra_files
+    assert "Telegram-facing OpenClaw agent" in extra_files["/home/node/.openclaw/workspace-telly/IDENTITY.md"]
+    assert "real tools" in extra_files["/home/node/.openclaw/workspace/TOOLS.md"]
+    assert "Context7" in extra_files["/home/node/.openclaw/workspace/MCPS.md"]
+    assert "Qdrant" in extra_files["/home/node/.openclaw/workspace-telly/MCPS.md"]
+    assert "Qdrant skills" in extra_files["/home/node/.openclaw/workspace/SKILLS.md"]
+    assert "shell/file tools" in extra_files["/home/node/.openclaw/workspace-telly/SKILLS.md"]
     workspace_contract = json.loads(extra_files["/home/node/.openclaw/workspace/nexa/contract.json"])
     assert workspace_contract["surface"] == "operator-user-visible"
     assert workspace_contract["authoritative_runtime_state"] == "server-owned env + durable state JSON"
@@ -947,7 +1188,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
         "agent_user_id": {"present": True, "source": "server-owned-env"},
         "agent_display_name": {"present": True, "source": "server-owned-env"},
     }
-    assert runtime_contract["nextcloud"]["base_url"] == "https://nextcloud.example.com"
+    assert runtime_contract["nextcloud"]["base_url"] == "http://wizard-stack-nextcloud"
     assert runtime_contract["nextcloud"]["webdav"] == {
         "auth_user_present": True,
         "auth_password_present": True,
@@ -992,7 +1233,24 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
     seeded = _decode_seeded_gateway_payload(compose)
     assert seeded["agents"]["list"] == [
         {"id": "main", "default": True},
-        {"id": "telly", "name": "Telly"},
+        {
+            "id": "telly",
+            "name": "Telly",
+            "model": {
+                "primary": "local/unsloth-active",
+                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+            },
+            "tools": {
+                "profile": "coding",
+                "elevated": {
+                    "enabled": True,
+                    "allowFrom": {
+                        "telegram": [],
+                        "webchat": ["clayton@superiorbyteworks.com"],
+                    },
+                },
+            },
+        },
     ]
     assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert "channels" not in seeded or "telegram" not in seeded.get("channels", {})

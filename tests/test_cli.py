@@ -276,10 +276,30 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                 "svc-onlyoffice",
                 f"stack:{desired_state.stack_name}:onlyoffice-service",
             ),
+            OwnedResource(
+                "openclaw_mem0_service",
+                "svc-mem0",
+                f"stack:{desired_state.stack_name}:openclaw-sidecar:mem0",
+            ),
+            OwnedResource(
+                "openclaw_qdrant_service",
+                "svc-qdrant",
+                f"stack:{desired_state.stack_name}:openclaw-sidecar:qdrant",
+            ),
+            OwnedResource(
+                "openclaw_runtime_service",
+                "svc-runtime",
+                f"stack:{desired_state.stack_name}:openclaw-sidecar:nexa-runtime",
+            ),
         ),
     )
     my_farm_container = "openmerge-my-farm-advisor-jy6axb-openmerge-my-farm-advisor-1"
     onlyoffice_container = "openmerge-nextcloud-a5izk5-openmerge-onlyoffice-1"
+    openclaw_internal_container = "openmerge-openclaw-3f2eds-openmerge-openclaw-1"
+    openclaw_public_container = "openmerge-openclaw-3f2eds-openmerge-openclaw-public-1"
+    mem0_container = "openmerge-openclaw-3f2eds-mem0-1"
+    qdrant_container = "openmerge-openclaw-3f2eds-qdrant-1"
+    runtime_container = "openmerge-openclaw-3f2eds-nexa-runtime-1"
     my_farm_hostname = desired_state.hostnames["my-farm-advisor"]
     onlyoffice_hostname = desired_state.hostnames["onlyoffice"]
 
@@ -315,6 +335,46 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                     "traefik.http.services.openmerge-onlyoffice.loadbalancer.server.port": "80",
                 },
             },
+            {
+                "name": openclaw_internal_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-openclaw",
+                    "com.docker.compose.project": "openmerge-openclaw-3f2eds",
+                },
+            },
+            {
+                "name": openclaw_public_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-openclaw-public",
+                    "com.docker.compose.project": "openmerge-openclaw-3f2eds",
+                },
+            },
+            {
+                "name": mem0_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "mem0",
+                    "com.docker.compose.project": "openmerge-openclaw-3f2eds",
+                },
+            },
+            {
+                "name": qdrant_container,
+                "status": "Up 2 minutes",
+                "labels": {
+                    "com.docker.compose.service": "qdrant",
+                    "com.docker.compose.project": "openmerge-openclaw-3f2eds",
+                },
+            },
+            {
+                "name": runtime_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "nexa-runtime",
+                    "com.docker.compose.project": "openmerge-openclaw-3f2eds",
+                },
+            },
         ),
     )
     monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", ())
@@ -345,13 +405,36 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     )
     assert any(
         entry["pack"] == "openclaw"
-        and entry["health"] == "missing"
-        and entry["live_name"] == f"{desired_state.stack_name}-openclaw"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == openclaw_internal_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "openclaw"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == mem0_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "openclaw"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == qdrant_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "openclaw"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == runtime_container
         for entry in wizard_entries
     )
     assert not any(entry["live_name"] == my_farm_container for entry in manual_entries)
     assert not any(entry["live_name"] == onlyoffice_container for entry in manual_entries)
-    assert report["summary"]["wizard_managed"] == 3
+    assert not any(entry["live_name"] == mem0_container for entry in manual_entries)
+    assert not any(entry["live_name"] == qdrant_container for entry in manual_entries)
+    assert not any(entry["live_name"] == runtime_container for entry in manual_entries)
+    assert not any(entry["live_name"] == openclaw_internal_container for entry in manual_entries)
+    assert not any(entry["live_name"] == openclaw_public_container for entry in manual_entries)
+    assert report["summary"]["wizard_managed"] == 6
     assert report["summary"]["manual_collision"] == 0
 
 
@@ -1046,6 +1129,43 @@ def test_install_resume_tolerates_required_ports_used_by_existing_dokploy_stack(
 
     assert summary["lifecycle"]["mode"] == "resume"
     assert summary["state_status"] == "existing"
+
+
+def test_install_fresh_state_tolerates_required_ports_when_dokploy_is_already_healthy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "install.env"
+    env_file.write_text(
+        (FIXTURES_DIR / "full.env").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    _stub_install_flow_after_preflight(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "collect_host_facts",
+        lambda _: HostFacts(
+            distribution_id="ubuntu",
+            version_id="24.04",
+            cpu_count=8,
+            memory_gb=16,
+            disk_gb=200,
+            disk_path="/var/lib/docker",
+            docker_installed=True,
+            docker_daemon_reachable=True,
+            ports_in_use=(80, 443, 3000),
+            environment_classification="vps",
+            hostname="test-host",
+        ),
+    )
+
+    summary = cli.run_install_flow(
+        env_file=env_file,
+        state_dir=tmp_path / ".dokploy-wizard-state",
+        dry_run=False,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    assert summary["ok"] is True
 
 
 def test_install_rehydrates_guided_retry_keys_from_persisted_state(
