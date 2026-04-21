@@ -156,7 +156,9 @@ def test_build_live_drift_report_classifies_required_collision_types(
             **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
             "STACK_NAME": "openmerge",
             "ROOT_DOMAIN": "openmerge.me",
-            "PACKS": "my-farm-advisor,nextcloud,openclaw",
+            "PACKS": "my-farm-advisor,nextcloud,openclaw,coder,seaweedfs",
+            "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
+            "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
         },
     )
     desired_state = resolve_desired_state(raw_env)
@@ -254,7 +256,9 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
             **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
             "STACK_NAME": "openmerge",
             "ROOT_DOMAIN": "openmerge.me",
-            "PACKS": "my-farm-advisor,nextcloud,openclaw",
+            "PACKS": "my-farm-advisor,nextcloud,openclaw,coder,seaweedfs",
+            "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
+            "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
         },
     )
     desired_state = resolve_desired_state(raw_env)
@@ -277,6 +281,31 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                 f"stack:{desired_state.stack_name}:onlyoffice-service",
             ),
             OwnedResource(
+                "nextcloud_service",
+                "svc-nextcloud",
+                f"stack:{desired_state.stack_name}:nextcloud-service",
+            ),
+            OwnedResource(
+                "coder_service",
+                "svc-coder",
+                f"stack:{desired_state.stack_name}:coder:service",
+            ),
+            OwnedResource(
+                "seaweedfs_service",
+                "svc-seaweedfs",
+                f"stack:{desired_state.stack_name}:seaweedfs-service",
+            ),
+            OwnedResource(
+                "shared_core_postgres",
+                "svc-shared-postgres",
+                f"stack:{desired_state.stack_name}:shared-postgres",
+            ),
+            OwnedResource(
+                "shared_core_redis",
+                "svc-shared-redis",
+                f"stack:{desired_state.stack_name}:shared-redis",
+            ),
+            OwnedResource(
                 "openclaw_mem0_service",
                 "svc-mem0",
                 f"stack:{desired_state.stack_name}:openclaw-sidecar:mem0",
@@ -295,11 +324,19 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     )
     my_farm_container = "openmerge-my-farm-advisor-jy6axb-openmerge-my-farm-advisor-1"
     onlyoffice_container = "openmerge-nextcloud-a5izk5-openmerge-onlyoffice-1"
+    nextcloud_container = "openmerge-nextcloud-a5izk5-openmerge-nextcloud-1"
     openclaw_internal_container = "openmerge-openclaw-3f2eds-openmerge-openclaw-1"
     openclaw_public_container = "openmerge-openclaw-3f2eds-openmerge-openclaw-public-1"
     mem0_container = "openmerge-openclaw-3f2eds-mem0-1"
     qdrant_container = "openmerge-openclaw-3f2eds-qdrant-1"
     runtime_container = "openmerge-openclaw-3f2eds-nexa-runtime-1"
+    coder_container = "openmerge-coder-8do2ol-openmerge-coder-1"
+    seaweedfs_container = "openmerge-seaweedfs-cr6zrs-openmerge-seaweedfs-1"
+    shared_postgres_container = "openmerge-shared-nojgtz-openmerge-shared-postgres-1"
+    shared_redis_container = "openmerge-shared-nojgtz-openmerge-shared-redis-1"
+    cloudflared_container = "openmerge-cloudflared-ghphch-openmerge-cloudflared-1"
+    auth_probe_container = "openmerge-dokploy-wizard-auth-probe-ocm4ux-auth-probe-1"
+    coder_workspace_container = "coder-clayton-openmergeme-workspace-2026-04-21"
     my_farm_hostname = desired_state.hostnames["my-farm-advisor"]
     onlyoffice_hostname = desired_state.hostnames["onlyoffice"]
 
@@ -321,6 +358,14 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                     "traefik.http.services.openmerge-my-farm-advisor.loadbalancer.server.port": (
                         "18789"
                     ),
+                },
+            },
+            {
+                "name": nextcloud_container,
+                "status": "Up 21 hours (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-nextcloud",
+                    "com.docker.compose.project": "openmerge-nextcloud-a5izk5",
                 },
             },
             {
@@ -352,6 +397,38 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                 },
             },
             {
+                "name": coder_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-coder",
+                    "com.docker.compose.project": "openmerge-coder-8do2ol",
+                },
+            },
+            {
+                "name": seaweedfs_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-seaweedfs",
+                    "com.docker.compose.project": "openmerge-seaweedfs-cr6zrs",
+                },
+            },
+            {
+                "name": shared_postgres_container,
+                "status": "Up 2 minutes",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-shared-postgres",
+                    "com.docker.compose.project": "openmerge-shared-nojgtz",
+                },
+            },
+            {
+                "name": shared_redis_container,
+                "status": "Up 2 minutes",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-shared-redis",
+                    "com.docker.compose.project": "openmerge-shared-nojgtz",
+                },
+            },
+            {
                 "name": mem0_container,
                 "status": "Up 2 minutes (healthy)",
                 "labels": {
@@ -374,6 +451,24 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                     "com.docker.compose.service": "nexa-runtime",
                     "com.docker.compose.project": "openmerge-openclaw-3f2eds",
                 },
+            },
+            {
+                "name": cloudflared_container,
+                "status": "Up 2 minutes",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-cloudflared",
+                    "com.docker.compose.project": "openmerge-cloudflared-ghphch",
+                },
+            },
+            {
+                "name": auth_probe_container,
+                "status": "Up 2 minutes",
+                "labels": {},
+            },
+            {
+                "name": coder_workspace_container,
+                "status": "Up 2 minutes",
+                "labels": {},
             },
         ),
     )
@@ -398,9 +493,39 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
         for entry in wizard_entries
     )
     assert any(
+        entry["pack"] == "nextcloud"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == nextcloud_container
+        for entry in wizard_entries
+    )
+    assert any(
         entry["pack"] == "onlyoffice"
         and entry["live_kind"] == "container"
         and entry["live_name"] == onlyoffice_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "coder"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == coder_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "seaweedfs"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == seaweedfs_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "shared-core"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == shared_postgres_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "shared-core"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == shared_redis_container
         for entry in wizard_entries
     )
     assert any(
@@ -434,7 +559,10 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     assert not any(entry["live_name"] == runtime_container for entry in manual_entries)
     assert not any(entry["live_name"] == openclaw_internal_container for entry in manual_entries)
     assert not any(entry["live_name"] == openclaw_public_container for entry in manual_entries)
-    assert report["summary"]["wizard_managed"] == 6
+    assert not any(entry["live_name"] == cloudflared_container for entry in manual_entries)
+    assert not any(entry["live_name"] == auth_probe_container for entry in manual_entries)
+    assert not any(entry["live_name"] == coder_workspace_container for entry in manual_entries)
+    assert report["summary"]["wizard_managed"] == 11
     assert report["summary"]["manual_collision"] == 0
 
 

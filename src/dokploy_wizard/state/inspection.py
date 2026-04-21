@@ -159,6 +159,9 @@ def _inspect_live_docker(
 
         for container in containers:
             container_name = container["name"]
+            if _ignore_known_auxiliary_container(container_name=container_name, stack_name=desired_state.stack_name):
+                consumed_live_items.add(("container", container_name))
+                continue
             managed_candidate_pack = managed_container_candidates.get(container_name)
             if managed_candidate_pack is not None:
                 if managed_candidate_pack == candidate["pack"] and scope_is_managed:
@@ -315,6 +318,36 @@ def _build_unmanaged_entry(
 
 def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ...]:
     candidates: list[dict[str, Any]] = []
+    if desired_state.shared_core.postgres is not None:
+        postgres_service_name = desired_state.shared_core.postgres.service_name
+        candidates.append(
+            {
+                "aliases": ("shared-postgres",),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": postgres_service_name,
+                },
+                "port": None,
+                "expected_service_name": postgres_service_name,
+                "pack": "shared-core",
+                "scope": f"stack:{desired_state.stack_name}:shared-postgres",
+            }
+        )
+    if desired_state.shared_core.redis is not None:
+        redis_service_name = desired_state.shared_core.redis.service_name
+        candidates.append(
+            {
+                "aliases": ("shared-redis",),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": redis_service_name,
+                },
+                "port": None,
+                "expected_service_name": redis_service_name,
+                "pack": "shared-core",
+                "scope": f"stack:{desired_state.stack_name}:shared-redis",
+            }
+        )
     if "openclaw" in desired_state.enabled_packs:
         candidates.append(
             {
@@ -379,6 +412,19 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
     if "nextcloud" in desired_state.enabled_packs:
         candidates.append(
             {
+                "aliases": ("nextcloud",),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-nextcloud"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-nextcloud",
+                "pack": "nextcloud",
+                "scope": f"stack:{desired_state.stack_name}:nextcloud-service",
+            }
+        )
+        candidates.append(
+            {
                 "aliases": ("onlyoffice",),
                 "hostname": desired_state.hostnames.get("onlyoffice"),
                 "managed_container_labels": {
@@ -388,6 +434,34 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "expected_service_name": f"{desired_state.stack_name}-onlyoffice",
                 "pack": "onlyoffice",
                 "scope": f"stack:{desired_state.stack_name}:onlyoffice-service",
+            }
+        )
+    if "coder" in desired_state.enabled_packs:
+        candidates.append(
+            {
+                "aliases": ("coder",),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-coder"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-coder",
+                "pack": "coder",
+                "scope": f"stack:{desired_state.stack_name}:coder:service",
+            }
+        )
+    if "seaweedfs" in desired_state.enabled_packs:
+        candidates.append(
+            {
+                "aliases": ("seaweedfs", "s3"),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-seaweedfs"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-seaweedfs",
+                "pack": "seaweedfs",
+                "scope": f"stack:{desired_state.stack_name}:seaweedfs-service",
             }
         )
     return tuple(candidates)
@@ -422,6 +496,8 @@ def _unknown_unmanaged_live_items(
         container_name = container["name"]
         if ("container", container_name) in consumed_live_items:
             continue
+        if _ignore_known_auxiliary_container(container_name=container_name, stack_name=desired_state.stack_name):
+            continue
         if any(
             _looks_like_managed_task(container_name=container_name, expected_service_name=name)
             for name in expected_service_names
@@ -437,6 +513,18 @@ def _looks_like_managed_task(*, container_name: str, expected_service_name: str)
     normalized_expected = expected_service_name.lower()
     normalized_name = container_name.lower()
     return normalized_name.startswith(normalized_expected + ".")
+
+
+def _ignore_known_auxiliary_container(*, container_name: str, stack_name: str) -> bool:
+    normalized_name = container_name.lower()
+    normalized_stack = stack_name.lower()
+    if normalized_name.startswith(f"{normalized_stack}-cloudflared-"):
+        return True
+    if normalized_name.startswith(f"{normalized_stack}-dokploy-wizard-auth-probe-"):
+        return True
+    if normalized_name.startswith("coder-") and "-workspace-" in normalized_name:
+        return True
+    return False
 
 
 def _managed_container_candidates(
