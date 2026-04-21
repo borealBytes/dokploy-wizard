@@ -26,6 +26,7 @@ from dokploy_wizard.dokploy import (
     DokployScheduleRecord,
 )
 from dokploy_wizard.dokploy.nextcloud import (
+    _ensure_nexa_service_account,
     _ensure_spreed_app_enabled,
     _ensure_trusted_domain,
     _find_container_name,
@@ -718,6 +719,57 @@ def test_build_nextcloud_ledger_persists_only_pack_owned_resources() -> None:
         (NEXTCLOUD_VOLUME_RESOURCE_TYPE, "stack:wizard-stack:nextcloud-volume"),
         (ONLYOFFICE_VOLUME_RESOURCE_TYPE, "stack:wizard-stack:onlyoffice-volume"),
     }
+
+
+def test_ensure_nexa_service_account_creates_user_and_updates_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_run(*args: object, **kwargs: object) -> Any:
+        del args, kwargs
+        return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "user not found"})()
+
+    monkeypatch.setattr(nextcloud_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(nextcloud_module, "_run_occ_shell", lambda container_name, shell_command: commands.append(shell_command))
+
+    _ensure_nexa_service_account(
+        "nextcloud-container",
+        user_id="nexa-agent",
+        password="nexa-secret",
+        display_name="Nexa",
+        email="nexa@example.com",
+    )
+
+    assert "php occ user:add --password-from-env --display-name=Nexa nexa-agent" in commands[0]
+    assert commands[1] == "php occ user:setting nexa-agent settings display_name Nexa"
+    assert commands[2] == "php occ user:setting nexa-agent settings email nexa@example.com"
+    assert commands[3] == "php occ user:profile nexa-agent profile_enabled 1"
+
+
+def test_ensure_nexa_service_account_updates_existing_user_without_recreate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_run(*args: object, **kwargs: object) -> Any:
+        del args, kwargs
+        return type("Result", (), {"returncode": 0, "stdout": "uid: nexa-agent", "stderr": ""})()
+
+    monkeypatch.setattr(nextcloud_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(nextcloud_module, "_run_occ_shell", lambda container_name, shell_command: commands.append(shell_command))
+
+    _ensure_nexa_service_account(
+        "nextcloud-container",
+        user_id="nexa-agent",
+        password="nexa-secret",
+        display_name="Nexa",
+        email=None,
+    )
+
+    assert len(commands) == 2
+    assert commands[0] == "php occ user:setting nexa-agent settings display_name Nexa"
+    assert commands[1] == "php occ user:profile nexa-agent profile_enabled 1"
 
 
 def test_dokploy_nextcloud_backend_creates_one_compose_for_pair() -> None:

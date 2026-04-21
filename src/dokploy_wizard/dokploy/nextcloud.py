@@ -132,6 +132,10 @@ class DokployNextcloudBackend:
         admin_password: str = _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD,
         openclaw_volume_name: str | None = None,
         openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None = None,
+        nexa_agent_user_id: str | None = None,
+        nexa_agent_display_name: str | None = None,
+        nexa_agent_password: str | None = None,
+        nexa_agent_email: str | None = None,
         openclaw_rescan_cron: str = _DEFAULT_OPENCLAW_RESCAN_CRON,
         openclaw_rescan_timezone: str = _DEFAULT_OPENCLAW_RESCAN_TIMEZONE,
         client: DokployNextcloudApi | None = None,
@@ -149,6 +153,10 @@ class DokployNextcloudBackend:
         self._admin_password = admin_password
         self._openclaw_volume_name = openclaw_volume_name
         self._openclaw_workspace_contract = openclaw_workspace_contract
+        self._nexa_agent_user_id = nexa_agent_user_id
+        self._nexa_agent_display_name = nexa_agent_display_name
+        self._nexa_agent_password = nexa_agent_password
+        self._nexa_agent_email = nexa_agent_email
         self._openclaw_rescan_cron = openclaw_rescan_cron
         self._openclaw_rescan_timezone = openclaw_rescan_timezone
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
@@ -298,6 +306,13 @@ class DokployNextcloudBackend:
                     "Nextcloud container could not be located for OnlyOffice and Talk verification."
                 )
             _ensure_admin_user(container, self._admin_user, self._admin_password)
+            _ensure_nexa_service_account(
+                container,
+                user_id=self._nexa_agent_user_id,
+                password=self._nexa_agent_password,
+                display_name=self._nexa_agent_display_name,
+                email=self._nexa_agent_email,
+            )
             _ensure_trusted_domain(container, _nextcloud_service_name(self._stack_name))
             _ensure_onlyoffice_app_config(
                 container,
@@ -322,6 +337,13 @@ class DokployNextcloudBackend:
                 "configuration was attempted."
             )
         _ensure_admin_user(container, self._admin_user, self._admin_password)
+        _ensure_nexa_service_account(
+            container,
+            user_id=self._nexa_agent_user_id,
+            password=self._nexa_agent_password,
+            display_name=self._nexa_agent_display_name,
+            email=self._nexa_agent_email,
+        )
         _ensure_trusted_domain(container, _nextcloud_service_name(self._stack_name))
         _ensure_onlyoffice_app_config(
             container,
@@ -757,9 +779,11 @@ def _render_compose_file(
         "    expose:\n"
         "      - '80'\n"
         "    networks:\n"
-        "      - default\n"
-        "      - dokploy-network\n"
-        f"      - {shared_network}\n"
+        "      default:\n"
+        "      dokploy-network:\n"
+        f"      {shared_network}:\n"
+        "        aliases:\n"
+        f"          - {nextcloud_service}\n"
         "    depends_on:\n"
         f"      - {onlyoffice_service}\n"
         f"  {onlyoffice_service}:\n"
@@ -791,9 +815,11 @@ def _render_compose_file(
         "    expose:\n"
         "      - '80'\n"
         "    networks:\n"
-        "      - default\n"
-        "      - dokploy-network\n"
-        f"      - {shared_network}\n"
+        "      default:\n"
+        "      dokploy-network:\n"
+        f"      {shared_network}:\n"
+        "        aliases:\n"
+        f"          - {onlyoffice_service}\n"
         "volumes:\n"
         f"  {nextcloud_volume}:\n"
         f"  {onlyoffice_volume}:\n"
@@ -1017,6 +1043,73 @@ def _ensure_admin_user(container_name: str, admin_user: str, admin_password: str
         f"php occ user:setting {shlex.quote(admin_user)} settings email {shlex.quote(admin_user)}"
     )
     _run_occ_shell(container_name, add_command)
+
+
+def _ensure_nexa_service_account(
+    container_name: str,
+    *,
+    user_id: str | None,
+    password: str | None,
+    display_name: str | None,
+    email: str | None,
+) -> None:
+    if user_id is None or password is None:
+        return
+    safe_user = shlex.quote(user_id)
+    exists = subprocess.run(
+        [
+            "docker",
+            "exec",
+            container_name,
+            "su",
+            "-s",
+            "/bin/sh",
+            "www-data",
+            "-c",
+            f"cd /var/www/html && php occ user:info {safe_user}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if exists.returncode != 0:
+        add_command = (
+            f"export OC_PASS={shlex.quote(password)} && "
+            f"php occ user:add --password-from-env --display-name={shlex.quote(display_name or user_id)} {safe_user}"
+        )
+        _run_occ_shell(container_name, add_command)
+    if display_name is not None:
+        _run_occ_shell_allow_noop(
+            container_name,
+            f"php occ user:setting {safe_user} settings display_name {shlex.quote(display_name)}",
+            noop_fragments=("same",),
+        )
+    if email is not None:
+        _run_occ_shell_allow_noop(
+            container_name,
+            f"php occ user:setting {safe_user} settings email {shlex.quote(email)}",
+            noop_fragments=("same",),
+        )
+    _run_occ_shell_allow_noop(
+        container_name,
+        f"php occ user:profile {safe_user} profile_enabled 1",
+        noop_fragments=("same",),
+    )
+
+
+def _run_occ_shell_allow_noop(
+    container_name: str,
+    shell_command: str,
+    *,
+    noop_fragments: tuple[str, ...],
+) -> None:
+    try:
+        _run_occ_shell(container_name, shell_command)
+    except NextcloudError as error:
+        detail = str(error).lower()
+        if any(fragment in detail for fragment in noop_fragments):
+            return
+        raise
 
 
 def _ensure_onlyoffice_app_config(

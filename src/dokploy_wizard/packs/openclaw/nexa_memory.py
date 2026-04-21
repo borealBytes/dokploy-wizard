@@ -209,7 +209,7 @@ def build_nexa_memory_scopes(
     current_day = today or datetime.now(tz=UTC).date()
     session_namespace = _join_namespace(
         scope.queue_scope_key(),
-        f"session:{scope.run_id or 'current'}",
+        "session:active",
     )
     user_memory = None
     if scope.user_id is not None:

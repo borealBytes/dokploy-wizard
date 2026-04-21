@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pexpect
 import posixpath
 import shlex
 import shutil
@@ -32,6 +33,7 @@ class HarnessConfig:
     artifact_root: Path
     target_host: str | None
     target_user: str | None
+    target_password: str | None
     target_path: str | None
     ssh_port: int
     ssh_options: tuple[str, ...]
@@ -74,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--target-host", help="remote SSH host for the proof run")
     parser.add_argument("--target-user", help="remote SSH user for the proof run")
+    parser.add_argument("--target-password", help="remote SSH password for the proof run")
     parser.add_argument(
         "--target-path", help="remote base path for the extracted proof-run workspace"
     )
@@ -231,6 +234,12 @@ def resolve_config(*, args: argparse.Namespace, repo_root: Path) -> HarnessConfi
         config_values=config_values,
         config_key="LABEL",
     )
+    target_password = resolve_text_setting(
+        cli_value=args.target_password,
+        env_key=f"{ENV_PREFIX}PASSWORD",
+        config_values=config_values,
+        config_key="PASSWORD",
+    )
     return HarnessConfig(
         repo_root=repo_root,
         config_file=discovered_config,
@@ -238,6 +247,7 @@ def resolve_config(*, args: argparse.Namespace, repo_root: Path) -> HarnessConfi
         artifact_root=artifact_root,
         target_host=target_host,
         target_user=target_user,
+        target_password=target_password,
         target_path=target_path,
         ssh_port=ssh_port,
         ssh_options=ssh_options,
@@ -377,6 +387,7 @@ def build_plan_payload(
             "ssh_port": config.ssh_port,
             "target_host": config.target_host,
             "target_path": config.target_path,
+            "target_password": "<redacted>" if config.target_password else None,
             "target_user": config.target_user,
         },
         "local_evidence_sensitive": True,
@@ -451,8 +462,10 @@ INSTALL_ENV={shlex.quote(plan.remote_install_env_path)}
 ARCHIVE_PATH={shlex.quote(plan.remote_archive_path)}
 SUMMARY_PATH="$EVIDENCE_DIR/summary.json"
 
-mkdir -p "$REMOTE_ROOT" "$REPO_DIR" "$STATE_DIR" "$EVIDENCE_DIR" "$LOG_DIR"
+mkdir -p "$REMOTE_ROOT"
 chmod 600 "$INSTALL_ENV"
+rm -rf "$STATE_DIR" "$EVIDENCE_DIR" "$LOG_DIR"
+mkdir -p "$STATE_DIR" "$EVIDENCE_DIR" "$LOG_DIR"
 rm -rf "$REPO_DIR"
 mkdir -p "$REPO_DIR"
 tar -xzf "$ARCHIVE_PATH" -C "$REPO_DIR"
@@ -602,12 +615,14 @@ def run_execute_mode(
         label="prepare-remote-root",
         commands=commands,
         artifact_dir=artifact_dir,
+        config=config,
     )
     run_logged_command(
         [*scp_command_base(config), str(archive_path), f"{ssh_target}:{plan.remote_archive_path}"],
         label="upload-archive",
         commands=commands,
         artifact_dir=artifact_dir,
+        config=config,
     )
     run_logged_command(
         [
@@ -618,6 +633,7 @@ def run_execute_mode(
         label="upload-install-env",
         commands=commands,
         artifact_dir=artifact_dir,
+        config=config,
     )
     run_logged_command(
         [
@@ -628,6 +644,7 @@ def run_execute_mode(
         label="upload-remote-script",
         commands=commands,
         artifact_dir=artifact_dir,
+        config=config,
     )
     remote_proof_record = run_logged_command(
         [
@@ -638,6 +655,7 @@ def run_execute_mode(
         label="run-remote-proof",
         commands=commands,
         artifact_dir=artifact_dir,
+        config=config,
         raise_on_error=False,
     )
     collect_dir = artifact_dir / "collected-remote"
@@ -656,6 +674,7 @@ def run_execute_mode(
             label="collect-remote-artifacts",
             commands=commands,
             artifact_dir=artifact_dir,
+            config=config,
         )
     except RuntimeError as error:
         collect_error = error
@@ -684,9 +703,13 @@ def run_logged_command(
     label: str,
     commands: list[dict[str, Any]],
     artifact_dir: Path,
+    config: HarnessConfig,
     raise_on_error: bool = True,
 ) -> dict[str, Any]:
-    result = subprocess.run(command, check=False, text=True, capture_output=True)
+    if config.target_password and command and command[0] in {"ssh", "scp"}:
+        result = _run_password_command(command, password=config.target_password)
+    else:
+        result = subprocess.run(command, check=False, text=True, capture_output=True)
     stdout_path = artifact_dir / f"{label}.stdout"
     stderr_path = artifact_dir / f"{label}.stderr"
     stdout_path.write_text(result.stdout, encoding="utf-8")
@@ -704,12 +727,43 @@ def run_logged_command(
     return record
 
 
+def _run_password_command(command: list[str], *, password: str) -> subprocess.CompletedProcess[str]:
+    child = pexpect.spawn(shlex.join(command), encoding="utf-8", timeout=7200)
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    while True:
+        idx = child.expect([r"password:", r"yes/no", pexpect.EOF, pexpect.TIMEOUT])
+        if idx == 0:
+            child.sendline(password)
+            continue
+        if idx == 1:
+            child.sendline("yes")
+            continue
+        if idx == 2:
+            stdout_parts.append(child.before or "")
+            break
+        if idx == 3:
+            stderr_parts.append(child.before or "")
+            child.close(force=True)
+            raise RuntimeError(f"password-based command timed out: {shlex.join(command)}")
+    child.close()
+    output = "".join(stdout_parts)
+    error = "".join(stderr_parts)
+    return subprocess.CompletedProcess(command, child.exitstatus or 0, output, error)
+
+
 def ssh_command_base(config: HarnessConfig) -> list[str]:
-    return ["ssh", "-p", str(config.ssh_port), *config.ssh_options]
+    parts = ["ssh", "-p", str(config.ssh_port)]
+    for option in config.ssh_options:
+        parts.extend(["-o", option])
+    return parts
 
 
 def scp_command_base(config: HarnessConfig) -> list[str]:
-    return ["scp", "-P", str(config.ssh_port), *config.ssh_options]
+    parts = ["scp", "-P", str(config.ssh_port)]
+    for option in config.ssh_options:
+        parts.extend(["-o", option])
+    return parts
 
 
 def render_ssh_target(config: HarnessConfig) -> str | None:
@@ -719,12 +773,16 @@ def render_ssh_target(config: HarnessConfig) -> str | None:
 
 
 def render_ssh_base(config: HarnessConfig) -> str:
-    parts = ["ssh", "-p", str(config.ssh_port), *config.ssh_options]
+    parts = ["ssh", "-p", str(config.ssh_port)]
+    for option in config.ssh_options:
+        parts.extend(["-o", option])
     return " ".join(shlex.quote(part) for part in parts)
 
 
 def render_scp_base(config: HarnessConfig) -> str:
-    parts = ["scp", "-P", str(config.ssh_port), *config.ssh_options]
+    parts = ["scp", "-P", str(config.ssh_port)]
+    for option in config.ssh_options:
+        parts.extend(["-o", option])
     return " ".join(shlex.quote(part) for part in parts)
 
 

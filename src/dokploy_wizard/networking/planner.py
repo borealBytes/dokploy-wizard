@@ -40,6 +40,8 @@ ACCESS_OTP_PROVIDER_RESOURCE_TYPE = "cloudflare_access_otp_provider"
 ACCESS_APPLICATION_RESOURCE_TYPE = "cloudflare_access_application"
 ACCESS_POLICY_RESOURCE_TYPE = "cloudflare_access_policy"
 
+_NON_PUBLIC_HOSTNAME_KEYS = {"openclaw-internal"}
+
 
 @dataclass(frozen=True)
 class CloudflareCredentials:
@@ -89,7 +91,7 @@ def reconcile_networking(
         dry_run=dry_run,
         zone_id=credentials.zone_id,
         dns_target=dns_target,
-        hostnames=tuple(sorted(desired_state.hostnames.values())),
+        hostnames=tuple(sorted(_public_hostnames(desired_state).values())),
         ownership_ledger=ownership_ledger,
         backend=backend,
     )
@@ -641,15 +643,16 @@ def _derive_outcome(tunnel_action: str, dns_records: tuple[PlannedDnsRecord, ...
 
 
 def _build_tunnel_ingress(desired_state: DesiredState) -> tuple[dict[str, object], ...]:
+    public_hostnames = _public_hostnames(desired_state)
     ingress: list[dict[str, object]] = [
         {
-            "hostname": desired_state.hostnames["dokploy"],
+            "hostname": public_hostnames["dokploy"],
             "service": "https://localhost:443",
             "originRequest": {"noTLSVerify": True},
         },
     ]
-    seen_hosts = {desired_state.hostnames["dokploy"]}
-    for key, hostname in desired_state.hostnames.items():
+    seen_hosts = {public_hostnames["dokploy"]}
+    for key, hostname in public_hostnames.items():
         if hostname in seen_hosts:
             continue
         if key == "dokploy":
@@ -664,6 +667,14 @@ def _build_tunnel_ingress(desired_state: DesiredState) -> tuple[dict[str, object
         seen_hosts.add(hostname)
     ingress.append({"service": "http_status:404"})
     return tuple(ingress)
+
+
+def _public_hostnames(desired_state: DesiredState) -> dict[str, str]:
+    return {
+        key: hostname
+        for key, hostname in desired_state.hostnames.items()
+        if key not in _NON_PUBLIC_HOSTNAME_KEYS
+    }
 
 
 def _resolve_connector(

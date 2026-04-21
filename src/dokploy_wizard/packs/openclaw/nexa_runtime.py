@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
+import difflib
+import re
 from typing import Any, Callable, Literal, Mapping, Protocol
 
+from dokploy_wizard.state import load_inbox_event_log, load_outbound_delivery_log
 from dokploy_wizard.state import DurableJobRecord
 
 from .nexa_mem0_client import (
@@ -73,6 +76,29 @@ class NexaOnlyofficeActionResult:
     memory_target_layer: Literal["shared", "durable_facts"] = "durable_facts"
     contains_private_memory: bool = False
     allow_private_to_shared: bool = False
+
+
+@dataclass(frozen=True)
+class NexaNextcloudFileCreateRequest:
+    filename: str
+    relative_path: str
+    content: str
+
+
+@dataclass(frozen=True)
+class NexaNextcloudFileCreateResult:
+    filename: str
+    relative_path: str
+    share_url: str
+    diff_text: str
+
+
+@dataclass(frozen=True)
+class NexaTerminalCommandResult:
+    command: str
+    stdout: str
+    stderr: str
+    exit_code: int
 
 
 @dataclass(frozen=True)
@@ -155,6 +181,8 @@ class NexaRuntimeDependencies:
     onlyoffice_agent_identity: NexaOnlyofficeAgentIdentity
     load_canonical_file: Callable[[NexaOnlyofficeSaveSignal], NexaCanonicalFileSnapshot]
     onlyoffice_reconcile_executor: NexaOnlyofficeReconcileExecutor
+    nextcloud_file_creator: Callable[[NexaNextcloudFileCreateRequest], NexaNextcloudFileCreateResult] | None = None
+    terminal_command_runner: Callable[[str], NexaTerminalCommandResult] | None = None
     mem0_client: NexaMem0Client | None = None
 
 
@@ -207,13 +235,24 @@ def process_talk_job(
 
     payload = _load_event_payload(store, source="nextcloud-talk", idempotency_key=job.idempotency_key)
     scope = build_talk_scope(payload)
+    payload = _augment_talk_payload_with_history(store, payload=payload, scope=scope)
     memory_read = _automatic_memory_search(
         env,
         scope=scope,
-        query=str(payload.get("message", {}).get("text", "")).strip(),
+        query=_memory_query_from_payload(payload),
         mem0_client=dependencies.mem0_client,
     )
-    planned_reply = dependencies.talk_reply_planner(payload, memory_read)
+    action_result = _maybe_create_markdown_file(payload, dependencies=dependencies)
+    if action_result is not None:
+        planned_reply = NexaPlannedTalkReply(
+            text=(
+                f"Created `{action_result.filename}` in your Nextcloud root. Share link: {action_result.share_url}\n\n"
+                f"Diff:\n```diff\n{action_result.diff_text}\n```"
+            ),
+            memory_content=f"Created and shared Nextcloud file {action_result.relative_path} for the user.",
+        )
+    else:
+        planned_reply = dependencies.talk_reply_planner(payload, memory_read)
     reply_request = NexaTalkReplyRequest(
         scope=scope,
         delivery_key=f"talk-reply:{scope.run_id or job.job_id}",
@@ -260,6 +299,219 @@ def process_talk_job(
         reply_dispatch=dispatch,
         memory_write=memory_write,
     )
+
+
+def _maybe_create_markdown_file(
+    payload: dict[str, Any],
+    *,
+    dependencies: NexaRuntimeDependencies,
+) -> NexaNextcloudFileCreateResult | None:
+    if dependencies.nextcloud_file_creator is None:
+        return None
+    text = str(payload.get("message", {}).get("text", "")).strip()
+    lowered = text.lower()
+    if "create" not in lowered or ".md" not in lowered:
+        return None
+    if "nextcloud" not in lowered and "file" not in lowered and "markdown" not in lowered:
+        return None
+    match = re.search(r"([A-Za-z0-9_.-]+\.md)", text)
+    if match is None:
+        return None
+    filename = match.group(1)
+    content = _default_markdown_content(filename)
+    return dependencies.nextcloud_file_creator(
+        NexaNextcloudFileCreateRequest(
+            filename=filename,
+            relative_path=filename,
+            content=content,
+        )
+    )
+
+
+def _default_markdown_content(filename: str) -> str:
+    stem = filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip() or filename
+    title = " ".join(word.capitalize() for word in stem.split())
+    return f"# {title}\n\nCreated by Nexa in Nextcloud.\n"
+
+
+def _augment_talk_payload_with_history(
+    store: Any,
+    payload: dict[str, Any],
+    *,
+    scope: NexaScopeContext,
+) -> dict[str, Any]:
+    transcript = _recent_talk_transcript(store, scope=scope, current_payload=payload)
+    if not transcript:
+        return payload
+    augmented = dict(payload)
+    augmented["recentConversation"] = transcript
+    return augmented
+
+
+def _memory_query_from_payload(payload: dict[str, Any]) -> str:
+    message_text = str(payload.get("message", {}).get("text", "")).strip()
+    if message_text == "":
+        return ""
+    recent = payload.get("recentConversation")
+    if not isinstance(recent, list):
+        return message_text
+    parts: list[str] = []
+    for entry in recent[-4:]:
+        if not isinstance(entry, dict):
+            continue
+        role = str(entry.get("role", "")).strip()
+        text = str(entry.get("text", "")).strip()
+        if role == "" or text == "":
+            continue
+        parts.append(f"{role}: {text}")
+    parts.append(f"user: {message_text}")
+    return "\n".join(parts)
+
+
+def _recent_talk_transcript(
+    store: Any,
+    *,
+    scope: NexaScopeContext,
+    current_payload: dict[str, Any],
+    limit: int = 8,
+) -> list[dict[str, str]]:
+    entries: list[tuple[str, str, str]] = []
+    inbox = load_inbox_event_log(store.state_dir)
+    current_message_id = str(current_payload.get("message", {}).get("id", "")).strip()
+    for event in inbox.events:
+        if event.source != "nextcloud-talk":
+            continue
+        event_scope = _safe_build_talk_scope(event.parsed_payload)
+        if event_scope is None or event_scope.queue_scope_key() != scope.queue_scope_key():
+            continue
+        message = event.parsed_payload.get("message")
+        if not isinstance(message, dict):
+            continue
+        message_id = str(message.get("id", "")).strip()
+        if message_id == current_message_id:
+            continue
+        text = str(message.get("text", "")).strip()
+        if text == "":
+            continue
+        entries.append((event.received_at, "user", text))
+
+    deliveries = load_outbound_delivery_log(store.state_dir)
+    for record in deliveries.records:
+        if record.channel != "nextcloud-talk" or record.scope_key != scope.queue_scope_key():
+            continue
+        text = str(record.payload.get("message", "")).strip()
+        if text == "":
+            continue
+        entries.append((record.created_at, "assistant", text))
+
+    entries.sort(key=lambda item: item[0])
+    trimmed = entries[-limit:]
+    return [{"role": role, "text": text} for _, role, text in trimmed]
+
+
+def _safe_build_talk_scope(payload: dict[str, Any]) -> NexaScopeContext | None:
+    try:
+        return build_talk_scope(payload)
+    except Exception:
+        return None
+
+
+def _maybe_run_terminal_command(
+    payload: dict[str, Any], *, dependencies: NexaRuntimeDependencies
+) -> NexaTerminalCommandResult | None:
+    if dependencies.terminal_command_runner is None:
+        return None
+    command = _extract_terminal_command(str(payload.get("message", {}).get("text", "")).strip())
+    if command is None:
+        return None
+    return dependencies.terminal_command_runner(command)
+
+
+def _extract_terminal_command(text: str) -> str | None:
+    lowered = text.lower()
+    if "time in hh:mm:ss" in lowered or "time in hh:mm:ss for me" in lowered:
+        return 'date +"%H:%M:%S"'
+    if any(phrase in lowered for phrase in ("central usa time", "central standard usa time", "central time")) and any(
+        phrase in lowered for phrase in ("time", "date", "right now", "what time", "get the time")
+    ):
+        return 'TZ="America/Chicago" date +"%H:%M:%S"'
+    if "what time is it" in lowered and any(
+        phrase in lowered for phrase in ("command line", "terminal", "tool use", "shell")
+    ):
+        return 'date +"%H:%M:%S"'
+    if any(phrase in lowered for phrase in ("terminal", "command line", "tool use", "shell")) and any(
+        phrase in lowered for phrase in ("time", "date", "right now")
+    ):
+        return 'date +"%H:%M:%S"'
+    fenced = re.search(r"`([^`]+)`", text)
+    if fenced is not None and any(
+        phrase in lowered for phrase in ("run", "execute", "command line", "terminal", "shell")
+    ):
+        candidate = fenced.group(1).strip()
+        return candidate or None
+    prefixed = re.search(
+        r"(?:run|execute)\s+(?:this\s+)?(?:command|cmd)?\s*:?[ \t]+(.+)$",
+        text,
+        re.IGNORECASE,
+    )
+    if prefixed is not None:
+        candidate = prefixed.group(1).strip()
+        return candidate or None
+    return None
+
+
+def _format_terminal_command_reply(result: NexaTerminalCommandResult) -> str:
+    parts = [f"Ran terminal command `{result.command}`."]
+    parts.append(f"Exit code: {result.exit_code}")
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+    if stdout:
+        parts.append(f"Stdout:\n```text\n{stdout}\n```")
+    if stderr:
+        parts.append(f"Stderr:\n```text\n{stderr}\n```")
+    if not stdout and not stderr:
+        parts.append("No output.")
+    return "\n\n".join(parts)
+
+
+def _maybe_answer_date_or_time(
+    payload: dict[str, Any],
+    *,
+    now: datetime | None,
+) -> NexaPlannedTalkReply | None:
+    text = str(payload.get("message", {}).get("text", "")).strip()
+    lowered = text.lower()
+    if not any(
+        phrase in lowered
+        for phrase in (
+            "what's the date",
+            "what is the date",
+            "what day is it",
+            "what is today",
+            "today's date",
+            "todays date",
+        )
+    ):
+        return None
+    current = now.astimezone(UTC) if now is not None else datetime.now(UTC)
+    pretty = current.strftime("%A, %B %d, %Y").replace(" 0", " ")
+    return NexaPlannedTalkReply(
+        text=f"Today is {pretty}.",
+        memory_content=f"Answered a date/time question with {pretty}.",
+        memory_content_class="assistant_summary",
+        memory_target_layer="shared",
+    )
+
+
+def _diff_for_new_file(relative_path: str, content: str) -> str:
+    diff = difflib.unified_diff(
+        [],
+        [line + "\n" for line in content.splitlines()],
+        fromfile=f"a/{relative_path}",
+        tofile=f"b/{relative_path}",
+        lineterm="",
+    )
+    return "\n".join(diff)
 
 
 def process_onlyoffice_job(
@@ -549,7 +801,7 @@ def _build_mem0_filters(*, scope: NexaScopeContext, namespace: str, layer: str) 
     }
     if scope.user_id is not None:
         filters["user_id"] = scope.user_id
-    if scope.run_id is not None:
+    if scope.run_id is not None and layer == "session":
         filters["run_id"] = scope.run_id
     if scope.room_id is not None:
         filters["metadata"]["room_id"] = scope.room_id
@@ -594,7 +846,8 @@ def _build_mem0_metadata(
 
 
 def _build_agent_id(scope: NexaScopeContext) -> str:
-    return f"nexa:{scope.integration_surface}"
+    del scope
+    return "nexa"
 
 
 def _dedupe_search_hits(

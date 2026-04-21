@@ -167,6 +167,17 @@ def test_shell_tailscale_backend_raises_explicit_error_when_binary_missing() -> 
         backend.get_status("wizard-admin")
 
 
+def test_find_node_by_name_returns_none_when_tailscale_is_not_installed_yet() -> None:
+    raw_env = _tailscale_raw_env(TAILSCALE_MOCK_INSTALLED="false")
+
+    def runner(command: list[str]) -> CommandResult:
+        raise FileNotFoundError(command[0])
+
+    backend = ShellTailscaleBackend(raw_env, runner=runner)
+
+    assert backend.find_node_by_name("wizard-admin") is None
+
+
 def test_shell_tailscale_backend_raises_install_failure_with_stderr() -> None:
     raw_env = _tailscale_raw_env(TAILSCALE_MOCK_INSTALLED="false")
 

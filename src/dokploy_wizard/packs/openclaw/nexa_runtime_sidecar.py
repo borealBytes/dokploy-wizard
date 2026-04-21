@@ -10,7 +10,9 @@ import logging
 import os
 import secrets
 import socket
+import subprocess
 import time
+import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,9 +27,13 @@ from dokploy_wizard.state import DurableQueueStore
 from .nexa_onlyoffice import NexaOnlyofficeAgentIdentity
 from .nexa_retrieval import NexaCanonicalFileSnapshot
 from .nexa_runtime import (
+    NexaNextcloudFileCreateRequest,
+    NexaNextcloudFileCreateResult,
     NexaOnlyofficeActionResult,
     NexaPlannedTalkReply,
     NexaRuntimeDependencies,
+    NexaTerminalCommandResult,
+    _diff_for_new_file,
     run_queued_nexa_job,
 )
 from .nexa_scope import NexaScopeContext
@@ -41,6 +47,7 @@ _DEFAULT_WORKSPACE_CONTRACT_PATH = "/mnt/openclaw/workspace/nexa/contract.json"
 _DEFAULT_STATE_DIR = "/mnt/openclaw/.nexa/state"
 _SUPPORTED_WORKER_MODE = "queue"
 _DEFAULT_HTTP_TIMEOUT_SECONDS = 15
+_DEFAULT_OPENCLAW_PASS_THROUGH_TIMEOUT_SECONDS = 90
 
 _ENV_NEXTCLOUD_BASE_URL = "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL"
 _ENV_TALK_SHARED_SECRET = "OPENCLAW_NEXA_TALK_SHARED_SECRET"
@@ -49,6 +56,16 @@ _ENV_WEBDAV_AUTH_USER = "OPENCLAW_NEXA_WEBDAV_AUTH_USER"
 _ENV_WEBDAV_AUTH_PASSWORD = "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD"
 _ENV_AGENT_USER_ID = "OPENCLAW_NEXA_AGENT_USER_ID"
 _ENV_AGENT_DISPLAY_NAME = "OPENCLAW_NEXA_AGENT_DISPLAY_NAME"
+_ENV_AGENT_PASSWORD = "OPENCLAW_NEXA_AGENT_PASSWORD"
+_ENV_OPENCLAW_INTERNAL_URL = "DOKPLOY_WIZARD_OPENCLAW_INTERNAL_URL"
+_ENV_PLANNER_MODEL = "DOKPLOY_WIZARD_NEXA_PLANNER_MODEL"
+_ENV_PLANNER_MODEL_PROVIDER = "DOKPLOY_WIZARD_NEXA_PLANNER_MODEL_PROVIDER"
+_ENV_PLANNER_LOCAL_BASE_URL = "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL"
+_ENV_PLANNER_LOCAL_API_KEY = "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY"
+_ENV_PLANNER_OPENROUTER_API_KEY = "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_API_KEY"
+_ENV_PLANNER_NVIDIA_API_KEY = "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY"
+_ENV_PLANNER_NVIDIA_BASE_URL = "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL"
+_ENV_PLANNER_OPENROUTER_BASE_URL = "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL"
 
 _DAV_NAMESPACE = "DAV:"
 _OWNCLOUD_NAMESPACE = "http://owncloud.org/ns"
@@ -90,6 +107,7 @@ def main() -> int:
     )
 
     store = DurableQueueStore(state_dir)
+    _ensure_nexa_openclaw_session(os.environ, state_dir=state_dir)
     dependencies = _runtime_dependencies_from_env(os.environ)
     worker_id = os.environ.get("DOKPLOY_WIZARD_NEXA_WORKER_ID", socket.gethostname())
     poll_seconds = _float_env("DOKPLOY_WIZARD_NEXA_POLL_SECONDS", _DEFAULT_POLL_SECONDS)
@@ -106,6 +124,8 @@ def main() -> int:
             sort_keys=True,
         ),
     )
+    _update_presence(os.environ, status="online", message="Ready")
+    last_presence_at = time.monotonic()
 
     while True:
         leased_job = store.lease_next_job(
@@ -113,8 +133,19 @@ def main() -> int:
             now=datetime.now(UTC),
         )
         if leased_job is None:
-            time.sleep(poll_seconds)
+            try:
+                queued = _poll_talk_messages(store=store, env=os.environ, now=datetime.now(UTC))
+            except RuntimeError:
+                LOGGER.warning("Nexa Talk polling failed", exc_info=True)
+                queued = 0
+            if time.monotonic() - last_presence_at >= 240:
+                _update_presence(os.environ, status="online", message="Ready")
+                last_presence_at = time.monotonic()
+            if queued == 0:
+                time.sleep(poll_seconds)
             continue
+        _update_presence(os.environ, status="away", message=_presence_message_for_job(leased_job))
+        last_presence_at = time.monotonic()
         result = run_queued_nexa_job(
             leased_job,
             store=store,
@@ -122,6 +153,8 @@ def main() -> int:
             dependencies=dependencies,
             now=datetime.now(UTC),
         )
+        _update_presence(os.environ, status="online", message="Ready")
+        last_presence_at = time.monotonic()
         LOGGER.info(
             "Processed Nexa job: %s",
             json.dumps(
@@ -135,6 +168,57 @@ def main() -> int:
                 sort_keys=True,
             ),
         )
+
+
+def _ensure_nexa_openclaw_session(
+    env: dict[str, str] | os._Environ[str],
+    *,
+    state_dir: Path,
+) -> None:
+    openclaw_root = state_dir.parent.parent
+    session_dir = openclaw_root / "agents" / "nexa" / "sessions"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_index = session_dir / "sessions.json"
+    if session_index.exists():
+        try:
+            data = json.loads(session_index.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            data = {}
+    else:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    key = "agent:nexa:main"
+    existing = data.get(key)
+    if isinstance(existing, dict) and existing.get("sessionFile"):
+        return
+    session_id = str(uuid.uuid4())
+    session_file = session_dir / f"{session_id}.jsonl"
+    if not session_file.exists():
+        session_file.write_text("", encoding="utf-8")
+    now_ms = int(time.time() * 1000)
+    display_name = env.get(_ENV_AGENT_DISPLAY_NAME, "Nexa") or "Nexa"
+    data[key] = {
+        "sessionId": session_id,
+        "updatedAt": now_ms,
+        "systemSent": True,
+        "abortedLastRun": False,
+        "chatType": "direct",
+        "deliveryContext": {"channel": "nextcloud-talk"},
+        "lastChannel": "nextcloud-talk",
+        "origin": {
+            "provider": "nextcloud-talk",
+            "surface": "nextcloud-talk",
+            "chatType": "direct",
+            "label": display_name,
+            "from": "nextcloud:nexa-agent",
+            "to": "nextcloud:nexa-agent",
+            "accountId": "default",
+        },
+        "sessionFile": str(session_file),
+        "compactionCount": 0,
+    }
+    session_index.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _wait_for_contracts(
@@ -175,8 +259,10 @@ def _float_env(name: str, default: float) -> float:
 
 def _runtime_dependencies_from_env(env: dict[str, str] | os._Environ[str]) -> NexaRuntimeDependencies:
     return NexaRuntimeDependencies(
-        talk_reply_planner=_minimal_talk_reply_planner,
+        talk_reply_planner=lambda payload, memory: _provider_talk_reply_planner(payload, memory, env=env),
         talk_sender=lambda payload: _send_talk_reply(payload, env=env),
+        nextcloud_file_creator=lambda request: _create_nextcloud_markdown_file(request, env=env),
+        terminal_command_runner=lambda command: _run_terminal_command(command),
         onlyoffice_agent_identity=_onlyoffice_agent_identity_from_env(env),
         load_canonical_file=lambda save_signal: _load_canonical_file(save_signal, env=env),
         onlyoffice_reconcile_executor=lambda decision, save_signal, canonical_file, memory: _execute_onlyoffice_reconcile(
@@ -186,6 +272,22 @@ def _runtime_dependencies_from_env(env: dict[str, str] | os._Environ[str]) -> Ne
             memory,
             env=env,
         ),
+    )
+
+
+def _run_terminal_command(command: str) -> NexaTerminalCommandResult:
+    completed = subprocess.run(
+        ["sh", "-lc", command],
+        capture_output=True,
+        text=True,
+        timeout=_DEFAULT_HTTP_TIMEOUT_SECONDS,
+        check=False,
+    )
+    return NexaTerminalCommandResult(
+        command=command,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        exit_code=completed.returncode,
     )
 
 
@@ -209,11 +311,216 @@ def _minimal_talk_reply_planner(
     return NexaPlannedTalkReply(text=reply_text, memory_content=memory_content)
 
 
+def _provider_talk_reply_planner(
+    payload: dict[str, Any],
+    memory: Any,
+    *,
+    env: dict[str, str] | os._Environ[str],
+) -> NexaPlannedTalkReply:
+    pass_through_enabled = env.get(_ENV_OPENCLAW_INTERNAL_URL, "").strip() != ""
+    openclaw_reply = _openclaw_talk_reply_planner(payload, memory, env=env)
+    if openclaw_reply is not None:
+        return openclaw_reply
+    if pass_through_enabled:
+        return NexaPlannedTalkReply(
+            text=(
+                "OpenClaw did not return a grounded response in time. "
+                "Please try again instead of trusting a guessed answer."
+            ),
+            memory_content="OpenClaw pass-through timed out before producing a grounded response.",
+            memory_content_class="assistant_summary",
+            memory_target_layer="shared",
+        )
+    model = env.get(_ENV_PLANNER_MODEL, "").strip()
+    provider = env.get(_ENV_PLANNER_MODEL_PROVIDER, "").strip() or "openai"
+    message_text = str(payload.get("message", {}).get("text", "")).strip() or "your message"
+    recent_conversation = payload.get("recentConversation")
+    conversation_summary = ""
+    if isinstance(recent_conversation, list):
+        turns: list[str] = []
+        for entry in recent_conversation[-8:]:
+            if not isinstance(entry, dict):
+                continue
+            role = str(entry.get("role", "")).strip()
+            text = str(entry.get("text", "")).strip()
+            if role == "" or text == "":
+                continue
+            turns.append(f"{role}: {text}")
+        if turns:
+            conversation_summary = "\n\nRecent conversation:\n" + "\n".join(turns)
+    memory_summary = ""
+    memory_hits = getattr(memory, "hits", ())
+    if memory_hits:
+        memory_summary = "\n\nRelevant memory:\n" + "\n".join(
+            f"- {str(hit.content).strip()}" for hit in memory_hits[:5]
+        )
+    if model == "":
+        return _minimal_talk_reply_planner(payload, memory)
+    if provider == "local" or model.startswith("local/"):
+        base_url = env.get(_ENV_PLANNER_LOCAL_BASE_URL, "").strip()
+        api_key = env.get(_ENV_PLANNER_LOCAL_API_KEY, "").strip() or "sk-no-key-required"
+    elif provider == "nvidia" or model.startswith("nvidia/"):
+        base_url = env.get(_ENV_PLANNER_NVIDIA_BASE_URL, "").strip() or "https://integrate.api.nvidia.com/v1"
+        api_key = env.get(_ENV_PLANNER_NVIDIA_API_KEY, "").strip()
+    else:
+        base_url = env.get(_ENV_PLANNER_OPENROUTER_BASE_URL, "").strip() or "https://openrouter.ai/api/v1"
+        api_key = env.get(_ENV_PLANNER_OPENROUTER_API_KEY, "").strip()
+    if not api_key:
+        return _minimal_talk_reply_planner(payload, memory)
+    body = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are Nexa, a Nextcloud coworker agent. Reply briefly and directly to the latest user message. "
+                    "Use recent conversation context to resolve pronouns and follow-up questions. "
+                    "Ignore system noise and respond like a helpful teammate."
+                ),
+            },
+            {"role": "user", "content": f"Incoming Nextcloud Talk message:\n{message_text}{conversation_summary}{memory_summary}"},
+        ],
+        "temperature": 0.2,
+    }
+    try:
+        response_payload = _json_request(
+            f"{base_url.rstrip('/')}/chat/completions",
+            method="POST",
+            body=body,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+        )
+    except RuntimeError:
+        LOGGER.warning("Nexa provider-backed planner failed; using minimal planner", exc_info=True)
+        return _minimal_talk_reply_planner(payload, memory)
+    text = _extract_openclaw_chat_text(response_payload).strip()
+    if text == "":
+        return _minimal_talk_reply_planner(payload, memory)
+    return NexaPlannedTalkReply(
+        text=text,
+        memory_content=f"Nexa replied through the provider-backed planner: {text}",
+        memory_content_class="assistant_summary",
+        memory_target_layer="shared",
+    )
+
+
+def _extract_openclaw_chat_text(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    message = first.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def _openclaw_talk_reply_planner(
+    payload: dict[str, Any],
+    memory: Any,
+    *,
+    env: dict[str, str] | os._Environ[str],
+) -> NexaPlannedTalkReply | None:
+    base_url = env.get(_ENV_OPENCLAW_INTERNAL_URL, "").strip()
+    if base_url == "":
+        return None
+    input_items: list[dict[str, object]] = []
+    recent_conversation = payload.get("recentConversation")
+    if isinstance(recent_conversation, list):
+        for entry in recent_conversation[-8:]:
+            if not isinstance(entry, dict):
+                continue
+            role = str(entry.get("role", "")).strip()
+            text = str(entry.get("text", "")).strip()
+            if role not in {"user", "assistant"} or text == "":
+                continue
+            input_items.append({"type": "message", "role": role, "content": text})
+    memory_hits = getattr(memory, "hits", ())
+    if memory_hits:
+        memory_summary = "Relevant memory:\n" + "\n".join(
+            f"- {str(hit.content).strip()}" for hit in memory_hits[:5]
+        )
+        input_items.append({"type": "message", "role": "developer", "content": memory_summary})
+    current_text = str(payload.get("message", {}).get("text", "")).strip() or "your message"
+    input_items.append({"type": "message", "role": "user", "content": current_text})
+    request_body = {
+        "model": "openclaw/nexa",
+        "input": input_items,
+        "user": str(payload.get("initiator", {}).get("id", "nexa-user")),
+        "stream": False,
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "cf-access-authenticated-user-email": _required_env(env, _ENV_AGENT_USER_ID),
+        "x-openclaw-agent-id": "nexa",
+        "x-openclaw-message-channel": "nextcloud-talk",
+        "x-openclaw-session-key": _openclaw_session_key(payload),
+    }
+    try:
+        response_payload = _json_request(
+            f"{base_url.rstrip('/')}/v1/responses",
+            method="POST",
+            body=request_body,
+            headers=headers,
+            timeout_seconds=_DEFAULT_OPENCLAW_PASS_THROUGH_TIMEOUT_SECONDS,
+        )
+    except RuntimeError:
+        LOGGER.warning("OpenClaw pass-through planner failed", exc_info=True)
+        return None
+    text = _extract_openclaw_responses_text(response_payload).strip()
+    if text == "":
+        return None
+    return NexaPlannedTalkReply(
+        text=text,
+        memory_content=f"Nexa replied through OpenClaw pass-through: {text}",
+        memory_content_class="assistant_summary",
+        memory_target_layer="shared",
+    )
+
+
+def _extract_openclaw_responses_text(payload: dict[str, Any]) -> str:
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return ""
+    chunks: list[str] = []
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "output_text":
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip() != "":
+                chunks.append(text.strip())
+    return "\n\n".join(chunks)
+
+
+def _openclaw_session_key(payload: dict[str, Any]) -> str:
+    conversation_id = str(payload.get("conversation", {}).get("id", "main")).strip() or "main"
+    context = payload.get("context")
+    thread = context.get("threadId") if isinstance(context, dict) else None
+    if thread is not None and str(thread).strip() != "":
+        return f"agent:nexa:nextcloud-{conversation_id}-thread-{str(thread).strip()}"
+    return f"agent:nexa:nextcloud-{conversation_id}"
+
+
 def _send_talk_reply(payload: dict[str, Any], *, env: dict[str, str] | os._Environ[str]) -> dict[str, Any]:
     base_url = _required_env(env, _ENV_NEXTCLOUD_BASE_URL)
+    agent_user = _required_env(env, _ENV_AGENT_USER_ID)
+    agent_password = _agent_password(env)
+    conversation_token = _conversation_token(payload)
     signing_secret = _required_env(env, _ENV_TALK_SIGNING_SECRET)
     shared_secret = _required_env(env, _ENV_TALK_SHARED_SECRET)
-    conversation_token = _conversation_token(payload)
     message = _required_string(payload, "message")
     body = {
         "message": message,
@@ -222,25 +529,57 @@ def _send_talk_reply(payload: dict[str, Any], *, env: dict[str, str] | os._Envir
     reply_to = payload.get("replyTo")
     if isinstance(reply_to, dict) and reply_to.get("messageId") is not None:
         body["replyTo"] = reply_to["messageId"]
-    random_header = secrets.token_hex(32)
-    signature = hmac.new(
-        signing_secret.encode("utf-8"),
-        f"{random_header}{message}".encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    response_payload = _json_request(
-        f"{base_url.rstrip('/')}/ocs/v2.php/apps/spreed/api/v1/bot/{parse.quote(conversation_token, safe='')}/message",
-        method="POST",
-        body=body,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "OCS-APIRequest": "true",
-            "X-Nextcloud-Talk-Bot-Random": random_header,
-            "X-Nextcloud-Talk-Bot-Signature": signature,
-            "X-Nextcloud-Talk-Secret": shared_secret,
-        },
-    )
+    if agent_password is not None:
+        try:
+            response_payload = _json_request(
+                f"{base_url.rstrip('/')}/ocs/v2.php/apps/spreed/api/v1/chat/{parse.quote(conversation_token, safe='')}",
+                method="POST",
+                body=body,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "OCS-APIRequest": "true",
+                },
+                auth_user=agent_user,
+                auth_password=agent_password,
+            )
+        except RuntimeError as exc:
+            if "reply-to" in str(exc).lower() and "replyTo" in body:
+                fallback_body = {key: value for key, value in body.items() if key != "replyTo"}
+                response_payload = _json_request(
+                    f"{base_url.rstrip('/')}/ocs/v2.php/apps/spreed/api/v1/chat/{parse.quote(conversation_token, safe='')}",
+                    method="POST",
+                    body=fallback_body,
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "OCS-APIRequest": "true",
+                    },
+                    auth_user=agent_user,
+                    auth_password=agent_password,
+                )
+            else:
+                raise
+    else:
+        random_header = secrets.token_hex(32)
+        signature = hmac.new(
+            signing_secret.encode("utf-8"),
+            f"{random_header}{message}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        response_payload = _json_request(
+            f"{base_url.rstrip('/')}/ocs/v2.php/apps/spreed/api/v1/bot/{parse.quote(conversation_token, safe='')}/message",
+            method="POST",
+            body=body,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "OCS-APIRequest": "true",
+                "X-Nextcloud-Talk-Bot-Random": random_header,
+                "X-Nextcloud-Talk-Bot-Signature": signature,
+                "X-Nextcloud-Talk-Secret": shared_secret,
+            },
+        )
     message_id = _extract_talk_response_string(response_payload, ("messageId",), fallback_paths=(("ocs", "data", "id"), ("ocs", "data", "messageId")))
     request_id = _extract_talk_response_string(response_payload, ("requestId",), fallback_paths=(("ocs", "meta", "requestid"),), required=False)
     result = {"messageId": message_id}
@@ -296,6 +635,56 @@ def _load_canonical_file(
     )
 
 
+def _create_nextcloud_markdown_file(
+    file_request: NexaNextcloudFileCreateRequest,
+    *,
+    env: dict[str, str] | os._Environ[str],
+) -> NexaNextcloudFileCreateResult:
+    base_url = _required_env(env, _ENV_NEXTCLOUD_BASE_URL)
+    webdav_user = _required_env(env, _ENV_WEBDAV_AUTH_USER)
+    webdav_password = _required_env(env, _ENV_WEBDAV_AUTH_PASSWORD)
+    file_url = _webdav_file_url(base_url=base_url, auth_user=webdav_user, path=file_request.relative_path)
+    _raw_request(
+        file_url,
+        method="PUT",
+        body=file_request.content.encode("utf-8"),
+        headers={
+            "Content-Type": "text/markdown; charset=utf-8",
+            "X-NC-WebDAV-AutoMkcol": "1",
+        },
+        auth_user=webdav_user,
+        auth_password=webdav_password,
+    )
+    share_payload = _json_request(
+        f"{base_url.rstrip('/')}/ocs/v2.php/apps/files_sharing/api/v1/shares",
+        method="POST",
+        body={
+            "path": file_request.relative_path,
+            "shareType": 3,
+        },
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "OCS-APIRequest": "true",
+        },
+        auth_user=webdav_user,
+        auth_password=webdav_password,
+    )
+    share_url = _extract_talk_response_string(
+        share_payload,
+        (),
+        fallback_paths=(("ocs", "data", "url"),),
+    )
+    if share_url is None:
+        share_url = "share link unavailable"
+    return NexaNextcloudFileCreateResult(
+        filename=file_request.filename,
+        relative_path=file_request.relative_path,
+        share_url=share_url,
+        diff_text=_diff_for_new_file(file_request.relative_path, file_request.content),
+    )
+
+
 def _execute_onlyoffice_reconcile(
     decision: Any,
     save_signal: Any,
@@ -341,6 +730,172 @@ def _onlyoffice_agent_identity_from_env(
         agent_user_id=_required_env(env, _ENV_AGENT_USER_ID),
         display_name=_required_env(env, _ENV_AGENT_DISPLAY_NAME),
     )
+
+
+def _agent_password(env: dict[str, str] | os._Environ[str]) -> str | None:
+    value = env.get(_ENV_AGENT_PASSWORD)
+    if value is not None and value.strip() != "":
+        return value.strip()
+    fallback = env.get(_ENV_WEBDAV_AUTH_PASSWORD)
+    return fallback.strip() if fallback is not None and fallback.strip() != "" else None
+
+
+def _presence_message_for_job(job: Any) -> str:
+    if job.kind == "nexa.onlyoffice.reconcile_saved_document":
+        return "Working on a document..."
+    return "Thinking..."
+
+
+def _presence_auth(env: dict[str, str] | os._Environ[str]) -> tuple[str, str] | None:
+    user = env.get(_ENV_AGENT_USER_ID)
+    password = _agent_password(env)
+    if user is None or user.strip() == "" or password is None:
+        return None
+    return user.strip(), password
+
+
+def _update_presence(env: dict[str, str] | os._Environ[str], *, status: str, message: str) -> None:
+    auth = _presence_auth(env)
+    if auth is None:
+        return
+    base_url = _required_env(env, _ENV_NEXTCLOUD_BASE_URL)
+    user, password = auth
+    form_headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "OCS-APIRequest": "true",
+    }
+    try:
+        _raw_request(
+            f"{base_url.rstrip('/')}/ocs/v2.php/apps/user_status/api/v1/heartbeat",
+            method="PUT",
+            headers=form_headers,
+            body=parse.urlencode({"status": status}).encode("utf-8"),
+            auth_user=user,
+            auth_password=password,
+        )
+        _raw_request(
+            f"{base_url.rstrip('/')}/ocs/v2.php/apps/user_status/api/v1/user_status/message/custom",
+            method="PUT",
+            headers=form_headers,
+            body=parse.urlencode({"message": message, "statusIcon": "🤖"}).encode("utf-8"),
+            auth_user=user,
+            auth_password=password,
+        )
+    except RuntimeError:
+        LOGGER.warning("Nexa presence update failed", exc_info=True)
+
+
+def _poll_talk_messages(store: DurableQueueStore, *, env: dict[str, str] | os._Environ[str], now: datetime) -> int:
+    auth = _presence_auth(env)
+    if auth is None:
+        return 0
+    base_url = _required_env(env, _ENV_NEXTCLOUD_BASE_URL)
+    agent_user_id, agent_password = auth
+    state_dir = Path(env.get("DOKPLOY_WIZARD_NEXA_STATE_DIR", _DEFAULT_STATE_DIR))
+    cursor_path = state_dir / "talk-cursors.json"
+    cursors: dict[str, str] = {}
+    if cursor_path.exists():
+        try:
+            loaded = json.loads(cursor_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cursors = {str(key): str(value) for key, value in loaded.items()}
+        except json.JSONDecodeError:
+            cursors = {}
+    payload = _json_request(
+        f"{base_url.rstrip('/')}/ocs/v2.php/apps/spreed/api/v4/room",
+        method="GET",
+        body=None,
+        headers={"Accept": "application/json", "OCS-APIRequest": "true"},
+        auth_user=agent_user_id,
+        auth_password=agent_password,
+    )
+    conversations = sorted(
+        _ocs_data_list(payload),
+        key=lambda item: int(str(item.get("unreadMessages", "0") or "0")),
+        reverse=True,
+    )
+    enqueued = 0
+    for conversation in conversations:
+        token = conversation.get("token")
+        if not isinstance(token, str) or token.strip() == "":
+            continue
+        last_seen = cursors.get(token)
+        try:
+            messages_payload = _json_request(
+                f"{base_url.rstrip('/')}/ocs/v2.php/apps/spreed/api/v1/chat/{parse.quote(token, safe='')}?lookIntoFuture=0&includeLastKnown=1&setReadMarker=0&lastKnownMessageId=0",
+                method="GET",
+                body=None,
+                headers={"Accept": "application/json", "OCS-APIRequest": "true"},
+                auth_user=agent_user_id,
+                auth_password=agent_password,
+            )
+        except RuntimeError:
+            LOGGER.warning("Nexa Talk poll failed for conversation %s", token, exc_info=True)
+            continue
+        messages = sorted(
+            _ocs_data_list(messages_payload),
+            key=lambda item: int(str(item.get("id", "0")) or "0"),
+        )
+        latest_seen = last_seen
+        for message in messages:
+            message_id = str(message.get("id", "")).strip()
+            actor_id = str(message.get("actorId", "")).strip()
+            text = str(message.get("message", "")).strip()
+            message_type = str(message.get("messageType", "comment")).strip()
+            if message_id == "" or text == "":
+                continue
+            latest_seen = message_id
+            if actor_id == agent_user_id:
+                continue
+            if message_type != "comment":
+                continue
+            if last_seen is not None and message_id <= last_seen:
+                continue
+            normalized = {
+                "server": base_url,
+                "webhookEventId": f"poll:{token}:{message_id}",
+                "conversationToken": token,
+                "conversation": {"id": token},
+                "initiator": {"id": actor_id},
+                "message": {"id": message_id, "text": text},
+                "capabilities": {"threads": False},
+            }
+            event = store.persist_incoming_event(
+                source="nextcloud-talk",
+                idempotency_key=normalized["webhookEventId"],
+                raw_body=json.dumps(message).encode("utf-8"),
+                parsed_payload=normalized,
+                received_at=now,
+            )
+            scope = NexaScopeContext(
+                tenant_id=parse.urlsplit(base_url).hostname or "nextcloud",
+                integration_surface="nextcloud-talk",
+                user_id=actor_id,
+                room_id=token,
+                run_id=normalized["webhookEventId"],
+            )
+            store.enqueue_job(
+                queue="foreground",
+                job_type="nexa.talk.process_message",
+                payload={"source": "nextcloud-talk", "event_id": event.event_id},
+                idempotency_key=normalized["webhookEventId"],
+                scope_key=scope.queue_scope_key(),
+                supersession_key=scope.run_correlation_key(),
+                now=now,
+            )
+            enqueued += 1
+        if latest_seen is not None:
+            cursors[token] = latest_seen
+    cursor_path.write_text(json.dumps(cursors, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return enqueued
+
+
+def _ocs_data_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    ocs = payload.get("ocs")
+    data = ocs.get("data") if isinstance(ocs, dict) else payload.get("data")
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
 
 
 def _required_env(env: dict[str, str] | os._Environ[str], key: str) -> str:
@@ -505,14 +1060,20 @@ def _json_request(
     url: str,
     *,
     method: str,
-    body: dict[str, Any],
+    body: dict[str, Any] | None,
     headers: dict[str, str],
+    auth_user: str | None = None,
+    auth_password: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     response_bytes, _ = _raw_request(
         url,
         method=method,
-        body=json.dumps(body).encode("utf-8"),
+        body=None if body is None else json.dumps(body).encode("utf-8"),
         headers=headers,
+        auth_user=auth_user,
+        auth_password=auth_password,
+        timeout_seconds=timeout_seconds,
     )
     try:
         payload = json.loads(response_bytes.decode("utf-8"))
@@ -533,6 +1094,7 @@ def _raw_request(
     body: bytes | None = None,
     auth_user: str | None = None,
     auth_password: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> tuple[bytes, str | None]:
     request_headers = dict(headers)
     if auth_user is not None and auth_password is not None:
@@ -540,15 +1102,19 @@ def _raw_request(
         request_headers["Authorization"] = f"Basic {token}"
     http_request = request.Request(url, data=body, method=method, headers=request_headers)
     try:
-        with request.urlopen(http_request, timeout=_DEFAULT_HTTP_TIMEOUT_SECONDS) as response:  # noqa: S310
+        with request.urlopen(http_request, timeout=timeout_seconds or _DEFAULT_HTTP_TIMEOUT_SECONDS) as response:  # noqa: S310
             return response.read(), response.headers.get("Content-Type")
     except error.HTTPError as exc:
+        if exc.code == 304:
+            return b"{}", exc.headers.get("Content-Type")
         detail = exc.read().decode("utf-8", errors="replace")
         msg = f"HTTP {exc.code} from {url}: {detail}"
         raise RuntimeError(msg) from exc
     except error.URLError as exc:
         msg = f"Request to {url} failed: {exc.reason}"
         raise RuntimeError(msg) from exc
+    except Exception as exc:
+        raise RuntimeError(f"Request to {url} failed: {exc}") from exc
 
 
 def _basic_auth_token(user: str, password: str) -> str:

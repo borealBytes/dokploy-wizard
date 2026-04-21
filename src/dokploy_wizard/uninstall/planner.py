@@ -16,6 +16,7 @@ from dokploy_wizard.networking import (
     DNS_RESOURCE_TYPE,
     TUNNEL_RESOURCE_TYPE,
 )
+from dokploy_wizard.packs.coder import CODER_DATA_RESOURCE_TYPE, CODER_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.headscale import HEADSCALE_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.matrix import MATRIX_DATA_RESOURCE_TYPE, MATRIX_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.nextcloud import (
@@ -26,6 +27,9 @@ from dokploy_wizard.packs.nextcloud import (
 )
 from dokploy_wizard.packs.openclaw import (
     MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
     OPENCLAW_SERVICE_RESOURCE_TYPE,
 )
 from dokploy_wizard.packs.seaweedfs import (
@@ -95,6 +99,9 @@ _RULES: dict[str, DeletionRule] = {
         phase="cloudflare_access", retain_safe=True, priority=9
     ),
     OPENCLAW_SERVICE_RESOURCE_TYPE: DeletionRule(phase="openclaw", retain_safe=True, priority=10),
+    OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE: DeletionRule(phase="openclaw", retain_safe=True, priority=11),
+    OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE: DeletionRule(phase="openclaw", retain_safe=True, priority=12),
+    OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE: DeletionRule(phase="openclaw", retain_safe=True, priority=13),
     MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE: DeletionRule(
         phase="my-farm-advisor", retain_safe=True, priority=11
     ),
@@ -108,6 +115,8 @@ _RULES: dict[str, DeletionRule] = {
     ),
     SEAWEEDFS_SERVICE_RESOURCE_TYPE: DeletionRule(phase="seaweedfs", retain_safe=True, priority=24),
     SEAWEEDFS_DATA_RESOURCE_TYPE: DeletionRule(phase="seaweedfs", retain_safe=False, priority=25),
+    CODER_SERVICE_RESOURCE_TYPE: DeletionRule(phase="coder", retain_safe=True, priority=26),
+    CODER_DATA_RESOURCE_TYPE: DeletionRule(phase="coder", retain_safe=False, priority=27),
     MATRIX_SERVICE_RESOURCE_TYPE: DeletionRule(phase="matrix", retain_safe=True, priority=30),
     MATRIX_DATA_RESOURCE_TYPE: DeletionRule(phase="matrix", retain_safe=False, priority=31),
     HEADSCALE_SERVICE_RESOURCE_TYPE: DeletionRule(phase="headscale", retain_safe=True, priority=40),
@@ -127,10 +136,11 @@ _PHASE_ORDER = {
     "my-farm-advisor": 3,
     "nextcloud": 4,
     "seaweedfs": 5,
-    "matrix": 6,
-    "headscale": 7,
-    "shared_core": 8,
-    "networking": 9,
+    "coder": 6,
+    "matrix": 7,
+    "headscale": 8,
+    "shared_core": 9,
+    "networking": 10,
 }
 
 _PACK_RUNTIME_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
@@ -138,8 +148,12 @@ _PACK_RUNTIME_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "matrix": (MATRIX_SERVICE_RESOURCE_TYPE,),
     "nextcloud": (NEXTCLOUD_SERVICE_RESOURCE_TYPE, ONLYOFFICE_SERVICE_RESOURCE_TYPE),
     "seaweedfs": (SEAWEEDFS_SERVICE_RESOURCE_TYPE,),
+    "coder": (CODER_SERVICE_RESOURCE_TYPE,),
     "openclaw": (
         OPENCLAW_SERVICE_RESOURCE_TYPE,
+        OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
+        OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
+        OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
         ACCESS_APPLICATION_RESOURCE_TYPE,
         ACCESS_POLICY_RESOURCE_TYPE,
     ),
@@ -154,6 +168,7 @@ _PACK_DATA_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "matrix": (MATRIX_DATA_RESOURCE_TYPE,),
     "nextcloud": (NEXTCLOUD_VOLUME_RESOURCE_TYPE, ONLYOFFICE_VOLUME_RESOURCE_TYPE),
     "seaweedfs": (SEAWEEDFS_DATA_RESOURCE_TYPE,),
+    "coder": (CODER_DATA_RESOURCE_TYPE,),
     "openclaw": (),
     "my-farm-advisor": (),
     "headscale": (),
@@ -164,6 +179,7 @@ _PACK_HOSTNAME_KEYS: dict[str, tuple[str, ...]] = {
     "matrix": ("matrix",),
     "nextcloud": ("nextcloud", "onlyoffice"),
     "seaweedfs": ("s3",),
+    "coder": ("coder",),
     "openclaw": ("openclaw",),
     "my-farm-advisor": ("my-farm-advisor",),
 }
@@ -241,7 +257,13 @@ def build_pack_disable_plan(
     removed_packs = sorted(
         set(existing_desired.enabled_packs) - set(requested_desired.enabled_packs)
     )
-    if not removed_packs:
+
+    tailscale_disable_only = existing_desired.enable_tailscale and not requested_desired.enable_tailscale
+    access_disable_only = (
+        bool(existing_desired.cloudflare_access_otp_emails)
+        and not bool(requested_desired.cloudflare_access_otp_emails)
+    )
+    if not removed_packs and not tailscale_disable_only and not access_disable_only:
         return UninstallPlan(
             mode="retain",
             environment=requested_desired.stack_name,
@@ -273,12 +295,9 @@ def build_pack_disable_plan(
     ):
         removable_types.add(SHARED_NETWORK_RESOURCE_TYPE)
         retained_types.update({SHARED_POSTGRES_RESOURCE_TYPE, SHARED_REDIS_RESOURCE_TYPE})
-    if existing_desired.enable_tailscale and not requested_desired.enable_tailscale:
+    if tailscale_disable_only:
         removable_types.add(TAILSCALE_NODE_RESOURCE_TYPE)
-    if (
-        existing_desired.cloudflare_access_otp_emails
-        and not requested_desired.cloudflare_access_otp_emails
-    ):
+    if access_disable_only:
         removable_types.add(ACCESS_OTP_PROVIDER_RESOURCE_TYPE)
 
     deletions: list[PlannedDeletion] = []
@@ -406,8 +425,14 @@ def compute_remaining_completed_steps(
             return tuple(prefix)
         prefix.append("seaweedfs")
     if "openclaw" in desired_state.enabled_packs:
-        if not _has_resource_type(resources_by_type, OPENCLAW_SERVICE_RESOURCE_TYPE):
-            return tuple(prefix)
+        for resource_type in (
+            OPENCLAW_SERVICE_RESOURCE_TYPE,
+            OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
+            OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
+            OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
+        ):
+            if not _has_resource_type(resources_by_type, resource_type):
+                return tuple(prefix)
         prefix.append("openclaw")
     if "my-farm-advisor" in desired_state.enabled_packs:
         if not _has_resource_type(resources_by_type, MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE):

@@ -157,6 +157,11 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
                 default_subdomain="openclaw",
                 env_key="OPENCLAW_SUBDOMAIN",
             ),
+            PackHostname(
+                key="openclaw-internal",
+                default_subdomain="openclaw-internal",
+                env_key="OPENCLAW_INTERNAL_SUBDOMAIN",
+            ),
         ),
         mutable_env_keys=(
             "ADVISOR_GATEWAY_PASSWORD",
@@ -173,6 +178,8 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
             "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD",
             "OPENCLAW_NEXA_AGENT_USER_ID",
             "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
+            "OPENCLAW_NEXA_AGENT_PASSWORD",
+            "OPENCLAW_NEXA_AGENT_EMAIL",
             "OPENCLAW_NEXA_MEM0_BASE_URL",
             "OPENCLAW_NEXA_MEM0_API_KEY",
             "OPENCLAW_NEXA_MEM0_LLM_BASE_URL",

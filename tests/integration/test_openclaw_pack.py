@@ -494,6 +494,9 @@ def test_install_reconciles_openclaw_and_persists_slot_ledger(tmp_path: Path) ->
         ("matrix_service", "stack:openclaw-stack:matrix-service"),
         ("matrix_data", "stack:openclaw-stack:matrix-data"),
         ("openclaw_service", "stack:openclaw-stack:openclaw"),
+        ("openclaw_mem0_service", "stack:openclaw-stack:openclaw-sidecar:mem0"),
+        ("openclaw_qdrant_service", "stack:openclaw-stack:openclaw-sidecar:qdrant"),
+        ("openclaw_runtime_service", "stack:openclaw-stack:openclaw-sidecar:nexa-runtime"),
     }
 
 
@@ -682,6 +685,21 @@ def test_install_modify_updates_owned_openclaw_service(tmp_path: Path) -> None:
     assert any(
         resource.resource_type == "openclaw_service"
         and resource.scope == "stack:openclaw-stack:openclaw"
+        for resource in loaded_state.ownership_ledger.resources
+    )
+    assert any(
+        resource.resource_type == "openclaw_mem0_service"
+        and resource.scope == "stack:openclaw-stack:openclaw-sidecar:mem0"
+        for resource in loaded_state.ownership_ledger.resources
+    )
+    assert any(
+        resource.resource_type == "openclaw_qdrant_service"
+        and resource.scope == "stack:openclaw-stack:openclaw-sidecar:qdrant"
+        for resource in loaded_state.ownership_ledger.resources
+    )
+    assert any(
+        resource.resource_type == "openclaw_runtime_service"
+        and resource.scope == "stack:openclaw-stack:openclaw-sidecar:nexa-runtime"
         for resource in loaded_state.ownership_ledger.resources
     )
 
@@ -935,8 +953,7 @@ def test_install_renders_internal_nexa_runtime_sidecar_into_openclaw_compose(
     assert compose is not None
     assert "  nexa-runtime:\n" in compose
     assert 'image: local/dokploy-wizard-nexa-runtime:latest' in compose
-    assert "context: ." in compose
-    assert "dockerfile: docker/nexa-runtime/Dockerfile" in compose
+    assert "build:" not in compose
     assert "openclaw-stack-openclaw-data:/mnt/openclaw" in compose
     assert 'DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH: "/mnt/openclaw/.nexa/runtime-contract.json"' in compose
     assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH: "/mnt/openclaw/workspace/nexa/contract.json"' in compose

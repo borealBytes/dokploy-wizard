@@ -164,6 +164,11 @@ def _inspect_live_docker(
                 if managed_candidate_pack == candidate["pack"] and scope_is_managed:
                     consumed_live_items.add(("container", container_name))
                 continue
+            if scope_is_managed and _is_expected_auxiliary_container(
+                container=container, candidate=candidate
+            ):
+                consumed_live_items.add(("container", container_name))
+                continue
             if _looks_like_managed_task(
                 container_name=container_name,
                 expected_service_name=candidate["expected_service_name"],
@@ -230,7 +235,7 @@ def _managed_service_health(
         container_matches = [
             container
             for container in containers
-            if managed_container_candidates.get(container["name"]) == candidate["pack"]
+            if managed_container_candidates.get(container["name"]) == candidate["scope"]
         ]
         if len(container_matches) == 1:
             container = container_matches[0]
@@ -325,6 +330,37 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "scope": f"stack:{desired_state.stack_name}:openclaw",
             }
         )
+        candidates.extend(
+            (
+                {
+                    "aliases": ("mem0",),
+                    "hostname": None,
+                    "managed_container_labels": {"com.docker.compose.service": "mem0"},
+                    "port": str(8000),
+                    "expected_service_name": "mem0",
+                    "pack": "openclaw",
+                    "scope": f"stack:{desired_state.stack_name}:openclaw-sidecar:mem0",
+                },
+                {
+                    "aliases": ("qdrant",),
+                    "hostname": None,
+                    "managed_container_labels": {"com.docker.compose.service": "qdrant"},
+                    "port": str(6333),
+                    "expected_service_name": "qdrant",
+                    "pack": "openclaw",
+                    "scope": f"stack:{desired_state.stack_name}:openclaw-sidecar:qdrant",
+                },
+                {
+                    "aliases": ("nexa-runtime",),
+                    "hostname": None,
+                    "managed_container_labels": {"com.docker.compose.service": "nexa-runtime"},
+                    "port": None,
+                    "expected_service_name": "nexa-runtime",
+                    "pack": "openclaw",
+                    "scope": f"stack:{desired_state.stack_name}:openclaw-sidecar:nexa-runtime",
+                },
+            )
+        )
     if "my-farm-advisor" in desired_state.enabled_packs:
         candidates.append(
             {
@@ -409,7 +445,7 @@ def _managed_container_candidates(
     resolved: dict[str, str] = {}
     for container in containers:
         matches = [
-            candidate["pack"]
+            str(candidate["scope"])
             for candidate in candidates
             if _container_proves_managed_candidate(container=container, candidate=candidate)
         ]
@@ -424,14 +460,31 @@ def _container_proves_managed_candidate(
     labels = container.get("labels")
     if not isinstance(labels, dict) or not labels:
         return False
+    if labels.get("com.docker.compose.service") == candidate["expected_service_name"]:
+        return True
     hostname = candidate.get("hostname")
     port = candidate.get("port")
     managed_labels = candidate.get("managed_container_labels")
-    if hostname is None or port is None or not isinstance(managed_labels, dict):
+    if not isinstance(managed_labels, dict):
         return False
     if not all(labels.get(key) == value for key, value in managed_labels.items()):
         return False
+    if hostname is None or port is None:
+        return True
     return _labels_reference_hostname(labels, hostname) and _labels_expose_port(labels, port)
+
+
+def _is_expected_auxiliary_container(*, container: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    labels = container.get("labels")
+    if not isinstance(labels, dict) or not labels:
+        return False
+    compose_service = labels.get("com.docker.compose.service")
+    if not isinstance(compose_service, str) or compose_service == "":
+        return False
+    expected_service_name = str(candidate.get("expected_service_name", ""))
+    if candidate.get("pack") == "openclaw" and compose_service == f"{expected_service_name}-public":
+        return True
+    return False
 
 
 def _labels_reference_hostname(labels: dict[str, str], hostname: str) -> bool:

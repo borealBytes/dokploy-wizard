@@ -73,6 +73,8 @@ class ShellTailscaleBackend:
         )
 
     def find_node_by_name(self, resource_name: str) -> TailscaleManagedResource | None:
+        if not self._is_installed():
+            return None
         status = self.get_status(resource_name)
         if status is None:
             return None
