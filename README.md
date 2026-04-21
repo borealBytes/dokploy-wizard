@@ -1,47 +1,109 @@
 # Dokploy Wizard
 
-Dokploy Wizard is a Python-first CLI for standing up a self-hosted business stack on a fresh VPS with:
+Dokploy Wizard is a Python-first installer for standing up a real self-hosted stack on a fresh Ubuntu VPS with Dokploy, Cloudflare Tunnel, optional Cloudflare Access, optional Tailscale host access, and a set of opinionated application packs.
+
+Today this repo is not a scaffold or mock planner. It performs real deployment, real rerun/modify/uninstall flows, and has been validated on fresh VPS rebuilds.
+
+## What it installs
 
 - **Dokploy** as the deployment control plane
 - **Cloudflare Tunnel** for public ingress
+- **Cloudflare Access** for browser-safe advisor surfaces
 - **Tailscale** for private/admin host access
-- **Cloudflare Access** for extra protection on browser-safe advisor apps
-- **Stateful rerun / modify / uninstall** behavior backed by a persisted ownership ledger
+- **Shared Core** services used by packs
+  - PostgreSQL
+  - Redis
+- **Nextcloud + OnlyOffice**
+- **OpenClaw**
+- **Nexa**, embedded inside OpenClaw as the Nextcloud/Talk/OnlyOffice-facing agent runtime
+- **Telly**, embedded inside OpenClaw as the Telegram-facing agent persona
+- **SeaweedFS** for S3-compatible object storage
+- **Coder** with a seeded Ubuntu + VS Code workspace template
 
-The project is built to be **guided for first-time operators** and **repeatable for power users**.
+Optional packs also include Headscale, Matrix, and My Farm Advisor.
 
-## Current status
+## Current reality
 
-This repo is now beyond a mock CLI scaffold. The following pieces are implemented and verified:
+- Fresh-VPS install works
+- Same-host rerun / noop proof works
+- fresh-VPS install, rerun, and inspect-state flows are part of the validation path
+- OpenClaw, Nexa, Nextcloud Talk, OnlyOffice, SeaweedFS, and Coder are all part of the wizard-managed path
 
-- guided first-run install with reusable env-file generation
-- persisted state documents (`raw-input`, `desired-state`, `applied-state`, `ownership-ledger`)
-- no-op reruns, supported modify flows, and checkpoint-based resume
-- safe uninstall with retain-data and destroy-data modes
-- real Dokploy-backed deployment for:
-  - shared core
-  - Headscale
-  - Matrix
-  - Nextcloud + OnlyOffice
-  - SeaweedFS
-- Tailscale host-level phase
-- Cloudflare Access hardening for:
-  - OpenClaw
-  - My Farm Advisor
-
-Still intentionally **not** implemented:
-
-- Cloudflare Access in front of Dokploy itself
-  - the wizard’s own Dokploy API automation still needs a machine-auth or bypass path first
-- Cloudflare Access in front of Matrix, Headscale, OnlyOffice, or the main Nextcloud hostname
-  - those surfaces are protocol/integration sensitive in the current architecture
-
-## What the wizard manages
+## High-level architecture
 
 ```mermaid
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "primaryColor": "#eef6ff",
+    "primaryTextColor": "#10243e",
+    "primaryBorderColor": "#8eb8e8",
+    "lineColor": "#5f7ea3",
+    "secondaryColor": "#f7f9fc",
+    "tertiaryColor": "#fffaf0",
+    "clusterBkg": "#fbfdff",
+    "clusterBorder": "#c9d9ee",
+    "fontFamily": "Inter, ui-sans-serif, system-ui, sans-serif"
+  }
+}}%%
+flowchart LR
+    Internet([🌍 Internet]) --> CF[☁️ Cloudflare Tunnel]
+    CF --> Traefik[🚦 Dokploy / Traefik ingress]
+
+    Tailnet([🔐 Tailscale Tailnet]) --> Host[🖥️ Host access]
+    Host --> Dokploy[📦 Dokploy]
+
+    subgraph Apps[Wizard-managed application surfaces]
+      OpenClaw[🤖 OpenClaw]
+      Nextcloud[🗂️ Nextcloud]
+      OnlyOffice[📝 OnlyOffice]
+      Coder[💻 Coder]
+      Seaweed[🪣 SeaweedFS / S3]
+    end
+
+    subgraph Internal[Internal-only sidecars and shared services]
+      Shared[(🧱 Shared Core\nPostgres + Redis)]
+      Mem0[🧠 Mem0]
+      Qdrant[🔎 Qdrant]
+      NexaRuntime[🧵 Nexa runtime]
+    end
+
+    Traefik --> OpenClaw
+    Traefik --> Nextcloud
+    Traefik --> OnlyOffice
+    Traefik --> Coder
+    Traefik --> Seaweed
+    Dokploy --> Shared
+    Dokploy --> OpenClaw
+    Dokploy --> Nextcloud
+    Dokploy --> Coder
+    Dokploy --> Seaweed
+
+    OpenClaw --> Mem0
+    OpenClaw --> Qdrant
+    OpenClaw --> NexaRuntime
+    NexaRuntime --> OpenClaw
+    NexaRuntime --> Nextcloud
+    Nextcloud --> OnlyOffice
+    Apps --> Shared
+```
+
+## Install and lifecycle flow
+
+```mermaid
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "primaryColor": "#f4fbf6",
+    "primaryTextColor": "#173226",
+    "primaryBorderColor": "#8fc8a8",
+    "lineColor": "#5c8f74",
+    "fontFamily": "Inter, ui-sans-serif, system-ui, sans-serif"
+  }
+}}%%
 stateDiagram-v2
-    [*] --> Input: guided install or env file
-    Input --> DesiredState: resolve target model
+    [*] --> Input : guided install\nor env file
+    Input --> DesiredState : resolve hostnames\nsecrets\npacks
     DesiredState --> Preflight
     Preflight --> DokployBootstrap
     DokployBootstrap --> Tailscale
@@ -59,226 +121,297 @@ stateDiagram-v2
     Installed --> Modify
     Installed --> Resume
     Installed --> Uninstall
-
     Modify --> DesiredState
     Resume --> Preflight
     Uninstall --> [*]
-
-    note right of Installed
-        Every successful phase updates:
-        - raw-input.json
-        - desired-state.json
-        - applied-state.json
-        - ownership-ledger.json
-    end note
 ```
 
-## Ingress and security model
+## What each major surface does
+
+### Dokploy
+
+Dokploy is the control plane the wizard targets for all compose app deployment. The wizard bootstraps Dokploy, mints or reuses an API key, and then uses that API key for all managed pack operations.
+
+### Shared Core
+
+Shared Core is the common substrate for packs that need databases or cache services. Today that means:
+
+- PostgreSQL for Coder, Nextcloud, and OpenClaw
+- Redis for Nextcloud
+
+These are wizard-owned resources, tracked in the ownership ledger, and reused across modify / rerun operations.
+
+### Nextcloud + OnlyOffice
+
+The `nextcloud` pack always includes OnlyOffice as its paired document editor runtime.
+
+What the wizard wires today:
+
+- Nextcloud service + persistent volume
+- OnlyOffice service + persistent volume
+- shared-core Postgres + Redis bindings
+- trusted domain configuration
+- OnlyOffice JWT configuration wiring
+- Nextcloud Talk app verification
+- OpenClaw workspace mount into Nextcloud when Nexa is enabled
+
+### OpenClaw
+
+OpenClaw is deployed as an advisor runtime with:
+
+- browser-facing access through Cloudflare Tunnel
+- Cloudflare Access OTP protection on its public hostname
+- trusted-proxy browser auth for the Control UI
+- generated gateway config and agent bindings
+- `gateway.http.endpoints.responses.enabled = true` so internal adapters can hand requests into OpenClaw’s own runtime
+
+### Nexa
+
+Nexa is **not** a standalone pack. It is embedded inside the OpenClaw deployment when `OPENCLAW_NEXA_*` env values are present.
+
+Nexa’s current role is to bridge OpenClaw into the Nextcloud ecosystem:
+
+- Nextcloud Talk message handling
+- Nextcloud file creation and sharing via WebDAV/OCS
+- OnlyOffice callback ingestion and reconcile contract wiring
+- Mem0-backed memory lookup and memory write policy
+- OpenClaw pass-through for grounded tool use and command execution
+
+The important design point is that Nexa is not just a prompt file. The wizard deploys a dedicated `nexa-runtime` sidecar and associated contract files under the OpenClaw volume, but some Talk and OnlyOffice behaviors are still intentionally conservative and continue to depend on upstream OpenClaw/runtime behavior.
+
+### Telly
+
+Telly is the Telegram-facing OpenClaw agent persona. Like Nexa, it is seeded by the OpenClaw deployment code rather than installed as a separate pack.
+
+What the wizard currently does for Telly:
+
+- seeds a dedicated Telegram-facing agent persona
+- binds the Telegram channel to `telly`
+- configures Telegram DM allowlist / ownership values from `OPENCLAW_TELEGRAM_*`
+- seeds a `workspace-telly` with operator-facing guidance files
+
+### Coder
+
+Coder gets a seeded Ubuntu + VS Code template and a first default workspace.
+
+On first successful bootstrap the wizard:
+
+- provisions the initial Coder admin
+- pushes the default template named `ubuntu-vscode`
+- creates a default workspace for the operator
+
+That default template installs:
+
+- `curl`
+- `git`
+- `wget`
+- `btop`
+- `opencode`
+- `zellij`
+
+The workspace home directory lives on a per-workspace Docker volume. The control plane state lives in shared-core Postgres.
+
+### SeaweedFS
+
+SeaweedFS provides the S3-compatible object-storage surface. The wizard wires:
+
+- service + data volume
+- generated access key + secret key in guided mode
+- public `s3.<root-domain>` hostname
+
+## Auth and credential model
+
+### Auth boundaries at a glance
 
 ```mermaid
-flowchart LR
-    subgraph PublicIngress[Public ingress]
-        Internet[Public Internet] --> Tunnel[Cloudflare Tunnel]
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "primaryColor": "#fff8ef",
+    "primaryTextColor": "#3b2b10",
+    "primaryBorderColor": "#e7bb74",
+    "lineColor": "#a77834",
+    "fontFamily": "Inter, ui-sans-serif, system-ui, sans-serif"
+  }
+}}%%
+flowchart TD
+    CFOTP[✉️ Cloudflare Access OTP] --> OpenClaw[openclaw.<root-domain>]
+    CFOTP --> Farm[farm.<root-domain>]
+
+    subgraph AppLogins[Own login surfaces]
+      Dokploy[Dokploy admin login]
+      Nextcloud[Nextcloud admin + users]
+      Coder[Coder admin login]
+      Seaweed[SeaweedFS access key / secret key]
     end
 
-    subgraph PrivateAdmin[Private / admin access]
-        Tailnet[Tailscale Tailnet] --> HostAccess[Host and private admin access]
+    subgraph InternalSecrets[Server-owned runtime secrets]
+      Nexa[Nexa Talk/WebDAV/OnlyOffice secrets]
+      DB[Database / Redis secret refs]
+      Model[OpenRouter / NVIDIA / local model config]
     end
-
-    subgraph PublicSurfaces[Public service hostnames]
-        DokployHost[Dokploy]
-        MatrixHost[Matrix]
-        HeadscaleHost[Headscale]
-        NextcloudHost[Nextcloud]
-        OnlyOfficeHost[OnlyOffice]
-        SeaweedHost[SeaweedFS / S3]
-        OpenClawHost[OpenClaw]
-        FarmHost[My Farm Advisor]
-    end
-
-    subgraph AccessWrapped[Cloudflare Access wrapped apps]
-        OpenClawAccess[OpenClaw]
-        FarmAccess[My Farm Advisor]
-    end
-
-    Tunnel --> DokployHost
-    Tunnel --> MatrixHost
-    Tunnel --> HeadscaleHost
-    Tunnel --> NextcloudHost
-    Tunnel --> OnlyOfficeHost
-    Tunnel --> SeaweedHost
-    Tunnel --> OpenClawHost
-    Tunnel --> FarmHost
-
-    HostAccess --> DokployHost
-    HostAccess --> HeadscaleHost
-
-    OpenClawHost --> OpenClawAccess
-    FarmHost --> FarmAccess
 ```
 
-### Cloudflare Access scope today
+### Which surfaces are behind OTP
 
-Protected by Access email/PIN:
+Current Cloudflare Access scope:
 
 - `openclaw.<root-domain>`
 - `farm.<root-domain>`
 
-Not wrapped by Access in the current implementation:
+Not behind Cloudflare Access in the current implementation:
 
 - `dokploy.<root-domain>`
-- `matrix.<root-domain>`
-- `headscale.<root-domain>`
 - `nextcloud.<root-domain>`
 - `office.<root-domain>`
 - `s3.<root-domain>`
+- `coder.<root-domain>`
+- `*.coder.<root-domain>`
+- `matrix.<root-domain>`
+- `headscale.<root-domain>`
 
 Why:
 
-- **Matrix** must remain reachable by Matrix clients
-- **Headscale** is a control-plane endpoint, not a browser login surface
-- **OnlyOffice** must interoperate directly with Nextcloud
-- **Nextcloud** also serves non-browser clients in the general case
-- **SeaweedFS / S3** is a protocol endpoint, not a browser login surface
-- **Dokploy** still shares its browser/API surface from the wizard’s point of view
+- Dokploy still needs a usable API/control plane path
+- Nextcloud and OnlyOffice have client/protocol concerns
+- SeaweedFS is an object-storage protocol surface
+- Coder has its own application login
+- Matrix and Headscale are protocol/control-plane surfaces
 
-## CLI commands
+### Which things have their own login/credentials
 
-```bash
-./bin/dokploy-wizard --help
-./bin/dokploy-wizard install --help
-./bin/dokploy-wizard modify --help
-./bin/dokploy-wizard uninstall --help
-./bin/dokploy-wizard inspect-state --help
-```
+| Surface | Credential model | Source |
+|---|---|---|
+| Dokploy | admin email + password, then API key | operator-supplied + wizard-generated API key |
+| OpenClaw | Cloudflare Access OTP + trusted-proxy browser auth, plus gateway password/token surfaces | generated gateway password, optional token |
+| Nextcloud | admin user/password and internal service accounts | currently derived from Dokploy admin credentials, plus Nexa service account from env |
+| OnlyOffice | JWT integration value shared with Nextcloud | currently wired by deployment bootstrap/runtime config |
+| Coder | Coder admin login | currently derived from Dokploy admin credentials |
+| SeaweedFS / S3 | access key + secret key | wizard-generated in guided mode or env-file provided |
+| Nexa internals | Talk/WebDAV/OnlyOffice/API secrets | server-owned env |
 
-### Install modes
+### Credential sources
 
-#### 1. Guided first-run install
+The wizard currently uses three broad credential sources:
 
-Use this when you do **not** already have an env file:
+1. **Operator-supplied values**
+   - Cloudflare token/account/zone
+   - Dokploy admin login
+   - Tailscale auth key
+   - model/provider API keys
+
+2. **Wizard-generated values**
+   - SeaweedFS access key + secret key in guided mode
+   - OpenClaw browser/control password in guided mode
+   - My Farm Advisor browser/control password in guided mode
+   - Dokploy API key after bootstrap
+
+3. **Server-owned runtime secrets**
+   - Nextcloud and Nexa runtime integration values
+   - Nexa Talk signing/shared secrets
+   - Nexa WebDAV auth
+   - Nexa service-account credentials
+   - Mem0/Qdrant private runtime configuration
+
+### Nexa credential mediation
+
+Nexa is intentionally treated as a server-owned runtime surface.
+
+That means:
+
+- the wizard keeps sensitive Nexa values in env/config surfaces owned by the deployment
+- the Nextcloud-visible Nexa workspace is an operator/user surface, not the source of truth
+- the runtime contract records **presence and source**, not raw secret values
+
+## Current install file expectations
+
+The current repo uses `.install.env` at repo root as the working operator env file.
+
+Important details:
+
+- it contains sensitive credentials and should remain `0600`
+- the fresh-VPS harness copies it explicitly to the remote host
+- Nexa functionality is enabled by the presence of `OPENCLAW_NEXA_*` values
+- runtime-only values like internal sidecar URLs are synthesized later during deployment
+
+## Current fresh-VPS proof status
+
+The repo includes a real fresh-VPS proof flow with:
+
+- first install success
+- same-host rerun/noop success
+- `inspect-state` execution as part of the proof loop
+
+The local proof artifacts live under:
+
+- `.sisyphus/evidence/fresh-vps-validation/fresh-reinstall-live-proof/`
+
+What that means in practice:
+
+- the wizard can package the repo and install env
+- copy both to a fresh host
+- run the installer non-interactively
+- rerun it on the same host
+- inspect the resulting state as part of the same reproducibility loop
+
+The checked-in proof artifact is useful as a concrete example run, but it should not be treated as the only source of truth for current drift status after later inspection fixes.
+
+## Install modes
+
+### Guided first-run install
 
 ```bash
 ./bin/dokploy-wizard install
 ```
 
-The wizard will prompt for:
+Use this when you do not already have an env file. The wizard prompts for domains, Dokploy credentials, Cloudflare values, optional Tailscale settings, and pack selection, then writes a reusable env file and runs the same install flow as env-file mode.
 
-- wizard state directory (default or custom path)
-- root domain
-- stack name (default derived from the root domain, for example `openmerge`)
-- Dokploy subdomain (default: `dokploy`)
-- Dokploy admin email + password
-- private network mode:
-  - `headscale` (default)
-  - `tailscale` (join existing)
-  - `none`
-- Cloudflare credentials
-- optional guided Cloudflare help with links for:
-  - API token creation
-  - Account ID lookup
-  - Zone ID lookup
-  - minimum token permissions
-- Cloudflare zone ID is optional in guided mode; if left blank, the wizard uses your root domain and looks the Zone ID up automatically
-- optional Tailscale settings only when `tailscale` mode is chosen
-- pack selection
-
-Then it writes a reusable env file, bootstraps Dokploy locally, mints the Dokploy API key automatically, and runs the same install flow as env-file mode.
-
-Current first-VPS contract for this guided path:
-
-- start from a fresh Ubuntu 24.04 host
-- Docker must already be installed and the local Docker daemon must be reachable
-- Dokploy reuse detection is intentionally narrow in this pass: the wizard only treats Dokploy as already present when the host has a local Docker Swarm service named `dokploy` and local HTTP health succeeds on `http://127.0.0.1:3000`
-- already-installed Dokploy on nonstandard topologies, reverse-proxied layouts, or remote/non-local control-plane setups is out of scope for this pass
-
-Sizing guidance for operators:
-
-- **Core**: 2 vCPU, 4 GB RAM, 40 GB disk
-- **Recommended**: 4 vCPU, 8 GB RAM, 100 GB disk
-- **Full Pack Set**: 6 vCPU, 12 GB RAM, 150 GB disk
-
-Treat those tiers as planning targets, not auto-negotiated hints. If your host is underprovisioned, reduce the selected scope or pack profile before install. Do not expect the wizard to silently downgrade CPU, disk, or enabled packs to make the host fit.
-
-Memory is the only explicit install-time continuation path below the recommended threshold. If preflight reports only a memory shortfall, you can continue by confirming the prompt in guided mode or by passing `--allow-memory-shortfall` in non-interactive mode. That override means you are choosing to proceed below the recommended production target, not that the host is now treated as equivalent to meeting it. There is no matching CPU or disk override.
-
-Treat the generated `install.env` as sensitive: it contains credentials, the wizard writes it with owner-only permissions (`0600`), and you should keep it out of version control.
-
-The wizard state directory stores only wizard metadata and the generated `install.env`. It does **not** decide where Docker or Dokploy store deployed service data.
-
-### Cloudflare prerequisites for guided install
-
-If you answer **yes** to the Cloudflare help prompt, the wizard now prints direct setup instructions instead of just sending you to docs.
-
-The beginner path is:
-
-1. Open: https://dash.cloudflare.com/profile/api-tokens
-2. Click: **Create Token** → **Create Custom Token**
-   Minimum token permissions for this wizard:
-   - `Account -> Cloudflare Tunnel -> Edit`
-   - `Zone -> DNS -> Edit`
-   - `Account -> Access: Apps and Policies -> Edit`
-   - `Account -> Access: Organizations, Identity Providers, and Groups -> Edit`
-3. Find the Zone ID for your root domain
-   - Cloudflare dashboard → your domain → **Overview** → **API** section → **Zone ID**
-   - if you are unsure which zone to use, use the root domain itself
-   - good: `openmerge.me`
-   - do **not** use `dokploy.openmerge.me`
-
-Cloudflare values in the wizard mean:
-
-- **Cloudflare account ID** = the Cloudflare account that owns tunnel and Access resources
-  - find it in Cloudflare dashboard → **Account home** → your account row → **Copy account ID**
-- **Cloudflare zone ID** = the DNS zone ID for your root domain
-
-If you still need official references after that, the wizard/README points to:
-
-- Token docs: https://developers.cloudflare.com/fundamentals/api/get-started/create-token/
-- Account ID / Zone ID docs: https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/
-
-#### 2. Reusable env-file install
+### Env-file install
 
 ```bash
 ./bin/dokploy-wizard install --env-file path/to/install.env --non-interactive
 ```
 
-`install.env` is a sensitive operator file. Keep it private, keep it out of git, and expect the CLI to warn on non-dry-run `install`/`modify` runs if its permissions are broader than owner-only.
-
-#### 3. Dry-run install
+### Inspect state
 
 ```bash
-./bin/dokploy-wizard install --env-file path/to/install.env --dry-run
+./bin/dokploy-wizard inspect-state --env-file path/to/install.env --state-dir .dokploy-wizard-state
 ```
 
-## State model
+### Modify / rerun / uninstall
 
-The wizard persists all lifecycle decisions in a state directory.
-
-Default state directory:
-
-```text
-.dokploy-wizard-state/
+```bash
+./bin/dokploy-wizard modify --env-file path/to/install.env --non-interactive
+./bin/dokploy-wizard uninstall --retain-data --non-interactive --confirm-file fixtures/retain.confirm
+./bin/dokploy-wizard uninstall --destroy-data --non-interactive --confirm-file fixtures/destroy.confirm
 ```
 
-Documents:
+## Fresh-VPS harness
 
-- `raw-input.json` — normalized env input
-- `desired-state.json` — resolved target model
-- `applied-state.json` — completed phase prefix
-- `ownership-ledger.json` — exact wizard-owned resources
+The repo also contains a real fresh-host validation harness:
 
-Important: the chosen state directory is **not** the same thing as deployment storage. Preflight disk checks are based on the host deployment storage path (Docker storage if detectable, otherwise `/`).
+```bash
+python -m src.dokploy_wizard.fresh_vps_validation_harness \
+  --install-env-file ./.install.env \
+  --target-host <host> \
+  --target-user root \
+  --target-password <password> \
+  --target-path /root/dokploy-proof \
+  --label proof-run
+```
 
-This is what makes these safe operations possible:
+What it does:
 
-- no-op reruns
-- supported modify flows
-- resume after failure
-- uninstall without guessing resource names
+- packages the repo
+- uploads repo + `.install.env`
+- runs wizard install
+- reruns the same install for noop proof
+- runs `inspect-state`
+- collects remote state and logs locally
 
-## How to test it locally
+## Local validation
 
-### Quick confidence checks
+Quick checks:
 
 ```bash
 pytest -q
@@ -286,164 +419,43 @@ ruff check .
 mypy .
 ```
 
-### Core manual flow from a clean workspace
-
-These are the high-value CLI checks that the project is expected to support in sequence:
+Focused modules that matter most for the current stack:
 
 ```bash
-rm -rf .dokploy-wizard-state
-
-./bin/dokploy-wizard install --env-file fixtures/full.env --non-interactive
-./bin/dokploy-wizard install --env-file fixtures/full.env --non-interactive
-./bin/dokploy-wizard modify --env-file fixtures/modify-domain.env --non-interactive
-./bin/dokploy-wizard uninstall --retain-data --non-interactive --confirm-file fixtures/retain.confirm
-./bin/dokploy-wizard uninstall --destroy-data --non-interactive --confirm-file fixtures/destroy.confirm
-```
-
-What this proves:
-
-- first install works
-- second install becomes a noop rerun
-- modify reuses owned resources and reruns only affected phases
-- retain uninstall preserves data-bearing resources
-- destroy uninstall clears the remaining owned state
-
-### Guided install smoke test
-
-Run the installer without `--env-file`:
-
-```bash
-./bin/dokploy-wizard install --dry-run
-```
-
-Use this to confirm the first-run prompt path works and writes a reusable env file.
-
-### Guided install behavior details
-
-- Guided install lets you choose where wizard state and the generated `install.env` are written.
-- If you choose `headscale` as the private network control plane, the wizard does **not** ask for a Tailscale auth key.
-- If you choose `tailscale`, the wizard assumes you want to join an existing Tailscale network and then asks for:
-  - auth key
-  - hostname
-  - SSH enablement
-  - optional tags
-  - optional subnet routes
-- Guided first-run install no longer asks for a Dokploy API key up front. It bootstraps Dokploy first and generates that key automatically.
-- If you enable SeaweedFS, guided install asks for:
-  - no manual keys up front
-  - the wizard generates the SeaweedFS access key and secret key for you
-  - it prints them clearly at the end and saves them into the generated `install.env`
-- If you do not want generated secrets echoed to stdout during install, add `--no-print-secrets`; the wizard still saves the generated values into `install.env`.
-- If you enable OpenClaw and leave channels at the default, it defaults to `matrix`
-
-### Focused test modules
-
-```bash
-pytest tests/unit/test_tailscale_phase.py -q
-pytest tests/integration/test_tailscale_phase.py -q
-
-pytest tests/unit/test_cloudflare_scopes.py -q
-pytest tests/integration/test_networking_reconciler.py -q
-
-pytest tests/integration/test_headscale_pack.py -q
-pytest tests/integration/test_matrix_pack.py -q
-pytest tests/integration/test_nextcloud_pack.py -q
+pytest tests/unit/test_openclaw_pack.py -q
+pytest tests/unit/test_nextcloud_pack.py -q
+pytest tests/unit/test_nexa_runtime.py -q
 pytest tests/integration/test_openclaw_pack.py -q
-
-pytest tests/e2e/test_rerun_modify_resume.py -q
-pytest tests/e2e/test_destroy_confirmation.py -q
+pytest tests/integration/test_nextcloud_pack.py -q
+pytest tests/test_cli.py -q
 ```
 
-## Fresh-VPS reality check
+## Operator notes
 
-As of the current repo state, the wizard now has real deployment paths for the major core services, not just planner mocks.
+- This is still a **fresh-host** workflow, not a general migration framework.
+- Docker can be bootstrap-remediated by the wizard on supported Ubuntu hosts.
+- The chosen state directory stores wizard metadata and the generated env file, not the Docker volumes themselves.
+- The ownership ledger is the uninstall authority.
+- OpenClaw/Nexa/Telly behavior is now wizard-managed, not just manually drifted on one VPS.
 
-This is still a first-VPS workflow, not a general Dokploy adoption or migration tool. The current contract is:
+## Current caveats
 
-- the host is expected to be a fresh Ubuntu 24.04 VPS
-- Docker must already be installed and reachable before `dokploy-wizard install` runs
-- existing Dokploy is only recognized when Docker can inspect a local Swarm service named `dokploy` and the wizard can reach Dokploy locally at `127.0.0.1:3000`
-- hosts with pre-existing Dokploy installs wired up some other way are out of scope for this pass
+- Dokploy itself is not yet protected by Cloudflare Access because the wizard still needs a safe machine-auth/control path.
+- Nexa features are env-gated, not universal defaults. For your deployment that is fine, because `.install.env` already carries the required `OPENCLAW_NEXA_*` values.
+- Some channel/runtime behavior still depends on the upstream OpenClaw image, so operational behavior can evolve as that image evolves.
 
-Resource planning for that contract is explicit:
+## Project layout
 
-- **Core**: 2 vCPU, 4 GB RAM, 40 GB disk
-- **Recommended**: 4 vCPU, 8 GB RAM, 100 GB disk
-- **Full Pack Set**: 6 vCPU, 12 GB RAM, 150 GB disk
+- `src/dokploy_wizard/cli.py` — lifecycle entrypoint and backend construction
+- `src/dokploy_wizard/networking/` — Cloudflare tunnel/DNS/Access planning
+- `src/dokploy_wizard/tailscale/` — host-level Tailscale phase
+- `src/dokploy_wizard/dokploy/` — Dokploy-backed deployment backends
+- `src/dokploy_wizard/packs/` — pack models and reconcilers
+- `templates/` — deployment templates, including Coder template assets
+- `tests/` — unit, integration, and lifecycle coverage
 
-If a host falls short, the operator should scale back the selected scope or profile. The wizard does not silently reduce enabled packs, CPU expectations, or disk requirements at runtime.
+## Summary
 
-The only explicit continuation below the recommended target is install-time memory override. When preflight finds only a memory warning, guided install can continue after confirmation and non-interactive install can continue with `--allow-memory-shortfall`. That is an explicit operator choice to proceed below the recommended production floor. CPU and disk shortfalls still stop the run.
+Dokploy Wizard now installs a real, stateful self-hosted stack, not just a set of placeholders. It bootstraps Dokploy, wires ingress and auth, deploys application packs, embeds OpenClaw-facing agents like Nexa and Telly, and supports fresh-host reruns with state-aware lifecycle behavior.
 
-Implemented as real Dokploy-backed or host-backed behavior:
-
-- Dokploy bootstrap
-- shared core
-- Headscale
-- Matrix
-- Nextcloud + OnlyOffice
-- SeaweedFS
-- Tailscale host access
-- Cloudflare Tunnel + DNS
-- Cloudflare Access for advisor apps
-
-This means the project is now in **real deployment territory**, not just simulation territory.
-
-That said, there are still practical follow-ups you should expect before calling it production-complete for your exact environment:
-
-- add a safe machine-auth/bypass model before protecting Dokploy itself with Cloudflare Access
-- document operational prerequisites clearly (Dokploy API key creation, Cloudflare token creation, Tailscale auth key creation)
-- continue hardening/operational testing against an actual fresh VPS
-
-## Example service model
-
-```mermaid
-flowchart TD
-    subgraph ControlPlane[Control plane]
-        Dokploy[Dokploy]
-        SharedCore[Shared Core<br/>network + postgres + redis]
-    end
-
-    subgraph CoreServices[Core services]
-        Headscale[Headscale]
-        Matrix[Matrix]
-        Nextcloud[Nextcloud]
-        OnlyOffice[OnlyOffice]
-        SeaweedFS[SeaweedFS / S3]
-    end
-
-    subgraph AdvisorApps[Advisor apps]
-        OpenClaw[OpenClaw]
-        MFA[My Farm Advisor]
-    end
-
-    Dokploy --> SharedCore
-    Dokploy --> Headscale
-    Dokploy --> Matrix
-    Dokploy --> Nextcloud
-    Dokploy --> SeaweedFS
-    Dokploy --> OpenClaw
-    Dokploy --> MFA
-
-    SharedCore --> Matrix
-    SharedCore --> Nextcloud
-    SharedCore --> OpenClaw
-    SharedCore --> MFA
-
-    Nextcloud --> OnlyOffice
-```
-
-## Notes for operators
-
-- The shell wrapper in `bin/dokploy-wizard` is still dispatch-only.
-- All orchestration logic lives under `src/dokploy_wizard/`.
-- The ownership ledger is the uninstall authority; if the wizard does not own it, uninstall should not guess at it.
-- There is a known unrelated environment warning from `pytest_asyncio`; it does not currently indicate a project failure.
-
-## Near-term follow-up work
-
-The biggest remaining follow-up items are:
-
-1. Add a safe Dokploy machine-auth / Access coexistence story before Access-protecting Dokploy
-2. Keep validating the wizard on real fresh VPSes
-3. Continue production hardening around operator workflows and service-specific operational concerns
+The current repo is built around a real fresh-VPS proof workflow and is intended to be the baseline for repeatable full rebuilds.
