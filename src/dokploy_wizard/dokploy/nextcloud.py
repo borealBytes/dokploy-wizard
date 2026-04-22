@@ -20,14 +20,22 @@ from dokploy_wizard.dokploy.client import (
     DokployDeployResult,
     DokployEnvironmentSummary,
     DokployProjectSummary,
+    DokployScheduleRecord,
 )
-from dokploy_wizard.packs.nextcloud.models import NextcloudResourceRecord
+from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudOpenClawWorkspaceContract,
+    NextcloudResourceRecord,
+)
 from dokploy_wizard.packs.nextcloud.reconciler import NextcloudError
 
 _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 _DEFAULT_NEXTCLOUD_ADMIN_USER = "admin"
 _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD = "ChangeMeSoon"
 _DEFAULT_SHARED_SERVICE_PASSWORD = "change-me"
+_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME = "/OpenClaw"
+_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH = "/mnt/openclaw"
+_DEFAULT_OPENCLAW_RESCAN_CRON = "*/15 * * * *"
+_DEFAULT_OPENCLAW_RESCAN_TIMEZONE = "UTC"
 _DEFAULT_ONLYOFFICE_DEF_FORMATS = {
     "docx": True,
     "xlsx": True,
@@ -60,6 +68,35 @@ class DokployNextcloudApi(Protocol):
         self, *, compose_id: str, title: str | None, description: str | None
     ) -> DokployDeployResult: ...
 
+    def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]: ...
+
+    def create_schedule(
+        self,
+        *,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord: ...
+
+    def update_schedule(
+        self,
+        *,
+        schedule_id: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord: ...
+
 
 @dataclass(frozen=True)
 class _ComposeLocator:
@@ -84,6 +121,14 @@ class DokployNextcloudBackend:
         integration_secret_ref: str,
         admin_user: str = _DEFAULT_NEXTCLOUD_ADMIN_USER,
         admin_password: str = _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD,
+        openclaw_volume_name: str | None = None,
+        openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None = None,
+        nexa_agent_user_id: str | None = None,
+        nexa_agent_display_name: str | None = None,
+        nexa_agent_password: str | None = None,
+        nexa_agent_email: str | None = None,
+        openclaw_rescan_cron: str = _DEFAULT_OPENCLAW_RESCAN_CRON,
+        openclaw_rescan_timezone: str = _DEFAULT_OPENCLAW_RESCAN_TIMEZONE,
         client: DokployNextcloudApi | None = None,
     ) -> None:
         self._stack_name = stack_name
@@ -97,6 +142,14 @@ class DokployNextcloudBackend:
         self._integration_secret_ref = integration_secret_ref
         self._admin_user = admin_user
         self._admin_password = admin_password
+        self._openclaw_volume_name = openclaw_volume_name
+        self._openclaw_workspace_contract = openclaw_workspace_contract
+        self._nexa_agent_user_id = nexa_agent_user_id
+        self._nexa_agent_display_name = nexa_agent_display_name
+        self._nexa_agent_password = nexa_agent_password
+        self._nexa_agent_email = nexa_agent_email
+        self._openclaw_rescan_cron = openclaw_rescan_cron
+        self._openclaw_rescan_timezone = openclaw_rescan_timezone
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
@@ -232,6 +285,13 @@ class DokployNextcloudBackend:
             if container is None:
                 return
             _ensure_admin_user(container, self._admin_user, self._admin_password)
+            _ensure_nexa_service_account(
+                container,
+                user_id=self._nexa_agent_user_id,
+                password=self._nexa_agent_password,
+                display_name=self._nexa_agent_display_name,
+                email=self._nexa_agent_email,
+            )
             _ensure_trusted_domain(container, _nextcloud_service_name(self._stack_name))
             _ensure_onlyoffice_app_config(
                 container,
@@ -254,6 +314,13 @@ class DokployNextcloudBackend:
                 "configuration was attempted."
             )
         _ensure_admin_user(container, self._admin_user, self._admin_password)
+        _ensure_nexa_service_account(
+            container,
+            user_id=self._nexa_agent_user_id,
+            password=self._nexa_agent_password,
+            display_name=self._nexa_agent_display_name,
+            email=self._nexa_agent_email,
+        )
         _ensure_trusted_domain(container, _nextcloud_service_name(self._stack_name))
         _ensure_onlyoffice_app_config(
             container,
@@ -264,6 +331,78 @@ class DokployNextcloudBackend:
         )
         _run_occ_shell(container, "php occ app:install spreed || true")
         _run_occ_shell(container, "php occ app:enable spreed")
+
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        if self._openclaw_volume_name is None:
+            return
+        container = _find_container_name(_nextcloud_service_name(self._stack_name))
+        if container is None:
+            raise NextcloudError(
+                "Nextcloud container could not be located for OpenClaw external storage refresh."
+            )
+        _ensure_files_external_app(container)
+        _ensure_openclaw_external_storage(container, admin_user=admin_user)
+        try:
+            self._ensure_openclaw_rescan_schedule()
+        except DokployApiError as error:
+            if _is_unauthorized_dokploy_error(error):
+                return
+            raise
+
+    def _ensure_openclaw_rescan_schedule(self) -> None:
+        if self._openclaw_volume_name is None:
+            return
+        locator = self._find_compose_locator()
+        if locator is None:
+            raise NextcloudError(
+                "Nextcloud compose locator is unavailable for schedule reconciliation."
+            )
+        schedule_name = f"{self._stack_name}-openclaw-rescan"
+        service_name = _nextcloud_service_name(self._stack_name)
+        command = (
+            "php /var/www/html/occ files:scan --path=\""
+            f"{self._admin_user}/files{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME}"
+            "\""
+        )
+        existing = next(
+            (
+                item
+                for item in self._client.list_compose_schedules(compose_id=locator.compose_id)
+                if item.name == schedule_name
+            ),
+            None,
+        )
+        if existing is None:
+            self._client.create_schedule(
+                name=schedule_name,
+                compose_id=locator.compose_id,
+                service_name=service_name,
+                cron_expression=self._openclaw_rescan_cron,
+                timezone=self._openclaw_rescan_timezone,
+                shell_type="bash",
+                command=command,
+                enabled=True,
+            )
+            return
+        if (
+            existing.service_name != service_name
+            or existing.cron_expression != self._openclaw_rescan_cron
+            or existing.timezone != self._openclaw_rescan_timezone
+            or existing.shell_type != "bash"
+            or existing.command != command
+            or existing.enabled is not True
+        ):
+            self._client.update_schedule(
+                schedule_id=existing.schedule_id,
+                name=schedule_name,
+                compose_id=locator.compose_id,
+                service_name=service_name,
+                cron_expression=self._openclaw_rescan_cron,
+                timezone=self._openclaw_rescan_timezone,
+                shell_type="bash",
+                command=command,
+                enabled=True,
+            )
 
     def _validate_service_inputs(
         self,
@@ -351,6 +490,8 @@ class DokployNextcloudBackend:
             integration_secret_ref=self._integration_secret_ref,
             admin_user=self._admin_user,
             admin_password=self._admin_password,
+            openclaw_volume_name=self._openclaw_volume_name,
+            openclaw_workspace_contract=self._openclaw_workspace_contract,
         )
         try:
             if self._applied_locator is not None:
@@ -443,6 +584,11 @@ class DokployNextcloudBackend:
         return locator
 
 
+def _is_unauthorized_dokploy_error(error: DokployApiError) -> bool:
+    message = str(error).lower()
+    return "401" in message or "unauthorized" in message
+
+
 def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSummary | None:
     if not project.environments:
         return None
@@ -470,6 +616,10 @@ def _nextcloud_volume_name(stack_name: str) -> str:
 
 def _onlyoffice_volume_name(stack_name: str) -> str:
     return f"{stack_name}-onlyoffice-data"
+
+
+def _openclaw_volume_name(stack_name: str) -> str:
+    return f"{stack_name}-openclaw-data"
 
 
 def _service_name_for_kind(stack_name: str, kind: str) -> str:
@@ -550,14 +700,36 @@ def _render_compose_file(
     integration_secret_ref: str,
     admin_user: str,
     admin_password: str,
+    openclaw_volume_name: str | None,
+    openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None,
 ) -> str:
     nextcloud_service = _nextcloud_service_name(stack_name)
     onlyoffice_service = _onlyoffice_service_name(stack_name)
     nextcloud_volume = _nextcloud_volume_name(stack_name)
     onlyoffice_volume = _onlyoffice_volume_name(stack_name)
+    openclaw_volume = openclaw_volume_name
     shared_network = _shared_network_name(stack_name)
     nextcloud_url = f"https://{nextcloud_hostname}"
     onlyoffice_url = f"https://{onlyoffice_hostname}"
+    nextcloud_workspace_env = ""
+    if openclaw_workspace_contract is not None:
+        nextcloud_workspace_env = (
+            "      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface\n"
+            f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: {openclaw_workspace_contract.visible_root}\n"
+            f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: {openclaw_workspace_contract.contract_path}\n"
+            "      DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: "
+            f"{openclaw_workspace_contract.runtime_state_source}\n"
+        )
+    nextcloud_extra_mount = (
+        f"      - {openclaw_volume}:{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH}\n"
+        if openclaw_volume is not None
+        else ""
+    )
+    openclaw_volume_block = (
+        f"  {openclaw_volume}:\n    name: {openclaw_volume}\n"
+        if openclaw_volume is not None
+        else ""
+    )
     return (
         "services:\n"
         f"  {nextcloud_service}:\n"
@@ -578,6 +750,7 @@ def _render_compose_file(
         "      OVERWRITEPROTOCOL: https\n"
         f"      OVERWRITECLIURL: {nextcloud_url}\n"
         f"      ONLYOFFICE_URL: {onlyoffice_url}\n"
+        f"{nextcloud_workspace_env}"
         "    labels:\n"
         '      traefik.enable: "true"\n'
         f'      traefik.http.routers.{nextcloud_service}.entrypoints: "websecure"\n'
@@ -590,6 +763,7 @@ def _render_compose_file(
         "      timeout: 10s\n"
         "      retries: 5\n"
         f"    volumes:\n      - {nextcloud_volume}:/var/www/html\n"
+        f"{nextcloud_extra_mount}"
         "    expose:\n"
         "      - '80'\n"
         "    networks:\n"
@@ -633,6 +807,7 @@ def _render_compose_file(
         "volumes:\n"
         f"  {nextcloud_volume}:\n"
         f"  {onlyoffice_volume}:\n"
+        f"{openclaw_volume_block}"
         "networks:\n"
         "  dokploy-network:\n"
         "    external: true\n"
@@ -733,8 +908,17 @@ def _wait_for_container_name(
     return None
 
 
-def _run_occ(container_name: str, args: list[str]) -> None:
-    command = [
+def _www_data_occ_shell(container_name: str, command: str) -> list[str]:
+    occ_command = command.replace("php occ", '"$PHP_BIN" occ')
+    shell_command = (
+        "cd /var/www/html && "
+        'PHP_BIN=/usr/local/bin/php; '
+        'if [ ! -x "$PHP_BIN" ] && [ -x /usr/bin/php ]; then PHP_BIN=/usr/bin/php; fi; '
+        'if [ ! -x "$PHP_BIN" ]; then '
+        'echo "php not found at /usr/local/bin/php or /usr/bin/php" >&2; exit 127; fi; '
+        f"{occ_command}"
+    )
+    return [
         "docker",
         "exec",
         container_name,
@@ -743,23 +927,19 @@ def _run_occ(container_name: str, args: list[str]) -> None:
         "/bin/sh",
         "www-data",
         "-c",
-        "cd /var/www/html && php occ " + " ".join(shlex.quote(arg) for arg in args),
+        shell_command,
     ]
+
+
+def _run_occ(container_name: str, args: list[str]) -> None:
+    command = _www_data_occ_shell(
+        container_name, "php occ " + " ".join(shlex.quote(arg) for arg in args)
+    )
     _run_occ_command(command, args)
 
 
 def _run_occ_shell(container_name: str, shell_command: str) -> None:
-    command = [
-        "docker",
-        "exec",
-        container_name,
-        "su",
-        "-s",
-        "/bin/sh",
-        "www-data",
-        "-c",
-        f"cd /var/www/html && {shell_command}",
-    ]
+    command = _www_data_occ_shell(container_name, shell_command)
     _run_occ_command(command, [shell_command])
 
 
@@ -776,17 +956,7 @@ def _ensure_admin_user(container_name: str, admin_user: str, admin_password: str
     if admin_user == _DEFAULT_NEXTCLOUD_ADMIN_USER:
         return
     exists = subprocess.run(
-        [
-            "docker",
-            "exec",
-            container_name,
-            "su",
-            "-s",
-            "/bin/sh",
-            "www-data",
-            "-c",
-            f"cd /var/www/html && php occ user:info {shlex.quote(admin_user)}",
-        ],
+        _www_data_occ_shell(container_name, f"php occ user:info {shlex.quote(admin_user)}"),
         check=False,
         capture_output=True,
         text=True,
@@ -799,6 +969,63 @@ def _ensure_admin_user(container_name: str, admin_user: str, admin_password: str
         f"php occ user:setting {shlex.quote(admin_user)} settings email {shlex.quote(admin_user)}"
     )
     _run_occ_shell(container_name, add_command)
+
+
+def _ensure_nexa_service_account(
+    container_name: str,
+    *,
+    user_id: str | None,
+    password: str | None,
+    display_name: str | None,
+    email: str | None,
+) -> None:
+    if user_id is None or password is None:
+        return
+    safe_user = shlex.quote(user_id)
+    exists = subprocess.run(
+        _www_data_occ_shell(container_name, f"php occ user:info {safe_user}"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if exists.returncode != 0:
+        add_command = (
+            f"export OC_PASS={shlex.quote(password)} && "
+            f"php occ user:add --password-from-env --display-name={shlex.quote(display_name or user_id)} {safe_user}"
+        )
+        _run_occ_shell(container_name, add_command)
+    if display_name is not None:
+        _run_occ_shell_allow_noop(
+            container_name,
+            f"php occ user:setting {safe_user} settings display_name {shlex.quote(display_name)}",
+            noop_fragments=("same",),
+        )
+    if email is not None:
+        _run_occ_shell_allow_noop(
+            container_name,
+            f"php occ user:setting {safe_user} settings email {shlex.quote(email)}",
+            noop_fragments=("same",),
+        )
+    _run_occ_shell_allow_noop(
+        container_name,
+        f"php occ user:profile {safe_user} profile_enabled 1",
+        noop_fragments=("same",),
+    )
+
+
+def _run_occ_shell_allow_noop(
+    container_name: str,
+    shell_command: str,
+    *,
+    noop_fragments: tuple[str, ...],
+) -> None:
+    try:
+        _run_occ_shell(container_name, shell_command)
+    except NextcloudError as error:
+        detail = str(error).lower()
+        if any(fragment in detail for fragment in noop_fragments):
+            return
+        raise
 
 
 def _ensure_onlyoffice_app_config(
@@ -858,19 +1085,88 @@ def _ensure_onlyoffice_app_config(
     _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
 
 
+def _ensure_files_external_app(container_name: str) -> None:
+    _run_occ(container_name, ["app:enable", "files_external"])
+
+
+def _list_external_storage_mounts(container_name: str) -> tuple[dict[str, object], ...]:
+    result = subprocess.run(
+        _www_data_occ_shell(container_name, "php occ files_external:list --output=json"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise NextcloudError(
+            "Nextcloud external storage list failed: "
+            f"{detail or 'unknown error'}"
+        )
+    try:
+        payload = json.loads(result.stdout.strip())
+    except json.JSONDecodeError as error:
+        raise NextcloudError(
+            "Nextcloud external storage list did not return valid JSON."
+        ) from error
+    if not isinstance(payload, list):
+        raise NextcloudError(
+            "Nextcloud external storage list returned an unexpected payload shape."
+        )
+    return tuple(item for item in payload if isinstance(item, dict))
+
+
+def _find_external_storage_mount_id(
+    container_name: str, *, mount_point: str, datadir: str
+) -> str | None:
+    for mount in _list_external_storage_mounts(container_name):
+        mount_name = mount.get("mount_point") or mount.get("mountPoint") or mount.get("mount")
+        config = mount.get("configuration") or mount.get("config")
+        mount_id = mount.get("mount_id") or mount.get("mountId") or mount.get("id")
+        config_datadir = config.get("datadir") if isinstance(config, dict) else None
+        if mount_name == mount_point or config_datadir == datadir:
+            if mount_id is not None:
+                return str(mount_id)
+    return None
+
+
+def _ensure_openclaw_external_storage(container_name: str, *, admin_user: str) -> None:
+    mount_id = _find_external_storage_mount_id(
+        container_name,
+        mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+        datadir=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+    )
+    if mount_id is None:
+        _run_occ(
+            container_name,
+            [
+                "files_external:create",
+                _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+                "local",
+                "null::null",
+                "-c",
+                f"datadir={_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH}",
+            ],
+        )
+        mount_id = _find_external_storage_mount_id(
+            container_name,
+            mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+            datadir=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+        )
+        if mount_id is None:
+            raise NextcloudError("Nextcloud external storage mount for OpenClaw was not created.")
+    _run_occ(container_name, ["files_external:applicable", mount_id, f"--add-user={admin_user}"])
+    _run_occ(container_name, ["files_external:option", mount_id, "readonly", "false"])
+    _run_occ(container_name, ["files_external:verify", mount_id])
+    _run_occ(container_name, ["files_external:scan", mount_id])
+    _run_occ(
+        container_name,
+        ["files:scan", f"--path={admin_user}/files{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME}"],
+    )
+
+
 def _nextcloud_user_exists(container_name: str, admin_user: str) -> bool:
     result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            container_name,
-            "su",
-            "-s",
-            "/bin/sh",
-            "www-data",
-            "-c",
-            f"cd /var/www/html && php occ user:info {shlex.quote(admin_user)}",
-        ],
+        _www_data_occ_shell(container_name, f"php occ user:info {shlex.quote(admin_user)}"),
         check=False,
         capture_output=True,
         text=True,
