@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import cast
 
 import dokploy_wizard.dokploy.coder as coder_module
@@ -168,6 +169,23 @@ def test_render_coder_compose_includes_root_and_wildcard_routes() -> None:
         in compose
     )
     assert 'traefik.http.services.wizard-stack-coder.loadbalancer.server.port: "3000"' in compose
+
+
+def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'apt-get install -y curl git ca-certificates wget btop' in template
+    assert 'if ! command -v opencode >/dev/null 2>&1; then' in template
+    assert 'if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then' in template
+    assert 'if [ ! -x /home/coder/.opencode/bin/opencode ]; then' in template
+    assert 'echo "OpenCode installer did not produce a usable binary" >&2' in template
+    assert 'exit 1' in template
+    assert 'if [ -x /home/coder/.opencode/bin/opencode ]; then' in template
+    assert 'ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode' in template
+    assert 'if ! command -v zellij >/dev/null 2>&1; then' in template
+    assert 'zellij-$${ARCH}-unknown-linux-musl.tar.gz' in template
 
 
 def test_reconcile_coder_creates_service_and_data() -> None:
@@ -541,8 +559,6 @@ def test_ensure_default_workspace_skips_existing_workspace(monkeypatch: pytest.M
 
     assert created_workspace is False
     assert create_calls == []
-
-
 def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
