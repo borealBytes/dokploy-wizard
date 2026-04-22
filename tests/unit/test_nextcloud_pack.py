@@ -42,6 +42,7 @@ from dokploy_wizard.packs.nextcloud import (
     reconcile_nextcloud,
 )
 from dokploy_wizard.packs.nextcloud.models import NextcloudOpenClawWorkspaceContract
+from dokploy_wizard.packs.nextcloud.models import NextcloudBundleVerification, NextcloudCommandCheck, TalkRuntime
 from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
 
 
@@ -120,8 +121,36 @@ class FakeNextcloudBackend:
         del url
         return self.health.get(service.resource_name, True)
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification:
         del nextcloud_url, onlyoffice_url
+        return NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        )
 
     def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
         del admin_user
@@ -301,6 +330,7 @@ def test_reconcile_nextcloud_plans_paired_runtime_when_enabled() -> None:
         == "wizard-stack-nextcloud-onlyoffice-jwt-secret"
     )
     assert phase.result.onlyoffice.health_check.passed is None
+    assert phase.result.talk is None
 
 
 def test_reconcile_nextcloud_skips_cleanly_when_disabled() -> None:
@@ -398,6 +428,8 @@ def test_reconcile_nextcloud_reuses_owned_resources_and_requires_both_health_che
     assert phase.result.onlyoffice is not None
     assert phase.result.onlyoffice.service.action == "update_owned"
     assert phase.result.onlyoffice.data_volume.action == "reuse_owned"
+    assert phase.result.talk is not None
+    assert phase.result.talk.enabled is True
     assert backend.create_service_calls == 0
     assert backend.update_service_calls == 2
     assert backend.create_volume_calls == 0
@@ -961,7 +993,7 @@ def test_dokploy_nextcloud_backend_creates_openclaw_rescan_schedule(
     ]
 
 
-def test_dokploy_nextcloud_backend_tolerates_openclaw_rescan_schedule_auth_failure(
+def test_dokploy_nextcloud_backend_fails_on_openclaw_rescan_schedule_auth_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     desired_state = resolve_desired_state(
@@ -1021,9 +1053,8 @@ def test_dokploy_nextcloud_backend_tolerates_openclaw_rescan_schedule_auth_failu
         lambda container_name, *, admin_user: None,
     )
 
-    backend.refresh_openclaw_external_storage(admin_user="clayton@example.com")
-
-    assert client.schedules == []
+    with pytest.raises(DokployApiError, match="401"):
+        backend.refresh_openclaw_external_storage(admin_user="clayton@example.com")
 
 
 def test_dokploy_nextcloud_backend_still_fails_on_non_auth_schedule_error(
@@ -1088,6 +1119,31 @@ def test_dokploy_nextcloud_backend_still_fails_on_non_auth_schedule_error(
 
     with pytest.raises(DokployApiError, match="500"):
         backend.refresh_openclaw_external_storage(admin_user="clayton@example.com")
+
+
+def test_reconcile_nextcloud_surfaces_talk_verification_runtime() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+
+    phase = reconcile_nextcloud(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=FakeNextcloudBackend(),
+    )
+
+    assert phase.result.talk is not None
+    assert phase.result.talk.app_id == "spreed"
+    assert phase.result.talk.enabled is True
+    assert phase.result.talk.enabled_check.command == "php occ app:list --output=json"
 
 
 def test_dokploy_nextcloud_backend_updates_existing_compose_to_keep_onlyoffice_route_managed() -> (
@@ -1244,7 +1300,6 @@ def test_ensure_onlyoffice_app_config_sets_internal_urls_and_jwt(
     )
 
     assert commands == [
-        "php occ app:install onlyoffice || true",
         "php occ app:enable --force onlyoffice",
         "php occ config:system:set allow_local_remote_servers --value=true --type=bool",
         "php occ config:system:set onlyoffice jwt_secret --value=change-me",
