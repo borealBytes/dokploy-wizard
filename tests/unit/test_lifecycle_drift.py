@@ -20,6 +20,17 @@ from dokploy_wizard.packs.nextcloud.models import (
     OnlyofficeServiceConfig,
     OnlyofficeServiceRuntime,
 )
+from dokploy_wizard.packs.docuseal.models import (
+    DocuSealBootstrapState,
+    DocuSealHealthState,
+    DocuSealManagedResource,
+    DocuSealResult,
+)
+from dokploy_wizard.packs.moodle.models import (
+    MoodleHealthCheck,
+    MoodleManagedResource,
+    MoodleResult,
+)
 from dokploy_wizard.packs.openclaw.models import (
     OpenClawHealthCheck,
     OpenClawManagedResource,
@@ -85,6 +96,7 @@ def test_validate_preserved_phases_allows_legacy_cloudflare_access_ownership_gap
         matrix_backend=_UNUSED_BACKEND,
         nextcloud_backend=_UNUSED_BACKEND,
         seaweedfs_backend=_UNUSED_BACKEND,
+        coder_backend=_UNUSED_BACKEND,
         openclaw_backend=_UNUSED_BACKEND,
     )
 
@@ -150,6 +162,7 @@ def test_validate_preserved_phases_still_rejects_cloudflare_access_drift_when_ow
             matrix_backend=_UNUSED_BACKEND,
             nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
             openclaw_backend=_UNUSED_BACKEND,
         )
 
@@ -206,7 +219,7 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_nextcloud(
             )
         ),
     )
-    nextcloud_backend = SimpleNamespace(check_health=lambda *, service, url: False)
+    nextcloud_backend = cast(Any, SimpleNamespace(check_health=lambda *, service, url: False))
 
     with pytest.raises(LifecycleDriftError, match="Nextcloud or OnlyOffice is no longer healthy"):
         validate_preserved_phases(
@@ -224,6 +237,7 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_nextcloud(
             matrix_backend=_UNUSED_BACKEND,
             nextcloud_backend=nextcloud_backend,
             seaweedfs_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
             openclaw_backend=_UNUSED_BACKEND,
         )
 
@@ -239,7 +253,9 @@ def test_validate_preserved_phases_rejects_invalid_shared_core_postgres_allocati
             },
         )
     )
-    shared_core_backend = SimpleNamespace(
+    shared_core_backend = cast(
+        Any,
+        SimpleNamespace(
         get_network=lambda resource_id: SimpleNamespace(
             resource_id=resource_id, resource_name="openmerge-shared"
         ),
@@ -262,6 +278,7 @@ def test_validate_preserved_phases_rejects_invalid_shared_core_postgres_allocati
             resource_id=resource_name, resource_name=resource_name
         ),
         validate_postgres_allocations=lambda allocations: False,
+        ),
     )
 
     with pytest.raises(LifecycleDriftError, match="Shared-core Postgres allocations are not ready"):
@@ -299,6 +316,7 @@ def test_validate_preserved_phases_rejects_invalid_shared_core_postgres_allocati
             matrix_backend=_UNUSED_BACKEND,
             nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
             openclaw_backend=_UNUSED_BACKEND,
         )
 
@@ -316,7 +334,7 @@ def test_validate_preserved_phases_rejects_stale_tunnel_ingress() -> None:
             },
         )
     )
-    networking_backend = SimpleNamespace(
+    networking_backend = cast(Any, SimpleNamespace(
         get_tunnel_configuration=lambda account_id, tunnel_id: (
             {
                 "hostname": "dokploy.openmerge.me",
@@ -355,7 +373,7 @@ def test_validate_preserved_phases_rejects_stale_tunnel_ingress() -> None:
         ),
         get_tunnel_token=lambda account_id, tunnel_id: "token",
         update_tunnel_configuration=lambda account_id, tunnel_id, ingress: None,
-    )
+    ))
 
     with pytest.raises(LifecycleDriftError, match="Cloudflare tunnel ingress no longer matches"):
         validate_preserved_phases(
@@ -399,6 +417,7 @@ def test_validate_preserved_phases_rejects_stale_tunnel_ingress() -> None:
             matrix_backend=_UNUSED_BACKEND,
             nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
             openclaw_backend=_UNUSED_BACKEND,
         )
 
@@ -459,8 +478,8 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_ope
             )
         ),
     )
-    sea_backend = SimpleNamespace(check_health=lambda *, service, url: False)
-    openclaw_backend = SimpleNamespace(check_health=lambda *, service, url: False)
+    sea_backend = cast(Any, SimpleNamespace(check_health=lambda *, service, url: False))
+    openclaw_backend = cast(Any, SimpleNamespace(check_health=lambda *, service, url: False))
 
     with pytest.raises(LifecycleDriftError, match="SeaweedFS health check no longer passes"):
         validate_preserved_phases(
@@ -478,6 +497,7 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_ope
             matrix_backend=_UNUSED_BACKEND,
             nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=sea_backend,
+            coder_backend=_UNUSED_BACKEND,
             openclaw_backend=_UNUSED_BACKEND,
         )
 
@@ -497,5 +517,109 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_ope
             matrix_backend=_UNUSED_BACKEND,
             nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
             openclaw_backend=openclaw_backend,
+        )
+
+
+def test_validate_preserved_phases_rejects_unhealthy_preserved_moodle_and_uninitialized_docuseal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openmerge",
+                "ROOT_DOMAIN": "openmerge.me",
+                "PACKS": "moodle,docuseal",
+            },
+        )
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.lifecycle.drift.reconcile_moodle",
+        lambda **_: SimpleNamespace(
+            result=MoodleResult(
+                outcome="already_present",
+                enabled=True,
+                hostname="moodle.openmerge.me",
+                service=MoodleManagedResource("reuse_owned", "svc-moodle", "openmerge-moodle"),
+                persistent_data=MoodleManagedResource(
+                    "reuse_owned", "vol-moodle", "openmerge-moodle-data"
+                ),
+                health_check=MoodleHealthCheck(
+                    url="https://moodle.openmerge.me/login/index.php", passed=None
+                ),
+                config=None,
+                notes=(),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.lifecycle.drift.reconcile_docuseal",
+        lambda **_: SimpleNamespace(
+            result=DocuSealResult(
+                outcome="already_present",
+                enabled=True,
+                hostname="docuseal.openmerge.me",
+                service=DocuSealManagedResource(
+                    "reuse_owned", "svc-docuseal", "openmerge-docuseal"
+                ),
+                persistent_data=DocuSealManagedResource(
+                    "reuse_owned", "vol-docuseal", "openmerge-docuseal-data"
+                ),
+                bootstrap_state=DocuSealBootstrapState(
+                    initialized=False,
+                    secret_key_base_secret_ref="openmerge-docuseal-secret-key-base",
+                ),
+                health_state=DocuSealHealthState(
+                    url="https://docuseal.openmerge.me/up",
+                    path="/up",
+                    passed=None,
+                ),
+                config=None,
+                notes=(),
+            )
+        ),
+    )
+
+    with pytest.raises(LifecycleDriftError, match="Moodle health check no longer passes"):
+        validate_preserved_phases(
+            raw_env=RawEnvInput(
+                format_version=1, values={"STACK_NAME": "openmerge", "ROOT_DOMAIN": "openmerge.me"}
+            ),
+            desired_state=desired_state,
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            preserved_phases=("moodle",),
+            bootstrap_backend=_UNUSED_BACKEND,
+            tailscale_backend=_UNUSED_BACKEND,
+            networking_backend=_UNUSED_BACKEND,
+            shared_core_backend=_UNUSED_BACKEND,
+            headscale_backend=_UNUSED_BACKEND,
+            matrix_backend=_UNUSED_BACKEND,
+            nextcloud_backend=_UNUSED_BACKEND,
+            seaweedfs_backend=_UNUSED_BACKEND,
+            openclaw_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
+            moodle_backend=cast(Any, SimpleNamespace(check_health=lambda *, service, url: False)),
+        )
+
+    with pytest.raises(LifecycleDriftError, match="DocuSeal bootstrap state is not initialized"):
+        validate_preserved_phases(
+            raw_env=RawEnvInput(
+                format_version=1, values={"STACK_NAME": "openmerge", "ROOT_DOMAIN": "openmerge.me"}
+            ),
+            desired_state=desired_state,
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            preserved_phases=("docuseal",),
+            bootstrap_backend=_UNUSED_BACKEND,
+            tailscale_backend=_UNUSED_BACKEND,
+            networking_backend=_UNUSED_BACKEND,
+            shared_core_backend=_UNUSED_BACKEND,
+            headscale_backend=_UNUSED_BACKEND,
+            matrix_backend=_UNUSED_BACKEND,
+            nextcloud_backend=_UNUSED_BACKEND,
+            seaweedfs_backend=_UNUSED_BACKEND,
+            openclaw_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
+            docuseal_backend=cast(Any, SimpleNamespace(check_health=lambda *, service, url: True)),
         )

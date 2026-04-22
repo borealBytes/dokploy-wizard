@@ -35,8 +35,10 @@ from dokploy_wizard.dokploy import (
     DokployBootstrapAuthError,
     DokployCloudflaredBackend,
     DokployCoderBackend,
+    DokployDocuSealBackend,
     DokployHeadscaleBackend,
     DokployMatrixBackend,
+    DokployMoodleBackend,
     DokployNextcloudBackend,
     DokployOpenClawBackend,
     DokploySeaweedFsBackend,
@@ -62,6 +64,12 @@ from dokploy_wizard.networking import (
     CloudflareError,
 )
 from dokploy_wizard.packs.coder import CoderBackend, CoderError, ShellCoderBackend
+from dokploy_wizard.packs.docuseal import (
+    DocuSealBackend,
+    DocuSealError,
+    ShellDocuSealBackend,
+    reconcile_docuseal,
+)
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     HeadscaleError,
@@ -72,11 +80,18 @@ from dokploy_wizard.packs.matrix import (
     MatrixError,
     ShellMatrixBackend,
 )
+from dokploy_wizard.packs.moodle import (
+    MoodleBackend,
+    MoodleError,
+    ShellMoodleBackend,
+    reconcile_moodle,
+)
 from dokploy_wizard.packs.nextcloud import (
     NextcloudBackend,
     NextcloudError,
     ShellNextcloudBackend,
 )
+from dokploy_wizard.packs.nextcloud.models import NextcloudOpenClawWorkspaceContract
 from dokploy_wizard.packs.openclaw import (
     OpenClawBackend,
     OpenClawError,
@@ -330,6 +345,8 @@ def _handle_install(args: argparse.Namespace) -> int:
         DokployBootstrapAuthError,
         LifecycleDriftError,
         MatrixError,
+        MoodleError,
+        DocuSealError,
         NextcloudError,
         OpenClawError,
         SeaweedFsError,
@@ -539,6 +556,8 @@ def _handle_modify(args: argparse.Namespace) -> int:
         CoderError,
         LifecycleDriftError,
         MatrixError,
+        MoodleError,
+        DocuSealError,
         NextcloudError,
         OpenClawError,
         SeaweedFsError,
@@ -581,13 +600,69 @@ def _handle_inspect_state(args: argparse.Namespace) -> int:
             desired_state=desired_state,
             ownership_ledger=loaded_state.ownership_ledger,
         )
+        snapshot["app_status"] = _build_app_inspection_status(
+            desired_state=desired_state,
+            ownership_ledger=loaded_state.ownership_ledger,
+        )
         if not args.dry_run:
             write_inspection_snapshot(args.state_dir, raw_env, snapshot)
-    except (OSError, StateValidationError) as error:
+    except (OSError, StateValidationError, MoodleError, DocuSealError) as error:
         raise SystemExit(str(error)) from error
 
     print(json.dumps(snapshot, indent=2, sort_keys=True))
     return 0
+
+
+def _build_app_inspection_status(
+    *,
+    desired_state: DesiredState,
+    ownership_ledger: OwnershipLedger | None,
+) -> dict[str, dict[str, Any]]:
+    ledger = ownership_ledger or OwnershipLedger(
+        format_version=desired_state.format_version,
+        resources=(),
+    )
+    moodle_phase = reconcile_moodle(
+        dry_run=True,
+        desired_state=desired_state,
+        ownership_ledger=ledger,
+        backend=ShellMoodleBackend(),
+    )
+    docuseal_phase = reconcile_docuseal(
+        dry_run=True,
+        desired_state=desired_state,
+        ownership_ledger=ledger,
+        backend=ShellDocuSealBackend(),
+    )
+    return {
+        "moodle": {
+            "enabled": moodle_phase.result.enabled,
+            "hostname": moodle_phase.result.hostname,
+            "shared_postgres_allocation_present": moodle_phase.result.config is not None,
+            "health_check": (
+                None
+                if moodle_phase.result.health_check is None
+                else moodle_phase.result.health_check.to_dict()
+            ),
+            "bootstrap_readiness_notes": list(moodle_phase.result.notes),
+        },
+        "docuseal": {
+            "enabled": docuseal_phase.result.enabled,
+            "hostname": docuseal_phase.result.hostname,
+            "shared_postgres_allocation_present": docuseal_phase.result.config is not None,
+            "bootstrap_state": (
+                None
+                if docuseal_phase.result.bootstrap_state is None
+                else docuseal_phase.result.bootstrap_state.to_dict()
+            ),
+            "health_state": (
+                None
+                if docuseal_phase.result.health_state is None
+                else docuseal_phase.result.health_state.to_dict()
+            ),
+            "bootstrap_readiness_notes": list(docuseal_phase.result.notes),
+        },
+    }
 
 
 def run_install_flow(
@@ -603,6 +678,8 @@ def run_install_flow(
     headscale_backend: HeadscaleBackend | None = None,
     matrix_backend: MatrixBackend | None = None,
     nextcloud_backend: NextcloudBackend | None = None,
+    moodle_backend: MoodleBackend | None = None,
+    docuseal_backend: DocuSealBackend | None = None,
     seaweedfs_backend: SeaweedFsBackend | None = None,
     coder_backend: CoderBackend | None = None,
     openclaw_backend: OpenClawBackend | None = None,
@@ -622,6 +699,8 @@ def run_install_flow(
         headscale_backend=headscale_backend,
         matrix_backend=matrix_backend,
         nextcloud_backend=nextcloud_backend,
+        moodle_backend=moodle_backend,
+        docuseal_backend=docuseal_backend,
         seaweedfs_backend=seaweedfs_backend,
         coder_backend=coder_backend,
         openclaw_backend=openclaw_backend,
@@ -646,6 +725,8 @@ def run_modify_flow(
     headscale_backend: HeadscaleBackend | None = None,
     matrix_backend: MatrixBackend | None = None,
     nextcloud_backend: NextcloudBackend | None = None,
+    moodle_backend: MoodleBackend | None = None,
+    docuseal_backend: DocuSealBackend | None = None,
     seaweedfs_backend: SeaweedFsBackend | None = None,
     coder_backend: CoderBackend | None = None,
     openclaw_backend: OpenClawBackend | None = None,
@@ -663,6 +744,8 @@ def run_modify_flow(
         headscale_backend=headscale_backend,
         matrix_backend=matrix_backend,
         nextcloud_backend=nextcloud_backend,
+        moodle_backend=moodle_backend,
+        docuseal_backend=docuseal_backend,
         seaweedfs_backend=seaweedfs_backend,
         coder_backend=coder_backend,
         openclaw_backend=openclaw_backend,
@@ -753,6 +836,8 @@ def _run_lifecycle_flow(
     headscale_backend: HeadscaleBackend | None,
     matrix_backend: MatrixBackend | None,
     nextcloud_backend: NextcloudBackend | None,
+    moodle_backend: MoodleBackend | None,
+    docuseal_backend: DocuSealBackend | None,
     seaweedfs_backend: SeaweedFsBackend | None,
     coder_backend: CoderBackend | None,
     openclaw_backend: OpenClawBackend | None,
@@ -840,12 +925,13 @@ def _run_lifecycle_flow(
             lifecycle_plan=lifecycle_plan,
             dry_run=dry_run,
         )
-        _validate_live_drift_for_mutation(
-            desired_state=desired_state,
-            ownership_ledger=ownership_ledger,
-            lifecycle_plan=lifecycle_plan,
-            dry_run=dry_run,
-        )
+    _validate_live_drift_for_mutation(
+        raw_input=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=ownership_ledger,
+        lifecycle_plan=lifecycle_plan,
+        dry_run=dry_run,
+    )
     host_facts = collect_host_facts(raw_env)
     host_prerequisite_summary: dict[str, Any] | None = None
     if remediate_install_host_prereqs and _host_supports_prerequisite_remediation(host_facts):
@@ -937,6 +1023,16 @@ def _run_lifecycle_flow(
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
+    moodle_phase_backend = moodle_backend or _build_moodle_backend(
+        raw_env=raw_env,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
+    docuseal_phase_backend = docuseal_backend or _build_docuseal_backend(
+        raw_env=raw_env,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
     seaweedfs_phase_backend = seaweedfs_backend or _build_seaweedfs_backend(
         raw_env=raw_env,
         desired_state=desired_state,
@@ -961,6 +1057,8 @@ def _run_lifecycle_flow(
         headscale=headscale_phase_backend,
         matrix=matrix_phase_backend,
         nextcloud=nextcloud_phase_backend,
+        moodle=moodle_phase_backend,
+        docuseal=docuseal_phase_backend,
         seaweedfs=seaweedfs_phase_backend,
         coder=coder_phase_backend,
         openclaw=openclaw_phase_backend,
@@ -979,6 +1077,8 @@ def _run_lifecycle_flow(
             headscale_backend=headscale_phase_backend,
             matrix_backend=matrix_phase_backend,
             nextcloud_backend=nextcloud_phase_backend,
+            moodle_backend=moodle_phase_backend,
+            docuseal_backend=docuseal_phase_backend,
             seaweedfs_backend=seaweedfs_phase_backend,
             coder_backend=coder_phase_backend,
             openclaw_backend=openclaw_phase_backend,
@@ -1356,6 +1456,7 @@ def _validate_live_run_env_for_mutation(
 
 def _validate_live_drift_for_mutation(
     *,
+    raw_input: RawEnvInput,
     desired_state: DesiredState,
     ownership_ledger: OwnershipLedger,
     lifecycle_plan: LifecyclePlan,
@@ -1366,6 +1467,7 @@ def _validate_live_drift_for_mutation(
     live_drift = build_live_drift_report(
         desired_state=desired_state,
         ownership_ledger=ownership_ledger,
+        raw_input=raw_input,
     )
     blocking_entries = [
         entry for entry in live_drift["entries"] if _live_drift_entry_blocks_mutation(entry)
@@ -1528,6 +1630,12 @@ def _build_nextcloud_backend(
         return ShellNextcloudBackend(raw_env)
     admin_user = raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
     admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon")
+    nexa_enabled = _has_openclaw_nexa_env(raw_env)
+    nexa_agent_password = None
+    if nexa_enabled:
+        nexa_agent_password = raw_env.values.get("OPENCLAW_NEXA_AGENT_PASSWORD") or raw_env.values.get(
+            "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD"
+        )
     return DokployNextcloudBackend(
         api_url=api_url,
         api_key=api_key,
@@ -1541,6 +1649,24 @@ def _build_nextcloud_backend(
         integration_secret_ref=f"{desired_state.stack_name}-nextcloud-onlyoffice-jwt-secret",
         admin_user=admin_user,
         admin_password=admin_password,
+        openclaw_volume_name=(
+            f"{desired_state.stack_name}-openclaw-data"
+            if "openclaw" in desired_state.enabled_packs
+            else None
+        ),
+        openclaw_workspace_contract=(
+            _build_nextcloud_openclaw_workspace_contract(desired_state)
+            if nexa_enabled and "openclaw" in desired_state.enabled_packs
+            else None
+        ),
+        nexa_agent_user_id=(raw_env.values.get("OPENCLAW_NEXA_AGENT_USER_ID") if nexa_enabled else None),
+        nexa_agent_display_name=(
+            raw_env.values.get("OPENCLAW_NEXA_AGENT_DISPLAY_NAME") if nexa_enabled else None
+        ),
+        nexa_agent_password=nexa_agent_password,
+        nexa_agent_email=(raw_env.values.get("OPENCLAW_NEXA_AGENT_EMAIL") if nexa_enabled else None),
+        openclaw_rescan_cron=raw_env.values.get("NEXTCLOUD_OPENCLAW_RESCAN_CRON", "*/15 * * * *"),
+        openclaw_rescan_timezone=raw_env.values.get("NEXTCLOUD_OPENCLAW_RESCAN_TIMEZONE", "UTC"),
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,
@@ -1586,6 +1712,84 @@ def _build_matrix_backend(
             f"{desired_state.stack_name}-matrix-registration-shared-secret",
             f"{desired_state.stack_name}-matrix-macaroon-secret-key",
         ),
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
+    )
+
+
+def _build_moodle_backend(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> MoodleBackend:
+    if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
+        return ShellMoodleBackend()
+    api_url = desired_state.dokploy_api_url
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    if not api_url or not api_key or "moodle" not in desired_state.enabled_packs:
+        return ShellMoodleBackend()
+    hostname = desired_state.hostnames.get("moodle")
+    allocation = next(
+        (item for item in desired_state.shared_core.allocations if item.pack_name == "moodle"),
+        None,
+    )
+    if hostname is None or allocation is None or desired_state.shared_core.postgres is None:
+        return ShellMoodleBackend()
+    if allocation.postgres is None:
+        return ShellMoodleBackend()
+    return DokployMoodleBackend(
+        api_url=api_url,
+        api_key=api_key,
+        stack_name=desired_state.stack_name,
+        hostname=hostname,
+        admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
+        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        postgres=allocation.postgres,
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
+    )
+
+
+def _build_docuseal_backend(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> DocuSealBackend:
+    if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
+        return ShellDocuSealBackend()
+    api_url = desired_state.dokploy_api_url
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    if not api_url or not api_key or "docuseal" not in desired_state.enabled_packs:
+        return ShellDocuSealBackend()
+    hostname = desired_state.hostnames.get("docuseal")
+    allocation = next(
+        (item for item in desired_state.shared_core.allocations if item.pack_name == "docuseal"),
+        None,
+    )
+    if hostname is None or allocation is None or desired_state.shared_core.postgres is None:
+        return ShellDocuSealBackend()
+    if allocation.postgres is None:
+        return ShellDocuSealBackend()
+    return DokployDocuSealBackend(
+        api_url=api_url,
+        api_key=api_key,
+        stack_name=desired_state.stack_name,
+        hostname=hostname,
+        admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
+        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        postgres=allocation.postgres,
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,
@@ -1679,22 +1883,36 @@ def _build_openclaw_backend(
         return ShellOpenClawBackend(raw_env)
     if not ({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs)):
         return ShellOpenClawBackend(raw_env)
+    openclaw_primary_model, openclaw_fallback_models = _advisor_model_selection(
+        raw_env, env_prefix="OPENCLAW"
+    )
+    my_farm_primary_model, my_farm_fallback_models = _advisor_model_selection(
+        raw_env, env_prefix="MY_FARM_ADVISOR"
+    )
     return DokployOpenClawBackend(
         api_url=api_url,
         api_key=api_key,
         stack_name=desired_state.stack_name,
         gateway_token=desired_state.openclaw_gateway_token,
+        openclaw_internal_hostname=_openclaw_internal_hostname(raw_env, desired_state),
+        openclaw_gateway_password=_advisor_env_optional(raw_env, "OPENCLAW_GATEWAY_PASSWORD")
+        or _advisor_env_optional(raw_env, "ADVISOR_GATEWAY_PASSWORD")
+        or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        my_farm_gateway_password=_advisor_env_optional(raw_env, "MY_FARM_ADVISOR_GATEWAY_PASSWORD")
+        or _advisor_env_optional(raw_env, "ADVISOR_GATEWAY_PASSWORD")
+        or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         trusted_proxy_emails=desired_state.cloudflare_access_otp_emails,
-        openclaw_primary_model=_advisor_primary_model(raw_env, env_prefix="OPENCLAW"),
-        openclaw_fallback_models=_advisor_model_list(raw_env, env_prefix="OPENCLAW"),
+        openclaw_primary_model=openclaw_primary_model,
+        openclaw_fallback_models=openclaw_fallback_models,
         openclaw_openrouter_api_key=_advisor_env_optional(raw_env, "OPENCLAW_OPENROUTER_API_KEY"),
         openclaw_nvidia_api_key=_advisor_env_optional(raw_env, "OPENCLAW_NVIDIA_API_KEY"),
         openclaw_telegram_bot_token=_advisor_env_optional(raw_env, "OPENCLAW_TELEGRAM_BOT_TOKEN"),
         openclaw_telegram_owner_user_id=_advisor_env_optional(
             raw_env, "OPENCLAW_TELEGRAM_OWNER_USER_ID"
         ),
-        my_farm_primary_model=_advisor_primary_model(raw_env, env_prefix="MY_FARM_ADVISOR"),
-        my_farm_fallback_models=_advisor_model_list(raw_env, env_prefix="MY_FARM_ADVISOR"),
+        openclaw_nexa_env=_openclaw_nexa_env(raw_env),
+        my_farm_primary_model=my_farm_primary_model,
+        my_farm_fallback_models=my_farm_fallback_models,
         my_farm_openrouter_api_key=_advisor_env_optional(
             raw_env, "MY_FARM_ADVISOR_OPENROUTER_API_KEY"
         ),
@@ -1730,6 +1948,46 @@ def _build_openclaw_backend(
             api_url=api_url,
             api_key=api_key,
             session_client=session_client,
+        ),
+    )
+
+
+def _openclaw_nexa_env(raw_env: RawEnvInput) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in sorted(raw_env.values.items())
+        if key.startswith("OPENCLAW_NEXA_") and value.strip() != ""
+    }
+
+
+def _openclaw_internal_hostname(raw_env: RawEnvInput, desired_state: DesiredState) -> str | None:
+    raw_value = raw_env.values.get("OPENCLAW_INTERNAL_SUBDOMAIN")
+    if raw_value is None:
+        return None
+    normalized = raw_value.strip().lower()
+    if normalized in {"", "disabled", "off", "false", "none"}:
+        return None
+    return desired_state.hostnames.get("openclaw-internal")
+
+
+def _has_openclaw_nexa_env(raw_env: RawEnvInput) -> bool:
+    return bool(_openclaw_nexa_env(raw_env))
+
+
+def _build_nextcloud_openclaw_workspace_contract(
+    desired_state: DesiredState,
+) -> NextcloudOpenClawWorkspaceContract:
+    stack_name = desired_state.stack_name
+    return NextcloudOpenClawWorkspaceContract(
+        enabled=True,
+        external_mount_name="/OpenClaw",
+        external_mount_path="/mnt/openclaw",
+        visible_root="/mnt/openclaw/workspace/nexa",
+        contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+        runtime_state_source="server-owned env + durable state JSON",
+        notes=(
+            "Nextcloud exposes the Nexa workspace as an operator/user surface only.",
+            "Credential values and identity-bearing fields remain server-owned and must not be overridden from workspace files.",
         ),
     )
 
@@ -1778,22 +2036,54 @@ def _advisor_env_optional(raw_env: RawEnvInput, key: str) -> str | None:
     return value.strip()
 
 
+def _advisor_model_selection(
+    raw_env: RawEnvInput, *, env_prefix: str
+) -> tuple[str | None, tuple[str, ...]]:
+    """Return repo-facing model envs mapped onto current OpenClaw config semantics.
+
+    `<PREFIX>_PRIMARY_MODEL` and `<PREFIX>_FALLBACK_MODELS` are dokploy-wizard
+    conventions, not OpenClaw-native env names. We normalize them here and hand the
+    results to the Dokploy OpenClaw backend, which seeds the current OpenClaw config
+    shape at `agents.defaults.model.primary` / `fallbacks`.
+
+    Service env remains the source of truth for deployment because Dokploy/container
+    env wins over seeded config fallback values at runtime.
+    """
+
+    return (
+        _advisor_primary_model(raw_env, env_prefix=env_prefix),
+        _advisor_model_list(raw_env, env_prefix=env_prefix),
+    )
+
+
 def _advisor_primary_model(raw_env: RawEnvInput, *, env_prefix: str) -> str | None:
     explicit = _advisor_env_optional(raw_env, f"{env_prefix}_PRIMARY_MODEL")
     if explicit is not None:
-        return explicit
+        return _normalize_advisor_model_ref(explicit)
     provider = _advisor_env_optional(raw_env, "ADVISOR_MODEL_PROVIDER")
     model_name = _advisor_env_optional(raw_env, "ADVISOR_MODEL_NAME")
     if provider is None or model_name is None:
         return None
-    return model_name if "/" in model_name else f"{provider}/{model_name}"
+    return _normalize_advisor_model_ref(
+        model_name if "/" in model_name else f"{provider}/{model_name}"
+    )
 
 
 def _advisor_model_list(raw_env: RawEnvInput, *, env_prefix: str) -> tuple[str, ...]:
     raw_value = _advisor_env_optional(raw_env, f"{env_prefix}_FALLBACK_MODELS")
     if raw_value is None:
         return ()
-    return tuple(item.strip() for item in raw_value.split(",") if item.strip())
+    return tuple(
+        _normalize_advisor_model_ref(item.strip()) for item in raw_value.split(",") if item.strip()
+    )
+
+
+def _normalize_advisor_model_ref(model_ref: str) -> str:
+    normalized = model_ref.strip()
+    legacy_aliases = {
+        "nvidia/moonshot/kimi-k2.5": "nvidia/moonshotai/kimi-k2.5",
+    }
+    return legacy_aliases.get(normalized, normalized)
 
 
 _DOKPLOY_AUTH_PROBE_DESCRIPTION = "Wizard-owned Dokploy auth qualifier"

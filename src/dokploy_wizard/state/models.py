@@ -9,6 +9,7 @@ from typing import Any
 from dokploy_wizard.core.models import SharedCorePlan
 
 STATE_FORMAT_VERSION = 1
+LIFECYCLE_CHECKPOINT_CONTRACT_VERSION = 2
 
 
 class StateValidationError(ValueError):
@@ -294,6 +295,16 @@ def _require_optional_positive_int(payload: dict[str, Any], key: str) -> int | N
     return value
 
 
+def _require_positive_int_with_default(payload: dict[str, Any], key: str, default: int) -> int:
+    value = payload.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, int) or value < 1:
+        msg = f"Expected positive integer for '{key}'."
+        raise StateValidationError(msg)
+    return value
+
+
 def _require_optional_string(payload: dict[str, Any], key: str) -> str | None:
     value = payload.get(key)
     if value is None:
@@ -311,6 +322,7 @@ class AppliedStateCheckpoint:
     format_version: int
     desired_state_fingerprint: str
     completed_steps: tuple[str, ...]
+    lifecycle_checkpoint_contract_version: int = LIFECYCLE_CHECKPOINT_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
         if self.format_version != STATE_FORMAT_VERSION:
@@ -325,12 +337,16 @@ class AppliedStateCheckpoint:
         if any(step == "" for step in self.completed_steps):
             msg = "Applied state steps must be non-empty strings."
             raise StateValidationError(msg)
+        if self.lifecycle_checkpoint_contract_version < 1:
+            msg = "Lifecycle checkpoint contract version must be a positive integer."
+            raise StateValidationError(msg)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "format_version": self.format_version,
             "desired_state_fingerprint": self.desired_state_fingerprint,
             "completed_steps": list(self.completed_steps),
+            "lifecycle_checkpoint_contract_version": self.lifecycle_checkpoint_contract_version,
         }
 
     @classmethod
@@ -339,6 +355,11 @@ class AppliedStateCheckpoint:
             format_version=_require_format_version(payload),
             desired_state_fingerprint=_require_string(payload, "desired_state_fingerprint"),
             completed_steps=_require_string_list(payload, "completed_steps"),
+            lifecycle_checkpoint_contract_version=_require_positive_int_with_default(
+                payload,
+                "lifecycle_checkpoint_contract_version",
+                default=1,
+            ),
         )
 
 
