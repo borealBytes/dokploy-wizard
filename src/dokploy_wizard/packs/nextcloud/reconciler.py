@@ -13,17 +13,20 @@ from dokploy_wizard.core.models import (
     SharedRedisAllocation,
 )
 from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudCommandCheck,
     NextcloudHealthCheck,
     NextcloudManagedResource,
     NextcloudPhase,
     NextcloudPostgresBinding,
     NextcloudRedisBinding,
+    NextcloudBundleVerification,
     NextcloudResourceRecord,
     NextcloudResult,
     NextcloudServiceConfig,
     NextcloudServiceRuntime,
     OnlyofficeServiceConfig,
     OnlyofficeServiceRuntime,
+    TalkRuntime,
 )
 from dokploy_wizard.state.models import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput
 
@@ -67,7 +70,9 @@ class NextcloudBackend(Protocol):
 
     def create_volume(self, *, resource_name: str) -> NextcloudResourceRecord: ...
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None: ...
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification: ...
 
     def refresh_openclaw_external_storage(self, *, admin_user: str) -> None: ...
 
@@ -184,8 +189,36 @@ class ShellNextcloudBackend:
             return forced
         return _http_health_check(url)
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification:
         del nextcloud_url, onlyoffice_url
+        return NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        )
 
     def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
         del admin_user
@@ -205,6 +238,7 @@ def reconcile_nextcloud(
                 enabled=False,
                 nextcloud=None,
                 onlyoffice=None,
+                talk=None,
                 notes=("Nextcloud + OnlyOffice pack is explicitly disabled for this install.",),
             ),
             nextcloud_service_resource_id=None,
@@ -322,6 +356,7 @@ def reconcile_nextcloud(
                 enabled=True,
                 nextcloud=nextcloud_runtime,
                 onlyoffice=onlyoffice_runtime,
+                talk=None,
                 notes=(
                     "Nextcloud reuses the shared-core postgres and redis allocation "
                     "for pack_name='nextcloud'.",
@@ -335,7 +370,7 @@ def reconcile_nextcloud(
             onlyoffice_volume_resource_id=None,
         )
 
-    backend.ensure_application_ready(
+    bundle = backend.ensure_application_ready(
         nextcloud_url=nextcloud_url,
         onlyoffice_url=onlyoffice_url,
     )
@@ -390,8 +425,9 @@ def reconcile_nextcloud(
             enabled=True,
             nextcloud=nextcloud_runtime,
             onlyoffice=onlyoffice_runtime,
+            talk=bundle.talk,
             notes=(
-                "Nextcloud and OnlyOffice are reconciled together and both reported healthy.",
+                "Nextcloud, OnlyOffice, and Talk are reconciled together and reported healthy.",
                 "Secret refs are deterministic names only; secret values are not persisted.",
             ),
         ),

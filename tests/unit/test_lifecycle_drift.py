@@ -215,6 +215,7 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_nextcloud(
                 enabled=True,
                 nextcloud=nextcloud_runtime,
                 onlyoffice=onlyoffice_runtime,
+                talk=None,
                 notes=(),
             )
         ),
