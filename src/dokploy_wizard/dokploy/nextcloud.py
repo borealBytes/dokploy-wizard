@@ -7,6 +7,7 @@ import shlex
 import ssl
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 from urllib import error, parse, request
@@ -23,8 +24,11 @@ from dokploy_wizard.dokploy.client import (
     DokployScheduleRecord,
 )
 from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudBundleVerification,
+    NextcloudCommandCheck,
     NextcloudOpenClawWorkspaceContract,
     NextcloudResourceRecord,
+    TalkRuntime,
 )
 from dokploy_wizard.packs.nextcloud.reconciler import NextcloudError
 
@@ -36,6 +40,7 @@ _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME = "/OpenClaw"
 _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH = "/mnt/openclaw"
 _DEFAULT_OPENCLAW_RESCAN_CRON = "*/15 * * * *"
 _DEFAULT_OPENCLAW_RESCAN_TIMEZONE = "UTC"
+_NEXTCLOUD_APPSTORE_APPS_JSON_URL = "https://apps.nextcloud.com/api/v1/platform/apps.json"
 _DEFAULT_ONLYOFFICE_DEF_FORMATS = {
     "docx": True,
     "xlsx": True,
@@ -274,7 +279,9 @@ class DokployNextcloudBackend:
             return True
         return _local_https_health_check(url)
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification:
         document_server_url = _with_trailing_slash(onlyoffice_url)
         document_server_internal_url = _with_trailing_slash(
             f"http://{_onlyoffice_service_name(self._stack_name)}"
@@ -283,7 +290,9 @@ class DokployNextcloudBackend:
         if _nextcloud_status_ready(f"{nextcloud_url}/status.php"):
             container = _find_container_name(_nextcloud_service_name(self._stack_name))
             if container is None:
-                return
+                raise NextcloudError(
+                    "Nextcloud container could not be located for OnlyOffice and Talk verification."
+                )
             _ensure_admin_user(container, self._admin_user, self._admin_password)
             _ensure_nexa_service_account(
                 container,
@@ -299,10 +308,12 @@ class DokployNextcloudBackend:
                 document_server_internal_url=document_server_internal_url,
                 storage_url=storage_url,
                 jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
+                wait_for_documentserver_check=self._created_in_process,
+                openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
+                admin_user=self._admin_user,
             )
-            _run_occ_shell(container, "php occ app:install spreed || true")
-            _run_occ_shell(container, "php occ app:enable spreed")
-            return
+            self._ensure_openclaw_rescan_schedule()
+            return _verify_nextcloud_bundle(container)
         container = _wait_for_container_name(_nextcloud_service_name(self._stack_name))
         if container is None:
             raise NextcloudError(
@@ -328,9 +339,12 @@ class DokployNextcloudBackend:
             document_server_internal_url=document_server_internal_url,
             storage_url=storage_url,
             jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
+            wait_for_documentserver_check=self._created_in_process,
+            openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
+            admin_user=self._admin_user,
         )
-        _run_occ_shell(container, "php occ app:install spreed || true")
-        _run_occ_shell(container, "php occ app:enable spreed")
+        self._ensure_openclaw_rescan_schedule()
+        return _verify_nextcloud_bundle(container)
 
     def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
         if self._openclaw_volume_name is None:
@@ -342,12 +356,7 @@ class DokployNextcloudBackend:
             )
         _ensure_files_external_app(container)
         _ensure_openclaw_external_storage(container, admin_user=admin_user)
-        try:
-            self._ensure_openclaw_rescan_schedule()
-        except DokployApiError as error:
-            if _is_unauthorized_dokploy_error(error):
-                return
-            raise
+        self._ensure_openclaw_rescan_schedule()
 
     def _ensure_openclaw_rescan_schedule(self) -> None:
         if self._openclaw_volume_name is None:
@@ -938,6 +947,21 @@ def _run_occ(container_name: str, args: list[str]) -> None:
     _run_occ_command(command, args)
 
 
+def _read_occ_www_data_output(container_name: str, args: list[str]) -> str:
+    result = subprocess.run(
+        _www_data_occ_shell(container_name, "php occ " + " ".join(shlex.quote(arg) for arg in args)),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise NextcloudError(
+            f"Nextcloud OCC command failed ({' '.join(args)}): {detail or 'unknown error'}"
+        )
+    return result.stdout
+
+
 def _run_occ_shell(container_name: str, shell_command: str) -> None:
     command = _www_data_occ_shell(container_name, shell_command)
     _run_occ_command(command, [shell_command])
@@ -1034,6 +1058,9 @@ def _ensure_onlyoffice_app_config(
     document_server_internal_url: str,
     storage_url: str,
     jwt_secret: str,
+    wait_for_documentserver_check: bool = False,
+    openclaw_external_storage_enabled: bool = False,
+    admin_user: str = _DEFAULT_NEXTCLOUD_ADMIN_USER,
 ) -> None:
     def_formats = json.dumps(_DEFAULT_ONLYOFFICE_DEF_FORMATS, separators=(",", ":"), sort_keys=True)
     edit_formats = json.dumps(
@@ -1041,8 +1068,11 @@ def _ensure_onlyoffice_app_config(
         separators=(",", ":"),
         sort_keys=True,
     )
-    _run_occ_shell(container_name, "php occ app:install onlyoffice || true")
-    _run_occ_shell(container_name, "php occ app:enable --force onlyoffice")
+    _enable_app_with_release_fallback(
+        container_name,
+        enable_command="php occ app:enable --force onlyoffice",
+        install_from_release=_install_onlyoffice_app_from_release,
+    )
     _run_occ_shell(
         container_name,
         "php occ config:system:set allow_local_remote_servers --value=true --type=bool",
@@ -1082,7 +1112,216 @@ def _ensure_onlyoffice_app_config(
     )
     _run_occ_shell(container_name, "php occ config:app:set onlyoffice sameTab --value=true")
     _run_occ_shell(container_name, "php occ config:app:set onlyoffice preview --value=true")
-    _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
+    if wait_for_documentserver_check:
+        _wait_for_onlyoffice_documentserver_check(container_name)
+    else:
+        _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
+    if openclaw_external_storage_enabled:
+        _ensure_files_external_app(container_name)
+        _ensure_openclaw_external_storage(container_name, admin_user=admin_user)
+
+
+def _wait_for_onlyoffice_documentserver_check(
+    container_name: str,
+    *,
+    attempts: int = 12,
+    delay_seconds: float = 5.0,
+) -> None:
+    for attempt in range(attempts):
+        try:
+            _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
+            return
+        except NextcloudError:
+            if attempt >= attempts - 1:
+                raise
+            time.sleep(delay_seconds)
+
+
+def _verify_nextcloud_bundle(container_name: str) -> NextcloudBundleVerification:
+    _ensure_spreed_app_enabled(container_name)
+    enabled = _talk_app_enabled(container_name)
+    return NextcloudBundleVerification(
+        onlyoffice_document_server_check=_command_check(
+            container_name,
+            command="php occ onlyoffice:documentserver --check",
+        ),
+        talk=TalkRuntime(
+            app_id="spreed",
+            enabled=enabled,
+            enabled_check=NextcloudCommandCheck(
+                command="php occ app:list --output=json",
+                passed=enabled,
+            ),
+            signaling_check=_command_check(
+                container_name,
+                command="php occ talk:signaling:list --output=json",
+            ),
+            stun_check=_command_check(
+                container_name,
+                command="php occ talk:stun:list --output=json",
+            ),
+            turn_check=_command_check(
+                container_name,
+                command="php occ talk:turn:list --output=json",
+            ),
+        ),
+    )
+
+
+def _ensure_spreed_app_enabled(container_name: str) -> None:
+    _enable_app_with_release_fallback(
+        container_name,
+        enable_command="php occ app:enable spreed",
+        install_from_release=_install_spreed_app_from_release,
+    )
+
+
+def _enable_app_with_release_fallback(
+    container_name: str,
+    *,
+    enable_command: str,
+    install_from_release: Callable[[str], None],
+) -> None:
+    try:
+        _run_occ_shell(container_name, enable_command)
+    except NextcloudError:
+        install_from_release(container_name)
+        _run_occ_shell(container_name, enable_command)
+
+
+def _install_onlyoffice_app_from_release(container_name: str) -> None:
+    _install_nextcloud_app_from_release(container_name, app_id="onlyoffice", app_label="ONLYOFFICE")
+
+
+def _install_spreed_app_from_release(container_name: str) -> None:
+    _install_nextcloud_app_from_release(container_name, app_id="spreed", app_label="Talk")
+
+
+def _install_nextcloud_app_from_release(
+    container_name: str, *, app_id: str, app_label: str
+) -> None:
+    download_url = _resolve_compatible_app_release_download_url(container_name, app_id)
+    _run_occ_shell(
+        container_name,
+        'export NEXTCLOUD_APP_TMP_DIR="$(mktemp -d)" && '
+        "trap 'rm -rf \"$NEXTCLOUD_APP_TMP_DIR\"' EXIT && "
+        f'php -r \'if (!copy("{download_url}", getenv("NEXTCLOUD_APP_TMP_DIR") . "/app-release.tar.gz")) {{ fwrite(STDERR, "Failed to download {app_label} app release\\n"); exit(1); }}\' && '
+        f"rm -rf apps/{app_id} && "
+        'tar -xzf "$NEXTCLOUD_APP_TMP_DIR/app-release.tar.gz" -C apps && '
+        f"test -d apps/{app_id}",
+    )
+
+
+def _resolve_compatible_app_release_download_url(container_name: str, app_id: str) -> str:
+    nextcloud_major = _read_installed_nextcloud_major_version(container_name)
+    apps = _fetch_nextcloud_appstore_apps()
+    for app in apps:
+        if app.get("id") != app_id:
+            continue
+        releases = app.get("releases")
+        if not isinstance(releases, list):
+            break
+        for release in releases:
+            if not isinstance(release, dict):
+                continue
+            download = release.get("download")
+            platform_spec = release.get("platformVersionSpec")
+            if not isinstance(download, str) or download == "":
+                continue
+            if not isinstance(platform_spec, str) or platform_spec == "":
+                continue
+            if _platform_version_spec_matches_major(platform_spec, nextcloud_major):
+                return download
+        break
+    raise NextcloudError(
+        f"Nextcloud appstore did not provide a compatible signed download URL for '{app_id}' on Nextcloud {nextcloud_major}."
+    )
+
+
+def _read_installed_nextcloud_major_version(container_name: str) -> int:
+    output = _read_occ_www_data_output(container_name, ["status", "--output=json"]).strip()
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise NextcloudError("Nextcloud status did not return valid JSON.") from error
+    if not isinstance(payload, dict):
+        raise NextcloudError("Nextcloud status did not return a JSON object.")
+    version_string = payload.get("versionstring")
+    if not isinstance(version_string, str) or version_string == "":
+        raise NextcloudError("Nextcloud status did not include a versionstring.")
+    major = _parse_version_major(version_string)
+    if major is None:
+        raise NextcloudError("Nextcloud status did not include a parseable major version.")
+    return major
+
+
+def _fetch_nextcloud_appstore_apps() -> tuple[dict[str, object], ...]:
+    req = request.Request(_NEXTCLOUD_APPSTORE_APPS_JSON_URL, method="GET")
+    try:
+        with request.urlopen(req, timeout=15) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except (error.HTTPError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise NextcloudError("Nextcloud appstore metadata could not be fetched.") from exc
+    apps = payload.get("apps") if isinstance(payload, dict) else payload
+    if not isinstance(apps, list):
+        raise NextcloudError("Nextcloud appstore metadata did not return an app list.")
+    return tuple(item for item in apps if isinstance(item, dict))
+
+
+def _platform_version_spec_matches_major(platform_spec: str, nextcloud_major: int) -> bool:
+    normalized = platform_spec.replace(",", " ")
+    clauses = [clause.strip() for clause in normalized.split() if clause.strip() != ""]
+    if not clauses:
+        return False
+    return all(_platform_version_clause_matches_major(clause, nextcloud_major) for clause in clauses)
+
+
+def _platform_version_clause_matches_major(clause: str, nextcloud_major: int) -> bool:
+    for operator in (">=", "<=", ">", "<", "==", "="):
+        if not clause.startswith(operator):
+            continue
+        version_major = _parse_version_major(clause[len(operator) :].strip())
+        if version_major is None:
+            return False
+        if operator == ">=":
+            return nextcloud_major >= version_major
+        if operator == "<=":
+            return nextcloud_major <= version_major
+        if operator == ">":
+            return nextcloud_major > version_major
+        if operator == "<":
+            return nextcloud_major < version_major
+        return nextcloud_major == version_major
+    version_major = _parse_version_major(clause)
+    return version_major is not None and nextcloud_major == version_major
+
+
+def _parse_version_major(value: str) -> int | None:
+    major_text = value.strip().split(".", 1)[0]
+    if major_text.isdigit():
+        return int(major_text)
+    return None
+
+
+def _talk_app_enabled(container_name: str) -> bool:
+    output = _read_occ_www_data_output(container_name, ["app:list", "--output=json"]).strip()
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise NextcloudError("Nextcloud app:list did not return valid JSON.") from error
+    if not isinstance(payload, dict):
+        raise NextcloudError("Nextcloud app:list did not return a JSON object.")
+    enabled = payload.get("enabled")
+    if isinstance(enabled, list):
+        return "spreed" in enabled
+    if isinstance(enabled, dict):
+        return "spreed" in enabled
+    raise NextcloudError("Nextcloud app:list did not include an enabled app collection.")
+
+
+def _command_check(container_name: str, *, command: str) -> NextcloudCommandCheck:
+    _run_occ_shell(container_name, command)
+    return NextcloudCommandCheck(command=command, passed=True)
 
 
 def _ensure_files_external_app(container_name: str) -> None:
