@@ -411,3 +411,126 @@ def test_dokploy_client_update_compose_uses_session_fallback_on_api_key_401() ->
 
     assert record.compose_id == "cmp-1"
     assert record.name == "wizard-compose"
+
+
+def test_dokploy_client_list_compose_schedules_uses_session_fallback_on_api_key_401() -> None:
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        list_compose_schedules_session_fallback=lambda compose_id: {
+            "data": [
+                {
+                    "scheduleId": "sch-1",
+                    "name": "wizard-stack-openclaw-rescan",
+                    "serviceName": "wizard-stack-nextcloud",
+                    "cronExpression": "*/15 * * * *",
+                    "timezone": "UTC",
+                    "shellType": "bash",
+                    "command": 'php /var/www/html/occ files:scan --path="admin/files/OpenClaw"',
+                    "enabled": True,
+                }
+            ]
+        },
+    )
+
+    schedules = client.list_compose_schedules(compose_id="cmp-1")
+
+    assert len(schedules) == 1
+    assert schedules[0].schedule_id == "sch-1"
+
+
+def test_dokploy_client_create_schedule_uses_session_fallback_on_api_key_401() -> None:
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        create_schedule_session_fallback=lambda *args: {
+            "data": {
+                "scheduleId": "sch-1",
+                "name": args[0],
+                "serviceName": args[2],
+                "cronExpression": args[3],
+                "timezone": args[4],
+                "shellType": args[5],
+                "command": args[6],
+                "enabled": args[7],
+            }
+        },
+    )
+
+    schedule = client.create_schedule(
+        name="wizard-stack-openclaw-rescan",
+        compose_id="cmp-1",
+        service_name="wizard-stack-nextcloud",
+        cron_expression="*/15 * * * *",
+        timezone="UTC",
+        shell_type="bash",
+        command='php /var/www/html/occ files:scan --path="admin/files/OpenClaw"',
+        enabled=True,
+    )
+
+    assert schedule.schedule_id == "sch-1"
+    assert schedule.enabled is True
+
+
+def test_dokploy_client_update_schedule_uses_session_fallback_on_api_key_401() -> None:
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        update_schedule_session_fallback=lambda *args: {
+            "data": {
+                "scheduleId": args[0],
+                "name": args[1],
+                "serviceName": args[3],
+                "cronExpression": args[4],
+                "timezone": args[5],
+                "shellType": args[6],
+                "command": args[7],
+                "enabled": args[8],
+            }
+        },
+    )
+
+    schedule = client.update_schedule(
+        schedule_id="sch-1",
+        name="wizard-stack-openclaw-rescan",
+        compose_id="cmp-1",
+        service_name="wizard-stack-nextcloud",
+        cron_expression="*/15 * * * *",
+        timezone="UTC",
+        shell_type="bash",
+        command='php /var/www/html/occ files:scan --path="admin/files/OpenClaw"',
+        enabled=True,
+    )
+
+    assert schedule.schedule_id == "sch-1"
+    assert schedule.service_name == "wizard-stack-nextcloud"

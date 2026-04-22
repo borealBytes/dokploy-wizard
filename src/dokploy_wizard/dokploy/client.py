@@ -14,6 +14,10 @@ ProjectCreateSessionFallbackFn = Callable[[str, str | None, str | None], Any]
 ComposeCreateSessionFallbackFn = Callable[[str, str, str, str], Any]
 ComposeUpdateSessionFallbackFn = Callable[[str, str], Any]
 DeploySessionFallbackFn = Callable[[str, str | None, str | None], Any]
+ListComposeSchedulesSessionFallbackFn = Callable[[str], Any]
+CreateScheduleSessionFallbackFn = Callable[[str, str, str, str, str, str, str, bool], Any]
+UpdateScheduleSessionFallbackFn = Callable[[str, str, str, str, str, str, str, str, bool], Any]
+DeleteScheduleSessionFallbackFn = Callable[[str], Any]
 
 
 class DokployApiError(RuntimeError):
@@ -85,6 +89,10 @@ class DokployApiClient:
         compose_create_session_fallback: ComposeCreateSessionFallbackFn | None = None,
         compose_update_session_fallback: ComposeUpdateSessionFallbackFn | None = None,
         deploy_session_fallback: DeploySessionFallbackFn | None = None,
+        list_compose_schedules_session_fallback: ListComposeSchedulesSessionFallbackFn | None = None,
+        create_schedule_session_fallback: CreateScheduleSessionFallbackFn | None = None,
+        update_schedule_session_fallback: UpdateScheduleSessionFallbackFn | None = None,
+        delete_schedule_session_fallback: DeleteScheduleSessionFallbackFn | None = None,
     ) -> None:
         self._api_url = api_url.removesuffix("/").removesuffix("/api")
         self._api_key = api_key
@@ -94,6 +102,10 @@ class DokployApiClient:
         self._compose_create_session_fallback = compose_create_session_fallback
         self._compose_update_session_fallback = compose_update_session_fallback
         self._deploy_session_fallback = deploy_session_fallback
+        self._list_compose_schedules_session_fallback = list_compose_schedules_session_fallback
+        self._create_schedule_session_fallback = create_schedule_session_fallback
+        self._update_schedule_session_fallback = update_schedule_session_fallback
+        self._delete_schedule_session_fallback = delete_schedule_session_fallback
 
     def list_projects(self) -> tuple[DokployProjectSummary, ...]:
         try:
@@ -242,10 +254,22 @@ class DokployApiClient:
         )
 
     def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
-        payload = self._request_json("GET", f"/api/schedule.all?composeId={compose_id}")
+        try:
+            payload = self._request_json(
+                "GET",
+                f"/api/schedule.list?id={compose_id}&scheduleType=compose",
+            )
+        except DokployApiError as error:
+            if self._list_compose_schedules_session_fallback is None or not _is_unauthorized_error(
+                error
+            ):
+                raise
+            payload = self._list_compose_schedules_session_fallback(compose_id)
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
         if not isinstance(payload, list):
-            raise DokployApiError("Dokploy schedule.all response must be a list.")
-        return tuple(_parse_schedule_record(item) for item in payload)
+            raise DokployApiError("Dokploy schedule.list response must be a list.")
+        return tuple(_parse_schedule_record(item, "schedule.list") for item in payload)
 
     def create_schedule(
         self,
@@ -259,21 +283,38 @@ class DokployApiClient:
         command: str,
         enabled: bool,
     ) -> DokployScheduleRecord:
-        payload = self._request_json(
-            "POST",
-            "/api/schedule.create",
-            {
-                "name": name,
-                "composeId": compose_id,
-                "serviceName": service_name,
-                "cronExpression": cron_expression,
-                "timezone": timezone,
-                "shellType": shell_type,
-                "command": command,
-                "enabled": enabled,
-            },
-        )
-        return _parse_schedule_record(payload)
+        try:
+            payload = self._request_json(
+                "POST",
+                "/api/schedule.create",
+                {
+                    "name": name,
+                    "composeId": compose_id,
+                    "serviceName": service_name,
+                    "cronExpression": cron_expression,
+                    "timezone": timezone,
+                    "shellType": shell_type,
+                    "command": command,
+                    "scheduleType": "compose",
+                    "enabled": enabled,
+                },
+            )
+        except DokployApiError as error:
+            if self._create_schedule_session_fallback is None or not _is_unauthorized_error(error):
+                raise
+            payload = self._create_schedule_session_fallback(
+                name,
+                compose_id,
+                service_name,
+                cron_expression,
+                timezone,
+                shell_type,
+                command,
+                enabled,
+            )
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
+        return _parse_schedule_record(payload, "schedule.create")
 
     def update_schedule(
         self,
@@ -288,22 +329,54 @@ class DokployApiClient:
         command: str,
         enabled: bool,
     ) -> DokployScheduleRecord:
-        payload = self._request_json(
-            "POST",
-            "/api/schedule.update",
-            {
-                "scheduleId": schedule_id,
-                "name": name,
-                "composeId": compose_id,
-                "serviceName": service_name,
-                "cronExpression": cron_expression,
-                "timezone": timezone,
-                "shellType": shell_type,
-                "command": command,
-                "enabled": enabled,
-            },
-        )
-        return _parse_schedule_record(payload)
+        try:
+            payload = self._request_json(
+                "POST",
+                "/api/schedule.update",
+                {
+                    "scheduleId": schedule_id,
+                    "name": name,
+                    "composeId": compose_id,
+                    "serviceName": service_name,
+                    "cronExpression": cron_expression,
+                    "timezone": timezone,
+                    "shellType": shell_type,
+                    "command": command,
+                    "scheduleType": "compose",
+                    "enabled": enabled,
+                },
+            )
+        except DokployApiError as error:
+            if self._update_schedule_session_fallback is None or not _is_unauthorized_error(error):
+                raise
+            payload = self._update_schedule_session_fallback(
+                schedule_id,
+                name,
+                compose_id,
+                service_name,
+                cron_expression,
+                timezone,
+                shell_type,
+                command,
+                enabled,
+            )
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
+        return _parse_schedule_record(payload, "schedule.update")
+
+    def delete_schedule(self, *, schedule_id: str) -> None:
+        try:
+            payload = self._request_json(
+                "POST", "/api/schedule.delete", {"scheduleId": schedule_id}
+            )
+        except DokployApiError as error:
+            if self._delete_schedule_session_fallback is None or not _is_unauthorized_error(error):
+                raise
+            payload = self._delete_schedule_session_fallback(schedule_id)
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
+        if payload is not True and not isinstance(payload, bool):
+            raise DokployApiError("Dokploy schedule.delete response must be true.")
 
     def _request_json(self, method: str, path: str, payload: Any | None = None) -> Any:
         data = None
@@ -393,12 +466,12 @@ def _parse_compose_record(payload: Any, operation: str) -> DokployComposeRecord:
     )
 
 
-def _parse_schedule_record(payload: Any) -> DokployScheduleRecord:
+def _parse_schedule_record(payload: Any, operation: str) -> DokployScheduleRecord:
     if not isinstance(payload, dict):
-        raise DokployApiError("Dokploy schedule response must be an object.")
+        raise DokployApiError(f"Dokploy {operation} response must be an object.")
     enabled = payload.get("enabled")
     if not isinstance(enabled, bool):
-        raise DokployApiError("Dokploy schedule enabled flag must be a boolean.")
+        raise DokployApiError(f"Dokploy {operation} enabled must be a boolean.")
     return DokployScheduleRecord(
         schedule_id=_require_string(payload, "scheduleId"),
         name=_require_string(payload, "name"),
