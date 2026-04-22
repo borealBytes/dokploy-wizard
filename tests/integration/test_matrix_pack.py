@@ -469,7 +469,7 @@ def test_install_reconciles_matrix_and_persists_runtime_ledger(tmp_path: Path) -
     loaded_state = load_state_dir(state_dir)
 
     assert summary["shared_core"]["outcome"] == "applied"
-    assert summary["headscale"]["outcome"] == "applied"
+    assert summary["headscale"]["outcome"] == "not_run"
     assert summary["matrix"]["outcome"] == "applied"
     assert summary["matrix"]["hostname"] == "matrix.example.com"
     assert summary["matrix"]["service"]["resource_name"] == "matrix-stack-matrix"
@@ -484,7 +484,6 @@ def test_install_reconciles_matrix_and_persists_runtime_ledger(tmp_path: Path) -
         "dokploy_bootstrap",
         "networking",
         "shared_core",
-        "headscale",
         "matrix",
     )
     assert loaded_state.ownership_ledger is not None
@@ -494,12 +493,10 @@ def test_install_reconciles_matrix_and_persists_runtime_ledger(tmp_path: Path) -
     } == {
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
-        ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:matrix.example.com"),
         ("shared_core_network", "stack:matrix-stack:shared-network"),
         ("shared_core_postgres", "stack:matrix-stack:shared-postgres"),
         ("shared_core_redis", "stack:matrix-stack:shared-redis"),
-        ("headscale_service", "stack:matrix-stack:headscale"),
         ("matrix_service", "stack:matrix-stack:matrix-service"),
         ("matrix_data", "stack:matrix-stack:matrix-data"),
     }
@@ -528,6 +525,10 @@ def test_install_reconciles_matrix_via_dokploy_backend(
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.matrix._http_health_check",
         lambda url: url == "https://matrix.example.com/_matrix/client/versions",
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.matrix._docker_container_is_up",
+        lambda service_name: False,
     )
 
     summary = run_install_flow(
@@ -597,13 +598,6 @@ def test_install_rerun_reuses_owned_matrix_resources(tmp_path: Path) -> None:
                     content="matrix-tunnel.cfargotunnel.com",
                     proxied=True,
                 ),
-                "headscale.example.com": CloudflareDnsRecord(
-                    record_id="dns-headscale.example.com",
-                    name="headscale.example.com",
-                    record_type="CNAME",
-                    content="matrix-tunnel.cfargotunnel.com",
-                    proxied=True,
-                ),
                 "matrix.example.com": CloudflareDnsRecord(
                     record_id="dns-matrix.example.com",
                     name="matrix.example.com",
@@ -619,7 +613,7 @@ def test_install_rerun_reuses_owned_matrix_resources(tmp_path: Path) -> None:
     )
 
     assert summary["shared_core"]["outcome"] == "already_present"
-    assert summary["headscale"]["outcome"] == "already_present"
+    assert summary["headscale"]["outcome"] == "not_run"
     assert summary["matrix"]["outcome"] == "already_present"
     assert summary["matrix"]["service"]["action"] == "reuse_owned"
     assert summary["matrix"]["persistent_data"]["action"] == "reuse_owned"

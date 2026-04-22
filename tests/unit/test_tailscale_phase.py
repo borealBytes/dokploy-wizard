@@ -26,6 +26,8 @@ class FakeRunner:
 
     def __call__(self, command: list[str]) -> CommandResult:
         self.commands.append(command)
+        if command[:2] == ["tailscale", "version"]:
+            return CommandResult(returncode=0, stdout="1.78.0\n", stderr="")
         if command[:2] == ["tailscale", "up"]:
             self.up_applied = True
             return CommandResult(returncode=0, stdout="", stderr="")
@@ -179,6 +181,58 @@ def test_shell_tailscale_backend_raises_install_failure_with_stderr() -> None:
 
     with pytest.raises(
         TailscaleError, match="tailscale install command failed: curl: install failed"
+    ):
+        backend.apply(
+            resource_name="wizard-admin",
+            auth_key="tskey-auth-123",
+            enable_ssh=False,
+            tags=(),
+            subnet_routes=(),
+        )
+
+
+def test_shell_tailscale_backend_raises_install_error_when_binary_still_missing() -> None:
+    raw_env = _tailscale_raw_env(TAILSCALE_MOCK_INSTALLED="false")
+
+    def runner(command: list[str]) -> CommandResult:
+        if command[:2] == ["sh", "-c"]:
+            return CommandResult(returncode=0, stdout="", stderr="")
+        if command[:2] == ["tailscale", "version"]:
+            raise FileNotFoundError("tailscale")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    backend = ShellTailscaleBackend(raw_env, runner=runner)
+
+    with pytest.raises(
+        TailscaleError,
+        match=(
+            "tailscale install command reported success but the tailscale binary "
+            "was not found on PATH afterward"
+        ),
+    ):
+        backend.apply(
+            resource_name="wizard-admin",
+            auth_key="tskey-auth-123",
+            enable_ssh=False,
+            tags=(),
+            subnet_routes=(),
+        )
+
+
+def test_shell_tailscale_backend_raises_install_verification_failure_with_stderr() -> None:
+    raw_env = _tailscale_raw_env(TAILSCALE_MOCK_INSTALLED="false")
+
+    def runner(command: list[str]) -> CommandResult:
+        if command[:2] == ["sh", "-c"]:
+            return CommandResult(returncode=0, stdout="", stderr="")
+        if command[:2] == ["tailscale", "version"]:
+            return CommandResult(returncode=1, stdout="", stderr="permission denied")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    backend = ShellTailscaleBackend(raw_env, runner=runner)
+
+    with pytest.raises(
+        TailscaleError, match="tailscale install verification failed: permission denied"
     ):
         backend.apply(
             resource_name="wizard-admin",

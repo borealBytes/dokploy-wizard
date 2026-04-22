@@ -139,6 +139,12 @@ def test_install_runs_tailscale_phase_before_networking(tmp_path: Path) -> None:
 
     loaded = load_state_dir(state_dir)
     assert summary["tailscale"]["outcome"] == "applied"
-    assert summary["lifecycle"]["applicable_phases"][2] == "tailscale"
+    assert summary["lifecycle"]["applicable_phases"] == [
+        "preflight",
+        "dokploy_bootstrap",
+        "networking",
+        "shared_core",
+        "tailscale",
+    ]
     assert loaded.applied_state is not None
     assert "tailscale" in loaded.applied_state.completed_steps

@@ -17,7 +17,12 @@ from dokploy_wizard.tailscale.models import (
 )
 
 TAILSCALE_NODE_RESOURCE_TYPE = "tailscale_node"
-TAILSCALE_INSTALL_COMMAND = "curl -fsSL https://tailscale.com/install.sh | sh"
+TAILSCALE_INSTALL_COMMAND = (
+    "tmp=\"$(mktemp)\" && "
+    "trap 'rm -f \"$tmp\"' EXIT && "
+    'curl -fsSL https://tailscale.com/install.sh -o "$tmp" && '
+    'sh "$tmp"'
+)
 
 
 class TailscaleError(RuntimeError):
@@ -178,6 +183,19 @@ class ShellTailscaleBackend:
         if result.returncode != 0:
             stderr = result.stderr.strip()
             msg = "tailscale install command failed"
+            if stderr:
+                msg = f"{msg}: {stderr}"
+            raise TailscaleError(msg)
+        try:
+            verification = self._runner(["tailscale", "version"])
+        except FileNotFoundError as error:
+            raise TailscaleError(
+                "tailscale install command reported success but the tailscale binary "
+                "was not found on PATH afterward."
+            ) from error
+        if verification.returncode != 0:
+            stderr = verification.stderr.strip()
+            msg = "tailscale install verification failed"
             if stderr:
                 msg = f"{msg}: {stderr}"
             raise TailscaleError(msg)

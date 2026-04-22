@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.cookiejar
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,9 @@ AUTH_SIGN_IN_PATHS = ("/api/auth/sign-in/email", "/api/auth/sign-in")
 AUTH_SIGN_UP_PATHS = ("/api/auth/sign-up/email", "/api/auth/sign-up")
 AUTH_SESSION_PATHS = ("/api/user.session", "/api/auth/get-session")
 API_KEY_CREATE_PATH = "/api/user.createApiKey"
+_RATE_LIMIT_RETRYABLE_PATHS = {*AUTH_SIGN_IN_PATHS, *AUTH_SIGN_UP_PATHS}
+_RATE_LIMIT_RETRY_ATTEMPTS = 4
+_RATE_LIMIT_RETRY_DELAY_SECONDS = 5.0
 
 RequestFn = Callable[[request.Request, http.cookiejar.CookieJar], Any]
 
@@ -346,42 +350,50 @@ class DokployBootstrapAuthClient:
         )
 
     def _request_json(self, method: str, path: str, payload: Any | None) -> Any:
-        data = None if payload is None else json.dumps(payload).encode("utf-8")
-        headers = {"Accept": "application/json"}
-        if payload is not None:
-            headers["Content-Type"] = "application/json"
-        req = request.Request(
-            url=f"{self._base_url}{path}",
-            method=method,
-            headers=headers,
-            data=data,
+        attempts = _RATE_LIMIT_RETRY_ATTEMPTS if path in _RATE_LIMIT_RETRYABLE_PATHS else 1
+        for attempt in range(1, attempts + 1):
+            data = None if payload is None else json.dumps(payload).encode("utf-8")
+            headers = {"Accept": "application/json"}
+            if payload is not None:
+                headers["Content-Type"] = "application/json"
+            req = request.Request(
+                url=f"{self._base_url}{path}",
+                method=method,
+                headers=headers,
+                data=data,
+            )
+            try:
+                response = self._request_fn(req, self._cookiejar)
+            except error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                if exc.code in {404, 405}:
+                    raise DokployBootstrapAuthError(f"endpoint-unavailable:{path}") from exc
+                if exc.code == 429 and attempt < attempts:
+                    time.sleep(_RATE_LIMIT_RETRY_DELAY_SECONDS)
+                    continue
+                raise DokployBootstrapAuthError(
+                    f"Dokploy auth request to {path} failed with status {exc.code}: "
+                    f"{body or exc.reason}."
+                ) from exc
+            except error.URLError as exc:
+                raise DokployBootstrapAuthError(
+                    f"Dokploy auth request to {path} failed: {exc.reason}."
+                ) from exc
+            if isinstance(response, list):
+                return response
+            if not isinstance(response, dict):
+                raise DokployBootstrapAuthError(
+                    f"Dokploy auth response from {path} must decode to a JSON object."
+                )
+            data_payload = response.get("data", response)
+            if not isinstance(data_payload, (dict, list)):
+                raise DokployBootstrapAuthError(
+                    f"Dokploy auth response from {path} must decode to a JSON object."
+                )
+            return data_payload
+        raise DokployBootstrapAuthError(
+            f"Dokploy auth request to {path} exhausted rate-limit retries without a response."
         )
-        try:
-            response = self._request_fn(req, self._cookiejar)
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            if exc.code in {404, 405}:
-                raise DokployBootstrapAuthError(f"endpoint-unavailable:{path}") from exc
-            raise DokployBootstrapAuthError(
-                f"Dokploy auth request to {path} failed with status {exc.code}: "
-                f"{body or exc.reason}."
-            ) from exc
-        except error.URLError as exc:
-            raise DokployBootstrapAuthError(
-                f"Dokploy auth request to {path} failed: {exc.reason}."
-            ) from exc
-        if isinstance(response, list):
-            return response
-        if not isinstance(response, dict):
-            raise DokployBootstrapAuthError(
-                f"Dokploy auth response from {path} must decode to a JSON object."
-            )
-        data_payload = response.get("data", response)
-        if not isinstance(data_payload, (dict, list)):
-            raise DokployBootstrapAuthError(
-                f"Dokploy auth response from {path} must decode to a JSON object."
-            )
-        return data_payload
 
 
 def _default_request(req: request.Request, jar: http.cookiejar.CookieJar) -> Any:

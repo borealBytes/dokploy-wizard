@@ -61,6 +61,18 @@ class DokployDeployResult:
     message: str | None
 
 
+@dataclass(frozen=True)
+class DokployScheduleRecord:
+    schedule_id: str
+    name: str
+    service_name: str
+    cron_expression: str
+    timezone: str
+    shell_type: str
+    command: str
+    enabled: bool
+
+
 class DokployApiClient:
     def __init__(
         self,
@@ -229,6 +241,70 @@ class DokployApiClient:
             message=message,
         )
 
+    def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
+        payload = self._request_json("GET", f"/api/schedule.all?composeId={compose_id}")
+        if not isinstance(payload, list):
+            raise DokployApiError("Dokploy schedule.all response must be a list.")
+        return tuple(_parse_schedule_record(item) for item in payload)
+
+    def create_schedule(
+        self,
+        *,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        payload = self._request_json(
+            "POST",
+            "/api/schedule.create",
+            {
+                "name": name,
+                "composeId": compose_id,
+                "serviceName": service_name,
+                "cronExpression": cron_expression,
+                "timezone": timezone,
+                "shellType": shell_type,
+                "command": command,
+                "enabled": enabled,
+            },
+        )
+        return _parse_schedule_record(payload)
+
+    def update_schedule(
+        self,
+        *,
+        schedule_id: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        payload = self._request_json(
+            "POST",
+            "/api/schedule.update",
+            {
+                "scheduleId": schedule_id,
+                "name": name,
+                "composeId": compose_id,
+                "serviceName": service_name,
+                "cronExpression": cron_expression,
+                "timezone": timezone,
+                "shellType": shell_type,
+                "command": command,
+                "enabled": enabled,
+            },
+        )
+        return _parse_schedule_record(payload)
+
     def _request_json(self, method: str, path: str, payload: Any | None = None) -> Any:
         data = None
         headers = {
@@ -314,6 +390,24 @@ def _parse_compose_record(payload: Any, operation: str) -> DokployComposeRecord:
     return DokployComposeRecord(
         compose_id=_require_string(payload, "composeId"),
         name=_require_string(payload, "name"),
+    )
+
+
+def _parse_schedule_record(payload: Any) -> DokployScheduleRecord:
+    if not isinstance(payload, dict):
+        raise DokployApiError("Dokploy schedule response must be an object.")
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        raise DokployApiError("Dokploy schedule enabled flag must be a boolean.")
+    return DokployScheduleRecord(
+        schedule_id=_require_string(payload, "scheduleId"),
+        name=_require_string(payload, "name"),
+        service_name=_require_string(payload, "serviceName"),
+        cron_expression=_require_string(payload, "cronExpression"),
+        timezone=_require_string(payload, "timezone"),
+        shell_type=_require_string(payload, "shellType"),
+        command=_require_string(payload, "command"),
+        enabled=enabled,
     )
 
 
