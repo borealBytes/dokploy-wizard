@@ -19,6 +19,7 @@ from dokploy_wizard.dokploy import (
     DokployNextcloudBackend,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.client import DokployScheduleRecord
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,
     CloudflareAccessIdentityProvider,
@@ -385,10 +386,14 @@ class FakeNextcloudBackend:
     def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
         del nextcloud_url, onlyoffice_url
 
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        del admin_user
+
 
 @dataclass
 class FakeDokployApiClient:
     projects: list[DokployProjectSummary] = field(default_factory=list)
+    schedules: list[DokployScheduleRecord] = field(default_factory=list)
     create_project_calls: int = 0
     create_compose_calls: int = 0
     deploy_calls: int = 0
@@ -453,6 +458,63 @@ class FakeDokployApiClient:
         del title, description
         self.deploy_calls += 1
         return DokployDeployResult(success=True, compose_id=compose_id, message="queued")
+
+    def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
+        del compose_id
+        return tuple(self.schedules)
+
+    def create_schedule(
+        self,
+        *,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        del compose_id
+        record = DokployScheduleRecord(
+            schedule_id="sch-1",
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+        self.schedules = [record]
+        return record
+
+    def update_schedule(
+        self,
+        *,
+        schedule_id: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        del compose_id
+        record = DokployScheduleRecord(
+            schedule_id=schedule_id,
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+        self.schedules = [record]
+        return record
 
 
 def _owned_dns_records() -> dict[str, CloudflareDnsRecord]:

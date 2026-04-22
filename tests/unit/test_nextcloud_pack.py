@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import ssl
 from dataclasses import dataclass, field
+from typing import Any
 from urllib import request
 
 import pytest
 
+import dokploy_wizard.dokploy.nextcloud as nextcloud_module
+from dokploy_wizard.cli import _build_nextcloud_backend
 from dokploy_wizard.core.models import SharedCorePlan
 from dokploy_wizard.dokploy import (
     DokployComposeRecord,
@@ -18,11 +21,14 @@ from dokploy_wizard.dokploy import (
     DokployNextcloudBackend,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.client import DokployScheduleRecord
+from dokploy_wizard.dokploy.client import DokployApiError
 from dokploy_wizard.dokploy.nextcloud import (
     _ensure_trusted_domain,
     _ensure_onlyoffice_app_config,
     _local_https_health_check,
     _nextcloud_status_ready,
+    _www_data_occ_shell,
     _with_trailing_slash,
 )
 from dokploy_wizard.packs.nextcloud import (
@@ -35,6 +41,7 @@ from dokploy_wizard.packs.nextcloud import (
     build_nextcloud_ledger,
     reconcile_nextcloud,
 )
+from dokploy_wizard.packs.nextcloud.models import NextcloudOpenClawWorkspaceContract
 from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
 
 
@@ -116,10 +123,15 @@ class FakeNextcloudBackend:
     def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
         del nextcloud_url, onlyoffice_url
 
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        del admin_user
+
 
 @dataclass
 class FakeDokployApiClient:
     projects: list[DokployProjectSummary] = field(default_factory=list)
+    schedules: list[DokployScheduleRecord] = field(default_factory=list)
+    schedule_auth_error: str | None = None
     create_project_calls: int = 0
     create_compose_calls: int = 0
     update_compose_calls: int = 0
@@ -189,6 +201,69 @@ class FakeDokployApiClient:
         del title, description
         self.deploy_calls += 1
         return DokployDeployResult(success=True, compose_id=compose_id, message="queued")
+
+    def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
+        del compose_id
+        if self.schedule_auth_error is not None:
+            raise DokployApiError(self.schedule_auth_error)
+        return tuple(self.schedules)
+
+    def create_schedule(
+        self,
+        *,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        del compose_id
+        if self.schedule_auth_error is not None:
+            raise DokployApiError(self.schedule_auth_error)
+        record = DokployScheduleRecord(
+            schedule_id="sch-1",
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+        self.schedules = [record]
+        return record
+
+    def update_schedule(
+        self,
+        *,
+        schedule_id: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        del compose_id
+        if self.schedule_auth_error is not None:
+            raise DokployApiError(self.schedule_auth_error)
+        record = DokployScheduleRecord(
+            schedule_id=schedule_id,
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+        self.schedules = [record]
+        return record
 
 
 def test_reconcile_nextcloud_plans_paired_runtime_when_enabled() -> None:
@@ -632,6 +707,389 @@ def test_dokploy_nextcloud_backend_creates_one_compose_for_pair() -> None:
     assert 'traefik.http.services.wizard-stack-onlyoffice.loadbalancer.server.port: "80"' in compose
 
 
+def test_dokploy_nextcloud_backend_mounts_openclaw_volume_when_enabled() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient()
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+
+    compose = client.last_create_compose_file
+    assert compose is not None
+    assert "wizard-stack-openclaw-data:/mnt/openclaw" in compose
+    assert "  wizard-stack-openclaw-data:" in compose
+    assert "    name: wizard-stack-openclaw-data" in compose
+
+
+def test_dokploy_nextcloud_backend_marks_nexa_workspace_as_operator_surface() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient()
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        openclaw_workspace_contract=NextcloudOpenClawWorkspaceContract(
+            enabled=True,
+            external_mount_name="/OpenClaw",
+            external_mount_path="/mnt/openclaw",
+            visible_root="/mnt/openclaw/workspace/nexa",
+            contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+            runtime_state_source="server-owned env + durable state JSON",
+            notes=("Nextcloud exposes the Nexa workspace as an operator/user surface only.",),
+        ),
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+
+    compose = client.last_create_compose_file
+    assert compose is not None
+    assert "wizard-stack-openclaw-data:/mnt/openclaw" in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface" in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: /mnt/openclaw/workspace/nexa" in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: /mnt/openclaw/workspace/nexa/contract.json" in compose
+    assert (
+        "DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: server-owned env + durable state JSON"
+        in compose
+    )
+
+
+def test_build_nextcloud_backend_passes_nexa_service_account_inputs() -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_API_KEY": "dokp-key-123",
+            "ENABLE_NEXTCLOUD": "true",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
+            "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD": "fallback-secret",
+            "OPENCLAW_NEXA_AGENT_EMAIL": "nexa@example.com",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    backend = _build_nextcloud_backend(raw_env=raw_env, desired_state=desired_state)
+
+    assert isinstance(backend, DokployNextcloudBackend)
+    assert backend._nexa_agent_user_id == "nexa-agent"
+    assert backend._nexa_agent_display_name == "Nexa"
+    assert backend._nexa_agent_password == "fallback-secret"
+    assert backend._nexa_agent_email == "nexa@example.com"
+
+
+def test_build_nextcloud_backend_prefers_explicit_nexa_agent_password() -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_API_KEY": "dokp-key-123",
+            "ENABLE_NEXTCLOUD": "true",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
+            "OPENCLAW_NEXA_AGENT_PASSWORD": "agent-secret",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD": "fallback-secret",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    backend = _build_nextcloud_backend(raw_env=raw_env, desired_state=desired_state)
+
+    assert isinstance(backend, DokployNextcloudBackend)
+    assert backend._nexa_agent_password == "agent-secret"
+
+
+def test_dokploy_nextcloud_backend_creates_openclaw_rescan_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient()
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        admin_user="clayton@example.com",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+    monkeypatch.setattr(nextcloud_module, "_find_container_name", lambda service_name: "nextcloud-container")
+    monkeypatch.setattr(nextcloud_module, "_ensure_files_external_app", lambda container_name: None)
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_openclaw_external_storage",
+        lambda container_name, *, admin_user: None,
+    )
+
+    backend.refresh_openclaw_external_storage(admin_user="clayton@example.com")
+
+    assert client.schedules == [
+        DokployScheduleRecord(
+            schedule_id="sch-1",
+            name="wizard-stack-openclaw-rescan",
+            service_name="wizard-stack-nextcloud",
+            cron_expression="*/15 * * * *",
+            timezone="UTC",
+            shell_type="bash",
+            command='php /var/www/html/occ files:scan --path="clayton@example.com/files/OpenClaw"',
+            enabled=True,
+        )
+    ]
+
+
+def test_dokploy_nextcloud_backend_tolerates_openclaw_rescan_schedule_auth_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient(schedule_auth_error="Dokploy API request failed with status 401: Unauthorized.")
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        admin_user="clayton@example.com",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+    monkeypatch.setattr(nextcloud_module, "_find_container_name", lambda service_name: "nextcloud-container")
+    monkeypatch.setattr(nextcloud_module, "_ensure_files_external_app", lambda container_name: None)
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_openclaw_external_storage",
+        lambda container_name, *, admin_user: None,
+    )
+
+    backend.refresh_openclaw_external_storage(admin_user="clayton@example.com")
+
+    assert client.schedules == []
+
+
+def test_dokploy_nextcloud_backend_still_fails_on_non_auth_schedule_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient(schedule_auth_error="Dokploy API request failed with status 500: Internal Server Error.")
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        admin_user="clayton@example.com",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+    monkeypatch.setattr(nextcloud_module, "_find_container_name", lambda service_name: "nextcloud-container")
+    monkeypatch.setattr(nextcloud_module, "_ensure_files_external_app", lambda container_name: None)
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_openclaw_external_storage",
+        lambda container_name, *, admin_user: None,
+    )
+
+    with pytest.raises(DokployApiError, match="500"):
+        backend.refresh_openclaw_external_storage(admin_user="clayton@example.com")
+
+
 def test_dokploy_nextcloud_backend_updates_existing_compose_to_keep_onlyoffice_route_managed() -> (
     None
 ):
@@ -808,6 +1266,81 @@ def test_with_trailing_slash_adds_missing_separator() -> None:
     assert (
         _with_trailing_slash("http://wizard-stack-onlyoffice/") == "http://wizard-stack-onlyoffice/"
     )
+
+
+def test_www_data_occ_shell_uses_deterministic_php_binary_with_narrow_fallback() -> None:
+    command = _www_data_occ_shell(
+        "nextcloud-container",
+        "php occ user:info 'clayton@example.com'",
+    )
+
+    assert command[:8] == [
+        "docker",
+        "exec",
+        "nextcloud-container",
+        "su",
+        "-s",
+        "/bin/sh",
+        "www-data",
+        "-c",
+    ]
+    shell_command = command[8]
+    assert shell_command.startswith("cd /var/www/html && ")
+    assert 'PHP_BIN=/usr/local/bin/php; ' in shell_command
+    assert 'if [ ! -x "$PHP_BIN" ] && [ -x /usr/bin/php ]; then PHP_BIN=/usr/bin/php; fi; ' in shell_command
+    assert 'echo "php not found at /usr/local/bin/php or /usr/bin/php" >&2; exit 127; ' in shell_command
+    assert shell_command.endswith('"$PHP_BIN" occ user:info \'clayton@example.com\'')
+
+
+def test_ensure_nexa_service_account_creates_user_and_updates_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_run(*args: object, **kwargs: object) -> Any:
+        del args, kwargs
+        return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "user not found"})()
+
+    monkeypatch.setattr(nextcloud_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(nextcloud_module, "_run_occ_shell", lambda container_name, shell_command: commands.append(shell_command))
+
+    nextcloud_module._ensure_nexa_service_account(
+        "nextcloud-container",
+        user_id="nexa-agent",
+        password="nexa-secret",
+        display_name="Nexa",
+        email="nexa@example.com",
+    )
+
+    assert "php occ user:add --password-from-env --display-name=Nexa nexa-agent" in commands[0]
+    assert commands[1] == "php occ user:setting nexa-agent settings display_name Nexa"
+    assert commands[2] == "php occ user:setting nexa-agent settings email nexa@example.com"
+    assert commands[3] == "php occ user:profile nexa-agent profile_enabled 1"
+
+
+def test_ensure_nexa_service_account_updates_existing_user_without_recreate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_run(*args: object, **kwargs: object) -> Any:
+        del args, kwargs
+        return type("Result", (), {"returncode": 0, "stdout": "uid: nexa-agent", "stderr": ""})()
+
+    monkeypatch.setattr(nextcloud_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(nextcloud_module, "_run_occ_shell", lambda container_name, shell_command: commands.append(shell_command))
+
+    nextcloud_module._ensure_nexa_service_account(
+        "nextcloud-container",
+        user_id="nexa-agent",
+        password="nexa-secret",
+        display_name="Nexa",
+        email=None,
+    )
+
+    assert len(commands) == 2
+    assert commands[0] == "php occ user:setting nexa-agent settings display_name Nexa"
+    assert commands[1] == "php occ user:profile nexa-agent profile_enabled 1"
 
 
 def test_ensure_trusted_domain_adds_internal_service_hostname(

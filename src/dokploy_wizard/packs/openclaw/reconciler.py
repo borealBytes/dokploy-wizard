@@ -1,10 +1,10 @@
-"""Advisor runtime reconciliation and ledger integration."""
+"""OpenClaw/My Farm runtime reconciliation and ledger integration."""
 
 from __future__ import annotations
 
 import http.client
 from pathlib import Path
-from typing import Protocol
+from typing import Mapping, Protocol
 from urllib.parse import urlsplit
 
 from dokploy_wizard.packs.openclaw.models import (
@@ -17,6 +17,9 @@ from dokploy_wizard.packs.openclaw.models import (
 from dokploy_wizard.state.models import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput
 
 OPENCLAW_SERVICE_RESOURCE_TYPE = "openclaw_service"
+OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE = "openclaw_mem0_service"
+OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE = "openclaw_qdrant_service"
+OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE = "openclaw_runtime_service"
 MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE = "my_farm_advisor_service"
 _PACK_NAMES = ("openclaw", "my-farm-advisor")
 _RESOURCE_TYPES = {
@@ -31,7 +34,7 @@ _TEMPLATE_PATHS = {
 
 def _migration_required_collision_message(*, pack_name: str, service_name: str) -> str:
     return (
-        f"Advisor service name collision detected for '{service_name}'. "
+        f"Service name collision detected for '{service_name}'. "
         "Refusing to adopt an unowned existing runtime resource. "
         f"Manual {pack_name} state requires migration into wizard-managed ownership "
         "before install, rerun, or modify can continue."
@@ -39,7 +42,7 @@ def _migration_required_collision_message(*, pack_name: str, service_name: str) 
 
 
 class OpenClawError(RuntimeError):
-    """Raised when advisor runtime reconciliation fails or detects drift."""
+    """Raised when OpenClaw/My Farm runtime reconciliation fails or detects drift."""
 
 
 class OpenClawBackend(Protocol):
@@ -76,7 +79,7 @@ class OpenClawBackend(Protocol):
 
 
 class ShellOpenClawBackend:
-    """Deterministic default backend for advisor planning and health checks."""
+    """Deterministic default backend for OpenClaw/My Farm planning and health checks."""
 
     def __init__(self, raw_env: RawEnvInput) -> None:
         values = raw_env.values
@@ -220,7 +223,7 @@ def _reconcile_advisor_pack(
     hostname = desired_state.hostnames.get(pack_name)
     if hostname is None:
         raise OpenClawError(
-            f"Desired state is missing the canonical advisor hostname at hostnames['{pack_name}']."
+            f"Desired state is missing the canonical hostname at hostnames['{pack_name}']."
         )
 
     template_path = _resolve_template_path(pack_name)
@@ -303,12 +306,44 @@ def build_openclaw_ledger(
     existing_ledger: OwnershipLedger,
     stack_name: str,
     service_resource_id: str | None,
+    nexa_sidecars_enabled: bool,
 ) -> OwnershipLedger:
-    return _build_advisor_ledger(
+    ledger = _build_advisor_ledger(
         existing_ledger=existing_ledger,
         stack_name=stack_name,
         pack_name="openclaw",
         service_resource_id=service_resource_id,
+    )
+    resources = list(ledger.resources)
+    sidecars = (
+        (OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE, _nexa_sidecar_scope(stack_name, "mem0")),
+        (OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE, _nexa_sidecar_scope(stack_name, "qdrant")),
+        (OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE, _nexa_sidecar_scope(stack_name, "nexa-runtime")),
+    )
+    for resource_type, scope in sidecars:
+        resources = [
+            resource
+            for resource in resources
+            if not (resource.resource_type == resource_type and resource.scope == scope)
+        ]
+        if nexa_sidecars_enabled:
+            resources.append(
+                OwnedResource(
+                    resource_type=resource_type,
+                    resource_id=scope,
+                    scope=scope,
+                )
+            )
+    return OwnershipLedger(
+        format_version=ledger.format_version,
+        resources=tuple(resources),
+    )
+
+
+def openclaw_nexa_sidecars_enabled(values: Mapping[str, str]) -> bool:
+    return any(
+        key.startswith("OPENCLAW_NEXA_") and value.strip() != ""
+        for key, value in values.items()
     )
 
 
@@ -501,14 +536,12 @@ def _find_owned_resource(
     ]
     if len(matches) > 1:
         scope = _service_scope(stack_name, pack_name)
-        raise OpenClawError(
-            f"Ownership ledger contains multiple advisor services for scope '{scope}'."
-        )
+        raise OpenClawError(f"Ownership ledger contains multiple services for scope '{scope}'.")
     return matches[0] if matches else None
 
 
 def _service_name(stack_name: str, pack_name: str) -> str:
-    suffix = "advisor" if pack_name == "openclaw" else "my-farm-advisor"
+    suffix = "openclaw" if pack_name == "openclaw" else "my-farm-advisor"
     return f"{stack_name}-{suffix}"
 
 
@@ -516,11 +549,15 @@ def _service_scope(stack_name: str, pack_name: str) -> str:
     return f"stack:{stack_name}:{pack_name}"
 
 
+def _nexa_sidecar_scope(stack_name: str, service_name: str) -> str:
+    return f"stack:{stack_name}:openclaw-sidecar:{service_name}"
+
+
 def _resource_type_for_pack(pack_name: str) -> str:
     try:
         return _RESOURCE_TYPES[pack_name]
     except KeyError as error:
-        raise OpenClawError(f"Unsupported advisor pack '{pack_name}'.") from error
+        raise OpenClawError(f"Unsupported pack '{pack_name}'.") from error
 
 
 def _channels_for_pack(desired_state: DesiredState, pack_name: str) -> tuple[str, ...]:
@@ -528,7 +565,7 @@ def _channels_for_pack(desired_state: DesiredState, pack_name: str) -> tuple[str
         return desired_state.openclaw_channels
     if pack_name == "my-farm-advisor":
         return desired_state.my_farm_advisor_channels
-    raise OpenClawError(f"Unsupported advisor pack '{pack_name}'.")
+    raise OpenClawError(f"Unsupported pack '{pack_name}'.")
 
 
 def _replicas_for_pack(desired_state: DesiredState, pack_name: str) -> int | None:
@@ -536,7 +573,7 @@ def _replicas_for_pack(desired_state: DesiredState, pack_name: str) -> int | Non
         return desired_state.openclaw_replicas
     if pack_name == "my-farm-advisor":
         return desired_state.my_farm_advisor_replicas
-    raise OpenClawError(f"Unsupported advisor pack '{pack_name}'.")
+    raise OpenClawError(f"Unsupported pack '{pack_name}'.")
 
 
 def _health_path_for_pack(pack_name: str) -> str:
@@ -544,7 +581,7 @@ def _health_path_for_pack(pack_name: str) -> str:
         return "/healthz"
     if pack_name == "openclaw":
         return "/health"
-    raise OpenClawError(f"Unsupported advisor pack '{pack_name}'.")
+    raise OpenClawError(f"Unsupported pack '{pack_name}'.")
 
 
 def _optional_bool(values: dict[str, str], key: str) -> bool | None:
