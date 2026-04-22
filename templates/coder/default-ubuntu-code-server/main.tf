@@ -50,12 +50,21 @@ resource "coder_agent" "main" {
     $_SUDO apt-get update -q
     $_SUDO apt-get install -y curl git ca-certificates wget btop
 
-    # OpenCode — skip if already installed
+    # OpenCode, skip if already installed
     if ! command -v opencode >/dev/null 2>&1; then
-      OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
+      if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then
+        if [ ! -x /home/coder/.opencode/bin/opencode ]; then
+          echo "OpenCode installer did not produce a usable binary" >&2
+          exit 1
+        fi
+      fi
     fi
 
-    # Zellij — skip if already installed
+    if [ -x /home/coder/.opencode/bin/opencode ]; then
+      $_SUDO ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode
+    fi
+
+    # Zellij, skip if already installed
     if ! command -v zellij >/dev/null 2>&1; then
       ARCH=$(uname -m)
       ZELLIJ_URL="https://github.com/zellij-org/zellij/releases/latest/download/zellij-$${ARCH}-unknown-linux-musl.tar.gz"
