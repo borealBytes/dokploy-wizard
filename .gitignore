@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+
 .Python
 .coverage
 .coverage.*
@@ -21,11 +22,16 @@ build/
 dist/
 *.egg-info/
 
+.install.env
 .env
 .env.*
 
+.playwright/
+.playwright-mcp/
+.gstack/
 .dokploy-wizard-state/
 .sisyphus/
 
 .idea/
 .vscode/
+ 
