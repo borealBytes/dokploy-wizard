@@ -30,6 +30,7 @@ from dokploy_wizard.networking import (
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.nextcloud import NextcloudError, NextcloudResourceRecord
 from dokploy_wizard.state import RawEnvInput, load_state_dir, resolve_desired_state
+from dokploy_wizard.packs.nextcloud.models import NextcloudBundleVerification, NextcloudCommandCheck, TalkRuntime
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -383,8 +384,36 @@ class FakeNextcloudBackend:
         del url
         return self.health.get(service.resource_name, True)
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification:
         del nextcloud_url, onlyoffice_url
+        return NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        )
 
     def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
         del admin_user
@@ -642,6 +671,55 @@ def test_install_reconciles_nextcloud_pair_via_dokploy_backend(
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.nextcloud._local_https_health_check",
         lambda url: url == "https://office.example.com/healthcheck",
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._find_container_name",
+        lambda service_name: "nextcloud-container",
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_admin_user",
+        lambda container_name, admin_user, admin_password: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_nexa_service_account",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_trusted_domain",
+        lambda container_name, hostname: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_onlyoffice_app_config",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._verify_nextcloud_bundle",
+        lambda container_name: NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        ),
     )
 
     summary = run_install_flow(
