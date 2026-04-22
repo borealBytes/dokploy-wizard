@@ -367,6 +367,9 @@ class FakeNextcloudBackend:
     def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
         del nextcloud_url, onlyoffice_url
 
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        del admin_user
+
 
 @dataclass
 class FakeOpenClawBackend:
@@ -573,8 +576,8 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
         "preflight",
         "dokploy_bootstrap",
         "networking",
-        "cloudflare_access",
         "shared_core",
+        "openclaw",
     )
     assert loaded_state.ownership_ledger is not None
     assert {resource.resource_type for resource in loaded_state.ownership_ledger.resources} >= {

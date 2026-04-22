@@ -44,7 +44,7 @@ def test_env_driven_selection_flow_resolves_requested_and_expanded_packs(
     payload = json.loads(result.stdout)
     desired_state = payload["desired_state"]
     assert desired_state["selected_packs"] == ["openclaw"]
-    assert desired_state["enabled_packs"] == ["headscale", "openclaw"]
+    assert desired_state["enabled_packs"] == ["openclaw"]
     assert desired_state["hostnames"]["openclaw"] == "openclaw.example.com"
     assert desired_state["openclaw_channels"] == ["telegram"]
     assert payload["preflight"]["required_profile"]["name"] == "Recommended"
@@ -63,11 +63,7 @@ def test_both_advisor_packs_can_be_selected_together(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     desired_state = payload["desired_state"]
-    assert desired_state["enabled_packs"] == [
-        "headscale",
-        "my-farm-advisor",
-        "openclaw",
-    ]
+    assert desired_state["enabled_packs"] == ["headscale", "my-farm-advisor", "openclaw"]
 
 
 def test_guided_install_branch_reuses_pack_selection_prompt(
@@ -93,7 +89,7 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
             stack_name="selection-stack",
             root_domain="example.com",
             dokploy_subdomain="dokploy",
-            dokploy_admin_email="admin@example.com",
+            dokploy_admin_email="clayton@superiorbyteworks.com",
             dokploy_admin_password=None,
             enable_headscale=True,
             cloudflare_api_token="token-123",
@@ -136,7 +132,7 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
     raw_env = captured["raw_env"]
     assert isinstance(raw_env, RawEnvInput)
     assert raw_env.values["DOKPLOY_SUBDOMAIN"] == "dokploy"
-    assert raw_env.values["DOKPLOY_ADMIN_EMAIL"] == "admin@example.com"
+    assert raw_env.values["DOKPLOY_ADMIN_EMAIL"] == "clayton@superiorbyteworks.com"
     assert raw_env.values["ENABLE_HEADSCALE"] == "true"
     assert "CLOUDFLARE_ZONE_ID" not in raw_env.values
     assert raw_env.values["PACKS"] == "openclaw"

@@ -102,7 +102,7 @@ class ShellDokployBootstrapBackend:
             route_file.write_text(desired_route, encoding="utf-8")
         admin_email = values.get("DOKPLOY_ADMIN_EMAIL")
         admin_password = values.get("DOKPLOY_ADMIN_PASSWORD")
-        if not route_changed or not admin_email or not admin_password:
+        if not admin_email or not admin_password:
             return
         try:
             DokployBootstrapAuthClient(base_url=LOCAL_HEALTH_URL).assign_domain_server(
