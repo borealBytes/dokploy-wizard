@@ -16,12 +16,16 @@ from dokploy_wizard.dokploy import (
     DokployBootstrapAuthResult,
     DokployComposeRecord,
     DokployComposeSummary,
+    DokployDocuSealBackend,
     DokployDeployResult,
     DokployEnvironmentSummary,
+    DokployMoodleBackend,
     DokployProjectSummary,
 )
 from dokploy_wizard.lifecycle import LifecyclePlan, applicable_phases_for, classify_install_request
 from dokploy_wizard.lifecycle.drift import DriftEntry, DriftReport, LifecycleDriftError
+from dokploy_wizard.packs.docuseal import ShellDocuSealBackend
+from dokploy_wizard.packs.moodle import ShellMoodleBackend
 from dokploy_wizard.packs import prompts as prompt_module
 from dokploy_wizard.packs.prompts import (
     GuidedInstallValues,
@@ -122,11 +126,36 @@ def test_handle_inspect_state_includes_live_drift_and_persists_snapshot(
             "unknown_unmanaged": 0,
         },
     }
+    expected_app_status = {
+        "moodle": {
+            "enabled": True,
+            "hostname": "moodle.example.com",
+            "shared_postgres_allocation_present": True,
+            "health_check": {"passed": None, "url": "https://moodle.example.com/login/index.php"},
+            "bootstrap_readiness_notes": ["Moodle bootstrap remains backend-managed."],
+        },
+        "docuseal": {
+            "enabled": True,
+            "hostname": "docuseal.example.com",
+            "shared_postgres_allocation_present": True,
+            "bootstrap_state": {
+                "initialized": None,
+                "secret_key_base_secret_ref": "wizard-stack-docuseal-secret-key-base",
+            },
+            "health_state": {
+                "passed": None,
+                "path": "/up",
+                "url": "https://docuseal.example.com/up",
+            },
+            "bootstrap_readiness_notes": ["DocuSeal bootstrap remains backend-managed."],
+        },
+    }
     monkeypatch.setattr(
         cli,
         "build_live_drift_report",
         lambda **_: expected_live_drift,
     )
+    monkeypatch.setattr(cli, "_build_app_inspection_status", lambda **_: expected_app_status)
 
     assert (
         cli._handle_inspect_state(
@@ -141,10 +170,86 @@ def test_handle_inspect_state_includes_live_drift_and_persists_snapshot(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["live_drift"] == expected_live_drift
+    assert payload["app_status"] == expected_app_status
     assert json.loads((state_dir / "desired-state.json").read_text(encoding="utf-8")) == payload
     assert (state_dir / "raw-input.json").exists()
     assert not (state_dir / "applied-state.json").exists()
     assert not (state_dir / "ownership-ledger.json").exists()
+
+
+def test_inspect_state_output_includes_moodle_and_docuseal_app_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / "moodle-docuseal.env"
+    env_file.write_text(
+        (FIXTURES_DIR / "moodle-docuseal.env").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cli,
+        "build_live_drift_report",
+        lambda **_: {
+            "detected": False,
+            "entries": [],
+            "inspection": {
+                "docker": {"available": True, "detail": "docker inspected"},
+                "host_routes": {"available": True, "detail": "routes inspected"},
+            },
+            "status": "clean",
+            "summary": {
+                "wizard_managed": 0,
+                "manual_collision": 0,
+                "host_local_route": 0,
+                "unknown_unmanaged": 0,
+            },
+        },
+    )
+
+    assert (
+        cli._handle_inspect_state(
+            argparse.Namespace(
+                env_file=env_file,
+                state_dir=tmp_path / "state",
+                dry_run=True,
+            )
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["app_status"]["moodle"] == {
+        "enabled": True,
+        "hostname": "moodle.example.com",
+        "shared_postgres_allocation_present": True,
+        "health_check": {
+            "passed": None,
+            "url": "https://moodle.example.com/login/index.php",
+        },
+        "bootstrap_readiness_notes": [
+            "Moodle service 'moodle-docuseal-stack-moodle' will be exposed at 'moodle.example.com'.",
+            "Moodle will reuse shared-core postgres database 'moodle_docuseal_stack_moodle'.",
+            "Moodle success in non-dry-run mode is gated on backend readiness hooks and the login endpoint health check.",
+        ],
+    }
+    assert payload["app_status"]["docuseal"] == {
+        "enabled": True,
+        "hostname": "docuseal.example.com",
+        "shared_postgres_allocation_present": True,
+        "bootstrap_state": {
+            "initialized": None,
+            "secret_key_base_secret_ref": "moodle-docuseal-stack-docuseal-secret-key-base",
+        },
+        "health_state": {
+            "passed": None,
+            "path": "/up",
+            "url": "https://docuseal.example.com/up",
+        },
+        "bootstrap_readiness_notes": [
+            "DocuSeal service 'moodle-docuseal-stack-docuseal' will be exposed at 'docuseal.example.com'.",
+            "DocuSeal will reuse shared-core postgres database 'moodle_docuseal_stack_docuseal'.",
+            "DocuSeal success in non-dry-run mode is gated on bootstrap readiness metadata and the /up health endpoint.",
+        ],
+    }
 
 
 def test_build_live_drift_report_classifies_required_collision_types(
@@ -183,7 +288,7 @@ def test_build_live_drift_report_classifies_required_collision_types(
     monkeypatch.setattr(
         inspection_module,
         "_list_docker_services",
-        lambda: (f"{desired_state.stack_name}-advisor",),
+        lambda: (f"{desired_state.stack_name}-openclaw",),
     )
     monkeypatch.setattr(
         inspection_module,
@@ -201,7 +306,7 @@ def test_build_live_drift_report_classifies_required_collision_types(
         inspection_module,
         "_list_service_task_statuses",
         lambda service_name: ("Exited (1) 5 seconds ago",)
-        if service_name == f"{desired_state.stack_name}-advisor"
+        if service_name == f"{desired_state.stack_name}-openclaw"
         else (),
     )
     monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", (tmp_path,))
@@ -245,6 +350,115 @@ def test_build_live_drift_report_classifies_required_collision_types(
     assert unknown_entry["live_name"] == f"{desired_state.stack_name}-helper"
 
 
+def test_build_live_drift_report_recognizes_moodle_and_docuseal_managed_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
+            "STACK_NAME": "openmerge",
+            "ROOT_DOMAIN": "openmerge.me",
+            "PACKS": "moodle,docuseal",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+    ownership_ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource("moodle_service", "svc-moodle", "stack:openmerge:moodle:service"),
+            OwnedResource(
+                "docuseal_service",
+                "svc-docuseal",
+                "stack:openmerge:docuseal:service",
+            ),
+        ),
+    )
+
+    monkeypatch.setattr(inspection_module, "_docker_cli_available", lambda: True)
+    monkeypatch.setattr(inspection_module, "_list_docker_services", lambda: ())
+    monkeypatch.setattr(
+        inspection_module,
+        "_list_docker_containers",
+        lambda: (
+            {
+                "name": "openmerge-moodle-abcd-openmerge-moodle-1",
+                "status": "Up 5 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-moodle",
+                    "com.docker.compose.project": "openmerge-moodle-abcd",
+                },
+            },
+            {
+                "name": "openmerge-docuseal-efgh-openmerge-docuseal-1",
+                "status": "Up 5 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-docuseal",
+                    "com.docker.compose.project": "openmerge-docuseal-efgh",
+                },
+            },
+        ),
+    )
+
+    report = inspection_module.build_live_drift_report(
+        desired_state=desired_state,
+        ownership_ledger=ownership_ledger,
+    )
+
+    managed_entries = [entry for entry in report["entries"] if entry["classification"] == "wizard_managed"]
+    assert {(entry["pack"], entry["scope"]) for entry in managed_entries} == {
+        ("moodle", "stack:openmerge:moodle:service"),
+        ("docuseal", "stack:openmerge:docuseal:service"),
+    }
+    assert all(entry["health"] == "healthy" for entry in managed_entries)
+
+
+def test_build_moodle_and_docuseal_backends_use_dokploy_when_enabled() -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "moodle,docuseal",
+            "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+            "DOKPLOY_API_KEY": "api-key",
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "ChangeMeSoon",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    assert isinstance(
+        cli._build_moodle_backend(raw_env=raw_env, desired_state=desired_state),
+        DokployMoodleBackend,
+    )
+    assert isinstance(
+        cli._build_docuseal_backend(raw_env=raw_env, desired_state=desired_state),
+        DokployDocuSealBackend,
+    )
+
+
+def test_build_moodle_and_docuseal_backends_fall_back_to_shell_without_dokploy_auth() -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "moodle,docuseal",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    assert isinstance(
+        cli._build_moodle_backend(raw_env=raw_env, desired_state=desired_state),
+        ShellMoodleBackend,
+    )
+    assert isinstance(
+        cli._build_docuseal_backend(raw_env=raw_env, desired_state=desired_state),
+        ShellDocuSealBackend,
+    )
+
+
 def test_build_live_drift_report_recognizes_label_backed_managed_compose_containers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -267,7 +481,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                 f"stack:{desired_state.stack_name}:openclaw",
             ),
             OwnedResource(
-                "openclaw_service",
+                "my_farm_advisor_service",
                 "svc-my-farm",
                 f"stack:{desired_state.stack_name}:my-farm-advisor",
             ),
@@ -293,7 +507,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                 "name": my_farm_container,
                 "status": "Up 8 seconds (health: starting)",
                 "labels": {
-                    "dokploy-wizard.slot": "advisor_suite",
+                    "dokploy-wizard.slot": "my-farm-advisor_suite",
                     "dokploy-wizard.variant": "my-farm-advisor",
                     "traefik.http.routers.openmerge-my-farm-advisor.rule": (
                         f"Host(`{my_farm_hostname}`)"
@@ -346,7 +560,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     assert any(
         entry["pack"] == "openclaw"
         and entry["health"] == "missing"
-        and entry["live_name"] == f"{desired_state.stack_name}-advisor"
+        and entry["live_name"] == f"{desired_state.stack_name}-openclaw"
         for entry in wizard_entries
     )
     assert not any(entry["live_name"] == my_farm_container for entry in manual_entries)
@@ -396,7 +610,7 @@ def test_guided_install_prompts_include_dokploy_guidance() -> None:
 
     assert values.stack_name == "example"
     assert values.dokploy_subdomain == "dokploy"
-    assert values.dokploy_admin_email == "admin@example.com"
+    assert values.dokploy_admin_email == "clayton@superiorbyteworks.com"
     assert values.dokploy_admin_password == "secret-123"
     assert values.enable_headscale is True
     assert values.enable_tailscale is False
@@ -471,7 +685,7 @@ def test_guided_install_writes_env_file_and_runs_install(
             stack_name="guided-stack",
             root_domain="example.com",
             dokploy_subdomain="dokploy",
-            dokploy_admin_email="admin@example.com",
+            dokploy_admin_email="clayton@superiorbyteworks.com",
             dokploy_admin_password="secret-123",
             enable_headscale=True,
             cloudflare_api_token="token-123",
@@ -517,7 +731,7 @@ def test_guided_install_writes_env_file_and_runs_install(
     assert "STACK_NAME=guided-stack" in env_contents
     assert "ROOT_DOMAIN=example.com" in env_contents
     assert "DOKPLOY_SUBDOMAIN=dokploy" in env_contents
-    assert "DOKPLOY_ADMIN_EMAIL=admin@example.com" in env_contents
+    assert "DOKPLOY_ADMIN_EMAIL=clayton@superiorbyteworks.com" in env_contents
     assert "DOKPLOY_ADMIN_PASSWORD=secret-123" in env_contents
     assert "ENABLE_HEADSCALE=true" in env_contents
     assert "CLOUDFLARE_API_TOKEN=token-123" in env_contents
@@ -574,7 +788,7 @@ def test_guided_install_reuses_existing_seaweedfs_credentials(
             stack_name="guided-stack",
             root_domain="example.com",
             dokploy_subdomain="dokploy",
-            dokploy_admin_email="admin@example.com",
+            dokploy_admin_email="clayton@superiorbyteworks.com",
             dokploy_admin_password="secret-123",
             enable_headscale=True,
             cloudflare_api_token="token-123",
@@ -947,7 +1161,7 @@ def test_install_resume_tolerates_required_ports_used_by_existing_dokploy_stack(
         AppliedStateCheckpoint(
             format_version=existing_desired.format_version,
             desired_state_fingerprint=existing_desired.fingerprint(),
-            completed_steps=("preflight", "dokploy_bootstrap", "networking", "cloudflare_access"),
+                completed_steps=("preflight", "dokploy_bootstrap", "networking", "shared_core"),
         ),
     )
     write_ownership_ledger(
@@ -1072,7 +1286,7 @@ def test_install_rehydrates_guided_retry_keys_from_persisted_state(
         AppliedStateCheckpoint(
             format_version=existing_desired.format_version,
             desired_state_fingerprint=existing_desired.fingerprint(),
-            completed_steps=("preflight", "dokploy_bootstrap", "networking", "cloudflare_access"),
+                completed_steps=("preflight", "dokploy_bootstrap", "networking", "shared_core"),
         ),
     )
     write_ownership_ledger(
@@ -1457,8 +1671,24 @@ def test_guided_state_dir_sanitizes_caret_notation_arrow_and_paste(
     )
 
 
+def test_guided_install_defaults_enable_docuseal_and_disable_moodle() -> None:
+    prompts: list[str] = []
+    responses = iter(["", "", "", "", "n", "n", "n"])
+
+    selection = prompt_module.prompt_for_pack_selection(
+        lambda message: prompts.append(message) or next(responses),
+        include_headscale_prompt=False,
+    )
+
+    assert "Enable DocuSeal? [Y/n]: " in prompts
+    assert "Enable Moodle? [y/N]: " in prompts
+    assert "docuseal" in selection.selected_packs
+    assert "moodle" not in selection.selected_packs
+    assert "moodle" in selection.disabled_packs
+
+
 def test_guided_install_generates_seaweedfs_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    responses = iter(["n", "n", "y", "n", "n"])
+    responses = iter(["n", "n", "n", "n", "y", "n", "n"])
     monkeypatch.setattr(
         prompt_module,
         "_generate_credential",
@@ -1488,7 +1718,9 @@ def test_guided_install_defaults_openclaw_to_telegram_when_matrix_disabled() -> 
     responses = iter(
         [
             "n",  # matrix default stays no
-            "y",  # nextcloud default yes
+            "",  # nextcloud default yes
+            "",  # docuseal default yes
+            "",  # moodle default no
             "y",  # seaweedfs default yes
             "y",  # openclaw default yes
             "",  # openclaw channel default telegram
@@ -1510,13 +1742,15 @@ def test_guided_install_defaults_openclaw_to_telegram_when_matrix_disabled() -> 
     )
     monkeypatch.undo()
 
-    assert selection.selected_packs == ("nextcloud", "openclaw", "seaweedfs")
+    assert selection.selected_packs == ("docuseal", "nextcloud", "openclaw", "seaweedfs")
     assert selection.openclaw_channels == ("telegram",)
     assert selection.generated_secrets == {
+        "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
         "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
         "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
     }
     assert selection.advisor_env == {
+        "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
         "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
         "OPENCLAW_NVIDIA_API_KEY": "nv-key",
         "OPENCLAW_OPENROUTER_API_KEY": "or-key",
@@ -1536,7 +1770,9 @@ def test_guided_install_keeps_matrix_default_for_openclaw_when_matrix_enabled() 
     responses = iter(
         [
             "y",  # matrix yes
-            "y",  # nextcloud default yes
+            "",  # nextcloud default yes
+            "",  # docuseal default yes
+            "",  # moodle default no
             "y",  # seaweedfs default yes
             "y",  # openclaw default yes
             "",  # default channel should become matrix
@@ -1556,12 +1792,20 @@ def test_guided_install_keeps_matrix_default_for_openclaw_when_matrix_enabled() 
     )
     monkeypatch.undo()
 
-    assert selection.selected_packs == ("matrix", "nextcloud", "openclaw", "seaweedfs")
+    assert selection.selected_packs == (
+        "docuseal",
+        "matrix",
+        "nextcloud",
+        "openclaw",
+        "seaweedfs",
+    )
     assert selection.openclaw_channels == ("matrix",)
     assert selection.generated_secrets == {
+        "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
         "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
         "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
     }
+    assert selection.advisor_env["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
     assert selection.advisor_env["OPENCLAW_PRIMARY_MODEL"] == "nvidia/moonshotai/kimi-k2.5"
     assert selection.advisor_env["OPENCLAW_FALLBACK_MODELS"] == "openrouter/openrouter/free"
     assert "OPENCLAW_TELEGRAM_BOT_TOKEN" not in selection.advisor_env
@@ -1676,6 +1920,48 @@ def test_load_install_raw_env_warns_on_broad_permissions(
     assert str(env_file) in captured.err
 
 
+def test_prompt_for_initial_install_raw_env_defaults_docuseal_on_and_moodle_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(["", "", "", "", "n", "n", "n"])
+
+    monkeypatch.setattr(
+        cli,
+        "prompt_for_initial_install_values",
+        lambda **kwargs: GuidedInstallValues(
+            stack_name="guided-stack",
+            root_domain="example.com",
+            dokploy_subdomain="dokploy",
+            dokploy_admin_email="clayton@superiorbyteworks.com",
+            dokploy_admin_password="secret-123",
+            enable_headscale=True,
+            cloudflare_api_token="token-123",
+            cloudflare_account_id="account-123",
+            cloudflare_zone_id=None,
+            enable_tailscale=False,
+            tailscale_auth_key=None,
+            tailscale_hostname=None,
+            tailscale_enable_ssh=False,
+            tailscale_tags=(),
+            tailscale_subnet_routes=(),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "prompt_for_pack_selection",
+        lambda **kwargs: prompt_module.prompt_for_pack_selection(lambda _: next(responses), **kwargs),
+    )
+
+    raw_env, generated_secrets = cli._prompt_for_initial_install_raw_env(
+        require_dokploy_auth=True,
+    )
+
+    assert generated_secrets == {}
+    assert raw_env.values["PACKS"] == "docuseal,nextcloud"
+    assert raw_env.values["ENABLE_MOODLE"] == "false"
+    assert "ENABLE_DOCUSEAL" not in raw_env.values
+
+
 def test_load_install_raw_env_skips_warning_when_permissions_are_owner_only(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1691,6 +1977,40 @@ def test_load_install_raw_env_skips_warning_when_permissions_are_owner_only(
 
     captured = capsys.readouterr()
     assert captured.err == ""
+
+
+def test_load_install_raw_env_skips_prompts_when_env_file_has_explicit_pack_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "install.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=example",
+                "ROOT_DOMAIN=example.com",
+                "ENABLE_DOCUSEAL=false",
+                "ENABLE_MOODLE=true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        cli,
+        "prompt_for_pack_selection",
+        lambda **kwargs: pytest.fail("prompt_for_pack_selection should not be called"),
+    )
+
+    raw_env = cli._load_install_raw_env(
+        env_file,
+        non_interactive=False,
+        warn_on_broad_permissions=False,
+    )
+
+    assert raw_env.values["ENABLE_DOCUSEAL"] == "false"
+    assert raw_env.values["ENABLE_MOODLE"] == "true"
 
 
 def test_handle_install_suppresses_generated_secret_output_when_requested(
@@ -2610,9 +2930,9 @@ def test_install_allows_missing_managed_service_drift_to_proceed(
                 {
                     "classification": "wizard_managed",
                     "detail": "managed openclaw missing",
-                    "expected_service_name": "wizard-stack-advisor",
+                    "expected_service_name": "wizard-stack-openclaw",
                     "health": "missing",
-                    "live_name": "wizard-stack-advisor",
+                    "live_name": "wizard-stack-openclaw",
                     "managed": True,
                     "pack": "openclaw",
                     "scope": "stack:wizard-stack:openclaw",
@@ -2718,7 +3038,7 @@ def test_install_bootstraps_missing_docker_before_strict_preflight_rerun(
     assert remediation_calls == [
         {
             "backend": remediation_calls[0]["backend"],
-            "missing_packages": ("docker.io",),
+            "missing_packages": (),
             "outcome": "missing_prerequisites",
         }
     ]
@@ -2750,32 +3070,30 @@ def test_install_bootstraps_missing_docker_before_strict_preflight_rerun(
                     "status": "pass",
                 },
                 {
-                    "detail": "required Ubuntu package 'docker.io' is not installed",
-                    "name": "docker_io",
-                    "package_name": "docker.io",
+                    "detail": "Docker CLI is not installed on the host",
+                    "name": "docker_cli",
+                    "package_name": None,
                     "status": "fail",
                 },
                 {
                     "detail": "Docker daemon is unavailable or unreachable",
                     "name": "docker_daemon",
-                    "package_name": "docker.io",
+                    "package_name": "docker",
                     "status": "fail",
                 },
             ],
-            "install_command": "sudo apt-get update && sudo apt-get install -y docker.io",
-            "missing_packages": ["docker.io"],
+            "docker_bootstrap_required": True,
+            "install_command": "sudo install -m 0755 -d /etc/apt/keyrings && sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && sudo chmod a+r /etc/apt/keyrings/docker.asc && sudo tee /etc/apt/sources.list.d/docker.list >/dev/null <<'EOF'\ndeb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable\nEOF && sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && sudo systemctl enable --now docker",
+            "missing_packages": [],
             "notes": [
-                "Missing apt-managed baseline packages can be remediated on this host.",
+                "Docker Engine can be bootstrapped with the official Ubuntu apt repository on this host.",
                 "Docker daemon reachability is required before install can proceed.",
             ],
             "outcome": "missing_prerequisites",
             "remediation_eligible": True,
         },
         "post_remediation_host_facts": remediated_host.to_dict(),
-        "remediation_actions": [
-            {"action": "apt_install", "packages": ["docker.io"]},
-            {"action": "ensure_docker_daemon"},
-        ],
+        "remediation_actions": [{"action": "ensure_docker_daemon"}],
         "remediation_attempted": True,
     }
 
@@ -2845,7 +3163,7 @@ def test_install_bootstraps_missing_docker_on_supported_ubuntu_patch_release(
         bootstrap_backend=_FakeBootstrapBackend(),
     )
 
-    assert remediation_calls == [("docker.io",)]
+    assert remediation_calls == [()]
     assert (
         summary["host_prerequisites"]["post_remediation_host_facts"]["version_id"] == "24.04.2 LTS"
     )
@@ -3092,18 +3410,19 @@ def test_install_leaves_supported_host_prerequisites_as_idempotent_noop(
                     "status": "pass",
                 },
                 {
-                    "detail": "Ubuntu package 'docker.io' is installed.",
-                    "name": "docker_io",
-                    "package_name": "docker.io",
+                    "detail": "Docker CLI is available.",
+                    "name": "docker_cli",
+                    "package_name": None,
                     "status": "pass",
                 },
                 {
                     "detail": "Docker daemon responded successfully.",
                     "name": "docker_daemon",
-                    "package_name": "docker.io",
+                    "package_name": "docker",
                     "status": "pass",
                 },
             ],
+            "docker_bootstrap_required": False,
             "install_command": None,
             "missing_packages": [],
             "notes": ["Baseline Ubuntu 24.04 host prerequisites are already satisfied."],
@@ -3174,6 +3493,8 @@ def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
     monkeypatch.setattr(cli, "_build_headscale_backend", record_backend)
     monkeypatch.setattr(cli, "_build_matrix_backend", record_backend)
     monkeypatch.setattr(cli, "_build_nextcloud_backend", record_backend)
+    monkeypatch.setattr(cli, "_build_moodle_backend", record_backend)
+    monkeypatch.setattr(cli, "_build_docuseal_backend", record_backend)
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", record_backend)
     monkeypatch.setattr(cli, "_build_coder_backend", record_backend)
     monkeypatch.setattr(cli, "_build_openclaw_backend", record_backend)
@@ -3191,6 +3512,8 @@ def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
         headscale_backend=None,
         matrix_backend=None,
         nextcloud_backend=None,
+        moodle_backend=None,
+        docuseal_backend=None,
         seaweedfs_backend=None,
         coder_backend=None,
         openclaw_backend=None,
@@ -3201,7 +3524,7 @@ def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
         enforce_live_run_contamination_check=False,
     )
 
-    assert len(seen_session_clients) == 7
+    assert len(seen_session_clients) == 9
     assert all(client is sentinel_session_client for client in seen_session_clients)
 
 

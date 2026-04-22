@@ -13,6 +13,7 @@ from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     OwnershipLedger,
     RawEnvInput,
+    StateValidationError,
     resolve_desired_state,
 )
 
@@ -66,7 +67,6 @@ def test_modify_domain_change_starts_at_networking() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "headscale",
                 "nextcloud",
             ),
         ),
@@ -78,7 +78,7 @@ def test_modify_domain_change_starts_at_networking() -> None:
     assert plan.mode == "modify"
     assert plan.start_phase == "networking"
     assert plan.initial_completed_steps == ("preflight", "dokploy_bootstrap")
-    assert plan.phases_to_run == ("networking", "headscale", "nextcloud")
+    assert plan.phases_to_run == ("networking", "nextcloud")
 
 
 def test_modify_cloudflare_auth_rotation_only_reruns_networking() -> None:
@@ -110,7 +110,6 @@ def test_modify_cloudflare_auth_rotation_only_reruns_networking() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "headscale",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -152,10 +151,9 @@ def test_modify_access_email_change_reruns_access_phase() -> None:
                 "preflight",
                 "dokploy_bootstrap",
                 "networking",
-                "cloudflare_access",
                 "shared_core",
-                "headscale",
                 "openclaw",
+                "cloudflare_access",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -163,8 +161,8 @@ def test_modify_access_email_change_reruns_access_phase() -> None:
         requested_desired=requested_desired,
     )
 
-    assert plan.start_phase == "cloudflare_access"
-    assert plan.phases_to_run == ("cloudflare_access", "openclaw")
+    assert plan.start_phase == "openclaw"
+    assert plan.phases_to_run == ("openclaw", "cloudflare_access")
 
 
 def test_modify_dokploy_admin_credential_change_reruns_nextcloud() -> None:
@@ -200,8 +198,54 @@ def test_modify_dokploy_admin_credential_change_reruns_nextcloud() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "headscale",
                 "nextcloud",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.start_phase == "nextcloud"
+    assert plan.phases_to_run == ("nextcloud",)
+
+
+def test_modify_dokploy_admin_credential_change_keeps_moodle_and_docuseal_seed_only() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "nextcloud,moodle,docuseal",
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "ChangeMeSoon",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "nextcloud,moodle,docuseal",
+            "DOKPLOY_ADMIN_EMAIL": "clayton@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "ChangeMeSoon",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "nextcloud",
+                "moodle",
+                "docuseal",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -217,7 +261,7 @@ def test_modify_rejects_stack_name_change() -> None:
     existing_raw = _raw({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})
     requested_raw = _raw({"STACK_NAME": "other-stack", "ROOT_DOMAIN": "example.com"})
 
-    with pytest.raises(ValueError, match="STACK_NAME changes are unsupported"):
+    with pytest.raises(StateValidationError, match="STACK_NAME changes are unsupported"):
         classify_modify_request(
             existing_raw=existing_raw,
             existing_desired=resolve_desired_state(existing_raw),
@@ -229,7 +273,6 @@ def test_modify_rejects_stack_name_change() -> None:
                     "dokploy_bootstrap",
                     "networking",
                     "shared_core",
-                    "headscale",
                 ),
             ),
             existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -268,7 +311,6 @@ def test_modify_disabling_nextcloud_is_supported_via_networking_only() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "headscale",
                 "nextcloud",
             ),
         ),
@@ -323,7 +365,7 @@ def test_modify_disabling_headscale_is_supported_via_networking_only() -> None:
 
     assert plan.mode == "modify"
     assert plan.start_phase == "networking"
-    assert plan.phases_to_run == ("networking", "headscale")
+    assert plan.phases_to_run == ("networking",)
 
 
 def test_modify_rejects_unmodeled_env_changes() -> None:
@@ -336,7 +378,10 @@ def test_modify_rejects_unmodeled_env_changes() -> None:
         }
     )
 
-    with pytest.raises(ValueError, match="Unsupported mutable env keys"):
+    with pytest.raises(
+        StateValidationError,
+        match="Unsupported mutable env keys for Task 11",
+    ):
         classify_modify_request(
             existing_raw=existing_raw,
             existing_desired=resolve_desired_state(existing_raw),
@@ -348,7 +393,6 @@ def test_modify_rejects_unmodeled_env_changes() -> None:
                     "dokploy_bootstrap",
                     "networking",
                     "shared_core",
-                    "headscale",
                 ),
             ),
             existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -359,16 +403,44 @@ def test_modify_rejects_unmodeled_env_changes() -> None:
 
 def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
     assert get_mutable_pack_env_keys() == (
+        "ADVISOR_GATEWAY_PASSWORD",
         "MY_FARM_ADVISOR_CHANNELS",
         "MY_FARM_ADVISOR_FALLBACK_MODELS",
+        "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
         "MY_FARM_ADVISOR_NVIDIA_API_KEY",
         "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
         "MY_FARM_ADVISOR_PRIMARY_MODEL",
         "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
         "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
+        "NEXTCLOUD_OPENCLAW_RESCAN_CRON",
+        "NEXTCLOUD_OPENCLAW_RESCAN_TIMEZONE",
         "OPENCLAW_CHANNELS",
         "OPENCLAW_FALLBACK_MODELS",
+        "OPENCLAW_GATEWAY_PASSWORD",
         "OPENCLAW_GATEWAY_TOKEN",
+        "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
+        "OPENCLAW_NEXA_AGENT_EMAIL",
+        "OPENCLAW_NEXA_AGENT_PASSWORD",
+        "OPENCLAW_NEXA_AGENT_USER_ID",
+        "OPENCLAW_NEXA_DEPLOYMENT_MODE",
+        "OPENCLAW_NEXA_EDITOR_EVENTS_SHARED_SECRET",
+        "OPENCLAW_NEXA_MEM0_API_KEY",
+        "OPENCLAW_NEXA_MEM0_BASE_URL",
+        "OPENCLAW_NEXA_MEM0_EMBEDDER_DIMENSIONS",
+        "OPENCLAW_NEXA_MEM0_EMBEDDER_MODEL",
+        "OPENCLAW_NEXA_MEM0_LLM_API_KEY",
+        "OPENCLAW_NEXA_MEM0_LLM_BASE_URL",
+        "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY",
+        "OPENCLAW_NEXA_MEM0_VECTOR_BACKEND",
+        "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL",
+        "OPENCLAW_NEXA_MEM0_VECTOR_DIMENSIONS",
+        "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL",
+        "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET",
+        "OPENCLAW_NEXA_PRESENCE_POLICY",
+        "OPENCLAW_NEXA_TALK_SHARED_SECRET",
+        "OPENCLAW_NEXA_TALK_SIGNING_SECRET",
+        "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD",
+        "OPENCLAW_NEXA_WEBDAV_AUTH_USER",
         "OPENCLAW_NVIDIA_API_KEY",
         "OPENCLAW_OPENROUTER_API_KEY",
         "OPENCLAW_PRIMARY_MODEL",
@@ -415,9 +487,7 @@ def test_modify_openclaw_replicas_change_uses_pack_mutable_resource_contract() -
                 "preflight",
                 "dokploy_bootstrap",
                 "networking",
-                "cloudflare_access",
                 "shared_core",
-                "headscale",
                 "openclaw",
             ),
         ),
@@ -464,9 +534,7 @@ def test_modify_openclaw_channels_change_uses_pack_mutable_contract() -> None:
                 "preflight",
                 "dokploy_bootstrap",
                 "networking",
-                "cloudflare_access",
                 "shared_core",
-                "headscale",
                 "openclaw",
             ),
         ),
@@ -513,9 +581,7 @@ def test_modify_openclaw_gateway_token_change_uses_pack_mutable_contract() -> No
                 "preflight",
                 "dokploy_bootstrap",
                 "networking",
-                "cloudflare_access",
                 "shared_core",
-                "headscale",
                 "openclaw",
             ),
         ),

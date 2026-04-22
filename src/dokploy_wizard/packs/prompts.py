@@ -29,7 +29,8 @@ class PromptSelection:
     my_farm_advisor_channels: tuple[str, ...]
 
 
-_ADVISOR_ENV_KEYS = (
+_RUNTIME_APP_ENV_KEYS = (
+    "OPENCLAW_GATEWAY_PASSWORD",
     "OPENCLAW_OPENROUTER_API_KEY",
     "OPENCLAW_NVIDIA_API_KEY",
     "OPENCLAW_PRIMARY_MODEL",
@@ -42,9 +43,17 @@ _ADVISOR_ENV_KEYS = (
     "MY_FARM_ADVISOR_FALLBACK_MODELS",
     "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
     "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
+    "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
 )
 _DEFAULT_NVIDIA_PRIMARY_MODEL = "nvidia/moonshotai/kimi-k2.5"
 _DEFAULT_OPENROUTER_FALLBACK_MODEL = "openrouter/openrouter/free"
+_DEFAULT_DOKPLOY_ADMIN_EMAIL = "clayton@superiorbyteworks.com"
+_OPENCLAW_RUNTIME_ENV_KEYS = tuple(
+    key for key in _RUNTIME_APP_ENV_KEYS if key.startswith("OPENCLAW_")
+)
+_MY_FARM_ADVISOR_RUNTIME_ENV_KEYS = tuple(
+    key for key in _RUNTIME_APP_ENV_KEYS if key.startswith("MY_FARM_ADVISOR_")
+)
 
 
 @dataclass(frozen=True)
@@ -84,16 +93,25 @@ def apply_prompt_selection(raw_env: RawEnvInput, selection: PromptSelection) -> 
         updated_values.pop("SEAWEEDFS_SECRET_KEY", None)
     if selection.openclaw_channels:
         updated_values["OPENCLAW_CHANNELS"] = ",".join(selection.openclaw_channels)
-    else:
+    elif "openclaw" in selection.disabled_packs:
         updated_values.pop("OPENCLAW_CHANNELS", None)
     if selection.my_farm_advisor_channels:
         updated_values["MY_FARM_ADVISOR_CHANNELS"] = ",".join(selection.my_farm_advisor_channels)
-    else:
+    elif "my-farm-advisor" in selection.disabled_packs:
         updated_values.pop("MY_FARM_ADVISOR_CHANNELS", None)
-    for key in _ADVISOR_ENV_KEYS:
-        updated_values.pop(key, None)
+    if "openclaw" in selection.disabled_packs:
+        for key in _OPENCLAW_RUNTIME_ENV_KEYS:
+            updated_values.pop(key, None)
+        updated_values.pop("OPENCLAW_GATEWAY_TOKEN", None)
+    if "my-farm-advisor" in selection.disabled_packs:
+        for key in _MY_FARM_ADVISOR_RUNTIME_ENV_KEYS:
+            updated_values.pop(key, None)
+    resulting_packs = {
+        item.strip() for item in updated_values.get("PACKS", "").split(",") if item.strip()
+    }
     updated_values.update(selection.advisor_env)
-    updated_values.pop("OPENCLAW_GATEWAY_TOKEN", None)
+    if "openclaw" not in resulting_packs:
+        updated_values.pop("OPENCLAW_GATEWAY_TOKEN", None)
     return RawEnvInput(format_version=raw_env.format_version, values=updated_values)
 
 
@@ -114,6 +132,12 @@ def prompt_for_pack_selection(
         selected.append("matrix")
     if _prompt_yes_no(prompt, "Enable Nextcloud + OnlyOffice? [Y/n]: ", default=True):
         selected.append("nextcloud")
+    if _prompt_yes_no(prompt, "Enable DocuSeal? [Y/n]: ", default=True):
+        selected.append("docuseal")
+    if _prompt_yes_no(prompt, "Enable Moodle? [y/N]: ", default=False):
+        selected.append("moodle")
+    else:
+        disabled.append("moodle")
     seaweedfs_access_key: str | None = None
     seaweedfs_secret_key: str | None = None
     generated_secrets: dict[str, str] = {}
@@ -129,6 +153,12 @@ def prompt_for_pack_selection(
     my_farm_advisor_channels: tuple[str, ...] = ()
     if _prompt_yes_no(prompt, "Enable OpenClaw? [Y/n]: ", default=True):
         selected.append("openclaw")
+        advisor_env.setdefault(
+            "OPENCLAW_GATEWAY_PASSWORD", _generate_credential(prefix="openclaw-ui")
+        )
+        generated_secrets.setdefault(
+            "OPENCLAW_GATEWAY_PASSWORD", advisor_env["OPENCLAW_GATEWAY_PASSWORD"]
+        )
         default_openclaw_channel = "matrix" if "matrix" in selected else "telegram"
         raw_channels = _prompt_default(
             prompt,
@@ -156,8 +186,17 @@ def prompt_for_pack_selection(
                 channels=openclaw_channels,
             )
         )
+    else:
+        disabled.append("openclaw")
     if _prompt_yes_no(prompt, "Enable My Farm Advisor? [y/N]: ", default=False):
         selected.append("my-farm-advisor")
+        advisor_env.setdefault(
+            "MY_FARM_ADVISOR_GATEWAY_PASSWORD", _generate_credential(prefix="my-farm-ui")
+        )
+        generated_secrets.setdefault(
+            "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
+            advisor_env["MY_FARM_ADVISOR_GATEWAY_PASSWORD"],
+        )
         raw_channels = _read_prompt(
             prompt,
             "My Farm Advisor channels [telegram/matrix] (comma separated, optional): ",
@@ -183,6 +222,8 @@ def prompt_for_pack_selection(
                 channels=my_farm_advisor_channels,
             )
         )
+    else:
+        disabled.append("my-farm-advisor")
 
     return PromptSelection(
         selected_packs=tuple(sorted(selected)),
@@ -274,8 +315,8 @@ def prompt_for_initial_install_values(
     )
     dokploy_admin_email = _prompt_default(
         prompt,
-        f"Dokploy admin email (default: admin@{root_domain}): ",
-        default=f"admin@{root_domain}",
+        f"Dokploy admin email (default: {_DEFAULT_DOKPLOY_ADMIN_EMAIL}): ",
+        default=_DEFAULT_DOKPLOY_ADMIN_EMAIL,
     )
     dokploy_admin_password = None
     if require_dokploy_auth:

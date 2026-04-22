@@ -58,7 +58,45 @@ def test_shared_core_plan_is_empty_when_no_selected_pack_needs_it() -> None:
     assert desired_state.shared_core.postgres is None
     assert desired_state.shared_core.redis is None
     assert desired_state.shared_core.allocations == ()
-    assert desired_state.enabled_packs == ("headscale",)
+    assert desired_state.enabled_packs == ()
+
+
+def test_shared_core_plan_allocates_distinct_postgres_for_moodle_and_docuseal() -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "shared-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_MOODLE": "true",
+            "ENABLE_DOCUSEAL": "true",
+        },
+    )
+
+    desired_state = resolve_desired_state(raw_env)
+
+    assert desired_state.enabled_packs == ("docuseal", "moodle")
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.postgres.service_name == "shared-stack-shared-postgres"
+    assert desired_state.shared_core.redis is None
+    assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
+        "docuseal",
+        "moodle",
+    ]
+
+    docuseal_allocation, moodle_allocation = desired_state.shared_core.allocations
+
+    assert docuseal_allocation.postgres == SharedPostgresAllocation(
+        database_name="shared_stack_docuseal",
+        user_name="shared_stack_docuseal",
+        password_secret_ref="shared-stack-docuseal-postgres-password",
+    )
+    assert docuseal_allocation.redis is None
+    assert moodle_allocation.postgres == SharedPostgresAllocation(
+        database_name="shared_stack_moodle",
+        user_name="shared_stack_moodle",
+        password_secret_ref="shared-stack-moodle-postgres-password",
+    )
+    assert moodle_allocation.redis is None
 
 
 def test_admin_credential_rejection_for_postgres_allocations() -> None:

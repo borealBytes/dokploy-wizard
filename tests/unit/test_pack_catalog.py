@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
 from dokploy_wizard.core import build_shared_core_plan
 from dokploy_wizard.packs.catalog import get_pack_definition, iter_pack_catalog
 from dokploy_wizard.packs.resolver import resolve_pack_selection
 from dokploy_wizard.state import RawEnvInput, resolve_desired_state
+from dokploy_wizard.state.models import StateValidationError
 
 
 def test_catalog_exposes_expected_pack_metadata() -> None:
@@ -17,16 +20,26 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
         "nextcloud",
         "seaweedfs",
         "coder",
+        "moodle",
+        "docuseal",
         "openclaw",
         "my-farm-advisor",
     ]
-    assert get_pack_definition("headscale").default_enabled is True
+    assert get_pack_definition("headscale").default_enabled is False
     assert get_pack_definition("seaweedfs").slot is None
     assert get_pack_definition("seaweedfs").hostnames[0].key == "s3"
     assert get_pack_definition("coder").hostnames[1].key == "coder-wildcard"
+    assert get_pack_definition("moodle").hostnames[0].env_key == "MOODLE_SUBDOMAIN"
+    assert get_pack_definition("moodle").shared_core_requirements == ("postgres",)
+    assert get_pack_definition("docuseal").hostnames[0].env_key == "DOCUSEAL_SUBDOMAIN"
+    assert get_pack_definition("docuseal").shared_core_requirements == ("postgres",)
     assert get_pack_definition("openclaw").slot is None
     assert get_pack_definition("my-farm-advisor").slot is None
     assert get_pack_definition("openclaw").mutable_resource_keys == ("OPENCLAW_REPLICAS",)
+    assert "OPENCLAW_NEXA_DEPLOYMENT_MODE" in get_pack_definition("openclaw").mutable_env_keys
+    assert "OPENCLAW_NEXA_MEM0_BASE_URL" in get_pack_definition("openclaw").mutable_env_keys
+    assert "OPENCLAW_NEXA_PRESENCE_POLICY" in get_pack_definition("openclaw").mutable_env_keys
+    assert "OPENCLAW_NEXA_TALK_SHARED_SECRET" in get_pack_definition("openclaw").mutable_env_keys
     assert get_pack_definition("my-farm-advisor").mutable_resource_keys == (
         "MY_FARM_ADVISOR_REPLICAS",
     )
@@ -43,10 +56,9 @@ def test_resolver_keeps_explicit_selection_separate_from_expanded_packs() -> Non
     )
 
     assert selection.selected_packs == ("nextcloud",)
-    assert selection.enabled_packs == ("headscale", "nextcloud")
-    assert selection.enabled_features == ("dokploy", "headscale")
+    assert selection.enabled_packs == ("nextcloud",)
+    assert selection.enabled_features == ("dokploy",)
     assert selection.hostnames == {
-        "headscale": "headscale.example.com",
         "nextcloud": "nextcloud.example.com",
         "onlyoffice": "office.example.com",
     }
@@ -96,12 +108,52 @@ def test_resolver_builds_root_and_wildcard_coder_hostnames() -> None:
         root_domain="example.com",
     )
 
-    assert selection.enabled_packs == ("coder", "headscale")
+    assert selection.enabled_packs == ("coder",)
     assert selection.hostnames == {
         "coder": "coder.example.com",
         "coder-wildcard": "*.coder.example.com",
-        "headscale": "headscale.example.com",
     }
+
+
+def test_resolver_supports_moodle_and_docuseal_from_catalog() -> None:
+    selection = resolve_pack_selection(
+        {
+            "ENABLE_MOODLE": "true",
+            "ENABLE_DOCUSEAL": "true",
+        },
+        root_domain="example.com",
+    )
+
+    assert selection.selected_packs == ("docuseal", "moodle")
+    assert selection.enabled_packs == ("docuseal", "moodle")
+    assert selection.hostnames == {
+        "docuseal": "docuseal.example.com",
+        "moodle": "moodle.example.com",
+    }
+
+
+@pytest.mark.parametrize("key", ["ENABLE_MOODLE", "ENABLE_DOCUSEAL"])
+def test_resolver_rejects_invalid_boolean_for_new_pack_flags(key: str) -> None:
+    with pytest.raises(StateValidationError, match=rf"Invalid boolean value for '{key}'"):
+        resolve_pack_selection(
+            {
+                key: "definitely",
+            },
+            root_domain="example.com",
+        )
+
+
+def test_resolver_rejects_hostname_collision_between_moodle_and_docuseal() -> None:
+    with pytest.raises(StateValidationError, match="Hostname collision"):
+        resolve_pack_selection(
+            {
+                "ENABLE_MOODLE": "true",
+                "ENABLE_DOCUSEAL": "true",
+                "MOODLE_SUBDOMAIN": "apps",
+                "DOCUSEAL_SUBDOMAIN": "apps",
+            },
+            root_domain="example.com",
+        )
 
 
 def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
@@ -128,6 +180,30 @@ def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
     )
 
 
+def test_resolved_state_allocates_postgres_for_moodle_and_docuseal_without_redis() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "catalog-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_MOODLE": "true",
+                "ENABLE_DOCUSEAL": "true",
+            },
+        )
+    )
+
+    assert desired_state.enabled_packs == ("docuseal", "moodle")
+    assert desired_state.hostnames["docuseal"] == "docuseal.example.com"
+    assert desired_state.hostnames["moodle"] == "moodle.example.com"
+    assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
+        "docuseal",
+        "moodle",
+    ]
+    assert all(allocation.postgres is not None for allocation in desired_state.shared_core.allocations)
+    assert all(allocation.redis is None for allocation in desired_state.shared_core.allocations)
+
+
 def test_resolved_state_includes_coder_shared_core_allocation() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
@@ -140,7 +216,7 @@ def test_resolved_state_includes_coder_shared_core_allocation() -> None:
         )
     )
 
-    assert desired_state.enabled_packs == ("coder", "headscale")
+    assert desired_state.enabled_packs == ("coder",)
     assert desired_state.hostnames["coder"] == "coder.example.com"
     assert desired_state.hostnames["coder-wildcard"] == "*.coder.example.com"
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
