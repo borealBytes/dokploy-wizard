@@ -243,9 +243,14 @@ def reconcile_coder(
     service_record = CoderResourceRecord(
         resource_id=service_id, resource_name=service.resource_name
     )
-    if not backend.check_health(service=service_record, url=health_url):
-        raise CoderError(f"Coder health check failed for '{health_url}'.")
+    initial_health = backend.check_health(service=service_record, url=health_url)
     notes = list(backend.ensure_application_ready())
+    if initial_health:
+        final_health = True
+    else:
+        final_health = backend.check_health(service=service_record, url=health_url)
+    if not final_health:
+        raise CoderError(f"Coder health check failed for '{health_url}'.")
     notes.extend(
         (
             f"Coder service '{service_name}' is reconciled and healthy.",
