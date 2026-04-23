@@ -35,8 +35,10 @@ from dokploy_wizard.dokploy import (
     DokployBootstrapAuthError,
     DokployCloudflaredBackend,
     DokployCoderBackend,
+    DokployDocuSealBackend,
     DokployHeadscaleBackend,
     DokployMatrixBackend,
+    DokployMoodleBackend,
     DokployNextcloudBackend,
     DokployOpenClawBackend,
     DokploySeaweedFsBackend,
@@ -63,6 +65,11 @@ from dokploy_wizard.networking import (
     CloudflareError,
 )
 from dokploy_wizard.packs.coder import CoderBackend, CoderError, ShellCoderBackend
+from dokploy_wizard.packs.docuseal import (
+    DocuSealBackend,
+    DocuSealError,
+    ShellDocuSealBackend,
+)
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     HeadscaleError,
@@ -73,6 +80,7 @@ from dokploy_wizard.packs.matrix import (
     MatrixError,
     ShellMatrixBackend,
 )
+from dokploy_wizard.packs.moodle import MoodleBackend, MoodleError, ShellMoodleBackend
 from dokploy_wizard.packs.nextcloud import (
     NextcloudBackend,
     NextcloudError,
@@ -955,6 +963,16 @@ def _run_lifecycle_flow(
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
+    moodle_phase_backend = _build_moodle_backend(
+        raw_env=raw_env,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
+    docuseal_phase_backend = _build_docuseal_backend(
+        raw_env=raw_env,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
     seaweedfs_phase_backend = seaweedfs_backend or _build_seaweedfs_backend(
         raw_env=raw_env,
         desired_state=desired_state,
@@ -979,6 +997,8 @@ def _run_lifecycle_flow(
         headscale=headscale_phase_backend,
         matrix=matrix_phase_backend,
         nextcloud=nextcloud_phase_backend,
+        moodle=moodle_phase_backend,
+        docuseal=docuseal_phase_backend,
         seaweedfs=seaweedfs_phase_backend,
         coder=coder_phase_backend,
         openclaw=openclaw_phase_backend,
@@ -997,6 +1017,8 @@ def _run_lifecycle_flow(
             headscale_backend=headscale_phase_backend,
             matrix_backend=matrix_phase_backend,
             nextcloud_backend=nextcloud_phase_backend,
+            moodle_backend=moodle_phase_backend,
+            docuseal_backend=docuseal_phase_backend,
             seaweedfs_backend=seaweedfs_phase_backend,
             coder_backend=coder_phase_backend,
             openclaw_backend=openclaw_phase_backend,
@@ -1473,6 +1495,11 @@ def _build_shared_core_backend(
             api_key=api_key,
             stack_name=desired_state.stack_name,
             plan=desired_state.shared_core,
+            mail_relay_config={
+                key: value
+                for key, value in raw_env.values.items()
+                if key.startswith("OUTBOUND_SMTP_") and value.strip() != ""
+            },
             client=_build_dokploy_api_client(
                 raw_env=raw_env,
                 api_url=api_url,
@@ -1647,6 +1674,93 @@ def _build_matrix_backend(
             f"{desired_state.stack_name}-matrix-registration-shared-secret",
             f"{desired_state.stack_name}-matrix-macaroon-secret-key",
         ),
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
+    )
+
+
+def _build_moodle_backend(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> MoodleBackend:
+    if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
+        return ShellMoodleBackend()
+    api_url = desired_state.dokploy_api_url
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    if not api_url or not api_key or "moodle" not in desired_state.enabled_packs:
+        return ShellMoodleBackend()
+    hostname = desired_state.hostnames.get("moodle")
+    allocation = next(
+        (item for item in desired_state.shared_core.allocations if item.pack_name == "moodle"),
+        None,
+    )
+    if hostname is None or allocation is None or desired_state.shared_core.postgres is None:
+        return ShellMoodleBackend()
+    if allocation.postgres is None:
+        return ShellMoodleBackend()
+    mail_relay = desired_state.shared_core.mail_relay
+    return DokployMoodleBackend(
+        api_url=api_url,
+        api_key=api_key,
+        stack_name=desired_state.stack_name,
+        hostname=hostname,
+        admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
+        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        postgres=allocation.postgres,
+        smtp_host=None if mail_relay is None else mail_relay.service_name,
+        smtp_port=None if mail_relay is None else mail_relay.smtp_port,
+        smtp_from_address=None if mail_relay is None else mail_relay.from_address,
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
+    )
+
+
+def _build_docuseal_backend(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> DocuSealBackend:
+    if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
+        return ShellDocuSealBackend()
+    api_url = desired_state.dokploy_api_url
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    if not api_url or not api_key or "docuseal" not in desired_state.enabled_packs:
+        return ShellDocuSealBackend()
+    hostname = desired_state.hostnames.get("docuseal")
+    allocation = next(
+        (item for item in desired_state.shared_core.allocations if item.pack_name == "docuseal"),
+        None,
+    )
+    if hostname is None or allocation is None or desired_state.shared_core.postgres is None:
+        return ShellDocuSealBackend()
+    if allocation.postgres is None:
+        return ShellDocuSealBackend()
+    mail_relay = desired_state.shared_core.mail_relay
+    return DokployDocuSealBackend(
+        api_url=api_url,
+        api_key=api_key,
+        stack_name=desired_state.stack_name,
+        hostname=hostname,
+        admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
+        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        postgres=allocation.postgres,
+        smtp_host=None if mail_relay is None else mail_relay.service_name,
+        smtp_port=None if mail_relay is None else mail_relay.smtp_port,
+        smtp_domain=desired_state.root_domain,
+        smtp_from_address=None if mail_relay is None else mail_relay.from_address,
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,

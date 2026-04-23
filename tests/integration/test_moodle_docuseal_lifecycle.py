@@ -11,6 +11,7 @@ import pytest
 
 from dokploy_wizard.cli import run_install_flow, run_uninstall_flow
 from dokploy_wizard.core import SHARED_NETWORK_RESOURCE_TYPE, SHARED_POSTGRES_RESOURCE_TYPE
+from dokploy_wizard.core.reconciler import SHARED_MAIL_RELAY_RESOURCE_TYPE
 from dokploy_wizard.lifecycle.drift import LifecycleDriftError, validate_preserved_phases
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
@@ -169,6 +170,11 @@ def test_inspect_state_report_includes_both_enabled_moodle_and_docuseal_entries(
                 "stack:moodle-docuseal-stack:shared-postgres",
             ),
             OwnedResource(
+                SHARED_MAIL_RELAY_RESOURCE_TYPE,
+                "moodle-docuseal-stack-postfix",
+                "stack:moodle-docuseal-stack:shared-postfix",
+            ),
+            OwnedResource(
                 "moodle_service",
                 "moodle-docuseal-stack-moodle",
                 "stack:moodle-docuseal-stack:moodle:service",
@@ -186,6 +192,7 @@ def test_inspect_state_report_includes_both_enabled_moodle_and_docuseal_entries(
         "dokploy_wizard.state.inspection._list_docker_services",
         lambda: (
             "moodle-docuseal-stack-shared-postgres",
+            "moodle-docuseal-stack-shared-postfix",
             "moodle-docuseal-stack-moodle",
             "moodle-docuseal-stack-docuseal",
         ),
@@ -209,6 +216,10 @@ def test_inspect_state_report_includes_both_enabled_moodle_and_docuseal_entries(
     report = build_live_drift_report(desired_state=desired_state, ownership_ledger=ownership_ledger)
 
     managed = {(entry["pack"], entry["live_name"]): entry for entry in report["entries"]}
+    assert managed[("shared-core", "moodle-docuseal-stack-shared-postfix")][
+        "classification"
+    ] == "wizard_managed"
+    assert managed[("shared-core", "moodle-docuseal-stack-shared-postfix")]["health"] == "healthy"
     assert managed[("moodle", "moodle-docuseal-stack-moodle")]["classification"] == "wizard_managed"
     assert managed[("moodle", "moodle-docuseal-stack-moodle")]["health"] == "healthy"
     assert managed[("docuseal", "moodle-docuseal-stack-docuseal")]["classification"] == "wizard_managed"

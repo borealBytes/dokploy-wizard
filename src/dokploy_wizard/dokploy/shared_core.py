@@ -59,6 +59,7 @@ class DokploySharedCoreBackend:
         api_key: str,
         stack_name: str,
         plan: SharedCorePlan,
+        mail_relay_config: dict[str, str] | None = None,
         client: DokploySharedCoreApi | None = None,
         allocation_provisioner: Callable[[tuple[SharedPostgresAllocation, ...]], None]
         | None = None,
@@ -66,6 +67,7 @@ class DokploySharedCoreBackend:
         self._stack_name = stack_name
         self._plan = plan
         self._compose_name = plan.network_name
+        self._mail_relay_config = mail_relay_config or {}
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._allocation_provisioner = allocation_provisioner
@@ -190,6 +192,38 @@ class DokploySharedCoreBackend:
             resource_name=resource_name,
         )
 
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        if self._plan.mail_relay is None or self._lookup_locator(resource_id, "postfix") is None:
+            return None
+        if _find_container_name(self._plan.mail_relay.service_name) is None:
+            return None
+        return SharedCoreResourceRecord(
+            resource_id=resource_id,
+            resource_name=self._plan.mail_relay.service_name,
+        )
+
+    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        if self._plan.mail_relay is None or resource_name != self._plan.mail_relay.service_name:
+            return None
+        locator = self._find_compose_locator()
+        if locator is None:
+            return None
+        if _find_container_name(resource_name) is None:
+            return None
+        return SharedCoreResourceRecord(
+            resource_id=_resource_id(locator.compose_id, "postfix"),
+            resource_name=resource_name,
+        )
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        if self._plan.mail_relay is None or resource_name != self._plan.mail_relay.service_name:
+            raise SharedCoreError("Shared-core mail relay name does not match the active plan.")
+        locator = self._ensure_compose_applied()
+        return SharedCoreResourceRecord(
+            resource_id=_resource_id(locator.compose_id, "postfix"),
+            resource_name=resource_name,
+        )
+
     def _lookup_locator(self, resource_id: str, kind: str) -> _ComposeLocator | None:
         compose_id = _parse_resource_id(resource_id, kind)
         if compose_id is None:
@@ -214,13 +248,11 @@ class DokploySharedCoreBackend:
                 continue
             for compose in environment.composes:
                 if compose.name == self._compose_name:
-                    locator = _ComposeLocator(
+                    return _ComposeLocator(
                         project_id=project.project_id,
                         environment_id=environment.environment_id,
                         compose_id=compose.compose_id,
                     )
-                    self._applied_locator = locator
-                    return locator
         return None
 
     def _ensure_compose_applied(self) -> _ComposeLocator:
@@ -238,7 +270,7 @@ class DokploySharedCoreBackend:
                     if compose.name == self._compose_name:
                         updated = self._client.update_compose(
                             compose_id=compose.compose_id,
-                            compose_file=_render_compose_file(self._plan),
+                            compose_file=_render_compose_file(self._plan, self._mail_relay_config),
                         )
                         self._client.deploy_compose(
                             compose_id=updated.compose_id,
@@ -255,7 +287,7 @@ class DokploySharedCoreBackend:
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
-                    compose_file=_render_compose_file(self._plan),
+                    compose_file=_render_compose_file(self._plan, self._mail_relay_config),
                     app_name=self._compose_name,
                 )
                 self._client.deploy_compose(
@@ -279,7 +311,7 @@ class DokploySharedCoreBackend:
             created_compose = self._client.create_compose(
                 name=self._compose_name,
                 environment_id=created_project.environment_id,
-                compose_file=_render_compose_file(self._plan),
+                compose_file=_render_compose_file(self._plan, self._mail_relay_config),
                 app_name=self._compose_name,
             )
             self._client.deploy_compose(
@@ -320,7 +352,7 @@ def _parse_resource_id(resource_id: str, kind: str) -> str | None:
     return compose_id or None
 
 
-def _render_compose_file(plan: SharedCorePlan) -> str:
+def _render_compose_file(plan: SharedCorePlan, mail_relay_config: dict[str, str]) -> str:
     postgres_block = ""
     volume_block = ""
     if plan.postgres is not None:
@@ -350,10 +382,31 @@ def _render_compose_file(plan: SharedCorePlan) -> str:
             "    networks:\n      - shared\n"
         )
         volume_block += f"  {redis_volume}:\n"
+    mail_block = ""
+    if plan.mail_relay is not None:
+        mail_volume = f"{plan.mail_relay.service_name}-spool"
+        sender_domain = plan.mail_relay.from_address.split("@", 1)[1]
+        mail_block = (
+            f"  {plan.mail_relay.service_name}:\n"
+            "    image: boky/postfix:latest\n"
+            "    restart: unless-stopped\n"
+            "    user: '0:0'\n"
+            "    environment:\n"
+            f"      ALLOWED_SENDER_DOMAINS: {sender_domain}\n"
+            f"      POSTFIX_myhostname: {plan.mail_relay.mail_hostname}\n"
+            "      POSTFIX_mynetworks: 0.0.0.0/0\n"
+            f"    volumes:\n      - {mail_volume}:/var/spool/postfix\n"
+            "    expose:\n"
+            f"      - '{plan.mail_relay.smtp_port}'\n"
+            "    networks:\n"
+            "      - shared\n"
+        )
+        volume_block += f"  {mail_volume}:\n"
     return (
         "services:\n"
         f"{postgres_block}"
         f"{redis_block}"
+        f"{mail_block}"
         "networks:\n"
         "  shared:\n"
         f"    name: {plan.network_name}\n"
@@ -398,6 +451,7 @@ def _wait_for_container_name(
 def _wait_for_postgres_ready(
     container_name: str, *, attempts: int = 20, delay_seconds: float = 3.0
 ) -> None:
+    result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
     for attempt in range(attempts):
         result = subprocess.run(
             [

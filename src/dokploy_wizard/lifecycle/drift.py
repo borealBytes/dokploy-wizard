@@ -15,12 +15,14 @@ from dokploy_wizard.networking import (
 )
 from dokploy_wizard.networking.planner import _build_tunnel_ingress
 from dokploy_wizard.packs.coder import CoderBackend, CoderResourceRecord, reconcile_coder
+from dokploy_wizard.packs.docuseal import DocuSealBackend
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     HeadscaleResourceRecord,
     reconcile_headscale,
 )
 from dokploy_wizard.packs.matrix import MatrixBackend, reconcile_matrix
+from dokploy_wizard.packs.moodle import MoodleBackend
 from dokploy_wizard.packs.nextcloud import (
     NextcloudBackend,
     NextcloudResourceRecord,
@@ -83,6 +85,8 @@ def validate_preserved_phases(
     headscale_backend: HeadscaleBackend,
     matrix_backend: MatrixBackend,
     nextcloud_backend: NextcloudBackend,
+    moodle_backend: MoodleBackend,
+    docuseal_backend: DocuSealBackend,
     seaweedfs_backend: SeaweedFsBackend,
     coder_backend: CoderBackend,
     openclaw_backend: OpenClawBackend,
@@ -105,6 +109,8 @@ def validate_preserved_phases(
                 headscale_backend=headscale_backend,
                 matrix_backend=matrix_backend,
                 nextcloud_backend=nextcloud_backend,
+                moodle_backend=moodle_backend,
+                docuseal_backend=docuseal_backend,
                 seaweedfs_backend=seaweedfs_backend,
                 coder_backend=coder_backend,
                 openclaw_backend=openclaw_backend,
@@ -135,6 +141,8 @@ def _validate_phase(
     headscale_backend: HeadscaleBackend,
     matrix_backend: MatrixBackend,
     nextcloud_backend: NextcloudBackend,
+    moodle_backend: MoodleBackend,
+    docuseal_backend: DocuSealBackend,
     seaweedfs_backend: SeaweedFsBackend,
     coder_backend: CoderBackend,
     openclaw_backend: OpenClawBackend,

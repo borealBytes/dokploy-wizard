@@ -8,6 +8,7 @@ import shutil
 import shlex
 import ssl
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -346,8 +347,8 @@ class DokployOpenClawBackend:
 
     def check_health(self, *, service: OpenClawResourceRecord, url: str) -> bool:
         if not _docker_container_is_up(service.resource_name):
-            return _local_https_health_check(url)
-        https_ok = _local_https_health_check(url)
+            return False
+        https_ok = _wait_for_local_https_health(url)
         if not https_ok:
             return False
         _control_ui_origin_ready(service.resource_name, url)
@@ -685,6 +686,17 @@ def _local_https_health_check(url: str) -> bool:
         return exc.code < 500
     except (error.URLError, TimeoutError):
         return False
+
+
+def _wait_for_local_https_health(
+    url: str, *, attempts: int = 12, delay_seconds: float = 5.0
+) -> bool:
+    for attempt in range(attempts):
+        if _local_https_health_check(url):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return False
 
 
 def _render_compose_file(

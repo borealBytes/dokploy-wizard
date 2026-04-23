@@ -27,6 +27,8 @@ PHASE_ORDER: tuple[str, ...] = (
     "tailscale",
     "matrix",
     "nextcloud",
+    "moodle",
+    "docuseal",
     "coder",
     "openclaw",
     "my-farm-advisor",
@@ -58,6 +60,8 @@ _SUPPORTED_HOSTNAME_KEYS = {
     "MATRIX_SUBDOMAIN",
     "NEXTCLOUD_SUBDOMAIN",
     "ONLYOFFICE_SUBDOMAIN",
+    "MOODLE_SUBDOMAIN",
+    "DOCUSEAL_SUBDOMAIN",
     "CODER_SUBDOMAIN",
     "CODER_WILDCARD_SUBDOMAIN",
     "OPENCLAW_SUBDOMAIN",
@@ -69,6 +73,8 @@ _SUPPORTED_ENABLEMENT_KEYS = {
     "ENABLE_HEADSCALE",
     "ENABLE_MATRIX",
     "ENABLE_NEXTCLOUD",
+    "ENABLE_MOODLE",
+    "ENABLE_DOCUSEAL",
     "ENABLE_CODER",
     "ENABLE_OPENCLAW",
     "ENABLE_MY_FARM_ADVISOR",
@@ -106,6 +112,8 @@ _HOSTNAME_PHASES = {
     "matrix": ("networking", "matrix"),
     "nextcloud": ("networking", "nextcloud"),
     "onlyoffice": ("networking", "nextcloud"),
+    "moodle": ("networking", "moodle"),
+    "docuseal": ("networking", "docuseal"),
     "s3": ("networking", "seaweedfs"),
     "coder": ("networking", "coder"),
     "coder-wildcard": ("networking", "coder"),
@@ -116,6 +124,8 @@ _HOSTNAME_PHASES = {
 _OPTIONAL_PHASE_PACKS = {
     "matrix": "matrix",
     "nextcloud": "nextcloud",
+    "moodle": "moodle",
+    "docuseal": "docuseal",
     "seaweedfs": "seaweedfs",
     "coder": "coder",
     "openclaw": "openclaw",
@@ -165,7 +175,17 @@ _MY_FARM_RUNTIME_ENV_KEYS = {
     "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
     "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
 }
+_OUTBOUND_MAIL_ENV_KEYS = {
+    "OUTBOUND_SMTP_HOSTNAME",
+    "OUTBOUND_SMTP_FROM_ADDRESS",
+}
 
+_SUPPORTED_MODIFY_KEYS |= (
+    _OPENCLAW_RUNTIME_ENV_KEYS
+    | _NEXTCLOUD_NEXA_USER_ENV_KEYS
+    | _MY_FARM_RUNTIME_ENV_KEYS
+    | _OUTBOUND_MAIL_ENV_KEYS
+)
 
 @dataclass(frozen=True)
 class LifecyclePlan:
@@ -197,6 +217,10 @@ def applicable_phases_for(desired_state: DesiredState) -> tuple[str, ...]:
         phases.add("matrix")
     if "nextcloud" in desired_state.enabled_packs:
         phases.add("nextcloud")
+    if "moodle" in desired_state.enabled_packs:
+        phases.add("moodle")
+    if "docuseal" in desired_state.enabled_packs:
+        phases.add("docuseal")
     if "coder" in desired_state.enabled_packs:
         phases.add("coder")
     if "openclaw" in desired_state.enabled_packs:
@@ -340,6 +364,12 @@ def classify_modify_request(
         phases_to_run.add("my-farm-advisor")
     if changed_keys & _MY_FARM_RUNTIME_ENV_KEYS:
         phases_to_run.add("my-farm-advisor")
+    if changed_keys & _OUTBOUND_MAIL_ENV_KEYS:
+        phases_to_run.add("shared_core")
+        if "moodle" in requested_desired.enabled_packs:
+            phases_to_run.add("moodle")
+        if "docuseal" in requested_desired.enabled_packs:
+            phases_to_run.add("docuseal")
     if (
         existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict()
         and not removed_packs
