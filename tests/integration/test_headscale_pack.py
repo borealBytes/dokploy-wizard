@@ -256,6 +256,17 @@ class FakeSharedCoreBackend:
     def create_redis_service(self, resource_name: str) -> SharedCoreResourceRecord:
         raise AssertionError(f"Headscale should not provision redis: {resource_name}")
 
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        del resource_id
+        return None
+
+    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        del resource_name
+        return None
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        raise AssertionError(f"Headscale should not provision mail relay: {resource_name}")
+
 
 @dataclass
 class FakeHeadscaleBackend:

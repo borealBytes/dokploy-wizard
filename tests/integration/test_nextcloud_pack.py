@@ -269,6 +269,17 @@ class FakeSharedCoreBackend:
         self.redis = SharedCoreResourceRecord(resource_id="redis-1", resource_name=resource_name)
         return self.redis
 
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        del resource_id
+        return None
+
+    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        del resource_name
+        return None
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        raise AssertionError(f"Nextcloud should not provision mail relay: {resource_name}")
+
     def ensure_postgres_allocations(
         self, allocations: tuple[SharedPostgresAllocation, ...]
     ) -> None:

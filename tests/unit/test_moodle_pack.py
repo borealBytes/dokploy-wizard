@@ -278,6 +278,28 @@ def test_render_moodle_compose_includes_shared_postgres_data_and_forwarded_https
     )
 
 
+def test_configure_moodle_smtp_uses_local_postfix_sender() -> None:
+    commands: list[str] = []
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        moodle_module,
+        "_run_container_shell",
+        lambda container_name, shell_command, *, error_prefix: commands.append(shell_command),
+    )
+
+    moodle_module._configure_moodle_smtp(
+        "moodle-container",
+        smtp_host="wizard-stack-shared-postfix",
+        smtp_port=587,
+        from_address="DoNotReply@example.com",
+    )
+    monkeypatch.undo()
+
+    assert commands == [
+        "set -eu && php /var/www/html/admin/cli/cfg.php --name=smtphosts --set=wizard-stack-shared-postfix:587 && php /var/www/html/admin/cli/cfg.php --name=smtpsecure --set='' && php /var/www/html/admin/cli/cfg.php --name=smtpauthtype --set='' && php /var/www/html/admin/cli/cfg.php --name=smtpuser --set='' && php /var/www/html/admin/cli/cfg.php --name=smtppass --set='' && php /var/www/html/admin/cli/cfg.php --name=noreplyaddress --set=DoNotReply@example.com"
+    ]
+
+
 def test_dokploy_moodle_backend_create_and_update_paths_keep_single_compose_stable() -> None:
     create_client = FakeDokployMoodleApiClient()
     create_backend = DokployMoodleBackend(
@@ -549,7 +571,7 @@ def test_install_moodle_derives_admin_username_from_admin_email_local_part(
     assert "--adminuser=admin" not in commands[0]
 
 
-def test_prepare_moodle_runtime_bootstraps_official_source_when_runtime_image_lacks_code(
+def test_prepare_moodle_runtime_bootstraps_official_source_without_wiping_existing_docroot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands: list[str] = []
@@ -568,7 +590,7 @@ def test_prepare_moodle_runtime_bootstraps_official_source_when_runtime_image_la
         in commands[0]
     )
     assert 'curl -fsSL https://github.com/moodle/moodle/archive/refs/heads/MOODLE_500_STABLE.tar.gz -o "${tmp_archive}"' in commands[0]
-    assert "rm -rf /var/www/html/*" in commands[0]
+    assert "rm -rf /var/www/html/*" not in commands[0]
     assert 'mkdir -p /var/www/html' in commands[0]
     assert 'tar -xzf "${tmp_archive}" -C /var/www/html --strip-components=1' in commands[0]
     assert 'rm -rf "${tmp_archive}"' in commands[0]

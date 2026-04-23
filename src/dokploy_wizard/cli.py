@@ -1538,6 +1538,11 @@ def _build_shared_core_backend(
             api_key=api_key,
             stack_name=desired_state.stack_name,
             plan=desired_state.shared_core,
+            mail_relay_config={
+                key: value
+                for key, value in raw_env.values.items()
+                if key.startswith("OUTBOUND_SMTP_") and value.strip() != ""
+            },
             client=_build_dokploy_api_client(
                 raw_env=raw_env,
                 api_url=api_url,
@@ -1742,6 +1747,7 @@ def _build_moodle_backend(
         return ShellMoodleBackend()
     if allocation.postgres is None:
         return ShellMoodleBackend()
+    mail_relay = desired_state.shared_core.mail_relay
     return DokployMoodleBackend(
         api_url=api_url,
         api_key=api_key,
@@ -1751,6 +1757,9 @@ def _build_moodle_backend(
         admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
+        smtp_host=None if mail_relay is None else mail_relay.service_name,
+        smtp_port=None if mail_relay is None else mail_relay.smtp_port,
+        smtp_from_address=None if mail_relay is None else mail_relay.from_address,
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,
@@ -1781,6 +1790,7 @@ def _build_docuseal_backend(
         return ShellDocuSealBackend()
     if allocation.postgres is None:
         return ShellDocuSealBackend()
+    mail_relay = desired_state.shared_core.mail_relay
     return DokployDocuSealBackend(
         api_url=api_url,
         api_key=api_key,
@@ -1790,6 +1800,10 @@ def _build_docuseal_backend(
         admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
+        smtp_host=None if mail_relay is None else mail_relay.service_name,
+        smtp_port=None if mail_relay is None else mail_relay.smtp_port,
+        smtp_domain=desired_state.root_domain,
+        smtp_from_address=None if mail_relay is None else mail_relay.from_address,
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,

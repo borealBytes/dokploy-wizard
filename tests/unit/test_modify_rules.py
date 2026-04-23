@@ -446,6 +446,8 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "OPENCLAW_PRIMARY_MODEL",
         "OPENCLAW_TELEGRAM_BOT_TOKEN",
         "OPENCLAW_TELEGRAM_OWNER_USER_ID",
+        "OUTBOUND_SMTP_FROM_ADDRESS",
+        "OUTBOUND_SMTP_HOSTNAME",
     )
 
 

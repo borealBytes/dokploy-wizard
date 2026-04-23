@@ -113,7 +113,7 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
             key="MY_FARM_ADVISOR_REPLICAS",
             pack_name="my-farm-advisor",
         ),
-        shared_core=build_shared_core_plan(stack_name, pack_selection.enabled_packs),
+        shared_core=build_shared_core_plan(stack_name, pack_selection.enabled_packs, values),
     )
 
 
@@ -159,6 +159,8 @@ def _resolve_tailscale_enabled(values: dict[str, str]) -> bool:
 def _resolve_tailscale_hostname(values: dict[str, str]) -> str | None:
     if not _resolve_tailscale_enabled(values):
         return None
+
+
     return _require_value(values, "TAILSCALE_HOSTNAME")
 
 
