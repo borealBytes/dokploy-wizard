@@ -91,6 +91,10 @@ class DokployDocuSealBackend:
         admin_password: str,
         postgres_service_name: str,
         postgres: SharedPostgresAllocation,
+        smtp_host: str | None = None,
+        smtp_port: int | None = None,
+        smtp_domain: str | None = None,
+        smtp_from_address: str | None = None,
         client: DokployDocuSealApi | None = None,
     ) -> None:
         self._stack_name = stack_name
@@ -101,6 +105,10 @@ class DokployDocuSealBackend:
         self._postgres_service_name = postgres_service_name
         self._postgres = postgres
         self._secret_key_base_secret_ref = _secret_key_base_secret_ref(stack_name)
+        self._smtp_host = smtp_host
+        self._smtp_port = smtp_port
+        self._smtp_domain = smtp_domain
+        self._smtp_from_address = smtp_from_address
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
@@ -267,6 +275,10 @@ class DokployDocuSealBackend:
             postgres_service_name=self._postgres_service_name,
             postgres=self._postgres,
             secret_key_base_secret_ref=self._secret_key_base_secret_ref,
+            smtp_host=self._smtp_host,
+            smtp_port=self._smtp_port,
+            smtp_domain=self._smtp_domain,
+            smtp_from_address=self._smtp_from_address,
         )
         try:
             if self._applied_locator is not None:
@@ -424,12 +436,25 @@ def _render_compose_file(
     postgres_service_name: str,
     postgres: SharedPostgresAllocation,
     secret_key_base_secret_ref: str,
+    smtp_host: str | None = None,
+    smtp_port: int | None = None,
+    smtp_domain: str | None = None,
+    smtp_from_address: str | None = None,
 ) -> str:
     service_name = _service_name(stack_name)
     data_name = _data_name(stack_name)
     shared_network = _shared_network_name(stack_name)
     health_url = _health_url(hostname)
     secret_key_base = _secret_key_base_value(stack_name, secret_key_base_secret_ref)
+    smtp_block = ""
+    if smtp_host is not None and smtp_port is not None and smtp_from_address is not None:
+        smtp_block = (
+            f"      SMTP_ADDRESS: {smtp_host}\n"
+            f"      SMTP_PORT: '{smtp_port}'\n"
+            f"      SMTP_DOMAIN: {smtp_domain or hostname}\n"
+            f"      SMTP_FROM: {_yaml_quote(smtp_from_address)}\n"
+            "      SMTP_ENABLE_STARTTLS: 'false'\n"
+        )
     return (
         "services:\n"
         f"  {service_name}:\n"
@@ -441,6 +466,7 @@ def _render_compose_file(
         f"      SECRET_KEY_BASE: {secret_key_base}\n"
         f"      DOKPLOY_WIZARD_DOCUSEAL_BASE_URL: {_yaml_quote(f'https://{hostname}')}\n"
         f"      DOKPLOY_WIZARD_DOCUSEAL_DATA_ROOT: {_yaml_quote(_DEFAULT_DOCUSEAL_DATA_ROOT)}\n"
+        f"{smtp_block}"
         "    labels:\n"
         '      traefik.enable: "true"\n'
         f'      traefik.http.routers.{service_name}.entrypoints: "websecure"\n'

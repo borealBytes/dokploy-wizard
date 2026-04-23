@@ -514,6 +514,8 @@ def _validate_state_document_set(loaded_state: LoadedState) -> None:
         "tailscale",
         "matrix",
         "nextcloud",
+        "moodle",
+        "docuseal",
         "coder",
         "openclaw",
         "my-farm-advisor",

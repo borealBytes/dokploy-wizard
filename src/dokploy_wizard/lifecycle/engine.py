@@ -22,12 +22,18 @@ from dokploy_wizard.networking import (
     reconcile_networking,
 )
 from dokploy_wizard.packs.coder import CoderBackend, build_coder_ledger, reconcile_coder
+from dokploy_wizard.packs.docuseal import (
+    DocuSealBackend,
+    build_docuseal_ledger,
+    reconcile_docuseal,
+)
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     build_headscale_ledger,
     reconcile_headscale,
 )
 from dokploy_wizard.packs.matrix import MatrixBackend, build_matrix_ledger, reconcile_matrix
+from dokploy_wizard.packs.moodle import MoodleBackend, build_moodle_ledger, reconcile_moodle
 from dokploy_wizard.packs.nextcloud import (
     NextcloudBackend,
     build_nextcloud_ledger,
@@ -68,6 +74,8 @@ class LifecycleBackends:
     headscale: HeadscaleBackend
     matrix: MatrixBackend
     nextcloud: NextcloudBackend
+    moodle: MoodleBackend
+    docuseal: DocuSealBackend
     seaweedfs: SeaweedFsBackend
     coder: CoderBackend
     openclaw: OpenClawBackend
@@ -186,6 +194,7 @@ def execute_lifecycle_plan(
                     network_resource_id=shared_core.network_resource_id,
                     postgres_resource_id=shared_core.postgres_resource_id,
                     redis_resource_id=shared_core.redis_resource_id,
+                    mail_relay_resource_id=shared_core.mail_relay_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "headscale":
@@ -251,6 +260,38 @@ def execute_lifecycle_plan(
                     onlyoffice_service_resource_id=nextcloud.onlyoffice_service_resource_id,
                     nextcloud_volume_resource_id=nextcloud.nextcloud_volume_resource_id,
                     onlyoffice_volume_resource_id=nextcloud.onlyoffice_volume_resource_id,
+                )
+                write_ownership_ledger(state_dir, current_ledger)
+        elif phase == "moodle":
+            moodle = reconcile_moodle(
+                dry_run=dry_run,
+                desired_state=desired_state,
+                ownership_ledger=current_ledger,
+                backend=backends.moodle,
+            )
+            phase_results[phase] = moodle.result.to_dict()
+            if not dry_run:
+                current_ledger = build_moodle_ledger(
+                    existing_ledger=current_ledger,
+                    stack_name=desired_state.stack_name,
+                    service_resource_id=moodle.service_resource_id,
+                    data_resource_id=moodle.data_resource_id,
+                )
+                write_ownership_ledger(state_dir, current_ledger)
+        elif phase == "docuseal":
+            docuseal = reconcile_docuseal(
+                dry_run=dry_run,
+                desired_state=desired_state,
+                ownership_ledger=current_ledger,
+                backend=backends.docuseal,
+            )
+            phase_results[phase] = docuseal.result.to_dict()
+            if not dry_run:
+                current_ledger = build_docuseal_ledger(
+                    existing_ledger=current_ledger,
+                    stack_name=desired_state.stack_name,
+                    service_resource_id=docuseal.service_resource_id,
+                    data_resource_id=docuseal.data_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "coder":

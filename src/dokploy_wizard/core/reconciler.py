@@ -18,6 +18,7 @@ from dokploy_wizard.state.models import DesiredState, OwnedResource, OwnershipLe
 SHARED_NETWORK_RESOURCE_TYPE = "shared_core_network"
 SHARED_POSTGRES_RESOURCE_TYPE = "shared_core_postgres"
 SHARED_REDIS_RESOURCE_TYPE = "shared_core_redis"
+SHARED_MAIL_RELAY_RESOURCE_TYPE = "shared_core_mail_relay"
 
 
 class SharedCoreError(RuntimeError):
@@ -44,6 +45,14 @@ class SharedCoreBackend(Protocol):
     def find_redis_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None: ...
 
     def create_redis_service(self, resource_name: str) -> SharedCoreResourceRecord: ...
+
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None: ...
+
+    def find_mail_relay_service_by_name(
+        self, resource_name: str
+    ) -> SharedCoreResourceRecord | None: ...
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord: ...
 
 
 class ShellSharedCoreBackend:
@@ -81,6 +90,15 @@ class ShellSharedCoreBackend:
     def create_redis_service(self, resource_name: str) -> SharedCoreResourceRecord:
         return SharedCoreResourceRecord(resource_id=resource_name, resource_name=resource_name)
 
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        return SharedCoreResourceRecord(resource_id=resource_id, resource_name=resource_id)
+
+    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        return None
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        return SharedCoreResourceRecord(resource_id=resource_name, resource_name=resource_name)
+
     def ensure_postgres_allocations(
         self, allocations: tuple[SharedPostgresAllocation, ...]
     ) -> None:
@@ -102,12 +120,14 @@ def reconcile_shared_core(
                 network=None,
                 postgres=None,
                 redis=None,
+                mail_relay=None,
                 allocations=plan.allocations,
-                notes=("No selected packs require shared PostgreSQL or Redis services.",),
+                notes=("No selected packs require shared PostgreSQL, Redis, or SMTP relay services.",),
             ),
             network_resource_id=None,
             postgres_resource_id=None,
             redis_resource_id=None,
+            mail_relay_resource_id=None,
         )
 
     network, network_id = _resolve_network(
@@ -137,6 +157,19 @@ def reconcile_shared_core(
         find_by_name=backend.find_redis_service_by_name,
         create_resource=backend.create_redis_service,
     )
+    if plan.mail_relay is None:
+        mail_relay, mail_relay_id = None, None
+    else:
+        mail_relay, mail_relay_id = _resolve_optional_service(
+            dry_run=dry_run,
+            ownership_ledger=ownership_ledger,
+            service_name=plan.mail_relay.service_name,
+            resource_type=SHARED_MAIL_RELAY_RESOURCE_TYPE,
+            scope=_mail_relay_scope(desired_state.stack_name),
+            get_resource=backend.get_mail_relay_service,
+            find_by_name=backend.find_mail_relay_service_by_name,
+            create_resource=backend.create_mail_relay_service,
+        )
     if not dry_run and postgres is not None:
         ensure_postgres_allocations = getattr(backend, "ensure_postgres_allocations", None)
         if callable(ensure_postgres_allocations):
@@ -152,6 +185,8 @@ def reconcile_shared_core(
         actions.append(postgres.action)
     if redis is not None:
         actions.append(redis.action)
+    if mail_relay is not None:
+        actions.append(mail_relay.action)
 
     return SharedCorePhase(
         result=SharedCoreResult(
@@ -159,6 +194,7 @@ def reconcile_shared_core(
             network=network,
             postgres=postgres,
             redis=redis,
+            mail_relay=mail_relay,
             allocations=plan.allocations,
             notes=(
                 f"Shared network '{plan.network_name}' planned for shared-core packs.",
@@ -168,6 +204,7 @@ def reconcile_shared_core(
         network_resource_id=None if dry_run else network_id,
         postgres_resource_id=None if dry_run else postgres_id,
         redis_resource_id=None if dry_run else redis_id,
+        mail_relay_resource_id=None if dry_run else mail_relay_id,
     )
 
 
@@ -178,6 +215,7 @@ def build_shared_core_ledger(
     network_resource_id: str | None,
     postgres_resource_id: str | None,
     redis_resource_id: str | None,
+    mail_relay_resource_id: str | None,
 ) -> OwnershipLedger:
     resources = [
         resource
@@ -187,6 +225,7 @@ def build_shared_core_ledger(
             SHARED_NETWORK_RESOURCE_TYPE,
             SHARED_POSTGRES_RESOURCE_TYPE,
             SHARED_REDIS_RESOURCE_TYPE,
+            SHARED_MAIL_RELAY_RESOURCE_TYPE,
         }
     ]
     if network_resource_id is not None:
@@ -211,6 +250,14 @@ def build_shared_core_ledger(
                 resource_type=SHARED_REDIS_RESOURCE_TYPE,
                 resource_id=redis_resource_id,
                 scope=_redis_scope(stack_name),
+            )
+        )
+    if mail_relay_resource_id is not None:
+        resources.append(
+            OwnedResource(
+                resource_type=SHARED_MAIL_RELAY_RESOURCE_TYPE,
+                resource_id=mail_relay_resource_id,
+                scope=_mail_relay_scope(stack_name),
             )
         )
     return OwnershipLedger(
@@ -366,3 +413,7 @@ def _postgres_scope(stack_name: str) -> str:
 
 def _redis_scope(stack_name: str) -> str:
     return f"stack:{stack_name}:shared-redis"
+
+
+def _mail_relay_scope(stack_name: str) -> str:
+    return f"stack:{stack_name}:shared-postfix"
