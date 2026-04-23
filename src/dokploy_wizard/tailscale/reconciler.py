@@ -103,6 +103,13 @@ class ShellTailscaleBackend:
     ) -> TailscaleManagedResource:
         if not self._is_installed():
             self._install()
+        existing = self.get_status(resource_name)
+        if existing is not None and existing.online:
+            return TailscaleManagedResource(
+                action="reuse_existing",
+                resource_id=resource_name,
+                resource_name=resource_name,
+            )
         command = [
             "tailscale",
             "up",
