@@ -134,6 +134,9 @@ class DokployMoodleBackend:
         admin_password: str,
         postgres_service_name: str,
         postgres: SharedPostgresAllocation,
+        smtp_host: str | None = None,
+        smtp_port: int | None = None,
+        smtp_from_address: str | None = None,
         moodle_cron: str = _DEFAULT_MOODLE_CRON,
         moodle_cron_timezone: str = _DEFAULT_MOODLE_CRON_TIMEZONE,
         client: DokployMoodleApi | None = None,
@@ -145,6 +148,9 @@ class DokployMoodleBackend:
         self._admin_password = admin_password
         self._postgres_service_name = postgres_service_name
         self._postgres = postgres
+        self._smtp_host = smtp_host
+        self._smtp_port = smtp_port
+        self._smtp_from_address = smtp_from_address
         self._moodle_cron = moodle_cron
         self._moodle_cron_timezone = moodle_cron_timezone
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
@@ -269,6 +275,14 @@ class DokployMoodleBackend:
             _persist_moodle_config(container_name)
             _wait_for_local_https_health(f"https://{self._hostname}/login/index.php")
             notes.append("Installed Moodle via admin/cli/install.php.")
+        if self._smtp_host is not None and self._smtp_port is not None and self._smtp_from_address is not None:
+            _configure_moodle_smtp(
+                container_name,
+                smtp_host=self._smtp_host,
+                smtp_port=self._smtp_port,
+                from_address=self._smtp_from_address,
+            )
+            notes.append(f"Configured Moodle outbound mail via '{self._smtp_host}:{self._smtp_port}'.")
         try:
             self._ensure_moodle_cron_schedule()
         except DokployApiError as error:
@@ -737,6 +751,29 @@ def _persist_moodle_config(container_name: str) -> None:
     )
 
 
+def _configure_moodle_smtp(
+    container_name: str,
+    *,
+    smtp_host: str,
+    smtp_port: int,
+    from_address: str,
+) -> None:
+    cfg = f"{_DEFAULT_MOODLE_DOCROOT}/admin/cli/cfg.php"
+    commands = [
+        f"php {cfg} --name=smtphosts --set={shlex.quote(f'{smtp_host}:{smtp_port}')}",
+        f"php {cfg} --name=smtpsecure --set=''",
+        f"php {cfg} --name=smtpauthtype --set=''",
+        f"php {cfg} --name=smtpuser --set=''",
+        f"php {cfg} --name=smtppass --set=''",
+        f"php {cfg} --name=noreplyaddress --set={shlex.quote(from_address)}",
+    ]
+    _run_container_shell(
+        container_name,
+        "set -eu && " + " && ".join(commands),
+        error_prefix="Unable to configure Moodle SMTP",
+    )
+
+
 def _repair_moodle_config_file(container_name: str, config_path: str) -> None:
     _run_container_shell(
         container_name,
@@ -815,7 +852,6 @@ def _moodle_runtime_prepare_shell() -> str:
         f"if [ ! -f {_DEFAULT_MOODLE_DOCROOT}/admin/cli/install.php ]; then\n"
         "  tmp_archive=/tmp/moodle-source.tar.gz\n"
         f"  curl -fsSL {source_archive_url} -o \"${{tmp_archive}}\"\n"
-        "  rm -rf /var/www/html/*\n"
         f"  mkdir -p {_DEFAULT_MOODLE_DOCROOT}\n"
         f"  tar -xzf \"${{tmp_archive}}\" -C {_DEFAULT_MOODLE_DOCROOT} --strip-components=1\n"
         "  rm -rf \"${tmp_archive}\"\n"

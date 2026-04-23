@@ -25,6 +25,7 @@ from dokploy_wizard.dokploy.openclaw import (
     DokployOpenClawBackend,
     _control_ui_origin_ready,
     _local_https_health_check,
+    _wait_for_local_https_health,
 )
 from dokploy_wizard.packs.openclaw import (
     MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
@@ -1563,6 +1564,54 @@ def test_local_https_health_check_rejects_cloudflare_access_redirect(
     assert _local_https_health_check("https://openclaw.example.com/health") is False
 
 
+def test_wait_for_local_https_health_retries_until_probe_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+    sleep_calls: list[float] = []
+
+    def fake_probe(url: str) -> bool:
+        attempts.append(url)
+        return len(attempts) >= 3
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._local_https_health_check", fake_probe)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw.time.sleep", sleep_calls.append)
+
+    assert _wait_for_local_https_health(
+        "https://openclaw.example.com/health", attempts=4, delay_seconds=0.25
+    ) is True
+    assert attempts == [
+        "https://openclaw.example.com/health",
+        "https://openclaw.example.com/health",
+        "https://openclaw.example.com/health",
+    ]
+    assert sleep_calls == [0.25, 0.25]
+
+
+def test_wait_for_local_https_health_hard_fails_after_last_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+    sleep_calls: list[float] = []
+
+    def fake_probe(url: str) -> bool:
+        attempts.append(url)
+        return False
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._local_https_health_check", fake_probe)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw.time.sleep", sleep_calls.append)
+
+    assert _wait_for_local_https_health(
+        "https://openclaw.example.com/health", attempts=3, delay_seconds=0.5
+    ) is False
+    assert attempts == [
+        "https://openclaw.example.com/health",
+        "https://openclaw.example.com/health",
+        "https://openclaw.example.com/health",
+    ]
+    assert sleep_calls == [0.5, 0.5]
+
+
 def test_check_health_succeeds_when_container_is_running_and_https_probe_passes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1580,10 +1629,78 @@ def test_check_health_succeeds_when_container_is_running_and_https_probe_passes(
 
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda _: True)
     monkeypatch.setattr(
-        "dokploy_wizard.dokploy.openclaw._local_https_health_check", lambda _: True
+        "dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda _: True
     )
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", lambda *_: True
     )
 
     assert backend.check_health(service=service, url="https://openclaw.example.com/health") is True
+
+
+def test_check_health_waits_for_local_https_readiness_before_control_ui_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=FakeDokployOpenClawApi(),
+    )
+    service = OpenClawResourceRecord(
+        resource_id="dokploy-compose:cmp-1:openclaw:replicas:1",
+        resource_name="wizard-stack-openclaw",
+        replicas=1,
+    )
+    calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda _: True)
+
+    def fake_wait(url: str) -> bool:
+        calls.append(("wait", url))
+        return True
+
+    def fake_control(service_name: str, url: str) -> bool:
+        calls.append((service_name, url))
+        return True
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", fake_wait)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", fake_control)
+
+    assert backend.check_health(service=service, url="https://openclaw.example.com/health") is True
+    assert calls == [
+        ("wait", "https://openclaw.example.com/health"),
+        ("wizard-stack-openclaw", "https://openclaw.example.com/health"),
+    ]
+
+
+def test_check_health_fails_when_local_https_never_becomes_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=FakeDokployOpenClawApi(),
+    )
+    service = OpenClawResourceRecord(
+        resource_id="dokploy-compose:cmp-1:openclaw:replicas:1",
+        resource_name="wizard-stack-openclaw",
+        replicas=1,
+    )
+    control_calls = 0
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda _: True)
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda _: False
+    )
+
+    def unexpected_control(*_: object) -> bool:
+        nonlocal control_calls
+        control_calls += 1
+        return True
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", unexpected_control)
+
+    assert backend.check_health(service=service, url="https://openclaw.example.com/health") is False
+    assert control_calls == 0

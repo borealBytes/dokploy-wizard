@@ -65,7 +65,10 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
                 env_key="MATRIX_SUBDOMAIN",
             ),
         ),
-        mutable_env_keys=(),
+        mutable_env_keys=(
+            "OUTBOUND_SMTP_HOSTNAME",
+            "OUTBOUND_SMTP_FROM_ADDRESS",
+        ),
         mutable_resource_keys=(),
         enabled_features=(),
         resource_profile="recommended",
@@ -113,7 +116,10 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
                 env_key="SEAWEEDFS_SUBDOMAIN",
             ),
         ),
-        mutable_env_keys=(),
+        mutable_env_keys=(
+            "OUTBOUND_SMTP_HOSTNAME",
+            "OUTBOUND_SMTP_FROM_ADDRESS",
+        ),
         mutable_resource_keys=(),
         enabled_features=(),
         resource_profile="recommended",

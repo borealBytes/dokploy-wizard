@@ -78,7 +78,12 @@ class ShellTailscaleBackend:
         )
 
     def find_node_by_name(self, resource_name: str) -> TailscaleManagedResource | None:
-        status = self.get_status(resource_name)
+        try:
+            status = self.get_status(resource_name)
+        except TailscaleError as error:
+            if _is_missing_tailscale_binary_error(error):
+                return None
+            raise
         if status is None:
             return None
         return TailscaleManagedResource(
@@ -402,6 +407,13 @@ def _command_stdout_or_none(result: CommandResult) -> str | None:
         return None
     value = result.stdout.strip()
     return value or None
+
+
+def _is_missing_tailscale_binary_error(error: TailscaleError) -> bool:
+    return str(error) == (
+        "tailscale command could not be executed because the tailscale "
+        "binary was not found on PATH."
+    )
 
 
 def _run_command(command: list[str]) -> CommandResult:

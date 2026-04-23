@@ -97,6 +97,11 @@ def test_shared_core_plan_allocates_distinct_postgres_for_moodle_and_docuseal() 
         password_secret_ref="shared-stack-moodle-postgres-password",
     )
     assert moodle_allocation.redis is None
+    assert desired_state.shared_core.mail_relay is not None
+    assert desired_state.shared_core.mail_relay.service_name == "shared-stack-shared-postfix"
+    assert desired_state.shared_core.mail_relay.mail_hostname == "mail.example.com"
+    assert desired_state.shared_core.mail_relay.smtp_port == 587
+    assert desired_state.shared_core.mail_relay.from_address == "DoNotReply@example.com"
 
 
 def test_admin_credential_rejection_for_postgres_allocations() -> None:

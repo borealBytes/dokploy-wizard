@@ -130,6 +130,20 @@ class FakeSharedCoreBackend:
     def create_redis_service(self, resource_name: str) -> SharedCoreResourceRecord:
         raise AssertionError(f"unexpected redis create: {resource_name}")
 
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        del resource_id
+        return None
+
+    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        del resource_name
+        return None
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        return SharedCoreResourceRecord(
+            resource_id="moodle-docuseal-stack-postfix",
+            resource_name=resource_name,
+        )
+
     def validate_postgres_allocations(self, allocations: tuple[object, ...]) -> bool:
         assert allocations
         return self.allocations_ready

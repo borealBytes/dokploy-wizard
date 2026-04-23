@@ -175,9 +175,16 @@ _MY_FARM_RUNTIME_ENV_KEYS = {
     "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
     "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
 }
+_OUTBOUND_MAIL_ENV_KEYS = {
+    "OUTBOUND_SMTP_HOSTNAME",
+    "OUTBOUND_SMTP_FROM_ADDRESS",
+}
 
 _SUPPORTED_MODIFY_KEYS |= (
-    _OPENCLAW_RUNTIME_ENV_KEYS | _NEXTCLOUD_NEXA_USER_ENV_KEYS | _MY_FARM_RUNTIME_ENV_KEYS
+    _OPENCLAW_RUNTIME_ENV_KEYS
+    | _NEXTCLOUD_NEXA_USER_ENV_KEYS
+    | _MY_FARM_RUNTIME_ENV_KEYS
+    | _OUTBOUND_MAIL_ENV_KEYS
 )
 
 
@@ -358,6 +365,12 @@ def classify_modify_request(
         phases_to_run.add("my-farm-advisor")
     if changed_keys & _MY_FARM_RUNTIME_ENV_KEYS:
         phases_to_run.add("my-farm-advisor")
+    if changed_keys & _OUTBOUND_MAIL_ENV_KEYS:
+        phases_to_run.add("shared_core")
+        if "moodle" in requested_desired.enabled_packs:
+            phases_to_run.add("moodle")
+        if "docuseal" in requested_desired.enabled_packs:
+            phases_to_run.add("docuseal")
     if (
         existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict()
         and not removed_packs

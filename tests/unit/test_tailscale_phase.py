@@ -169,6 +169,63 @@ def test_shell_tailscale_backend_raises_explicit_error_when_binary_missing() -> 
         backend.get_status("wizard-admin")
 
 
+def test_reconcile_tailscale_installs_on_fresh_host_when_probe_hits_missing_binary() -> None:
+    raw_env = _tailscale_raw_env(TAILSCALE_MOCK_INSTALLED="false")
+    desired_state = _tailscale_desired_state(TAILSCALE_MOCK_INSTALLED="false")
+
+    @dataclass
+    class FreshHostRunner:
+        commands: list[list[str]] = field(default_factory=list)
+        installed: bool = False
+        up_applied: bool = False
+
+        def __call__(self, command: list[str]) -> CommandResult:
+            self.commands.append(command)
+            if command[:3] == ["tailscale", "status", "--json"]:
+                if not self.installed:
+                    raise FileNotFoundError("tailscale")
+                if not self.up_applied:
+                    return CommandResult(returncode=1, stdout="", stderr="not connected")
+                return CommandResult(
+                    returncode=0,
+                    stdout=(
+                        '{"Self":{"HostName":"wizard-admin","Online":true,'
+                        '"LoginName":"user@example.com"}}'
+                    ),
+                    stderr="",
+                )
+            if command[:2] == ["sh", "-c"]:
+                self.installed = True
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if command[:2] == ["tailscale", "version"]:
+                return CommandResult(returncode=0, stdout="1.78.0\n", stderr="")
+            if command[:2] == ["tailscale", "up"]:
+                self.up_applied = True
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if command[:3] == ["tailscale", "ip", "-4"]:
+                return CommandResult(returncode=0, stdout="100.64.0.10\n", stderr="")
+            if command[:3] == ["tailscale", "ip", "-6"]:
+                return CommandResult(returncode=0, stdout="fd7a:115c:a1e0::10\n", stderr="")
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = FreshHostRunner()
+    backend = ShellTailscaleBackend(raw_env, runner=runner)
+
+    phase = reconcile_tailscale(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert phase.result.outcome == "applied"
+    assert phase.result.status is not None
+    assert phase.result.status.hostname == "wizard-admin"
+    assert any(command[:2] == ["sh", "-c"] for command in runner.commands)
+    assert any(command[:2] == ["tailscale", "up"] for command in runner.commands)
+
+
 def test_shell_tailscale_backend_raises_install_failure_with_stderr() -> None:
     raw_env = _tailscale_raw_env(TAILSCALE_MOCK_INSTALLED="false")
 

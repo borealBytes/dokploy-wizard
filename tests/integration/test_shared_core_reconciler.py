@@ -226,9 +226,11 @@ class FakeSharedCoreBackend:
     network: SharedCoreResourceRecord | None = None
     postgres: SharedCoreResourceRecord | None = None
     redis: SharedCoreResourceRecord | None = None
+    mail_relay: SharedCoreResourceRecord | None = None
     create_network_calls: int = 0
     create_postgres_calls: int = 0
     create_redis_calls: int = 0
+    create_mail_relay_calls: int = 0
     ensured_allocations: tuple[SharedPostgresAllocation, ...] = ()
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
@@ -284,6 +286,24 @@ class FakeSharedCoreBackend:
             resource_name=resource_name,
         )
         return self.redis
+
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        if self.mail_relay is not None and self.mail_relay.resource_id == resource_id:
+            return self.mail_relay
+        return None
+
+    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        if self.mail_relay is not None and self.mail_relay.resource_name == resource_name:
+            return self.mail_relay
+        return None
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        self.create_mail_relay_calls += 1
+        self.mail_relay = SharedCoreResourceRecord(
+            resource_id="postfix-1",
+            resource_name=resource_name,
+        )
+        return self.mail_relay
 
     def ensure_postgres_allocations(
         self, allocations: tuple[SharedPostgresAllocation, ...]
@@ -495,6 +515,9 @@ class FakeNextcloudBackend:
                 ),
             ),
         )
+
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        del admin_user
 
 
 def test_install_plans_and_persists_shared_core_once_for_nextcloud(tmp_path: Path) -> None:
@@ -765,3 +788,85 @@ def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_re
     assert client.create_compose_calls == 1
     assert client.update_compose_calls == 0
     assert client.deploy_calls == 1
+
+
+def test_dokploy_shared_core_backend_updates_existing_compose_when_mail_relay_container_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "docuseal-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_DOCUSEAL": "true",
+                "DOKPLOY_API_URL": "https://dokploy.example.com",
+                "DOKPLOY_API_KEY": "dokp-key-123",
+            },
+        )
+    )
+    existing_project = DokployProjectSummary(
+        project_id="proj-1",
+        name=desired_state.stack_name,
+        environments=(
+            DokployEnvironmentSummary(
+                environment_id="env-1",
+                name="production",
+                is_default=True,
+                composes=(
+                    DokployComposeSummary(
+                        compose_id="cmp-1",
+                        name=desired_state.shared_core.network_name,
+                        status="running",
+                    ),
+                ),
+            ),
+        ),
+    )
+    client = FakeDokployApiClient(projects=[existing_project])
+    provisioned: list[tuple[SharedPostgresAllocation, ...]] = []
+    backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        plan=desired_state.shared_core,
+        client=client,
+        allocation_provisioner=lambda allocations: provisioned.append(allocations),
+    )
+    assert desired_state.shared_core.mail_relay is not None
+    mail_relay_service_name = desired_state.shared_core.mail_relay.service_name
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.shared_core._find_container_name",
+        lambda service_name: None
+        if service_name == mail_relay_service_name
+        else "present-container",
+    )
+
+    phase = reconcile_shared_core(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert phase.result.outcome == "applied"
+    assert phase.result.network is not None
+    assert phase.result.network.action == "reuse_existing"
+    assert phase.result.postgres is not None
+    assert phase.result.postgres.action == "reuse_existing"
+    assert phase.result.mail_relay is not None
+    assert phase.result.mail_relay.action == "create"
+    assert phase.mail_relay_resource_id == "dokploy-compose:cmp-1:postfix"
+    assert client.create_project_calls == 0
+    assert client.create_compose_calls == 0
+    assert client.update_compose_calls == 1
+    assert client.deploy_calls == 1
+    assert provisioned == [
+        (
+            SharedPostgresAllocation(
+                database_name="docuseal_stack_docuseal",
+                user_name="docuseal_stack_docuseal",
+                password_secret_ref="docuseal-stack-docuseal-postgres-password",
+            ),
+        )
+    ]

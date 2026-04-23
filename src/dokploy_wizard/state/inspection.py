@@ -367,6 +367,21 @@ def _service_candidates(
                 "scope": f"stack:{desired_state.stack_name}:shared-redis",
             }
         )
+    if desired_state.shared_core.mail_relay is not None:
+        mail_relay_service_name = desired_state.shared_core.mail_relay.service_name
+        candidates.append(
+            {
+                "aliases": ("shared-postfix", "postfix"),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": mail_relay_service_name,
+                },
+                "port": str(desired_state.shared_core.mail_relay.smtp_port),
+                "expected_service_name": mail_relay_service_name,
+                "pack": "shared-core",
+                "scope": f"stack:{desired_state.stack_name}:shared-postfix",
+            }
+        )
     if "openclaw" in desired_state.enabled_packs:
         candidates.append(
             {

@@ -249,6 +249,30 @@ def test_render_docuseal_compose_includes_database_secret_persistent_storage_and
     )
 
 
+def test_render_docuseal_compose_includes_local_postfix_smtp_when_configured() -> None:
+    compose = _render_compose_file(
+        stack_name="wizard-stack",
+        hostname="docuseal.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_docuseal",
+            user_name="wizard_stack_docuseal",
+            password_secret_ref="wizard-stack-docuseal-postgres-password",
+        ),
+        secret_key_base_secret_ref="wizard-stack-docuseal-secret-key-base",
+        smtp_host="wizard-stack-shared-postfix",
+        smtp_port=587,
+        smtp_domain="example.com",
+        smtp_from_address="DoNotReply@example.com",
+    )
+
+    assert "SMTP_ADDRESS: wizard-stack-shared-postfix" in compose
+    assert "SMTP_PORT: '587'" in compose
+    assert "SMTP_DOMAIN: example.com" in compose
+    assert 'SMTP_FROM: "DoNotReply@example.com"' in compose
+    assert "SMTP_ENABLE_STARTTLS: 'false'" in compose
+
+
 def test_dokploy_docuseal_backend_create_and_update_paths_keep_single_compose_stable() -> None:
     create_client = FakeDokployDocuSealApiClient()
     create_backend = DokployDocuSealBackend(
