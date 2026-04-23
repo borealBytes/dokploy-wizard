@@ -198,19 +198,22 @@ class DokployCoderBackend:
         )
         notes.append(f"Seeded default Coder template '{_default_template_name()}'.")
         workspace_name = _default_workspace_name(self._hostname)
-        if _ensure_default_workspace(
-            container_name=container_name,
-            hostname=self._hostname,
-            session_token=session_token,
-            workspace_name=workspace_name,
-            template_name=_default_template_name(),
-        ):
-            if first_user_provisioned:
-                notes.append(
-                    f"Created default Coder workspace '{workspace_name}' for '{self._admin_email}'."
-                )
-            else:
-                notes.append(f"Created missing default Coder workspace '{workspace_name}'.")
+        try:
+            if _ensure_default_workspace(
+                container_name=container_name,
+                hostname=self._hostname,
+                session_token=session_token,
+                workspace_name=workspace_name,
+                template_name=_default_template_name(),
+            ):
+                if first_user_provisioned:
+                    notes.append(
+                        f"Created default Coder workspace '{workspace_name}' for '{self._admin_email}'."
+                    )
+                else:
+                    notes.append(f"Created missing default Coder workspace '{workspace_name}'.")
+        except CoderError as e:
+            notes.append(f"Skipped default workspace creation: {e}")
         return tuple(notes)
 
     def _find_compose_locator(self) -> _ComposeLocator | None:
