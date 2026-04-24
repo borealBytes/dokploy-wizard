@@ -79,8 +79,10 @@ def test_root_mvp_env_applicable_phases_follow_required_order_and_keep_coder() -
     raw_env = _load_root_env()
     desired_state = resolve_desired_state(raw_env)
 
-    assert raw_env.values["PACKS"] == "nextcloud,openclaw,seaweedfs,coder,moodle,docuseal"
+    assert raw_env.values["PACKS"] == "nextcloud,openclaw,seaweedfs,coder,moodle,docuseal,paperclip,multica"
     assert "coder" in desired_state.enabled_packs
+    assert "multica" in desired_state.enabled_packs
+    assert "paperclip" in desired_state.enabled_packs
     assert desired_state.enable_tailscale is True
 
     assert applicable_phases_for(desired_state) == (

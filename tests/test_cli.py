@@ -888,7 +888,7 @@ def test_install_persists_post_auth_target_before_later_failure(
     monkeypatch.setattr(
         cli,
         "DokployApiClient",
-        lambda *, api_url, api_key, **kwargs: type(
+        lambda *, api_url, **kwargs: type(
             "_ValidDokployClient",
             (),
             {
@@ -2143,9 +2143,20 @@ def test_ensure_dokploy_api_auth_rewrites_env_with_generated_key(
             )
 
     class ValidDokployClient:
-        def __init__(self, *, api_url: str, api_key: str) -> None:
+        def __init__(
+            self,
+            *,
+            api_url: str,
+            email: str,
+            password: str,
+            api_key: str,
+            prefer_session_auth: bool,
+        ) -> None:
             assert api_url == "http://127.0.0.1:3000"
+            assert email == "admin@example.com"
+            assert password == "secret-123"
             assert api_key == "dokp-key-123"
+            assert prefer_session_auth is False
 
         def list_projects(self) -> tuple[object, ...]:
             return ()
@@ -2212,14 +2223,26 @@ def test_ensure_dokploy_api_auth_refreshes_invalid_existing_key(
             )
 
     class ValidatingDokployClient:
-        def __init__(self, *, api_url: str, api_key: str) -> None:
+        def __init__(
+            self,
+            *,
+            api_url: str,
+            email: str,
+            password: str,
+            api_key: str,
+            prefer_session_auth: bool = True,
+        ) -> None:
             assert api_url == "http://127.0.0.1:3000"
+            assert email == "admin@example.com"
+            assert password == "secret-123"
             self.api_key = api_key
+            self.prefer_session_auth = prefer_session_auth
 
         def list_projects(self) -> tuple[object, ...]:
             if self.api_key == "stale-key":
                 raise cli.DokployApiError("unauthorized")
             assert self.api_key == "fresh-key-123"
+            assert self.prefer_session_auth is False
             return ()
 
     monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
@@ -2264,8 +2287,17 @@ def test_ensure_dokploy_api_auth_reuses_valid_existing_key_even_when_password_pr
             raise AssertionError("install should not be called")
 
     class ValidDokployClient:
-        def __init__(self, *, api_url: str, api_key: str) -> None:
+        def __init__(
+            self,
+            *,
+            api_url: str,
+            email: str,
+            password: str,
+            api_key: str,
+        ) -> None:
             assert api_url == "http://127.0.0.1:3000"
+            assert email == "admin@example.com"
+            assert password == "changed-password"
             assert api_key == "valid-key"
 
         def list_projects(self) -> tuple[object, ...]:
@@ -2687,9 +2719,20 @@ def test_dokploy_mutation_auth_qualification_detects_write_auth_failure_after_li
     None
 ):
     class FailingMutationClient:
-        def __init__(self, *, api_url: str, api_key: str, **_: Any) -> None:
+        def __init__(
+            self,
+            *,
+            api_url: str,
+            api_key: str,
+            email: str | None = None,
+            password: str | None = None,
+            **_: Any,
+        ) -> None:
             assert api_url == "http://127.0.0.1:3000"
             assert api_key == "dokp-key-123"
+            if email is not None or password is not None:
+                assert email == "admin@example.com"
+                assert password == "secret-123"
 
         def list_projects(self) -> tuple[object, ...]:
             return ()
@@ -2736,9 +2779,20 @@ def test_dokploy_mutation_auth_qualification_reuses_existing_probe_when_create_c
     recorded: list[str] = []
 
     class DuplicateThenUpdateClient:
-        def __init__(self, *, api_url: str, api_key: str, **_: Any) -> None:
+        def __init__(
+            self,
+            *,
+            api_url: str,
+            api_key: str,
+            email: str | None = None,
+            password: str | None = None,
+            **_: Any,
+        ) -> None:
             assert api_url == "http://127.0.0.1:3000"
             assert api_key == "dokp-key-123"
+            if email is not None or password is not None:
+                assert email == "admin@example.com"
+                assert password == "secret-123"
 
         def list_projects(self) -> tuple[object, ...]:
             return (
@@ -2814,9 +2868,20 @@ def test_dokploy_mutation_auth_qualification_reuses_existing_probe_when_create_c
 
 def test_dokploy_mutation_auth_qualification_fails_fast_when_deploy_remains_unauthorized() -> None:
     class DeployUnauthorizedClient:
-        def __init__(self, *, api_url: str, api_key: str, **_: Any) -> None:
+        def __init__(
+            self,
+            *,
+            api_url: str,
+            api_key: str,
+            email: str | None = None,
+            password: str | None = None,
+            **_: Any,
+        ) -> None:
             assert api_url == "http://127.0.0.1:3000"
             assert api_key == "dokp-key-123"
+            if email is not None or password is not None:
+                assert email == "admin@example.com"
+                assert password == "secret-123"
 
         def list_projects(self) -> tuple[object, ...]:
             return ()
@@ -3516,6 +3581,8 @@ def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
         docuseal_backend=None,
         seaweedfs_backend=None,
         coder_backend=None,
+        multica_backend=None,
+        paperclip_backend=None,
         openclaw_backend=None,
         allow_modify=False,
         remediate_install_host_prereqs=False,

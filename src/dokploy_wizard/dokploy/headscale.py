@@ -53,7 +53,9 @@ class DokployHeadscaleBackend:
         self,
         *,
         api_url: str,
-        api_key: str,
+        email: str | None = None,
+        password: str | None = None,
+        api_key: str | None = None,
         stack_name: str,
         hostname: str,
         client: DokployHeadscaleApi | None = None,
@@ -61,7 +63,12 @@ class DokployHeadscaleBackend:
         self._stack_name = stack_name
         self._hostname = hostname
         self._service_name = f"{stack_name}-headscale"
-        self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
+        self._client = client or DokployApiClient(
+            api_url=api_url,
+            email=email,
+            password=password,
+            api_key=api_key,
+        )
         self._applied_locator: _ComposeLocator | None = None
 
     def get_service(self, resource_id: str) -> HeadscaleResourceRecord | None:

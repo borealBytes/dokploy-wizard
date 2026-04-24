@@ -127,7 +127,9 @@ class DokployMoodleBackend:
         self,
         *,
         api_url: str,
-        api_key: str,
+        email: str | None = None,
+        password: str | None = None,
+        api_key: str | None = None,
         stack_name: str,
         hostname: str,
         admin_email: str,
@@ -153,7 +155,12 @@ class DokployMoodleBackend:
         self._smtp_from_address = smtp_from_address
         self._moodle_cron = moodle_cron
         self._moodle_cron_timezone = moodle_cron_timezone
-        self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
+        self._client = client or DokployApiClient(
+            api_url=api_url,
+            email=email,
+            password=password,
+            api_key=api_key,
+        )
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
 

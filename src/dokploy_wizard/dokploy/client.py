@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import http.cookiejar
+import inspect
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from urllib import error, request
 
-RequestFn = Callable[[request.Request], Any]
+_AUTH_SIGN_IN_PATH = "/api/auth/sign-in/email"
+_SESSION_COOKIE_NAME = "better-auth.session_token"
+
+RequestFn = Callable[..., Any]
 ListProjectsSessionFallbackFn = Callable[[], Any]
 ProjectCreateSessionFallbackFn = Callable[[str, str | None, str | None], Any]
 ComposeCreateSessionFallbackFn = Callable[[str, str, str, str], Any]
@@ -82,21 +87,32 @@ class DokployApiClient:
         self,
         *,
         api_url: str,
-        api_key: str,
+        email: str | None = None,
+        password: str | None = None,
+        api_key: str | None = None,
+        prefer_session_auth: bool = True,
         request_fn: RequestFn | None = None,
         list_projects_session_fallback: ListProjectsSessionFallbackFn | None = None,
         project_create_session_fallback: ProjectCreateSessionFallbackFn | None = None,
         compose_create_session_fallback: ComposeCreateSessionFallbackFn | None = None,
         compose_update_session_fallback: ComposeUpdateSessionFallbackFn | None = None,
         deploy_session_fallback: DeploySessionFallbackFn | None = None,
-        list_compose_schedules_session_fallback: ListComposeSchedulesSessionFallbackFn | None = None,
+        list_compose_schedules_session_fallback: (
+            ListComposeSchedulesSessionFallbackFn | None
+        ) = None,
         create_schedule_session_fallback: CreateScheduleSessionFallbackFn | None = None,
         update_schedule_session_fallback: UpdateScheduleSessionFallbackFn | None = None,
         delete_schedule_session_fallback: DeleteScheduleSessionFallbackFn | None = None,
     ) -> None:
         self._api_url = api_url.removesuffix("/").removesuffix("/api")
+        self._email = email
+        self._password = password
         self._api_key = api_key
+        self._prefer_session_auth = prefer_session_auth
+        self._cookiejar = http.cookiejar.CookieJar()
         self._request_fn = request_fn or _default_request
+        self._authenticated = False
+        self._session_auth_unavailable = False
         self._list_projects_session_fallback = list_projects_session_fallback
         self._project_create_session_fallback = project_create_session_fallback
         self._compose_create_session_fallback = compose_create_session_fallback
@@ -106,6 +122,12 @@ class DokployApiClient:
         self._create_schedule_session_fallback = create_schedule_session_fallback
         self._update_schedule_session_fallback = update_schedule_session_fallback
         self._delete_schedule_session_fallback = delete_schedule_session_fallback
+        if (self._email is None) != (self._password is None):
+            raise ValueError("DokployApiClient requires both email and password for session auth.")
+        if self._email is None and self._password is None and self._api_key is None:
+            raise ValueError(
+                "DokployApiClient requires either email/password session auth or an api_key."
+            )
 
     def list_projects(self) -> tuple[DokployProjectSummary, ...]:
         try:
@@ -380,10 +402,16 @@ class DokployApiClient:
 
     def _request_json(self, method: str, path: str, payload: Any | None = None) -> Any:
         data = None
-        headers = {
-            "Accept": "application/json",
-            "x-api-key": self._api_key,
-        }
+        headers = {"Accept": "application/json"}
+        if self._should_use_session_auth():
+            try:
+                self._login()
+            except DokployApiError as exc:
+                if self._api_key is None or not _is_endpoint_unavailable_error(exc):
+                    raise
+                self._session_auth_unavailable = True
+        if not self._should_use_session_auth() and self._api_key is not None:
+            headers["x-api-key"] = self._api_key
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -394,7 +422,7 @@ class DokployApiClient:
             data=data,
         )
         try:
-            response = self._request_fn(req)
+            response = self._send_request(req)
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise DokployApiError(
@@ -408,10 +436,73 @@ class DokployApiClient:
             raise DokployApiError("Dokploy API response must decode to a JSON object or array.")
         return response.get("data", response)
 
+    def _login(self) -> None:
+        if self._authenticated:
+            return
+        if self._email is None or self._password is None:
+            raise DokployApiError("Dokploy session auth requires both email and password.")
+        req = request.Request(
+            url=f"{self._api_url}{_AUTH_SIGN_IN_PATH}",
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            data=json.dumps(
+                {"email": self._email, "password": self._password}
+            ).encode("utf-8"),
+        )
+        try:
+            self._send_request(req)
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise DokployApiError(
+                f"Dokploy auth request failed with status {exc.code}: {body or exc.reason}."
+            ) from exc
+        except error.URLError as exc:
+            raise DokployApiError(f"Dokploy auth request failed: {exc.reason}.") from exc
+        if not _cookiejar_has_cookie(self._cookiejar, _SESSION_COOKIE_NAME):
+            raise DokployApiError(
+                "Dokploy auth sign-in succeeded but no better-auth session cookie was stored."
+            )
+        self._authenticated = True
 
-def _default_request(req: request.Request) -> Any:
-    with request.urlopen(req, timeout=30) as response:  # noqa: S310
+    def _should_use_session_auth(self) -> bool:
+        has_session_credentials = self._email is not None and self._password is not None
+        if not has_session_credentials or self._session_auth_unavailable:
+            return False
+        return self._prefer_session_auth or self._api_key is None
+
+    def _send_request(self, req: request.Request) -> Any:
+        if _request_fn_accepts_cookiejar(self._request_fn):
+            return cast(Any, self._request_fn)(req, self._cookiejar)
+        return cast(Any, self._request_fn)(req)
+
+
+def _default_request(req: request.Request, jar: http.cookiejar.CookieJar) -> Any:
+    opener = request.build_opener(request.HTTPCookieProcessor(jar))
+    with opener.open(req, timeout=30) as response:  # noqa: S310
         return json.loads(response.read().decode("utf-8"))
+
+
+def _request_fn_accepts_cookiejar(request_fn: RequestFn) -> bool:
+    try:
+        parameters = inspect.signature(request_fn).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    positional = {
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    }
+    accepted = sum(parameter.kind in positional for parameter in parameters)
+    has_varargs = any(
+        parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters
+    )
+    return accepted >= 2 or has_varargs
+
+
+def _cookiejar_has_cookie(jar: http.cookiejar.CookieJar, name: str) -> bool:
+    return any(cookie.name == name for cookie in jar)
 
 
 def _parse_project_summary(payload: Any) -> DokployProjectSummary:
@@ -493,3 +584,8 @@ def _require_string(payload: dict[str, Any], key: str) -> str:
 
 def _is_unauthorized_error(error: DokployApiError) -> bool:
     return "status 401" in str(error).lower()
+
+
+def _is_endpoint_unavailable_error(error: DokployApiError) -> bool:
+    text = str(error).lower()
+    return "status 404" in text or "status 405" in text

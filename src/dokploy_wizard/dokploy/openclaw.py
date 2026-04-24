@@ -194,7 +194,9 @@ class DokployOpenClawBackend:
         self,
         *,
         api_url: str,
-        api_key: str,
+        email: str | None = None,
+        password: str | None = None,
+        api_key: str | None = None,
         stack_name: str,
         gateway_token: str | None = None,
         openclaw_gateway_password: str | None = None,
@@ -260,7 +262,12 @@ class DokployOpenClawBackend:
                 nexa_contract=None,
             ),
         }
-        self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
+        self._client = client or DokployApiClient(
+            api_url=api_url,
+            email=email,
+            password=password,
+            api_key=api_key,
+        )
 
     def get_service(self, resource_id: str) -> OpenClawResourceRecord | None:
         parsed = _parse_resource_id(resource_id)

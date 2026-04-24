@@ -34,6 +34,7 @@ from dokploy_wizard.packs.headscale import (
 )
 from dokploy_wizard.packs.matrix import MatrixBackend, build_matrix_ledger, reconcile_matrix
 from dokploy_wizard.packs.moodle import MoodleBackend, build_moodle_ledger, reconcile_moodle
+from dokploy_wizard.packs.multica import MulticaBackend
 from dokploy_wizard.packs.nextcloud import (
     NextcloudBackend,
     build_nextcloud_ledger,
@@ -47,6 +48,7 @@ from dokploy_wizard.packs.openclaw import (
     reconcile_my_farm_advisor,
     reconcile_openclaw,
 )
+from dokploy_wizard.packs.paperclip import PaperclipBackend
 from dokploy_wizard.packs.seaweedfs import (
     SeaweedFsBackend,
     build_seaweedfs_ledger,
@@ -80,6 +82,8 @@ class LifecycleBackends:
     seaweedfs: SeaweedFsBackend
     coder: CoderBackend
     openclaw: OpenClawBackend
+    multica: MulticaBackend | None = None
+    paperclip: PaperclipBackend | None = None
 
 
 def execute_lifecycle_plan(

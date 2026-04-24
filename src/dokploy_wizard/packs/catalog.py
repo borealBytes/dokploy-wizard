@@ -11,6 +11,8 @@ class PackHostname:
     key: str
     default_subdomain: str
     env_key: str
+    route_kind: Literal["browser", "machine"] = "browser"
+    access_wrapped: bool = False
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,7 @@ class PackDefinition:
     mutable_resource_keys: tuple[str, ...]
     enabled_features: tuple[str, ...]
     resource_profile: Literal["core", "recommended"]
+    workspace_daemon_enabled: bool = False
 
 
 _PACK_CATALOG: tuple[PackDefinition, ...] = (
@@ -148,6 +151,56 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         mutable_resource_keys=(),
         enabled_features=(),
         resource_profile="recommended",
+    ),
+    PackDefinition(
+        name="multica",
+        prompt_label="Multica",
+        env_flag="ENABLE_MULTICA",
+        default_enabled=False,
+        depends_on=(),
+        slot=None,
+        shared_core_requirements=("postgres",),
+        hostnames=(
+            PackHostname(
+                key="multica",
+                default_subdomain="multica",
+                env_key="MULTICA_SUBDOMAIN",
+                access_wrapped=True,
+            ),
+            PackHostname(
+                key="multica-api",
+                default_subdomain="multica-api",
+                env_key="MULTICA_API_SUBDOMAIN",
+                route_kind="machine",
+            ),
+        ),
+        mutable_env_keys=(),
+        mutable_resource_keys=(),
+        enabled_features=(),
+        resource_profile="recommended",
+        workspace_daemon_enabled=True,
+    ),
+    PackDefinition(
+        name="paperclip",
+        prompt_label="Paperclip",
+        env_flag="ENABLE_PAPERCLIP",
+        default_enabled=False,
+        depends_on=(),
+        slot=None,
+        shared_core_requirements=("postgres",),
+        hostnames=(
+            PackHostname(
+                key="paperclip",
+                default_subdomain="paperclip",
+                env_key="PAPERCLIP_SUBDOMAIN",
+                access_wrapped=True,
+            ),
+        ),
+        mutable_env_keys=(),
+        mutable_resource_keys=(),
+        enabled_features=(),
+        resource_profile="recommended",
+        workspace_daemon_enabled=True,
     ),
     PackDefinition(
         name="moodle",
