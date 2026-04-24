@@ -33,7 +33,7 @@ _DEFAULT_MULTICA_API_PORT = "8080"
 _DEFAULT_MULTICA_FRONTEND_PORT = "3000"
 _DEFAULT_MULTICA_DATA_ROOT = "/app/data/uploads"
 _DEFAULT_MULTICA_ENV_JWT_SECRET = secrets.token_urlsafe(32)
-_DEFAULT_MULTICA_ENV_DB_PASSWORD = secrets.token_urlsafe(32)
+_DEFAULT_MULTICA_ENV_DB_PASSWORD = "change-me"
 
 
 class DokployMulticaApi(Protocol):
@@ -471,6 +471,7 @@ def _render_compose_file(
         "services:\n"
         f"  {backend_service}:\n"
         f"    image: {_DEFAULT_MULTICA_BACKEND_IMAGE}\n"
+        "    hostname: backend\n"
         "    restart: unless-stopped\n"
         "    environment:\n"
         f"{_yaml_env_block(backend_env, indent='      ')}"

@@ -320,10 +320,10 @@ def _build_env_contract(
 ) -> dict[str, str]:
     env: dict[str, str] = {
         "DATABASE_URL": (
-            f"postgres://{postgres.user_name}:{_secret_placeholder(postgres.password_secret_ref)}"
+            f"postgres://{postgres.user_name}:change-me"
             f"@{postgres_service_name}:5432/{postgres.database_name}?sslmode=disable"
         ),
-        "JWT_SECRET": _secret_placeholder(jwt_secret_ref),
+        "JWT_SECRET": "change-me",
         "FRONTEND_ORIGIN": frontend_origin,
         "ALLOW_SIGNUP": "false",
     }

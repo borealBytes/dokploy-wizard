@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
 import ssl
 import time
 from dataclasses import dataclass
@@ -29,8 +28,8 @@ from dokploy_wizard.packs.paperclip import (
 
 _DEFAULT_PAPERCLIP_IMAGE = "ghcr.io/paperclipai/paperclip:latest"
 _DEFAULT_PAPERCLIP_PORT = "3100"
-_DEFAULT_PAPERCLIP_ENV_DB_PASSWORD = secrets.token_urlsafe(32)
-_DEFAULT_PAPERCLIP_ENV_BETTER_AUTH_SECRET = secrets.token_urlsafe(32)
+_DEFAULT_PAPERCLIP_ENV_DB_PASSWORD = "change-me"
+_DEFAULT_PAPERCLIP_ENV_BETTER_AUTH_SECRET = "change-me"
 
 
 class DokployPaperclipApi(Protocol):

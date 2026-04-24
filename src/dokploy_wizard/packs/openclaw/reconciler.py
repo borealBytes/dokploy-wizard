@@ -5,7 +5,12 @@ from __future__ import annotations
 import http.client
 from pathlib import Path
 from typing import Mapping, Protocol
+from urllib import error as urlerror
+from urllib import parse
+from urllib import request as urlrequest
 from urllib.parse import urlsplit
+
+import ssl
 
 from dokploy_wizard.packs.openclaw.models import (
     OpenClawHealthCheck,
@@ -159,7 +164,9 @@ class ShellOpenClawBackend:
         del service
         if self._forced_health is not None:
             return self._forced_health
-        return _http_health_check(url)
+        if _http_health_check(url):
+            return True
+        return _local_https_health_check(url)
 
 
 def reconcile_openclaw(
@@ -609,6 +616,30 @@ def _optional_positive_int(values: dict[str, str], key: str) -> int | None:
     if parsed < 1:
         raise OpenClawError(f"Invalid positive integer value for '{key}': {raw_value!r}.")
     return parsed
+
+
+def _local_https_health_check(url: str) -> bool:
+    parsed = parse.urlsplit(url)
+    if not parsed.hostname:
+        return False
+    request_path = parsed.path or "/"
+    if parsed.query:
+        request_path = f"{request_path}?{parsed.query}"
+    req = urlrequest.Request(
+        f"https://127.0.0.1{request_path}",
+        headers={"Host": parsed.hostname},
+        method="GET",
+    )
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with urlrequest.urlopen(req, timeout=15, context=context):  # noqa: S310
+            return True
+    except urlerror.HTTPError:
+        return False
+    except (urlerror.URLError, TimeoutError):
+        return False
 
 
 def _http_health_check(url: str) -> bool:
