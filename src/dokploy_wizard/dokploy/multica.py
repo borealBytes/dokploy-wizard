@@ -532,7 +532,7 @@ def _render_compose_file(
 
 
 def _yaml_env_block(env: dict[str, str], *, indent: str) -> str:
-    return "".join(f"{indent}{key}: {_yaml_quote(value)}\\n" for key, value in env.items())
+    return "".join(f"{indent}{key}: {_yaml_quote(value)}\n" for key, value in env.items())
 
 
 def _local_https_health_check(url: str) -> bool:
