@@ -222,7 +222,7 @@ class DokployPaperclipBackend:
         return None
 
     def _ensure_compose_applied(self, *, env: dict[str, str] | None = None) -> _ComposeLocator:
-        if self._applied_locator is not None and self._created_in_process:
+        if self._applied_locator is not None and self._created_in_process and env is None:
             return self._applied_locator
         compose_file = _render_compose_file(
             stack_name=self._stack_name,
