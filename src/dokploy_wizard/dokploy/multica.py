@@ -486,7 +486,7 @@ def _render_compose_file(
         f"{backend_forwarded_port}"
         f"{backend_service_port}"
         "    healthcheck:\n"
-        "      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:8080/health >/dev/null']\n"
+        "      test: ['CMD-SHELL', 'wget -q -O- http://127.0.0.1:8080/health >/dev/null']\n"
         "      interval: 30s\n"
         "      timeout: 5s\n"
         "      retries: 10\n"
