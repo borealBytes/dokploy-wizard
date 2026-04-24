@@ -388,11 +388,11 @@ def _build_env_contract(
 ) -> dict[str, str]:
     env = {
         "DATABASE_URL": (
-            f"postgres://{postgres.user_name}:{_secret_placeholder(postgres.password_secret_ref)}"
+            f"postgres://{postgres.user_name}:change-me"
             f"@{postgres_service_name}:5432/{postgres.database_name}?sslmode=disable"
         ),
         "PAPERCLIP_HOME": paperclip_home,
-        "BETTER_AUTH_SECRET": _secret_placeholder(better_auth_secret_ref),
+        "BETTER_AUTH_SECRET": "change-me",
         "PAPERCLIP_PUBLIC_URL": public_url,
     }
     if (openclaw_gateway_url is None) != (openclaw_gateway_token_secret_ref is None):
