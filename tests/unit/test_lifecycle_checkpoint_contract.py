@@ -40,8 +40,9 @@ def test_phase_order_preserves_infra_prereqs_but_uses_required_mvp_pack_sequence
     assert _index("seaweedfs") < _index("headscale") < _index("tailscale")
     assert _index("tailscale") < _index("nextcloud") < _index("moodle") < _index("docuseal")
     assert _index("docuseal") < _index("coder") < _index("openclaw")
-    assert _index("openclaw") < _index("my-farm-advisor")
-    assert _index("openclaw") < _index("cloudflare_access")
+    assert _index("openclaw") < _index("multica") < _index("paperclip")
+    assert _index("paperclip") < _index("my-farm-advisor")
+    assert _index("paperclip") < _index("cloudflare_access")
     assert _index("my-farm-advisor") < _index("cloudflare_access")
 
 
@@ -97,6 +98,8 @@ def test_root_mvp_env_applicable_phases_follow_required_order_and_keep_coder() -
         "docuseal",
         "coder",
         "openclaw",
+        "multica",
+        "paperclip",
         "cloudflare_access",
     )
 

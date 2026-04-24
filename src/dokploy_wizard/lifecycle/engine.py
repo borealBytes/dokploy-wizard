@@ -34,7 +34,7 @@ from dokploy_wizard.packs.headscale import (
 )
 from dokploy_wizard.packs.matrix import MatrixBackend, build_matrix_ledger, reconcile_matrix
 from dokploy_wizard.packs.moodle import MoodleBackend, build_moodle_ledger, reconcile_moodle
-from dokploy_wizard.packs.multica import MulticaBackend
+from dokploy_wizard.packs.multica import MulticaBackend, reconcile_multica
 from dokploy_wizard.packs.nextcloud import (
     NextcloudBackend,
     build_nextcloud_ledger,
@@ -49,6 +49,7 @@ from dokploy_wizard.packs.openclaw import (
     reconcile_openclaw,
 )
 from dokploy_wizard.packs.paperclip import PaperclipBackend
+from dokploy_wizard.packs.paperclip import build_paperclip_ledger, reconcile_paperclip
 from dokploy_wizard.packs.seaweedfs import (
     SeaweedFsBackend,
     build_seaweedfs_ledger,
@@ -59,6 +60,7 @@ from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     DesiredState,
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+    OwnedResource,
     OwnershipLedger,
     RawEnvInput,
     write_applied_checkpoint,
@@ -335,6 +337,42 @@ def execute_lifecycle_plan(
                     backends.nextcloud.refresh_openclaw_external_storage(
                         admin_user=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
                     )
+        elif phase == "multica":
+            backend = _require_backend("multica", backends.multica)
+            multica = reconcile_multica(
+                dry_run=dry_run,
+                desired_state=desired_state,
+                ownership_ledger=current_ledger,
+                backend=backend,
+            )
+            phase_results[phase] = multica.to_dict()
+            if not dry_run:
+                current_ledger = _build_multica_ledger(
+                    existing_ledger=current_ledger,
+                    stack_name=desired_state.stack_name,
+                    service_resource_id=(
+                        None if multica.service is None else multica.service.resource_id
+                    ),
+                    data_resource_id=None if multica.data is None else multica.data.resource_id,
+                )
+                write_ownership_ledger(state_dir, current_ledger)
+        elif phase == "paperclip":
+            backend = _require_backend("paperclip", backends.paperclip)
+            paperclip = reconcile_paperclip(
+                dry_run=dry_run,
+                desired_state=desired_state,
+                ownership_ledger=current_ledger,
+                backend=backend,
+            )
+            phase_results[phase] = paperclip.result.to_dict()
+            if not dry_run:
+                current_ledger = build_paperclip_ledger(
+                    existing_ledger=current_ledger,
+                    stack_name=desired_state.stack_name,
+                    service_resource_id=paperclip.service_resource_id,
+                    data_resource_id=paperclip.data_resource_id,
+                )
+                write_ownership_ledger(state_dir, current_ledger)
         elif phase == "my-farm-advisor":
             advisor = reconcile_my_farm_advisor(
                 dry_run=dry_run,
@@ -456,6 +494,7 @@ def _build_summary(
             "start_phase": lifecycle_plan.start_phase,
         },
         "matrix": phase_results.get("matrix", {"outcome": "not_run"}),
+        "multica": phase_results.get("multica", {"outcome": "not_run"}),
         "my_farm_advisor": phase_results.get("my-farm-advisor", {"outcome": "not_run"}),
         "nextcloud": phase_results.get("nextcloud", {"outcome": "not_run"}),
         "moodle": phase_results.get("moodle", {"outcome": "not_run"}),
@@ -463,6 +502,7 @@ def _build_summary(
         "coder": phase_results.get("coder", {"outcome": "not_run"}),
         "networking": phase_results.get("networking", {"outcome": "not_run"}),
         "openclaw": phase_results.get("openclaw", {"outcome": "not_run"}),
+        "paperclip": phase_results.get("paperclip", {"outcome": "not_run"}),
         "preflight": preflight_report.to_dict(),
         "seaweedfs": phase_results.get("seaweedfs", {"outcome": "not_run"}),
         "shared_core": phase_results.get("shared_core", {"outcome": "not_run"}),
@@ -594,6 +634,28 @@ def _preserved_result(
         if result["outcome"] != "skipped":
             result["outcome"] = "already_present"
         return result
+    if phase == "multica":
+        backend = _require_backend("multica", backends.multica)
+        result = reconcile_multica(
+            dry_run=True,
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            backend=backend,
+        ).to_dict()
+        if result["outcome"] != "skipped":
+            result["outcome"] = "already_present"
+        return result
+    if phase == "paperclip":
+        backend = _require_backend("paperclip", backends.paperclip)
+        result = reconcile_paperclip(
+            dry_run=True,
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            backend=backend,
+        ).result.to_dict()
+        if result["outcome"] != "skipped":
+            result["outcome"] = "already_present"
+        return result
     if phase == "my-farm-advisor":
         result = reconcile_my_farm_advisor(
             dry_run=True,
@@ -619,3 +681,48 @@ def _preserved_result(
         "notes": ["Phase preserved from an existing successful checkpoint."],
         "outcome": "not_run",
     }
+
+
+def _require_backend[T](phase: str, backend: T | None) -> T:
+    if backend is None:
+        raise RuntimeError(f"Lifecycle backend for phase {phase!r} is not configured.")
+    return backend
+
+
+def _build_multica_ledger(
+    *,
+    existing_ledger: OwnershipLedger,
+    stack_name: str,
+    service_resource_id: str | None,
+    data_resource_id: str | None,
+) -> OwnershipLedger:
+    service_scope = f"stack:{stack_name}:multica:service"
+    data_scope = f"stack:{stack_name}:multica:data"
+    resources = [
+        resource
+        for resource in existing_ledger.resources
+        if not (
+            (resource.resource_type == "multica_service" and resource.scope == service_scope)
+            or (resource.resource_type == "multica_data" and resource.scope == data_scope)
+        )
+    ]
+    if service_resource_id is not None:
+        resources.append(
+            OwnedResource(
+                resource_type="multica_service",
+                resource_id=service_resource_id,
+                scope=service_scope,
+            )
+        )
+    if data_resource_id is not None:
+        resources.append(
+            OwnedResource(
+                resource_type="multica_data",
+                resource_id=data_resource_id,
+                scope=data_scope,
+            )
+        )
+    return OwnershipLedger(
+        format_version=existing_ledger.format_version,
+        resources=tuple(resources),
+    )
