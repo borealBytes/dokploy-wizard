@@ -440,7 +440,7 @@ def _render_compose_file(
         f"{forwarded_port}"
         f"{service_port}"
         "    healthcheck:\n"
-        "      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:3100/api/health >/dev/null']\n"
+        "      test: ['CMD-SHELL', 'wget -q -O- http://127.0.0.1:3100/api/health >/dev/null']\n"
         "      interval: 30s\n"
         "      timeout: 5s\n"
         "      retries: 10\n"
