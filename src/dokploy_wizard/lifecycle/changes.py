@@ -31,6 +31,8 @@ PHASE_ORDER: tuple[str, ...] = (
     "docuseal",
     "coder",
     "openclaw",
+    "multica",
+    "paperclip",
     "my-farm-advisor",
     "cloudflare_access",
 )
@@ -66,6 +68,9 @@ _SUPPORTED_HOSTNAME_KEYS = {
     "CODER_WILDCARD_SUBDOMAIN",
     "OPENCLAW_SUBDOMAIN",
     "OPENCLAW_INTERNAL_SUBDOMAIN",
+    "MULTICA_SUBDOMAIN",
+    "MULTICA_API_SUBDOMAIN",
+    "PAPERCLIP_SUBDOMAIN",
     "MY_FARM_ADVISOR_SUBDOMAIN",
 }
 _SUPPORTED_ENABLEMENT_KEYS = {
@@ -77,6 +82,8 @@ _SUPPORTED_ENABLEMENT_KEYS = {
     "ENABLE_DOCUSEAL",
     "ENABLE_CODER",
     "ENABLE_OPENCLAW",
+    "ENABLE_MULTICA",
+    "ENABLE_PAPERCLIP",
     "ENABLE_MY_FARM_ADVISOR",
 }
 _SUPPORTED_MUTABLE_PACK_ENV_KEYS = set(get_mutable_pack_env_keys())
@@ -119,6 +126,9 @@ _HOSTNAME_PHASES = {
     "coder-wildcard": ("networking", "coder"),
     "openclaw": ("networking", "openclaw"),
     "openclaw-internal": ("openclaw",),
+    "multica": ("networking", "multica"),
+    "multica-api": ("networking", "multica"),
+    "paperclip": ("networking", "paperclip"),
     "my-farm-advisor": ("networking", "my-farm-advisor"),
 }
 _OPTIONAL_PHASE_PACKS = {
@@ -129,6 +139,8 @@ _OPTIONAL_PHASE_PACKS = {
     "seaweedfs": "seaweedfs",
     "coder": "coder",
     "openclaw": "openclaw",
+    "multica": "multica",
+    "paperclip": "paperclip",
     "my-farm-advisor": "my-farm-advisor",
 }
 _OPENCLAW_RUNTIME_ENV_KEYS = {
@@ -226,6 +238,10 @@ def applicable_phases_for(desired_state: DesiredState) -> tuple[str, ...]:
         phases.add("coder")
     if "openclaw" in desired_state.enabled_packs:
         phases.add("openclaw")
+    if "multica" in desired_state.enabled_packs:
+        phases.add("multica")
+    if "paperclip" in desired_state.enabled_packs:
+        phases.add("paperclip")
     if "my-farm-advisor" in desired_state.enabled_packs:
         phases.add("my-farm-advisor")
     if _access_enabled(desired_state):
@@ -455,7 +471,9 @@ def _hostname_change_phases(
         if existing_desired.hostnames.get(key) == requested_desired.hostnames.get(key):
             continue
         changed.update(_HOSTNAME_PHASES.get(key, ()))
-        if key in {"openclaw", "my-farm-advisor"} and _access_enabled(requested_desired):
+        if key in {"openclaw", "multica", "paperclip", "my-farm-advisor"} and _access_enabled(
+            requested_desired
+        ):
             changed.add("cloudflare_access")
     return changed
 
@@ -474,6 +492,8 @@ def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredS
             "docuseal",
             "coder",
             "openclaw",
+            "multica",
+            "paperclip",
             "my-farm-advisor",
         }
     ):
@@ -496,6 +516,14 @@ def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredS
         if _access_enabled(requested_desired):
             phases.add("cloudflare_access")
         phases.add("openclaw")
+    if "multica" in new_packs:
+        if _access_enabled(requested_desired):
+            phases.add("cloudflare_access")
+        phases.add("multica")
+    if "paperclip" in new_packs:
+        if _access_enabled(requested_desired):
+            phases.add("cloudflare_access")
+        phases.add("paperclip")
     if "my-farm-advisor" in new_packs:
         if _access_enabled(requested_desired):
             phases.add("cloudflare_access")
@@ -557,4 +585,7 @@ def _sorted_reasons(changed_keys: set[str], phases_to_run: set[str]) -> tuple[st
 
 
 def _access_enabled(desired_state: DesiredState) -> bool:
-    return bool({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs))
+    return bool(
+        {"openclaw", "multica", "paperclip", "my-farm-advisor"}
+        & set(desired_state.enabled_packs)
+    )
