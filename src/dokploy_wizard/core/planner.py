@@ -23,6 +23,9 @@ def build_shared_core_plan(
     requires_postgres = False
     requires_redis = False
     values = values or {}
+    postgres_major_version: int | None = None
+    postgres_image: str | None = None
+    available_extensions: tuple[str, ...] = ()
 
     for pack_name in enabled_packs:
         requirements = get_pack_definition(pack_name).shared_core_requirements
@@ -34,7 +37,13 @@ def build_shared_core_plan(
                 database_name=f"{stack_name}_{pack_name}".replace("-", "_"),
                 user_name=f"{stack_name}_{pack_name}".replace("-", "_")[:63],
                 password_secret_ref=f"{stack_name}-{pack_name}-postgres-password",
+                minimum_postgres_major_version=(17 if pack_name == "multica" else None),
+                required_extensions=(("vector",) if pack_name == "multica" else ()),
             )
+            if pack_name == "multica":
+                postgres_major_version = 17
+                postgres_image = "pgvector/pgvector:pg17"
+                available_extensions = ("vector",)
         if "redis" in requirements:
             requires_redis = True
             redis = SharedRedisAllocation(
@@ -57,7 +66,12 @@ def build_shared_core_plan(
         postgres=(
             None
             if not requires_postgres
-            else SharedPostgresServicePlan(service_name=f"{stack_name}-shared-postgres")
+            else SharedPostgresServicePlan(
+                service_name=f"{stack_name}-shared-postgres",
+                image=postgres_image,
+                major_version=postgres_major_version,
+                available_extensions=available_extensions,
+            )
         ),
         redis=(
             None
