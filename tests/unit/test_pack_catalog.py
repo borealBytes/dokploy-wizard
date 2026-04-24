@@ -20,6 +20,8 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
         "nextcloud",
         "seaweedfs",
         "coder",
+        "multica",
+        "paperclip",
         "moodle",
         "docuseal",
         "openclaw",
@@ -29,6 +31,11 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     assert get_pack_definition("seaweedfs").slot is None
     assert get_pack_definition("seaweedfs").hostnames[0].key == "s3"
     assert get_pack_definition("coder").hostnames[1].key == "coder-wildcard"
+    assert get_pack_definition("multica").hostnames[0].access_wrapped is True
+    assert get_pack_definition("multica").hostnames[1].route_kind == "machine"
+    assert get_pack_definition("multica").workspace_daemon_enabled is True
+    assert get_pack_definition("paperclip").hostnames[0].env_key == "PAPERCLIP_SUBDOMAIN"
+    assert get_pack_definition("paperclip").workspace_daemon_enabled is True
     assert get_pack_definition("moodle").hostnames[0].env_key == "MOODLE_SUBDOMAIN"
     assert get_pack_definition("moodle").shared_core_requirements == ("postgres",)
     assert get_pack_definition("docuseal").hostnames[0].env_key == "DOCUSEAL_SUBDOMAIN"

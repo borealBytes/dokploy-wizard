@@ -56,7 +56,9 @@ class DokploySharedCoreBackend:
         self,
         *,
         api_url: str,
-        api_key: str,
+        email: str | None = None,
+        password: str | None = None,
+        api_key: str | None = None,
         stack_name: str,
         plan: SharedCorePlan,
         mail_relay_config: dict[str, str] | None = None,
@@ -68,7 +70,12 @@ class DokploySharedCoreBackend:
         self._plan = plan
         self._compose_name = plan.network_name
         self._mail_relay_config = mail_relay_config or {}
-        self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
+        self._client = client or DokployApiClient(
+            api_url=api_url,
+            email=email,
+            password=password,
+            api_key=api_key,
+        )
         self._applied_locator: _ComposeLocator | None = None
         self._allocation_provisioner = allocation_provisioner
 

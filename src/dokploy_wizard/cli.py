@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from dokploy_wizard.bootstrap import (
     LOCAL_HEALTH_URL,
@@ -86,12 +86,21 @@ from dokploy_wizard.packs.moodle import (
     ShellMoodleBackend,
     reconcile_moodle,
 )
+from dokploy_wizard.packs.multica import MulticaBackend, MulticaError
+from dokploy_wizard.packs.multica.reconciler import ShellMulticaBackend
 from dokploy_wizard.packs.nextcloud import (
     NextcloudBackend,
     NextcloudError,
     ShellNextcloudBackend,
 )
 from dokploy_wizard.packs.nextcloud.models import NextcloudOpenClawWorkspaceContract
+from dokploy_wizard.packs.paperclip import (
+    PaperclipBackend,
+    PaperclipError,
+    ShellPaperclipBackend,
+    build_paperclip_ledger,
+    reconcile_paperclip,
+)
 from dokploy_wizard.packs.openclaw import (
     OpenClawBackend,
     OpenClawError,
@@ -683,6 +692,8 @@ def run_install_flow(
     seaweedfs_backend: SeaweedFsBackend | None = None,
     coder_backend: CoderBackend | None = None,
     openclaw_backend: OpenClawBackend | None = None,
+    multica_backend: MulticaBackend | None = None,
+    paperclip_backend: PaperclipBackend | None = None,
     allow_memory_shortfall: bool = False,
     prompt_for_memory_shortfall: bool = False,
     enforce_live_run_contamination_check: bool = False,
@@ -704,6 +715,8 @@ def run_install_flow(
         seaweedfs_backend=seaweedfs_backend,
         coder_backend=coder_backend,
         openclaw_backend=openclaw_backend,
+        multica_backend=multica_backend,
+        paperclip_backend=paperclip_backend,
         allow_modify=False,
         remediate_install_host_prereqs=True,
         allow_memory_shortfall=allow_memory_shortfall,
@@ -730,6 +743,8 @@ def run_modify_flow(
     seaweedfs_backend: SeaweedFsBackend | None = None,
     coder_backend: CoderBackend | None = None,
     openclaw_backend: OpenClawBackend | None = None,
+    multica_backend: MulticaBackend | None = None,
+    paperclip_backend: PaperclipBackend | None = None,
     enforce_live_run_contamination_check: bool = False,
 ) -> dict[str, Any]:
     return _run_lifecycle_flow(
@@ -749,6 +764,8 @@ def run_modify_flow(
         seaweedfs_backend=seaweedfs_backend,
         coder_backend=coder_backend,
         openclaw_backend=openclaw_backend,
+        multica_backend=multica_backend,
+        paperclip_backend=paperclip_backend,
         allow_modify=True,
         remediate_install_host_prereqs=False,
         allow_memory_shortfall=False,
@@ -841,6 +858,8 @@ def _run_lifecycle_flow(
     seaweedfs_backend: SeaweedFsBackend | None,
     coder_backend: CoderBackend | None,
     openclaw_backend: OpenClawBackend | None,
+    multica_backend: MulticaBackend | None,
+    paperclip_backend: PaperclipBackend | None,
     allow_modify: bool,
     remediate_install_host_prereqs: bool,
     allow_memory_shortfall: bool,
@@ -1048,6 +1067,16 @@ def _run_lifecycle_flow(
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
+    multica_phase_backend = multica_backend or _build_multica_backend(
+        raw_env=raw_env,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
+    paperclip_phase_backend = paperclip_backend or _build_paperclip_backend(
+        raw_env=raw_env,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
     lifecycle_backends = LifecycleBackends(
         bootstrap=backend,
         tailscale=tailscale_phase_backend,
@@ -1062,6 +1091,8 @@ def _run_lifecycle_flow(
         seaweedfs=seaweedfs_phase_backend,
         coder=coder_phase_backend,
         openclaw=openclaw_phase_backend,
+        multica=multica_phase_backend,
+        paperclip=paperclip_phase_backend,
     )
 
     try:
@@ -1082,6 +1113,8 @@ def _run_lifecycle_flow(
             seaweedfs_backend=seaweedfs_phase_backend,
             coder_backend=coder_phase_backend,
             openclaw_backend=openclaw_phase_backend,
+            multica_backend=multica_phase_backend,
+            paperclip_backend=paperclip_phase_backend,
         )
     except LifecycleDriftError as error:
         lifecycle_plan = _resume_plan_from_drift(
@@ -1522,6 +1555,12 @@ def _live_drift_entry_message(entry: dict[str, Any]) -> str:
     )
 
 
+class _DokployClientAuthKwargs(TypedDict, total=False):
+    email: str
+    password: str
+    api_key: str
+
+
 def _build_shared_core_backend(
     *,
     raw_env: RawEnvInput,
@@ -1532,10 +1571,11 @@ def _build_shared_core_backend(
         return ShellSharedCoreBackend()
     api_url = desired_state.dokploy_api_url
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
-    if api_url and api_key:
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if api_url and auth_kwargs:
         return DokploySharedCoreBackend(
             api_url=api_url,
-            api_key=api_key,
+            **auth_kwargs,
             stack_name=desired_state.stack_name,
             plan=desired_state.shared_core,
             mail_relay_config={
@@ -1563,11 +1603,12 @@ def _build_cloudflared_connector_backend(
         return None
     api_url = desired_state.dokploy_api_url
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
-    if not api_url or not api_key:
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if not api_url or not auth_kwargs:
         return None
     return DokployCloudflaredBackend(
         api_url=api_url,
-        api_key=api_key,
+        **auth_kwargs,
         stack_name=desired_state.stack_name,
         public_url=desired_state.dokploy_url,
         client=_build_dokploy_api_client(
@@ -1589,11 +1630,12 @@ def _build_headscale_backend(
         return ShellHeadscaleBackend(raw_env)
     api_url = desired_state.dokploy_api_url
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
     hostname = desired_state.hostnames.get("headscale")
-    if api_url and api_key and hostname is not None:
+    if api_url and auth_kwargs and hostname is not None:
         return DokployHeadscaleBackend(
             api_url=api_url,
-            api_key=api_key,
+            **auth_kwargs,
             stack_name=desired_state.stack_name,
             hostname=hostname,
             client=_build_dokploy_api_client(
@@ -1616,7 +1658,8 @@ def _build_nextcloud_backend(
         return ShellNextcloudBackend(raw_env)
     api_url = desired_state.dokploy_api_url
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
-    if not api_url or not api_key or "nextcloud" not in desired_state.enabled_packs:
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if not api_url or not auth_kwargs or "nextcloud" not in desired_state.enabled_packs:
         return ShellNextcloudBackend(raw_env)
     nextcloud_hostname = desired_state.hostnames.get("nextcloud")
     onlyoffice_hostname = desired_state.hostnames.get("onlyoffice")
@@ -1643,7 +1686,7 @@ def _build_nextcloud_backend(
         )
     return DokployNextcloudBackend(
         api_url=api_url,
-        api_key=api_key,
+        **auth_kwargs,
         stack_name=desired_state.stack_name,
         nextcloud_hostname=nextcloud_hostname,
         onlyoffice_hostname=onlyoffice_hostname,
@@ -1691,7 +1734,8 @@ def _build_matrix_backend(
         return ShellMatrixBackend(raw_env)
     api_url = desired_state.dokploy_api_url
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
-    if not api_url or not api_key or "matrix" not in desired_state.enabled_packs:
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if not api_url or not auth_kwargs or "matrix" not in desired_state.enabled_packs:
         return ShellMatrixBackend(raw_env)
     hostname = desired_state.hostnames.get("matrix")
     allocation = next(
@@ -1707,7 +1751,7 @@ def _build_matrix_backend(
         return ShellMatrixBackend(raw_env)
     return DokployMatrixBackend(
         api_url=api_url,
-        api_key=api_key,
+        **auth_kwargs,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         shared_allocation=allocation,
@@ -1736,7 +1780,8 @@ def _build_moodle_backend(
         return ShellMoodleBackend()
     api_url = desired_state.dokploy_api_url
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
-    if not api_url or not api_key or "moodle" not in desired_state.enabled_packs:
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if not api_url or not auth_kwargs or "moodle" not in desired_state.enabled_packs:
         return ShellMoodleBackend()
     hostname = desired_state.hostnames.get("moodle")
     allocation = next(
@@ -1750,7 +1795,7 @@ def _build_moodle_backend(
     mail_relay = desired_state.shared_core.mail_relay
     return DokployMoodleBackend(
         api_url=api_url,
-        api_key=api_key,
+        **auth_kwargs,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
@@ -1779,7 +1824,8 @@ def _build_docuseal_backend(
         return ShellDocuSealBackend()
     api_url = desired_state.dokploy_api_url
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
-    if not api_url or not api_key or "docuseal" not in desired_state.enabled_packs:
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if not api_url or not auth_kwargs or "docuseal" not in desired_state.enabled_packs:
         return ShellDocuSealBackend()
     hostname = desired_state.hostnames.get("docuseal")
     allocation = next(
@@ -1793,7 +1839,7 @@ def _build_docuseal_backend(
     mail_relay = desired_state.shared_core.mail_relay
     return DokployDocuSealBackend(
         api_url=api_url,
-        api_key=api_key,
+        **auth_kwargs,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
@@ -1813,6 +1859,94 @@ def _build_docuseal_backend(
     )
 
 
+def _build_multica_backend(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> MulticaBackend:
+    from dokploy_wizard.dokploy.multica import DokployMulticaBackend
+
+    if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
+        return ShellMulticaBackend()
+    api_url = desired_state.dokploy_api_url
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if not api_url or not auth_kwargs or "multica" not in desired_state.enabled_packs:
+        return ShellMulticaBackend()
+    hostname = desired_state.hostnames.get("multica")
+    machine_hostnames = cast(dict[str, str], getattr(desired_state, "machine_hostnames", {}))
+    api_hostname = machine_hostnames.get("multica-api") or desired_state.hostnames.get("multica-api")
+    allocation = next(
+        (item for item in desired_state.shared_core.allocations if item.pack_name == "multica"),
+        None,
+    )
+    if (
+        hostname is None
+        or api_hostname is None
+        or allocation is None
+        or desired_state.shared_core.postgres is None
+    ):
+        return ShellMulticaBackend()
+    if allocation.postgres is None:
+        return ShellMulticaBackend()
+    return DokployMulticaBackend(
+        api_url=api_url,
+        **auth_kwargs,
+        stack_name=desired_state.stack_name,
+        hostname=hostname,
+        api_hostname=api_hostname,
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        postgres=allocation.postgres,
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
+    )
+
+
+def _build_paperclip_backend(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> PaperclipBackend:
+    from dokploy_wizard.dokploy.paperclip import DokployPaperclipBackend
+
+    if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
+        return ShellPaperclipBackend()
+    api_url = desired_state.dokploy_api_url
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if not api_url or not auth_kwargs or "paperclip" not in desired_state.enabled_packs:
+        return ShellPaperclipBackend()
+    hostname = desired_state.hostnames.get("paperclip")
+    allocation = next(
+        (item for item in desired_state.shared_core.allocations if item.pack_name == "paperclip"),
+        None,
+    )
+    if hostname is None or allocation is None or desired_state.shared_core.postgres is None:
+        return ShellPaperclipBackend()
+    if allocation.postgres is None:
+        return ShellPaperclipBackend()
+    return DokployPaperclipBackend(
+        api_url=api_url,
+        **auth_kwargs,
+        stack_name=desired_state.stack_name,
+        hostname=hostname,
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        postgres=allocation.postgres,
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
+    )
+
+
 def _build_seaweedfs_backend(
     *,
     raw_env: RawEnvInput,
@@ -1821,7 +1955,8 @@ def _build_seaweedfs_backend(
 ) -> SeaweedFsBackend:
     api_url = desired_state.dokploy_api_url
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
-    if not api_url or not api_key or "seaweedfs" not in desired_state.enabled_packs:
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if not api_url or not auth_kwargs or "seaweedfs" not in desired_state.enabled_packs:
         return ShellSeaweedFsBackend(raw_env)
     hostname = desired_state.hostnames.get("s3")
     access_key = desired_state.seaweedfs_access_key
@@ -1830,7 +1965,7 @@ def _build_seaweedfs_backend(
         return ShellSeaweedFsBackend(raw_env)
     return DokploySeaweedFsBackend(
         api_url=api_url,
-        api_key=api_key,
+        **auth_kwargs,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         access_key=access_key,
@@ -1852,7 +1987,8 @@ def _build_coder_backend(
 ) -> CoderBackend:
     api_url = desired_state.dokploy_api_url
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
-    if not api_url or not api_key or "coder" not in desired_state.enabled_packs:
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if not api_url or not auth_kwargs or "coder" not in desired_state.enabled_packs:
         return ShellCoderBackend()
     hostname = desired_state.hostnames.get("coder")
     wildcard_hostname = desired_state.hostnames.get("coder-wildcard")
@@ -1866,7 +2002,7 @@ def _build_coder_backend(
         return ShellCoderBackend()
     return DokployCoderBackend(
         api_url=api_url,
-        api_key=api_key,
+        **auth_kwargs,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         wildcard_hostname=wildcard_hostname,
@@ -1893,7 +2029,8 @@ def _build_openclaw_backend(
         return ShellOpenClawBackend(raw_env)
     api_url = desired_state.dokploy_api_url
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
-    if not api_url or not api_key:
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if not api_url or not auth_kwargs:
         return ShellOpenClawBackend(raw_env)
     if not ({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs)):
         return ShellOpenClawBackend(raw_env)
@@ -1905,7 +2042,7 @@ def _build_openclaw_backend(
     )
     return DokployOpenClawBackend(
         api_url=api_url,
-        api_key=api_key,
+        **auth_kwargs,
         stack_name=desired_state.stack_name,
         gateway_token=desired_state.openclaw_gateway_token,
         openclaw_internal_hostname=_openclaw_internal_hostname(raw_env, desired_state),
@@ -2294,73 +2431,41 @@ def _can_reuse_existing_dokploy_api_key(
     if dry_run or not require_real_dokploy_auth:
         return True
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
-    if api_key is None:
+    auth_kwargs = _dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key)
+    if not auth_kwargs:
         return False
     try:
-        DokployApiClient(api_url=LOCAL_HEALTH_URL, api_key=api_key).list_projects()
+        DokployApiClient(api_url=LOCAL_HEALTH_URL, **auth_kwargs).list_projects()
     except DokployApiError:
         return False
     return True
+
+
+def _dokploy_client_auth_kwargs(
+    *, raw_env: RawEnvInput, api_key: str | None
+) -> _DokployClientAuthKwargs:
+    auth_kwargs: _DokployClientAuthKwargs = {}
+    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL")
+    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD")
+    if admin_email and admin_password:
+        auth_kwargs["email"] = admin_email
+        auth_kwargs["password"] = admin_password
+    if api_key:
+        auth_kwargs["api_key"] = api_key
+    return auth_kwargs
 
 
 def _build_dokploy_api_client(
     *,
     raw_env: RawEnvInput,
     api_url: str,
-    api_key: str,
+    api_key: str | None,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> DokployApiClient:
-    session_client = session_client or _build_dokploy_session_client(
-        raw_env=raw_env,
-        api_url=api_url,
-    )
-    if session_client is None:
-        return DokployApiClient(api_url=api_url, api_key=api_key)
+    del session_client
     return DokployApiClient(
         api_url=api_url,
-        api_key=api_key,
-        list_projects_session_fallback=_build_dokploy_session_list_projects_fallback(
-            raw_env=raw_env,
-            session_client=session_client,
-        ),
-        project_create_session_fallback=_build_dokploy_session_project_create_fallback(
-            raw_env=raw_env,
-            session_client=session_client,
-        ),
-        compose_create_session_fallback=_build_dokploy_session_compose_create_fallback(
-            raw_env=raw_env,
-            session_client=session_client,
-        ),
-        compose_update_session_fallback=_build_dokploy_session_compose_update_fallback(
-            raw_env=raw_env,
-            session_client=session_client,
-        ),
-        deploy_session_fallback=_build_dokploy_session_deploy_fallback(
-            raw_env=raw_env,
-            session_client=session_client,
-        ),
-        list_compose_schedules_session_fallback=_build_dokploy_session_schedule_list_fallback(
-            raw_env=raw_env,
-            session_client=session_client,
-        ),
-        create_schedule_session_fallback=cast(
-            Any,
-            _build_dokploy_session_schedule_create_fallback(
-                raw_env=raw_env,
-                session_client=session_client,
-            ),
-        ),
-        update_schedule_session_fallback=cast(
-            Any,
-            _build_dokploy_session_schedule_update_fallback(
-                raw_env=raw_env,
-                session_client=session_client,
-            ),
-        ),
-        delete_schedule_session_fallback=_build_dokploy_session_schedule_delete_fallback(
-            raw_env=raw_env,
-            session_client=session_client,
-        ),
+        **_dokploy_client_auth_kwargs(raw_env=raw_env, api_key=api_key),
     )
 
 
@@ -2624,7 +2729,13 @@ def _refresh_local_dokploy_api_key(
             key_name=f"dokploy-wizard-{uuid.uuid4().hex[:12]}",
         )
         try:
-            DokployApiClient(api_url=LOCAL_HEALTH_URL, api_key=result.api_key).list_projects()
+            DokployApiClient(
+                api_url=LOCAL_HEALTH_URL,
+                email=admin_email,
+                password=admin_password,
+                api_key=result.api_key,
+                prefer_session_auth=False,
+            ).list_projects()
             return result
         except DokployApiError as error:
             last_error = error

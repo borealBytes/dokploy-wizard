@@ -27,6 +27,7 @@ from dokploy_wizard.packs.headscale import (
 )
 from dokploy_wizard.packs.matrix import MatrixBackend, reconcile_matrix
 from dokploy_wizard.packs.moodle import MoodleBackend, MoodleResourceRecord, reconcile_moodle
+from dokploy_wizard.packs.multica import MulticaBackend
 from dokploy_wizard.packs.nextcloud import (
     NextcloudBackend,
     NextcloudResourceRecord,
@@ -38,6 +39,7 @@ from dokploy_wizard.packs.openclaw import (
     reconcile_my_farm_advisor,
     reconcile_openclaw,
 )
+from dokploy_wizard.packs.paperclip import PaperclipBackend
 from dokploy_wizard.packs.seaweedfs import (
     SeaweedFsBackend,
     SeaweedFsResourceRecord,
@@ -94,6 +96,8 @@ def validate_preserved_phases(
     seaweedfs_backend: SeaweedFsBackend,
     coder_backend: CoderBackend,
     openclaw_backend: OpenClawBackend,
+    multica_backend: MulticaBackend | None = None,
+    paperclip_backend: PaperclipBackend | None = None,
 ) -> DriftReport:
     applicable = applicable_phases_for(desired_state)
     entries: list[DriftEntry] = []

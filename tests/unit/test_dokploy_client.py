@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.cookiejar
 import json
 from email.message import Message
 from io import BytesIO
@@ -11,6 +12,72 @@ from urllib import error, request
 import pytest
 
 from dokploy_wizard.dokploy import DokployApiClient, DokployApiError
+
+
+def test_dokploy_client_logs_in_with_email_password_and_reuses_session_cookie() -> None:
+    requests_seen: list[str] = []
+
+    def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
+        requests_seen.append(req.full_url)
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            jar.set_cookie(_session_cookie())
+            return {"user": {"email": "admin@example.com"}}
+        assert any(cookie.name == "better-auth.session_token" for cookie in jar)
+        assert "X-api-key" not in dict(req.header_items())
+        return {"data": [{"projectId": "proj-1", "name": "wizard", "environments": []}]}
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/",
+        email="admin@example.com",
+        password="secret-123",
+        api_key="legacy-key-123",
+        request_fn=fake_request,
+    )
+
+    first = client.list_projects()
+    second = client.list_projects()
+
+    assert first[0].project_id == "proj-1"
+    assert second[0].project_id == "proj-1"
+    assert requests_seen == [
+        "https://dokploy.example.com/api/auth/sign-in/email",
+        "https://dokploy.example.com/api/project.all",
+        "https://dokploy.example.com/api/project.all",
+    ]
+
+
+def test_dokploy_client_falls_back_to_api_key_when_session_endpoint_is_unavailable() -> None:
+    requests_seen: list[str] = []
+
+    def fake_request(req: request.Request) -> object:
+        requests_seen.append(req.full_url)
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            raise error.HTTPError(
+                req.full_url,
+                404,
+                "Not Found",
+                hdrs=Message(),
+                fp=BytesIO(b'{"message":"Not Found"}'),
+            )
+        headers = dict(req.header_items())
+        assert headers["X-api-key"] == "dokp-key-123"
+        return {"data": [{"projectId": "proj-1", "name": "wizard", "environments": []}]}
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/",
+        email="admin@example.com",
+        password="secret-123",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    projects = client.list_projects()
+
+    assert projects[0].project_id == "proj-1"
+    assert requests_seen == [
+        "https://dokploy.example.com/api/auth/sign-in/email",
+        "https://dokploy.example.com/api/project.all",
+    ]
 
 
 def test_dokploy_client_uses_x_api_key_and_api_paths() -> None:
@@ -534,3 +601,25 @@ def test_dokploy_client_update_schedule_uses_session_fallback_on_api_key_401() -
 
     assert schedule.schedule_id == "sch-1"
     assert schedule.service_name == "wizard-stack-nextcloud"
+
+
+def _session_cookie() -> http.cookiejar.Cookie:
+    return http.cookiejar.Cookie(
+        version=0,
+        name="better-auth.session_token",
+        value="session-token-123",
+        port=None,
+        port_specified=False,
+        domain="dokploy.example.com",
+        domain_specified=True,
+        domain_initial_dot=False,
+        path="/",
+        path_specified=True,
+        secure=True,
+        expires=None,
+        discard=True,
+        comment=None,
+        comment_url=None,
+        rest={"HttpOnly": ""},
+        rfc2109=False,
+    )
