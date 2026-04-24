@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any
 
@@ -139,6 +139,9 @@ class DesiredState:
     my_farm_advisor_channels: tuple[str, ...]
     my_farm_advisor_replicas: int | None
     shared_core: SharedCorePlan
+    access_wrapped_hostnames: dict[str, str] = field(default_factory=dict)
+    machine_hostnames: dict[str, str] = field(default_factory=dict)
+    workspace_daemon_packs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.format_version != STATE_FORMAT_VERSION:
@@ -207,6 +210,24 @@ class DesiredState:
         if any(value == "" for value in self.hostnames.values()):
             msg = "Desired hostnames must be non-empty strings."
             raise StateValidationError(msg)
+        if any(value == "" for value in self.access_wrapped_hostnames.values()):
+            msg = "Desired access-wrapped hostnames must be non-empty strings."
+            raise StateValidationError(msg)
+        if any(value == "" for value in self.machine_hostnames.values()):
+            msg = "Desired machine hostnames must be non-empty strings."
+            raise StateValidationError(msg)
+        if sorted(self.workspace_daemon_packs) != list(self.workspace_daemon_packs):
+            msg = "Workspace daemon packs must be stored in sorted order."
+            raise StateValidationError(msg)
+        if not set(self.access_wrapped_hostnames).issubset(self.hostnames):
+            msg = "Access-wrapped hostnames must reference known hostnames."
+            raise StateValidationError(msg)
+        if not set(self.machine_hostnames).issubset(self.hostnames):
+            msg = "Machine hostnames must reference known hostnames."
+            raise StateValidationError(msg)
+        if not set(self.workspace_daemon_packs).issubset(self.enabled_packs):
+            msg = "Workspace daemon packs must be enabled packs."
+            raise StateValidationError(msg)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -225,6 +246,9 @@ class DesiredState:
             "selected_packs": list(self.selected_packs),
             "enabled_packs": list(self.enabled_packs),
             "hostnames": dict(sorted(self.hostnames.items())),
+            "access_wrapped_hostnames": dict(sorted(self.access_wrapped_hostnames.items())),
+            "machine_hostnames": dict(sorted(self.machine_hostnames.items())),
+            "workspace_daemon_packs": list(self.workspace_daemon_packs),
             "seaweedfs_access_key": self.seaweedfs_access_key,
             "seaweedfs_secret_key": self.seaweedfs_secret_key,
             "openclaw_gateway_token": self.openclaw_gateway_token,
@@ -261,6 +285,11 @@ class DesiredState:
             selected_packs=_require_string_list(payload, "selected_packs"),
             enabled_packs=_require_string_list(payload, "enabled_packs"),
             hostnames=_require_string_map(payload, "hostnames"),
+            access_wrapped_hostnames=_require_optional_string_map(
+                payload, "access_wrapped_hostnames"
+            ),
+            machine_hostnames=_require_optional_string_map(payload, "machine_hostnames"),
+            workspace_daemon_packs=_require_optional_string_list(payload, "workspace_daemon_packs"),
             seaweedfs_access_key=_require_optional_string(payload, "seaweedfs_access_key"),
             seaweedfs_secret_key=_require_optional_string(payload, "seaweedfs_secret_key"),
             openclaw_gateway_token=_require_optional_string(payload, "openclaw_gateway_token"),
@@ -313,6 +342,20 @@ def _require_optional_string(payload: dict[str, Any], key: str) -> str | None:
         msg = f"Expected string or null for '{key}'."
         raise StateValidationError(msg)
     return value
+
+
+def _require_optional_string_map(payload: dict[str, Any], key: str) -> dict[str, str]:
+    value = payload.get(key)
+    if value is None:
+        return {}
+    return _require_string_map(payload, key)
+
+
+def _require_optional_string_list(payload: dict[str, Any], key: str) -> tuple[str, ...]:
+    value = payload.get(key)
+    if value is None:
+        return ()
+    return _require_string_list(payload, key)
 
 
 @dataclass(frozen=True)
