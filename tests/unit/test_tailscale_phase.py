@@ -304,6 +304,8 @@ def test_shell_tailscale_backend_raises_up_failure_with_stderr() -> None:
     raw_env = _tailscale_raw_env()
 
     def runner(command: list[str]) -> CommandResult:
+        if command[:3] == ["tailscale", "status", "--json"]:
+            return CommandResult(returncode=1, stdout="", stderr="not logged in")
         if command[:2] == ["tailscale", "up"]:
             return CommandResult(returncode=1, stdout="", stderr="auth rejected")
         return CommandResult(returncode=0, stdout="", stderr="")
