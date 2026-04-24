@@ -18,19 +18,53 @@ def _ensure_non_empty(value: str, field_name: str) -> str:
 @dataclass(frozen=True)
 class SharedPostgresServicePlan:
     service_name: str
+    image: str | None = None
+    major_version: int | None = None
+    available_extensions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _ensure_non_empty(self.service_name, "service_name")
+        if self.major_version is not None and self.major_version < 1:
+            raise ValueError("SharedPostgresServicePlan.major_version must be positive.")
+        if tuple(sorted(self.available_extensions)) != self.available_extensions:
+            raise ValueError(
+                "SharedPostgresServicePlan.available_extensions must be stored in sorted order."
+            )
 
-    def to_dict(self) -> dict[str, str]:
-        return {"service_name": self.service_name}
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "service_name": self.service_name,
+            "image": self.image,
+            "major_version": self.major_version,
+            "available_extensions": list(self.available_extensions),
+        }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SharedPostgresServicePlan:
         service_name = payload.get("service_name")
+        image = payload.get("image")
+        major_version = payload.get("major_version")
+        available_extensions = payload.get("available_extensions", [])
         if not isinstance(service_name, str):
             raise ValueError("SharedPostgresServicePlan.service_name must be a string.")
-        return cls(service_name=service_name)
+        if image is not None and not isinstance(image, str):
+            raise ValueError("SharedPostgresServicePlan.image must be a string or null.")
+        if major_version is not None and not isinstance(major_version, int):
+            raise ValueError(
+                "SharedPostgresServicePlan.major_version must be an integer or null."
+            )
+        if not isinstance(available_extensions, list) or any(
+            not isinstance(item, str) for item in available_extensions
+        ):
+            raise ValueError(
+                "SharedPostgresServicePlan.available_extensions must be a list of strings."
+            )
+        return cls(
+            service_name=service_name,
+            image=image,
+            major_version=major_version,
+            available_extensions=tuple(sorted(available_extensions)),
+        )
 
 
 @dataclass(frozen=True)
@@ -100,6 +134,8 @@ class SharedPostgresAllocation:
     database_name: str
     user_name: str
     password_secret_ref: str
+    minimum_postgres_major_version: int | None = None
+    required_extensions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _ensure_non_empty(self.database_name, "database_name")
@@ -109,12 +145,25 @@ class SharedPostgresAllocation:
             raise ValueError(
                 "SharedPostgresAllocation.user_name cannot use admin/root credentials."
             )
+        if (
+            self.minimum_postgres_major_version is not None
+            and self.minimum_postgres_major_version < 1
+        ):
+            raise ValueError(
+                "SharedPostgresAllocation.minimum_postgres_major_version must be positive."
+            )
+        if tuple(sorted(self.required_extensions)) != self.required_extensions:
+            raise ValueError(
+                "SharedPostgresAllocation.required_extensions must be stored in sorted order."
+            )
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "database_name": self.database_name,
             "password_secret_ref": self.password_secret_ref,
             "user_name": self.user_name,
+            "minimum_postgres_major_version": self.minimum_postgres_major_version,
+            "required_extensions": list(self.required_extensions),
         }
 
     @classmethod
@@ -122,16 +171,32 @@ class SharedPostgresAllocation:
         database_name = payload.get("database_name")
         user_name = payload.get("user_name")
         password_secret_ref = payload.get("password_secret_ref")
+        minimum_postgres_major_version = payload.get("minimum_postgres_major_version")
+        required_extensions = payload.get("required_extensions", [])
         if not isinstance(database_name, str):
             raise ValueError("SharedPostgresAllocation.database_name must be a string.")
         if not isinstance(user_name, str):
             raise ValueError("SharedPostgresAllocation.user_name must be a string.")
         if not isinstance(password_secret_ref, str):
             raise ValueError("SharedPostgresAllocation.password_secret_ref must be a string.")
+        if minimum_postgres_major_version is not None and not isinstance(
+            minimum_postgres_major_version, int
+        ):
+            raise ValueError(
+                "SharedPostgresAllocation.minimum_postgres_major_version must be an integer or null."
+            )
+        if not isinstance(required_extensions, list) or any(
+            not isinstance(item, str) for item in required_extensions
+        ):
+            raise ValueError(
+                "SharedPostgresAllocation.required_extensions must be a list of strings."
+            )
         return cls(
             database_name=database_name,
             user_name=user_name,
             password_secret_ref=password_secret_ref,
+            minimum_postgres_major_version=minimum_postgres_major_version,
+            required_extensions=tuple(sorted(required_extensions)),
         )
 
 

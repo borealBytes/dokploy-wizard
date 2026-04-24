@@ -95,6 +95,9 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
         selected_packs=pack_selection.selected_packs,
         enabled_packs=pack_selection.enabled_packs,
         hostnames=dict(sorted(hostnames.items())),
+        access_wrapped_hostnames=pack_selection.access_wrapped_hostnames,
+        machine_hostnames=pack_selection.machine_hostnames,
+        workspace_daemon_packs=pack_selection.workspace_daemon_packs,
         seaweedfs_access_key=_resolve_seaweedfs_secret(
             values, enabled_packs=pack_selection.enabled_packs, key="SEAWEEDFS_ACCESS_KEY"
         ),

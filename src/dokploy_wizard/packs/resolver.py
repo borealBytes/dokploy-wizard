@@ -19,6 +19,9 @@ class ResolvedPackSelection:
     enabled_packs: tuple[str, ...]
     enabled_features: tuple[str, ...]
     hostnames: dict[str, str]
+    access_wrapped_hostnames: dict[str, str]
+    machine_hostnames: dict[str, str]
+    workspace_daemon_packs: tuple[str, ...]
     openclaw_channels: tuple[str, ...]
     my_farm_advisor_channels: tuple[str, ...]
 
@@ -42,10 +45,15 @@ def resolve_pack_selection(values: Mapping[str, str], *, root_domain: str) -> Re
 
     enabled_features = {"dokploy"}
     hostnames: dict[str, str] = {}
+    access_wrapped_hostnames: dict[str, str] = {}
+    machine_hostnames: dict[str, str] = {}
+    workspace_daemon_packs: set[str] = set()
     hostname_targets: dict[str, str] = {}
     for pack_name in sorted(enabled):
         pack = get_pack_definition(pack_name)
         enabled_features.update(pack.enabled_features)
+        if pack.workspace_daemon_enabled:
+            workspace_daemon_packs.add(pack.name)
         for hostname in pack.hostnames:
             fqdn = _join_hostname(
                 values.get(hostname.env_key, hostname.default_subdomain), root_domain
@@ -59,6 +67,10 @@ def resolve_pack_selection(values: Mapping[str, str], *, root_domain: str) -> Re
                 raise StateValidationError(msg)
             hostname_targets[fqdn] = hostname.key
             hostnames[hostname.key] = fqdn
+            if hostname.access_wrapped:
+                access_wrapped_hostnames[hostname.key] = fqdn
+            if hostname.route_kind == "machine":
+                machine_hostnames[hostname.key] = fqdn
 
     openclaw_channels: tuple[str, ...] = ()
     my_farm_advisor_channels: tuple[str, ...] = ()
@@ -83,6 +95,9 @@ def resolve_pack_selection(values: Mapping[str, str], *, root_domain: str) -> Re
         enabled_packs=tuple(sorted(enabled)),
         enabled_features=tuple(sorted(enabled_features)),
         hostnames=dict(sorted(hostnames.items())),
+        access_wrapped_hostnames=dict(sorted(access_wrapped_hostnames.items())),
+        machine_hostnames=dict(sorted(machine_hostnames.items())),
+        workspace_daemon_packs=tuple(sorted(workspace_daemon_packs)),
         openclaw_channels=openclaw_channels,
         my_farm_advisor_channels=my_farm_advisor_channels,
     )
