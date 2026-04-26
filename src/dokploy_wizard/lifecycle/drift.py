@@ -15,14 +15,18 @@ from dokploy_wizard.networking import (
 )
 from dokploy_wizard.networking.planner import _build_tunnel_ingress
 from dokploy_wizard.packs.coder import CoderBackend, CoderResourceRecord, reconcile_coder
-from dokploy_wizard.packs.docuseal import DocuSealBackend
+from dokploy_wizard.packs.docuseal import (
+    DocuSealBackend,
+    DocuSealResourceRecord,
+    reconcile_docuseal,
+)
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     HeadscaleResourceRecord,
     reconcile_headscale,
 )
 from dokploy_wizard.packs.matrix import MatrixBackend, reconcile_matrix
-from dokploy_wizard.packs.moodle import MoodleBackend
+from dokploy_wizard.packs.moodle import MoodleBackend, MoodleResourceRecord, reconcile_moodle
 from dokploy_wizard.packs.nextcloud import (
     NextcloudBackend,
     NextcloudResourceRecord,
@@ -85,11 +89,11 @@ def validate_preserved_phases(
     headscale_backend: HeadscaleBackend,
     matrix_backend: MatrixBackend,
     nextcloud_backend: NextcloudBackend,
-    moodle_backend: MoodleBackend,
-    docuseal_backend: DocuSealBackend,
     seaweedfs_backend: SeaweedFsBackend,
     coder_backend: CoderBackend,
     openclaw_backend: OpenClawBackend,
+    moodle_backend: MoodleBackend | None = None,
+    docuseal_backend: DocuSealBackend | None = None,
 ) -> DriftReport:
     applicable = applicable_phases_for(desired_state)
     entries: list[DriftEntry] = []
@@ -141,11 +145,11 @@ def _validate_phase(
     headscale_backend: HeadscaleBackend,
     matrix_backend: MatrixBackend,
     nextcloud_backend: NextcloudBackend,
-    moodle_backend: MoodleBackend,
-    docuseal_backend: DocuSealBackend,
     seaweedfs_backend: SeaweedFsBackend,
     coder_backend: CoderBackend,
     openclaw_backend: OpenClawBackend,
+    moodle_backend: MoodleBackend | None = None,
+    docuseal_backend: DocuSealBackend | None = None,
 ) -> DriftEntry:
     try:
         if phase == "preflight":
@@ -422,6 +426,82 @@ def _validate_phase(
             return DriftEntry(
                 phase=phase, status="ok", detail="Nextcloud ownership remains aligned."
             )
+        if phase == "moodle":
+            if moodle_backend is None:
+                return DriftEntry(phase=phase, status="drift", detail="Moodle backend is unavailable.")
+            moodle = reconcile_moodle(
+                dry_run=True,
+                desired_state=desired_state,
+                ownership_ledger=ownership_ledger,
+                backend=moodle_backend,
+            ).result
+            if moodle.outcome == "skipped":
+                return DriftEntry(phase=phase, status="ok", detail="Moodle remains skipped.")
+            actions = {
+                resource.action
+                for resource in (moodle.service, moodle.persistent_data)
+                if resource is not None
+            }
+            if actions != {"reuse_owned"}:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=f"Moodle expected owned reuse, found actions {sorted(actions)}.",
+                )
+            if moodle.health_check is None or moodle.service is None or not moodle_backend.check_health(
+                service=MoodleResourceRecord(
+                    resource_id=moodle.service.resource_id,
+                    resource_name=moodle.service.resource_name,
+                ),
+                url=moodle.health_check.url,
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="Moodle health check no longer passes for a preserved phase.",
+                )
+            return DriftEntry(phase=phase, status="ok", detail="Moodle ownership remains aligned.")
+        if phase == "docuseal":
+            if docuseal_backend is None:
+                return DriftEntry(phase=phase, status="drift", detail="DocuSeal backend is unavailable.")
+            docuseal = reconcile_docuseal(
+                dry_run=True,
+                desired_state=desired_state,
+                ownership_ledger=ownership_ledger,
+                backend=docuseal_backend,
+            ).result
+            if docuseal.outcome == "skipped":
+                return DriftEntry(phase=phase, status="ok", detail="DocuSeal remains skipped.")
+            actions = {
+                resource.action
+                for resource in (docuseal.service, docuseal.persistent_data)
+                if resource is not None
+            }
+            if actions != {"reuse_owned"}:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=f"DocuSeal expected owned reuse, found actions {sorted(actions)}.",
+                )
+            if getattr(docuseal, "bootstrap_state", None) is not None and not docuseal.bootstrap_state.initialized:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="DocuSeal bootstrap state is not initialized.",
+                )
+            if docuseal.health_state is None or docuseal.service is None or not docuseal_backend.check_health(
+                service=DocuSealResourceRecord(
+                    resource_id=docuseal.service.resource_id,
+                    resource_name=docuseal.service.resource_name,
+                ),
+                url=docuseal.health_state.url,
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="DocuSeal health check no longer passes for a preserved phase.",
+                )
+            return DriftEntry(phase=phase, status="ok", detail="DocuSeal ownership remains aligned.")
         if phase == "seaweedfs":
             seaweedfs = reconcile_seaweedfs(
                 dry_run=True,

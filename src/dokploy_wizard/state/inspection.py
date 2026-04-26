@@ -451,6 +451,34 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "scope": f"stack:{desired_state.stack_name}:onlyoffice-service",
             }
         )
+    if "moodle" in desired_state.enabled_packs:
+        candidates.append(
+            {
+                "aliases": ("moodle",),
+                "hostname": desired_state.hostnames.get("moodle"),
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-moodle"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-moodle",
+                "pack": "moodle",
+                "scope": f"stack:{desired_state.stack_name}:moodle:service",
+            }
+        )
+    if "docuseal" in desired_state.enabled_packs:
+        candidates.append(
+            {
+                "aliases": ("docuseal",),
+                "hostname": desired_state.hostnames.get("docuseal"),
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-docuseal"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-docuseal",
+                "pack": "docuseal",
+                "scope": f"stack:{desired_state.stack_name}:docuseal:service",
+            }
+        )
     if "coder" in desired_state.enabled_packs:
         candidates.append(
             {
