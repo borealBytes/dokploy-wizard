@@ -159,10 +159,18 @@ def _inspect_live_docker(
 
         for container in containers:
             container_name = container["name"]
+            if _ignore_known_auxiliary_container(container_name=container_name, stack_name=desired_state.stack_name):
+                consumed_live_items.add(("container", container_name))
+                continue
             managed_candidate_pack = managed_container_candidates.get(container_name)
             if managed_candidate_pack is not None:
                 if managed_candidate_pack == candidate["pack"] and scope_is_managed:
                     consumed_live_items.add(("container", container_name))
+                continue
+            if scope_is_managed and _is_expected_auxiliary_container(
+                container=container, candidate=candidate
+            ):
+                consumed_live_items.add(("container", container_name))
                 continue
             if _looks_like_managed_task(
                 container_name=container_name,
@@ -230,7 +238,7 @@ def _managed_service_health(
         container_matches = [
             container
             for container in containers
-            if managed_container_candidates.get(container["name"]) == candidate["pack"]
+            if managed_container_candidates.get(container["name"]) == candidate["scope"]
         ]
         if len(container_matches) == 1:
             container = container_matches[0]
@@ -310,20 +318,96 @@ def _build_unmanaged_entry(
 
 def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ...]:
     candidates: list[dict[str, Any]] = []
+    if desired_state.shared_core.postgres is not None:
+        postgres_service_name = desired_state.shared_core.postgres.service_name
+        candidates.append(
+            {
+                "aliases": ("shared-postgres",),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": postgres_service_name,
+                },
+                "port": None,
+                "expected_service_name": postgres_service_name,
+                "pack": "shared-core",
+                "scope": f"stack:{desired_state.stack_name}:shared-postgres",
+            }
+        )
+    if desired_state.shared_core.redis is not None:
+        redis_service_name = desired_state.shared_core.redis.service_name
+        candidates.append(
+            {
+                "aliases": ("shared-redis",),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": redis_service_name,
+                },
+                "port": None,
+                "expected_service_name": redis_service_name,
+                "pack": "shared-core",
+                "scope": f"stack:{desired_state.stack_name}:shared-redis",
+            }
+        )
+    if desired_state.shared_core.mail_relay is not None:
+        mail_relay_service_name = desired_state.shared_core.mail_relay.service_name
+        candidates.append(
+            {
+                "aliases": ("shared-postfix", "postfix"),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": mail_relay_service_name,
+                },
+                "port": str(desired_state.shared_core.mail_relay.smtp_port),
+                "expected_service_name": mail_relay_service_name,
+                "pack": "shared-core",
+                "scope": f"stack:{desired_state.stack_name}:shared-postfix",
+            }
+        )
     if "openclaw" in desired_state.enabled_packs:
         candidates.append(
             {
                 "aliases": ("openclaw", "advisor"),
                 "hostname": desired_state.hostnames.get("openclaw"),
                 "managed_container_labels": {
-                    "dokploy-wizard.slot": "advisor_suite",
+                    "dokploy-wizard.slot": "openclaw_suite",
                     "dokploy-wizard.variant": "openclaw",
                 },
                 "port": "18789",
-                "expected_service_name": f"{desired_state.stack_name}-advisor",
+                "expected_service_name": f"{desired_state.stack_name}-openclaw",
                 "pack": "openclaw",
                 "scope": f"stack:{desired_state.stack_name}:openclaw",
             }
+        )
+        candidates.extend(
+            (
+                {
+                    "aliases": ("mem0",),
+                    "hostname": None,
+                    "managed_container_labels": {"com.docker.compose.service": "mem0"},
+                    "port": str(8000),
+                    "expected_service_name": "mem0",
+                    "pack": "openclaw",
+                    "scope": f"stack:{desired_state.stack_name}:openclaw-sidecar:mem0",
+                },
+                {
+                    "aliases": ("qdrant",),
+                    "hostname": None,
+                    "managed_container_labels": {"com.docker.compose.service": "qdrant"},
+                    "port": str(6333),
+                    "expected_service_name": "qdrant",
+                    "pack": "openclaw",
+                    "scope": f"stack:{desired_state.stack_name}:openclaw-sidecar:qdrant",
+                },
+                {
+                    "aliases": ("nexa-runtime",),
+                    "hostname": None,
+                    "managed_container_labels": {"com.docker.compose.service": "nexa-runtime"},
+                    "port": None,
+                    "expected_service_name": "nexa-runtime",
+                    "pack": "openclaw",
+                    "scope": f"stack:{desired_state.stack_name}:openclaw-sidecar:nexa-runtime",
+                },
+            )
         )
     if "my-farm-advisor" in desired_state.enabled_packs:
         candidates.append(
@@ -331,7 +415,7 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "aliases": ("my-farm-advisor", "my-farm", "farm-advisor"),
                 "hostname": desired_state.hostnames.get("my-farm-advisor"),
                 "managed_container_labels": {
-                    "dokploy-wizard.slot": "advisor_suite",
+                    "dokploy-wizard.slot": "my-farm-advisor_suite",
                     "dokploy-wizard.variant": "my-farm-advisor",
                 },
                 "port": "18789",
@@ -343,6 +427,19 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
     if "nextcloud" in desired_state.enabled_packs:
         candidates.append(
             {
+                "aliases": ("nextcloud",),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-nextcloud"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-nextcloud",
+                "pack": "nextcloud",
+                "scope": f"stack:{desired_state.stack_name}:nextcloud-service",
+            }
+        )
+        candidates.append(
+            {
                 "aliases": ("onlyoffice",),
                 "hostname": desired_state.hostnames.get("onlyoffice"),
                 "managed_container_labels": {
@@ -352,6 +449,62 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "expected_service_name": f"{desired_state.stack_name}-onlyoffice",
                 "pack": "onlyoffice",
                 "scope": f"stack:{desired_state.stack_name}:onlyoffice-service",
+            }
+        )
+    if "moodle" in desired_state.enabled_packs:
+        candidates.append(
+            {
+                "aliases": ("moodle",),
+                "hostname": desired_state.hostnames.get("moodle"),
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-moodle"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-moodle",
+                "pack": "moodle",
+                "scope": f"stack:{desired_state.stack_name}:moodle:service",
+            }
+        )
+    if "docuseal" in desired_state.enabled_packs:
+        candidates.append(
+            {
+                "aliases": ("docuseal",),
+                "hostname": desired_state.hostnames.get("docuseal"),
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-docuseal"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-docuseal",
+                "pack": "docuseal",
+                "scope": f"stack:{desired_state.stack_name}:docuseal:service",
+            }
+        )
+    if "coder" in desired_state.enabled_packs:
+        candidates.append(
+            {
+                "aliases": ("coder",),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-coder"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-coder",
+                "pack": "coder",
+                "scope": f"stack:{desired_state.stack_name}:coder:service",
+            }
+        )
+    if "seaweedfs" in desired_state.enabled_packs:
+        candidates.append(
+            {
+                "aliases": ("seaweedfs", "s3"),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-seaweedfs"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-seaweedfs",
+                "pack": "seaweedfs",
+                "scope": f"stack:{desired_state.stack_name}:seaweedfs-service",
             }
         )
     return tuple(candidates)
@@ -386,6 +539,8 @@ def _unknown_unmanaged_live_items(
         container_name = container["name"]
         if ("container", container_name) in consumed_live_items:
             continue
+        if _ignore_known_auxiliary_container(container_name=container_name, stack_name=desired_state.stack_name):
+            continue
         if any(
             _looks_like_managed_task(container_name=container_name, expected_service_name=name)
             for name in expected_service_names
@@ -403,13 +558,25 @@ def _looks_like_managed_task(*, container_name: str, expected_service_name: str)
     return normalized_name.startswith(normalized_expected + ".")
 
 
+def _ignore_known_auxiliary_container(*, container_name: str, stack_name: str) -> bool:
+    normalized_name = container_name.lower()
+    normalized_stack = stack_name.lower()
+    if normalized_name.startswith(f"{normalized_stack}-cloudflared-"):
+        return True
+    if normalized_name.startswith(f"{normalized_stack}-dokploy-wizard-auth-probe-"):
+        return True
+    if normalized_name.startswith("coder-") and "-workspace-" in normalized_name:
+        return True
+    return False
+
+
 def _managed_container_candidates(
     *, containers: tuple[dict[str, Any], ...], candidates: tuple[dict[str, Any], ...]
 ) -> dict[str, str]:
     resolved: dict[str, str] = {}
     for container in containers:
         matches = [
-            candidate["pack"]
+            str(candidate["scope"])
             for candidate in candidates
             if _container_proves_managed_candidate(container=container, candidate=candidate)
         ]
@@ -424,14 +591,31 @@ def _container_proves_managed_candidate(
     labels = container.get("labels")
     if not isinstance(labels, dict) or not labels:
         return False
+    if labels.get("com.docker.compose.service") == candidate["expected_service_name"]:
+        return True
     hostname = candidate.get("hostname")
     port = candidate.get("port")
     managed_labels = candidate.get("managed_container_labels")
-    if hostname is None or port is None or not isinstance(managed_labels, dict):
+    if not isinstance(managed_labels, dict):
         return False
     if not all(labels.get(key) == value for key, value in managed_labels.items()):
         return False
+    if hostname is None or port is None:
+        return True
     return _labels_reference_hostname(labels, hostname) and _labels_expose_port(labels, port)
+
+
+def _is_expected_auxiliary_container(*, container: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    labels = container.get("labels")
+    if not isinstance(labels, dict) or not labels:
+        return False
+    compose_service = labels.get("com.docker.compose.service")
+    if not isinstance(compose_service, str) or compose_service == "":
+        return False
+    expected_service_name = str(candidate.get("expected_service_name", ""))
+    if candidate.get("pack") == "openclaw" and compose_service == f"{expected_service_name}-public":
+        return True
+    return False
 
 
 def _labels_reference_hostname(labels: dict[str, str], hostname: str) -> bool:

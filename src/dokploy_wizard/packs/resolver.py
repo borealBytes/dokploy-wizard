@@ -37,7 +37,7 @@ def resolve_pack_selection(values: Mapping[str, str], *, root_domain: str) -> Re
         if pack.default_enabled and pack.name not in explicit_disabled
     }
     enabled.update(explicit_selected)
-    _expand_dependencies(enabled, values=values)
+    _expand_dependencies(enabled, explicit_disabled=explicit_disabled, values=values)
     _validate_slots(enabled)
 
     enabled_features = {"dokploy"}
@@ -112,7 +112,9 @@ def _parse_explicit_pack_intent(values: Mapping[str, str]) -> tuple[set[str], se
     return explicit_selected, explicit_disabled
 
 
-def _expand_dependencies(enabled: set[str], *, values: Mapping[str, str]) -> None:
+def _expand_dependencies(
+    enabled: set[str], *, explicit_disabled: set[str], values: Mapping[str, str]
+) -> None:
     pending = sorted(enabled)
     while pending:
         pack_name = pending.pop(0)
@@ -120,6 +122,10 @@ def _expand_dependencies(enabled: set[str], *, values: Mapping[str, str]) -> Non
         for dependency in pack.depends_on:
             if dependency == "headscale" and _uses_existing_tailscale_control_plane(values):
                 continue
+            if dependency in explicit_disabled:
+                raise StateValidationError(
+                    f"Pack '{pack_name}' requires '{dependency}', but '{dependency}' was explicitly disabled."
+                )
             if dependency not in enabled:
                 enabled.add(dependency)
                 pending.append(dependency)

@@ -277,6 +277,17 @@ class FakeSharedCoreBackend:
         )
         return self.redis
 
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        del resource_id
+        return None
+
+    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        del resource_name
+        return None
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        raise AssertionError(f"Matrix should not provision mail relay: {resource_name}")
+
 
 @dataclass
 class FakeHeadscaleBackend:
@@ -528,6 +539,10 @@ def test_install_reconciles_matrix_via_dokploy_backend(
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.matrix._http_health_check",
         lambda url: url == "https://matrix.example.com/_matrix/client/versions",
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.matrix._docker_container_is_up",
+        lambda service_name: service_name == "matrix-stack-matrix",
     )
 
     summary = run_install_flow(

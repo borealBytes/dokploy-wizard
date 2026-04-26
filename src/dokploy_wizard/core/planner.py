@@ -5,6 +5,7 @@ from __future__ import annotations
 from dokploy_wizard.core.models import (
     PackSharedAllocation,
     SharedCorePlan,
+    SharedMailRelayServicePlan,
     SharedPostgresAllocation,
     SharedPostgresServicePlan,
     SharedRedisAllocation,
@@ -13,10 +14,15 @@ from dokploy_wizard.core.models import (
 from dokploy_wizard.packs.catalog import get_pack_definition
 
 
-def build_shared_core_plan(stack_name: str, enabled_packs: tuple[str, ...]) -> SharedCorePlan:
+def build_shared_core_plan(
+    stack_name: str,
+    enabled_packs: tuple[str, ...],
+    values: dict[str, str] | None = None,
+) -> SharedCorePlan:
     allocations: list[PackSharedAllocation] = []
     requires_postgres = False
     requires_redis = False
+    values = values or {}
 
     for pack_name in enabled_packs:
         requirements = get_pack_definition(pack_name).shared_core_requirements
@@ -47,6 +53,7 @@ def build_shared_core_plan(stack_name: str, enabled_packs: tuple[str, ...]) -> S
 
     return SharedCorePlan(
         network_name=f"{stack_name}-shared",
+        mail_relay=_build_shared_mail_relay_plan(stack_name, enabled_packs, values),
         postgres=(
             None
             if not requires_postgres
@@ -58,4 +65,24 @@ def build_shared_core_plan(stack_name: str, enabled_packs: tuple[str, ...]) -> S
             else SharedRedisServicePlan(service_name=f"{stack_name}-shared-redis")
         ),
         allocations=tuple(allocations),
+    )
+
+
+def _build_shared_mail_relay_plan(
+    stack_name: str,
+    enabled_packs: tuple[str, ...],
+    values: dict[str, str],
+) -> SharedMailRelayServicePlan | None:
+    if not ({"moodle", "docuseal"} & set(enabled_packs)):
+        return None
+    root_domain = values.get("ROOT_DOMAIN", "").strip()
+    if root_domain == "":
+        return None
+    mail_hostname = values.get("OUTBOUND_SMTP_HOSTNAME", f"mail.{root_domain}").strip()
+    from_address = values.get("OUTBOUND_SMTP_FROM_ADDRESS", f"DoNotReply@{root_domain}").strip()
+    return SharedMailRelayServicePlan(
+        service_name=f"{stack_name}-shared-postfix",
+        mail_hostname=mail_hostname,
+        smtp_port=587,
+        from_address=from_address,
     )

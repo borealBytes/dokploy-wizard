@@ -30,6 +30,15 @@ class NextcloudHealthCheck:
 
 
 @dataclass(frozen=True)
+class NextcloudCommandCheck:
+    command: str
+    passed: bool | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"command": self.command, "passed": self.passed}
+
+
+@dataclass(frozen=True)
 class NextcloudPostgresBinding:
     database_name: str
     user_name: str
@@ -82,6 +91,28 @@ class OnlyofficeServiceConfig:
 
 
 @dataclass(frozen=True)
+class NextcloudOpenClawWorkspaceContract:
+    enabled: bool
+    external_mount_name: str
+    external_mount_path: str
+    visible_root: str
+    contract_path: str
+    runtime_state_source: str
+    notes: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract_path": self.contract_path,
+            "enabled": self.enabled,
+            "external_mount_name": self.external_mount_name,
+            "external_mount_path": self.external_mount_path,
+            "notes": list(self.notes),
+            "runtime_state_source": self.runtime_state_source,
+            "visible_root": self.visible_root,
+        }
+
+
+@dataclass(frozen=True)
 class NextcloudServiceRuntime:
     hostname: str
     url: str
@@ -109,11 +140,13 @@ class OnlyofficeServiceRuntime:
     data_volume: NextcloudManagedResource
     health_check: NextcloudHealthCheck
     config: OnlyofficeServiceConfig
+    document_server_check: NextcloudCommandCheck
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "config": self.config.to_dict(),
             "data_volume": self.data_volume.to_dict(),
+            "document_server_check": self.document_server_check.to_dict(),
             "health_check": self.health_check.to_dict(),
             "hostname": self.hostname,
             "service": self.service.to_dict(),
@@ -122,11 +155,38 @@ class OnlyofficeServiceRuntime:
 
 
 @dataclass(frozen=True)
+class TalkRuntime:
+    app_id: str
+    enabled: bool | None
+    enabled_check: NextcloudCommandCheck
+    signaling_check: NextcloudCommandCheck
+    stun_check: NextcloudCommandCheck
+    turn_check: NextcloudCommandCheck
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "app_id": self.app_id,
+            "enabled": self.enabled,
+            "enabled_check": self.enabled_check.to_dict(),
+            "signaling_check": self.signaling_check.to_dict(),
+            "stun_check": self.stun_check.to_dict(),
+            "turn_check": self.turn_check.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class NextcloudBundleVerification:
+    onlyoffice_document_server_check: NextcloudCommandCheck
+    talk: TalkRuntime
+
+
+@dataclass(frozen=True)
 class NextcloudResult:
     outcome: str
     enabled: bool
     nextcloud: NextcloudServiceRuntime | None
     onlyoffice: OnlyofficeServiceRuntime | None
+    talk: TalkRuntime | None
     notes: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -136,6 +196,7 @@ class NextcloudResult:
             "notes": list(self.notes),
             "onlyoffice": None if self.onlyoffice is None else self.onlyoffice.to_dict(),
             "outcome": self.outcome,
+            "talk": None if self.talk is None else self.talk.to_dict(),
         }
 
 

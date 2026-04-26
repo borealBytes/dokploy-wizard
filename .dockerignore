@@ -1,0 +1,9 @@
+.git
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.sisyphus
+__pycache__/
+*.pyc
+tests
+fixtures

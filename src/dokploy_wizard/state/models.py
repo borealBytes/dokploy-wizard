@@ -9,6 +9,8 @@ from typing import Any
 from dokploy_wizard.core.models import SharedCorePlan
 
 STATE_FORMAT_VERSION = 1
+LEGACY_LIFECYCLE_CHECKPOINT_CONTRACT_VERSION = 1
+LIFECYCLE_CHECKPOINT_CONTRACT_VERSION = 2
 
 
 class StateValidationError(ValueError):
@@ -71,6 +73,28 @@ def _require_format_version(payload: dict[str, Any]) -> int:
     version = _require_int(payload, "format_version")
     if version != STATE_FORMAT_VERSION:
         msg = f"Unsupported format_version {version}; expected {STATE_FORMAT_VERSION}."
+        raise StateValidationError(msg)
+    return version
+
+
+def _require_lifecycle_checkpoint_contract_version(payload: dict[str, Any]) -> int:
+    version = payload.get(
+        "lifecycle_checkpoint_contract_version",
+        LEGACY_LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+    )
+    if not isinstance(version, int):
+        msg = "Expected integer for 'lifecycle_checkpoint_contract_version'."
+        raise StateValidationError(msg)
+    if version not in {
+        LEGACY_LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+        LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+    }:
+        msg = (
+            "Unsupported lifecycle_checkpoint_contract_version "
+            f"{version}; expected one of "
+            f"{LEGACY_LIFECYCLE_CHECKPOINT_CONTRACT_VERSION} or "
+            f"{LIFECYCLE_CHECKPOINT_CONTRACT_VERSION}."
+        )
         raise StateValidationError(msg)
     return version
 
@@ -311,6 +335,7 @@ class AppliedStateCheckpoint:
     format_version: int
     desired_state_fingerprint: str
     completed_steps: tuple[str, ...]
+    lifecycle_checkpoint_contract_version: int = LIFECYCLE_CHECKPOINT_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
         if self.format_version != STATE_FORMAT_VERSION:
@@ -325,12 +350,24 @@ class AppliedStateCheckpoint:
         if any(step == "" for step in self.completed_steps):
             msg = "Applied state steps must be non-empty strings."
             raise StateValidationError(msg)
+        if self.lifecycle_checkpoint_contract_version not in {
+            LEGACY_LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+            LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+        }:
+            msg = (
+                "Unsupported lifecycle_checkpoint_contract_version "
+                f"{self.lifecycle_checkpoint_contract_version}; expected one of "
+                f"{LEGACY_LIFECYCLE_CHECKPOINT_CONTRACT_VERSION} or "
+                f"{LIFECYCLE_CHECKPOINT_CONTRACT_VERSION}."
+            )
+            raise StateValidationError(msg)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "format_version": self.format_version,
             "desired_state_fingerprint": self.desired_state_fingerprint,
             "completed_steps": list(self.completed_steps),
+            "lifecycle_checkpoint_contract_version": self.lifecycle_checkpoint_contract_version,
         }
 
     @classmethod
@@ -339,6 +376,9 @@ class AppliedStateCheckpoint:
             format_version=_require_format_version(payload),
             desired_state_fingerprint=_require_string(payload, "desired_state_fingerprint"),
             completed_steps=_require_string_list(payload, "completed_steps"),
+            lifecycle_checkpoint_contract_version=_require_lifecycle_checkpoint_contract_version(
+                payload
+            ),
         )
 
 

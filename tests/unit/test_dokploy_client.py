@@ -411,3 +411,144 @@ def test_dokploy_client_update_compose_uses_session_fallback_on_api_key_401() ->
 
     assert record.compose_id == "cmp-1"
     assert record.name == "wizard-compose"
+
+
+def test_dokploy_client_lists_compose_schedules_with_query_string() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_request(req: request.Request) -> object:
+        captured["url"] = req.full_url
+        return {
+            "data": [
+                {
+                    "scheduleId": "sch-1",
+                    "name": "wizard-openclaw-rescan",
+                    "serviceName": "wizard-nextcloud",
+                    "cronExpression": "*/15 * * * *",
+                    "timezone": "UTC",
+                    "shellType": "bash",
+                    "command": "php /var/www/html/occ files:scan --path=...",
+                    "enabled": True,
+                }
+            ]
+        }
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    schedules = client.list_compose_schedules(compose_id="cmp-1")
+
+    assert captured["url"] == (
+        "https://dokploy.example.com/api/schedule.list?id=cmp-1&scheduleType=compose"
+    )
+    assert schedules[0].schedule_id == "sch-1"
+    assert schedules[0].service_name == "wizard-nextcloud"
+
+
+def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_request(req: request.Request) -> object:
+        captured["url"] = req.full_url
+        body = cast(bytes | None, req.data)
+        captured["body"] = json.loads(body.decode("utf-8")) if body is not None else None
+        return {
+            "data": {
+                "scheduleId": "sch-1",
+                "name": "wizard-openclaw-rescan",
+                "serviceName": "wizard-nextcloud",
+                "cronExpression": "*/15 * * * *",
+                "timezone": "UTC",
+                "shellType": "bash",
+                "command": "php /var/www/html/occ files:scan --path=...",
+                "enabled": True,
+            }
+        }
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    record = client.create_schedule(
+        name="wizard-openclaw-rescan",
+        compose_id="cmp-1",
+        service_name="wizard-nextcloud",
+        cron_expression="*/15 * * * *",
+        timezone="UTC",
+        shell_type="bash",
+        command="php /var/www/html/occ files:scan --path=...",
+        enabled=True,
+    )
+
+    assert captured["url"] == "https://dokploy.example.com/api/schedule.create"
+    assert captured["body"] == {
+        "name": "wizard-openclaw-rescan",
+        "composeId": "cmp-1",
+        "serviceName": "wizard-nextcloud",
+        "cronExpression": "*/15 * * * *",
+        "timezone": "UTC",
+        "shellType": "bash",
+        "command": "php /var/www/html/occ files:scan --path=...",
+        "scheduleType": "compose",
+        "enabled": True,
+    }
+    assert record.schedule_id == "sch-1"
+
+
+def test_dokploy_client_updates_compose_schedule_with_expected_payload() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_request(req: request.Request) -> object:
+        captured["url"] = req.full_url
+        body = cast(bytes | None, req.data)
+        captured["body"] = json.loads(body.decode("utf-8")) if body is not None else None
+        return {
+            "data": {
+                "scheduleId": "sch-1",
+                "name": "wizard-openclaw-rescan",
+                "serviceName": "wizard-nextcloud",
+                "cronExpression": "0 * * * *",
+                "timezone": "America/Detroit",
+                "shellType": "bash",
+                "command": "php /var/www/html/occ files:scan --path=...",
+                "enabled": True,
+            }
+        }
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    record = client.update_schedule(
+        schedule_id="sch-1",
+        name="wizard-openclaw-rescan",
+        compose_id="cmp-1",
+        service_name="wizard-nextcloud",
+        cron_expression="0 * * * *",
+        timezone="America/Detroit",
+        shell_type="bash",
+        command="php /var/www/html/occ files:scan --path=...",
+        enabled=True,
+    )
+
+    assert captured["url"] == "https://dokploy.example.com/api/schedule.update"
+    assert captured["body"] == {
+        "scheduleId": "sch-1",
+        "name": "wizard-openclaw-rescan",
+        "composeId": "cmp-1",
+        "serviceName": "wizard-nextcloud",
+        "cronExpression": "0 * * * *",
+        "timezone": "America/Detroit",
+        "shellType": "bash",
+        "command": "php /var/www/html/occ files:scan --path=...",
+        "scheduleType": "compose",
+        "enabled": True,
+    }
+    assert record.timezone == "America/Detroit"

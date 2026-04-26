@@ -25,6 +25,11 @@ locals {
   username = data.coder_workspace_owner.me.name
 }
 
+# Storage boundary for this default workspace template:
+# - Coder control-plane state stays on the shared-core Postgres service managed by dokploy-wizard.
+# - Workspace /home stays on a per-workspace local Docker volume in this slice.
+# - SeaweedFS-backed workspace/home mounting is intentionally deferred until a later task.
+
 data "coder_provisioner" "me" {}
 data "coder_workspace" "me" {}
 data "coder_workspace_owner" "me" {}
@@ -36,10 +41,34 @@ resource "coder_agent" "main" {
 
   startup_script = <<-EOT
     set -e
+
+    _SUDO=""
     if command -v sudo >/dev/null 2>&1; then
-      sudo sh -lc 'apt-get update && apt-get install -y curl git ca-certificates wget'
-    else
-      apt-get update && apt-get install -y curl git ca-certificates wget
+      _SUDO="sudo"
+    fi
+
+    $_SUDO apt-get update -q
+    $_SUDO apt-get install -y curl git ca-certificates wget btop
+
+    # OpenCode, skip if already installed
+    if ! command -v opencode >/dev/null 2>&1; then
+      if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then
+        if [ ! -x /home/coder/.opencode/bin/opencode ]; then
+          echo "OpenCode installer did not produce a usable binary" >&2
+          exit 1
+        fi
+      fi
+    fi
+
+    if [ -x /home/coder/.opencode/bin/opencode ]; then
+      $_SUDO ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode
+    fi
+
+    # Zellij, skip if already installed
+    if ! command -v zellij >/dev/null 2>&1; then
+      ARCH=$(uname -m)
+      ZELLIJ_URL="https://github.com/zellij-org/zellij/releases/latest/download/zellij-$${ARCH}-unknown-linux-musl.tar.gz"
+      curl -fsSL "$${ZELLIJ_URL}" | $_SUDO tar -C /usr/local/bin -xz
     fi
   EOT
 }
@@ -74,6 +103,9 @@ resource "docker_container" "workspace" {
 
   env = [
     "CODER_AGENT_TOKEN=${coder_agent.main.token}",
+    "DOKPLOY_WIZARD_CODER_CONTROL_PLANE_DATABASE_BACKEND=shared_core_postgres",
+    "DOKPLOY_WIZARD_CODER_WORKSPACE_HOME_BACKEND=local_docker_volume",
+    "DOKPLOY_WIZARD_CODER_WORKSPACE_HOME_STATUS=seaweedfs_deferred",
   ]
 
   host {

@@ -11,6 +11,7 @@ import pytest
 import dokploy_wizard.cli
 from dokploy_wizard.cli import run_install_flow, run_modify_flow
 from dokploy_wizard.core import SharedCoreResourceRecord
+from dokploy_wizard.dokploy.openclaw import DokployOpenClawBackend
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,
     CloudflareAccessIdentityProvider,
@@ -22,6 +23,7 @@ from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.matrix import MatrixResourceRecord
 from dokploy_wizard.packs.openclaw import OpenClawError, OpenClawResourceRecord
 from dokploy_wizard.state import RawEnvInput, load_state_dir, write_ownership_ledger
+from tests.unit.test_openclaw_pack import FakeDokployOpenClawApi
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -265,6 +267,17 @@ class FakeSharedCoreBackend:
         )
         return self.redis
 
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        del resource_id
+        return None
+
+    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        del resource_name
+        return None
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        raise AssertionError(f"OpenClaw should not provision mail relay: {resource_name}")
+
 
 @dataclass
 class FakeHeadscaleBackend:
@@ -465,18 +478,17 @@ def test_install_reconciles_openclaw_and_persists_slot_ledger(tmp_path: Path) ->
     assert summary["openclaw"]["variant"] == "openclaw"
     assert summary["openclaw"]["hostname"] == "openclaw.example.com"
     assert summary["openclaw"]["channels"] == ["matrix", "telegram"]
-    assert summary["openclaw"]["service"]["resource_name"] == "openclaw-stack-advisor"
+    assert summary["openclaw"]["service"]["resource_name"] == "openclaw-stack-openclaw"
     assert summary["openclaw"]["health_check"]["passed"] is True
     assert loaded_state.applied_state is not None
     assert loaded_state.applied_state.completed_steps == (
         "preflight",
         "dokploy_bootstrap",
         "networking",
-        "cloudflare_access",
         "shared_core",
-        "headscale",
         "matrix",
         "openclaw",
+        "cloudflare_access",
     )
     assert loaded_state.ownership_ledger is not None
     assert {
@@ -485,16 +497,17 @@ def test_install_reconciles_openclaw_and_persists_slot_ledger(tmp_path: Path) ->
     } == {
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
-        ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:matrix.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:openclaw.example.com"),
         ("shared_core_network", "stack:openclaw-stack:shared-network"),
         ("shared_core_postgres", "stack:openclaw-stack:shared-postgres"),
         ("shared_core_redis", "stack:openclaw-stack:shared-redis"),
-        ("headscale_service", "stack:openclaw-stack:headscale"),
         ("matrix_service", "stack:openclaw-stack:matrix-service"),
         ("matrix_data", "stack:openclaw-stack:matrix-data"),
         ("openclaw_service", "stack:openclaw-stack:openclaw"),
+        ("openclaw_mem0_service", "stack:openclaw-stack:openclaw-sidecar:mem0"),
+        ("openclaw_qdrant_service", "stack:openclaw-stack:openclaw-sidecar:qdrant"),
+        ("openclaw_runtime_service", "stack:openclaw-stack:openclaw-sidecar:nexa-runtime"),
     }
 
 
@@ -685,6 +698,21 @@ def test_install_modify_updates_owned_openclaw_service(tmp_path: Path) -> None:
         and resource.scope == "stack:openclaw-stack:openclaw"
         for resource in loaded_state.ownership_ledger.resources
     )
+    assert any(
+        resource.resource_type == "openclaw_mem0_service"
+        and resource.scope == "stack:openclaw-stack:openclaw-sidecar:mem0"
+        for resource in loaded_state.ownership_ledger.resources
+    )
+    assert any(
+        resource.resource_type == "openclaw_qdrant_service"
+        and resource.scope == "stack:openclaw-stack:openclaw-sidecar:qdrant"
+        for resource in loaded_state.ownership_ledger.resources
+    )
+    assert any(
+        resource.resource_type == "openclaw_runtime_service"
+        and resource.scope == "stack:openclaw-stack:openclaw-sidecar:nexa-runtime"
+        for resource in loaded_state.ownership_ledger.resources
+    )
 
 
 def test_install_rerun_fails_when_openclaw_service_is_manual_and_unowned(tmp_path: Path) -> None:
@@ -804,6 +832,148 @@ def test_install_reconciles_my_farm_advisor_variant(
     assert recording_backend.init_kwargs["trusted_proxies"] == "10.0.0.0/8"
     assert recording_backend.init_kwargs["nvidia_visible_devices"] == "GPU-1"
     assert recording_backend.last_health_url == "https://farm.example.com/healthz"
+
+
+def test_install_passes_nexa_env_into_dokploy_openclaw_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "openclaw-nexa.env"
+    recording_backend = RecordingOpenClawBackend()
+
+    def _build_backend(**kwargs: Any) -> RecordingOpenClawBackend:
+        recording_backend.init_kwargs = dict(kwargs)
+        return recording_backend
+
+    monkeypatch.setattr(dokploy_wizard.cli, "DokployOpenClawBackend", _build_backend)
+    monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
+    monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda service_name: True)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda url: True)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", lambda service_name, url: True)
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openclaw-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+                "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
+                "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET": "office-shared-secret",
+                "HOST_OS_ID": "ubuntu",
+                "HOST_OS_VERSION_ID": "24.04",
+                "HOST_CPU_COUNT": "4",
+                "HOST_MEMORY_GB": "8",
+                "HOST_DISK_GB": "100",
+                "HOST_DOCKER_INSTALLED": "true",
+                "HOST_DOCKER_DAEMON_REACHABLE": "true",
+                "HOST_PORT_80_IN_USE": "false",
+                "HOST_PORT_443_IN_USE": "false",
+                "HOST_PORT_3000_IN_USE": "false",
+                "HOST_ENVIRONMENT": "local",
+                "DOKPLOY_BOOTSTRAP_HEALTHY": "true",
+                "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+                "DOKPLOY_API_KEY": "api-key-123",
+                "CLOUDFLARE_API_TOKEN": "token-123",
+                "CLOUDFLARE_ACCOUNT_ID": "account-123",
+                "CLOUDFLARE_ZONE_ID": "zone-123",
+                "CLOUDFLARE_TUNNEL_NAME": "openclaw-stack-tunnel",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "admin@example.com",
+            },
+        ),
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        openclaw_backend=None,
+    )
+
+    assert summary["openclaw"]["variant"] == "openclaw"
+    assert recording_backend.init_kwargs["openclaw_nexa_env"] == {
+        "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
+        "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET": "office-shared-secret",
+    }
+
+
+def test_install_renders_internal_nexa_runtime_sidecar_into_openclaw_compose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "openclaw-nexa-compose.env"
+    api = FakeDokployOpenClawApi()
+
+    def _build_backend(**kwargs: Any) -> DokployOpenClawBackend:
+        kwargs["client"] = api
+        return DokployOpenClawBackend(**kwargs)
+
+    monkeypatch.setattr(dokploy_wizard.cli, "DokployOpenClawBackend", _build_backend)
+    monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
+    monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda service_name: True)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda url: True)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", lambda service_name, url: True)
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openclaw-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+                "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
+                "OPENCLAW_NEXA_MEM0_LLM_BASE_URL": "https://integrate.api.nvidia.com/v1",
+                "OPENCLAW_NEXA_MEM0_LLM_API_KEY": "nvidia-api-key",
+                "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY": "qdrant-api-key",
+                "HOST_OS_ID": "ubuntu",
+                "HOST_OS_VERSION_ID": "24.04",
+                "HOST_CPU_COUNT": "4",
+                "HOST_MEMORY_GB": "8",
+                "HOST_DISK_GB": "100",
+                "HOST_DOCKER_INSTALLED": "true",
+                "HOST_DOCKER_DAEMON_REACHABLE": "true",
+                "HOST_PORT_80_IN_USE": "false",
+                "HOST_PORT_443_IN_USE": "false",
+                "HOST_PORT_3000_IN_USE": "false",
+                "HOST_ENVIRONMENT": "local",
+                "DOKPLOY_BOOTSTRAP_HEALTHY": "true",
+                "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+                "DOKPLOY_API_KEY": "api-key-123",
+                "CLOUDFLARE_API_TOKEN": "token-123",
+                "CLOUDFLARE_ACCOUNT_ID": "account-123",
+                "CLOUDFLARE_ZONE_ID": "zone-123",
+                "CLOUDFLARE_TUNNEL_NAME": "openclaw-stack-tunnel",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "admin@example.com",
+            },
+        ),
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        openclaw_backend=None,
+    )
+
+    compose = api.last_create_compose_file
+    assert summary["openclaw"]["outcome"] == "applied"
+    assert compose is not None
+    assert "  nexa-runtime:\n" in compose
+    assert 'image: local/dokploy-wizard-nexa-runtime:latest' in compose
+    assert "build:" not in compose
+    assert "openclaw-stack-openclaw-data:/mnt/openclaw" in compose
+    assert 'DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH: "/mnt/openclaw/.nexa/runtime-contract.json"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH: "/mnt/openclaw/workspace/nexa/contract.json"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_STATE_DIR: "/mnt/openclaw/.nexa/state"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_WORKER_MODE: "queue"' in compose
+    assert "traefik.http.routers.nexa-runtime" not in compose
+    assert "ports:" not in compose
 
 
 def test_install_fails_when_advisor_slot_health_check_does_not_pass(tmp_path: Path) -> None:

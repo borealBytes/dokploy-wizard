@@ -3,8 +3,11 @@
 """Public Nextcloud + OnlyOffice runtime interface."""
 
 from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudBundleVerification,
+    NextcloudCommandCheck,
     NextcloudHealthCheck,
     NextcloudManagedResource,
+    NextcloudOpenClawWorkspaceContract,
     NextcloudPhase,
     NextcloudPostgresBinding,
     NextcloudRedisBinding,
@@ -14,6 +17,7 @@ from dokploy_wizard.packs.nextcloud.models import (
     NextcloudServiceRuntime,
     OnlyofficeServiceConfig,
     OnlyofficeServiceRuntime,
+    TalkRuntime,
 )
 from dokploy_wizard.packs.nextcloud.reconciler import (
     NEXTCLOUD_SERVICE_RESOURCE_TYPE,
@@ -33,9 +37,12 @@ __all__ = [
     "ONLYOFFICE_SERVICE_RESOURCE_TYPE",
     "ONLYOFFICE_VOLUME_RESOURCE_TYPE",
     "NextcloudBackend",
+    "NextcloudBundleVerification",
+    "NextcloudCommandCheck",
     "NextcloudError",
     "NextcloudHealthCheck",
     "NextcloudManagedResource",
+    "NextcloudOpenClawWorkspaceContract",
     "NextcloudPhase",
     "NextcloudPostgresBinding",
     "NextcloudRedisBinding",
@@ -46,6 +53,7 @@ __all__ = [
     "OnlyofficeServiceConfig",
     "OnlyofficeServiceRuntime",
     "ShellNextcloudBackend",
+    "TalkRuntime",
     "build_nextcloud_ledger",
     "reconcile_nextcloud",
 ]

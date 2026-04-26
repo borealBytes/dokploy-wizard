@@ -209,6 +209,17 @@ class FakeSharedCoreBackend:
         self.redis = SharedCoreResourceRecord(resource_id="redis-1", resource_name=resource_name)
         return self.redis
 
+    def get_mail_relay_service(self, resource_id: str):
+        del resource_id
+        return None
+
+    def find_mail_relay_service_by_name(self, resource_name: str):
+        del resource_name
+        return None
+
+    def create_mail_relay_service(self, resource_name: str):
+        raise AssertionError(f"SeaweedFS should not provision mail relay: {resource_name}")
+
 
 @dataclass
 class FakeHeadscaleBackend:
