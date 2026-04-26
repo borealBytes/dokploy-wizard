@@ -10,7 +10,6 @@ import ssl
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib import error, parse, request
@@ -683,7 +682,8 @@ def _local_https_health_check(url: str) -> bool:
         with opener.open(req, timeout=15):
             return True
     except error.HTTPError as exc:
-        return exc.code < 500
+        del exc
+        return False
     except (error.URLError, TimeoutError):
         return False
 
@@ -991,6 +991,7 @@ def _gateway_environment(
         "CONTROL_UI_ALLOWED_ORIGINS": f"https://{hostname}",
         "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
         "NVIDIA_VISIBLE_DEVICES": runtime_config.nvidia_visible_devices,
+        "OPENCLAW_DISABLE_BONJOUR": "1",
         "OPENCLAW_CONFIG_PATH": f"{state_root}/openclaw.json",
         "OPENCLAW_STATE_DIR": state_root,
         "OPENCLAW_WORKSPACE_DIR": f"{state_root}/workspace",
@@ -1345,8 +1346,8 @@ def _command_for_variant(
     payload: dict[str, object] = {
         "meta": {
             "lastTouchedVersion": "dokploy-wizard",
-            "lastTouchedAt": datetime.now(UTC).isoformat(),
         },
+        "discovery": {"mdns": {"mode": "off"}},
         "gateway": {
             **gateway_payload,
             "http": {"endpoints": {"responses": {"enabled": True}}},
@@ -1361,6 +1362,7 @@ def _command_for_variant(
         defaults_payload = {}
         agents_payload["defaults"] = defaults_payload
     defaults_payload["workspace"] = f"{state_root}/workspace"
+    defaults_payload["timeoutSeconds"] = 300
     if runtime_config.primary_model is not None or runtime_config.fallback_models:
         allowed_models = _allowed_models(runtime_config)
         if _DEFAULT_LOCAL_MODEL_REF not in allowed_models:
@@ -1586,8 +1588,15 @@ def _command_for_variant(
         [
             "sh",
             "-lc",
-            f"umask 0000 && {seed_command} && chown -R node:node {state_root} && chmod -R a+rwX {state_root} && (while true; do chmod -R a+rwX {state_root} 2>/dev/null || true; sleep 5; done) & "
-            f"exec su -s /bin/sh node -c {json.dumps(f'umask 0000 && exec node openclaw.mjs gateway --bind lan --port {app_port} --allow-unconfigured')}",
+            (
+                f"umask 0000 && "
+                f"if [ ! -f {state_root}/.wizard-seeded ]; then "
+                f"{seed_command} && chown -R node:node {state_root} && "
+                f"touch {state_root}/.wizard-seeded; "
+                f"fi && "
+                f"chmod -R a+rwX {state_root} && "
+                f"exec su -s /bin/sh node -c {json.dumps(f'umask 0000 && exec node openclaw.mjs gateway --bind lan --port {app_port} --allow-unconfigured')}"
+            ),
         ]
     )
 
@@ -1965,7 +1974,8 @@ def _render_seed_script(
             'const rendered=JSON.stringify(payload, null, 2)+"\\n";',
             f"for (const target of {json.dumps(list(config_targets))}) {{",
             "fs.mkdirSync(path.dirname(target), {recursive:true});",
-            "fs.writeFileSync(target, rendered);",
+            'const existing=fs.existsSync(target)?fs.readFileSync(target,"utf8"):null;',
+            'if (existing !== rendered) { fs.writeFileSync(target, rendered); }',
             "}",
             (
                 f'for (const item of JSON.parse(Buffer.from("{extra_files_b64}","base64").toString("utf8"))) {{'

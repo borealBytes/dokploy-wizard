@@ -757,6 +757,8 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
     assert seeded["gateway"]["auth"]["mode"] == "token"
     assert seeded["gateway"]["trustedProxies"] == ["10.0.0.0/8", "172.16.0.0/12"]
     assert seeded["gateway"]["controlUi"]["allowInsecureAuth"] is True
+    assert seeded["discovery"] == {"mdns": {"mode": "off"}}
+    assert seeded["meta"] == {"lastTouchedVersion": "dokploy-wizard"}
     assert seeded["tools"] == {
         "profile": "coding",
         "elevated": {
@@ -792,6 +794,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
     assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert seeded["agents"]["defaults"] == {
         "elevatedDefault": "off",
+        "timeoutSeconds": 300,
         "workspace": "/home/node/.openclaw/workspace",
     }
     assert (
@@ -803,6 +806,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
     assert "wizard-stack-openclaw-data:/home/node/.openclaw" in compose
     assert "  wizard-stack-openclaw-data:" in compose
     assert "replicas: 2" in compose
+    assert 'OPENCLAW_DISABLE_BONJOUR: "1"' in compose
 
 
 def test_dokploy_openclaw_backend_keeps_token_mode_without_access_emails() -> None:
@@ -833,6 +837,7 @@ def test_dokploy_openclaw_backend_keeps_token_mode_without_access_emails() -> No
     assert seeded["gateway"]["auth"]["mode"] == "token"
     assert seeded["gateway"]["remote"]["token"] == "fixed-token-123"
     assert seeded["gateway"]["controlUi"]["allowInsecureAuth"] is True
+    assert seeded["discovery"] == {"mdns": {"mode": "off"}}
     assert seeded["tools"] == {
         "profile": "coding",
         "elevated": {
@@ -1015,6 +1020,8 @@ def test_dokploy_openclaw_backend_renders_split_public_and_internal_gateways() -
         "url": "ws://wizard-stack-openclaw:18789",
         "token": "fixed-token-123",
     }
+    assert internal_payload["discovery"] == {"mdns": {"mode": "off"}}
+    assert public_payload["discovery"] == {"mdns": {"mode": "off"}}
     assert public_payload["agents"]["defaults"]["workspace"] == "/home/node/.openclaw-public/workspace"
     assert "tools" not in public_payload
 

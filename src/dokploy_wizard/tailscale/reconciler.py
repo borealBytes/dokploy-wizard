@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -18,6 +19,8 @@ from dokploy_wizard.tailscale.models import (
 
 TAILSCALE_NODE_RESOURCE_TYPE = "tailscale_node"
 TAILSCALE_INSTALL_COMMAND = "curl -fsSL https://tailscale.com/install.sh | sh"
+DEFAULT_STATUS_RETRY_ATTEMPTS = 12
+DEFAULT_STATUS_RETRY_INTERVAL_SECONDS = 5.0
 
 
 class TailscaleError(RuntimeError):
@@ -124,7 +127,7 @@ class ShellTailscaleBackend:
             if stderr:
                 msg = f"{msg}: {stderr}"
             raise TailscaleError(msg)
-        status = self.get_status(resource_name)
+        status = self._wait_for_online_status(resource_name)
         if status is None or not status.online:
             raise TailscaleError(
                 "tailscale up completed but Tailscale did not report an online node."
@@ -138,6 +141,8 @@ class ShellTailscaleBackend:
     def get_status(self, resource_name: str) -> TailscaleNodeStatus | None:
         status_result = self._run_tailscale_command(["tailscale", "status", "--json"])
         if status_result.returncode != 0:
+            return None
+        if status_result.stdout.strip() == "":
             return None
         try:
             payload = json.loads(status_result.stdout)
@@ -174,6 +179,18 @@ class ShellTailscaleBackend:
                 msg = f"{msg}: {stderr}"
             raise TailscaleError(msg)
 
+    def _wait_for_online_status(self, resource_name: str) -> TailscaleNodeStatus | None:
+        attempts = _retry_attempts(self._values)
+        interval_seconds = _retry_interval_seconds(self._values)
+        last_status: TailscaleNodeStatus | None = None
+        for attempt in range(attempts):
+            last_status = self.get_status(resource_name)
+            if last_status is not None and last_status.online:
+                return last_status
+            if attempt < attempts - 1 and interval_seconds > 0:
+                time.sleep(interval_seconds)
+        return last_status
+
     def _is_installed(self) -> bool:
         forced = self._values.get("TAILSCALE_MOCK_INSTALLED")
         if forced is not None:
@@ -190,6 +207,21 @@ class ShellTailscaleBackend:
         if result.returncode != 0:
             stderr = result.stderr.strip()
             msg = "tailscale install command failed"
+            if stderr:
+                msg = f"{msg}: {stderr}"
+            raise TailscaleError(msg)
+        try:
+            version_result = self._run_tailscale_command(["tailscale", "version"])
+        except TailscaleError as error:
+            detail = str(error).lower()
+            if "binary was not found on path" in detail:
+                raise TailscaleError(
+                    "tailscale install command reported success but the tailscale binary was not found on PATH afterward"
+                ) from error
+            raise
+        if version_result.returncode != 0:
+            stderr = version_result.stderr.strip()
+            msg = "tailscale install verification failed"
             if stderr:
                 msg = f"{msg}: {stderr}"
             raise TailscaleError(msg)
@@ -403,6 +435,22 @@ def _is_missing_tailscale_binary_error(error: TailscaleError) -> bool:
         "tailscale command could not be executed because the tailscale "
         "binary was not found on PATH."
     )
+
+
+def _retry_attempts(values: dict[str, str]) -> int:
+    raw_value = values.get("TAILSCALE_STATUS_RETRY_ATTEMPTS")
+    if raw_value is None:
+        return DEFAULT_STATUS_RETRY_ATTEMPTS
+    parsed = int(raw_value)
+    return parsed if parsed > 0 else 1
+
+
+def _retry_interval_seconds(values: dict[str, str]) -> float:
+    raw_value = values.get("TAILSCALE_STATUS_RETRY_INTERVAL_SECONDS")
+    if raw_value is None:
+        return DEFAULT_STATUS_RETRY_INTERVAL_SECONDS
+    parsed = float(raw_value)
+    return parsed if parsed > 0 else 0.0
 
 
 def _run_command(command: list[str]) -> CommandResult:
