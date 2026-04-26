@@ -306,6 +306,7 @@ def build_openclaw_ledger(
     existing_ledger: OwnershipLedger,
     stack_name: str,
     service_resource_id: str | None,
+    nexa_sidecars_enabled: bool = True,
 ) -> OwnershipLedger:
     ledger = _build_advisor_ledger(
         existing_ledger=existing_ledger,
@@ -313,6 +314,8 @@ def build_openclaw_ledger(
         pack_name="openclaw",
         service_resource_id=service_resource_id,
     )
+    if not nexa_sidecars_enabled:
+        return ledger
     resources = list(ledger.resources)
     sidecars = (
         (OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE, _nexa_sidecar_scope(stack_name, "mem0")),

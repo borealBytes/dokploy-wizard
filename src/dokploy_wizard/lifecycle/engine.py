@@ -452,6 +452,8 @@ def _build_summary(
         "matrix": phase_results.get("matrix", {"outcome": "not_run"}),
         "my_farm_advisor": phase_results.get("my-farm-advisor", {"outcome": "not_run"}),
         "nextcloud": phase_results.get("nextcloud", {"outcome": "not_run"}),
+        "moodle": phase_results.get("moodle", {"outcome": "not_run"}),
+        "docuseal": phase_results.get("docuseal", {"outcome": "not_run"}),
         "coder": phase_results.get("coder", {"outcome": "not_run"}),
         "networking": phase_results.get("networking", {"outcome": "not_run"}),
         "openclaw": phase_results.get("openclaw", {"outcome": "not_run"}),
@@ -542,6 +544,26 @@ def _preserved_result(
             desired_state=desired_state,
             ownership_ledger=ownership_ledger,
             backend=backends.nextcloud,
+        ).result.to_dict()
+        if result["outcome"] != "skipped":
+            result["outcome"] = "already_present"
+        return result
+    if phase == "moodle":
+        result = reconcile_moodle(
+            dry_run=True,
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            backend=backends.moodle,
+        ).result.to_dict()
+        if result["outcome"] != "skipped":
+            result["outcome"] = "already_present"
+        return result
+    if phase == "docuseal":
+        result = reconcile_docuseal(
+            dry_run=True,
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            backend=backends.docuseal,
         ).result.to_dict()
         if result["outcome"] != "skipped":
             result["outcome"] = "already_present"
