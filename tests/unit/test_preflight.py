@@ -257,7 +257,7 @@ def test_host_prerequisites_report_noop_when_baseline_is_already_satisfied() -> 
         ("git", "pass"),
         ("curl", "pass"),
         ("ca_certificates", "pass"),
-        ("docker_io", "pass"),
+        ("docker_cli", "pass"),
         ("docker_daemon", "pass"),
     )
     assert result.to_dict()["outcome"] == "noop"
@@ -288,24 +288,13 @@ def test_host_prerequisites_report_missing_packages_individually() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("override_key", "missing_package"),
-    (
-        ("HOST_PREREQ_CURL_INSTALLED", "curl"),
-        ("HOST_PREREQ_DOCKER_IO_INSTALLED", "docker.io"),
-    ),
-)
-def test_host_prerequisites_report_single_missing_package_directly(
-    override_key: str,
-    missing_package: str,
-) -> None:
+def test_host_prerequisites_report_single_missing_package_directly() -> None:
     raw_env = parse_env_file(FIXTURES_DIR / "core-low-resource.env")
     values = dict(raw_env.values)
     values["HOST_PREREQ_GIT_INSTALLED"] = "true"
-    values["HOST_PREREQ_CURL_INSTALLED"] = "true"
+    values["HOST_PREREQ_CURL_INSTALLED"] = "false"
     values["HOST_PREREQ_CA_CERTIFICATES_INSTALLED"] = "true"
     values["HOST_PREREQ_DOCKER_IO_INSTALLED"] = "true"
-    values[override_key] = "false"
     values["HOST_PREREQ_DOCKER_DAEMON_REACHABLE"] = "true"
     raw_env = type(raw_env)(format_version=raw_env.format_version, values=values)
 
@@ -316,11 +305,36 @@ def test_host_prerequisites_report_single_missing_package_directly(
 
     assert result.outcome == "missing_prerequisites"
     assert result.remediation_eligible is True
-    assert result.missing_packages == (missing_package,)
-    assert result.install_command == f"{APT_INSTALL_PREFIX} {missing_package}"
+    assert result.missing_packages == ("curl",)
+    assert result.install_command == f"{APT_INSTALL_PREFIX} curl"
     assert tuple(check.package_name for check in result.checks if check.status == "fail") == (
-        missing_package,
+        "curl",
     )
+
+
+def test_host_prerequisites_report_missing_docker_cli_as_bootstrap_work() -> None:
+    raw_env = parse_env_file(FIXTURES_DIR / "core-low-resource.env")
+    values = dict(raw_env.values)
+    values["HOST_PREREQ_GIT_INSTALLED"] = "true"
+    values["HOST_PREREQ_CURL_INSTALLED"] = "true"
+    values["HOST_PREREQ_CA_CERTIFICATES_INSTALLED"] = "true"
+    values["HOST_PREREQ_DOCKER_IO_INSTALLED"] = "true"
+    values["HOST_DOCKER_INSTALLED"] = "false"
+    values["HOST_PREREQ_DOCKER_DAEMON_REACHABLE"] = "true"
+    raw_env = type(raw_env)(format_version=raw_env.format_version, values=values)
+
+    result = assess_host_prerequisites(
+        host_facts=collect_host_facts(raw_env),
+        backend=UbuntuAptHostPrerequisiteBackend(raw_env),
+    )
+
+    assert result.outcome == "missing_prerequisites"
+    assert result.remediation_eligible is True
+    assert result.missing_packages == ()
+    assert result.docker_bootstrap_required is True
+    assert result.install_command is not None
+    assert "docker-ce" in result.install_command
+    assert any(check.name == "docker_cli" and check.status == "fail" for check in result.checks)
 
 
 def test_host_prerequisites_mark_unsupported_hosts_as_not_apt_remediable() -> None:
@@ -356,6 +370,6 @@ def test_host_prerequisites_require_reachable_docker_daemon_for_noop() -> None:
     assert result.outcome == "missing_prerequisites"
     assert result.remediation_eligible is True
     assert result.missing_packages == ()
-    assert result.install_command is None
+    assert result.install_command == "sudo systemctl enable --now docker"
     assert result.checks[-1].name == "docker_daemon"
     assert result.checks[-1].status == "fail"

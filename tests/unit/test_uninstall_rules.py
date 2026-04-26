@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from dokploy_wizard.state import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput
+from dokploy_wizard.state import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
 from dokploy_wizard.uninstall import (
     UninstallConfirmationError,
     UninstallPlanningError,
+    build_pack_disable_plan,
     build_uninstall_plan,
     collect_confirmation_lines,
     compute_remaining_completed_steps,
@@ -20,7 +21,7 @@ def _raw(values: dict[str, str]) -> RawEnvInput:
     return RawEnvInput(format_version=1, values=values)
 
 
-def _desired(*, nextcloud: bool = False, matrix: bool = False) -> DesiredState:
+def _desired(*, nextcloud: bool = False, matrix: bool = False, coder: bool = False) -> DesiredState:
     from dokploy_wizard.state import resolve_desired_state
 
     values = {
@@ -32,11 +33,14 @@ def _desired(*, nextcloud: bool = False, matrix: bool = False) -> DesiredState:
         values["ENABLE_MATRIX"] = "true"
     if nextcloud:
         values["ENABLE_NEXTCLOUD"] = "true"
+    if coder:
+        values["ENABLE_CODER"] = "true"
+    values["ENABLE_OPENCLAW"] = "true"
     return resolve_desired_state(_raw(values))
 
 
 def test_uninstall_plan_retains_data_by_default() -> None:
-    desired = _desired(nextcloud=True)
+    desired = _desired(nextcloud=True, coder=True)
     ledger = OwnershipLedger(
         format_version=1,
         resources=(
@@ -77,6 +81,28 @@ def test_uninstall_plan_retains_data_by_default() -> None:
             OwnedResource(
                 "onlyoffice_volume", "onlyoffice-volume", "stack:nextcloud-stack:onlyoffice-volume"
             ),
+            OwnedResource("coder_service", "coder-1", "stack:nextcloud-stack:coder:service"),
+            OwnedResource("coder_data", "coder-data", "stack:nextcloud-stack:coder:data"),
+            OwnedResource(
+                "openclaw_service",
+                "openclaw-1",
+                "stack:nextcloud-stack:openclaw",
+            ),
+            OwnedResource(
+                "openclaw_mem0_service",
+                "mem0-1",
+                "stack:nextcloud-stack:openclaw-sidecar:mem0",
+            ),
+            OwnedResource(
+                "openclaw_qdrant_service",
+                "qdrant-1",
+                "stack:nextcloud-stack:openclaw-sidecar:qdrant",
+            ),
+            OwnedResource(
+                "openclaw_runtime_service",
+                "nexa-runtime-1",
+                "stack:nextcloud-stack:openclaw-sidecar:nexa-runtime",
+            ),
         ),
     )
 
@@ -92,14 +118,20 @@ def test_uninstall_plan_retains_data_by_default() -> None:
         "cloudflare_access_otp_provider",
         "cloudflare_access_application",
         "cloudflare_access_policy",
+        "openclaw_service",
+        "openclaw_mem0_service",
+        "openclaw_qdrant_service",
+        "openclaw_runtime_service",
         "nextcloud_service",
         "onlyoffice_service",
+        "coder_service",
         "headscale_service",
         "shared_core_network",
         "cloudflare_dns_record",
         "cloudflare_tunnel",
     ]
     assert [resource.resource_type for resource in plan.retained_resources] == [
+        "coder_data",
         "nextcloud_volume",
         "onlyoffice_volume",
         "shared_core_postgres",
@@ -129,6 +161,22 @@ def test_compute_remaining_completed_steps_shrinks_after_runtime_delete() -> Non
                 "shared_core_postgres", "postgres-1", "stack:nextcloud-stack:shared-postgres"
             ),
             OwnedResource("shared_core_redis", "redis-1", "stack:nextcloud-stack:shared-redis"),
+            OwnedResource("openclaw_service", "openclaw-1", "stack:nextcloud-stack:openclaw"),
+            OwnedResource(
+                "openclaw_mem0_service",
+                "mem0-1",
+                "stack:nextcloud-stack:openclaw-sidecar:mem0",
+            ),
+            OwnedResource(
+                "openclaw_qdrant_service",
+                "qdrant-1",
+                "stack:nextcloud-stack:openclaw-sidecar:qdrant",
+            ),
+            OwnedResource(
+                "openclaw_runtime_service",
+                "nexa-runtime-1",
+                "stack:nextcloud-stack:openclaw-sidecar:nexa-runtime",
+            ),
             OwnedResource(
                 "nextcloud_volume", "nextcloud-volume", "stack:nextcloud-stack:nextcloud-volume"
             ),
@@ -145,6 +193,44 @@ def test_compute_remaining_completed_steps_shrinks_after_runtime_delete() -> Non
     )
 
     assert completed == ("preflight", "dokploy_bootstrap")
+
+
+def test_build_pack_disable_plan_deletes_tailscale_node_even_without_pack_removal() -> None:
+    existing = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_TAILSCALE": "true",
+                "TAILSCALE_AUTH_KEY": "tskey-auth-123",
+                "TAILSCALE_HOSTNAME": "wizard-admin",
+            },
+        )
+    )
+    requested = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+            },
+        )
+    )
+    ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource("tailscale_node", "wizard-admin", "stack:wizard-stack:tailscale"),
+        ),
+    )
+
+    plan = build_pack_disable_plan(
+        existing_desired=existing,
+        requested_desired=requested,
+        ownership_ledger=ledger,
+    )
+
+    assert [item.resource.resource_type for item in plan.deletions] == ["tailscale_node"]
 
 
 def test_destroy_confirmation_requires_three_strong_lines(tmp_path: Path) -> None:

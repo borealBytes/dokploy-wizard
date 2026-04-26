@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import ssl
+import subprocess
 from dataclasses import dataclass, field
 from urllib import request
 
 import pytest
 
-from dokploy_wizard.core.models import SharedCorePlan
+import dokploy_wizard.dokploy.nextcloud as nextcloud_module
+from dokploy_wizard.core.models import (
+    SharedCorePlan,
+    SharedPostgresAllocation,
+    SharedRedisAllocation,
+)
 from dokploy_wizard.dokploy import (
     DokployComposeRecord,
     DokployComposeSummary,
@@ -17,21 +23,32 @@ from dokploy_wizard.dokploy import (
     DokployEnvironmentSummary,
     DokployNextcloudBackend,
     DokployProjectSummary,
+    DokployScheduleRecord,
 )
 from dokploy_wizard.dokploy.nextcloud import (
+    _ensure_nexa_service_account,
+    _ensure_spreed_app_enabled,
     _ensure_trusted_domain,
+    _find_container_name,
+    _platform_version_spec_matches_major,
     _ensure_onlyoffice_app_config,
     _local_https_health_check,
     _nextcloud_status_ready,
+    _resolve_compatible_app_release_download_url,
+    _talk_app_enabled,
     _with_trailing_slash,
 )
 from dokploy_wizard.packs.nextcloud import (
     NEXTCLOUD_SERVICE_RESOURCE_TYPE,
     NEXTCLOUD_VOLUME_RESOURCE_TYPE,
+    NextcloudBundleVerification,
+    NextcloudCommandCheck,
     ONLYOFFICE_SERVICE_RESOURCE_TYPE,
     ONLYOFFICE_VOLUME_RESOURCE_TYPE,
     NextcloudError,
+    NextcloudOpenClawWorkspaceContract,
     NextcloudResourceRecord,
+    TalkRuntime,
     build_nextcloud_ledger,
     reconcile_nextcloud,
 )
@@ -46,6 +63,7 @@ class FakeNextcloudBackend:
     create_service_calls: int = 0
     update_service_calls: int = 0
     create_volume_calls: int = 0
+    refresh_calls: list[str] = field(default_factory=list)
 
     def get_service(self, resource_id: str) -> NextcloudResourceRecord | None:
         for record in self.services.values():
@@ -113,8 +131,39 @@ class FakeNextcloudBackend:
         del url
         return self.health.get(service.resource_name, True)
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification:
         del nextcloud_url, onlyoffice_url
+        return NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        )
+
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        self.refresh_calls.append(admin_user)
 
 
 @dataclass
@@ -124,6 +173,7 @@ class FakeDokployApiClient:
     create_compose_calls: int = 0
     update_compose_calls: int = 0
     deploy_calls: int = 0
+    schedules: list[DokployScheduleRecord] = field(default_factory=list)
     last_create_compose_file: str | None = None
     last_update_compose_file: str | None = None
 
@@ -190,6 +240,64 @@ class FakeDokployApiClient:
         self.deploy_calls += 1
         return DokployDeployResult(success=True, compose_id=compose_id, message="queued")
 
+    def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
+        del compose_id
+        return tuple(self.schedules)
+
+    def create_schedule(
+        self,
+        *,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        record = DokployScheduleRecord(
+            schedule_id="sch-1",
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+        self.schedules = [record]
+        return record
+
+    def update_schedule(
+        self,
+        *,
+        schedule_id: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        record = DokployScheduleRecord(
+            schedule_id=schedule_id,
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+        self.schedules = [record]
+        return record
+
+    def delete_schedule(self, *, schedule_id: str) -> None:
+        self.schedules = [item for item in self.schedules if item.schedule_id != schedule_id]
+
 
 def test_reconcile_nextcloud_plans_paired_runtime_when_enabled() -> None:
     desired_state = resolve_desired_state(
@@ -226,6 +334,14 @@ def test_reconcile_nextcloud_plans_paired_runtime_when_enabled() -> None:
         == "wizard-stack-nextcloud-onlyoffice-jwt-secret"
     )
     assert phase.result.onlyoffice.health_check.passed is None
+    assert phase.result.onlyoffice.document_server_check.passed is None
+    assert phase.result.talk is not None
+    assert phase.result.talk.app_id == "spreed"
+    assert phase.result.talk.enabled is None
+    assert phase.result.talk.enabled_check.command == "php occ app:list --output=json"
+    assert phase.result.talk.signaling_check.passed is None
+    assert phase.result.talk.stun_check.passed is None
+    assert phase.result.talk.turn_check.passed is None
 
 
 def test_reconcile_nextcloud_skips_cleanly_when_disabled() -> None:
@@ -323,6 +439,8 @@ def test_reconcile_nextcloud_reuses_owned_resources_and_requires_both_health_che
     assert phase.result.onlyoffice is not None
     assert phase.result.onlyoffice.service.action == "update_owned"
     assert phase.result.onlyoffice.data_volume.action == "reuse_owned"
+    assert phase.result.talk is not None
+    assert phase.result.talk.enabled is True
     assert backend.create_service_calls == 0
     assert backend.update_service_calls == 2
     assert backend.create_volume_calls == 0
@@ -442,6 +560,7 @@ def test_reconcile_nextcloud_reuses_existing_dokploy_managed_volumes() -> None:
     assert phase.result.outcome == "applied"
     assert phase.result.nextcloud is not None
     assert phase.result.onlyoffice is not None
+    assert phase.result.talk is not None
     assert phase.result.nextcloud.service.action == "create"
     assert phase.result.onlyoffice.service.action == "create"
     assert phase.result.nextcloud.data_volume.action == "reuse_existing"
@@ -492,6 +611,7 @@ def test_reconcile_nextcloud_reuses_existing_dokploy_managed_services() -> None:
     assert phase.result.outcome == "already_present"
     assert phase.result.nextcloud is not None
     assert phase.result.onlyoffice is not None
+    assert phase.result.talk is not None
     assert phase.result.nextcloud.service.action == "reuse_existing"
     assert phase.result.onlyoffice.service.action == "reuse_existing"
     assert phase.result.nextcloud.data_volume.action == "reuse_existing"
@@ -517,6 +637,59 @@ def test_reconcile_nextcloud_fails_when_onlyoffice_health_check_does_not_pass() 
             desired_state=desired_state,
             ownership_ledger=OwnershipLedger(format_version=1, resources=()),
             backend=FakeNextcloudBackend(health={"wizard-stack-onlyoffice": False}),
+        )
+
+
+def test_reconcile_nextcloud_fails_when_talk_is_not_enabled() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+
+    class TalkDisabledBackend(FakeNextcloudBackend):
+        def ensure_application_ready(
+            self, *, nextcloud_url: str, onlyoffice_url: str
+        ) -> NextcloudBundleVerification:
+            del nextcloud_url, onlyoffice_url
+            return NextcloudBundleVerification(
+                onlyoffice_document_server_check=NextcloudCommandCheck(
+                    command="php occ onlyoffice:documentserver --check",
+                    passed=True,
+                ),
+                talk=TalkRuntime(
+                    app_id="spreed",
+                    enabled=False,
+                    enabled_check=NextcloudCommandCheck(
+                        command="php occ app:list --output=json",
+                        passed=False,
+                    ),
+                    signaling_check=NextcloudCommandCheck(
+                        command="php occ talk:signaling:list --output=json",
+                        passed=True,
+                    ),
+                    stun_check=NextcloudCommandCheck(
+                        command="php occ talk:stun:list --output=json",
+                        passed=True,
+                    ),
+                    turn_check=NextcloudCommandCheck(
+                        command="php occ talk:turn:list --output=json",
+                        passed=True,
+                    ),
+                ),
+            )
+
+    with pytest.raises(NextcloudError, match="Talk app 'spreed' is not enabled"):
+        reconcile_nextcloud(
+            dry_run=False,
+            desired_state=desired_state,
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=TalkDisabledBackend(),
         )
 
 
@@ -546,6 +719,57 @@ def test_build_nextcloud_ledger_persists_only_pack_owned_resources() -> None:
         (NEXTCLOUD_VOLUME_RESOURCE_TYPE, "stack:wizard-stack:nextcloud-volume"),
         (ONLYOFFICE_VOLUME_RESOURCE_TYPE, "stack:wizard-stack:onlyoffice-volume"),
     }
+
+
+def test_ensure_nexa_service_account_creates_user_and_updates_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_run(*args: object, **kwargs: object) -> Any:
+        del args, kwargs
+        return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "user not found"})()
+
+    monkeypatch.setattr(nextcloud_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(nextcloud_module, "_run_occ_shell", lambda container_name, shell_command: commands.append(shell_command))
+
+    _ensure_nexa_service_account(
+        "nextcloud-container",
+        user_id="nexa-agent",
+        password="nexa-secret",
+        display_name="Nexa",
+        email="nexa@example.com",
+    )
+
+    assert "php occ user:add --password-from-env --display-name=Nexa nexa-agent" in commands[0]
+    assert commands[1] == "php occ user:setting nexa-agent settings display_name Nexa"
+    assert commands[2] == "php occ user:setting nexa-agent settings email nexa@example.com"
+    assert commands[3] == "php occ user:profile nexa-agent profile_enabled 1"
+
+
+def test_ensure_nexa_service_account_updates_existing_user_without_recreate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_run(*args: object, **kwargs: object) -> Any:
+        del args, kwargs
+        return type("Result", (), {"returncode": 0, "stdout": "uid: nexa-agent", "stderr": ""})()
+
+    monkeypatch.setattr(nextcloud_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(nextcloud_module, "_run_occ_shell", lambda container_name, shell_command: commands.append(shell_command))
+
+    _ensure_nexa_service_account(
+        "nextcloud-container",
+        user_id="nexa-agent",
+        password="nexa-secret",
+        display_name="Nexa",
+        email=None,
+    )
+
+    assert len(commands) == 2
+    assert commands[0] == "php occ user:setting nexa-agent settings display_name Nexa"
+    assert commands[1] == "php occ user:profile nexa-agent profile_enabled 1"
 
 
 def test_dokploy_nextcloud_backend_creates_one_compose_for_pair() -> None:
@@ -630,6 +854,313 @@ def test_dokploy_nextcloud_backend_creates_one_compose_for_pair() -> None:
         'traefik.http.routers.wizard-stack-onlyoffice.rule: "Host(`office.example.com`)"' in compose
     )
     assert 'traefik.http.services.wizard-stack-onlyoffice.loadbalancer.server.port: "80"' in compose
+
+
+def test_dokploy_nextcloud_backend_mounts_openclaw_volume_when_enabled() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient()
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+
+    compose = client.last_create_compose_file
+    assert compose is not None
+    assert "wizard-stack-openclaw-data:/mnt/openclaw" in compose
+    assert "  wizard-stack-openclaw-data:" in compose
+    assert "    name: wizard-stack-openclaw-data" in compose
+
+
+def test_dokploy_nextcloud_backend_marks_nexa_workspace_as_operator_surface() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient()
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        openclaw_workspace_contract=NextcloudOpenClawWorkspaceContract(
+            enabled=True,
+            external_mount_name="/OpenClaw",
+            external_mount_path="/mnt/openclaw",
+            visible_root="/mnt/openclaw/workspace/nexa",
+            contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+            runtime_state_source="server-owned env + durable state JSON",
+            notes=(
+                "Nextcloud exposes the Nexa workspace as an operator/user surface only.",
+            ),
+        ),
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+
+    compose = client.last_create_compose_file
+    assert compose is not None
+    assert "wizard-stack-openclaw-data:/mnt/openclaw" in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface" in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: /mnt/openclaw/workspace/nexa" in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: /mnt/openclaw/workspace/nexa/contract.json" in compose
+    assert (
+        "DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: server-owned env + durable state JSON"
+        in compose
+    )
+
+
+def test_dokploy_nextcloud_backend_creates_openclaw_rescan_schedule() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient()
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        admin_user="clayton@superiorbyteworks.com",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        nextcloud_module, "_find_container_name", lambda service_name: "nextcloud-container"
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_files_external_app",
+        lambda container_name: None,
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_openclaw_external_storage",
+        lambda container_name, *, admin_user: None,
+    )
+    backend.refresh_openclaw_external_storage(admin_user="clayton@superiorbyteworks.com")
+    monkeypatch.undo()
+
+    assert client.schedules == [
+        DokployScheduleRecord(
+            schedule_id="sch-1",
+            name="wizard-stack-openclaw-rescan",
+            service_name="wizard-stack-nextcloud",
+            cron_expression="*/15 * * * *",
+            timezone="UTC",
+            shell_type="bash",
+            command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/OpenClaw"',
+            enabled=True,
+        )
+    ]
+
+
+def test_dokploy_nextcloud_backend_updates_existing_openclaw_rescan_schedule() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = FakeDokployApiClient(
+        schedules=[
+            DokployScheduleRecord(
+                schedule_id="sch-1",
+                name="wizard-stack-openclaw-rescan",
+                service_name="wizard-stack-nextcloud",
+                cron_expression="0 * * * *",
+                timezone="America/Detroit",
+                shell_type="bash",
+                command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/OpenClaw"',
+                enabled=True,
+            )
+        ]
+    )
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        admin_user="clayton@superiorbyteworks.com",
+        openclaw_volume_name="wizard-stack-openclaw-data",
+        openclaw_rescan_cron="*/5 * * * *",
+        openclaw_rescan_timezone="UTC",
+        client=client,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        nextcloud_module, "_find_container_name", lambda service_name: "nextcloud-container"
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_files_external_app",
+        lambda container_name: None,
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_openclaw_external_storage",
+        lambda container_name, *, admin_user: None,
+    )
+    backend.refresh_openclaw_external_storage(admin_user="clayton@superiorbyteworks.com")
+    monkeypatch.undo()
+
+    assert client.schedules == [
+        DokployScheduleRecord(
+            schedule_id="sch-1",
+            name="wizard-stack-openclaw-rescan",
+            service_name="wizard-stack-nextcloud",
+            cron_expression="*/5 * * * *",
+            timezone="UTC",
+            shell_type="bash",
+            command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/OpenClaw"',
+            enabled=True,
+        )
+    ]
 
 
 def test_dokploy_nextcloud_backend_updates_existing_compose_to_keep_onlyoffice_route_managed() -> (
@@ -731,6 +1262,130 @@ def test_dokploy_nextcloud_backend_updates_existing_compose_to_keep_onlyoffice_r
     assert 'traefik.http.services.wizard-stack-onlyoffice.loadbalancer.server.port: "80"' in compose
 
 
+def test_dokploy_nextcloud_onlyoffice_health_accepts_immediate_public_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        nextcloud_hostname="nextcloud.example.com",
+        onlyoffice_hostname="office.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        redis_service_name="wizard-stack-shared-redis",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_nextcloud",
+            user_name="wizard_stack_nextcloud",
+            password_secret_ref="wizard-stack-nextcloud-postgres-password",
+        ),
+        redis=SharedRedisAllocation(
+            identity_name="wizard-stack-nextcloud-redis",
+            password_secret_ref="wizard-stack-nextcloud-redis-password",
+        ),
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        client=FakeDokployApiClient(),
+    )
+    monkeypatch.setattr(nextcloud_module, "_local_https_health_check", lambda url: False)
+    monkeypatch.setattr(nextcloud_module, "_public_https_health_check", lambda url: True)
+    wait_calls: list[str] = []
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_wait_for_public_https_health",
+        lambda url: wait_calls.append(url) or False,
+    )
+
+    ok = backend.check_health(
+        service=NextcloudResourceRecord("onlyoffice-service-1", "wizard-stack-onlyoffice"),
+        url="https://office.example.com/healthcheck",
+    )
+
+    assert ok is True
+    assert wait_calls == []
+
+
+def test_dokploy_nextcloud_onlyoffice_health_waits_for_public_route_on_first_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        nextcloud_hostname="nextcloud.example.com",
+        onlyoffice_hostname="office.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        redis_service_name="wizard-stack-shared-redis",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_nextcloud",
+            user_name="wizard_stack_nextcloud",
+            password_secret_ref="wizard-stack-nextcloud-postgres-password",
+        ),
+        redis=SharedRedisAllocation(
+            identity_name="wizard-stack-nextcloud-redis",
+            password_secret_ref="wizard-stack-nextcloud-redis-password",
+        ),
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        client=FakeDokployApiClient(),
+    )
+    backend._created_in_process = True
+    monkeypatch.setattr(nextcloud_module, "_local_https_health_check", lambda url: False)
+    monkeypatch.setattr(nextcloud_module, "_public_https_health_check", lambda url: False)
+    waited_urls: list[str] = []
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_wait_for_public_https_health",
+        lambda url: waited_urls.append(url) or True,
+    )
+
+    ok = backend.check_health(
+        service=NextcloudResourceRecord("onlyoffice-service-1", "wizard-stack-onlyoffice"),
+        url="https://office.example.com/healthcheck",
+    )
+
+    assert ok is True
+    assert waited_urls == ["https://office.example.com/healthcheck"]
+
+
+def test_dokploy_nextcloud_onlyoffice_health_fails_closed_without_first_apply_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        nextcloud_hostname="nextcloud.example.com",
+        onlyoffice_hostname="office.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        redis_service_name="wizard-stack-shared-redis",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_nextcloud",
+            user_name="wizard_stack_nextcloud",
+            password_secret_ref="wizard-stack-nextcloud-postgres-password",
+        ),
+        redis=SharedRedisAllocation(
+            identity_name="wizard-stack-nextcloud-redis",
+            password_secret_ref="wizard-stack-nextcloud-redis-password",
+        ),
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        client=FakeDokployApiClient(),
+    )
+    monkeypatch.setattr(nextcloud_module, "_local_https_health_check", lambda url: False)
+    monkeypatch.setattr(nextcloud_module, "_public_https_health_check", lambda url: False)
+    wait_calls: list[str] = []
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_wait_for_public_https_health",
+        lambda url: wait_calls.append(url) or True,
+    )
+
+    ok = backend.check_health(
+        service=NextcloudResourceRecord("onlyoffice-service-1", "wizard-stack-onlyoffice"),
+        url="https://office.example.com/healthcheck",
+    )
+
+    assert ok is False
+    assert wait_calls == []
+
+
 def test_local_https_health_check_uses_host_header(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, dict[str, str], bool]] = []
 
@@ -786,7 +1441,6 @@ def test_ensure_onlyoffice_app_config_sets_internal_urls_and_jwt(
     )
 
     assert commands == [
-        "php occ app:install onlyoffice || true",
         "php occ app:enable --force onlyoffice",
         "php occ config:system:set allow_local_remote_servers --value=true --type=bool",
         "php occ config:system:set onlyoffice jwt_secret --value=change-me",
@@ -803,11 +1457,382 @@ def test_ensure_onlyoffice_app_config_sets_internal_urls_and_jwt(
     ]
 
 
+def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    mount_id_calls = 0
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        lambda container_name, shell_command: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ",
+        lambda container_name, args: commands.append(tuple(args)),
+    )
+
+    def fake_find_mount_id(container_name: str, *, mount_point: str, datadir: str) -> str | None:
+        nonlocal mount_id_calls
+        mount_id_calls += 1
+        assert mount_point == "/OpenClaw"
+        assert datadir == "/mnt/openclaw"
+        return None if mount_id_calls == 1 else "17"
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._find_external_storage_mount_id",
+        fake_find_mount_id,
+    )
+
+    _ensure_onlyoffice_app_config(
+        "nextcloud-container",
+        document_server_url="https://office.example.com",
+        document_server_internal_url="http://wizard-stack-onlyoffice",
+        storage_url="http://wizard-stack-nextcloud",
+        jwt_secret="change-me",
+        openclaw_external_storage_enabled=True,
+        admin_user="clayton@example.com",
+    )
+
+    assert ("app:enable", "files_external") in commands
+    assert (
+        "files_external:create",
+        "/OpenClaw",
+        "local",
+        "null::null",
+        "-c",
+        "datadir=/mnt/openclaw",
+    ) in commands
+    assert ("files_external:applicable", "17", "--add-user=clayton@example.com") in commands
+    assert ("files_external:option", "17", "readonly", "false") in commands
+    assert ("files_external:verify", "17") in commands
+    assert ("files_external:scan", "17") in commands
+    assert (
+        "files:scan",
+        "--path=clayton@example.com/files/OpenClaw",
+    ) in commands
+
+
+def test_ensure_onlyoffice_app_config_waits_for_transient_documentserver_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+    documentserver_attempts = 0
+    sleep_calls: list[float] = []
+
+    def fake_run_occ_shell(container_name: str, shell_command: str) -> None:
+        nonlocal documentserver_attempts
+        assert container_name == "nextcloud-container"
+        commands.append(shell_command)
+        if shell_command == "php occ onlyoffice:documentserver --check":
+            documentserver_attempts += 1
+            if documentserver_attempts < 3:
+                raise NextcloudError(
+                    "Nextcloud OCC command failed (php occ onlyoffice:documentserver --check): 502 Bad Gateway"
+                )
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        fake_run_occ_shell,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud.time.sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    _ensure_onlyoffice_app_config(
+        "nextcloud-container",
+        document_server_url="https://office.example.com",
+        document_server_internal_url="http://wizard-stack-onlyoffice",
+        storage_url="http://wizard-stack-nextcloud",
+        jwt_secret="change-me",
+        wait_for_documentserver_check=True,
+    )
+
+    assert commands[-3:] == [
+        "php occ onlyoffice:documentserver --check",
+        "php occ onlyoffice:documentserver --check",
+        "php occ onlyoffice:documentserver --check",
+    ]
+    assert sleep_calls == [5.0, 5.0]
+
+
+def test_ensure_onlyoffice_app_config_fails_closed_after_documentserver_warmup_exhausts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    documentserver_attempts = 0
+    sleep_calls: list[float] = []
+
+    def fake_run_occ_shell(container_name: str, shell_command: str) -> None:
+        nonlocal documentserver_attempts
+        assert container_name == "nextcloud-container"
+        if shell_command == "php occ onlyoffice:documentserver --check":
+            documentserver_attempts += 1
+            raise NextcloudError(
+                "Nextcloud OCC command failed (php occ onlyoffice:documentserver --check): 502 Bad Gateway"
+            )
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        fake_run_occ_shell,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud.time.sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    with pytest.raises(NextcloudError, match="502 Bad Gateway"):
+        _ensure_onlyoffice_app_config(
+            "nextcloud-container",
+            document_server_url="https://office.example.com",
+            document_server_internal_url="http://wizard-stack-onlyoffice",
+            storage_url="http://wizard-stack-nextcloud",
+            jwt_secret="change-me",
+            wait_for_documentserver_check=True,
+        )
+
+    assert documentserver_attempts == 180
+    assert sleep_calls == [5.0] * 179
+
+
+def test_platform_version_spec_matches_major_handles_compound_constraints() -> None:
+    assert _platform_version_spec_matches_major(">=33.0.0 <34.0.0", 33) is True
+    assert _platform_version_spec_matches_major(">=33.0.0 <34.0.0", 32) is False
+    assert _platform_version_spec_matches_major(">=33.0.0 <34.0.0", 34) is False
+
+
+def test_resolve_compatible_app_release_download_url_matches_nextcloud_major(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        def __init__(self, payload: str) -> None:
+            self._payload = payload
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self._payload.encode("utf-8")
+
+    requested_urls: list[str] = []
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._read_occ_www_data_output",
+        lambda container_name, args: '{"versionstring":"33.0.2"}',
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud.request.urlopen",
+        lambda req, timeout: (
+            requested_urls.append(req.full_url)
+            or FakeResponse(
+                """[
+                {"id":"spreed","releases":[
+                    {"version":"9.0.9","platformVersionSpec":">=9.0.0 <10.0.0","download":"https://github.com/nextcloud/spreed/releases/download/v9.0.9/spreed-9.0.9.tar.gz"},
+                    {"version":"23.0.3","platformVersionSpec":">=33.0.0 <34.0.0","download":"https://github.com/nextcloud-releases/spreed/releases/download/v23.0.3/spreed-v23.0.3.tar.gz"}
+                ]},
+                {"id":"onlyoffice","releases":[
+                    {"version":"9.9.0","platformVersionSpec":">=9.0.0 <10.0.0","download":"https://github.com/ONLYOFFICE/onlyoffice-nextcloud/releases/download/v9.9.0/onlyoffice.tar.gz"},
+                    {"version":"10.0.0","platformVersionSpec":">=33.0.0 <34.0.0","download":"https://github.com/ONLYOFFICE/onlyoffice-nextcloud/releases/download/v10.0.0/onlyoffice.tar.gz"}
+                ]}
+                ]"""
+            )
+        ),
+    )
+
+    assert _resolve_compatible_app_release_download_url("nextcloud-container", "spreed") == (
+        "https://github.com/nextcloud-releases/spreed/releases/download/v23.0.3/spreed-v23.0.3.tar.gz"
+    )
+    assert _resolve_compatible_app_release_download_url("nextcloud-container", "onlyoffice") == (
+        "https://github.com/ONLYOFFICE/onlyoffice-nextcloud/releases/download/v10.0.0/onlyoffice.tar.gz"
+    )
+    assert requested_urls == [
+        "https://apps.nextcloud.com/api/v1/apps.json",
+        "https://apps.nextcloud.com/api/v1/apps.json",
+    ]
+
+
+def test_ensure_onlyoffice_app_config_falls_back_to_manual_release_install_when_enable_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+    enable_attempts = 0
+
+    def fake_run_occ_shell(container_name: str, shell_command: str) -> None:
+        nonlocal enable_attempts
+        assert container_name == "nextcloud-container"
+        commands.append(shell_command)
+        if shell_command == "php occ app:enable --force onlyoffice" and enable_attempts == 0:
+            enable_attempts += 1
+            raise NextcloudError(
+                "Nextcloud OCC command failed (php occ app:enable --force onlyoffice): onlyoffice is not installed"
+            )
+        if shell_command == "php occ app:enable --force onlyoffice":
+            enable_attempts += 1
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        fake_run_occ_shell,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._resolve_compatible_app_release_download_url",
+        lambda container_name,
+        app_id: "https://github.com/ONLYOFFICE/onlyoffice-nextcloud/releases/download/v9.9.0/onlyoffice.tar.gz",
+    )
+
+    _ensure_onlyoffice_app_config(
+        "nextcloud-container",
+        document_server_url="https://office.example.com",
+        document_server_internal_url="http://wizard-stack-onlyoffice",
+        storage_url="http://wizard-stack-nextcloud",
+        jwt_secret="change-me",
+    )
+
+    assert commands[0:3] == [
+        "php occ app:enable --force onlyoffice",
+        'export NEXTCLOUD_APP_TMP_DIR="$(mktemp -d)" && '
+        "trap 'rm -rf \"$NEXTCLOUD_APP_TMP_DIR\"' EXIT && "
+        'php -r \'if (!copy("https://github.com/ONLYOFFICE/onlyoffice-nextcloud/releases/download/v9.9.0/onlyoffice.tar.gz", getenv("NEXTCLOUD_APP_TMP_DIR") . "/app-release.tar.gz")) { fwrite(STDERR, "Failed to download ONLYOFFICE app release\\n"); exit(1); }\' && '
+        "rm -rf apps/onlyoffice && "
+        'tar -xzf "$NEXTCLOUD_APP_TMP_DIR/app-release.tar.gz" -C apps && '
+        "test -d apps/onlyoffice",
+        "php occ app:enable --force onlyoffice",
+    ]
+    assert commands[-1] == "php occ onlyoffice:documentserver --check"
+    assert enable_attempts == 2
+
+
+def test_ensure_spreed_app_enabled_keeps_happy_path_minimal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_run_occ_shell(container_name: str, shell_command: str) -> None:
+        assert container_name == "nextcloud-container"
+        commands.append(shell_command)
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        fake_run_occ_shell,
+    )
+
+    _ensure_spreed_app_enabled("nextcloud-container")
+
+    assert commands == ["php occ app:enable spreed"]
+
+
+def test_ensure_spreed_app_enabled_falls_back_to_manual_release_install_when_enable_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+    enable_attempts = 0
+
+    def fake_run_occ_shell(container_name: str, shell_command: str) -> None:
+        nonlocal enable_attempts
+        assert container_name == "nextcloud-container"
+        commands.append(shell_command)
+        if shell_command == "php occ app:enable spreed" and enable_attempts == 0:
+            enable_attempts += 1
+            raise NextcloudError(
+                "Nextcloud OCC command failed (php occ app:enable spreed): Could not download app spreed, it was not found on the appstore"
+            )
+        if shell_command == "php occ app:enable spreed":
+            enable_attempts += 1
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        fake_run_occ_shell,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._resolve_compatible_app_release_download_url",
+        lambda container_name,
+        app_id: "https://github.com/nextcloud/spreed/releases/download/v21.0.0/spreed-21.0.0.tar.gz",
+    )
+
+    _ensure_spreed_app_enabled("nextcloud-container")
+
+    assert commands == [
+        "php occ app:enable spreed",
+        'export NEXTCLOUD_APP_TMP_DIR="$(mktemp -d)" && '
+        "trap 'rm -rf \"$NEXTCLOUD_APP_TMP_DIR\"' EXIT && "
+        'php -r \'if (!copy("https://github.com/nextcloud/spreed/releases/download/v21.0.0/spreed-21.0.0.tar.gz", getenv("NEXTCLOUD_APP_TMP_DIR") . "/app-release.tar.gz")) { fwrite(STDERR, "Failed to download Talk app release\\n"); exit(1); }\' && '
+        "rm -rf apps/spreed && "
+        'tar -xzf "$NEXTCLOUD_APP_TMP_DIR/app-release.tar.gz" -C apps && '
+        "test -d apps/spreed",
+        "php occ app:enable spreed",
+    ]
+    assert enable_attempts == 2
+
+
+def test_talk_app_enabled_accepts_real_object_shaped_enabled_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._read_occ_www_data_output",
+        lambda container_name, args: (
+            '{"enabled":{"onlyoffice":"10.0.0","spreed":"23.0.3"},"disabled":{"files_pdfviewer":"3.1.0"}}'
+        ),
+    )
+
+    assert _talk_app_enabled("nextcloud-container") is True
+
+
+def test_talk_app_enabled_rejects_missing_enabled_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._read_occ_www_data_output",
+        lambda container_name, args: '{"disabled":{"spreed":"23.0.3"}}',
+    )
+
+    with pytest.raises(NextcloudError, match="enabled app collection"):
+        _talk_app_enabled("nextcloud-container")
+
+
 def test_with_trailing_slash_adds_missing_separator() -> None:
     assert _with_trailing_slash("https://office.example.com") == "https://office.example.com/"
     assert (
         _with_trailing_slash("http://wizard-stack-onlyoffice/") == "http://wizard-stack-onlyoffice/"
     )
+
+
+def test_find_container_name_prefers_exact_compose_service_label_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded_commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        recorded_commands.append(command)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=(
+                "openmerge-nextcloud-08k3b3-openmerge-nextcloud-1\n"
+                "openmerge-nextcloud-08k3b3-openmerge-nextcloud-2\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.nextcloud.subprocess.run", fake_run)
+
+    assert (
+        _find_container_name("openmerge-nextcloud")
+        == "openmerge-nextcloud-08k3b3-openmerge-nextcloud-1"
+    )
+    assert recorded_commands == [
+        [
+            "docker",
+            "ps",
+            "--filter",
+            "label=com.docker.compose.service=openmerge-nextcloud",
+            "--format",
+            "{{.Names}}",
+        ]
+    ]
 
 
 def test_ensure_trusted_domain_adds_internal_service_hostname(

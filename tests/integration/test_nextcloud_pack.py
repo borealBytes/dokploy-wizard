@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from dokploy_wizard.dokploy import (
     DokployEnvironmentSummary,
     DokployNextcloudBackend,
     DokployProjectSummary,
+    DokployScheduleRecord,
 )
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,
@@ -28,7 +30,15 @@ from dokploy_wizard.networking import (
 )
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.nextcloud import NextcloudError, NextcloudResourceRecord
+from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudBundleVerification,
+    NextcloudCommandCheck,
+    TalkRuntime,
+)
+from dokploy_wizard.packs.openclaw import OpenClawResourceRecord
+from dokploy_wizard.packs.seaweedfs import SeaweedFsResourceRecord
 from dokploy_wizard.state import RawEnvInput, load_state_dir, resolve_desired_state
+from tests.integration.test_networking_reconciler import FakeCoderBackend
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -267,6 +277,17 @@ class FakeSharedCoreBackend:
         self.redis = SharedCoreResourceRecord(resource_id="redis-1", resource_name=resource_name)
         return self.redis
 
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        del resource_id
+        return None
+
+    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        del resource_name
+        return None
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        raise AssertionError(f"Nextcloud should not provision mail relay: {resource_name}")
+
     def ensure_postgres_allocations(
         self, allocations: tuple[SharedPostgresAllocation, ...]
     ) -> None:
@@ -316,6 +337,7 @@ class FakeNextcloudBackend:
     health: dict[str, bool] = field(default_factory=dict)
     create_service_calls: int = 0
     create_volume_calls: int = 0
+    refresh_calls: list[str] = field(default_factory=list)
 
     def get_service(self, resource_id: str) -> NextcloudResourceRecord | None:
         for record in self.services.values():
@@ -382,8 +404,166 @@ class FakeNextcloudBackend:
         del url
         return self.health.get(service.resource_name, True)
 
-    def ensure_application_ready(self, *, nextcloud_url: str, onlyoffice_url: str) -> None:
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification:
         del nextcloud_url, onlyoffice_url
+        return NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        )
+
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        self.refresh_calls.append(admin_user)
+
+
+@dataclass
+class RecordingNextcloudBackend(FakeNextcloudBackend):
+    init_kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FakeSeaweedFsBackend:
+    def get_service(self, resource_id: str) -> SeaweedFsResourceRecord | None:
+        del resource_id
+        return None
+
+    def find_service_by_name(self, resource_name: str) -> SeaweedFsResourceRecord | None:
+        del resource_name
+        return None
+
+    def create_service(
+        self,
+        *,
+        resource_name: str,
+        hostname: str,
+        access_key: str,
+        secret_key: str,
+        data_resource_name: str,
+    ) -> SeaweedFsResourceRecord:
+        del hostname, access_key, secret_key, data_resource_name
+        return SeaweedFsResourceRecord(
+            resource_id=f"service:{resource_name}", resource_name=resource_name
+        )
+
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        access_key: str,
+        secret_key: str,
+        data_resource_name: str,
+    ) -> SeaweedFsResourceRecord:
+        del resource_id
+        return self.create_service(
+            resource_name=resource_name,
+            hostname=hostname,
+            access_key=access_key,
+            secret_key=secret_key,
+            data_resource_name=data_resource_name,
+        )
+
+    def get_persistent_data(self, resource_id: str) -> SeaweedFsResourceRecord | None:
+        del resource_id
+        return None
+
+    def find_persistent_data_by_name(self, resource_name: str) -> SeaweedFsResourceRecord | None:
+        del resource_name
+        return None
+
+    def create_persistent_data(self, resource_name: str) -> SeaweedFsResourceRecord:
+        return SeaweedFsResourceRecord(
+            resource_id=f"volume:{resource_name}", resource_name=resource_name
+        )
+
+    def check_health(self, *, service: SeaweedFsResourceRecord, url: str) -> bool:
+        del service, url
+        return True
+
+
+@dataclass
+class FakeOpenClawBackend:
+    services: dict[str, OpenClawResourceRecord] = field(default_factory=dict)
+
+    def get_service(self, resource_id: str) -> OpenClawResourceRecord | None:
+        for record in self.services.values():
+            if record.resource_id == resource_id:
+                return record
+        return None
+
+    def find_service_by_name(self, resource_name: str) -> OpenClawResourceRecord | None:
+        return self.services.get(resource_name)
+
+    def create_service(
+        self,
+        *,
+        resource_name: str,
+        hostname: str,
+        template_path: object,
+        variant: str,
+        channels: tuple[str, ...],
+        replicas: int,
+        secret_refs: tuple[str, ...],
+    ) -> OpenClawResourceRecord:
+        del hostname, template_path, variant, channels, replicas, secret_refs
+        record = OpenClawResourceRecord(
+            resource_id=f"service:{resource_name}",
+            resource_name=resource_name,
+            replicas=1,
+        )
+        self.services[resource_name] = record
+        return record
+
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        template_path: object,
+        variant: str,
+        channels: tuple[str, ...],
+        replicas: int,
+        secret_refs: tuple[str, ...],
+    ) -> OpenClawResourceRecord:
+        del resource_id
+        return self.create_service(
+            resource_name=resource_name,
+            hostname=hostname,
+            template_path=template_path,
+            variant=variant,
+            channels=channels,
+            replicas=replicas,
+            secret_refs=secret_refs,
+        )
+
+    def check_health(self, *, service: OpenClawResourceRecord, url: str) -> bool:
+        del service, url
+        return True
 
 
 @dataclass
@@ -454,6 +634,62 @@ class FakeDokployApiClient:
         self.deploy_calls += 1
         return DokployDeployResult(success=True, compose_id=compose_id, message="queued")
 
+    def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
+        del compose_id
+        return ()
+
+    def create_schedule(
+        self,
+        *,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        del compose_id
+        return DokployScheduleRecord(
+            schedule_id="sch-1",
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+
+    def update_schedule(
+        self,
+        *,
+        schedule_id: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        del compose_id
+        return DokployScheduleRecord(
+            schedule_id=schedule_id,
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+
+    def delete_schedule(self, *, schedule_id: str) -> None:
+        del schedule_id
+
 
 def _owned_dns_records() -> dict[str, CloudflareDnsRecord]:
     return {
@@ -521,6 +757,13 @@ def test_install_reconciles_nextcloud_pair_and_persists_runtime_ledger(tmp_path:
     )
     assert summary["nextcloud"]["nextcloud"]["health_check"]["passed"] is True
     assert summary["nextcloud"]["onlyoffice"]["health_check"]["passed"] is True
+    assert summary["nextcloud"]["onlyoffice"]["document_server_check"]["passed"] is True
+    assert summary["nextcloud"]["talk"]["app_id"] == "spreed"
+    assert summary["nextcloud"]["talk"]["enabled"] is True
+    assert summary["nextcloud"]["talk"]["enabled_check"]["passed"] is True
+    assert summary["nextcloud"]["talk"]["signaling_check"]["passed"] is True
+    assert summary["nextcloud"]["talk"]["stun_check"]["passed"] is True
+    assert summary["nextcloud"]["talk"]["turn_check"]["passed"] is True
     assert loaded_state.applied_state is not None
     assert loaded_state.applied_state.completed_steps == (
         "preflight",
@@ -581,6 +824,58 @@ def test_install_reconciles_nextcloud_pair_via_dokploy_backend(
         "dokploy_wizard.dokploy.nextcloud._local_https_health_check",
         lambda url: url == "https://office.example.com/healthcheck",
     )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._find_container_name",
+        lambda service_name: "nextcloud-container",
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_admin_user",
+        lambda container_name, admin_user, admin_password: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_trusted_domain",
+        lambda container_name, hostname: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_onlyoffice_app_config",
+        lambda container_name,
+        document_server_url,
+        document_server_internal_url,
+        storage_url,
+        jwt_secret,
+        wait_for_documentserver_check=False,
+        openclaw_external_storage_enabled=False,
+        admin_user="admin": None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._verify_nextcloud_bundle",
+        lambda container_name: NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        ),
+    )
 
     summary = run_install_flow(
         env_file=FIXTURES_DIR / "nextcloud.env",
@@ -613,10 +908,91 @@ def test_install_reconciles_nextcloud_pair_via_dokploy_backend(
     assert summary["nextcloud"]["onlyoffice"]["service"]["resource_id"] == (
         "dokploy-compose:cmp-1:onlyoffice-service"
     )
+    assert summary["nextcloud"]["talk"]["enabled"] is True
     assert client.create_project_calls == 1
     assert client.create_compose_calls == 1
     assert client.deploy_calls == 1
     assert loaded_state.ownership_ledger is not None
+
+
+def test_install_passes_nexa_workspace_contract_into_dokploy_nextcloud_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "nextcloud-nexa.env"
+    recording_backend = RecordingNextcloudBackend()
+
+    def _build_backend(**kwargs: Any) -> RecordingNextcloudBackend:
+        recording_backend.init_kwargs = dict(kwargs)
+        return recording_backend
+
+    monkeypatch.setattr("dokploy_wizard.cli.DokployNextcloudBackend", _build_backend)
+    monkeypatch.setattr("dokploy_wizard.cli._can_reuse_existing_dokploy_api_key", lambda **_: True)
+    monkeypatch.setattr("dokploy_wizard.cli._qualify_dokploy_mutation_auth", lambda **_: None)
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "nextcloud-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+                "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.internal.example.com",
+                "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
+                "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
+                "OPENCLAW_NEXA_AGENT_PASSWORD": "nexa-secret",
+                "OPENCLAW_NEXA_AGENT_EMAIL": "nexa@example.com",
+                "HOST_OS_ID": "ubuntu",
+                "HOST_OS_VERSION_ID": "24.04",
+                "HOST_CPU_COUNT": "4",
+                "HOST_MEMORY_GB": "8",
+                "HOST_DISK_GB": "100",
+                "HOST_DOCKER_INSTALLED": "true",
+                "HOST_DOCKER_DAEMON_REACHABLE": "true",
+                "HOST_PORT_80_IN_USE": "false",
+                "HOST_PORT_443_IN_USE": "false",
+                "HOST_PORT_3000_IN_USE": "false",
+                "HOST_ENVIRONMENT": "local",
+                "DOKPLOY_BOOTSTRAP_HEALTHY": "true",
+                "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+                "DOKPLOY_API_KEY": "api-key-123",
+                "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+                "DOKPLOY_ADMIN_PASSWORD": "ChangeMeSoon",
+                "CLOUDFLARE_API_TOKEN": "token-123",
+                "CLOUDFLARE_ACCOUNT_ID": "account-123",
+                "CLOUDFLARE_ZONE_ID": "zone-123",
+                "CLOUDFLARE_TUNNEL_NAME": "nextcloud-stack-tunnel",
+                "HEADSCALE_TAILNET_DOMAIN": "tailnet.example.com",
+                "HEADSCALE_ACME_EMAIL": "admin@example.com",
+                "HEADSCALE_OIDC_ISSUER_URL": "https://auth.example.com/application/o/headscale/",
+                "HEADSCALE_OIDC_CLIENT_ID": "headscale-client",
+                "HEADSCALE_OIDC_CLIENT_SECRET": "headscale-secret",
+                "HEADSCALE_OIDC_STRIP_EMAIL_DOMAIN": "true",
+            },
+        ),
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        openclaw_backend=FakeOpenClawBackend(),
+        nextcloud_backend=None,
+    )
+
+    assert summary["nextcloud"]["outcome"] == "applied"
+    workspace_contract = recording_backend.init_kwargs["openclaw_workspace_contract"]
+    assert workspace_contract is not None
+    assert workspace_contract.visible_root == "/mnt/openclaw/workspace/nexa"
+    assert workspace_contract.contract_path == "/mnt/openclaw/workspace/nexa/contract.json"
+    assert workspace_contract.runtime_state_source == "server-owned env + durable state JSON"
+    assert recording_backend.init_kwargs["nexa_agent_user_id"] == "nexa-agent"
+    assert recording_backend.init_kwargs["nexa_agent_display_name"] == "Nexa"
+    assert recording_backend.init_kwargs["nexa_agent_password"] == "nexa-secret"
+    assert recording_backend.init_kwargs["nexa_agent_email"] == "nexa@example.com"
 
 
 def test_install_rerun_reuses_owned_nextcloud_resources(tmp_path: Path) -> None:
@@ -669,6 +1045,7 @@ def test_install_rerun_reuses_owned_nextcloud_resources(tmp_path: Path) -> None:
     assert summary["nextcloud"]["onlyoffice"]["service"]["action"] == "reuse_owned"
     assert summary["nextcloud"]["nextcloud"]["data_volume"]["action"] == "reuse_owned"
     assert summary["nextcloud"]["onlyoffice"]["data_volume"]["action"] == "reuse_owned"
+    assert summary["nextcloud"]["talk"]["app_id"] == "spreed"
     assert nextcloud_backend.create_service_calls == 2
     assert nextcloud_backend.create_volume_calls == 2
 
@@ -693,3 +1070,78 @@ def test_install_fails_before_nextcloud_checkpoint_when_onlyoffice_health_fails(
     loaded_state = load_state_dir(state_dir)
     assert loaded_state.applied_state is not None
     assert "nextcloud" not in loaded_state.applied_state.completed_steps
+
+
+def test_install_fails_before_nextcloud_checkpoint_when_talk_verification_fails(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+
+    @dataclass
+    class TalkDisabledBackend(FakeNextcloudBackend):
+        def ensure_application_ready(
+            self, *, nextcloud_url: str, onlyoffice_url: str
+        ) -> NextcloudBundleVerification:
+            del nextcloud_url, onlyoffice_url
+            return NextcloudBundleVerification(
+                onlyoffice_document_server_check=NextcloudCommandCheck(
+                    command="php occ onlyoffice:documentserver --check",
+                    passed=True,
+                ),
+                talk=TalkRuntime(
+                    app_id="spreed",
+                    enabled=False,
+                    enabled_check=NextcloudCommandCheck(
+                        command="php occ app:list --output=json",
+                        passed=False,
+                    ),
+                    signaling_check=NextcloudCommandCheck(
+                        command="php occ talk:signaling:list --output=json",
+                        passed=True,
+                    ),
+                    stun_check=NextcloudCommandCheck(
+                        command="php occ talk:stun:list --output=json",
+                        passed=True,
+                    ),
+                    turn_check=NextcloudCommandCheck(
+                        command="php occ talk:turn:list --output=json",
+                        passed=True,
+                    ),
+                ),
+            )
+
+    with pytest.raises(NextcloudError, match="Talk app 'spreed' is not enabled"):
+        run_install_flow(
+            env_file=FIXTURES_DIR / "nextcloud.env",
+            state_dir=state_dir,
+            dry_run=False,
+            bootstrap_backend=FakeDokployBackend(True, True),
+            networking_backend=FakeCloudflareBackend(),
+            shared_core_backend=FakeSharedCoreBackend(),
+            headscale_backend=FakeHeadscaleBackend(),
+            nextcloud_backend=TalkDisabledBackend(),
+        )
+
+    loaded_state = load_state_dir(state_dir)
+    assert loaded_state.applied_state is not None
+    assert "nextcloud" not in loaded_state.applied_state.completed_steps
+
+
+def test_openclaw_phase_refreshes_nextcloud_external_storage(tmp_path: Path) -> None:
+    nextcloud_backend = FakeNextcloudBackend()
+
+    run_install_flow(
+        env_file=FIXTURES_DIR / "full.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=nextcloud_backend,
+        seaweedfs_backend=FakeSeaweedFsBackend(),
+        coder_backend=FakeCoderBackend(),
+        openclaw_backend=FakeOpenClawBackend(),
+    )
+
+    assert nextcloud_backend.refresh_calls == ["admin"]

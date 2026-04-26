@@ -52,6 +52,50 @@ class SharedRedisServicePlan:
 
 
 @dataclass(frozen=True)
+class SharedMailRelayServicePlan:
+    service_name: str
+    mail_hostname: str
+    smtp_port: int
+    from_address: str
+
+    def __post_init__(self) -> None:
+        _ensure_non_empty(self.service_name, "service_name")
+        _ensure_non_empty(self.mail_hostname, "mail_hostname")
+        _ensure_non_empty(self.from_address, "from_address")
+        if self.smtp_port < 1:
+            raise ValueError("SharedMailRelayServicePlan.smtp_port must be positive.")
+
+    def to_dict(self) -> dict[str, str | int]:
+        return {
+            "service_name": self.service_name,
+            "mail_hostname": self.mail_hostname,
+            "smtp_port": self.smtp_port,
+            "from_address": self.from_address,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> SharedMailRelayServicePlan:
+        service_name = payload.get("service_name")
+        mail_hostname = payload.get("mail_hostname")
+        smtp_port = payload.get("smtp_port")
+        from_address = payload.get("from_address")
+        if not isinstance(service_name, str):
+            raise ValueError("SharedMailRelayServicePlan.service_name must be a string.")
+        if not isinstance(mail_hostname, str):
+            raise ValueError("SharedMailRelayServicePlan.mail_hostname must be a string.")
+        if not isinstance(smtp_port, int):
+            raise ValueError("SharedMailRelayServicePlan.smtp_port must be an integer.")
+        if not isinstance(from_address, str):
+            raise ValueError("SharedMailRelayServicePlan.from_address must be a string.")
+        return cls(
+            service_name=service_name,
+            mail_hostname=mail_hostname,
+            smtp_port=smtp_port,
+            from_address=from_address,
+        )
+
+
+@dataclass(frozen=True)
 class SharedPostgresAllocation:
     database_name: str
     user_name: str
@@ -177,6 +221,7 @@ class SharedCorePlan:
     postgres: SharedPostgresServicePlan | None
     redis: SharedRedisServicePlan | None
     allocations: tuple[PackSharedAllocation, ...]
+    mail_relay: SharedMailRelayServicePlan | None = None
 
     def __post_init__(self) -> None:
         _ensure_non_empty(self.network_name, "network_name")
@@ -185,12 +230,13 @@ class SharedCorePlan:
             raise ValueError("SharedCorePlan allocations must be sorted by pack_name.")
 
     def requires_reconciliation(self) -> bool:
-        return bool(self.allocations)
+        return bool(self.allocations) or self.mail_relay is not None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "allocations": [allocation.to_dict() for allocation in self.allocations],
             "network_name": self.network_name,
+            "mail_relay": None if self.mail_relay is None else self.mail_relay.to_dict(),
             "postgres": None if self.postgres is None else self.postgres.to_dict(),
             "redis": None if self.redis is None else self.redis.to_dict(),
         }
@@ -198,11 +244,14 @@ class SharedCorePlan:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SharedCorePlan:
         network_name = payload.get("network_name")
+        mail_relay_payload = payload.get("mail_relay")
         postgres_payload = payload.get("postgres")
         redis_payload = payload.get("redis")
         allocations_payload = payload.get("allocations")
         if not isinstance(network_name, str):
             raise ValueError("SharedCorePlan.network_name must be a string.")
+        if mail_relay_payload is not None and not isinstance(mail_relay_payload, dict):
+            raise ValueError("SharedCorePlan.mail_relay must be an object or null.")
         if postgres_payload is not None and not isinstance(postgres_payload, dict):
             raise ValueError("SharedCorePlan.postgres must be an object or null.")
         if redis_payload is not None and not isinstance(redis_payload, dict):
@@ -216,6 +265,11 @@ class SharedCorePlan:
             allocations.append(PackSharedAllocation.from_dict(item))
         return cls(
             network_name=network_name,
+            mail_relay=(
+                None
+                if mail_relay_payload is None
+                else SharedMailRelayServicePlan.from_dict(mail_relay_payload)
+            ),
             postgres=(
                 None
                 if postgres_payload is None
@@ -250,6 +304,7 @@ class SharedCoreResult:
     redis: SharedCoreManagedResource | None
     allocations: tuple[PackSharedAllocation, ...]
     notes: tuple[str, ...]
+    mail_relay: SharedCoreManagedResource | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -257,6 +312,7 @@ class SharedCoreResult:
             "network": None if self.network is None else self.network.to_dict(),
             "notes": list(self.notes),
             "outcome": self.outcome,
+            "mail_relay": None if self.mail_relay is None else self.mail_relay.to_dict(),
             "postgres": None if self.postgres is None else self.postgres.to_dict(),
             "redis": None if self.redis is None else self.redis.to_dict(),
         }
@@ -268,6 +324,7 @@ class SharedCorePhase:
     network_resource_id: str | None
     postgres_resource_id: str | None
     redis_resource_id: str | None
+    mail_relay_resource_id: str | None = None
 
 
 @dataclass(frozen=True)

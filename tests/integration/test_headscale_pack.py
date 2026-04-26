@@ -256,6 +256,17 @@ class FakeSharedCoreBackend:
     def create_redis_service(self, resource_name: str) -> SharedCoreResourceRecord:
         raise AssertionError(f"Headscale should not provision redis: {resource_name}")
 
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        del resource_id
+        return None
+
+    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        del resource_name
+        return None
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        raise AssertionError(f"Headscale should not provision mail relay: {resource_name}")
+
 
 @dataclass
 class FakeHeadscaleBackend:
@@ -413,6 +424,10 @@ def test_install_reconciles_headscale_via_dokploy_backend(
         "dokploy_wizard.dokploy.headscale._http_health_check",
         lambda url: url == "https://headscale.example.com/health",
     )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.headscale._docker_container_is_up",
+        lambda service_name: service_name == "headscale-stack-headscale",
+    )
 
     summary = run_install_flow(
         env_file=FIXTURES_DIR / "headscale.env",
@@ -533,7 +548,7 @@ def test_install_skips_headscale_when_explicitly_disabled(tmp_path: Path) -> Non
 
     loaded_state = load_state_dir(state_dir)
 
-    assert summary["headscale"]["outcome"] == "skipped"
+    assert summary["headscale"]["outcome"] == "not_run"
     assert loaded_state.ownership_ledger is not None
     assert all(
         resource.resource_type != "headscale_service"

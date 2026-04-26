@@ -56,7 +56,7 @@ def test_desired_state_resolution_is_deterministic(tmp_path: Path) -> None:
     assert desired_a.to_dict() == desired_b.to_dict()
     assert desired_a.fingerprint() == desired_b.fingerprint()
     assert desired_a.selected_packs == ("nextcloud", "openclaw")
-    assert desired_a.enabled_packs == ("headscale", "nextcloud", "openclaw")
+    assert desired_a.enabled_packs == ("nextcloud", "openclaw")
     assert desired_a.hostnames["onlyoffice"] == "office.example.com"
     assert desired_a.dokploy_api_url is None
     assert desired_a.openclaw_channels == ("telegram",)
@@ -65,6 +65,33 @@ def test_desired_state_resolution_is_deterministic(tmp_path: Path) -> None:
     assert desired_a.shared_core.postgres is not None
     assert desired_a.shared_core.redis is not None
     assert [allocation.pack_name for allocation in desired_a.shared_core.allocations] == [
+        "nextcloud",
+        "openclaw",
+    ]
+
+
+def test_explicitly_disabled_dependency_is_not_silently_reenabled() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "my-stack",
+                "ROOT_DOMAIN": "example.com",
+                "PACKS": "nextcloud,openclaw,seaweedfs,coder",
+                "ENABLE_HEADSCALE": "false",
+                "ENABLE_TAILSCALE": "false",
+                "OPENCLAW_CHANNELS": "telegram",
+                "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
+                "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
+            },
+        )
+    )
+
+    assert desired_state.selected_packs == ("coder", "nextcloud", "openclaw", "seaweedfs")
+    assert desired_state.enabled_packs == ("coder", "nextcloud", "openclaw", "seaweedfs")
+    assert "headscale" not in desired_state.hostnames
+    assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
+        "coder",
         "nextcloud",
         "openclaw",
     ]

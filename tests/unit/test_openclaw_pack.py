@@ -6,7 +6,9 @@ import base64
 import json
 import re
 from dataclasses import dataclass
+from email.message import Message
 from typing import Any
+from urllib import error
 
 import pytest
 
@@ -18,9 +20,18 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
-from dokploy_wizard.dokploy.openclaw import DokployOpenClawBackend, _control_ui_origin_ready
+from dokploy_wizard.lifecycle import classify_modify_request
+from dokploy_wizard.dokploy.openclaw import (
+    DokployOpenClawBackend,
+    _control_ui_origin_ready,
+    _local_https_health_check,
+    _wait_for_local_https_health,
+)
 from dokploy_wizard.packs.openclaw import (
     MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
     OPENCLAW_SERVICE_RESOURCE_TYPE,
     OpenClawError,
     OpenClawResourceRecord,
@@ -30,6 +41,7 @@ from dokploy_wizard.packs.openclaw import (
     reconcile_openclaw,
 )
 from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
     OwnedResource,
     OwnershipLedger,
     RawEnvInput,
@@ -75,7 +87,7 @@ class FakeOpenClawBackend:
         self.create_calls += 1
         self.last_requested_replicas = replicas
         self.existing_service = OpenClawResourceRecord(
-            resource_id="advisor-service-1",
+            resource_id="openclaw-service-1",
             resource_name=resource_name,
             replicas=replicas,
         )
@@ -110,9 +122,43 @@ class FakeOpenClawBackend:
 
 
 def _decode_seeded_gateway_payload(compose: str) -> dict[str, Any]:
-    match = re.search(r"Buffer\.from\('([^']+)',\s*'base64'\)", compose)
+    match = re.search(
+        r"Buffer\.from\(\\?[\'\"]([^\'\"]+)\\?[\'\"],\\?[\'\"]base64\\?[\'\"]\)",
+        compose,
+    )
     assert match is not None
     return json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
+
+
+def _decode_seeded_gateway_payloads(compose: str) -> list[dict[str, Any]]:
+    matches = re.findall(
+        r"Buffer\.from\(\\?[\'\"]([^\'\"]+)\\?[\'\"],\\?[\'\"]base64\\?[\'\"]\)",
+        compose,
+    )
+    assert len(matches) >= 2
+    return [json.loads(base64.b64decode(item).decode("utf-8")) for item in matches[::2]]
+
+
+def _decode_extra_seeded_files(compose: str) -> dict[str, str]:
+    matches = re.findall(
+        r"Buffer\.from\(\\?[\'\"]([^\'\"]+)\\?[\'\"],\\?[\'\"]base64\\?[\'\"]\)",
+        compose,
+    )
+    assert len(matches) >= 2
+    payload = json.loads(base64.b64decode(matches[1]).decode("utf-8"))
+    return {
+        item["path"]: base64.b64decode(item["content"]).decode("utf-8") for item in payload
+    }
+
+
+def _service_block(compose: str, service_name: str) -> str:
+    match = re.search(
+        rf"^  {re.escape(service_name)}:\n(?P<body>(?:    .*\n)*)",
+        compose,
+        re.MULTILINE,
+    )
+    assert match is not None
+    return match.group(0)
 
 
 def test_reconcile_openclaw_plans_slot_runtime_for_openclaw_variant() -> None:
@@ -146,7 +192,7 @@ def test_reconcile_openclaw_plans_slot_runtime_for_openclaw_variant() -> None:
     assert phase.result.template_path is not None
     assert phase.result.template_path.endswith("templates/packs/openclaw.compose.yaml")
     assert phase.result.service is not None
-    assert phase.result.service.resource_name == "wizard-stack-advisor"
+    assert phase.result.service.resource_name == "wizard-stack-openclaw"
     assert phase.result.health_check is not None
     assert phase.result.health_check.passed is None
 
@@ -208,6 +254,37 @@ def test_resolve_desired_state_rejects_gateway_token_without_openclaw_pack() -> 
                 },
             )
         )
+
+
+def test_resolve_desired_state_rejects_nexa_env_without_openclaw_pack() -> None:
+    with pytest.raises(StateValidationError, match="require the 'openclaw' pack"):
+        resolve_desired_state(
+            RawEnvInput(
+                format_version=1,
+                values={
+                    "STACK_NAME": "wizard-stack",
+                    "ROOT_DOMAIN": "example.com",
+                    "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.example.com",
+                },
+            )
+        )
+
+
+def test_resolve_desired_state_allows_nexa_env_with_openclaw_pack() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.example.com",
+                "OPENCLAW_NEXA_PRESENCE_POLICY": "rooms-only",
+            },
+        )
+    )
+
+    assert "openclaw" in desired_state.enabled_packs
 
 
 def test_reconcile_my_farm_advisor_plans_runtime_independently() -> None:
@@ -326,8 +403,8 @@ def test_reconcile_openclaw_reuses_owned_service_and_requires_health() -> None:
     )
     backend = FakeOpenClawBackend(
         existing_service=OpenClawResourceRecord(
-            resource_id="advisor-service-1",
-            resource_name="wizard-stack-advisor",
+            resource_id="openclaw-service-1",
+            resource_name="wizard-stack-openclaw",
             replicas=1,
         ),
         health_ok=True,
@@ -341,7 +418,7 @@ def test_reconcile_openclaw_reuses_owned_service_and_requires_health() -> None:
             resources=(
                 OwnedResource(
                     resource_type=OPENCLAW_SERVICE_RESOURCE_TYPE,
-                    resource_id="advisor-service-1",
+                    resource_id="openclaw-service-1",
                     scope="stack:wizard-stack:openclaw",
                 ),
             ),
@@ -372,8 +449,8 @@ def test_reconcile_openclaw_updates_owned_service_when_replicas_change() -> None
     )
     backend = FakeOpenClawBackend(
         existing_service=OpenClawResourceRecord(
-            resource_id="advisor-service-1",
-            resource_name="wizard-stack-advisor",
+            resource_id="openclaw-service-1",
+            resource_name="wizard-stack-openclaw",
             replicas=1,
         ),
         health_ok=True,
@@ -387,7 +464,7 @@ def test_reconcile_openclaw_updates_owned_service_when_replicas_change() -> None
             resources=(
                 OwnedResource(
                     resource_type=OPENCLAW_SERVICE_RESOURCE_TYPE,
-                    resource_id="advisor-service-1",
+                    resource_id="openclaw-service-1",
                     scope="stack:wizard-stack:openclaw",
                 ),
             ),
@@ -398,9 +475,59 @@ def test_reconcile_openclaw_updates_owned_service_when_replicas_change() -> None
     assert phase.result.outcome == "applied"
     assert phase.result.replicas == 3
     assert phase.result.service is not None
-    assert phase.result.service.action == "update_owned"
-    assert backend.update_calls == 1
-    assert backend.last_requested_replicas == 3
+
+
+def test_modify_nexa_only_env_change_reruns_openclaw_only() -> None:
+    existing_raw = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "ENABLE_NEXTCLOUD": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0-a.example.com",
+        },
+    )
+    requested_raw = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "ENABLE_NEXTCLOUD": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0-b.example.com",
+        },
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "nextcloud",
+                "openclaw",
+                "cloudflare_access",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert "OPENCLAW_NEXA_MEM0_BASE_URL" in plan.reasons[0]
+    assert plan.start_phase == "openclaw"
+    assert plan.phases_to_run == ("openclaw",)
 
 
 def test_reconcile_openclaw_fails_closed_on_unowned_name_collision() -> None:
@@ -423,8 +550,8 @@ def test_reconcile_openclaw_fails_closed_on_unowned_name_collision() -> None:
             ownership_ledger=OwnershipLedger(format_version=1, resources=()),
             backend=FakeOpenClawBackend(
                 existing_service=OpenClawResourceRecord(
-                    resource_id="advisor-service-1",
-                    resource_name="wizard-stack-advisor",
+                    resource_id="openclaw-service-1",
+                    resource_name="wizard-stack-openclaw",
                     replicas=1,
                 )
             ),
@@ -488,13 +615,46 @@ def test_build_openclaw_ledger_persists_pack_specific_scope() -> None:
     updated = build_openclaw_ledger(
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
         stack_name="wizard-stack",
-        service_resource_id="advisor-service-1",
+        service_resource_id="openclaw-service-1",
+        nexa_sidecars_enabled=True,
     )
 
     assert updated.resources == (
         OwnedResource(
             resource_type=OPENCLAW_SERVICE_RESOURCE_TYPE,
-            resource_id="advisor-service-1",
+            resource_id="openclaw-service-1",
+            scope="stack:wizard-stack:openclaw",
+        ),
+        OwnedResource(
+            resource_type=OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
+            resource_id="stack:wizard-stack:openclaw-sidecar:mem0",
+            scope="stack:wizard-stack:openclaw-sidecar:mem0",
+        ),
+        OwnedResource(
+            resource_type=OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
+            resource_id="stack:wizard-stack:openclaw-sidecar:qdrant",
+            scope="stack:wizard-stack:openclaw-sidecar:qdrant",
+        ),
+        OwnedResource(
+            resource_type=OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
+            resource_id="stack:wizard-stack:openclaw-sidecar:nexa-runtime",
+            scope="stack:wizard-stack:openclaw-sidecar:nexa-runtime",
+        ),
+    )
+
+
+def test_build_openclaw_ledger_omits_nexa_sidecars_when_nexa_is_disabled() -> None:
+    updated = build_openclaw_ledger(
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        stack_name="wizard-stack",
+        service_resource_id="openclaw-service-1",
+        nexa_sidecars_enabled=False,
+    )
+
+    assert updated.resources == (
+        OwnedResource(
+            resource_type=OPENCLAW_SERVICE_RESOURCE_TYPE,
+            resource_id="openclaw-service-1",
             scope="stack:wizard-stack:openclaw",
         ),
     )
@@ -564,7 +724,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
         api_url="https://dokploy.example.com/api",
         api_key="key-123",
         stack_name="wizard-stack",
-        trusted_proxy_emails=("admin@example.com",),
+        openclaw_gateway_password="openclaw-ui-generated",
         model_provider="anthropic",
         model_name="claude-3-7-sonnet",
         trusted_proxies="10.0.0.0/8,172.16.0.0/12",
@@ -573,7 +733,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
     )
 
     record = backend.create_service(
-        resource_name="wizard-stack-advisor",
+        resource_name="wizard-stack-openclaw",
         hostname="openclaw.example.com",
         template_path=None,
         variant="openclaw",
@@ -584,7 +744,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
 
     compose = api.last_create_compose_file
     assert compose is not None
-    assert record.resource_name == "wizard-stack-advisor"
+    assert record.resource_name == "wizard-stack-openclaw"
     assert record.resource_id == "dokploy-compose:compose-1:openclaw:replicas:2"
     assert "image: ghcr.io/openclaw/openclaw:latest" in compose
     assert "exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" in compose
@@ -594,21 +754,59 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
     assert 'NVIDIA_VISIBLE_DEVICES: "GPU-0"' in compose
     assert "OPENCLAW_GATEWAY_TOKEN:" not in compose
     seeded = _decode_seeded_gateway_payload(compose)
-    assert seeded["gateway"]["auth"]["mode"] == "trusted-proxy"
-    assert seeded["gateway"]["auth"]["trustedProxy"]["userHeader"] == (
-        "cf-access-authenticated-user-email"
-    )
-    assert seeded["gateway"]["auth"]["trustedProxy"]["requiredHeaders"] == [
-        "cf-access-jwt-assertion"
-    ]
-    assert seeded["gateway"]["auth"]["trustedProxy"]["allowUsers"] == ["admin@example.com"]
+    assert seeded["gateway"]["auth"]["mode"] == "token"
     assert seeded["gateway"]["trustedProxies"] == ["10.0.0.0/8", "172.16.0.0/12"]
-    assert "agents" not in seeded
-    assert 'traefik.http.services.wizard-stack-advisor.loadbalancer.server.port: "18789"' in compose
+    assert seeded["gateway"]["controlUi"]["allowInsecureAuth"] is True
+    assert seeded["discovery"] == {"mdns": {"mode": "off"}}
+    assert seeded["meta"] == {"lastTouchedVersion": "dokploy-wizard"}
+    assert seeded["tools"] == {
+        "profile": "coding",
+        "elevated": {
+            "enabled": True,
+            "allowFrom": {
+                "webchat": ["clayton@superiorbyteworks.com"],
+                "telegram": [],
+                "nextcloud-talk": ["clayton@superiorbyteworks.com", "nexa-agent"],
+            },
+        },
+    }
+    assert seeded["agents"]["list"] == [
+        {"id": "main", "default": True},
+        {
+            "id": "telly",
+            "name": "Telly",
+            "model": {
+                "primary": "local/unsloth-active",
+                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+            },
+            "tools": {
+                "profile": "coding",
+                "elevated": {
+                    "enabled": True,
+                    "allowFrom": {
+                        "telegram": [],
+                        "webchat": ["clayton@superiorbyteworks.com"],
+                    },
+                },
+            },
+        },
+    ]
+    assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
+    assert seeded["agents"]["defaults"] == {
+        "elevatedDefault": "off",
+        "timeoutSeconds": 300,
+        "workspace": "/home/node/.openclaw/workspace",
+    }
     assert (
-        'traefik.http.routers.wizard-stack-advisor.rule: "Host(`openclaw.example.com`)"' in compose
+        'traefik.http.services.wizard-stack-openclaw.loadbalancer.server.port: "18789"' in compose
     )
+    assert (
+        'traefik.http.routers.wizard-stack-openclaw.rule: "Host(`openclaw.example.com`)"' in compose
+    )
+    assert "wizard-stack-openclaw-data:/home/node/.openclaw" in compose
+    assert "  wizard-stack-openclaw-data:" in compose
     assert "replicas: 2" in compose
+    assert 'OPENCLAW_DISABLE_BONJOUR: "1"' in compose
 
 
 def test_dokploy_openclaw_backend_keeps_token_mode_without_access_emails() -> None:
@@ -618,11 +816,12 @@ def test_dokploy_openclaw_backend_keeps_token_mode_without_access_emails() -> No
         api_key="key-123",
         stack_name="wizard-stack",
         gateway_token="fixed-token-123",
+        openclaw_gateway_password="openclaw-ui-generated",
         client=api,
     )
 
     backend.create_service(
-        resource_name="wizard-stack-advisor",
+        resource_name="wizard-stack-openclaw",
         hostname="openclaw.example.com",
         template_path=None,
         variant="openclaw",
@@ -636,7 +835,58 @@ def test_dokploy_openclaw_backend_keeps_token_mode_without_access_emails() -> No
     assert 'OPENCLAW_GATEWAY_TOKEN: "fixed-token-123"' in compose
     seeded = _decode_seeded_gateway_payload(compose)
     assert seeded["gateway"]["auth"]["mode"] == "token"
+    assert seeded["gateway"]["remote"]["token"] == "fixed-token-123"
+    assert seeded["gateway"]["controlUi"]["allowInsecureAuth"] is True
+    assert seeded["discovery"] == {"mdns": {"mode": "off"}}
+    assert seeded["tools"] == {
+        "profile": "coding",
+        "elevated": {
+            "enabled": True,
+            "allowFrom": {
+                "webchat": ["clayton@superiorbyteworks.com"],
+                "telegram": [],
+                "nextcloud-talk": ["clayton@superiorbyteworks.com", "nexa-agent"],
+            },
+        },
+    }
     assert "payload.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;" in compose
+
+
+def test_dokploy_openclaw_backend_uses_trusted_proxy_mode_for_single_gateway_when_access_emails_present() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        trusted_proxy_emails=("admin@example.com",),
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    assert 'OPENCLAW_GATEWAY_TOKEN: "fixed-token-123"' not in compose
+    seeded = _decode_seeded_gateway_payload(compose)
+    assert seeded["gateway"]["mode"] == "local"
+    assert seeded["gateway"]["auth"] == {
+        "mode": "trusted-proxy",
+        "trustedProxy": {
+            "userHeader": "cf-access-authenticated-user-email",
+            "allowUsers": ["admin@example.com"],
+        },
+    }
+    assert "remote" not in seeded["gateway"]
+    assert "payload.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;" not in compose
 
 
 def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys() -> None:
@@ -659,7 +909,7 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
     )
 
     backend.create_service(
-        resource_name="wizard-stack-advisor",
+        resource_name="wizard-stack-openclaw",
         hostname="openclaw.example.com",
         template_path=None,
         variant="openclaw",
@@ -682,7 +932,30 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
         "openrouter/openrouter/free",
         "openrouter/google/gemma-4-31b-it:free",
     ]
+    assert seeded["agents"]["list"] == [
+        {"id": "main", "default": True},
+        {
+            "id": "telly",
+            "name": "Telly",
+            "model": {
+                "primary": "local/unsloth-active",
+                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+            },
+            "tools": {
+                "profile": "coding",
+                "elevated": {
+                    "enabled": True,
+                    "allowFrom": {
+                        "telegram": ["123456789"],
+                        "webchat": ["clayton@superiorbyteworks.com"],
+                    },
+                },
+            },
+        },
+    ]
+    assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert seeded["agents"]["defaults"]["models"] == {
+        "local/unsloth-active": {},
         "nvidia/moonshotai/kimi-k2.5": {},
         "openrouter/openrouter/free": {},
         "openrouter/google/gemma-4-31b-it:free": {},
@@ -693,6 +966,326 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
         "allowFrom": ["123456789"],
         "execApprovals": {"enabled": False},
     }
+
+
+def test_dokploy_openclaw_backend_renders_split_public_and_internal_gateways() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        openclaw_internal_hostname="openclaw-internal.example.com",
+        trusted_proxy_emails=("admin@example.com",),
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    assert "  wizard-stack-openclaw:\n" in compose
+    assert "  wizard-stack-openclaw-public:\n" in compose
+    internal_block = _service_block(compose, "wizard-stack-openclaw")
+    public_block = _service_block(compose, "wizard-stack-openclaw-public")
+    assert "traefik.enable" not in internal_block
+    assert 'OPENCLAW_CONFIG_PATH: "/home/node/.openclaw/openclaw.json"' in internal_block
+    assert 'OPENCLAW_CONFIG_PATH: "/home/node/.openclaw-public/openclaw.json"' in public_block
+    assert 'OPENCLAW_STATE_DIR: "/home/node/.openclaw-public"' in public_block
+    assert "wizard-stack-openclaw-public-data:/home/node/.openclaw-public" in compose
+    assert "      - wizard-stack-openclaw" in public_block
+    assert 'traefik.http.routers.wizard-stack-openclaw-public.rule: "Host(`openclaw.example.com`)"' in compose
+
+    payloads = _decode_seeded_gateway_payloads(compose)
+    assert len(payloads) == 2
+    internal_payload, public_payload = payloads
+    assert internal_payload["gateway"]["mode"] == "local"
+    assert internal_payload["gateway"]["auth"]["mode"] == "token"
+    assert internal_payload["agents"]["defaults"]["workspace"] == "/home/node/.openclaw/workspace"
+    assert public_payload["gateway"]["mode"] == "remote"
+    assert public_payload["gateway"]["auth"]["mode"] == "trusted-proxy"
+    assert public_payload["gateway"]["auth"]["trustedProxy"] == {
+        "userHeader": "cf-access-authenticated-user-email",
+        "allowUsers": ["admin@example.com"],
+    }
+    assert public_payload["gateway"]["remote"] == {
+        "url": "ws://wizard-stack-openclaw:18789",
+        "token": "fixed-token-123",
+    }
+    assert internal_payload["discovery"] == {"mdns": {"mode": "off"}}
+    assert public_payload["discovery"] == {"mdns": {"mode": "off"}}
+    assert public_payload["agents"]["defaults"]["workspace"] == "/home/node/.openclaw-public/workspace"
+    assert "tools" not in public_payload
+
+
+def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surface() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        openclaw_nexa_env={
+            "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
+            "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
+            "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
+            "OPENCLAW_NEXA_MEM0_LLM_BASE_URL": "https://integrate.api.nvidia.com/v1",
+            "OPENCLAW_NEXA_MEM0_LLM_API_KEY": "nvidia-api-key",
+            "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY": "qdrant-api-key",
+            "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL": "https://nextcloud.example.com",
+            "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET": "office-shared-secret",
+            "OPENCLAW_NEXA_TALK_SHARED_SECRET": "talk-shared-secret",
+            "OPENCLAW_NEXA_TALK_SIGNING_SECRET": "talk-signing-secret",
+            "OPENCLAW_NEXA_PRESENCE_POLICY": "rooms-only",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD": "webdav-app-password",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_USER": "nexa-agent",
+        },
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    assert 'OPENCLAW_NEXA_DEPLOYMENT_MODE: "sidecar"' in compose
+    assert 'OPENCLAW_NEXA_MEM0_BASE_URL: "http://mem0:8000"' in compose
+    assert 'OPENCLAW_NEXA_MEM0_VECTOR_BACKEND: "qdrant"' in compose
+    assert 'OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL: "http://qdrant:6333"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_ENABLED: "true"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_MEM0_MODE: "rest"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_CREDENTIAL_MEDIATION_MODE: "server-owned-env"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_ROOT: "/home/node/.openclaw/workspace/nexa"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT: "/mnt/openclaw/workspace/nexa"' in compose
+    assert "  mem0:\n" in compose
+    assert "  qdrant:\n" in compose
+    assert "  nexa-runtime:\n" in compose
+    assert "wizard-stack-openclaw-qdrant-data:/qdrant/storage" in compose
+    assert "wizard-stack-openclaw-mem0-history:/app/history" in compose
+    assert "wizard-stack-openclaw-data:/mnt/openclaw" in compose
+    assert "traefik.http.routers.mem0" not in compose
+    assert "traefik.http.routers.qdrant" not in compose
+    assert "traefik.http.routers.nexa-runtime" not in compose
+    assert "ports:" not in compose
+
+    mem0_block = _service_block(compose, "mem0")
+    qdrant_block = _service_block(compose, "qdrant")
+    runtime_block = _service_block(compose, "nexa-runtime")
+    assert "dokploy-network" not in mem0_block
+    assert "dokploy-network" not in qdrant_block
+    assert "dokploy-network" not in runtime_block
+    assert "wizard-stack-shared" not in mem0_block
+    assert "wizard-stack-shared" not in qdrant_block
+    assert "wizard-stack-shared" in runtime_block
+    assert "      - default" in mem0_block
+    assert "      - default" in qdrant_block
+    assert "      - default" in runtime_block
+    assert 'image: local/dokploy-wizard-nexa-mem0:latest' in mem0_block
+    assert "build:" not in mem0_block
+    assert "labels:" not in runtime_block
+    assert "expose:" not in runtime_block
+    assert 'image: local/dokploy-wizard-nexa-runtime:latest' in runtime_block
+    assert "build:" not in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH: "/mnt/openclaw/.nexa/runtime-contract.json"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH: "/mnt/openclaw/workspace/nexa/contract.json"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_STATE_DIR: "/mnt/openclaw/.nexa/state"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_WORKER_MODE: "queue"' in runtime_block
+    assert 'DOKPLOY_WIZARD_OPENCLAW_INTERNAL_URL: "http://wizard-stack-openclaw:18789"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL: "local/unsloth-active"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL_PROVIDER: "local"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL: "http://tuxdesktop.tailb12aa5.ts.net:61434/v1"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY: "sk-no-key-required"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL: "https://integrate.api.nvidia.com/v1"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL: "https://openrouter.ai/api/v1"' in runtime_block
+    assert 'OPENCLAW_NEXA_NEXTCLOUD_BASE_URL: "http://wizard-stack-nextcloud"' in runtime_block
+    assert 'OPENCLAW_NEXA_MEM0_BASE_URL: "http://mem0:8000"' in runtime_block
+    assert 'OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL: "http://qdrant:6333"' in runtime_block
+    assert 'OPENCLAW_NEXA_MEM0_API_KEY: "mem0-api-key"' in runtime_block
+    assert 'OPENCLAW_NEXA_MEM0_VECTOR_API_KEY: "qdrant-api-key"' in runtime_block
+    assert "      - wizard-stack-openclaw" in runtime_block
+    assert "      - mem0" in runtime_block
+    assert "      - qdrant" in runtime_block
+
+    seeded = _decode_seeded_gateway_payload(compose)
+    assert "wizard" not in seeded
+    assert seeded["tools"] == {
+        "profile": "coding",
+        "elevated": {
+            "enabled": True,
+            "allowFrom": {
+                "webchat": ["clayton@superiorbyteworks.com"],
+                "telegram": [],
+                "nextcloud-talk": ["clayton@superiorbyteworks.com", "nexa-agent"],
+            },
+        },
+    }
+    assert seeded["agents"]["list"] == [
+        {"id": "main", "default": True},
+        {
+            "id": "nexa",
+            "name": "Nexa",
+            "model": {
+                "primary": "openrouter/auto",
+                "fallbacks": ["openrouter/openrouter/free"],
+            },
+            "tools": {
+                "profile": "coding",
+                "elevated": {
+                    "enabled": True,
+                    "allowFrom": {
+                        "nextcloud-talk": ["clayton@superiorbyteworks.com", "nexa-agent"],
+                        "webchat": ["clayton@superiorbyteworks.com"],
+                    },
+                },
+            },
+        },
+        {
+            "id": "telly",
+            "name": "Telly",
+            "model": {
+                "primary": "local/unsloth-active",
+                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+            },
+            "tools": {
+                "profile": "coding",
+                "elevated": {
+                    "enabled": True,
+                    "allowFrom": {
+                        "telegram": [],
+                        "webchat": ["clayton@superiorbyteworks.com"],
+                    },
+                },
+            },
+        },
+    ]
+    assert seeded["bindings"] == [
+        {"agentId": "nexa", "match": {"channel": "nextcloud-talk"}},
+        {"agentId": "telly", "match": {"channel": "telegram"}},
+    ]
+
+    extra_files = _decode_extra_seeded_files(compose)
+    assert "/home/node/.openclaw/workspace/SOUL.md" in extra_files
+    assert "/home/node/.openclaw/workspace/AGENTS.md" in extra_files
+    assert "/home/node/.openclaw/workspace/TOOLS.md" in extra_files
+    assert "/home/node/.openclaw/workspace/MCPS.md" in extra_files
+    assert "/home/node/.openclaw/workspace/SKILLS.md" in extra_files
+    assert "/home/node/.openclaw/workspace-telly/IDENTITY.md" in extra_files
+    assert "/home/node/.openclaw/workspace-telly/TOOLS.md" in extra_files
+    assert "/home/node/.openclaw/workspace-telly/MCPS.md" in extra_files
+    assert "/home/node/.openclaw/workspace-telly/SKILLS.md" in extra_files
+    assert "/home/node/.openclaw/.nexa/runtime-contract.json" in extra_files
+    assert "/home/node/.openclaw/workspace/nexa/contract.json" in extra_files
+    assert "/home/node/.openclaw/workspace/nexa/README.md" in extra_files
+    assert "Telegram-facing OpenClaw agent" in extra_files["/home/node/.openclaw/workspace-telly/IDENTITY.md"]
+    assert "real tools" in extra_files["/home/node/.openclaw/workspace/TOOLS.md"]
+    assert "Context7" in extra_files["/home/node/.openclaw/workspace/MCPS.md"]
+    assert "Qdrant" in extra_files["/home/node/.openclaw/workspace-telly/MCPS.md"]
+    assert "Qdrant skills" in extra_files["/home/node/.openclaw/workspace/SKILLS.md"]
+    assert "shell/file tools" in extra_files["/home/node/.openclaw/workspace-telly/SKILLS.md"]
+    workspace_contract = json.loads(extra_files["/home/node/.openclaw/workspace/nexa/contract.json"])
+    assert workspace_contract["surface"] == "operator-user-visible"
+    assert workspace_contract["authoritative_runtime_state"] == "server-owned env + durable state JSON"
+    assert workspace_contract["visible_root"] == "/mnt/openclaw/workspace/nexa"
+    assert "mem0-api-key" not in extra_files["/home/node/.openclaw/workspace/nexa/contract.json"]
+    assert "nvidia-api-key" not in extra_files["/home/node/.openclaw/workspace/nexa/contract.json"]
+    runtime_contract = json.loads(extra_files["/home/node/.openclaw/.nexa/runtime-contract.json"])
+    assert runtime_contract["nexa"]["deployment_mode"] == "sidecar"
+    assert runtime_contract["topology"] == {
+        "mode": "internal-compose-sidecars",
+        "internal_network_only": True,
+        "runtime_state_dir": "/mnt/openclaw/.nexa/state",
+        "services": {"runtime": "nexa-runtime", "mem0": "mem0", "qdrant": "qdrant"},
+    }
+    assert runtime_contract["credential_mediation"]["secret_env"]["OPENCLAW_NEXA_MEM0_API_KEY"] == {
+        "present": True,
+        "source": "server-owned-env",
+    }
+    assert runtime_contract["credential_mediation"]["server_owned_runtime_inputs"] == {
+        "nextcloud_base_url": {"present": True, "source": "server-owned-env"},
+        "webdav_auth_user": {"present": True, "source": "server-owned-env"},
+        "agent_user_id": {"present": True, "source": "server-owned-env"},
+        "agent_display_name": {"present": True, "source": "server-owned-env"},
+    }
+    assert runtime_contract["nextcloud"]["base_url"] == "http://wizard-stack-nextcloud"
+    assert runtime_contract["nextcloud"]["webdav"] == {
+        "auth_user_present": True,
+        "auth_password_present": True,
+        "source": "server-owned-env",
+    }
+    assert runtime_contract["agent_identity"] == {
+        "user_id_present": True,
+        "display_name_present": True,
+        "source": "server-owned-env",
+    }
+    assert runtime_contract["mem0"]["base_url"] == "http://mem0:8000"
+    assert runtime_contract["mem0"]["service_name"] == "mem0"
+    assert runtime_contract["mem0"]["vector_base_url"] == "http://qdrant:6333"
+    assert runtime_contract["mem0"]["vector_service_name"] == "qdrant"
+    assert runtime_contract["mem0"]["require_private_network"] is True
+    assert runtime_contract["mem0"]["require_api_key_auth"] is True
+
+
+def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without_bot_token() -> (
+    None
+):
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    seeded = _decode_seeded_gateway_payload(compose)
+    assert seeded["agents"]["list"] == [
+        {"id": "main", "default": True},
+        {
+            "id": "telly",
+            "name": "Telly",
+            "model": {
+                "primary": "local/unsloth-active",
+                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+            },
+            "tools": {
+                "profile": "coding",
+                "elevated": {
+                    "enabled": True,
+                    "allowFrom": {
+                        "telegram": [],
+                        "webchat": ["clayton@superiorbyteworks.com"],
+                    },
+                },
+            },
+        },
+    ]
+    assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
+    assert "channels" not in seeded or "telegram" not in seeded.get("channels", {})
 
 
 def test_dokploy_openclaw_backend_renders_my_farm_variant_with_same_backend_path() -> None:
@@ -769,7 +1362,7 @@ def test_dokploy_openclaw_backend_accepts_legacy_advisor_service_resource_id() -
         composes=(
             DokployComposeSummary(
                 compose_id="YEGn1TjLLuRP7rPLSh22y",
-                name="openmerge-advisor",
+                name="openmerge-openclaw",
                 status="done",
             ),
         ),
@@ -790,7 +1383,7 @@ def test_dokploy_openclaw_backend_accepts_legacy_advisor_service_resource_id() -
 
     assert record is not None
     assert record.resource_id == "dokploy-compose:YEGn1TjLLuRP7rPLSh22y:advisor-service"
-    assert record.resource_name == "openmerge-advisor"
+    assert record.resource_name == "openmerge-openclaw"
     assert record.replicas == 1
 
 
@@ -813,6 +1406,308 @@ def test_control_ui_origin_ready_requires_public_origin_in_seeded_config(
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw.subprocess.run", fake_run)
 
     assert (
-        _control_ui_origin_ready("wizard-stack-advisor", "https://openclaw.example.com/health")
+        _control_ui_origin_ready("wizard-stack-openclaw", "https://openclaw.example.com/health")
         is True
     )
+
+
+def test_openclaw_local_https_health_check_accepts_real_2xx_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self) -> _FakeResponse:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            del exc_type, exc, tb
+
+    class _FakeOpener:
+        def open(self, req: Any, timeout: int) -> _FakeResponse:
+            captured["url"] = req.full_url
+            captured["host"] = req.get_header("Host")
+            captured["timeout"] = timeout
+            return _FakeResponse()
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw.request.build_opener",
+        lambda *handlers: _FakeOpener(),
+    )
+
+    assert _local_https_health_check("https://openclaw.example.com/health") is True
+    assert captured == {
+        "url": "https://127.0.0.1/health",
+        "host": "openclaw.example.com",
+        "timeout": 15,
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    ((302, "Found"), (403, "Forbidden")),
+)
+def test_openclaw_local_https_health_check_rejects_access_redirects_and_denials(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    reason: str,
+) -> None:
+    class _FakeOpener:
+        def open(self, req: Any, timeout: int) -> Any:
+            del timeout
+            raise error.HTTPError(req.full_url, status, reason, hdrs=Message(), fp=None)
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw.request.build_opener",
+        lambda *handlers: _FakeOpener(),
+    )
+
+    assert _local_https_health_check("https://openclaw.example.com/health") is False
+
+
+def test_dokploy_openclaw_backend_health_fails_when_service_container_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=FakeDokployOpenClawApi(),
+    )
+    local_probe_calls = 0
+
+    def _unexpected_local_probe(url: str) -> bool:
+        del url
+        nonlocal local_probe_calls
+        local_probe_calls += 1
+        return True
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda service_name: False
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._local_https_health_check", _unexpected_local_probe
+    )
+
+    ok = backend.check_health(
+        service=OpenClawResourceRecord(
+            resource_id="openclaw-service-1",
+            resource_name="wizard-stack-openclaw",
+            replicas=1,
+        ),
+        url="https://openclaw.example.com/health",
+    )
+
+    assert ok is False
+    assert local_probe_calls == 0
+
+
+def test_check_health_requires_running_container_even_if_https_probe_would_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=FakeDokployOpenClawApi(),
+    )
+    service = OpenClawResourceRecord(
+        resource_id="dokploy-compose:cmp-1:openclaw:replicas:1",
+        resource_name="wizard-stack-openclaw",
+        replicas=1,
+    )
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda _: False)
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._local_https_health_check", lambda _: True
+    )
+
+    assert backend.check_health(service=service, url="https://openclaw.example.com/health") is False
+
+
+def test_local_https_health_check_rejects_cloudflare_access_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeOpener:
+        def open(self, req: object, timeout: int) -> object:
+            del req, timeout
+            raise error.HTTPError(
+                url="https://127.0.0.1/health",
+                code=403,
+                msg="Forbidden",
+                hdrs=Message(),
+                fp=None,
+            )
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw.request.build_opener",
+        lambda *args: FakeOpener(),
+    )
+
+    assert _local_https_health_check("https://openclaw.example.com/health") is False
+
+
+def test_local_https_health_check_rejects_cloudflare_access_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeOpener:
+        def open(self, req: object, timeout: int) -> object:
+            del req, timeout
+            raise error.HTTPError(
+                url="https://127.0.0.1/health",
+                code=302,
+                msg="Found",
+                hdrs=Message(),
+                fp=None,
+            )
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw.request.build_opener",
+        lambda *args: FakeOpener(),
+    )
+
+    assert _local_https_health_check("https://openclaw.example.com/health") is False
+
+
+def test_wait_for_local_https_health_retries_until_probe_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+    sleep_calls: list[float] = []
+
+    def fake_probe(url: str) -> bool:
+        attempts.append(url)
+        return len(attempts) >= 3
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._local_https_health_check", fake_probe)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw.time.sleep", sleep_calls.append)
+
+    assert _wait_for_local_https_health(
+        "https://openclaw.example.com/health", attempts=4, delay_seconds=0.25
+    ) is True
+    assert attempts == [
+        "https://openclaw.example.com/health",
+        "https://openclaw.example.com/health",
+        "https://openclaw.example.com/health",
+    ]
+    assert sleep_calls == [0.25, 0.25]
+
+
+def test_wait_for_local_https_health_hard_fails_after_last_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+    sleep_calls: list[float] = []
+
+    def fake_probe(url: str) -> bool:
+        attempts.append(url)
+        return False
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._local_https_health_check", fake_probe)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw.time.sleep", sleep_calls.append)
+
+    assert _wait_for_local_https_health(
+        "https://openclaw.example.com/health", attempts=3, delay_seconds=0.5
+    ) is False
+    assert attempts == [
+        "https://openclaw.example.com/health",
+        "https://openclaw.example.com/health",
+        "https://openclaw.example.com/health",
+    ]
+    assert sleep_calls == [0.5, 0.5]
+
+
+def test_check_health_succeeds_when_container_is_running_and_https_probe_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=FakeDokployOpenClawApi(),
+    )
+    service = OpenClawResourceRecord(
+        resource_id="dokploy-compose:cmp-1:openclaw:replicas:1",
+        resource_name="wizard-stack-openclaw",
+        replicas=1,
+    )
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda _: True)
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda _: True
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", lambda *_: True
+    )
+
+    assert backend.check_health(service=service, url="https://openclaw.example.com/health") is True
+
+
+def test_check_health_waits_for_local_https_readiness_before_control_ui_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=FakeDokployOpenClawApi(),
+    )
+    service = OpenClawResourceRecord(
+        resource_id="dokploy-compose:cmp-1:openclaw:replicas:1",
+        resource_name="wizard-stack-openclaw",
+        replicas=1,
+    )
+    calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda _: True)
+
+    def fake_wait(url: str) -> bool:
+        calls.append(("wait", url))
+        return True
+
+    def fake_control(service_name: str, url: str) -> bool:
+        calls.append((service_name, url))
+        return True
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", fake_wait)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", fake_control)
+
+    assert backend.check_health(service=service, url="https://openclaw.example.com/health") is True
+    assert calls == [
+        ("wait", "https://openclaw.example.com/health"),
+        ("wizard-stack-openclaw", "https://openclaw.example.com/health"),
+    ]
+
+
+def test_check_health_fails_when_local_https_never_becomes_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=FakeDokployOpenClawApi(),
+    )
+    service = OpenClawResourceRecord(
+        resource_id="dokploy-compose:cmp-1:openclaw:replicas:1",
+        resource_name="wizard-stack-openclaw",
+        replicas=1,
+    )
+    control_calls = 0
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda _: True)
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda _: False
+    )
+
+    def unexpected_control(*_: object) -> bool:
+        nonlocal control_calls
+        control_calls += 1
+        return True
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", unexpected_control)
+
+    assert backend.check_health(service=service, url="https://openclaw.example.com/health") is False
+    assert control_calls == 0

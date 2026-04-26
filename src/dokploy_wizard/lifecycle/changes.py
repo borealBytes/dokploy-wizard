@@ -11,6 +11,7 @@ from dokploy_wizard.packs.catalog import (
 from dokploy_wizard.state.models import (
     AppliedStateCheckpoint,
     DesiredState,
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
@@ -19,17 +20,19 @@ from dokploy_wizard.state.models import (
 PHASE_ORDER: tuple[str, ...] = (
     "preflight",
     "dokploy_bootstrap",
-    "tailscale",
     "networking",
-    "cloudflare_access",
     "shared_core",
+    "seaweedfs",
     "headscale",
+    "tailscale",
     "matrix",
     "nextcloud",
-    "seaweedfs",
+    "moodle",
+    "docuseal",
     "coder",
     "openclaw",
     "my-farm-advisor",
+    "cloudflare_access",
 )
 
 _SUPPORTED_AUTH_KEYS = {
@@ -57,9 +60,12 @@ _SUPPORTED_HOSTNAME_KEYS = {
     "MATRIX_SUBDOMAIN",
     "NEXTCLOUD_SUBDOMAIN",
     "ONLYOFFICE_SUBDOMAIN",
+    "MOODLE_SUBDOMAIN",
+    "DOCUSEAL_SUBDOMAIN",
     "CODER_SUBDOMAIN",
     "CODER_WILDCARD_SUBDOMAIN",
     "OPENCLAW_SUBDOMAIN",
+    "OPENCLAW_INTERNAL_SUBDOMAIN",
     "MY_FARM_ADVISOR_SUBDOMAIN",
 }
 _SUPPORTED_ENABLEMENT_KEYS = {
@@ -67,6 +73,8 @@ _SUPPORTED_ENABLEMENT_KEYS = {
     "ENABLE_HEADSCALE",
     "ENABLE_MATRIX",
     "ENABLE_NEXTCLOUD",
+    "ENABLE_MOODLE",
+    "ENABLE_DOCUSEAL",
     "ENABLE_CODER",
     "ENABLE_OPENCLAW",
     "ENABLE_MY_FARM_ADVISOR",
@@ -104,27 +112,60 @@ _HOSTNAME_PHASES = {
     "matrix": ("networking", "matrix"),
     "nextcloud": ("networking", "nextcloud"),
     "onlyoffice": ("networking", "nextcloud"),
+    "moodle": ("networking", "moodle"),
+    "docuseal": ("networking", "docuseal"),
     "s3": ("networking", "seaweedfs"),
     "coder": ("networking", "coder"),
     "coder-wildcard": ("networking", "coder"),
     "openclaw": ("networking", "openclaw"),
+    "openclaw-internal": ("openclaw",),
     "my-farm-advisor": ("networking", "my-farm-advisor"),
 }
 _OPTIONAL_PHASE_PACKS = {
     "matrix": "matrix",
     "nextcloud": "nextcloud",
+    "moodle": "moodle",
+    "docuseal": "docuseal",
     "seaweedfs": "seaweedfs",
     "coder": "coder",
     "openclaw": "openclaw",
     "my-farm-advisor": "my-farm-advisor",
 }
 _OPENCLAW_RUNTIME_ENV_KEYS = {
+    "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL",
+    "OPENCLAW_NEXA_TALK_SHARED_SECRET",
+    "OPENCLAW_NEXA_TALK_SIGNING_SECRET",
+    "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET",
+    "OPENCLAW_NEXA_EDITOR_EVENTS_SHARED_SECRET",
+    "OPENCLAW_NEXA_WEBDAV_AUTH_USER",
+    "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD",
+    "OPENCLAW_NEXA_AGENT_USER_ID",
+    "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
+    "OPENCLAW_NEXA_AGENT_PASSWORD",
+    "OPENCLAW_NEXA_AGENT_EMAIL",
+    "OPENCLAW_NEXA_MEM0_BASE_URL",
+    "OPENCLAW_NEXA_MEM0_API_KEY",
+    "OPENCLAW_NEXA_MEM0_LLM_BASE_URL",
+    "OPENCLAW_NEXA_MEM0_LLM_API_KEY",
+    "OPENCLAW_NEXA_MEM0_EMBEDDER_MODEL",
+    "OPENCLAW_NEXA_MEM0_EMBEDDER_DIMENSIONS",
+    "OPENCLAW_NEXA_MEM0_VECTOR_BACKEND",
+    "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL",
+    "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY",
+    "OPENCLAW_NEXA_MEM0_VECTOR_DIMENSIONS",
+    "OPENCLAW_NEXA_PRESENCE_POLICY",
     "OPENCLAW_OPENROUTER_API_KEY",
     "OPENCLAW_NVIDIA_API_KEY",
     "OPENCLAW_PRIMARY_MODEL",
     "OPENCLAW_FALLBACK_MODELS",
     "OPENCLAW_TELEGRAM_BOT_TOKEN",
     "OPENCLAW_TELEGRAM_OWNER_USER_ID",
+}
+_NEXTCLOUD_NEXA_USER_ENV_KEYS = {
+    "OPENCLAW_NEXA_AGENT_USER_ID",
+    "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
+    "OPENCLAW_NEXA_AGENT_PASSWORD",
+    "OPENCLAW_NEXA_AGENT_EMAIL",
 }
 _MY_FARM_RUNTIME_ENV_KEYS = {
     "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
@@ -134,7 +175,17 @@ _MY_FARM_RUNTIME_ENV_KEYS = {
     "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
     "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
 }
+_OUTBOUND_MAIL_ENV_KEYS = {
+    "OUTBOUND_SMTP_HOSTNAME",
+    "OUTBOUND_SMTP_FROM_ADDRESS",
+}
 
+_SUPPORTED_MODIFY_KEYS |= (
+    _OPENCLAW_RUNTIME_ENV_KEYS
+    | _NEXTCLOUD_NEXA_USER_ENV_KEYS
+    | _MY_FARM_RUNTIME_ENV_KEYS
+    | _OUTBOUND_MAIL_ENV_KEYS
+)
 
 @dataclass(frozen=True)
 class LifecyclePlan:
@@ -150,29 +201,35 @@ class LifecyclePlan:
 
 
 def applicable_phases_for(desired_state: DesiredState) -> tuple[str, ...]:
-    phases = [
+    phases = {
         "preflight",
         "dokploy_bootstrap",
-    ]
-    if desired_state.enable_tailscale:
-        phases.append("tailscale")
-    phases.append("networking")
-    if _access_enabled(desired_state):
-        phases.append("cloudflare_access")
-    phases.extend(["shared_core", "headscale"])
-    if "matrix" in desired_state.enabled_packs:
-        phases.append("matrix")
-    if "nextcloud" in desired_state.enabled_packs:
-        phases.append("nextcloud")
+        "networking",
+        "shared_core",
+    }
     if "seaweedfs" in desired_state.enabled_packs:
-        phases.append("seaweedfs")
+        phases.add("seaweedfs")
+    if "headscale" in desired_state.selected_packs:
+        phases.add("headscale")
+    if desired_state.enable_tailscale:
+        phases.add("tailscale")
+    if "matrix" in desired_state.enabled_packs:
+        phases.add("matrix")
+    if "nextcloud" in desired_state.enabled_packs:
+        phases.add("nextcloud")
+    if "moodle" in desired_state.enabled_packs:
+        phases.add("moodle")
+    if "docuseal" in desired_state.enabled_packs:
+        phases.add("docuseal")
     if "coder" in desired_state.enabled_packs:
-        phases.append("coder")
+        phases.add("coder")
     if "openclaw" in desired_state.enabled_packs:
-        phases.append("openclaw")
+        phases.add("openclaw")
     if "my-farm-advisor" in desired_state.enabled_packs:
-        phases.append("my-farm-advisor")
-    return tuple(phases)
+        phases.add("my-farm-advisor")
+    if _access_enabled(desired_state):
+        phases.add("cloudflare_access")
+    return tuple(phase for phase in PHASE_ORDER if phase in phases)
 
 
 def validate_completed_steps(
@@ -185,6 +242,21 @@ def validate_completed_steps(
             f"Expected prefix {list(expected_prefix)}, found {list(completed_steps)}."
         )
         raise StateValidationError(msg)
+
+
+def validate_checkpoint_contract(
+    applied_state: AppliedStateCheckpoint, applicable_phases: tuple[str, ...]
+) -> None:
+    if applied_state.lifecycle_checkpoint_contract_version != LIFECYCLE_CHECKPOINT_CONTRACT_VERSION:
+        msg = (
+            "Applied checkpoint uses lifecycle checkpoint contract version "
+            f"{applied_state.lifecycle_checkpoint_contract_version}, but the current "
+            f"contract version is {LIFECYCLE_CHECKPOINT_CONTRACT_VERSION}. "
+            "Only empty install scaffolds can be restarted across contract versions; "
+            "existing non-empty checkpoints must not be resumed or modified under the new order."
+        )
+        raise StateValidationError(msg)
+    validate_completed_steps(applied_state.completed_steps, applicable_phases)
 
 
 def classify_install_request(
@@ -224,7 +296,7 @@ def classify_modify_request(
     requested_desired: DesiredState,
 ) -> LifecyclePlan:
     old_applicable = applicable_phases_for(existing_desired)
-    validate_completed_steps(existing_applied.completed_steps, old_applicable)
+    validate_checkpoint_contract(existing_applied, old_applicable)
     raw_equivalent = _normalized_modify_raw_values(existing_raw) == _normalized_modify_raw_values(
         requested_raw
     )
@@ -284,12 +356,20 @@ def classify_modify_request(
         phases_to_run.add("openclaw")
     if changed_keys & _OPENCLAW_RUNTIME_ENV_KEYS:
         phases_to_run.add("openclaw")
+    if changed_keys & _NEXTCLOUD_NEXA_USER_ENV_KEYS:
+        phases_to_run.add("nextcloud")
     if existing_desired.my_farm_advisor_channels != requested_desired.my_farm_advisor_channels:
         phases_to_run.add("my-farm-advisor")
     if existing_desired.my_farm_advisor_replicas != requested_desired.my_farm_advisor_replicas:
         phases_to_run.add("my-farm-advisor")
     if changed_keys & _MY_FARM_RUNTIME_ENV_KEYS:
         phases_to_run.add("my-farm-advisor")
+    if changed_keys & _OUTBOUND_MAIL_ENV_KEYS:
+        phases_to_run.add("shared_core")
+        if "moodle" in requested_desired.enabled_packs:
+            phases_to_run.add("moodle")
+        if "docuseal" in requested_desired.enabled_packs:
+            phases_to_run.add("docuseal")
     if (
         existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict()
         and not removed_packs
@@ -334,7 +414,7 @@ def _classify_same_target(
     desired_equivalent: bool,
 ) -> LifecyclePlan:
     applicable_phases = applicable_phases_for(desired_state)
-    validate_completed_steps(existing_applied.completed_steps, applicable_phases)
+    validate_checkpoint_contract(existing_applied, applicable_phases)
     if existing_applied.completed_steps == applicable_phases:
         return LifecyclePlan(
             mode="noop",
@@ -408,8 +488,8 @@ def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredS
             phases.add("cloudflare_access")
         phases.add("my-farm-advisor")
     if (
-        "headscale" in requested_desired.enabled_packs
-        and "headscale" not in existing_desired.enabled_packs
+        "headscale" in requested_desired.selected_packs
+        and "headscale" not in existing_desired.selected_packs
     ):
         phases.add("headscale")
     return phases

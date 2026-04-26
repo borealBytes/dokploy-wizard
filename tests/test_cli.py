@@ -156,7 +156,9 @@ def test_build_live_drift_report_classifies_required_collision_types(
             **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
             "STACK_NAME": "openmerge",
             "ROOT_DOMAIN": "openmerge.me",
-            "PACKS": "my-farm-advisor,nextcloud,openclaw",
+            "PACKS": "my-farm-advisor,nextcloud,openclaw,coder,seaweedfs",
+            "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
+            "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
         },
     )
     desired_state = resolve_desired_state(raw_env)
@@ -183,7 +185,7 @@ def test_build_live_drift_report_classifies_required_collision_types(
     monkeypatch.setattr(
         inspection_module,
         "_list_docker_services",
-        lambda: (f"{desired_state.stack_name}-advisor",),
+        lambda: (f"{desired_state.stack_name}-openclaw",),
     )
     monkeypatch.setattr(
         inspection_module,
@@ -201,7 +203,7 @@ def test_build_live_drift_report_classifies_required_collision_types(
         inspection_module,
         "_list_service_task_statuses",
         lambda service_name: ("Exited (1) 5 seconds ago",)
-        if service_name == f"{desired_state.stack_name}-advisor"
+        if service_name == f"{desired_state.stack_name}-openclaw"
         else (),
     )
     monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", (tmp_path,))
@@ -254,7 +256,9 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
             **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
             "STACK_NAME": "openmerge",
             "ROOT_DOMAIN": "openmerge.me",
-            "PACKS": "my-farm-advisor,nextcloud,openclaw",
+            "PACKS": "my-farm-advisor,nextcloud,openclaw,coder,seaweedfs",
+            "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
+            "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
         },
     )
     desired_state = resolve_desired_state(raw_env)
@@ -276,10 +280,63 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                 "svc-onlyoffice",
                 f"stack:{desired_state.stack_name}:onlyoffice-service",
             ),
+            OwnedResource(
+                "nextcloud_service",
+                "svc-nextcloud",
+                f"stack:{desired_state.stack_name}:nextcloud-service",
+            ),
+            OwnedResource(
+                "coder_service",
+                "svc-coder",
+                f"stack:{desired_state.stack_name}:coder:service",
+            ),
+            OwnedResource(
+                "seaweedfs_service",
+                "svc-seaweedfs",
+                f"stack:{desired_state.stack_name}:seaweedfs-service",
+            ),
+            OwnedResource(
+                "shared_core_postgres",
+                "svc-shared-postgres",
+                f"stack:{desired_state.stack_name}:shared-postgres",
+            ),
+            OwnedResource(
+                "shared_core_redis",
+                "svc-shared-redis",
+                f"stack:{desired_state.stack_name}:shared-redis",
+            ),
+            OwnedResource(
+                "openclaw_mem0_service",
+                "svc-mem0",
+                f"stack:{desired_state.stack_name}:openclaw-sidecar:mem0",
+            ),
+            OwnedResource(
+                "openclaw_qdrant_service",
+                "svc-qdrant",
+                f"stack:{desired_state.stack_name}:openclaw-sidecar:qdrant",
+            ),
+            OwnedResource(
+                "openclaw_runtime_service",
+                "svc-runtime",
+                f"stack:{desired_state.stack_name}:openclaw-sidecar:nexa-runtime",
+            ),
         ),
     )
     my_farm_container = "openmerge-my-farm-advisor-jy6axb-openmerge-my-farm-advisor-1"
     onlyoffice_container = "openmerge-nextcloud-a5izk5-openmerge-onlyoffice-1"
+    nextcloud_container = "openmerge-nextcloud-a5izk5-openmerge-nextcloud-1"
+    openclaw_internal_container = "openmerge-openclaw-3f2eds-openmerge-openclaw-1"
+    openclaw_public_container = "openmerge-openclaw-3f2eds-openmerge-openclaw-public-1"
+    mem0_container = "openmerge-openclaw-3f2eds-mem0-1"
+    qdrant_container = "openmerge-openclaw-3f2eds-qdrant-1"
+    runtime_container = "openmerge-openclaw-3f2eds-nexa-runtime-1"
+    coder_container = "openmerge-coder-8do2ol-openmerge-coder-1"
+    seaweedfs_container = "openmerge-seaweedfs-cr6zrs-openmerge-seaweedfs-1"
+    shared_postgres_container = "openmerge-shared-nojgtz-openmerge-shared-postgres-1"
+    shared_redis_container = "openmerge-shared-nojgtz-openmerge-shared-redis-1"
+    cloudflared_container = "openmerge-cloudflared-ghphch-openmerge-cloudflared-1"
+    auth_probe_container = "openmerge-dokploy-wizard-auth-probe-ocm4ux-auth-probe-1"
+    coder_workspace_container = "coder-clayton-openmergeme-workspace-2026-04-21"
     my_farm_hostname = desired_state.hostnames["my-farm-advisor"]
     onlyoffice_hostname = desired_state.hostnames["onlyoffice"]
 
@@ -293,7 +350,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                 "name": my_farm_container,
                 "status": "Up 8 seconds (health: starting)",
                 "labels": {
-                    "dokploy-wizard.slot": "advisor_suite",
+                    "dokploy-wizard.slot": "my-farm-advisor_suite",
                     "dokploy-wizard.variant": "my-farm-advisor",
                     "traefik.http.routers.openmerge-my-farm-advisor.rule": (
                         f"Host(`{my_farm_hostname}`)"
@@ -301,6 +358,14 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                     "traefik.http.services.openmerge-my-farm-advisor.loadbalancer.server.port": (
                         "18789"
                     ),
+                },
+            },
+            {
+                "name": nextcloud_container,
+                "status": "Up 21 hours (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-nextcloud",
+                    "com.docker.compose.project": "openmerge-nextcloud-a5izk5",
                 },
             },
             {
@@ -314,6 +379,96 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                     ),
                     "traefik.http.services.openmerge-onlyoffice.loadbalancer.server.port": "80",
                 },
+            },
+            {
+                "name": openclaw_internal_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-openclaw",
+                    "com.docker.compose.project": "openmerge-openclaw-3f2eds",
+                },
+            },
+            {
+                "name": openclaw_public_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-openclaw-public",
+                    "com.docker.compose.project": "openmerge-openclaw-3f2eds",
+                },
+            },
+            {
+                "name": coder_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-coder",
+                    "com.docker.compose.project": "openmerge-coder-8do2ol",
+                },
+            },
+            {
+                "name": seaweedfs_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-seaweedfs",
+                    "com.docker.compose.project": "openmerge-seaweedfs-cr6zrs",
+                },
+            },
+            {
+                "name": shared_postgres_container,
+                "status": "Up 2 minutes",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-shared-postgres",
+                    "com.docker.compose.project": "openmerge-shared-nojgtz",
+                },
+            },
+            {
+                "name": shared_redis_container,
+                "status": "Up 2 minutes",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-shared-redis",
+                    "com.docker.compose.project": "openmerge-shared-nojgtz",
+                },
+            },
+            {
+                "name": mem0_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "mem0",
+                    "com.docker.compose.project": "openmerge-openclaw-3f2eds",
+                },
+            },
+            {
+                "name": qdrant_container,
+                "status": "Up 2 minutes",
+                "labels": {
+                    "com.docker.compose.service": "qdrant",
+                    "com.docker.compose.project": "openmerge-openclaw-3f2eds",
+                },
+            },
+            {
+                "name": runtime_container,
+                "status": "Up 2 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": "nexa-runtime",
+                    "com.docker.compose.project": "openmerge-openclaw-3f2eds",
+                },
+            },
+            {
+                "name": cloudflared_container,
+                "status": "Up 2 minutes",
+                "labels": {
+                    "com.docker.compose.service": "openmerge-cloudflared",
+                    "com.docker.compose.project": "openmerge-cloudflared-ghphch",
+                },
+            },
+            {
+                "name": auth_probe_container,
+                "status": "Up 2 minutes",
+                "labels": {},
+            },
+            {
+                "name": coder_workspace_container,
+                "status": "Up 2 minutes",
+                "labels": {},
             },
         ),
     )
@@ -338,20 +493,76 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
         for entry in wizard_entries
     )
     assert any(
+        entry["pack"] == "nextcloud"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == nextcloud_container
+        for entry in wizard_entries
+    )
+    assert any(
         entry["pack"] == "onlyoffice"
         and entry["live_kind"] == "container"
         and entry["live_name"] == onlyoffice_container
         for entry in wizard_entries
     )
     assert any(
+        entry["pack"] == "coder"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == coder_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "seaweedfs"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == seaweedfs_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "shared-core"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == shared_postgres_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "shared-core"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == shared_redis_container
+        for entry in wizard_entries
+    )
+    assert any(
         entry["pack"] == "openclaw"
-        and entry["health"] == "missing"
-        and entry["live_name"] == f"{desired_state.stack_name}-advisor"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == openclaw_internal_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "openclaw"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == mem0_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "openclaw"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == qdrant_container
+        for entry in wizard_entries
+    )
+    assert any(
+        entry["pack"] == "openclaw"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == runtime_container
         for entry in wizard_entries
     )
     assert not any(entry["live_name"] == my_farm_container for entry in manual_entries)
     assert not any(entry["live_name"] == onlyoffice_container for entry in manual_entries)
-    assert report["summary"]["wizard_managed"] == 3
+    assert not any(entry["live_name"] == mem0_container for entry in manual_entries)
+    assert not any(entry["live_name"] == qdrant_container for entry in manual_entries)
+    assert not any(entry["live_name"] == runtime_container for entry in manual_entries)
+    assert not any(entry["live_name"] == openclaw_internal_container for entry in manual_entries)
+    assert not any(entry["live_name"] == openclaw_public_container for entry in manual_entries)
+    assert not any(entry["live_name"] == cloudflared_container for entry in manual_entries)
+    assert not any(entry["live_name"] == auth_probe_container for entry in manual_entries)
+    assert not any(entry["live_name"] == coder_workspace_container for entry in manual_entries)
+    assert report["summary"]["wizard_managed"] == 11
     assert report["summary"]["manual_collision"] == 0
 
 
@@ -396,7 +607,7 @@ def test_guided_install_prompts_include_dokploy_guidance() -> None:
 
     assert values.stack_name == "example"
     assert values.dokploy_subdomain == "dokploy"
-    assert values.dokploy_admin_email == "admin@example.com"
+    assert values.dokploy_admin_email == "clayton@superiorbyteworks.com"
     assert values.dokploy_admin_password == "secret-123"
     assert values.enable_headscale is True
     assert values.enable_tailscale is False
@@ -471,7 +682,7 @@ def test_guided_install_writes_env_file_and_runs_install(
             stack_name="guided-stack",
             root_domain="example.com",
             dokploy_subdomain="dokploy",
-            dokploy_admin_email="admin@example.com",
+            dokploy_admin_email="clayton@superiorbyteworks.com",
             dokploy_admin_password="secret-123",
             enable_headscale=True,
             cloudflare_api_token="token-123",
@@ -517,13 +728,14 @@ def test_guided_install_writes_env_file_and_runs_install(
     assert "STACK_NAME=guided-stack" in env_contents
     assert "ROOT_DOMAIN=example.com" in env_contents
     assert "DOKPLOY_SUBDOMAIN=dokploy" in env_contents
-    assert "DOKPLOY_ADMIN_EMAIL=admin@example.com" in env_contents
+    assert "DOKPLOY_ADMIN_EMAIL=clayton@superiorbyteworks.com" in env_contents
     assert "DOKPLOY_ADMIN_PASSWORD=secret-123" in env_contents
     assert "ENABLE_HEADSCALE=true" in env_contents
     assert "CLOUDFLARE_API_TOKEN=token-123" in env_contents
     assert "CLOUDFLARE_ZONE_ID" not in env_contents
     assert "PACKS=openclaw" in env_contents
     assert "OPENCLAW_CHANNELS=telegram" in env_contents
+    assert "CLOUDFLARE_ACCESS_OTP_EMAILS=clayton@superiorbyteworks.com" in env_contents
     assert "OPENCLAW_GATEWAY_TOKEN=" not in env_contents
     assert captured["env_file"] == env_file
     assert captured["state_dir"] == custom_state_dir
@@ -574,7 +786,7 @@ def test_guided_install_reuses_existing_seaweedfs_credentials(
             stack_name="guided-stack",
             root_domain="example.com",
             dokploy_subdomain="dokploy",
-            dokploy_admin_email="admin@example.com",
+            dokploy_admin_email="clayton@superiorbyteworks.com",
             dokploy_admin_password="secret-123",
             enable_headscale=True,
             cloudflare_api_token="token-123",
@@ -947,7 +1159,7 @@ def test_install_resume_tolerates_required_ports_used_by_existing_dokploy_stack(
         AppliedStateCheckpoint(
             format_version=existing_desired.format_version,
             desired_state_fingerprint=existing_desired.fingerprint(),
-            completed_steps=("preflight", "dokploy_bootstrap", "networking", "cloudflare_access"),
+            completed_steps=("preflight", "dokploy_bootstrap", "networking", "shared_core"),
         ),
     )
     write_ownership_ledger(
@@ -1047,6 +1259,43 @@ def test_install_resume_tolerates_required_ports_used_by_existing_dokploy_stack(
     assert summary["state_status"] == "existing"
 
 
+def test_install_fresh_state_tolerates_required_ports_when_dokploy_is_already_healthy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "install.env"
+    env_file.write_text(
+        (FIXTURES_DIR / "full.env").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    _stub_install_flow_after_preflight(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "collect_host_facts",
+        lambda _: HostFacts(
+            distribution_id="ubuntu",
+            version_id="24.04",
+            cpu_count=8,
+            memory_gb=16,
+            disk_gb=200,
+            disk_path="/var/lib/docker",
+            docker_installed=True,
+            docker_daemon_reachable=True,
+            ports_in_use=(80, 443, 3000),
+            environment_classification="vps",
+            hostname="test-host",
+        ),
+    )
+
+    summary = cli.run_install_flow(
+        env_file=env_file,
+        state_dir=tmp_path / ".dokploy-wizard-state",
+        dry_run=False,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    assert summary["ok"] is True
+
+
 def test_install_rehydrates_guided_retry_keys_from_persisted_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1072,7 +1321,7 @@ def test_install_rehydrates_guided_retry_keys_from_persisted_state(
         AppliedStateCheckpoint(
             format_version=existing_desired.format_version,
             desired_state_fingerprint=existing_desired.fingerprint(),
-            completed_steps=("preflight", "dokploy_bootstrap", "networking", "cloudflare_access"),
+            completed_steps=("preflight", "dokploy_bootstrap", "networking", "shared_core"),
         ),
     )
     write_ownership_ledger(
@@ -1513,10 +1762,12 @@ def test_guided_install_defaults_openclaw_to_telegram_when_matrix_disabled() -> 
     assert selection.selected_packs == ("nextcloud", "openclaw", "seaweedfs")
     assert selection.openclaw_channels == ("telegram",)
     assert selection.generated_secrets == {
+        "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
         "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
         "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
     }
     assert selection.advisor_env == {
+        "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
         "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
         "OPENCLAW_NVIDIA_API_KEY": "nv-key",
         "OPENCLAW_OPENROUTER_API_KEY": "or-key",
@@ -1559,9 +1810,11 @@ def test_guided_install_keeps_matrix_default_for_openclaw_when_matrix_enabled() 
     assert selection.selected_packs == ("matrix", "nextcloud", "openclaw", "seaweedfs")
     assert selection.openclaw_channels == ("matrix",)
     assert selection.generated_secrets == {
+        "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
         "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
         "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
     }
+    assert selection.advisor_env["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
     assert selection.advisor_env["OPENCLAW_PRIMARY_MODEL"] == "nvidia/moonshotai/kimi-k2.5"
     assert selection.advisor_env["OPENCLAW_FALLBACK_MODELS"] == "openrouter/openrouter/free"
     assert "OPENCLAW_TELEGRAM_BOT_TOKEN" not in selection.advisor_env
@@ -1627,6 +1880,24 @@ def test_append_operator_links_skips_when_access_auth_handles_openclaw() -> None
     cli._append_operator_links(summary, desired_state)
 
     assert "authorized_dashboard_url" not in summary["openclaw"]
+
+
+def test_advisor_model_normalization_maps_legacy_nvidia_kimi_id() -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshot/kimi-k2.5",
+            "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free,nvidia/moonshot/kimi-k2.5",
+        },
+    )
+
+    assert cli._advisor_primary_model(raw_env, env_prefix="OPENCLAW") == (
+        "nvidia/moonshotai/kimi-k2.5"
+    )
+    assert cli._advisor_model_list(raw_env, env_prefix="OPENCLAW") == (
+        "openrouter/openrouter/free",
+        "nvidia/moonshotai/kimi-k2.5",
+    )
 
 
 def test_guided_install_prints_generated_seaweedfs_credentials(
@@ -2566,7 +2837,7 @@ def test_live_drift_entry_blocks_mutation_allows_missing_managed_service() -> No
                 "classification": "wizard_managed",
                 "pack": "openclaw",
                 "health": "missing",
-                "live_name": "openmerge-advisor",
+                "live_name": "openmerge-openclaw",
             }
         )
         is False
@@ -2577,7 +2848,7 @@ def test_live_drift_entry_blocks_mutation_allows_missing_managed_service() -> No
                 "classification": "wizard_managed",
                 "pack": "openclaw",
                 "health": "unhealthy",
-                "live_name": "openmerge-advisor",
+                "live_name": "openmerge-openclaw",
             }
         )
         is True
@@ -2588,7 +2859,7 @@ def test_live_drift_entry_blocks_mutation_allows_missing_managed_service() -> No
                 "classification": "wizard_managed",
                 "pack": "openclaw",
                 "health": "unknown",
-                "live_name": "openmerge-advisor",
+                "live_name": "openmerge-openclaw",
             }
         )
         is True
@@ -2610,9 +2881,9 @@ def test_install_allows_missing_managed_service_drift_to_proceed(
                 {
                     "classification": "wizard_managed",
                     "detail": "managed openclaw missing",
-                    "expected_service_name": "wizard-stack-advisor",
+                    "expected_service_name": "wizard-stack-openclaw",
                     "health": "missing",
-                    "live_name": "wizard-stack-advisor",
+                    "live_name": "wizard-stack-openclaw",
                     "managed": True,
                     "pack": "openclaw",
                     "scope": "stack:wizard-stack:openclaw",
@@ -2718,66 +2989,30 @@ def test_install_bootstraps_missing_docker_before_strict_preflight_rerun(
     assert remediation_calls == [
         {
             "backend": remediation_calls[0]["backend"],
-            "missing_packages": ("docker.io",),
+            "missing_packages": (),
             "outcome": "missing_prerequisites",
         }
     ]
-    assert summary["host_prerequisites"] == {
-        "assessment": {
-            "checks": [
-                {
-                    "detail": "Ubuntu 24.04 host detected for apt-backed prerequisite checks.",
-                    "name": "os_support",
-                    "package_name": None,
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'git' is installed.",
-                    "name": "git",
-                    "package_name": "git",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'curl' is installed.",
-                    "name": "curl",
-                    "package_name": "curl",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'ca-certificates' is installed.",
-                    "name": "ca_certificates",
-                    "package_name": "ca-certificates",
-                    "status": "pass",
-                },
-                {
-                    "detail": "required Ubuntu package 'docker.io' is not installed",
-                    "name": "docker_io",
-                    "package_name": "docker.io",
-                    "status": "fail",
-                },
-                {
-                    "detail": "Docker daemon is unavailable or unreachable",
-                    "name": "docker_daemon",
-                    "package_name": "docker.io",
-                    "status": "fail",
-                },
+    assessment = summary["host_prerequisites"]["assessment"]
+    assert assessment["outcome"] == "missing_prerequisites"
+    assert assessment["docker_bootstrap_required"] is True
+    assert assessment["missing_packages"] == []
+    assert summary["host_prerequisites"]["post_remediation_host_facts"] == remediated_host.to_dict()
+    assert summary["host_prerequisites"]["remediation_actions"] == [
+        {
+            "action": "bootstrap_docker_engine",
+            "packages": [
+                "docker-ce",
+                "docker-ce-cli",
+                "containerd.io",
+                "docker-buildx-plugin",
+                "docker-compose-plugin",
             ],
-            "install_command": "sudo apt-get update && sudo apt-get install -y docker.io",
-            "missing_packages": ["docker.io"],
-            "notes": [
-                "Missing apt-managed baseline packages can be remediated on this host.",
-                "Docker daemon reachability is required before install can proceed.",
-            ],
-            "outcome": "missing_prerequisites",
-            "remediation_eligible": True,
+            "repository": "official_docker_apt_repository",
         },
-        "post_remediation_host_facts": remediated_host.to_dict(),
-        "remediation_actions": [
-            {"action": "apt_install", "packages": ["docker.io"]},
-            {"action": "ensure_docker_daemon"},
-        ],
-        "remediation_attempted": True,
-    }
+        {"action": "ensure_docker_daemon"},
+    ]
+    assert summary["host_prerequisites"]["remediation_attempted"] is True
 
 
 def test_install_bootstraps_missing_docker_on_supported_ubuntu_patch_release(
@@ -2845,7 +3080,7 @@ def test_install_bootstraps_missing_docker_on_supported_ubuntu_patch_release(
         bootstrap_backend=_FakeBootstrapBackend(),
     )
 
-    assert remediation_calls == [("docker.io",)]
+    assert remediation_calls == [()]
     assert (
         summary["host_prerequisites"]["post_remediation_host_facts"]["version_id"] == "24.04.2 LTS"
     )
@@ -3064,55 +3299,22 @@ def test_install_leaves_supported_host_prerequisites_as_idempotent_noop(
 
     assert collect_calls == [raw_env]
     assert preflight_hosts == [ready_host]
-    assert summary["host_prerequisites"] == {
-        "assessment": {
-            "checks": [
-                {
-                    "detail": "Ubuntu 24.04 host detected for apt-backed prerequisite checks.",
-                    "name": "os_support",
-                    "package_name": None,
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'git' is installed.",
-                    "name": "git",
-                    "package_name": "git",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'curl' is installed.",
-                    "name": "curl",
-                    "package_name": "curl",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'ca-certificates' is installed.",
-                    "name": "ca_certificates",
-                    "package_name": "ca-certificates",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Ubuntu package 'docker.io' is installed.",
-                    "name": "docker_io",
-                    "package_name": "docker.io",
-                    "status": "pass",
-                },
-                {
-                    "detail": "Docker daemon responded successfully.",
-                    "name": "docker_daemon",
-                    "package_name": "docker.io",
-                    "status": "pass",
-                },
-            ],
-            "install_command": None,
-            "missing_packages": [],
-            "notes": ["Baseline Ubuntu 24.04 host prerequisites are already satisfied."],
-            "outcome": "noop",
-            "remediation_eligible": True,
-        },
-        "remediation_actions": [],
-        "remediation_attempted": False,
-    }
+    assert summary["host_prerequisites"]["assessment"]["outcome"] == "noop"
+    assert summary["host_prerequisites"]["assessment"]["missing_packages"] == []
+    assert summary["host_prerequisites"]["assessment"]["notes"] == [
+        "Baseline Ubuntu 24.04 host prerequisites are already satisfied."
+    ]
+    assert summary["host_prerequisites"]["assessment"]["docker_bootstrap_required"] is False
+    assert [check["name"] for check in summary["host_prerequisites"]["assessment"]["checks"]] == [
+        "os_support",
+        "git",
+        "curl",
+        "ca_certificates",
+        "docker_cli",
+        "docker_daemon",
+    ]
+    assert summary["host_prerequisites"]["remediation_actions"] == []
+    assert summary["host_prerequisites"]["remediation_attempted"] is False
 
 
 def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
