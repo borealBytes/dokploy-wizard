@@ -117,8 +117,20 @@ resource "coder_agent" "main" {
       printf '%s' "$OPENWORK_BUILD_ID" > "$OPENWORK_BUILD_STAMP"
     fi
 
-    OPENWORK_APPROVAL_MODE=auto OPENWORK_PORT=$OPENWORK_SERVER_PORT OPENWORK_TOKEN="$OPENWORK_CLIENT_TOKEN" OPENWORK_HOST_TOKEN="$OPENWORK_HOST_TOKEN" nohup openwork serve --workspace /home/coder >/tmp/openwork.log 2>&1 &
+    OPENWORK_APPROVAL_MODE=auto OPENWORK_PORT=$OPENWORK_SERVER_PORT OPENWORK_TOKEN="$OPENWORK_CLIENT_TOKEN" OPENWORK_HOST_TOKEN="$OPENWORK_HOST_TOKEN" nohup openwork serve --workspace /home/coder --json >/tmp/openwork.log 2>&1 &
     nohup sh -lc "cd '$OPENWORK_SRC_DIR/apps/app' && pnpm exec vite preview --host 127.0.0.1 --port $OPENWORK_UI_PORT --strictPort" >/tmp/openwork-webui.log 2>&1 &
+
+    # Wait for openwork to start and extract owner token
+    for i in $(seq 1 60); do
+      if grep -q '"ownerToken"' /tmp/openwork.log 2>/dev/null; then
+        break
+      fi
+      sleep 2
+    done
+    OPENWORK_OWNER_TOKEN=$(grep -o '"ownerToken": "[^"]*"' /tmp/openwork.log | head -1 | sed 's/"ownerToken": "//;s/"//')
+    if [ -z "$OPENWORK_OWNER_TOKEN" ]; then
+      OPENWORK_OWNER_TOKEN="$OPENWORK_CLIENT_TOKEN"
+    fi
 
     cat >/tmp/coder-mounted-proxy.mjs <<'JS'
 import http from "node:http";
@@ -149,7 +161,7 @@ const isApiPath = (pathname) => {
 let cachedWorkspaceId = null;
 function fetchWorkspaceId() {
   return new Promise((resolve) => {
-    const req = http.request({ hostname: API_HOST, port: API_PORT, path: "/workspaces", method: "GET", headers: { Authorization: 'Bearer $${CLIENT_TOKEN}' } }, (res) => {
+    const req = http.request({ hostname: API_HOST, port: API_PORT, path: "/workspaces", method: "GET", headers: { Authorization: `Bearer $${CLIENT_TOKEN}` } }, (res) => {
       const chunks = [];
       res.on("data", (c) => chunks.push(Buffer.from(c)));
       res.on("end", () => {
@@ -346,7 +358,7 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(PROXY_PORT, "127.0.0.1");
 JS
 
-    nohup env UI_PORT="$OPENWORK_UI_PORT" API_PORT="$OPENWORK_SERVER_PORT" PROXY_PORT="$OPENWORK_PROXY_PORT" CLIENT_TOKEN="$OPENWORK_CLIENT_TOKEN" node /tmp/coder-mounted-proxy.mjs >/tmp/openwork-webui-proxy.log 2>&1 &
+    nohup env UI_PORT="$OPENWORK_UI_PORT" API_PORT="$OPENWORK_SERVER_PORT" PROXY_PORT="$OPENWORK_PROXY_PORT" CLIENT_TOKEN="$OPENWORK_OWNER_TOKEN" node /tmp/coder-mounted-proxy.mjs >/tmp/openwork-webui-proxy.log 2>&1 &
   EOT
 }
 
@@ -363,7 +375,7 @@ resource "coder_app" "openwork" {
   agent_id     = coder_agent.main.id
   slug         = "openwork"
   display_name = "OpenWork"
-  icon         = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23fff'/%3E%3Ctext x='32' y='41' font-size='24' font-weight='700' text-anchor='middle'%3EOW%3C/text%3E%3C/svg%3E"
+  icon         = "/icon/code.svg"
   url          = "http://localhost:8788"
   share        = "owner"
   subdomain    = false

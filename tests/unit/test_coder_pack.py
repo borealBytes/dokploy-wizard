@@ -237,13 +237,13 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
     assert 'pnpm install --frozen-lockfile' in template
     assert 'VITE_OPENWORK_DEPLOYMENT=web OPENWORK_PUBLIC_HOST=localhost VITE_ALLOWED_HOSTS=localhost,127.0.0.1 pnpm --filter @openwork/app exec vite build --base ./' in template
     assert 'perl -0pi -e ' in template
-    assert 'OPENWORK_APPROVAL_MODE=auto OPENWORK_PORT=$OPENWORK_SERVER_PORT OPENWORK_TOKEN="$OPENWORK_CLIENT_TOKEN" OPENWORK_HOST_TOKEN="$OPENWORK_HOST_TOKEN" nohup openwork serve --workspace /home/coder >/tmp/openwork.log 2>&1 &' in template
+    assert 'OPENWORK_APPROVAL_MODE=auto OPENWORK_PORT=$OPENWORK_SERVER_PORT OPENWORK_TOKEN="$OPENWORK_CLIENT_TOKEN" OPENWORK_HOST_TOKEN="$OPENWORK_HOST_TOKEN" nohup openwork serve --workspace /home/coder --json' in template
     assert "pnpm exec vite preview --host 127.0.0.1 --port $OPENWORK_UI_PORT --strictPort" in template
     assert 'localStorage.setItem("openwork.server.urlOverride", baseUrl);' in template
     assert 'localStorage.setItem("openwork.server.token"' in template
     assert 'localStorage.setItem("openwork.server.active", baseUrl' in template
     assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
-    assert 'nohup env UI_PORT="$OPENWORK_UI_PORT" API_PORT="$OPENWORK_SERVER_PORT" PROXY_PORT="$OPENWORK_PROXY_PORT" CLIENT_TOKEN="$OPENWORK_CLIENT_TOKEN" node /tmp/coder-mounted-proxy.mjs' in template
+    assert 'nohup env UI_PORT="$OPENWORK_UI_PORT" API_PORT="$OPENWORK_SERVER_PORT" PROXY_PORT="$OPENWORK_PROXY_PORT" CLIENT_TOKEN="$OPENWORK_OWNER_TOKEN" node /tmp/coder-mounted-proxy.mjs' in template
     assert 'resource "coder_app" "openwork"' in template
     assert 'slug         = "openwork"' in template
     assert 'display_name = "OpenWork"' in template
