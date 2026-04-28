@@ -158,6 +158,13 @@ const isApiPath = (pathname) => {
   return API_PREFIXES.some((prefix) => p === prefix || p.startsWith(prefix));
 };
 
+function isStaticAsset(pathname) {
+  const p = pathname || "/";
+  if (p.startsWith("/assets/")) return true;
+  const lastSegment = p.split("/").pop() || "";
+  return lastSegment.includes(".");
+}
+
 let cachedWorkspaceId = null;
 function fetchWorkspaceId() {
   return new Promise((resolve) => {
@@ -297,8 +304,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Root path → serve bootstrapped index HTML
-  if ((pathname === "" || pathname === "/") && search.indexOf("ow_url=") === -1) {
+  // SPA routes → serve bootstrapped index HTML
+  if (search.indexOf("ow_url=") === -1 && !isStaticAsset(pathname)) {
     if (!cachedWorkspaceId) await fetchWorkspaceId();
     if (!cachedWorkspaceId) {
       res.writeHead(503, { "Content-Type": "text/plain; charset=utf-8" });
