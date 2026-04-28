@@ -178,7 +178,12 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
                 env_key="CODER_WILDCARD_SUBDOMAIN",
             ),
         ),
-        mutable_env_keys=(),
+        mutable_env_keys=(
+            "HERMES_INFERENCE_PROVIDER",
+            "HERMES_MODEL",
+            "OPENCODE_GO_API_KEY",
+            "OPENCODE_GO_BASE_URL",
+        ),
         mutable_resource_keys=(),
         enabled_features=(),
         resource_profile="recommended",

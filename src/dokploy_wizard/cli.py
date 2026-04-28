@@ -1831,6 +1831,14 @@ def _build_coder_backend(
         admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
+        hermes_inference_provider=raw_env.values.get(
+            "HERMES_INFERENCE_PROVIDER", "opencode-go"
+        ),
+        hermes_model=raw_env.values.get("HERMES_MODEL", "deepseek-v4-flash"),
+        opencode_go_base_url=raw_env.values.get(
+            "OPENCODE_GO_BASE_URL", "https://opencode.ai/zen/go/v1"
+        ),
+        opencode_go_api_key=raw_env.values.get("OPENCODE_GO_API_KEY"),
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,

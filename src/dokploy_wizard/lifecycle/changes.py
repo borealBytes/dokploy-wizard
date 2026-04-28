@@ -179,12 +179,19 @@ _OUTBOUND_MAIL_ENV_KEYS = {
     "OUTBOUND_SMTP_HOSTNAME",
     "OUTBOUND_SMTP_FROM_ADDRESS",
 }
+_CODER_RUNTIME_ENV_KEYS = {
+    "HERMES_INFERENCE_PROVIDER",
+    "HERMES_MODEL",
+    "OPENCODE_GO_API_KEY",
+    "OPENCODE_GO_BASE_URL",
+}
 
 _SUPPORTED_MODIFY_KEYS |= (
     _OPENCLAW_RUNTIME_ENV_KEYS
     | _NEXTCLOUD_NEXA_USER_ENV_KEYS
     | _MY_FARM_RUNTIME_ENV_KEYS
     | _OUTBOUND_MAIL_ENV_KEYS
+    | _CODER_RUNTIME_ENV_KEYS
 )
 
 @dataclass(frozen=True)
@@ -338,6 +345,8 @@ def classify_modify_request(
         requested_desired
     ):
         phases_to_run.add("cloudflare_access")
+    if changed_keys & _CODER_RUNTIME_ENV_KEYS and "coder" in requested_desired.enabled_packs:
+        phases_to_run.add("coder")
     if (
         existing_desired.cloudflare_access_otp_emails
         != requested_desired.cloudflare_access_otp_emails
