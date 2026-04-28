@@ -193,23 +193,25 @@ def test_default_opencode_web_template_includes_web_app() -> None:
         encoding="utf-8"
     )
 
-    assert 'apt-get install -y curl git ca-certificates wget btop python3' in template
+    assert 'apt-get install -y curl git ca-certificates wget btop' in template
     assert 'if ! command -v opencode >/dev/null 2>&1; then' in template
     assert 'if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then' in template
     assert 'if [ ! -x /home/coder/.opencode/bin/opencode ]; then' in template
     assert 'ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode' in template
+    assert 'NEED_NODE=true' in template
     assert 'OPENCODE_WEB_PORT=4096' in template
     assert 'OPENCODE_PROXY_PORT=4097' in template
     assert 'nohup opencode web --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT" >/tmp/opencode-web.log 2>&1 &' in template
-    assert "cat >/tmp/opencode-web-proxy.py <<'PY'" in template
+    assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
     assert '"accept-encoding"' in template
     assert "content-security-policy" in template
     assert "content-encoding" in template
-    assert 'if (raw.startsWith(location.origin + "/")) return location.origin + mount + new URL(raw).pathname + new URL(raw).search;' in template
+    assert 'pageHttpOrigin + mount + next.pathname + next.search' in template
     assert 'if (input instanceof Request) return originalFetch(new Request(rewrite(input.url), input), init);' in template
     assert 'window.EventSource = class extends OriginalEventSource' in template
     assert 'window.WebSocket = class extends OriginalWebSocket' in template
-    assert 'nohup python3 /tmp/opencode-web-proxy.py >/tmp/opencode-web-proxy.log 2>&1 &' in template
+    assert 'originalPushState = window.history.pushState' in template
+    assert 'nohup env TARGET_PORT="$OPENCODE_WEB_PORT" PROXY_PORT="$OPENCODE_PROXY_PORT" node /tmp/coder-mounted-proxy.mjs' in template
     assert 'resource "coder_app" "opencode"' in template
     assert 'display_name = "OpenCode"' in template
     assert 'icon         = "/icon/code.svg"' in template
