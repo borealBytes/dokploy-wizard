@@ -247,6 +247,8 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
     assert '"/w/", "/api"' in template
     assert 'function isStaticAsset(pathname)' in template
     assert 'raw === mount || raw.startsWith(mount + "/")' in template
+    assert 'await input.clone().arrayBuffer()' in template
+    assert 'originalFetch(new Request(url, next))' in template
     assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
     assert 'nohup env UI_PORT="$OPENWORK_UI_PORT" API_PORT="$OPENWORK_SERVER_PORT" PROXY_PORT="$OPENWORK_PROXY_PORT" CLIENT_TOKEN="$OPENWORK_OWNER_TOKEN" node /tmp/coder-mounted-proxy.mjs' in template
     assert 'resource "coder_app" "openwork"' in template
