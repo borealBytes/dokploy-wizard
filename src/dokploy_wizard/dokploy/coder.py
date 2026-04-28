@@ -678,7 +678,7 @@ def _default_openwork_template_dir() -> Path:
         Path(__file__).resolve().parents[3]
         / "templates"
         / "coder"
-        / "default-ubuntu-code-server-openwork-webui"
+        / "default-ubuntu-code-server-openwork"
     )
 
 
