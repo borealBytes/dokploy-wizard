@@ -111,7 +111,7 @@ resource "coder_agent" "main" {
 
     if [ ! -d "$OPENWORK_NODE_MODULES" ] || [ ! -f "$OPENWORK_UI_INDEX" ] || [ ! -f "$OPENWORK_BUILD_STAMP" ] || [ "$(cat "$OPENWORK_BUILD_STAMP" 2>/dev/null || true)" != "$OPENWORK_BUILD_ID" ]; then
       cd "$OPENWORK_SRC_DIR"
-      CI=true pnpm install --frozen-lockfile || CI=true pnpm install
+      CI=true pnpm install
       VITE_OPENWORK_DEPLOYMENT=web OPENWORK_PUBLIC_HOST=localhost VITE_ALLOWED_HOSTS=localhost,127.0.0.1 pnpm --filter @openwork/app exec vite build --base ./
       perl -0pi -e 's#(href|src)="/#$1="./#g' "$OPENWORK_UI_INDEX"
       printf '%s' "$OPENWORK_BUILD_ID" > "$OPENWORK_BUILD_STAMP"
