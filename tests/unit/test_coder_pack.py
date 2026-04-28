@@ -223,7 +223,7 @@ def test_default_opencode_web_template_includes_web_app() -> None:
 
 def test_default_openwork_template_includes_full_webui_stack() -> None:
     template = Path(
-        "templates/coder/default-ubuntu-code-server-openwork-webui/main.tf"
+        "templates/coder/default-ubuntu-code-server-openwork/main.tf"
     ).read_text(encoding="utf-8")
 
     assert '$_SUDO apt-get install -y curl git ca-certificates wget btop' in template
