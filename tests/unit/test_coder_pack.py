@@ -230,11 +230,11 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
     assert '$_SUDO corepack enable' in template
     assert '$_SUDO corepack prepare pnpm@10.27.0 --activate' in template
     assert '$_SUDO npm install -g openwork-orchestrator' in template
-    assert 'OPENWORK_WEBUI_BUILD_KEY=v5-coder-mounted-bootstrap' in template
+    assert 'OPENWORK_WEBUI_BUILD_KEY=v6-coder-mounted-basename' in template
     assert 'OPENWORK_CLIENT_TOKEN=openwork-client-token' in template
     assert 'OPENWORK_HOST_TOKEN=openwork-host-token' in template
     assert 'git clone --depth 1 --branch dev https://github.com/different-ai/openwork "$OPENWORK_SRC_DIR"' in template
-    assert 'pnpm install --frozen-lockfile' in template
+    assert 'CI=true pnpm install' in template
     assert 'VITE_OPENWORK_DEPLOYMENT=web OPENWORK_PUBLIC_HOST=localhost VITE_ALLOWED_HOSTS=localhost,127.0.0.1 pnpm --filter @openwork/app exec vite build --base ./' in template
     assert 'perl -0pi -e ' in template
     assert 'OPENWORK_APPROVAL_MODE=auto OPENWORK_PORT=$OPENWORK_SERVER_PORT OPENWORK_TOKEN="$OPENWORK_CLIENT_TOKEN" OPENWORK_HOST_TOKEN="$OPENWORK_HOST_TOKEN" nohup openwork serve --workspace /home/coder --json' in template
@@ -242,6 +242,11 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
     assert 'localStorage.setItem("openwork.server.urlOverride", baseUrl);' in template
     assert 'localStorage.setItem("openwork.server.token"' in template
     assert 'localStorage.setItem("openwork.server.active", baseUrl' in template
+    assert 'const routerBasename =' in template
+    assert '<Router basename={routerBasename}>' in template
+    assert '"/w/", "/api"' in template
+    assert 'function isStaticAsset(pathname)' in template
+    assert 'raw === mount || raw.startsWith(mount + "/")' in template
     assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
     assert 'nohup env UI_PORT="$OPENWORK_UI_PORT" API_PORT="$OPENWORK_SERVER_PORT" PROXY_PORT="$OPENWORK_PROXY_PORT" CLIENT_TOKEN="$OPENWORK_OWNER_TOKEN" node /tmp/coder-mounted-proxy.mjs' in template
     assert 'resource "coder_app" "openwork"' in template
