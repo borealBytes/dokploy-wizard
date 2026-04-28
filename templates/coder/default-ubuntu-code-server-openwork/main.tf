@@ -150,7 +150,7 @@ if (!UI_PORT || !API_PORT || !PROXY_PORT) {
 const API_PREFIXES = [
   "/health", "/status", "/capabilities", "/whoami",
   "/workspaces", "/workspace/", "/approvals", "/tokens",
-  "/files/", "/opencode", "/opencode-router", "/w/",
+  "/files/", "/opencode", "/opencode-router", "/w/", "/api",
 ];
 const isApiPath = (pathname) => {
   const p = pathname || "/";
