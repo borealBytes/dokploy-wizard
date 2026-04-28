@@ -86,7 +86,7 @@ resource "coder_agent" "main" {
 
     OPENWORK_SRC_DIR=/home/coder/.cache/openwork-src
     OPENWORK_BUILD_STAMP=/home/coder/.cache/openwork-webui-build-rev
-    OPENWORK_WEBUI_BUILD_KEY=v5-coder-mounted-bootstrap
+    OPENWORK_WEBUI_BUILD_KEY=v6-coder-mounted-basename
     OPENWORK_UI_PORT=8790
     OPENWORK_PROXY_PORT=8788
     OPENWORK_SERVER_PORT=8787
@@ -103,6 +103,9 @@ resource "coder_agent" "main" {
       git -C "$OPENWORK_SRC_DIR" checkout -f dev
       git -C "$OPENWORK_SRC_DIR" reset --hard origin/dev
     fi
+
+    perl -0pi -e 's#const Router = isDesktopRuntime\(\) \? HashRouter : BrowserRouter;#const Router = isDesktopRuntime() ? HashRouter : BrowserRouter;\nconst routerBasename =\n  typeof window !== "undefined" && window.location.pathname.includes("/apps/")\n    ? (() => {\n        const idx = window.location.pathname.indexOf("/apps/");\n        const prefix = window.location.pathname.slice(0, idx + "/apps/".length);\n        const slug = window.location.pathname.slice(idx + "/apps/".length).split("/")[0] || "";\n        return prefix + slug;\n      })()\n    : undefined;#' "$OPENWORK_SRC_DIR/apps/app/src/index.react.tsx"
+    perl -0pi -e 's#<Router>#<Router basename={routerBasename}>#' "$OPENWORK_SRC_DIR/apps/app/src/index.react.tsx"
 
     OPENWORK_REV=$(git -C "$OPENWORK_SRC_DIR" rev-parse HEAD)
     OPENWORK_BUILD_ID="$OPENWORK_REV:$OPENWORK_WEBUI_BUILD_KEY"
@@ -218,6 +221,7 @@ function buildMountScript() {
     + 'if (raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("ws://") || raw.startsWith("wss://")) { const next = new URL(raw.replace(/^ws/, "http"));\n'
     + 'if (localHosts.has(next.hostname) || next.hostname === location.hostname) return (raw.startsWith("ws") ? pageWsOrigin : pageHttpOrigin) + mount + next.pathname + next.search + next.hash;\n'
     + 'return raw; }\n'
+    + 'if (raw === mount || raw.startsWith(mount + "/")) return raw;\n'
     + 'if (raw.startsWith("/") && !raw.startsWith("//")) return mount + raw; return raw; };\n'
     + 'const originalFetch = window.fetch.bind(window); window.fetch = (input, init) => { if (input instanceof Request) return originalFetch(new Request(rewrite(input.url), input), init); return originalFetch(rewrite(input), init); };\n'
     + 'window.EventSource = class extends window.EventSource { constructor(url, config) { super(rewrite(url), config); } };\n'
