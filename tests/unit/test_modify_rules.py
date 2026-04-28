@@ -387,6 +387,8 @@ def test_modify_rejects_unmodeled_env_changes() -> None:
 def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
     assert get_mutable_pack_env_keys() == (
         "ADVISOR_GATEWAY_PASSWORD",
+        "HERMES_INFERENCE_PROVIDER",
+        "HERMES_MODEL",
         "MY_FARM_ADVISOR_CHANNELS",
         "MY_FARM_ADVISOR_FALLBACK_MODELS",
         "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
@@ -429,6 +431,8 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "OPENCLAW_PRIMARY_MODEL",
         "OPENCLAW_TELEGRAM_BOT_TOKEN",
         "OPENCLAW_TELEGRAM_OWNER_USER_ID",
+        "OPENCODE_GO_API_KEY",
+        "OPENCODE_GO_BASE_URL",
         "OUTBOUND_SMTP_FROM_ADDRESS",
         "OUTBOUND_SMTP_HOSTNAME",
     )
@@ -478,6 +482,48 @@ def test_modify_runs_nextcloud_when_nexa_service_account_fields_change() -> None
 
     assert "nextcloud" in plan.phases_to_run
     assert "openclaw" in plan.phases_to_run
+
+
+def test_modify_coder_hermes_env_change_reruns_coder() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_CODER": "true",
+            "OPENCODE_GO_API_KEY": "old-key",
+            "HERMES_INFERENCE_PROVIDER": "opencode-go",
+            "HERMES_MODEL": "deepseek-v4-flash",
+            "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
+        }
+    )
+    requested_raw = _raw(
+        {
+            **existing_raw.values,
+            "OPENCODE_GO_API_KEY": "new-key",
+        }
+    )
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=resolve_desired_state(existing_raw),
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=resolve_desired_state(existing_raw).fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "coder",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=resolve_desired_state(requested_raw),
+    )
+
+    assert plan.start_phase == "coder"
+    assert plan.phases_to_run == ("coder",)
 
 
 def test_modify_uses_explicit_pack_mutable_resource_contract() -> None:

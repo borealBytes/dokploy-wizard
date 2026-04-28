@@ -188,6 +188,129 @@ def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
     assert 'zellij-$${ARCH}-unknown-linux-musl.tar.gz' in template
 
 
+def test_default_opencode_web_template_includes_web_app() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-opencode-web/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'apt-get install -y curl git ca-certificates wget btop python3' in template
+    assert 'if ! command -v opencode >/dev/null 2>&1; then' in template
+    assert 'if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then' in template
+    assert 'if [ ! -x /home/coder/.opencode/bin/opencode ]; then' in template
+    assert 'ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode' in template
+    assert 'OPENCODE_WEB_PORT=4096' in template
+    assert 'OPENCODE_PROXY_PORT=4097' in template
+    assert 'nohup opencode web --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT" >/tmp/opencode-web.log 2>&1 &' in template
+    assert "cat >/tmp/opencode-web-proxy.py <<'PY'" in template
+    assert '"accept-encoding"' in template
+    assert "content-security-policy" in template
+    assert "content-encoding" in template
+    assert 'if (raw.startsWith(location.origin + "/")) return location.origin + mount + new URL(raw).pathname + new URL(raw).search;' in template
+    assert 'if (input instanceof Request) return originalFetch(new Request(rewrite(input.url), input), init);' in template
+    assert 'window.EventSource = class extends OriginalEventSource' in template
+    assert 'window.WebSocket = class extends OriginalWebSocket' in template
+    assert 'nohup python3 /tmp/opencode-web-proxy.py >/tmp/opencode-web-proxy.log 2>&1 &' in template
+    assert 'resource "coder_app" "opencode"' in template
+    assert 'display_name = "OpenCode"' in template
+    assert 'icon         = "/icon/code.svg"' in template
+    assert 'url          = "http://localhost:4097"' in template
+    assert 'share        = "owner"' in template
+    assert 'subdomain    = false' in template
+    assert 'url       = "http://localhost:4097"' in template
+
+
+def test_default_openwork_template_includes_full_webui_stack() -> None:
+    template = Path(
+        "templates/coder/default-ubuntu-code-server-openwork-webui/main.tf"
+    ).read_text(encoding="utf-8")
+
+    assert '$_SUDO apt-get install -y curl git ca-certificates wget btop python3' in template
+    assert '$_SUDO corepack enable' in template
+    assert '$_SUDO corepack prepare pnpm@10.27.0 --activate' in template
+    assert '$_SUDO npm install -g openwork-orchestrator' in template
+    assert 'OPENWORK_WEBUI_BUILD_KEY=v5-coder-mounted-bootstrap' in template
+    assert 'OPENWORK_CLIENT_TOKEN=openwork-client-token' in template
+    assert 'OPENWORK_HOST_TOKEN=openwork-host-token' in template
+    assert 'git clone --depth 1 --branch dev https://github.com/different-ai/openwork "$OPENWORK_SRC_DIR"' in template
+    assert 'pnpm install --frozen-lockfile' in template
+    assert 'VITE_OPENWORK_DEPLOYMENT=web OPENWORK_PUBLIC_HOST=localhost VITE_ALLOWED_HOSTS=localhost,127.0.0.1 pnpm --filter @openwork/app exec vite build --base ./' in template
+    assert 'perl -0pi -e ' in template
+    assert 'OPENWORK_APPROVAL_MODE=auto OPENWORK_PORT=$OPENWORK_SERVER_PORT OPENWORK_TOKEN="$OPENWORK_CLIENT_TOKEN" OPENWORK_HOST_TOKEN="$OPENWORK_HOST_TOKEN" nohup openwork serve --workspace /home/coder >/tmp/openwork.log 2>&1 &' in template
+    assert "pnpm exec vite preview --host 127.0.0.1 --port $OPENWORK_UI_PORT --strictPort" in template
+    assert 'connection.request("GET", "/workspaces", headers={"Authorization": f"Bearer {CLIENT_TOKEN}"})' in template
+    assert "cat >/tmp/openwork-webui-proxy.py <<'PY'" in template
+    assert 'localStorage.setItem("openwork.server.urlOverride", baseUrl);' in template
+    assert 'localStorage.setItem("openwork.server.token", token);' in template
+    assert 'localStorage.setItem("openwork.server.active", baseUrl + "/opencode");' in template
+    assert 'nohup python3 /tmp/openwork-webui-proxy.py >/tmp/openwork-webui-proxy.log 2>&1 &' in template
+    assert 'http.server.ThreadingHTTPServer(("127.0.0.1", 8788), Proxy).serve_forever()' in template
+    assert 'resource "coder_app" "openwork"' in template
+    assert 'slug         = "openwork"' in template
+    assert 'display_name = "OpenWork"' in template
+    assert 'url          = "http://localhost:8788"' in template
+    assert 'subdomain    = false' in template
+    assert 'url       = "http://localhost:8788/health"' in template
+
+
+def test_default_hermes_template_includes_full_web_stack() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-hermes/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    assert '$_SUDO apt-get install -y curl git ca-certificates wget btop python3' in template
+    assert 'curl -fsSL https://deb.nodesource.com/setup_24.x | $_SUDO -E bash -' in template
+    assert (
+        'HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup'
+        in template
+    )
+    assert 'export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1' in template
+    assert 'export HERMES_TEMPLATE_PROVIDER="__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__"' in template
+    assert 'export HERMES_TEMPLATE_MODEL="__DOKPLOY_WIZARD_HERMES_MODEL__"' in template
+    assert 'export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_OPENCODE_GO_BASE_URL__"' in template
+    assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_OPENCODE_GO_API_KEY__"' in template
+    assert 'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_OPENCODE_GO_API_KEY__"' in template
+    assert 'export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"' in template
+    assert 'export HERMES_MODEL="$${HERMES_MODEL:-$HERMES_TEMPLATE_MODEL}"' in template
+    assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$HERMES_TEMPLATE_BASE_URL}"' in template
+    assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$HERMES_TEMPLATE_API_KEY}"' in template
+    assert 'upsert_env OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"' in template
+    assert 'API_SERVER_ENABLED=true' in template
+    assert 'OPENCODE_GO_API_KEY is required for the Hermes workspace template' in template
+    assert 'hermes config set model.provider "$HERMES_INFERENCE_PROVIDER"' in template
+    assert 'hermes config set model.default "$HERMES_MODEL"' in template
+    assert 'hermes config set model.base_url "$OPENCODE_GO_BASE_URL"' in template
+    assert 'hermes config set terminal.cwd /home/coder' in template
+    assert 'HERMES_BOOTSTRAP_SCRIPT=/tmp/hermes-workspace-bootstrap.sh' in template
+    assert 'nohup sh "$HERMES_BOOTSTRAP_SCRIPT" >/tmp/hermes-bootstrap.log 2>&1 &' in template
+    assert 'nohup hermes gateway >/tmp/hermes-gateway.log 2>&1 &' in template
+    assert 'hermes dashboard --host 127.0.0.1 --port "$HERMES_DASHBOARD_PORT" --no-open' in template
+    assert 'hermes-web-ui start --port "$HERMES_WEB_UI_PORT" >/tmp/hermes-web-ui-start.log 2>&1' in template
+    assert 'HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install' in template
+    assert 'const SYNTHETIC_HEALTHCHECK = process.env.SYNTHETIC_HEALTHCHECK === "1";' in template
+    assert 'const DASHBOARD_SESSION_HEADER = process.env.DASHBOARD_SESSION_HEADER === "1";' in template
+    assert 'const TOKEN_FILE = process.env.TOKEN_FILE || "";' in template
+    assert 'headers["X-Hermes-Session-Token"] = await getDashboardSessionToken();' in template
+    assert 'window.history.pushState = (state, title, url) => originalPushState(state, title, url == null ? url : rewrite(url));' in template
+    assert "location.pathname.indexOf(\"/apps/\") !== -1" in template
+    assert '.replace(/(["\'])\\/assets\\//g, "$1./assets/")' in template
+    assert '.replace(/(["\'])\\/static\\//g, "$1./static/")' in template
+    assert '.replace(/`\\/`\\+e/g, "`./`+e")' in template
+    assert 'DASHBOARD_SESSION_HEADER=1 SYNTHETIC_HEALTHCHECK=1 TARGET_PORT=$HERMES_DASHBOARD_PORT PROXY_PORT=$HERMES_DASHBOARD_PROXY_PORT node /tmp/coder-mounted-proxy.mjs' in template
+    assert 'TOKEN_FILE=/home/coder/.hermes-web-ui/.token TARGET_PORT=$HERMES_WEB_UI_PORT PROXY_PORT=$HERMES_WEB_UI_PROXY_PORT node /tmp/coder-mounted-proxy.mjs' in template
+    assert 'server.on("upgrade", (req, socket, head) => {' in template
+    assert 'window.WebSocket = class extends OriginalWebSocket' in template
+    assert 'resource "coder_app" "hermes_dashboard"' in template
+    assert 'url          = "http://localhost:9120"' in template
+    assert 'resource "coder_app" "hermes_web_ui"' in template
+    assert 'url          = "http://localhost:8649"' in template
+    assert 'resource "coder_app" "hermes_webui"' in template
+    assert 'url          = "http://localhost:8788"' in template
+    assert 'HERMIES_PROVIDER' not in template
+    assert 'HERMEIS_OPENCODE_GO_MODEL' not in template
+    assert 'HERMIES_BASE_USL' not in template
+    assert 'HERMIES_API_MODE' not in template
+
+
 def test_reconcile_coder_creates_service_and_data() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
@@ -279,6 +402,18 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     monkeypatch.setattr(
         coder_module, "_coder_container_name", lambda service_name: "coder-container"
     )
+    secret_sync_calls: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_sync_hermes_workspace_secrets",
+        lambda **kwargs: secret_sync_calls.append(
+            (
+                str(kwargs["hermes_inference_provider"]),
+                str(kwargs["hermes_model"]),
+                str(kwargs["opencode_go_base_url"]),
+            )
+        ),
+    )
     monkeypatch.setattr(coder_module, "_copy_template_into_container", lambda **kwargs: None)
     monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
     monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
@@ -286,9 +421,15 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     notes = backend.ensure_application_ready()
 
     assert waits == ["coder.example.com"]
+    assert secret_sync_calls == [
+        ("opencode-go", "deepseek-v4-flash", "https://opencode.ai/zen/go/v1")
+    ]
     assert notes == (
         "Provisioned initial Coder admin for 'admin@example.com'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
+        "Seeded default Coder template 'ubuntu-vscode-openwork'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes'.",
     )
 
 
@@ -580,9 +721,10 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     )
     first_user_calls: list[tuple[str, str, str]] = []
     login_calls: list[tuple[str, str, str]] = []
-    template_copy_calls: list[tuple[str, str]] = []
+    template_copy_calls: list[tuple[str, str, str]] = []
     template_push_calls: list[tuple[str, str, str, str]] = []
     ensure_workspace_calls: list[tuple[str, str, str, str, str]] = []
+    secret_sync_calls: list[tuple[str, str, str, str | None]] = []
 
     monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
     monkeypatch.setattr(
@@ -603,9 +745,21 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     )
     monkeypatch.setattr(
         coder_module,
+        "_sync_hermes_workspace_secrets",
+        lambda **kwargs: secret_sync_calls.append(
+            (
+                str(kwargs["container_name"]),
+                str(kwargs["hermes_inference_provider"]),
+                str(kwargs["hermes_model"]),
+                kwargs["opencode_go_api_key"],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        coder_module,
         "_copy_template_into_container",
-        lambda *, container_name, template_dir: template_copy_calls.append(
-            (container_name, str(template_dir))
+        lambda *, container_name, template_dir, template_name, replacements: template_copy_calls.append(
+            (container_name, str(template_dir), template_name)
         ),
     )
     monkeypatch.setattr(
@@ -643,7 +797,26 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert first_user_calls == [("coder.example.com", "clayton@openmerge.me", "ChangeMeSoon")]
     assert login_calls == [("coder.example.com", "clayton@openmerge.me", "ChangeMeSoon")]
     assert template_copy_calls == [
-        ("wizard-stack-coder-container", str(coder_module._default_template_dir()))
+        (
+            "wizard-stack-coder-container",
+            str(coder_module._default_template_dir()),
+            coder_module._default_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
+            str(coder_module._default_opencode_web_template_dir()),
+            coder_module._default_opencode_web_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
+            str(coder_module._default_openwork_template_dir()),
+            coder_module._default_openwork_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
+            str(coder_module._default_hermes_template_dir()),
+            coder_module._default_hermes_template_name(),
+        ),
     ]
     assert template_push_calls == [
         (
@@ -651,6 +824,24 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "coder.example.com",
             "session-123",
             coder_module._default_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
+            "coder.example.com",
+            "session-123",
+            coder_module._default_opencode_web_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
+            "coder.example.com",
+            "session-123",
+            coder_module._default_openwork_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
+            "coder.example.com",
+            "session-123",
+            coder_module._default_hermes_template_name(),
         )
     ]
     assert ensure_workspace_calls == [
@@ -662,8 +853,19 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             coder_module._default_template_name(),
         )
     ]
+    assert secret_sync_calls == [
+        (
+            "wizard-stack-coder-container",
+            "opencode-go",
+            "deepseek-v4-flash",
+            None,
+        )
+    ]
     assert notes == (
         "Provisioned initial Coder admin for 'clayton@openmerge.me'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
+        "Seeded default Coder template 'ubuntu-vscode-openwork'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes'.",
         "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'clayton@openmerge.me'.",
     )
