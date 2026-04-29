@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import base64
 import json
-import shutil
 import shlex
+import shutil
 import ssl
 import subprocess
 import time
@@ -345,11 +345,14 @@ class DokployOpenClawBackend:
         )
 
     def check_health(self, *, service: OpenClawResourceRecord, url: str) -> bool:
-        if not _docker_container_is_up(service.resource_name):
+        if not _wait_for_docker_container_is_up(service.resource_name):
             return False
-        https_ok = _wait_for_local_https_health(url)
-        if not https_ok:
-            return False
+        variant = _variant_from_service_name(self._stack_name, service.resource_name)
+        app_port = _app_port_for_variant(variant or "openclaw")
+        if not _wait_for_container_http_health(service.resource_name, url, app_port=app_port):
+            https_ok = _wait_for_local_https_health(url)
+            if not https_ok:
+                return False
         _control_ui_origin_ready(service.resource_name, url)
         return True
 
@@ -480,6 +483,52 @@ class DokployOpenClawBackend:
         )
 
 
+def _container_name_matches_service(container_name: str, service_name: str) -> bool:
+    if container_name == service_name:
+        return True
+    if container_name.startswith(f"{service_name}."):
+        return True
+    return container_name.endswith(f"-{service_name}-1")
+
+
+def _container_http_health_check(service_name: str, url: str, *, app_port: int) -> bool:
+    container_name = _find_container_name(service_name)
+    if container_name is None:
+        return False
+    parsed = parse.urlsplit(url)
+    request_path = parsed.path or "/"
+    if parsed.query:
+        request_path = f"{request_path}?{parsed.query}"
+    target_url = f"http://127.0.0.1:{app_port}{request_path}"
+    script = (
+        "fetch(process.argv[1], {redirect: 'manual'})"
+        ".then((response) => process.exit(response.status >= 200 && response.status < 300 ? 0 : 1))"
+        ".catch(() => process.exit(1));"
+    )
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container_name, "node", "-e", script, target_url],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0
+
+
+def _wait_for_container_http_health(
+    service_name: str, url: str, *, app_port: int, attempts: int = 120, delay_seconds: float = 3.0
+) -> bool:
+    for attempt in range(attempts):
+        if _container_http_health_check(service_name, url, app_port=app_port):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return False
+
+
 def _service_name(stack_name: str, variant: str) -> str:
     suffix = "openclaw" if variant == "openclaw" else "my-farm-advisor"
     return f"{stack_name}-{suffix}"
@@ -550,9 +599,20 @@ def _docker_container_is_up(service_name: str) -> bool:
         return False
     for line in result.stdout.splitlines():
         name, _, status = line.partition("\t")
-        if service_name not in name:
+        if not _container_name_matches_service(name, service_name):
             continue
         return status.startswith("Up ")
+    return False
+
+
+def _wait_for_docker_container_is_up(
+    service_name: str, *, attempts: int = 120, delay_seconds: float = 3.0
+) -> bool:
+    for attempt in range(attempts):
+        if _docker_container_is_up(service_name):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
     return False
 
 
@@ -599,7 +659,7 @@ def _find_container_name(service_name: str) -> str | None:
     if result.returncode != 0:
         return None
     for line in result.stdout.splitlines():
-        if service_name in line:
+        if _container_name_matches_service(line, service_name):
             return line
     return None
 
@@ -760,7 +820,7 @@ def _render_compose_file(
                 environment=internal_environment,
                 labels=None,
                 app_port=app_port,
-                networks=("default", f"dokploy-network", shared_network),
+                networks=("default", "dokploy-network", shared_network),
                 depends_on=(
                     (_DEFAULT_NEXA_MEM0_SERVICE_NAME, _DEFAULT_NEXA_QDRANT_SERVICE_NAME)
                     if nexa_sidecars_enabled
@@ -1065,9 +1125,9 @@ def _render_gateway_service_block(
             f"      - '{app_port}'",
             "    healthcheck:",
             (
-                "      test: ['CMD-SHELL', 'wget -q -O- "
-                f"http://127.0.0.1:{app_port}{_health_path_for_variant('openclaw')} "
-                ">/dev/null']"
+                "      test: ['CMD-SHELL', 'node -e \"fetch(\\\""
+                f"http://127.0.0.1:{app_port}{_health_path_for_variant('openclaw')}"
+                "\\\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"']"
             ),
             "      interval: 30s",
             "      timeout: 5s",

@@ -849,6 +849,10 @@ def test_install_passes_nexa_env_into_dokploy_openclaw_backend(
     monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
     monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda service_name: True)
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._wait_for_container_http_health",
+        lambda service_name, url, *, app_port: True,
+    )
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda url: True)
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", lambda service_name, url: True)
 
@@ -915,6 +919,10 @@ def test_install_renders_internal_nexa_runtime_sidecar_into_openclaw_compose(
     monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
     monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda service_name: True)
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._wait_for_container_http_health",
+        lambda service_name, url, *, app_port: True,
+    )
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda url: True)
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", lambda service_name, url: True)
 
