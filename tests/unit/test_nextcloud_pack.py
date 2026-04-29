@@ -27,13 +27,13 @@ from dokploy_wizard.dokploy import (
 )
 from dokploy_wizard.dokploy.nextcloud import (
     _ensure_nexa_service_account,
+    _ensure_onlyoffice_app_config,
     _ensure_spreed_app_enabled,
     _ensure_trusted_domain,
     _find_container_name,
-    _platform_version_spec_matches_major,
-    _ensure_onlyoffice_app_config,
     _local_https_health_check,
     _nextcloud_status_ready,
+    _platform_version_spec_matches_major,
     _resolve_compatible_app_release_download_url,
     _talk_app_enabled,
     _with_trailing_slash,
@@ -41,10 +41,10 @@ from dokploy_wizard.dokploy.nextcloud import (
 from dokploy_wizard.packs.nextcloud import (
     NEXTCLOUD_SERVICE_RESOURCE_TYPE,
     NEXTCLOUD_VOLUME_RESOURCE_TYPE,
-    NextcloudBundleVerification,
-    NextcloudCommandCheck,
     ONLYOFFICE_SERVICE_RESOURCE_TYPE,
     ONLYOFFICE_VOLUME_RESOURCE_TYPE,
+    NextcloudBundleVerification,
+    NextcloudCommandCheck,
     NextcloudError,
     NextcloudOpenClawWorkspaceContract,
     NextcloudResourceRecord,
@@ -949,7 +949,7 @@ def test_dokploy_nextcloud_backend_marks_nexa_workspace_as_operator_surface() ->
         openclaw_workspace_contract=NextcloudOpenClawWorkspaceContract(
             enabled=True,
             external_mount_name="/OpenClaw",
-            external_mount_path="/mnt/openclaw",
+            external_mount_path="/mnt/openclaw/workspace",
             visible_root="/mnt/openclaw/workspace/nexa",
             contract_path="/mnt/openclaw/workspace/nexa/contract.json",
             runtime_state_source="server-owned env + durable state JSON",
@@ -1471,12 +1471,18 @@ def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
         "dokploy_wizard.dokploy.nextcloud._run_occ",
         lambda container_name, args: commands.append(tuple(args)),
     )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_openclaw_external_storage_path", lambda _: None
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._list_external_storage_mounts", lambda _: ()
+    )
 
     def fake_find_mount_id(container_name: str, *, mount_point: str, datadir: str) -> str | None:
         nonlocal mount_id_calls
         mount_id_calls += 1
         assert mount_point == "/OpenClaw"
-        assert datadir == "/mnt/openclaw"
+        assert datadir == "/mnt/openclaw/workspace"
         return None if mount_id_calls == 1 else "17"
 
     monkeypatch.setattr(
@@ -1501,7 +1507,7 @@ def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
         "local",
         "null::null",
         "-c",
-        "datadir=/mnt/openclaw",
+        "datadir=/mnt/openclaw/workspace",
     ) in commands
     assert ("files_external:applicable", "17", "--add-user=clayton@example.com") in commands
     assert ("files_external:option", "17", "readonly", "false") in commands
@@ -1511,6 +1517,68 @@ def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
         "files:scan",
         "--path=clayton@example.com/files/OpenClaw",
     ) in commands
+
+
+def test_ensure_onlyoffice_app_config_replaces_stale_openclaw_external_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    mount_id_calls = 0
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        lambda container_name, shell_command: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ",
+        lambda container_name, args: commands.append(tuple(args)),
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_openclaw_external_storage_path", lambda _: None
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._list_external_storage_mounts",
+        lambda _: (
+            {
+                "mount_id": 9,
+                "mount_point": "/OpenClaw",
+                "configuration": {"datadir": "/mnt/openclaw"},
+            },
+        ),
+    )
+
+    def fake_find_mount_id(container_name: str, *, mount_point: str, datadir: str) -> str | None:
+        nonlocal mount_id_calls
+        mount_id_calls += 1
+        assert mount_point == "/OpenClaw"
+        assert datadir == "/mnt/openclaw/workspace"
+        return None if mount_id_calls == 1 else "17"
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._find_external_storage_mount_id",
+        fake_find_mount_id,
+    )
+
+    _ensure_onlyoffice_app_config(
+        "nextcloud-container",
+        document_server_url="https://office.example.com",
+        document_server_internal_url="http://wizard-stack-onlyoffice",
+        storage_url="http://wizard-stack-nextcloud",
+        jwt_secret="change-me",
+        openclaw_external_storage_enabled=True,
+        admin_user="clayton@example.com",
+    )
+
+    assert commands.index(("files_external:delete", "--yes", "9")) < commands.index(
+        (
+            "files_external:create",
+            "/OpenClaw",
+            "local",
+            "null::null",
+            "-c",
+            "datadir=/mnt/openclaw/workspace",
+        )
+    )
 
 
 def test_ensure_onlyoffice_app_config_waits_for_transient_documentserver_warmup(

@@ -113,9 +113,9 @@ from dokploy_wizard.preflight import (
     run_preflight,
 )
 from dokploy_wizard.state import (
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
-    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
@@ -1960,7 +1960,7 @@ def _build_nextcloud_openclaw_workspace_contract(
     return NextcloudOpenClawWorkspaceContract(
         enabled=True,
         external_mount_name="/OpenClaw",
-        external_mount_path="/mnt/openclaw",
+        external_mount_path="/mnt/openclaw/workspace",
         visible_root="/mnt/openclaw/workspace/nexa",
         contract_path="/mnt/openclaw/workspace/nexa/contract.json",
         runtime_state_source="server-owned env + durable state JSON",

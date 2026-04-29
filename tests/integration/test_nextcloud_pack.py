@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -986,6 +986,7 @@ def test_install_passes_nexa_workspace_contract_into_dokploy_nextcloud_backend(
     assert summary["nextcloud"]["outcome"] == "applied"
     workspace_contract = recording_backend.init_kwargs["openclaw_workspace_contract"]
     assert workspace_contract is not None
+    assert workspace_contract.external_mount_path == "/mnt/openclaw/workspace"
     assert workspace_contract.visible_root == "/mnt/openclaw/workspace/nexa"
     assert workspace_contract.contract_path == "/mnt/openclaw/workspace/nexa/contract.json"
     assert workspace_contract.runtime_state_source == "server-owned env + durable state JSON"
