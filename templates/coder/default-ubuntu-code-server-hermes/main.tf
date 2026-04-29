@@ -418,12 +418,12 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(PROXY_PORT, "127.0.0.1");
 JS
 
-    HERMES_DASHBOARD_PORT=9119
-    HERMES_DASHBOARD_PROXY_PORT=9120
-    HERMES_WEB_UI_PORT=8648
-    HERMES_WEB_UI_PROXY_PORT=8649
-    HERMES_WEBUI_PORT=8787
-    HERMES_WEBUI_PROXY_PORT=8788
+    export HERMES_DASHBOARD_PORT=9119
+    export HERMES_DASHBOARD_PROXY_PORT=9120
+    export HERMES_WEB_UI_PORT=8648
+    export HERMES_WEB_UI_PROXY_PORT=8649
+    export HERMES_WEBUI_PORT=8787
+    export HERMES_WEBUI_PROXY_PORT=8788
     HERMES_BOOTSTRAP_SCRIPT=/tmp/hermes-workspace-bootstrap.sh
     HERMES_BOOTSTRAP_PID_FILE=/tmp/hermes-workspace-bootstrap.pid
 
@@ -556,7 +556,7 @@ resource "coder_app" "hermes_dashboard" {
   agent_id     = coder_agent.main.id
   slug         = "hermes-dashboard"
   display_name = "Hermes Dashboard"
-  icon         = "/icon/code.svg"
+  icon         = "https://raw.githubusercontent.com/NousResearch/hermes-agent/refs/heads/main/acp_registry/icon.svg"
   url          = "http://localhost:9120"
   share        = "owner"
   subdomain    = false
@@ -573,7 +573,7 @@ resource "coder_app" "hermes_web_ui" {
   agent_id     = coder_agent.main.id
   slug         = "hermes-web-ui"
   display_name = "Hermes Web UI"
-  icon         = "/icon/code.svg"
+  icon         = "https://raw.githubusercontent.com/EKKOLearnAI/hermes-web-ui/refs/heads/main/packages/client/public/favicon.svg"
   url          = "http://localhost:8649"
   share        = "owner"
   subdomain    = false
@@ -590,7 +590,7 @@ resource "coder_app" "hermes_webui" {
   agent_id     = coder_agent.main.id
   slug         = "hermes-webui"
   display_name = "Hermes WebUI Classic"
-  icon         = "/icon/code.svg"
+  icon         = "https://raw.githubusercontent.com/nesquena/hermes-webui/refs/heads/master/static/favicon.svg"
   url          = "http://localhost:8788"
   share        = "owner"
   subdomain    = false

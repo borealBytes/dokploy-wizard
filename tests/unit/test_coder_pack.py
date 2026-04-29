@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+import subprocess
 from typing import cast
 
 import dokploy_wizard.dokploy.coder as coder_module
@@ -207,14 +208,30 @@ def test_default_opencode_web_template_includes_web_app() -> None:
     assert "content-security-policy" in template
     assert "content-encoding" in template
     assert 'pageHttpOrigin + mount + next.pathname + next.search' in template
-    assert 'if (input instanceof Request) return originalFetch(new Request(rewrite(input.url), input), init);' in template
+    assert 'const requestInitFrom = async (request, init) => {' in template
+    assert 'requestInit.body = await request.clone().arrayBuffer();' in template
+    assert 'if (input instanceof Request) return originalFetch(url, await requestInitFrom(input, init));' in template
     assert 'window.EventSource = class extends OriginalEventSource' in template
     assert 'window.WebSocket = class extends OriginalWebSocket' in template
     assert 'originalPushState = window.history.pushState' in template
+    assert 'window.__OPENCODE_MOUNT = mount;' in template
+    assert 'const mountedBaseScript' in template
+    assert 'document.head.prepend(base);' in template
+    assert 'coder-mount=v2' in template
+    assert 'responseHeaders["Cache-Control"] = "no-store";' in template
+    assert '.replace("<head>", "<head>" + mountedBaseScript)' in template
+    assert 'KO=function(e){let t="";const n=location.pathname.indexOf("/apps/");' in template
+    assert 'import("./$1?coder-mount=v2")' in template
+    assert 'from"./$1?coder-mount=v2"' in template
+    assert 'window.history.replaceState(window.history.state, "", "/L2hvbWUvY29kZXI/session");' in template
+    assert 'path:"/:coderUser/:coderWorkspace/apps/:coderApp/:dir"' in template
     assert 'nohup env TARGET_PORT="$OPENCODE_WEB_PORT" PROXY_PORT="$OPENCODE_PROXY_PORT" node /tmp/coder-mounted-proxy.mjs' in template
     assert 'resource "coder_app" "opencode"' in template
     assert 'display_name = "OpenCode"' in template
-    assert 'icon         = "/icon/code.svg"' in template
+    assert (
+        'icon         = "https://raw.githubusercontent.com/anomalyco/opencode/refs/heads/dev/packages/ui/src/assets/favicon/favicon-v3.svg"'
+        in template
+    )
     assert 'url          = "http://localhost:4097"' in template
     assert 'share        = "owner"' in template
     assert 'subdomain    = false' in template
@@ -254,6 +271,10 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
     assert 'resource "coder_app" "openwork"' in template
     assert 'slug         = "openwork"' in template
     assert 'display_name = "OpenWork"' in template
+    assert (
+        'icon         = "https://raw.githubusercontent.com/different-ai/openwork/refs/heads/dev/apps/app/public/openwork-logo-square.svg"'
+        in template
+    )
     assert 'url          = "http://localhost:8788"' in template
     assert 'subdomain    = false' in template
     assert 'url       = "http://localhost:8788/health"' in template
@@ -287,6 +308,12 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert 'hermes config set model.default "$HERMES_MODEL"' in template
     assert 'hermes config set model.base_url "$OPENCODE_GO_BASE_URL"' in template
     assert 'hermes config set terminal.cwd /home/coder' in template
+    assert 'export HERMES_DASHBOARD_PORT=9119' in template
+    assert 'export HERMES_DASHBOARD_PROXY_PORT=9120' in template
+    assert 'export HERMES_WEB_UI_PORT=8648' in template
+    assert 'export HERMES_WEB_UI_PROXY_PORT=8649' in template
+    assert 'export HERMES_WEBUI_PORT=8787' in template
+    assert 'export HERMES_WEBUI_PROXY_PORT=8788' in template
     assert 'HERMES_BOOTSTRAP_SCRIPT=/tmp/hermes-workspace-bootstrap.sh' in template
     assert 'nohup sh "$HERMES_BOOTSTRAP_SCRIPT" >/tmp/hermes-bootstrap.log 2>&1 &' in template
     assert 'nohup hermes gateway >/tmp/hermes-gateway.log 2>&1 &' in template
@@ -307,15 +334,66 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert 'server.on("upgrade", (req, socket, head) => {' in template
     assert 'window.WebSocket = class extends OriginalWebSocket' in template
     assert 'resource "coder_app" "hermes_dashboard"' in template
+    assert (
+        'icon         = "https://raw.githubusercontent.com/NousResearch/hermes-agent/refs/heads/main/acp_registry/icon.svg"'
+        in template
+    )
     assert 'url          = "http://localhost:9120"' in template
     assert 'resource "coder_app" "hermes_web_ui"' in template
+    assert (
+        'icon         = "https://raw.githubusercontent.com/EKKOLearnAI/hermes-web-ui/refs/heads/main/packages/client/public/favicon.svg"'
+        in template
+    )
     assert 'url          = "http://localhost:8649"' in template
     assert 'resource "coder_app" "hermes_webui"' in template
+    assert (
+        'icon         = "https://raw.githubusercontent.com/nesquena/hermes-webui/refs/heads/master/static/favicon.svg"'
+        in template
+    )
     assert 'url          = "http://localhost:8788"' in template
     assert 'HERMIES_PROVIDER' not in template
     assert 'HERMEIS_OPENCODE_GO_MODEL' not in template
     assert 'HERMIES_BASE_USL' not in template
     assert 'HERMIES_API_MODE' not in template
+
+
+def test_push_default_template_ignores_missing_terraform_lockfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
+    coder_module._push_default_template(
+        container_name="coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        template_name="ubuntu-vscode-opencode-web",
+    )
+
+    assert calls == [
+        [
+            "docker",
+            "exec",
+            "-e",
+            "CODER_URL=https://coder.example.com/",
+            "-e",
+            "CODER_SESSION_TOKEN=session-123",
+            "coder-container",
+            "/opt/coder",
+            "templates",
+            "push",
+            "ubuntu-vscode-opencode-web",
+            "--directory",
+            "/tmp/ubuntu-vscode-opencode-web",
+            "--ignore-lockfile",
+            "--yes",
+        ]
+    ]
 
 
 def test_reconcile_coder_creates_service_and_data() -> None:
