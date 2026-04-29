@@ -565,7 +565,7 @@ def _ignore_known_auxiliary_container(*, container_name: str, stack_name: str) -
         return True
     if normalized_name.startswith(f"{normalized_stack}-dokploy-wizard-auth-probe-"):
         return True
-    if normalized_name.startswith("coder-") and "-workspace-" in normalized_name:
+    if normalized_name.startswith("coder-"):
         return True
     return False
 

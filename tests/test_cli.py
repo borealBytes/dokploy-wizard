@@ -337,6 +337,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     cloudflared_container = "openmerge-cloudflared-ghphch-openmerge-cloudflared-1"
     auth_probe_container = "openmerge-dokploy-wizard-auth-probe-ocm4ux-auth-probe-1"
     coder_workspace_container = "coder-clayton-openmergeme-workspace-2026-04-21"
+    coder_named_template_container = "coder-clayton-openwork"
     my_farm_hostname = desired_state.hostnames["my-farm-advisor"]
     onlyoffice_hostname = desired_state.hostnames["onlyoffice"]
 
@@ -470,6 +471,11 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                 "status": "Up 2 minutes",
                 "labels": {},
             },
+            {
+                "name": coder_named_template_container,
+                "status": "Up 2 minutes",
+                "labels": {},
+            },
         ),
     )
     monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", ())
@@ -562,6 +568,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     assert not any(entry["live_name"] == cloudflared_container for entry in manual_entries)
     assert not any(entry["live_name"] == auth_probe_container for entry in manual_entries)
     assert not any(entry["live_name"] == coder_workspace_container for entry in manual_entries)
+    assert not any(entry["live_name"] == coder_named_template_container for entry in manual_entries)
     assert report["summary"]["wizard_managed"] == 11
     assert report["summary"]["manual_collision"] == 0
 
