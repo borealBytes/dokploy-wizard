@@ -390,7 +390,7 @@ resource "coder_app" "openwork" {
   agent_id     = coder_agent.main.id
   slug         = "openwork"
   display_name = "OpenWork"
-  icon         = "/icon/code.svg"
+  icon         = "https://raw.githubusercontent.com/different-ai/openwork/refs/heads/dev/apps/app/public/openwork-logo-square.svg"
   url          = "http://localhost:8788"
   share        = "owner"
   subdomain    = false
