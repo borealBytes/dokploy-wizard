@@ -803,6 +803,7 @@ def _push_default_template(
             template_name,
             "--directory",
             f"/tmp/{template_name}",
+            "--ignore-lockfile",
             "--yes",
         ],
         check=False,
@@ -811,7 +812,7 @@ def _push_default_template(
     )
     if result.returncode != 0:
         raise CoderError(
-            f"Unable to push default Coder template: {(result.stderr or result.stdout).strip()}"
+            f"Unable to push default Coder template '{template_name}': {(result.stderr or result.stdout).strip()}"
         )
 
 
