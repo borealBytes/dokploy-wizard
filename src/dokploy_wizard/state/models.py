@@ -51,7 +51,9 @@ def _require_string_list(payload: dict[str, Any], key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _require_string_map(payload: dict[str, Any], key: str) -> dict[str, str]:
+def _require_string_map(
+    payload: dict[str, Any], key: str, *, allow_empty_values: bool = False
+) -> dict[str, str]:
     value = payload.get(key)
     if not isinstance(value, dict):
         msg = f"Expected object for '{key}'."
@@ -62,8 +64,9 @@ def _require_string_map(payload: dict[str, Any], key: str) -> dict[str, str]:
         if not isinstance(map_key, str) or map_key == "":
             msg = f"Expected non-empty string keys in '{key}'."
             raise StateValidationError(msg)
-        if not isinstance(map_value, str) or map_value == "":
-            msg = f"Expected non-empty string values in '{key}'."
+        if not isinstance(map_value, str) or (not allow_empty_values and map_value == ""):
+            qualifier = "string" if allow_empty_values else "non-empty string"
+            msg = f"Expected {qualifier} values in '{key}'."
             raise StateValidationError(msg)
         normalized[map_key] = map_value
     return normalized
@@ -117,8 +120,8 @@ class RawEnvInput:
             msg = "Raw env input cannot be empty."
             raise StateValidationError(msg)
         for key, value in self.values.items():
-            if key == "" or value == "":
-                msg = "Raw env input keys and values must be non-empty strings."
+            if key == "" or not isinstance(value, str):
+                msg = "Raw env input keys must be non-empty strings and values must be strings."
                 raise StateValidationError(msg)
 
     def to_dict(self) -> dict[str, Any]:
@@ -131,7 +134,7 @@ class RawEnvInput:
     def from_dict(cls, payload: dict[str, Any]) -> RawEnvInput:
         return cls(
             format_version=_require_format_version(payload),
-            values=_require_string_map(payload, "values"),
+            values=_require_string_map(payload, "values", allow_empty_values=True),
         )
 
 

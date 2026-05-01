@@ -5,11 +5,13 @@ from __future__ import annotations
 import ssl
 import subprocess
 from dataclasses import dataclass, field
+from typing import Any
 from urllib import request
 
 import pytest
 
 import dokploy_wizard.dokploy.nextcloud as nextcloud_module
+import dokploy_wizard.packs.nextcloud as nextcloud_pack
 from dokploy_wizard.core.models import (
     SharedCorePlan,
     SharedPostgresAllocation,
@@ -43,6 +45,7 @@ from dokploy_wizard.packs.nextcloud import (
     NEXTCLOUD_VOLUME_RESOURCE_TYPE,
     ONLYOFFICE_SERVICE_RESOURCE_TYPE,
     ONLYOFFICE_VOLUME_RESOURCE_TYPE,
+    NextcloudAdvisorWorkspaceMountContract,
     NextcloudBundleVerification,
     NextcloudCommandCheck,
     NextcloudError,
@@ -983,6 +986,115 @@ def test_dokploy_nextcloud_backend_marks_nexa_workspace_as_operator_surface() ->
     assert (
         "DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: server-owned env + durable state JSON"
         in compose
+    )
+
+
+def test_nextcloud_advisor_mount_contracts_can_coexist_without_path_collisions() -> None:
+    contracts = (
+        NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="openclaw",
+            volume_name="wizard-stack-openclaw-data",
+            container_mount_root="/mnt/openclaw",
+            external_mount_name="/Nexa Claw",
+            external_mount_path="/mnt/openclaw/workspace",
+            visible_root="/mnt/openclaw/workspace/nexa",
+            contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+            runtime_state_source="server-owned env + durable state JSON",
+            rescan_schedule_identity="openclaw",
+            notes=("Operator-facing Nexa workspace.",),
+        ),
+        NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="my-farm-advisor",
+            volume_name="wizard-stack-my-farm-advisor-data",
+            container_mount_root="/mnt/my-farm-advisor",
+            external_mount_name="/Nexa Farm",
+            external_mount_path="/mnt/my-farm-advisor/field-operations",
+            visible_root="/mnt/my-farm-advisor/field-operations/workspace",
+            contract_path=None,
+            runtime_state_source="wizard-managed service workspace",
+            rescan_schedule_identity="my-farm-advisor-field-operations",
+            notes=("Field operations workspace.",),
+        ),
+        NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="my-farm-advisor",
+            volume_name="wizard-stack-my-farm-advisor-data",
+            container_mount_root="/mnt/my-farm-advisor",
+            external_mount_name="/Nexa Farm Data Pipeline",
+            external_mount_path="/mnt/my-farm-advisor/data-pipeline",
+            visible_root="/mnt/my-farm-advisor/data-pipeline/workspace",
+            contract_path=None,
+            runtime_state_source="wizard-managed data pipeline workspace",
+            rescan_schedule_identity="my-farm-advisor-data-pipeline",
+            notes=("Data pipeline workspace.",),
+        ),
+    )
+
+    assert len({item.external_mount_name for item in contracts}) == 3
+    assert len({item.external_mount_path for item in contracts}) == 3
+    assert {item.external_mount_name for item in contracts} == {
+        "/Nexa Claw",
+        "/Nexa Farm",
+        "/Nexa Farm Data Pipeline",
+    }
+
+
+def test_nextcloud_advisor_workspace_contract_serialization_is_deterministic() -> None:
+    contract = NextcloudAdvisorWorkspaceMountContract(
+        advisor_id="openclaw",
+        volume_name="wizard-stack-openclaw-data",
+        container_mount_root="/mnt/openclaw",
+        external_mount_name="/Nexa Claw",
+        external_mount_path="/mnt/openclaw/workspace",
+        visible_root="/mnt/openclaw/workspace/nexa",
+        contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+        runtime_state_source="server-owned env + durable state JSON",
+        rescan_schedule_identity="openclaw",
+        notes=("Operator-facing Nexa workspace.",),
+    )
+
+    expected = {
+        "advisor_id": "openclaw",
+        "container_mount_root": "/mnt/openclaw",
+        "contract_path": "/mnt/openclaw/workspace/nexa/contract.json",
+        "enabled": True,
+        "external_mount_name": "/Nexa Claw",
+        "external_mount_path": "/mnt/openclaw/workspace",
+        "notes": ["Operator-facing Nexa workspace."],
+        "read_write_mode": True,
+        "rescan_schedule_identity": "openclaw",
+        "runtime_state_source": "server-owned env + durable state JSON",
+        "visible_root": "/mnt/openclaw/workspace/nexa",
+        "volume_name": "wizard-stack-openclaw-data",
+    }
+
+    assert contract.to_dict() == expected
+    assert contract.to_dict() == expected
+
+
+def test_nextcloud_openclaw_workspace_contract_import_remains_backward_compatible() -> None:
+    contract = nextcloud_pack.NextcloudOpenClawWorkspaceContract(
+        enabled=True,
+        external_mount_name="/Nexa Claw",
+        external_mount_path="/mnt/openclaw/workspace",
+        visible_root="/mnt/openclaw/workspace/nexa",
+        contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+        runtime_state_source="server-owned env + durable state JSON",
+        notes=("Operator-facing Nexa workspace.",),
+    )
+
+    assert isinstance(contract, NextcloudOpenClawWorkspaceContract)
+    assert contract.advisor_mount == NextcloudAdvisorWorkspaceMountContract(
+        advisor_id="openclaw",
+        volume_name="openclaw-data",
+        container_mount_root="/mnt/openclaw",
+        external_mount_name="/Nexa Claw",
+        external_mount_path="/mnt/openclaw/workspace",
+        visible_root="/mnt/openclaw/workspace/nexa",
+        contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+        runtime_state_source="server-owned env + durable state JSON",
+        rescan_schedule_identity="openclaw",
+        notes=("Operator-facing Nexa workspace.",),
+        enabled=True,
     )
 
 
