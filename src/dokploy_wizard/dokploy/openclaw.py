@@ -35,6 +35,11 @@ _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 _DEFAULT_NVIDIA_VISIBLE_DEVICES = "all"
 _DEFAULT_APP_PORT = 18789
 _MY_FARM_ADVISOR_PORT = 18789
+_MY_FARM_ADVISOR_STATE_ROOT = "/data"
+_MY_FARM_ADVISOR_WORKSPACE_ROOT = f"{_MY_FARM_ADVISOR_STATE_ROOT}/workspace"
+_MY_FARM_ADVISOR_PIPELINE_WORKSPACE_ROOT = (
+    f"{_MY_FARM_ADVISOR_STATE_ROOT}/workspace-data-pipeline"
+)
 _DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace/nexa"
 _DEFAULT_NEXA_RUNTIME_CONTRACT_PATH = "/home/node/.openclaw/.nexa/runtime-contract.json"
 _DEFAULT_NEXA_WORKSPACE_CONTRACT_PATH = f"{_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT}/contract.json"
@@ -973,12 +978,24 @@ def _render_compose_file(
             startup_mode=startup_mode,
             runtime_config=runtime_config,
             variant=variant,
-            state_root="/data" if variant == "my-farm-advisor" else _DEFAULT_OPENCLAW_STATE_ROOT,
+            state_root=(
+                _MY_FARM_ADVISOR_STATE_ROOT
+                if variant == "my-farm-advisor"
+                else _DEFAULT_OPENCLAW_STATE_ROOT
+            ),
             include_gateway_token=not single_gateway_trusted_proxy,
             include_nexa=variant == "openclaw",
         )
-        volume_name = f"{service_name}-data" if variant == "my-farm-advisor" else _openclaw_data_volume_name(stack_name)
-        volume_target = "/data" if variant == "my-farm-advisor" else _DEFAULT_OPENCLAW_STATE_ROOT
+        volume_name = (
+            f"{service_name}-data"
+            if variant == "my-farm-advisor"
+            else _openclaw_data_volume_name(stack_name)
+        )
+        volume_target = (
+            _MY_FARM_ADVISOR_STATE_ROOT
+            if variant == "my-farm-advisor"
+            else _DEFAULT_OPENCLAW_STATE_ROOT
+        )
         lines.extend(
             _render_gateway_service_block(
                 service_name=service_name,
@@ -1194,7 +1211,7 @@ def _gateway_environment(
             }
         )
     if variant == "my-farm-advisor":
-        environment["HOME"] = "/data"
+        environment["HOME"] = _MY_FARM_ADVISOR_STATE_ROOT
     return environment
 
 
@@ -1917,7 +1934,8 @@ def _command_for_variant(
     )
     if variant == "my-farm-advisor":
         seed_command = (
-            "mkdir -p /data /data/.openclaw /data/workspace && "
+            f"mkdir -p {_MY_FARM_ADVISOR_STATE_ROOT} {_MY_FARM_ADVISOR_STATE_ROOT}/.openclaw "
+            f"{_MY_FARM_ADVISOR_WORKSPACE_ROOT} {_MY_FARM_ADVISOR_PIPELINE_WORKSPACE_ROOT} && "
             f"node -e {shlex.quote(node_script)}"
         )
         return json.dumps(
@@ -1926,8 +1944,7 @@ def _command_for_variant(
                 "-lc",
                 (
                     f"{seed_command} && "
-                    f"exec node openclaw.mjs gateway --bind lan --port {app_port} "
-                    "--allow-unconfigured"
+                    "exec /app/scripts/entrypoint.sh"
                 ),
             ]
         )

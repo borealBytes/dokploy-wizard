@@ -8,7 +8,7 @@ import shlex
 import ssl
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Protocol
 from urllib import error, parse, request
 
@@ -24,6 +24,7 @@ from dokploy_wizard.dokploy.client import (
     DokployScheduleRecord,
 )
 from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudAdvisorWorkspaceMountContract,
     NextcloudBundleVerification,
     NextcloudCommandCheck,
     NextcloudOpenClawWorkspaceContract,
@@ -36,8 +37,10 @@ _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 _DEFAULT_NEXTCLOUD_ADMIN_USER = "admin"
 _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD = "ChangeMeSoon"
 _DEFAULT_SHARED_SERVICE_PASSWORD = "change-me"
-_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME = "/OpenClaw"
-_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH = "/mnt/openclaw"
+_DEFAULT_ADVISOR_VOLUME_MOUNT_ROOT = "/mnt/advisors"
+_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME = "/Nexa Claw"
+_LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME = "/OpenClaw"
+_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH = f"{_DEFAULT_ADVISOR_VOLUME_MOUNT_ROOT}/openclaw"
 _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH = f"{_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH}/workspace"
 _DEFAULT_OPENCLAW_RESCAN_CRON = "*/15 * * * *"
 _DEFAULT_OPENCLAW_RESCAN_TIMEZONE = "UTC"
@@ -131,6 +134,7 @@ class DokployNextcloudBackend:
         integration_secret_ref: str,
         admin_user: str = _DEFAULT_NEXTCLOUD_ADMIN_USER,
         admin_password: str = _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD,
+        advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...] = (),
         openclaw_volume_name: str | None = None,
         openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None = None,
         nexa_agent_user_id: str | None = None,
@@ -152,8 +156,37 @@ class DokployNextcloudBackend:
         self._integration_secret_ref = integration_secret_ref
         self._admin_user = admin_user
         self._admin_password = admin_password
-        self._openclaw_volume_name = openclaw_volume_name
-        self._openclaw_workspace_contract = openclaw_workspace_contract
+        self._advisor_workspace_mounts = _resolve_advisor_workspace_mounts(
+            advisor_workspace_mounts=advisor_workspace_mounts,
+            openclaw_volume_name=openclaw_volume_name,
+            openclaw_workspace_contract=openclaw_workspace_contract,
+        )
+        self._openclaw_mount = next(
+            (
+                contract
+                for contract in self._advisor_workspace_mounts
+                if contract.advisor_id == "openclaw"
+            ),
+            None,
+        )
+        self._openclaw_volume_name = (
+            self._openclaw_mount.volume_name if self._openclaw_mount is not None else None
+        )
+        self._openclaw_external_mount_name = (
+            self._openclaw_mount.external_mount_name
+            if self._openclaw_mount is not None
+            else _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME
+        )
+        self._openclaw_external_mount_path = (
+            self._openclaw_mount.external_mount_path
+            if self._openclaw_mount is not None
+            else _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH
+        )
+        self._openclaw_container_mount_root = (
+            self._openclaw_mount.container_mount_root
+            if self._openclaw_mount is not None
+            else _DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH
+        )
         self._nexa_agent_user_id = nexa_agent_user_id
         self._nexa_agent_display_name = nexa_agent_display_name
         self._nexa_agent_password = nexa_agent_password
@@ -323,6 +356,9 @@ class DokployNextcloudBackend:
                 jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
                 wait_for_documentserver_check=self._created_in_process,
                 openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
+                openclaw_external_storage_mount_point=self._openclaw_external_mount_name,
+                openclaw_external_storage_datadir=self._openclaw_external_mount_path,
+                openclaw_external_storage_volume_root=self._openclaw_container_mount_root,
                 admin_user=self._admin_user,
             )
             self._ensure_openclaw_rescan_schedule()
@@ -354,6 +390,9 @@ class DokployNextcloudBackend:
             jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
             wait_for_documentserver_check=self._created_in_process,
             openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
+            openclaw_external_storage_mount_point=self._openclaw_external_mount_name,
+            openclaw_external_storage_datadir=self._openclaw_external_mount_path,
+            openclaw_external_storage_volume_root=self._openclaw_container_mount_root,
             admin_user=self._admin_user,
         )
         self._ensure_openclaw_rescan_schedule()
@@ -368,7 +407,13 @@ class DokployNextcloudBackend:
                 "Nextcloud container could not be located for OpenClaw external storage refresh."
             )
         _ensure_files_external_app(container)
-        _ensure_openclaw_external_storage(container, admin_user=admin_user)
+        _ensure_openclaw_external_storage(
+            container,
+            admin_user=admin_user,
+            mount_point=self._openclaw_external_mount_name,
+            datadir=self._openclaw_external_mount_path,
+            volume_root=self._openclaw_container_mount_root,
+        )
         self._ensure_openclaw_rescan_schedule()
 
     def _ensure_openclaw_rescan_schedule(self) -> None:
@@ -381,7 +426,11 @@ class DokployNextcloudBackend:
             )
         schedule_name = f"{self._stack_name}-openclaw-rescan"
         service_name = _nextcloud_service_name(self._stack_name)
-        command = f'php /var/www/html/occ files:scan --path="{self._admin_user}/files{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME}"'
+        rescan_mount_name = self._resolve_openclaw_rescan_mount_name()
+        command = (
+            f'php /var/www/html/occ files:scan '
+            f'--path="{self._admin_user}/files{rescan_mount_name}"'
+        )
         existing = next(
             (
                 item
@@ -421,6 +470,23 @@ class DokployNextcloudBackend:
                 command=command,
                 enabled=True,
             )
+
+    def _resolve_openclaw_rescan_mount_name(self) -> str:
+        if self._openclaw_volume_name is None:
+            return _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME
+        container = _find_container_name(_nextcloud_service_name(self._stack_name))
+        if container is None:
+            return self._openclaw_external_mount_name
+        if (
+            _find_external_storage_mount_id(
+                container,
+                mount_point=_LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME,
+                datadir=self._openclaw_external_mount_path,
+            )
+            is not None
+        ):
+            return _LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME
+        return self._openclaw_external_mount_name
 
     def _validate_service_inputs(
         self,
@@ -508,8 +574,7 @@ class DokployNextcloudBackend:
             integration_secret_ref=self._integration_secret_ref,
             admin_user=self._admin_user,
             admin_password=self._admin_password,
-            openclaw_volume_name=self._openclaw_volume_name,
-            openclaw_workspace_contract=self._openclaw_workspace_contract,
+            advisor_workspace_mounts=self._advisor_workspace_mounts,
         )
         try:
             if self._applied_locator is not None:
@@ -635,6 +700,180 @@ def _openclaw_volume_name(stack_name: str) -> str:
     return f"{stack_name}-openclaw-data"
 
 
+def _advisor_volume_mount_root(advisor_id: str) -> str:
+    return f"{_DEFAULT_ADVISOR_VOLUME_MOUNT_ROOT}/{advisor_id}"
+
+
+def _normalize_advisor_path(path: str | None, *, current_root: str, target_root: str) -> str | None:
+    if path is None:
+        return None
+    if path == current_root or path.startswith(f"{current_root}/"):
+        return f"{target_root}{path[len(current_root):]}"
+    return path
+
+
+def _normalize_advisor_workspace_mount(
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> NextcloudAdvisorWorkspaceMountContract:
+    target_root = _advisor_volume_mount_root(contract.advisor_id)
+    return replace(
+        contract,
+        container_mount_root=target_root,
+        external_mount_name=(
+            _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME
+            if contract.advisor_id == "openclaw"
+            else contract.external_mount_name
+        ),
+        external_mount_path=_normalize_advisor_path(
+            contract.external_mount_path,
+            current_root=contract.container_mount_root,
+            target_root=target_root,
+        )
+        or contract.external_mount_path,
+        visible_root=_normalize_advisor_path(
+            contract.visible_root,
+            current_root=contract.container_mount_root,
+            target_root=target_root,
+        )
+        or contract.visible_root,
+        contract_path=_normalize_advisor_path(
+            contract.contract_path,
+            current_root=contract.container_mount_root,
+            target_root=target_root,
+        ),
+    )
+
+
+def _resolve_advisor_workspace_mounts(
+    *,
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
+    openclaw_volume_name: str | None,
+    openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None,
+) -> tuple[NextcloudAdvisorWorkspaceMountContract, ...]:
+    if advisor_workspace_mounts:
+        return tuple(
+            _normalize_advisor_workspace_mount(contract)
+            for contract in advisor_workspace_mounts
+            if contract.enabled
+        )
+    if openclaw_volume_name is None:
+        return ()
+    if openclaw_workspace_contract is not None:
+        return (
+            _normalize_advisor_workspace_mount(
+                replace(
+                    openclaw_workspace_contract.advisor_mount,
+                    volume_name=openclaw_volume_name,
+                )
+            ),
+        )
+    return (
+        _normalize_advisor_workspace_mount(
+            NextcloudAdvisorWorkspaceMountContract(
+                advisor_id="openclaw",
+                volume_name=openclaw_volume_name,
+                container_mount_root="/mnt/openclaw",
+                external_mount_name=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+                external_mount_path="/mnt/openclaw/workspace",
+                visible_root="/mnt/openclaw/workspace",
+                contract_path=None,
+                runtime_state_source="server-owned env + durable state JSON",
+                notes=("Operator-facing OpenClaw workspace.",),
+            )
+        ),
+    )
+
+
+def _workspace_env_slug(contract: NextcloudAdvisorWorkspaceMountContract) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", contract.rescan_schedule_identity.upper()).strip("_")
+
+
+def _yaml_quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _render_nextcloud_workspace_env(
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
+) -> str:
+    if not advisor_workspace_mounts:
+        return ""
+    payload = json.dumps(
+        [contract.to_dict() for contract in advisor_workspace_mounts],
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    env_lines = [
+        f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MOUNTS_JSON: {_yaml_quote(payload)}",
+        f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_COUNT: {len(advisor_workspace_mounts)}",
+    ]
+    openclaw_contract = next(
+        (contract for contract in advisor_workspace_mounts if contract.advisor_id == "openclaw"),
+        None,
+    )
+    if openclaw_contract is not None:
+        env_lines.extend(
+            [
+                "      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface",
+                f"      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_NAME: {openclaw_contract.external_mount_name}",
+                f"      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_PATH: {openclaw_contract.external_mount_path}",
+                f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: {openclaw_contract.visible_root}",
+            ]
+        )
+        if openclaw_contract.contract_path is not None:
+            env_lines.append(
+                f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: {openclaw_contract.contract_path}"
+            )
+        env_lines.append(
+            "      DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: "
+            f"{openclaw_contract.runtime_state_source}"
+        )
+    for contract in advisor_workspace_mounts:
+        slug = _workspace_env_slug(contract)
+        env_lines.extend(
+            [
+                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_ADVISOR_ID: {contract.advisor_id}",
+                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_EXTERNAL_MOUNT_NAME: {contract.external_mount_name}",
+                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_EXTERNAL_MOUNT_PATH: {contract.external_mount_path}",
+                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_VISIBLE_ROOT: {contract.visible_root}",
+                "      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_"
+                f"{slug}_RUNTIME_STATE_SOURCE: {contract.runtime_state_source}",
+            ]
+        )
+        if contract.contract_path is not None:
+            env_lines.append(
+                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_CONTRACT_PATH: {contract.contract_path}"
+            )
+    return "\n".join(env_lines) + "\n"
+
+
+def _render_nextcloud_advisor_volume_mounts(
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
+) -> str:
+    seen: set[tuple[str, str]] = set()
+    lines: list[str] = []
+    for contract in advisor_workspace_mounts:
+        key = (contract.volume_name, contract.container_mount_root)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"      - {contract.volume_name}:{contract.container_mount_root}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _render_nextcloud_advisor_volume_block(
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
+) -> str:
+    seen: set[str] = set()
+    lines: list[str] = []
+    for contract in advisor_workspace_mounts:
+        if contract.volume_name in seen:
+            continue
+        seen.add(contract.volume_name)
+        lines.extend([f"  {contract.volume_name}:", f"    name: {contract.volume_name}"])
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def _service_name_for_kind(stack_name: str, kind: str) -> str:
     if kind == "nextcloud":
         return _nextcloud_service_name(stack_name)
@@ -713,36 +952,18 @@ def _render_compose_file(
     integration_secret_ref: str,
     admin_user: str,
     admin_password: str,
-    openclaw_volume_name: str | None,
-    openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None,
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
 ) -> str:
     nextcloud_service = _nextcloud_service_name(stack_name)
     onlyoffice_service = _onlyoffice_service_name(stack_name)
     nextcloud_volume = _nextcloud_volume_name(stack_name)
     onlyoffice_volume = _onlyoffice_volume_name(stack_name)
-    openclaw_volume = openclaw_volume_name
     shared_network = _shared_network_name(stack_name)
     nextcloud_url = f"https://{nextcloud_hostname}"
     onlyoffice_url = f"https://{onlyoffice_hostname}"
-    nextcloud_workspace_env = ""
-    if openclaw_workspace_contract is not None:
-        nextcloud_workspace_env = (
-            f"      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface\n"
-            f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: {openclaw_workspace_contract.visible_root}\n"
-            f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: {openclaw_workspace_contract.contract_path}\n"
-            "      DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: "
-            f"{openclaw_workspace_contract.runtime_state_source}\n"
-        )
-    nextcloud_extra_mount = (
-        f"      - {openclaw_volume}:{_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH}\n"
-        if openclaw_volume is not None
-        else ""
-    )
-    openclaw_volume_block = (
-        f"  {openclaw_volume}:\n    name: {openclaw_volume}\n"
-        if openclaw_volume is not None
-        else ""
-    )
+    nextcloud_workspace_env = _render_nextcloud_workspace_env(advisor_workspace_mounts)
+    nextcloud_extra_mount = _render_nextcloud_advisor_volume_mounts(advisor_workspace_mounts)
+    advisor_volume_block = _render_nextcloud_advisor_volume_block(advisor_workspace_mounts)
     return (
         "services:\n"
         f"  {nextcloud_service}:\n"
@@ -824,7 +1045,7 @@ def _render_compose_file(
         "volumes:\n"
         f"  {nextcloud_volume}:\n"
         f"  {onlyoffice_volume}:\n"
-        f"{openclaw_volume_block}"
+        f"{advisor_volume_block}"
         "networks:\n"
         "  dokploy-network:\n"
         "    external: true\n"
@@ -1121,6 +1342,9 @@ def _ensure_onlyoffice_app_config(
     jwt_secret: str,
     wait_for_documentserver_check: bool = False,
     openclaw_external_storage_enabled: bool = False,
+    openclaw_external_storage_mount_point: str = _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+    openclaw_external_storage_datadir: str = _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+    openclaw_external_storage_volume_root: str = _DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH,
     admin_user: str = _DEFAULT_NEXTCLOUD_ADMIN_USER,
 ) -> None:
     def_formats = json.dumps(_DEFAULT_ONLYOFFICE_DEF_FORMATS, separators=(",", ":"), sort_keys=True)
@@ -1179,7 +1403,13 @@ def _ensure_onlyoffice_app_config(
         _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
     if openclaw_external_storage_enabled:
         _ensure_files_external_app(container_name)
-        _ensure_openclaw_external_storage(container_name, admin_user=admin_user)
+        _ensure_openclaw_external_storage(
+            container_name,
+            admin_user=admin_user,
+            mount_point=openclaw_external_storage_mount_point,
+            datadir=openclaw_external_storage_datadir,
+            volume_root=openclaw_external_storage_volume_root,
+        )
 
 
 def _wait_for_onlyoffice_documentserver_check(
@@ -1264,9 +1494,11 @@ def _find_external_storage_mount_id(
     return None
 
 
-def _ensure_openclaw_external_storage_path(container_name: str) -> None:
-    path = shlex.quote(_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH)
-    volume_root = shlex.quote(_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH)
+def _ensure_openclaw_external_storage_path(
+    container_name: str, *, datadir: str, volume_root: str
+) -> None:
+    path = shlex.quote(datadir)
+    volume_root = shlex.quote(volume_root)
     result = subprocess.run(
         [
             "docker",
@@ -1289,45 +1521,66 @@ def _ensure_openclaw_external_storage_path(container_name: str) -> None:
 
 
 def _delete_stale_external_storage_mounts(
-    container_name: str, *, mount_point: str, datadir: str
+    container_name: str, *, mount_points: tuple[str, ...], datadir: str
 ) -> None:
     for mount in _list_external_storage_mounts(container_name):
         mount_name = mount.get("mount_point") or mount.get("mountPoint") or mount.get("mount")
         config = mount.get("configuration") or mount.get("config")
         mount_id = mount.get("mount_id") or mount.get("mountId") or mount.get("id")
         config_datadir = config.get("datadir") if isinstance(config, dict) else None
-        if mount_name == mount_point and config_datadir != datadir and mount_id is not None:
+        if mount_name in mount_points and config_datadir != datadir and mount_id is not None:
             _run_occ(container_name, ["files_external:delete", "--yes", str(mount_id)])
 
 
-def _ensure_openclaw_external_storage(container_name: str, *, admin_user: str) -> None:
-    _ensure_openclaw_external_storage_path(container_name)
+def _ensure_openclaw_external_storage(
+    container_name: str,
+    *,
+    admin_user: str,
+    mount_point: str = _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+    datadir: str = _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+    volume_root: str = _DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH,
+) -> None:
+    _ensure_openclaw_external_storage_path(
+        container_name,
+        datadir=datadir,
+        volume_root=volume_root,
+    )
     _delete_stale_external_storage_mounts(
         container_name,
-        mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
-        datadir=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+        mount_points=(mount_point, _LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME),
+        datadir=datadir,
     )
+    active_mount_point = mount_point
     mount_id = _find_external_storage_mount_id(
         container_name,
-        mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
-        datadir=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+        mount_point=mount_point,
+        datadir=datadir,
     )
+    if mount_id is None:
+        legacy_mount_id = _find_external_storage_mount_id(
+            container_name,
+            mount_point=_LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME,
+            datadir=datadir,
+        )
+        if legacy_mount_id is not None:
+            mount_id = legacy_mount_id
+            active_mount_point = _LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME
     if mount_id is None:
         _run_occ(
             container_name,
             [
                 "files_external:create",
-                _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+                mount_point,
                 "local",
                 "null::null",
                 "-c",
-                f"datadir={_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH}",
+                f"datadir={datadir}",
             ],
         )
         mount_id = _find_external_storage_mount_id(
             container_name,
-            mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
-            datadir=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+            mount_point=mount_point,
+            datadir=datadir,
         )
         if mount_id is None:
             raise NextcloudError("Nextcloud external storage mount for OpenClaw was not created.")
@@ -1337,7 +1590,7 @@ def _ensure_openclaw_external_storage(container_name: str, *, admin_user: str) -
     _run_occ(container_name, ["files_external:scan", mount_id])
     _run_occ(
         container_name,
-        ["files:scan", f"--path={admin_user}/files{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME}"],
+        ["files:scan", f"--path={admin_user}/files{active_mount_point}"],
     )
 
 

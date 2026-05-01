@@ -859,7 +859,56 @@ def test_dokploy_nextcloud_backend_creates_one_compose_for_pair() -> None:
     assert 'traefik.http.services.wizard-stack-onlyoffice.loadbalancer.server.port: "80"' in compose
 
 
-def test_dokploy_nextcloud_backend_mounts_openclaw_volume_when_enabled() -> None:
+def _openclaw_advisor_workspace_mount() -> NextcloudAdvisorWorkspaceMountContract:
+    return NextcloudAdvisorWorkspaceMountContract(
+        advisor_id="openclaw",
+        volume_name="wizard-stack-openclaw-data",
+        container_mount_root="/mnt/openclaw",
+        external_mount_name="/OpenClaw",
+        external_mount_path="/mnt/openclaw/workspace",
+        visible_root="/mnt/openclaw/workspace/nexa",
+        contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+        runtime_state_source="server-owned env + durable state JSON",
+        rescan_schedule_identity="openclaw",
+        notes=("Nextcloud exposes the Nexa workspace as an operator/user surface only.",),
+    )
+
+
+def _my_farm_advisor_workspace_mounts() -> tuple[NextcloudAdvisorWorkspaceMountContract, ...]:
+    return (
+        NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="my-farm-advisor",
+            volume_name="wizard-stack-my-farm-advisor-data",
+            container_mount_root="/mnt/my-farm-advisor",
+            external_mount_name="/Nexa Farm",
+            external_mount_path="/mnt/my-farm-advisor/field-operations",
+            visible_root="/mnt/my-farm-advisor/field-operations/workspace",
+            contract_path=None,
+            runtime_state_source="wizard-managed service workspace",
+            rescan_schedule_identity="my-farm-advisor-field-operations",
+            notes=("Field operations workspace.",),
+        ),
+        NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="my-farm-advisor",
+            volume_name="wizard-stack-my-farm-advisor-data",
+            container_mount_root="/mnt/my-farm-advisor",
+            external_mount_name="/Nexa Farm Data Pipeline",
+            external_mount_path="/mnt/my-farm-advisor/data-pipeline",
+            visible_root="/mnt/my-farm-advisor/data-pipeline/workspace",
+            contract_path=None,
+            runtime_state_source="wizard-managed data pipeline workspace",
+            rescan_schedule_identity="my-farm-advisor-data-pipeline",
+            notes=("Data pipeline workspace.",),
+        ),
+    )
+
+
+def _render_nextcloud_compose_for_mounts(
+    *,
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...] = (),
+    openclaw_volume_name: str | None = None,
+    openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None = None,
+) -> str:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -867,8 +916,6 @@ def test_dokploy_nextcloud_backend_mounts_openclaw_volume_when_enabled() -> None
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
                 "ENABLE_NEXTCLOUD": "true",
-                "ENABLE_OPENCLAW": "true",
-                "OPENCLAW_CHANNELS": "telegram",
             },
         )
     )
@@ -891,7 +938,9 @@ def test_dokploy_nextcloud_backend_mounts_openclaw_volume_when_enabled() -> None
         postgres=allocation.postgres,
         redis=allocation.redis,
         integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
-        openclaw_volume_name="wizard-stack-openclaw-data",
+        advisor_workspace_mounts=advisor_workspace_mounts,
+        openclaw_volume_name=openclaw_volume_name,
+        openclaw_workspace_contract=openclaw_workspace_contract,
         client=client,
     )
 
@@ -911,82 +960,79 @@ def test_dokploy_nextcloud_backend_mounts_openclaw_volume_when_enabled() -> None
 
     compose = client.last_create_compose_file
     assert compose is not None
-    assert "wizard-stack-openclaw-data:/mnt/openclaw" in compose
+    return compose
+
+
+def test_dokploy_nextcloud_backend_renders_openclaw_only_mounts() -> None:
+    compose = _render_nextcloud_compose_for_mounts(
+        advisor_workspace_mounts=(_openclaw_advisor_workspace_mount(),),
+    )
+
+    assert "wizard-stack-openclaw-data:/mnt/advisors/openclaw" in compose
+    assert "wizard-stack-my-farm-advisor-data" not in compose
     assert "  wizard-stack-openclaw-data:" in compose
     assert "    name: wizard-stack-openclaw-data" in compose
-
-
-def test_dokploy_nextcloud_backend_marks_nexa_workspace_as_operator_surface() -> None:
-    desired_state = resolve_desired_state(
-        RawEnvInput(
-            format_version=1,
-            values={
-                "STACK_NAME": "wizard-stack",
-                "ROOT_DOMAIN": "example.com",
-                "ENABLE_NEXTCLOUD": "true",
-                "ENABLE_OPENCLAW": "true",
-                "OPENCLAW_CHANNELS": "telegram",
-            },
-        )
-    )
-    allocation = next(
-        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
-    )
-    assert allocation.postgres is not None
-    assert allocation.redis is not None
-    assert desired_state.shared_core.postgres is not None
-    assert desired_state.shared_core.redis is not None
-    client = FakeDokployApiClient()
-    backend = DokployNextcloudBackend(
-        api_url="https://dokploy.example.com",
-        api_key="dokp-key-123",
-        stack_name=desired_state.stack_name,
-        nextcloud_hostname=desired_state.hostnames["nextcloud"],
-        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
-        postgres_service_name=desired_state.shared_core.postgres.service_name,
-        redis_service_name=desired_state.shared_core.redis.service_name,
-        postgres=allocation.postgres,
-        redis=allocation.redis,
-        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
-        openclaw_volume_name="wizard-stack-openclaw-data",
-        openclaw_workspace_contract=NextcloudOpenClawWorkspaceContract(
-            enabled=True,
-            external_mount_name="/OpenClaw",
-            external_mount_path="/mnt/openclaw/workspace",
-            visible_root="/mnt/openclaw/workspace/nexa",
-            contract_path="/mnt/openclaw/workspace/nexa/contract.json",
-            runtime_state_source="server-owned env + durable state JSON",
-            notes=(
-                "Nextcloud exposes the Nexa workspace as an operator/user surface only.",
-            ),
-        ),
-        client=client,
-    )
-
-    backend.create_service(
-        resource_name="wizard-stack-nextcloud",
-        hostname="nextcloud.example.com",
-        data_volume_name="wizard-stack-nextcloud-data",
-        config={
-            "onlyoffice_url": "https://office.example.com",
-            "postgres_database_name": allocation.postgres.database_name,
-            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
-            "postgres_user_name": allocation.postgres.user_name,
-            "redis_identity_name": allocation.redis.identity_name,
-            "redis_password_secret_ref": allocation.redis.password_secret_ref,
-        },
-    )
-
-    compose = client.last_create_compose_file
-    assert compose is not None
-    assert "wizard-stack-openclaw-data:/mnt/openclaw" in compose
     assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface" in compose
-    assert "DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: /mnt/openclaw/workspace/nexa" in compose
-    assert "DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: /mnt/openclaw/workspace/nexa/contract.json" in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_NAME: /Nexa Claw" in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: /mnt/advisors/openclaw/workspace/nexa" in compose
+    assert (
+        "DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: "
+        "/mnt/advisors/openclaw/workspace/nexa/contract.json" in compose
+    )
     assert (
         "DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: server-owned env + durable state JSON"
         in compose
     )
+    assert (
+        'DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MOUNTS_JSON: "[{\\"advisor_id\\":\\"openclaw\\"'
+        in compose
+    )
+
+
+def test_dokploy_nextcloud_backend_renders_farm_only_mounts_without_openclaw() -> None:
+    compose = _render_nextcloud_compose_for_mounts(
+        advisor_workspace_mounts=_my_farm_advisor_workspace_mounts(),
+    )
+
+    assert "wizard-stack-openclaw-data:/mnt/advisors/openclaw" not in compose
+    assert "wizard-stack-my-farm-advisor-data:/mnt/advisors/my-farm-advisor" in compose
+    assert compose.count("wizard-stack-my-farm-advisor-data:/mnt/advisors/my-farm-advisor") == 1
+    assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE" not in compose
+    assert "DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_FIELD_OPERATIONS_EXTERNAL_MOUNT_NAME: /Nexa Farm" in compose
+    assert (
+        "DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_DATA_PIPELINE_EXTERNAL_MOUNT_NAME: "
+        "/Nexa Farm Data Pipeline" in compose
+    )
+    assert "/mnt/advisors/my-farm-advisor/field-operations/workspace" in compose
+    assert "/mnt/advisors/my-farm-advisor/data-pipeline/workspace" in compose
+
+
+def test_dokploy_nextcloud_backend_renders_openclaw_and_farm_mounts_together() -> None:
+    compose = _render_nextcloud_compose_for_mounts(
+        advisor_workspace_mounts=(
+            _openclaw_advisor_workspace_mount(),
+            *_my_farm_advisor_workspace_mounts(),
+        ),
+    )
+
+    assert "wizard-stack-openclaw-data:/mnt/advisors/openclaw" in compose
+    assert "wizard-stack-my-farm-advisor-data:/mnt/advisors/my-farm-advisor" in compose
+    assert compose.count("wizard-stack-my-farm-advisor-data:/mnt/advisors/my-farm-advisor") == 1
+    assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_NAME: /Nexa Claw" in compose
+    assert "DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_FIELD_OPERATIONS_EXTERNAL_MOUNT_NAME: /Nexa Farm" in compose
+    assert (
+        "DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_DATA_PIPELINE_EXTERNAL_MOUNT_NAME: "
+        "/Nexa Farm Data Pipeline" in compose
+    )
+
+
+def test_dokploy_nextcloud_backend_renders_no_advisor_mounts_when_none_enabled() -> None:
+    compose = _render_nextcloud_compose_for_mounts()
+
+    assert "/mnt/advisors/openclaw" not in compose
+    assert "/mnt/advisors/my-farm-advisor" not in compose
+    assert "DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MOUNTS_JSON" not in compose
+    assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE" not in compose
 
 
 def test_nextcloud_advisor_mount_contracts_can_coexist_without_path_collisions() -> None:
@@ -1160,7 +1206,12 @@ def test_dokploy_nextcloud_backend_creates_openclaw_rescan_schedule() -> None:
     monkeypatch.setattr(
         nextcloud_module,
         "_ensure_openclaw_external_storage",
-        lambda container_name, *, admin_user: None,
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_find_external_storage_mount_id",
+        lambda container_name, *, mount_point, datadir: None,
     )
     backend.refresh_openclaw_external_storage(admin_user="clayton@superiorbyteworks.com")
     monkeypatch.undo()
@@ -1173,7 +1224,7 @@ def test_dokploy_nextcloud_backend_creates_openclaw_rescan_schedule() -> None:
             cron_expression="*/15 * * * *",
             timezone="UTC",
             shell_type="bash",
-            command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/OpenClaw"',
+            command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/Nexa Claw"',
             enabled=True,
         )
     ]
@@ -1208,7 +1259,7 @@ def test_dokploy_nextcloud_backend_updates_existing_openclaw_rescan_schedule() -
                 cron_expression="0 * * * *",
                 timezone="America/Detroit",
                 shell_type="bash",
-                command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/OpenClaw"',
+                command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/Nexa Claw"',
                 enabled=True,
             )
         ]
@@ -1256,7 +1307,12 @@ def test_dokploy_nextcloud_backend_updates_existing_openclaw_rescan_schedule() -
     monkeypatch.setattr(
         nextcloud_module,
         "_ensure_openclaw_external_storage",
-        lambda container_name, *, admin_user: None,
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_find_external_storage_mount_id",
+        lambda container_name, *, mount_point, datadir: None,
     )
     backend.refresh_openclaw_external_storage(admin_user="clayton@superiorbyteworks.com")
     monkeypatch.undo()
@@ -1269,7 +1325,7 @@ def test_dokploy_nextcloud_backend_updates_existing_openclaw_rescan_schedule() -
             cron_expression="*/5 * * * *",
             timezone="UTC",
             shell_type="bash",
-            command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/OpenClaw"',
+            command='php /var/www/html/occ files:scan --path="clayton@superiorbyteworks.com/files/Nexa Claw"',
             enabled=True,
         )
     ]
@@ -1573,7 +1629,7 @@ def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands: list[tuple[str, ...]] = []
-    mount_id_calls = 0
+    new_mount_id_calls = 0
 
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
@@ -1584,18 +1640,21 @@ def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
         lambda container_name, args: commands.append(tuple(args)),
     )
     monkeypatch.setattr(
-        "dokploy_wizard.dokploy.nextcloud._ensure_openclaw_external_storage_path", lambda _: None
+        "dokploy_wizard.dokploy.nextcloud._ensure_openclaw_external_storage_path",
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.nextcloud._list_external_storage_mounts", lambda _: ()
     )
 
     def fake_find_mount_id(container_name: str, *, mount_point: str, datadir: str) -> str | None:
-        nonlocal mount_id_calls
-        mount_id_calls += 1
+        nonlocal new_mount_id_calls
+        assert datadir == "/mnt/advisors/openclaw/workspace"
+        if mount_point == "/Nexa Claw":
+            new_mount_id_calls += 1
+            return None if new_mount_id_calls == 1 else "17"
         assert mount_point == "/OpenClaw"
-        assert datadir == "/mnt/openclaw/workspace"
-        return None if mount_id_calls == 1 else "17"
+        return None
 
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.nextcloud._find_external_storage_mount_id",
@@ -1615,11 +1674,11 @@ def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
     assert ("app:enable", "files_external") in commands
     assert (
         "files_external:create",
-        "/OpenClaw",
+        "/Nexa Claw",
         "local",
         "null::null",
         "-c",
-        "datadir=/mnt/openclaw/workspace",
+        "datadir=/mnt/advisors/openclaw/workspace",
     ) in commands
     assert ("files_external:applicable", "17", "--add-user=clayton@example.com") in commands
     assert ("files_external:option", "17", "readonly", "false") in commands
@@ -1627,15 +1686,14 @@ def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
     assert ("files_external:scan", "17") in commands
     assert (
         "files:scan",
-        "--path=clayton@example.com/files/OpenClaw",
+        "--path=clayton@example.com/files/Nexa Claw",
     ) in commands
 
 
-def test_ensure_onlyoffice_app_config_replaces_stale_openclaw_external_storage(
+def test_ensure_onlyoffice_app_config_reuses_legacy_openclaw_mount_idempotently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands: list[tuple[str, ...]] = []
-    mount_id_calls = 0
 
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
@@ -1646,7 +1704,67 @@ def test_ensure_onlyoffice_app_config_replaces_stale_openclaw_external_storage(
         lambda container_name, args: commands.append(tuple(args)),
     )
     monkeypatch.setattr(
-        "dokploy_wizard.dokploy.nextcloud._ensure_openclaw_external_storage_path", lambda _: None
+        "dokploy_wizard.dokploy.nextcloud._ensure_openclaw_external_storage_path",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._list_external_storage_mounts",
+        lambda _: (
+            {
+                "mount_id": 17,
+                "mount_point": "/OpenClaw",
+                "configuration": {"datadir": "/mnt/advisors/openclaw/workspace"},
+            },
+        ),
+    )
+
+    def fake_find_mount_id(container_name: str, *, mount_point: str, datadir: str) -> str | None:
+        assert datadir == "/mnt/advisors/openclaw/workspace"
+        if mount_point == "/Nexa Claw":
+            return None
+        assert mount_point == "/OpenClaw"
+        return "17"
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._find_external_storage_mount_id",
+        fake_find_mount_id,
+    )
+
+    _ensure_onlyoffice_app_config(
+        "nextcloud-container",
+        document_server_url="https://office.example.com",
+        document_server_internal_url="http://wizard-stack-onlyoffice",
+        storage_url="http://wizard-stack-nextcloud",
+        jwt_secret="change-me",
+        openclaw_external_storage_enabled=True,
+        admin_user="clayton@example.com",
+    )
+
+    assert not any(command[:2] == ("files_external:create", "/Nexa Claw") for command in commands)
+    assert ("files_external:applicable", "17", "--add-user=clayton@example.com") in commands
+    assert (
+        "files:scan",
+        "--path=clayton@example.com/files/OpenClaw",
+    ) in commands
+
+
+def test_ensure_onlyoffice_app_config_replaces_stale_openclaw_external_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    new_mount_id_calls = 0
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ_shell",
+        lambda container_name, shell_command: None,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._run_occ",
+        lambda container_name, args: commands.append(tuple(args)),
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.nextcloud._ensure_openclaw_external_storage_path",
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.nextcloud._list_external_storage_mounts",
@@ -1654,17 +1772,19 @@ def test_ensure_onlyoffice_app_config_replaces_stale_openclaw_external_storage(
             {
                 "mount_id": 9,
                 "mount_point": "/OpenClaw",
-                "configuration": {"datadir": "/mnt/openclaw"},
+                "configuration": {"datadir": "/mnt/advisors/openclaw"},
             },
         ),
     )
 
     def fake_find_mount_id(container_name: str, *, mount_point: str, datadir: str) -> str | None:
-        nonlocal mount_id_calls
-        mount_id_calls += 1
+        nonlocal new_mount_id_calls
+        assert datadir == "/mnt/advisors/openclaw/workspace"
+        if mount_point == "/Nexa Claw":
+            new_mount_id_calls += 1
+            return None if new_mount_id_calls == 1 else "17"
         assert mount_point == "/OpenClaw"
-        assert datadir == "/mnt/openclaw/workspace"
-        return None if mount_id_calls == 1 else "17"
+        return None
 
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.nextcloud._find_external_storage_mount_id",
@@ -1684,11 +1804,11 @@ def test_ensure_onlyoffice_app_config_replaces_stale_openclaw_external_storage(
     assert commands.index(("files_external:delete", "--yes", "9")) < commands.index(
         (
             "files_external:create",
-            "/OpenClaw",
+            "/Nexa Claw",
             "local",
             "null::null",
             "-c",
-            "datadir=/mnt/openclaw/workspace",
+            "datadir=/mnt/advisors/openclaw/workspace",
         )
     )
 

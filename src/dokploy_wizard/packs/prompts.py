@@ -49,11 +49,32 @@ _DEFAULT_NVIDIA_PRIMARY_MODEL = "nvidia/moonshotai/kimi-k2.5"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_REMOTE_FALLBACK_MODEL = "opencode-go/deepseek-v4-flash"
 _DEFAULT_DOKPLOY_ADMIN_EMAIL = "clayton@superiorbyteworks.com"
+_DEFAULT_MY_FARM_CHANNEL = "telegram"
 _OPENCLAW_RUNTIME_ENV_KEYS = tuple(
     key for key in _RUNTIME_APP_ENV_KEYS if key.startswith("OPENCLAW_")
 )
 _MY_FARM_ADVISOR_RUNTIME_ENV_KEYS = tuple(
     key for key in _RUNTIME_APP_ENV_KEYS if key.startswith("MY_FARM_ADVISOR_")
+)
+_MY_FARM_ADVISOR_PACK_ONLY_ENV_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "NVIDIA_BASE_URL",
+    "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
+    "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
+    "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
+    "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
+    "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
+    "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
+    "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
+    "TELEGRAM_ALLOWED_USERS",
+    "R2_BUCKET_NAME",
+    "R2_ENDPOINT",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+    "CF_ACCOUNT_ID",
+    "DATA_MODE",
+    "WORKSPACE_DATA_R2_RCLONE_MOUNT",
+    "WORKSPACE_DATA_R2_PREFIX",
 )
 
 
@@ -108,6 +129,8 @@ def apply_prompt_selection(raw_env: RawEnvInput, selection: PromptSelection) -> 
         updated_values.pop("OPENCLAW_GATEWAY_TOKEN", None)
     if "my-farm-advisor" in selection.disabled_packs:
         for key in _MY_FARM_ADVISOR_RUNTIME_ENV_KEYS:
+            updated_values.pop(key, None)
+        for key in _MY_FARM_ADVISOR_PACK_ONLY_ENV_KEYS:
             updated_values.pop(key, None)
     resulting_packs = {
         item.strip() for item in updated_values.get("PACKS", "").split(",") if item.strip()
@@ -194,16 +217,15 @@ def prompt_for_pack_selection(
             "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
             advisor_env["MY_FARM_ADVISOR_GATEWAY_PASSWORD"],
         )
-        raw_channels = _read_prompt(
+        raw_channels = _prompt_default(
             prompt,
-            "My Farm Advisor channels [telegram/matrix] (comma separated, optional): ",
-        ).strip()
-        if raw_channels != "":
-            my_farm_advisor_channels = tuple(
-                sorted({item.strip() for item in raw_channels.split(",") if item.strip()})
-            )
-            if "matrix" in my_farm_advisor_channels and "matrix" not in selected:
-                selected.append("matrix")
+            "My Farm Advisor channels [telegram/matrix] "
+            f"(comma separated, default: {_DEFAULT_MY_FARM_CHANNEL}): ",
+            default=_DEFAULT_MY_FARM_CHANNEL,
+        )
+        my_farm_advisor_channels = _parse_channel_list(raw_channels)
+        if "matrix" in my_farm_advisor_channels and "matrix" not in selected:
+            selected.append("matrix")
         advisor_env.update(
             _prompt_advisor_runtime_config(
                 prompt=prompt,
@@ -220,6 +242,7 @@ def prompt_for_pack_selection(
                 channels=my_farm_advisor_channels,
             )
         )
+        advisor_env.update(_prompt_my_farm_advisor_runtime_extras(prompt=prompt))
     else:
         disabled.append("my-farm-advisor")
 
@@ -283,6 +306,113 @@ def _prompt_advisor_runtime_config(
     return values
 
 
+def _prompt_my_farm_advisor_runtime_extras(*, prompt: PromptFn) -> dict[str, str]:
+    values: dict[str, str] = {}
+    anthropic_api_key = _prompt_optional(
+        prompt,
+        "My Farm Advisor Anthropic API key (optional; press Enter to skip): ",
+    )
+    if anthropic_api_key is not None:
+        values["ANTHROPIC_API_KEY"] = anthropic_api_key
+    nvidia_base_url = _prompt_optional(
+        prompt,
+        "My Farm Advisor NVIDIA base URL override (optional; press Enter to skip): ",
+    )
+    if nvidia_base_url is not None:
+        values["NVIDIA_BASE_URL"] = nvidia_base_url
+    values.update(
+        _prompt_optional_key_values(
+            prompt,
+            (
+                (
+                    "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
+                    "Field operations Telegram bot token",
+                ),
+                (
+                    "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
+                    "Field operations Telegram bot pairing code",
+                ),
+                (
+                    "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
+                    "Field operations Telegram allowed users (comma separated user IDs/usernames)",
+                ),
+                (
+                    "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
+                    "Data pipeline Telegram bot token",
+                ),
+                (
+                    "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
+                    "Data pipeline Telegram bot pairing code",
+                ),
+                (
+                    "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
+                    "Data pipeline Telegram allowed users (comma separated user IDs/usernames)",
+                ),
+                (
+                    "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
+                    "Data pipeline bot allowlist (comma separated user IDs/usernames)",
+                ),
+                (
+                    "TELEGRAM_ALLOWED_USERS",
+                    "Global Telegram allowed users (comma separated user IDs/usernames)",
+                ),
+                (
+                    "OPENCLAW_TELEGRAM_GROUP_POLICY",
+                    "Telegram group policy override",
+                ),
+                ("TZ", "Timezone override (for example UTC or America/Chicago)"),
+                (
+                    "OPENCLAW_BOOTSTRAP_REFRESH",
+                    "Bootstrap refresh override (for example 1/0)",
+                ),
+                (
+                    "OPENCLAW_MEMORY_SEARCH_ENABLED",
+                    "Memory search override (for example 1/0)",
+                ),
+            ),
+        )
+    )
+    if _prompt_yes_no(
+        prompt,
+        "Configure optional My Farm Advisor R2/data settings? [y/N]: ",
+        default=False,
+    ):
+        values.update(
+            _prompt_optional_key_values(
+                prompt,
+                (
+                    ("R2_BUCKET_NAME", "R2 bucket name"),
+                    ("R2_ENDPOINT", "R2 endpoint URL (optional if you plan to use CF account ID)"),
+                    ("R2_ACCESS_KEY_ID", "R2 access key ID"),
+                    ("R2_SECRET_ACCESS_KEY", "R2 secret access key"),
+                    ("CF_ACCOUNT_ID", "Cloudflare account ID override for R2"),
+                    ("DATA_MODE", "Data mode override (for example r2)"),
+                    (
+                        "WORKSPACE_DATA_R2_RCLONE_MOUNT",
+                        "Enable workspace R2 rclone mount (for example 1/true)",
+                    ),
+                    (
+                        "WORKSPACE_DATA_R2_PREFIX",
+                        "Workspace data R2 prefix",
+                    ),
+                    (
+                        "OPENCLAW_SYNC_SKILLS_ON_START",
+                        "Sync skills on start override (for example 1/0)",
+                    ),
+                    (
+                        "OPENCLAW_SYNC_SKILLS_OVERWRITE",
+                        "Sync skills overwrite override (for example 1/0)",
+                    ),
+                    (
+                        "OPENCLAW_FORCE_SKILL_SYNC",
+                        "Force skill sync override (for example 1/0)",
+                    ),
+                ),
+            )
+        )
+    return values
+
+
 def _prompt_advisor_telegram_config(
     *, prompt: PromptFn, label: str, env_prefix: str, channels: tuple[str, ...]
 ) -> dict[str, str]:
@@ -300,6 +430,21 @@ def _prompt_advisor_telegram_config(
     if owner_id is not None:
         values[f"{env_prefix}_TELEGRAM_OWNER_USER_ID"] = owner_id
     return values
+
+
+def _prompt_optional_key_values(
+    prompt: PromptFn, fields: tuple[tuple[str, str], ...]
+) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for env_key, label in fields:
+        response = _prompt_optional(prompt, f"{label} (optional): ")
+        if response is not None:
+            values[env_key] = response
+    return values
+
+
+def _parse_channel_list(raw_channels: str) -> tuple[str, ...]:
+    return tuple(sorted({item.strip() for item in raw_channels.split(",") if item.strip()}))
 
 
 def prompt_for_initial_install_values(
