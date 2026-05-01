@@ -162,9 +162,9 @@ def _inspect_live_docker(
             if _ignore_known_auxiliary_container(container_name=container_name, stack_name=desired_state.stack_name):
                 consumed_live_items.add(("container", container_name))
                 continue
-            managed_candidate_pack = managed_container_candidates.get(container_name)
-            if managed_candidate_pack is not None:
-                if managed_candidate_pack == candidate["pack"] and scope_is_managed:
+            managed_candidate_scope = managed_container_candidates.get(container_name)
+            if managed_candidate_scope is not None:
+                if managed_candidate_scope == candidate["scope"] and scope_is_managed:
                     consumed_live_items.add(("container", container_name))
                 continue
             if scope_is_managed and _is_expected_auxiliary_container(
