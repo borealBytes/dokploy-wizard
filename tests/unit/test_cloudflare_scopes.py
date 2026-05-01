@@ -11,6 +11,7 @@ from dokploy_wizard.networking import (
     CloudflareAccessApplication,
     CloudflareAccessIdentityProvider,
     CloudflareAccessPolicy,
+    CloudflareCertificatePack,
     CloudflareDnsRecord,
     CloudflareError,
     CloudflareTunnel,
@@ -72,9 +73,12 @@ class FakeCloudflareBackend:
     zone_ok: bool = True
     existing_tunnel: CloudflareTunnel | None = None
     dns_records: dict[str, tuple[CloudflareDnsRecord, ...]] = field(default_factory=dict)
+    certificate_packs: dict[str, CloudflareCertificatePack] = field(default_factory=dict)
     access_provider: CloudflareAccessIdentityProvider | None = None
     access_apps: dict[str, CloudflareAccessApplication] = field(default_factory=dict)
     access_policies: dict[str, CloudflareAccessPolicy] = field(default_factory=dict)
+    certificate_scope_ok: bool = True
+    ordered_certificate_hosts: list[tuple[str, ...]] = field(default_factory=list)
 
     def validate_account_access(self, account_id: str) -> None:
         if not self.account_ok:
@@ -144,6 +148,26 @@ class FakeCloudflareBackend:
             content=content,
             proxied=proxied,
         )
+
+    def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
+        if not self.certificate_scope_ok:
+            raise CloudflareError("certificate scope failed")
+        return tuple(self.certificate_packs.values())
+
+    def order_advanced_certificate_pack(
+        self, zone_id: str, *, hosts: tuple[str, ...]
+    ) -> CloudflareCertificatePack:
+        if not self.certificate_scope_ok:
+            raise CloudflareError("certificate scope failed")
+        self.ordered_certificate_hosts.append(hosts)
+        pack = CloudflareCertificatePack(
+            pack_id=f"created-cert-{hosts[-1]}",
+            pack_type="advanced",
+            status="active",
+            hosts=hosts,
+        )
+        self.certificate_packs[hosts[-1]] = pack
+        return pack
 
     def get_access_identity_provider(
         self, account_id: str, provider_id: str
@@ -322,6 +346,58 @@ def test_networking_creates_cloudflared_connector_for_dokploy_url() -> None:
     assert phase.result.connector.public_url == "https://dokploy.example.com"
     assert phase.result.connector.passed is True
     assert connector.created == [("wizard-stack-cloudflared", "token-created-tunnel")]
+
+
+def test_networking_orders_advanced_certificate_for_nested_coder_wildcard() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_CODER": "true",
+            },
+        )
+    )
+    backend = FakeCloudflareBackend()
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=_raw_env(),
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert backend.ordered_certificate_hosts == [
+        ("example.com", "coder.example.com", "*.coder.example.com")
+    ]
+    assert any(
+        "advanced edge certificate" in note and "*.coder.example.com" in note
+        for note in phase.result.notes
+    )
+
+
+def test_networking_fails_when_nested_coder_wildcard_needs_ssl_scope() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_CODER": "true",
+            },
+        )
+    )
+
+    with pytest.raises(CloudflareError, match="Zone -> SSL and Certificates -> Edit"):
+        reconcile_networking(
+            dry_run=False,
+            raw_env=_raw_env(),
+            desired_state=desired_state,
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=FakeCloudflareBackend(certificate_scope_ok=False),
+        )
 
 
 def test_access_only_targets_advisor_hostnames() -> None:

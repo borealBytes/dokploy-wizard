@@ -13,6 +13,7 @@ from dokploy_wizard.networking import (
     CloudflareAccessApplication,
     CloudflareAccessIdentityProvider,
     CloudflareAccessPolicy,
+    CloudflareCertificatePack,
     CloudflareDnsRecord,
     CloudflareError,
     CloudflareTunnel,
@@ -107,11 +108,13 @@ class FakeCloudflareBackend:
     zone_ok: bool = True
     existing_tunnel: CloudflareTunnel | None = None
     dns_records: dict[str, CloudflareDnsRecord] = field(default_factory=dict)
+    certificate_packs: dict[str, CloudflareCertificatePack] = field(default_factory=dict)
     access_provider: CloudflareAccessIdentityProvider | None = None
     access_apps: dict[str, CloudflareAccessApplication] = field(default_factory=dict)
     access_policies: dict[str, CloudflareAccessPolicy] = field(default_factory=dict)
     create_tunnel_calls: int = 0
     create_dns_calls: int = 0
+    ordered_certificate_hosts: list[tuple[str, ...]] = field(default_factory=list)
     update_tunnel_configuration_calls: list[tuple[str, str, tuple[dict[str, object], ...]]] = field(
         default_factory=list
     )
@@ -180,6 +183,22 @@ class FakeCloudflareBackend:
         )
         self.dns_records[hostname] = record
         return record
+
+    def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
+        return tuple(self.certificate_packs.values())
+
+    def order_advanced_certificate_pack(
+        self, zone_id: str, *, hosts: tuple[str, ...]
+    ) -> CloudflareCertificatePack:
+        self.ordered_certificate_hosts.append(hosts)
+        pack = CloudflareCertificatePack(
+            pack_id=f"cert-{hosts[-1]}",
+            pack_type="advanced",
+            status="active",
+            hosts=hosts,
+        )
+        self.certificate_packs[hosts[-1]] = pack
+        return pack
 
     def get_access_identity_provider(
         self, account_id: str, provider_id: str
@@ -747,6 +766,9 @@ def test_install_includes_coder_root_and_wildcard_dns(
 
     assert "coder.example.com" in dns_hostnames
     assert "*.coder.example.com" in dns_hostnames
+    assert backend.ordered_certificate_hosts == [
+        ("example.com", "coder.example.com", "*.coder.example.com")
+    ]
 
 
 def test_install_programs_tunnel_ingress_to_local_https(tmp_path: Path) -> None:
@@ -774,6 +796,61 @@ def test_install_programs_tunnel_ingress_to_local_https(tmp_path: Path) -> None:
         "originRequest": {"noTLSVerify": True},
     }
     assert ingress[-1] == {"service": "http_status:404"}
+
+
+def test_install_with_coder_wildcard_adds_catchall_tunnel_ingress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel")
+    )
+    env_file = tmp_path / "cloudflare-coder.env"
+    env_file.write_text((FIXTURES_DIR / "cloudflare-valid.env").read_text() + "\nENABLE_CODER=1\n")
+
+    monkeypatch.setattr(
+        cli,
+        "_run_preflight_report",
+        lambda **_: PreflightReport(
+            host_facts=HostFacts(
+                distribution_id="ubuntu",
+                version_id="24.04",
+                cpu_count=8,
+                memory_gb=16,
+                disk_gb=200,
+                disk_path="/var/lib/docker",
+                docker_installed=True,
+                docker_daemon_reachable=True,
+                ports_in_use=(),
+                environment_classification="local",
+                hostname="test-host",
+            ),
+            required_profile=ResourceProfile(
+                name="Recommended",
+                minimum_vcpu=4,
+                minimum_memory_gb=8,
+                minimum_disk_gb=100,
+            ),
+            checks=(PreflightCheck(name="preflight", status="pass", detail="ok"),),
+            advisories=(),
+        ),
+    )
+
+    run_install_flow(
+        env_file=env_file,
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        coder_backend=FakeCoderBackend(),
+    )
+
+    _, _, ingress = backend.update_tunnel_configuration_calls[0]
+    assert ingress[-1] == {
+        "service": "https://localhost:443",
+        "originRequest": {"noTLSVerify": True},
+    }
+    assert {"service": "http_status:404"} not in ingress
 
 
 def test_install_fails_closed_when_zone_scope_is_wrong(tmp_path: Path) -> None:
