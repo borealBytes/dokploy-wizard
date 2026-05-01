@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,13 @@ from typing import Any
 import pytest
 
 import dokploy_wizard.cli
+from dokploy_wizard.dokploy import (
+    DokployComposeRecord,
+    DokployComposeSummary,
+    DokployDeployResult,
+    DokployEnvironmentSummary,
+    DokployProjectSummary,
+)
 from dokploy_wizard.cli import run_install_flow, run_modify_flow
 from dokploy_wizard.core import SharedCoreResourceRecord
 from dokploy_wizard.dokploy.openclaw import DokployOpenClawBackend
@@ -21,9 +29,20 @@ from dokploy_wizard.networking import (
 )
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.matrix import MatrixResourceRecord
-from dokploy_wizard.packs.openclaw import OpenClawError, OpenClawResourceRecord
+from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudBundleVerification,
+    NextcloudCommandCheck,
+    NextcloudResourceRecord,
+    TalkRuntime,
+)
+from dokploy_wizard.packs.openclaw import (
+    MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_SERVICE_RESOURCE_TYPE,
+    OpenClawError,
+    OpenClawResourceRecord,
+)
 from dokploy_wizard.state import RawEnvInput, load_state_dir, write_ownership_ledger
-from tests.unit.test_openclaw_pack import FakeDokployOpenClawApi
+from tests.unit.test_openclaw_pack import FakeDokployOpenClawApi, _service_environment
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -390,6 +409,235 @@ class FakeOpenClawBackend:
 @dataclass
 class RecordingOpenClawBackend(FakeOpenClawBackend):
     init_kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RecordingDokployOpenClawApi(FakeDokployOpenClawApi):
+    project_name: str | None = None
+    compose_names_by_id: dict[str, str] = field(default_factory=dict)
+    compose_files_by_name: dict[str, str] = field(default_factory=dict)
+    create_calls_by_name: list[str] = field(default_factory=list)
+    update_calls_by_name: list[str] = field(default_factory=list)
+    deploy_calls_by_name: list[str] = field(default_factory=list)
+
+    def list_projects(self) -> tuple[DokployProjectSummary, ...]:
+        if self.project_name is None:
+            return ()
+        environment = DokployEnvironmentSummary(
+            environment_id=self.created_project.environment_id,
+            name="default",
+            is_default=True,
+            composes=tuple(
+                DokployComposeSummary(compose_id=compose_id, name=name, status="done")
+                for compose_id, name in self.compose_names_by_id.items()
+            ),
+        )
+        return (
+            DokployProjectSummary(
+                project_id=self.created_project.project_id,
+                name=self.project_name,
+                environments=(environment,),
+            ),
+        )
+
+    def create_project(
+        self, *, name: str, description: str | None, env: str | None
+    ):
+        del description, env
+        self.project_name = name
+        return self.created_project
+
+    def create_compose(
+        self, *, name: str, environment_id: str, compose_file: str, app_name: str
+    ) -> DokployComposeRecord:
+        del environment_id, app_name
+        compose_id = f"compose-{len(self.compose_names_by_id) + 1}"
+        self.compose_names_by_id[compose_id] = name
+        self.compose_files_by_name[name] = compose_file
+        self.create_calls_by_name.append(name)
+        self.last_create_name = name
+        self.last_create_compose_file = compose_file
+        return DokployComposeRecord(compose_id=compose_id, name=name)
+
+    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
+        name = self.compose_names_by_id[compose_id]
+        self.compose_files_by_name[name] = compose_file
+        self.update_calls_by_name.append(name)
+        self.last_update_compose_file = compose_file
+        return DokployComposeRecord(compose_id=compose_id, name=name)
+
+    def deploy_compose(
+        self, *, compose_id: str, title: str | None, description: str | None
+    ) -> DokployDeployResult:
+        del title, description
+        self.deploy_calls += 1
+        self.deploy_calls_by_name.append(self.compose_names_by_id[compose_id])
+        return DokployDeployResult(success=True, compose_id=compose_id, message=None)
+
+
+@dataclass
+class RecordingNextcloudBackend:
+    services: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
+    volumes: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
+    create_service_calls: int = 0
+    update_service_calls: int = 0
+    refresh_calls: list[str] = field(default_factory=list)
+    service_configs: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def get_service(self, resource_id: str) -> NextcloudResourceRecord | None:
+        for record in self.services.values():
+            if record.resource_id == resource_id:
+                return record
+        return None
+
+    def find_service_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
+        return self.services.get(resource_name)
+
+    def create_service(
+        self,
+        *,
+        resource_name: str,
+        hostname: str,
+        data_volume_name: str,
+        config: dict[str, str],
+    ) -> NextcloudResourceRecord:
+        del hostname, data_volume_name
+        self.create_service_calls += 1
+        self.service_configs[resource_name] = dict(config)
+        record = NextcloudResourceRecord(
+            resource_id=f"service:{resource_name}",
+            resource_name=resource_name,
+        )
+        self.services[resource_name] = record
+        return record
+
+    def update_service(
+        self,
+        *,
+        resource_id: str,
+        resource_name: str,
+        hostname: str,
+        data_volume_name: str,
+        config: dict[str, str],
+    ) -> NextcloudResourceRecord:
+        del resource_id
+        self.update_service_calls += 1
+        return self.create_service(
+            resource_name=resource_name,
+            hostname=hostname,
+            data_volume_name=data_volume_name,
+            config=config,
+        )
+
+    def get_volume(self, resource_id: str) -> NextcloudResourceRecord | None:
+        for record in self.volumes.values():
+            if record.resource_id == resource_id:
+                return record
+        return None
+
+    def find_volume_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
+        return self.volumes.get(resource_name)
+
+    def create_volume(self, *, resource_name: str) -> NextcloudResourceRecord:
+        record = NextcloudResourceRecord(
+            resource_id=f"volume:{resource_name}",
+            resource_name=resource_name,
+        )
+        self.volumes[resource_name] = record
+        return record
+
+    def ensure_application_ready(
+        self, *, nextcloud_url: str, onlyoffice_url: str
+    ) -> NextcloudBundleVerification:
+        del nextcloud_url, onlyoffice_url
+        return NextcloudBundleVerification(
+            onlyoffice_document_server_check=NextcloudCommandCheck(
+                command="php occ onlyoffice:documentserver --check",
+                passed=True,
+            ),
+            talk=TalkRuntime(
+                app_id="spreed",
+                enabled=True,
+                enabled_check=NextcloudCommandCheck(
+                    command="php occ app:list --output=json",
+                    passed=True,
+                ),
+                signaling_check=NextcloudCommandCheck(
+                    command="php occ talk:signaling:list --output=json",
+                    passed=True,
+                ),
+                stun_check=NextcloudCommandCheck(
+                    command="php occ talk:stun:list --output=json",
+                    passed=True,
+                ),
+                turn_check=NextcloudCommandCheck(
+                    command="php occ talk:turn:list --output=json",
+                    passed=True,
+                ),
+            ),
+        )
+
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        self.refresh_calls.append(admin_user)
+
+    def check_health(self, *, service: NextcloudResourceRecord, url: str) -> bool:
+        del service, url
+        return True
+
+
+def _patch_real_dokploy_openclaw_backend(
+    monkeypatch: pytest.MonkeyPatch, api: RecordingDokployOpenClawApi
+) -> None:
+    monkeypatch.setattr(
+        dokploy_wizard.cli,
+        "DokployOpenClawBackend",
+        lambda **kwargs: DokployOpenClawBackend(**{**kwargs, "client": api}),
+    )
+    monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
+    monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda service_name: True)
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._wait_for_container_http_health",
+        lambda service_name, url, *, app_port: True,
+    )
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda url: True)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", lambda service_name, url: True)
+
+
+def _base_install_values(**overrides: str) -> dict[str, str]:
+    values = {
+        "STACK_NAME": "wizard-stack",
+        "ROOT_DOMAIN": "example.com",
+        "HOST_OS_ID": "ubuntu",
+        "HOST_OS_VERSION_ID": "24.04",
+        "HOST_CPU_COUNT": "4",
+        "HOST_MEMORY_GB": "8",
+        "HOST_DISK_GB": "100",
+        "HOST_DOCKER_INSTALLED": "true",
+        "HOST_DOCKER_DAEMON_REACHABLE": "true",
+        "HOST_PORT_80_IN_USE": "false",
+        "HOST_PORT_443_IN_USE": "false",
+        "HOST_PORT_3000_IN_USE": "false",
+        "HOST_ENVIRONMENT": "local",
+        "DOKPLOY_BOOTSTRAP_HEALTHY": "true",
+        "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+        "DOKPLOY_API_KEY": "api-key-123",
+        "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+        "DOKPLOY_ADMIN_PASSWORD": "secret-123",
+        "CLOUDFLARE_API_TOKEN": "token-123",
+        "CLOUDFLARE_ACCOUNT_ID": "account-123",
+        "CLOUDFLARE_ZONE_ID": "zone-123",
+        "CLOUDFLARE_TUNNEL_NAME": "wizard-stack-tunnel",
+    }
+    values.update(overrides)
+    return values
+
+
+def _advisor_mounts(nextcloud_backend: RecordingNextcloudBackend) -> list[dict[str, object]]:
+    payload = nextcloud_backend.service_configs["wizard-stack-nextcloud"][
+        "DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MOUNTS_JSON"
+    ]
+    return list(json.loads(payload))
 
 
 @dataclass
@@ -807,6 +1055,8 @@ def test_install_reconciles_my_farm_advisor_variant(
                 "CLOUDFLARE_ACCOUNT_ID": "account-123",
                 "CLOUDFLARE_ZONE_ID": "zone-123",
                 "CLOUDFLARE_TUNNEL_NAME": "farm-stack-tunnel",
+                "AI_DEFAULT_API_KEY": "shared-ai-key",
+                "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
                 "ADVISOR_MODEL_PROVIDER": "ollama",
                 "ADVISOR_MODEL_NAME": "llama3.1:8b",
                 "ADVISOR_TRUSTED_PROXIES": "10.0.0.0/8",
@@ -832,6 +1082,397 @@ def test_install_reconciles_my_farm_advisor_variant(
     assert recording_backend.init_kwargs["trusted_proxies"] == "10.0.0.0/8"
     assert recording_backend.init_kwargs["nvidia_visible_devices"] == "GPU-1"
     assert recording_backend.last_health_url == "https://farm.example.com/healthz"
+
+
+def test_install_fresh_my_farm_only_renders_compose_and_persists_lifecycle_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "farm-only.env"
+    api = RecordingDokployOpenClawApi()
+
+    _patch_real_dokploy_openclaw_backend(monkeypatch, api)
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=RawEnvInput(
+            format_version=1,
+            values=_base_install_values(
+                STACK_NAME="farm-stack",
+                CLOUDFLARE_TUNNEL_NAME="farm-stack-tunnel",
+                ENABLE_MY_FARM_ADVISOR="true",
+                MY_FARM_ADVISOR_CHANNELS="telegram",
+                AI_DEFAULT_API_KEY="shared-ai-key",
+                AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+                MY_FARM_ADVISOR_PRIMARY_MODEL="anthropic/claude-sonnet-4",
+                CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+            ),
+        ),
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        matrix_backend=FakeMatrixBackend(),
+        nextcloud_backend=RecordingNextcloudBackend(),
+        openclaw_backend=None,
+    )
+
+    compose = api.compose_files_by_name["farm-stack-my-farm-advisor"]
+    service_environment = _service_environment(compose, "farm-stack-my-farm-advisor")
+    loaded_state = load_state_dir(state_dir)
+
+    assert set(api.compose_files_by_name) == {"farm-stack-my-farm-advisor"}
+    assert summary["lifecycle"]["mode"] == "install"
+    assert summary["lifecycle"]["phases_to_run"] == [
+        "dokploy_bootstrap",
+        "networking",
+        "shared_core",
+        "my-farm-advisor",
+        "cloudflare_access",
+    ]
+    assert summary["my_farm_advisor"]["outcome"] == "applied"
+    assert "ghcr.io/borealbytes/my-farm-advisor:latest" in compose
+    assert "ghcr.io/openclaw/openclaw:latest" not in compose
+    assert "farm-stack-my-farm-advisor-data:/data" in compose
+    assert service_environment["ADVISOR_VARIANT"] == "my-farm-advisor"
+    assert service_environment["ADVISOR_CANONICAL_HOSTNAME"] == "farm.example.com"
+    assert service_environment["PRIMARY_MODEL"] == "anthropic/claude-sonnet-4"
+    assert service_environment["OPENROUTER_API_KEY"] == "shared-ai-key"
+    assert service_environment["HOME"] == "/data"
+    assert service_environment["OPENCLAW_SYNC_SKILLS_ON_START"] == "0"
+    assert loaded_state.applied_state is not None
+    assert loaded_state.applied_state.completed_steps == (
+        "preflight",
+        "dokploy_bootstrap",
+        "networking",
+        "shared_core",
+        "my-farm-advisor",
+        "cloudflare_access",
+    )
+    assert loaded_state.ownership_ledger is not None
+    assert any(
+        resource.resource_type == MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE
+        and resource.scope == "stack:farm-stack:my-farm-advisor"
+        for resource in loaded_state.ownership_ledger.resources
+    )
+    assert not any(
+        resource.resource_type == OPENCLAW_SERVICE_RESOURCE_TYPE
+        for resource in loaded_state.ownership_ledger.resources
+    )
+
+
+def test_install_fresh_with_both_advisors_renders_non_conflicting_compose_apps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "both-advisors.env"
+    api = RecordingDokployOpenClawApi()
+
+    _patch_real_dokploy_openclaw_backend(monkeypatch, api)
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=RawEnvInput(
+            format_version=1,
+            values=_base_install_values(
+                ENABLE_OPENCLAW="true",
+                OPENCLAW_CHANNELS="telegram",
+                ENABLE_MY_FARM_ADVISOR="true",
+                MY_FARM_ADVISOR_CHANNELS="telegram",
+                AI_DEFAULT_API_KEY="shared-ai-key",
+                AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+                MY_FARM_ADVISOR_PRIMARY_MODEL="anthropic/claude-sonnet-4",
+                CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+            ),
+        ),
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        matrix_backend=FakeMatrixBackend(),
+        nextcloud_backend=RecordingNextcloudBackend(),
+        openclaw_backend=None,
+    )
+
+    openclaw_compose = api.compose_files_by_name["wizard-stack-openclaw"]
+    farm_compose = api.compose_files_by_name["wizard-stack-my-farm-advisor"]
+    openclaw_env = _service_environment(openclaw_compose, "wizard-stack-openclaw")
+    farm_env = _service_environment(farm_compose, "wizard-stack-my-farm-advisor")
+    loaded_state = load_state_dir(state_dir)
+
+    assert set(api.compose_files_by_name) == {
+        "wizard-stack-openclaw",
+        "wizard-stack-my-farm-advisor",
+    }
+    assert summary["openclaw"]["outcome"] == "applied"
+    assert summary["my_farm_advisor"]["outcome"] == "applied"
+    assert openclaw_env["ADVISOR_VARIANT"] == "openclaw"
+    assert openclaw_env["ADVISOR_CANONICAL_HOSTNAME"] == "openclaw.example.com"
+    assert farm_env["ADVISOR_VARIANT"] == "my-farm-advisor"
+    assert farm_env["ADVISOR_CANONICAL_HOSTNAME"] == "farm.example.com"
+    assert "wizard-stack-openclaw-data:/home/node/.openclaw" in openclaw_compose
+    assert "wizard-stack-my-farm-advisor-data:/data" in farm_compose
+    assert "wizard-stack-openclaw-data:/data" not in farm_compose
+    assert "wizard-stack-my-farm-advisor-data:/home/node/.openclaw" not in openclaw_compose
+    assert 'traefik.http.routers.wizard-stack-openclaw.rule: "Host(`openclaw.example.com`)"' in openclaw_compose
+    assert 'traefik.http.routers.wizard-stack-my-farm-advisor.rule: "Host(`farm.example.com`)"' in farm_compose
+    assert loaded_state.applied_state is not None
+    assert loaded_state.applied_state.completed_steps == (
+        "preflight",
+        "dokploy_bootstrap",
+        "networking",
+        "shared_core",
+        "openclaw",
+        "my-farm-advisor",
+        "cloudflare_access",
+    )
+
+
+def test_modify_adding_farm_later_reruns_nextcloud_without_rerunning_openclaw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "modify-add-farm.env"
+    api = RecordingDokployOpenClawApi()
+    networking_backend = FakeCloudflareBackend()
+    shared_core_backend = FakeSharedCoreBackend()
+    nextcloud_backend = RecordingNextcloudBackend()
+
+    _patch_real_dokploy_openclaw_backend(monkeypatch, api)
+    monkeypatch.setattr(dokploy_wizard.cli, "validate_preserved_phases", lambda **_: None)
+
+    initial_raw = RawEnvInput(
+        format_version=1,
+        values=_base_install_values(
+            ENABLE_NEXTCLOUD="true",
+            ENABLE_OPENCLAW="true",
+            OPENCLAW_CHANNELS="telegram",
+            AI_DEFAULT_API_KEY="shared-ai-key",
+            AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+            CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+        ),
+    )
+    modified_raw = RawEnvInput(
+        format_version=1,
+        values=_base_install_values(
+            ENABLE_NEXTCLOUD="true",
+            ENABLE_OPENCLAW="true",
+            OPENCLAW_CHANNELS="telegram",
+            ENABLE_MY_FARM_ADVISOR="true",
+            MY_FARM_ADVISOR_CHANNELS="telegram",
+            AI_DEFAULT_API_KEY="shared-ai-key",
+            AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+            MY_FARM_ADVISOR_PRIMARY_MODEL="anthropic/claude-sonnet-4",
+            CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+        ),
+    )
+
+    run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=initial_raw,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        matrix_backend=FakeMatrixBackend(),
+        nextcloud_backend=nextcloud_backend,
+        openclaw_backend=None,
+    )
+
+    summary = run_modify_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=modified_raw,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        matrix_backend=FakeMatrixBackend(),
+        nextcloud_backend=nextcloud_backend,
+        openclaw_backend=None,
+    )
+
+    loaded_state = load_state_dir(state_dir)
+
+    assert {"nextcloud", "my-farm-advisor", "cloudflare_access"}.issubset(
+        set(summary["lifecycle"]["phases_to_run"])
+    )
+    assert summary["my_farm_advisor"]["outcome"] == "applied"
+    assert api.create_calls_by_name.count("wizard-stack-openclaw") == 1
+    assert "wizard-stack-openclaw" not in api.update_calls_by_name
+    assert "wizard-stack-my-farm-advisor" in api.create_calls_by_name
+    assert nextcloud_backend.update_service_calls > 0
+    assert loaded_state.ownership_ledger is not None
+    assert any(
+        resource.resource_type == MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE
+        for resource in loaded_state.ownership_ledger.resources
+    )
+    assert any(
+        resource.resource_type == OPENCLAW_SERVICE_RESOURCE_TYPE
+        for resource in loaded_state.ownership_ledger.resources
+    )
+
+
+def test_modify_removing_farm_later_removes_owned_farm_resources_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "modify-remove-farm.env"
+    api = RecordingDokployOpenClawApi()
+    networking_backend = FakeCloudflareBackend()
+    shared_core_backend = FakeSharedCoreBackend()
+    nextcloud_backend = RecordingNextcloudBackend()
+
+    _patch_real_dokploy_openclaw_backend(monkeypatch, api)
+
+    initial_raw = RawEnvInput(
+        format_version=1,
+        values=_base_install_values(
+            ENABLE_NEXTCLOUD="true",
+            ENABLE_OPENCLAW="true",
+            OPENCLAW_CHANNELS="telegram",
+            ENABLE_MY_FARM_ADVISOR="true",
+            MY_FARM_ADVISOR_CHANNELS="telegram",
+            AI_DEFAULT_API_KEY="shared-ai-key",
+            AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+            MY_FARM_ADVISOR_PRIMARY_MODEL="anthropic/claude-sonnet-4",
+            CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+        ),
+    )
+    modified_raw = RawEnvInput(
+        format_version=1,
+        values=_base_install_values(
+            ENABLE_NEXTCLOUD="true",
+            ENABLE_OPENCLAW="true",
+            OPENCLAW_CHANNELS="telegram",
+            AI_DEFAULT_API_KEY="shared-ai-key",
+            AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+            CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+        ),
+    )
+
+    run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=initial_raw,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        matrix_backend=FakeMatrixBackend(),
+        nextcloud_backend=nextcloud_backend,
+        openclaw_backend=None,
+    )
+
+    summary = run_modify_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=modified_raw,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        matrix_backend=FakeMatrixBackend(),
+        nextcloud_backend=nextcloud_backend,
+        openclaw_backend=None,
+    )
+
+    loaded_state = load_state_dir(state_dir)
+    deleted_types = {
+        item["resource_type"]
+        for item in summary["disable_teardown"]["executed"]["deleted_resources"]
+    }
+
+    assert summary["lifecycle"]["mode"] == "modify"
+    assert summary["lifecycle"]["phases_to_run"] == []
+    assert MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE in deleted_types
+    assert OPENCLAW_SERVICE_RESOURCE_TYPE not in deleted_types
+    assert loaded_state.ownership_ledger is not None
+    assert not any(
+        resource.resource_type == MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE
+        for resource in loaded_state.ownership_ledger.resources
+    )
+    assert any(
+        resource.resource_type == OPENCLAW_SERVICE_RESOURCE_TYPE
+        for resource in loaded_state.ownership_ledger.resources
+    )
+
+
+def test_install_rerun_noops_with_farm_enabled_without_duplicate_nextcloud_mounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "farm-rerun.env"
+    api = RecordingDokployOpenClawApi()
+    networking_backend = FakeCloudflareBackend()
+    shared_core_backend = FakeSharedCoreBackend()
+    nextcloud_backend = RecordingNextcloudBackend()
+
+    _patch_real_dokploy_openclaw_backend(monkeypatch, api)
+
+    raw_env = RawEnvInput(
+        format_version=1,
+        values=_base_install_values(
+            ENABLE_NEXTCLOUD="true",
+            ENABLE_MY_FARM_ADVISOR="true",
+            MY_FARM_ADVISOR_CHANNELS="telegram",
+            AI_DEFAULT_API_KEY="shared-ai-key",
+            AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+            MY_FARM_ADVISOR_PRIMARY_MODEL="anthropic/claude-sonnet-4",
+            CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+        ),
+    )
+
+    run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        matrix_backend=FakeMatrixBackend(),
+        nextcloud_backend=nextcloud_backend,
+        openclaw_backend=None,
+    )
+
+    create_calls_before = list(api.create_calls_by_name)
+    update_calls_before = list(api.update_calls_by_name)
+    nextcloud_creates_before = nextcloud_backend.create_service_calls
+    nextcloud_updates_before = nextcloud_backend.update_service_calls
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        matrix_backend=FakeMatrixBackend(),
+        nextcloud_backend=nextcloud_backend,
+        openclaw_backend=None,
+    )
+
+    assert summary["lifecycle"]["mode"] == "noop"
+    assert summary["lifecycle"]["phases_to_run"] == []
+    assert summary["my_farm_advisor"]["outcome"] == "already_present"
+    assert api.create_calls_by_name == create_calls_before
+    assert api.update_calls_by_name == update_calls_before
+    assert nextcloud_backend.create_service_calls == nextcloud_creates_before
+    assert nextcloud_backend.update_service_calls == nextcloud_updates_before
+    assert api.create_calls_by_name.count("wizard-stack-my-farm-advisor") == 1
 
 
 def test_install_passes_nexa_env_into_dokploy_openclaw_backend(

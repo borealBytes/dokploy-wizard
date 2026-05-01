@@ -192,6 +192,20 @@ What the wizard currently does for Telly:
 - configures Telegram DM allowlist / ownership values from `OPENCLAW_TELEGRAM_*`
 - seeds a `workspace-telly` with operator-facing guidance files
 
+### My Farm Advisor
+
+My Farm Advisor is a separate advisor runtime from OpenClaw. It runs its own container image (`ghcr.io/borealbytes/my-farm-advisor:latest`) on its own hostname (default `farm.<root-domain>`) and does not share the OpenClaw Nexa sidecars.
+
+What the wizard does for My Farm Advisor:
+
+- deploys a standalone service with its own Dokploy compose app
+- wires Cloudflare Access OTP on `farm.<root-domain>`
+- seeds two workspaces under `/data`: `workspace` (field ops) and `workspace-data-pipeline`
+- mounts both workspaces into Nextcloud as external storage when Nextcloud is enabled
+- maps wizard env keys into the container using a dedicated farm runtime contract so farm-only flags cannot leak into OpenClaw
+
+My Farm Advisor and OpenClaw can run side by side. There is no slot conflict.
+
 ### Coder
 
 Coder gets a seeded Ubuntu + VS Code template and a first default workspace.
@@ -480,6 +494,145 @@ pytest tests/test_cli.py -q
 - Dokploy itself is not yet protected by Cloudflare Access because the wizard still needs a safe machine-auth/control path.
 - Nexa features are env-gated, not universal defaults. For your deployment that is fine, because `.install.env` already carries the required `OPENCLAW_NEXA_*` values.
 - Some channel/runtime behavior still depends on the upstream OpenClaw image, so operational behavior can evolve as that image evolves.
+
+## My Farm Advisor operator reference
+
+### Required env keys
+
+My Farm Advisor is enabled with `ENABLE_MY_FARM_ADVISOR=true`. When it is enabled, you must provide at least one model provider path.
+
+| Key | Example | Notes |
+|---|---|---|
+| `ENABLE_MY_FARM_ADVISOR` | `true` | Pack flag |
+| `MY_FARM_ADVISOR_CHANNELS` | `telegram` | Comma-separated; `telegram` and `matrix` are supported. Matrix requires the Matrix pack. |
+| `MY_FARM_ADVISOR_SUBDOMAIN` | `farm` | Defaults to `farm` |
+| `MY_FARM_ADVISOR_GATEWAY_PASSWORD` | `changeme` | Browser/control UI password. `ADVISOR_GATEWAY_PASSWORD` is a shared fallback for both advisors. |
+| **Provider (at least one)** | | |
+| `MY_FARM_ADVISOR_OPENROUTER_API_KEY` | `sk-or-v1-...` | Farm-only OpenRouter key |
+| `MY_FARM_ADVISOR_NVIDIA_API_KEY` | `nvapi-...` | Farm-only NVIDIA key |
+| `ANTHROPIC_API_KEY` | `sk-ant-...` | Shared across packs |
+| `AI_DEFAULT_API_KEY` + `AI_DEFAULT_BASE_URL` | `sk-...` + `https://...` | Shared fallback pair; both must be present to count as a valid provider path |
+
+### Optional env keys
+
+| Key | Example | Notes |
+|---|---|---|
+| `MY_FARM_ADVISOR_REPLICAS` | `1` | Defaults to 1 |
+| `MY_FARM_ADVISOR_PRIMARY_MODEL` | `openrouter/openrouter/hunter-alpha` | |
+| `MY_FARM_ADVISOR_FALLBACK_MODELS` | `openrouter/openrouter/healer-alpha,openrouter/nvidia/...` | Comma-separated |
+| `MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN` | `...` | Main farm Telegram bot |
+| `MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID` | `12345678` | DM allowlist owner |
+| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | |
+| `TZ` | `America/Chicago` | Container timezone |
+
+### Feature-gated env keys
+
+These keys are accepted only when the `my-farm-advisor` pack is enabled, but they are not required.
+
+**Field Operations and Data Pipeline Telegram bots**
+
+| Key | Purpose |
+|---|---|
+| `TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN` | Field ops bot |
+| `TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE` | Pairing code |
+| `TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS` | Allowlist |
+| `TELEGRAM_DATA_PIPELINE_BOT_TOKEN` | Data pipeline bot |
+| `TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE` | Pairing code |
+| `TELEGRAM_DATA_PIPELINE_ALLOWED_USERS` | Allowlist |
+| `TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS` | Secondary allowlist |
+| `TELEGRAM_ALLOWED_USERS` | General allowlist |
+| `OPENCLAW_TELEGRAM_GROUP_POLICY` | `allowlist` or `open` |
+
+**R2 / data pipeline persistence**
+
+R2 is only mounted when all of the following are present and `WORKSPACE_DATA_R2_RCLONE_MOUNT=1`:
+
+| Key | Example |
+|---|---|
+| `R2_BUCKET_NAME` | `my-farm-advisor` |
+| `R2_ENDPOINT` | `https://your-account-id.r2.cloudflarestorage.com` |
+| `R2_ACCESS_KEY_ID` | `...` |
+| `R2_SECRET_ACCESS_KEY` | `...` |
+| `CF_ACCOUNT_ID` | `...` |
+| `DATA_MODE` | `volume` |
+| `WORKSPACE_DATA_R2_RCLONE_MOUNT` | `0` or `1` |
+| `WORKSPACE_DATA_R2_PREFIX` | `workspace/data` |
+
+When R2 is not fully configured, the container explicitly sets `OPENCLAW_SYNC_SKILLS_ON_START=0` so local skill sync does not run.
+
+**Skill and bootstrap control**
+
+| Key | Default | Purpose |
+|---|---|---|
+| `OPENCLAW_SYNC_SKILLS_ON_START` | `0` when R2 is off | Enable skill sync on start |
+| `OPENCLAW_SYNC_SKILLS_OVERWRITE` | `1` | Overwrite existing skills |
+| `OPENCLAW_FORCE_SKILL_SYNC` | `0` | Force a one-time sync |
+| `OPENCLAW_BOOTSTRAP_REFRESH` | `0` | Re-seed config on next start |
+| `OPENCLAW_MEMORY_SEARCH_ENABLED` | `0` | Enable memory search |
+
+### Nextcloud workspace mounts
+
+When Nextcloud is enabled alongside My Farm Advisor, the wizard creates two external storage mounts:
+
+| Mount name | Purpose |
+|---|---|
+| `/Nexa Farm` | Field ops workspace (`/data/workspace`) |
+| `/Nexa Farm Data Pipeline` | Data pipeline workspace (`/data/workspace-data-pipeline`) |
+
+For reference, OpenClaw uses `/Nexa Claw` (new installs) or `/OpenClaw` (legacy).
+
+### Side-by-side with OpenClaw
+
+My Farm Advisor and OpenClaw can be enabled in the same install. They use separate Dokploy compose apps, separate hostnames, and separate volumes. Shared provider keys like `AI_DEFAULT_API_KEY` and `ANTHROPIC_API_KEY` are reused by both advisors unless you override them with pack-specific keys.
+
+### Migrating from the old Coolify-era `.env`
+
+If you have an existing My Farm Advisor deployment from the Coolify era, the key names have changed. The wizard now uses prefixed keys so farm settings do not collide with OpenClaw.
+
+| Old Coolify key | New wizard key |
+|---|---|
+| `OPENROUTER_API_KEY` | `MY_FARM_ADVISOR_OPENROUTER_API_KEY` (or shared `AI_DEFAULT_API_KEY`) |
+| `NVIDIA_API_KEY` | `MY_FARM_ADVISOR_NVIDIA_API_KEY` |
+| `PRIMARY_MODEL` | `MY_FARM_ADVISOR_PRIMARY_MODEL` |
+| `FALLBACK_MODELS` | `MY_FARM_ADVISOR_FALLBACK_MODELS` |
+| `TELEGRAM_BOT_TOKEN` | `MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN` |
+| `TELEGRAM_ACCOUNT_ID` | Not mapped; use `MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID` instead |
+
+Keys that kept the same name:
+
+- `ANTHROPIC_API_KEY`
+- `NVIDIA_BASE_URL`
+- `TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN`
+- `TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE`
+- `TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS`
+- `TELEGRAM_DATA_PIPELINE_BOT_TOKEN`
+- `TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE`
+- `TELEGRAM_DATA_PIPELINE_ALLOWED_USERS`
+- `TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS`
+- `TELEGRAM_ALLOWED_USERS`
+- `OPENCLAW_TELEGRAM_GROUP_POLICY`
+- `R2_BUCKET_NAME`
+- `R2_ENDPOINT`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `CF_ACCOUNT_ID`
+- `DATA_MODE`
+- `WORKSPACE_DATA_R2_RCLONE_MOUNT`
+- `WORKSPACE_DATA_R2_PREFIX`
+- `OPENCLAW_SYNC_SKILLS_ON_START`
+- `OPENCLAW_SYNC_SKILLS_OVERWRITE`
+- `OPENCLAW_FORCE_SKILL_SYNC`
+- `OPENCLAW_BOOTSTRAP_REFRESH`
+- `OPENCLAW_MEMORY_SEARCH_ENABLED`
+- `TZ`
+
+### Breaking changes from the Coolify era
+
+1. **No more `OPENCLAW_GATEWAY_TOKEN` for farm**. The wizard manages gateway tokens and passwords through `ADVISOR_GATEWAY_PASSWORD` or `MY_FARM_ADVISOR_GATEWAY_PASSWORD`.
+2. **No `CLOUDFLARE_TUNNEL_TOKEN` in env**. The wizard wires ingress through its own Cloudflare Tunnel phase.
+3. **No `OPENCLAW_PUBLIC_HOSTNAME` in env**. The hostname is derived from `MY_FARM_ADVISOR_SUBDOMAIN` and `ROOT_DOMAIN`.
+4. **Provider keys are prefixed**. Unprefixed `OPENROUTER_API_KEY` and `NVIDIA_API_KEY` are no longer read for farm; use the `MY_FARM_ADVISOR_*` versions or the shared `AI_DEFAULT_*` pair.
+5. **R2 is opt-in and gated**. Partial R2 config is ignored; all five credential fields plus `WORKSPACE_DATA_R2_RCLONE_MOUNT=1` must be present for the mount to activate.
 
 ## Project layout
 
