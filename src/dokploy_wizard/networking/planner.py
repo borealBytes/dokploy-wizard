@@ -737,14 +737,16 @@ def _resolve_nested_coder_wildcard_certificate(
     except CloudflareError as exc:
         raise CloudflareError(
             "Nested Coder wildcard routing requires Cloudflare edge certificate access for "
-            f"'{wildcard_hostname}'. Ensure the token includes 'Zone -> SSL and Certificates -> Edit' "
+            f"'{wildcard_hostname}'. Ensure the token includes "
+            "'Zone -> SSL and Certificates -> Edit' "
             "and that Advanced Certificate Manager is enabled. "
             f"Underlying error: {exc}"
         ) from exc
     if existing_pack is not None:
         return (
             "Cloudflare edge certificate "
-            f"'{existing_pack.pack_id}' ({existing_pack.pack_type}, {existing_pack.status}) already covers "
+            f"'{existing_pack.pack_id}' "
+            f"({existing_pack.pack_type}, {existing_pack.status}) already covers "
             f"'{wildcard_hostname}'.",
         )
     if dry_run:
@@ -758,13 +760,15 @@ def _resolve_nested_coder_wildcard_certificate(
         )
     except CloudflareError as exc:
         raise CloudflareError(
-            "Unable to order the Cloudflare advanced edge certificate required for nested Coder app "
-            f"hosts under '{wildcard_hostname}'. Ensure Advanced Certificate Manager is enabled and the "
+            "Unable to order the Cloudflare advanced edge certificate required for nested "
+            f"Coder app hosts under '{wildcard_hostname}'. Ensure Advanced Certificate "
+            "Manager is enabled and the "
             "token includes 'Zone -> SSL and Certificates -> Edit'. "
             f"Underlying error: {exc}"
         ) from exc
     note = (
-        f"Ordered Cloudflare advanced edge certificate '{created_pack.pack_id}' for '{wildcard_hostname}' "
+        f"Ordered Cloudflare advanced edge certificate '{created_pack.pack_id}' for "
+        f"'{wildcard_hostname}' "
         f"with status '{created_pack.status}'."
     )
     if created_pack.status != "active":

@@ -409,6 +409,7 @@ def test_access_only_targets_advisor_hostnames() -> None:
                 "ROOT_DOMAIN": "example.com",
                 "ENABLE_OPENCLAW": "true",
                 "ENABLE_MY_FARM_ADVISOR": "true",
+                "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-key",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com,ops@example.com",
             },
         )

@@ -136,7 +136,7 @@ def test_harness_reads_ignored_style_config_file(tmp_path: Path) -> None:
 
 def test_execute_mode_collects_remote_artifacts_after_remote_proof_failure(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     install_env = _write_install_env(tmp_path / ".install.env")
     artifact_dir = tmp_path / "artifacts"
@@ -150,6 +150,7 @@ def test_execute_mode_collects_remote_artifacts_after_remote_proof_failure(
         artifact_root=artifact_dir,
         target_host="203.0.113.10",
         target_user="root",
+        target_password="proof-password",
         target_path="/srv/dokploy-proof",
         ssh_port=22,
         ssh_options=(),
@@ -165,9 +166,10 @@ def test_execute_mode_collects_remote_artifacts_after_remote_proof_failure(
         label: str,
         commands: list[dict[str, object]],
         artifact_dir: Path,
+        config: harness.HarnessConfig | None = None,
         raise_on_error: bool = True,
     ) -> dict[str, object]:
-        del command, artifact_dir
+        del command, artifact_dir, config
         calls.append((label, raise_on_error))
         exit_code = 1 if label == "run-remote-proof" else 0
         record: dict[str, object] = {

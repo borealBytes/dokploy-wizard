@@ -419,6 +419,9 @@ class FakeNextcloudBackend:
             ),
         )
 
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        del admin_user
+
 
 @dataclass
 class FakeOpenClawBackend:
@@ -603,6 +606,7 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
         encoding="utf-8",
     )
     backend = FakeCloudflareBackend()
+    nextcloud_backend = FakeNextcloudBackend()
 
     summary = run_install_flow(
         env_file=env_file,
@@ -611,7 +615,7 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=backend,
         headscale_backend=FakeHeadscaleBackend(),
-        nextcloud_backend=FakeNextcloudBackend(),
+        nextcloud_backend=nextcloud_backend,
         openclaw_backend=FakeOpenClawBackend(),
     )
 
@@ -650,6 +654,7 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
                 "ENABLE_NEXTCLOUD=true",
                 "ENABLE_MY_FARM_ADVISOR=true",
                 "MY_FARM_ADVISOR_CHANNELS=telegram",
+                "MY_FARM_ADVISOR_OPENROUTER_API_KEY=farm-openrouter-key",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,ops@example.com",
                 "HOST_OS_ID=ubuntu",
                 "HOST_OS_VERSION_ID=24.04",
@@ -674,6 +679,7 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
         encoding="utf-8",
     )
     backend = FakeCloudflareBackend()
+    nextcloud_backend = FakeNextcloudBackend()
 
     summary = run_install_flow(
         env_file=env_file,
@@ -682,7 +688,7 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=backend,
         headscale_backend=FakeHeadscaleBackend(),
-        nextcloud_backend=FakeNextcloudBackend(),
+        nextcloud_backend=nextcloud_backend,
         openclaw_backend=FakeOpenClawBackend(),
     )
 

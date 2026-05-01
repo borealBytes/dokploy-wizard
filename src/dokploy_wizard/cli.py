@@ -67,7 +67,6 @@ from dokploy_wizard.networking import (
 from dokploy_wizard.packs.coder import CoderBackend, CoderError, ShellCoderBackend
 from dokploy_wizard.packs.docuseal import (
     DocuSealBackend,
-    DocuSealError,
     ShellDocuSealBackend,
 )
 from dokploy_wizard.packs.headscale import (
@@ -80,7 +79,7 @@ from dokploy_wizard.packs.matrix import (
     MatrixError,
     ShellMatrixBackend,
 )
-from dokploy_wizard.packs.moodle import MoodleBackend, MoodleError, ShellMoodleBackend
+from dokploy_wizard.packs.moodle import MoodleBackend, ShellMoodleBackend
 from dokploy_wizard.packs.nextcloud import (
     NextcloudAdvisorWorkspaceMountContract,
     NextcloudBackend,

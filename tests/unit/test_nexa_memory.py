@@ -113,7 +113,7 @@ def test_build_nexa_memory_scopes_keeps_session_and_long_term_layers_explicit() 
 
     assert scopes.session_memory.namespace == (
         "tenant:example.com|surface:nextcloud-talk|room:room-42|thread:thread-room-42-msg-840"
-        "|session:evt-talk-room-42-msg-845-v2"
+        "|session:active"
     )
     assert scopes.session_memory.durable is False
     assert scopes.user_memory is not None

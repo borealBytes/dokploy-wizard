@@ -75,7 +75,7 @@ def _mem0_env(base_url: str) -> dict[str, str]:
 
 
 def _runtime_ts(hour: int, minute: int = 0) -> datetime:
-    return datetime(2026, 4, 20, hour, minute, tzinfo=UTC)
+    return datetime(datetime.now(tz=UTC).year + 1, 4, 20, hour, minute, tzinfo=UTC)
 
 
 def _fresh_canonical_file(*, file_version: str, acl_complete: bool = True) -> NexaCanonicalFileSnapshot:
