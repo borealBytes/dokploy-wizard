@@ -407,7 +407,14 @@ def _load_install_raw_env(
         or not _stdin_is_interactive()
     ):
         return raw_env
-    return apply_prompt_selection(raw_env, prompt_for_pack_selection())
+    return apply_prompt_selection(
+        raw_env,
+        prompt_for_pack_selection(
+            shared_ai_default_configured=bool(
+                _shared_ai_default_api_key_from_values(raw_env.values)
+            )
+        ),
+    )
 
 
 def _stdin_is_interactive() -> bool:
@@ -436,6 +443,10 @@ def _prompt_for_initial_install_raw_env(
     )
     if guided_values.dokploy_admin_password is not None:
         raw_env.values["DOKPLOY_ADMIN_PASSWORD"] = guided_values.dokploy_admin_password
+    if guided_values.ai_default_api_key is not None:
+        raw_env.values["AI_DEFAULT_API_KEY"] = guided_values.ai_default_api_key
+    if guided_values.ai_default_base_url is not None:
+        raw_env.values["AI_DEFAULT_BASE_URL"] = guided_values.ai_default_base_url
     if guided_values.enable_tailscale:
         assert guided_values.tailscale_auth_key is not None
         assert guided_values.tailscale_hostname is not None
@@ -452,7 +463,10 @@ def _prompt_for_initial_install_raw_env(
             )
     if guided_values.cloudflare_zone_id is not None:
         raw_env.values["CLOUDFLARE_ZONE_ID"] = guided_values.cloudflare_zone_id
-    selection = prompt_for_pack_selection(include_headscale_prompt=False)
+    selection = prompt_for_pack_selection(
+        include_headscale_prompt=False,
+        shared_ai_default_configured=guided_values.ai_default_api_key is not None,
+    )
     updated_raw_env = apply_prompt_selection(
         raw_env,
         selection,
@@ -1835,10 +1849,8 @@ def _build_coder_backend(
             "HERMES_INFERENCE_PROVIDER", "opencode-go"
         ),
         hermes_model=raw_env.values.get("HERMES_MODEL", "deepseek-v4-flash"),
-        opencode_go_base_url=raw_env.values.get(
-            "OPENCODE_GO_BASE_URL", "https://opencode.ai/zen/go/v1"
-        ),
-        opencode_go_api_key=raw_env.values.get("OPENCODE_GO_API_KEY"),
+        ai_default_base_url=_shared_ai_default_base_url(raw_env),
+        ai_default_api_key=_shared_ai_default_api_key(raw_env),
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,
@@ -1885,6 +1897,8 @@ def _build_openclaw_backend(
         openclaw_fallback_models=openclaw_fallback_models,
         openclaw_openrouter_api_key=_advisor_env_optional(raw_env, "OPENCLAW_OPENROUTER_API_KEY"),
         openclaw_nvidia_api_key=_advisor_env_optional(raw_env, "OPENCLAW_NVIDIA_API_KEY"),
+        openclaw_ai_default_api_key=_shared_ai_default_api_key(raw_env),
+        openclaw_ai_default_base_url=_shared_ai_default_base_url(raw_env),
         openclaw_telegram_bot_token=_advisor_env_optional(raw_env, "OPENCLAW_TELEGRAM_BOT_TOKEN"),
         openclaw_telegram_owner_user_id=_advisor_env_optional(
             raw_env, "OPENCLAW_TELEGRAM_OWNER_USER_ID"
@@ -1896,6 +1910,8 @@ def _build_openclaw_backend(
             raw_env, "MY_FARM_ADVISOR_OPENROUTER_API_KEY"
         ),
         my_farm_nvidia_api_key=_advisor_env_optional(raw_env, "MY_FARM_ADVISOR_NVIDIA_API_KEY"),
+        my_farm_ai_default_api_key=_shared_ai_default_api_key(raw_env),
+        my_farm_ai_default_base_url=_shared_ai_default_base_url(raw_env),
         my_farm_telegram_bot_token=_advisor_env_optional(
             raw_env, "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN"
         ),
@@ -2013,6 +2029,30 @@ def _advisor_env_optional(raw_env: RawEnvInput, key: str) -> str | None:
     if value is None or value.strip() == "":
         return None
     return value.strip()
+
+
+def _shared_ai_default_api_key(raw_env: RawEnvInput) -> str | None:
+    return _shared_ai_default_api_key_from_values(raw_env.values)
+
+
+def _shared_ai_default_api_key_from_values(values: dict[str, str]) -> str | None:
+    value = values.get("AI_DEFAULT_API_KEY")
+    if value is not None and value.strip() != "":
+        return value.strip()
+    legacy = values.get("OPENCODE_GO_API_KEY")
+    if legacy is None or legacy.strip() == "":
+        return None
+    return legacy.strip()
+
+
+def _shared_ai_default_base_url(raw_env: RawEnvInput) -> str:
+    value = raw_env.values.get("AI_DEFAULT_BASE_URL")
+    if value is not None and value.strip() != "":
+        return value.strip()
+    legacy = raw_env.values.get("OPENCODE_GO_BASE_URL")
+    if legacy is not None and legacy.strip() != "":
+        return legacy.strip()
+    return "https://opencode.ai/zen/go/v1"
 
 
 def _advisor_model_selection(
