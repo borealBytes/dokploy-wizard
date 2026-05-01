@@ -10,6 +10,7 @@ from dokploy_wizard.networking.cloudflare import (
     CloudflareAccessIdentityProvider,
     CloudflareAccessPolicy,
     CloudflareBackend,
+    CloudflareCertificatePack,
     CloudflareDnsRecord,
     CloudflareError,
     CloudflareTunnel,
@@ -71,6 +72,19 @@ def reconcile_networking(
         "Cloudflare account scope validated for Cloudflare Tunnel Read/Edit.",
         "Cloudflare zone scope validated for DNS Read/Edit.",
     ]
+
+    nested_coder_wildcard = _nested_coder_wildcard_hostname(desired_state)
+    if nested_coder_wildcard is not None:
+        notes.extend(
+            _resolve_nested_coder_wildcard_certificate(
+                dry_run=dry_run,
+                zone_id=credentials.zone_id,
+                root_domain=desired_state.root_domain,
+                coder_hostname=desired_state.hostnames.get("coder"),
+                wildcard_hostname=nested_coder_wildcard,
+                backend=backend,
+            )
+        )
 
     tunnel, tunnel_action = _resolve_tunnel(
         dry_run=dry_run,
@@ -652,10 +666,15 @@ def _build_tunnel_ingress(desired_state: DesiredState) -> tuple[dict[str, object
         },
     ]
     seen_hosts = {public_hostnames["dokploy"]}
+    wildcard_hostnames_present = False
     for key, hostname in public_hostnames.items():
         if hostname in seen_hosts:
             continue
         if key == "dokploy":
+            continue
+        if hostname.startswith("*."):
+            wildcard_hostnames_present = True
+            seen_hosts.add(hostname)
             continue
         ingress.append(
             {
@@ -665,8 +684,89 @@ def _build_tunnel_ingress(desired_state: DesiredState) -> tuple[dict[str, object
             }
         )
         seen_hosts.add(hostname)
-    ingress.append({"service": "http_status:404"})
+    if wildcard_hostnames_present:
+        ingress.append(
+            {
+                "service": "https://localhost:443",
+                "originRequest": {"noTLSVerify": True},
+            }
+        )
+    else:
+        ingress.append({"service": "http_status:404"})
     return tuple(ingress)
+
+
+def _nested_coder_wildcard_hostname(desired_state: DesiredState) -> str | None:
+    if "coder" not in desired_state.enabled_packs:
+        return None
+    wildcard_hostname = desired_state.hostnames.get("coder-wildcard")
+    if wildcard_hostname is None or not wildcard_hostname.startswith("*."):
+        return None
+    if wildcard_hostname == f"*.{desired_state.root_domain}":
+        return None
+    return wildcard_hostname
+
+
+def _resolve_nested_coder_wildcard_certificate(
+    *,
+    dry_run: bool,
+    zone_id: str,
+    root_domain: str,
+    coder_hostname: str | None,
+    wildcard_hostname: str,
+    backend: CloudflareBackend,
+) -> tuple[str, ...]:
+    if coder_hostname is None:
+        raise CloudflareError("Coder hostname is required when configuring wildcard app routing.")
+    try:
+        existing_pack = _find_certificate_pack_for_hostname(
+            backend.list_certificate_packs(zone_id), wildcard_hostname
+        )
+    except CloudflareError as exc:
+        raise CloudflareError(
+            "Nested Coder wildcard routing requires Cloudflare edge certificate access for "
+            f"'{wildcard_hostname}'. Ensure the token includes 'Zone -> SSL and Certificates -> Edit' "
+            "and that Advanced Certificate Manager is enabled. "
+            f"Underlying error: {exc}"
+        ) from exc
+    if existing_pack is not None:
+        return (
+            "Cloudflare edge certificate "
+            f"'{existing_pack.pack_id}' ({existing_pack.pack_type}, {existing_pack.status}) already covers "
+            f"'{wildcard_hostname}'.",
+        )
+    if dry_run:
+        return (
+            f"Would order a Cloudflare advanced edge certificate for '{wildcard_hostname}'.",
+        )
+    try:
+        created_pack = backend.order_advanced_certificate_pack(
+            zone_id,
+            hosts=(root_domain, coder_hostname, wildcard_hostname),
+        )
+    except CloudflareError as exc:
+        raise CloudflareError(
+            "Unable to order the Cloudflare advanced edge certificate required for nested Coder app "
+            f"hosts under '{wildcard_hostname}'. Ensure Advanced Certificate Manager is enabled and the "
+            "token includes 'Zone -> SSL and Certificates -> Edit'. "
+            f"Underlying error: {exc}"
+        ) from exc
+    note = (
+        f"Ordered Cloudflare advanced edge certificate '{created_pack.pack_id}' for '{wildcard_hostname}' "
+        f"with status '{created_pack.status}'."
+    )
+    if created_pack.status != "active":
+        note = f"{note} Public TLS may take a few minutes to become active."
+    return (note,)
+
+
+def _find_certificate_pack_for_hostname(
+    certificate_packs: tuple[CloudflareCertificatePack, ...], hostname: str
+) -> CloudflareCertificatePack | None:
+    for pack in certificate_packs:
+        if hostname in pack.hosts:
+            return pack
+    return None
 
 
 def _public_hostnames(desired_state: DesiredState) -> dict[str, str]:

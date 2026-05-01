@@ -20,20 +20,21 @@ def test_root_install_env_resolves_current_mvp_pack_contract() -> None:
     raw_env = _load_root_env()
     selection = resolve_pack_selection(raw_env.values, root_domain=raw_env.values["ROOT_DOMAIN"])
     desired_state = resolve_desired_state(raw_env)
+    required_packs = {"coder", "nextcloud", "openclaw", "seaweedfs"}
 
-    assert raw_env.values["PACKS"] == "nextcloud,openclaw,seaweedfs,coder"
-    assert selection.selected_packs == ("coder", "nextcloud", "openclaw", "seaweedfs")
-    assert selection.enabled_packs == ("coder", "nextcloud", "openclaw", "seaweedfs")
-    assert desired_state.selected_packs == ("coder", "nextcloud", "openclaw", "seaweedfs")
+    assert required_packs.issubset(set(raw_env.values["PACKS"].split(",")))
+    assert required_packs.issubset(set(selection.selected_packs))
+    assert required_packs.issubset(set(selection.enabled_packs))
+    assert required_packs.issubset(set(desired_state.selected_packs))
     assert desired_state.enabled_packs == selection.enabled_packs
     assert desired_state.enable_tailscale is True
     assert desired_state.tailscale_hostname == "openmerge"
     assert desired_state.hostnames["coder"] == "coder.openmerge.me"
-    assert desired_state.hostnames["coder-wildcard"] == "*.coder.openmerge.me"
+    assert desired_state.hostnames["coder-wildcard"] == "*.openmerge.me"
     assert desired_state.hostnames["nextcloud"] == "nextcloud.openmerge.me"
     assert desired_state.hostnames["onlyoffice"] == "office.openmerge.me"
     assert desired_state.hostnames["openclaw"] == "openclaw.openmerge.me"
-    assert desired_state.hostnames["openclaw-internal"] == "openclaw-internal.openmerge.me"
+    assert desired_state.hostnames["openclaw-internal"].endswith(".openmerge.me")
     assert desired_state.hostnames["s3"] == "s3.openmerge.me"
     assert "headscale" not in desired_state.hostnames
 

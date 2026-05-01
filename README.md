@@ -14,6 +14,8 @@ Today this repo is not a scaffold or mock planner. It performs real deployment, 
   - PostgreSQL
   - Redis
 - **Nextcloud + OnlyOffice**
+- **Moodle**
+- **DocuSeal**
 - **OpenClaw**
 - **Nexa**, embedded inside OpenClaw as the Nextcloud/Talk/OnlyOffice-facing agent runtime
 - **Telly**, embedded inside OpenClaw as the Telegram-facing agent persona
@@ -197,7 +199,12 @@ Coder gets a seeded Ubuntu + VS Code template and a first default workspace.
 On first successful bootstrap the wizard:
 
 - provisions the initial Coder admin
-- pushes the default template named `ubuntu-vscode`
+- pushes the seeded templates:
+  - `ubuntu-vscode`
+  - `ubuntu-vscode-opencode-web`
+  - `ubuntu-vscode-openwork`
+  - `ubuntu-vscode-kdense-byok`
+  - `ubuntu-vscode-hermes`
 - creates a default workspace for the operator
 
 That default template installs:
@@ -210,6 +217,36 @@ That default template installs:
 - `zellij`
 
 The workspace home directory lives on a per-workspace Docker volume. The control plane state lives in shared-core Postgres.
+
+### Coder App Hostnames
+
+The wizard supports two different ideas for how browser-facing Coder apps should be routed:
+
+- The ideal Coder-native shape is `*.coder.<root-domain>`.
+- The currently selected no-fee fallback is `*.<root-domain>` limited by a strict app-host pattern, so only Coder app-style hostnames route into Coder.
+
+Why the fallback exists:
+
+- Cloudflare Universal SSL on a full zone covers the zone apex and first-level subdomains.
+- A hostname like `foo.coder.example.com` is a deeper subdomain and is not covered by Universal SSL.
+- Cloudflare's supported paid fix is Advanced Certificate Manager, which can issue edge certificates for `*.coder.<root-domain>`.
+
+Current decision:
+
+- Keep the fallback `*.<root-domain>` for live installs until a future architecture change is chosen.
+- Preserve a strict router pattern so service hosts like `dokploy.<root-domain>`, `nextcloud.<root-domain>`, and `openclaw.<root-domain>` are not hijacked by Coder.
+
+Future architecture options:
+
+1. Keep the current fallback: lowest risk and already working. Coder app hosts look like `app--workspace--user.<root-domain>`.
+2. Use `*.coder.<root-domain>` with Cloudflare Advanced Certificate Manager: closest to the Coder docs and cleanest hostname model, but requires ACM on the zone.
+3. Keep `*.coder.<root-domain>` but move Coder off Cloudflare Tunnel: terminate public TLS directly in Dokploy/Traefik using DNS-01 wildcard certificates. This avoids the ACM fee but changes the ingress architecture for Coder.
+4. Convert selected Coder apps to path-based routing: works without wildcard subdomain TLS, but app compatibility is weaker than subdomain routing and usually requires template-specific base-path work.
+
+Operational note:
+
+- Hermes, OpenCode Web, and OpenWork are already path-based Coder apps in this repo.
+- K-Dense BYOK is the current outlier that uses `subdomain = true` and benefits the most from proper wildcard app routing.
 
 ### SeaweedFS
 
@@ -266,7 +303,7 @@ Not behind Cloudflare Access in the current implementation:
 - `office.<root-domain>`
 - `s3.<root-domain>`
 - `coder.<root-domain>`
-- `*.coder.<root-domain>`
+- Coder workspace app hosts, currently routed via a controlled `*.<root-domain>` fallback
 - `matrix.<root-domain>`
 - `headscale.<root-domain>`
 

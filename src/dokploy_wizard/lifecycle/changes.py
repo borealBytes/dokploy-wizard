@@ -132,6 +132,8 @@ _OPTIONAL_PHASE_PACKS = {
     "my-farm-advisor": "my-farm-advisor",
 }
 _OPENCLAW_RUNTIME_ENV_KEYS = {
+    "AI_DEFAULT_API_KEY",
+    "AI_DEFAULT_BASE_URL",
     "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL",
     "OPENCLAW_NEXA_TALK_SHARED_SECRET",
     "OPENCLAW_NEXA_TALK_SIGNING_SECRET",
@@ -168,6 +170,8 @@ _NEXTCLOUD_NEXA_USER_ENV_KEYS = {
     "OPENCLAW_NEXA_AGENT_EMAIL",
 }
 _MY_FARM_RUNTIME_ENV_KEYS = {
+    "AI_DEFAULT_API_KEY",
+    "AI_DEFAULT_BASE_URL",
     "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
     "MY_FARM_ADVISOR_NVIDIA_API_KEY",
     "MY_FARM_ADVISOR_PRIMARY_MODEL",
@@ -179,12 +183,21 @@ _OUTBOUND_MAIL_ENV_KEYS = {
     "OUTBOUND_SMTP_HOSTNAME",
     "OUTBOUND_SMTP_FROM_ADDRESS",
 }
+_CODER_RUNTIME_ENV_KEYS = {
+    "HERMES_INFERENCE_PROVIDER",
+    "HERMES_MODEL",
+    "AI_DEFAULT_API_KEY",
+    "AI_DEFAULT_BASE_URL",
+    "OPENCODE_GO_API_KEY",
+    "OPENCODE_GO_BASE_URL",
+}
 
 _SUPPORTED_MODIFY_KEYS |= (
     _OPENCLAW_RUNTIME_ENV_KEYS
     | _NEXTCLOUD_NEXA_USER_ENV_KEYS
     | _MY_FARM_RUNTIME_ENV_KEYS
     | _OUTBOUND_MAIL_ENV_KEYS
+    | _CODER_RUNTIME_ENV_KEYS
 )
 
 @dataclass(frozen=True)
@@ -338,6 +351,8 @@ def classify_modify_request(
         requested_desired
     ):
         phases_to_run.add("cloudflare_access")
+    if changed_keys & _CODER_RUNTIME_ENV_KEYS and "coder" in requested_desired.enabled_packs:
+        phases_to_run.add("coder")
     if (
         existing_desired.cloudflare_access_otp_emails
         != requested_desired.cloudflare_access_otp_emails
@@ -415,6 +430,24 @@ def _classify_same_target(
 ) -> LifecyclePlan:
     applicable_phases = applicable_phases_for(desired_state)
     validate_checkpoint_contract(existing_applied, applicable_phases)
+    if (
+        existing_applied.completed_steps != applicable_phases
+        and existing_applied.desired_state_fingerprint != desired_state.fingerprint()
+    ):
+        return LifecyclePlan(
+            mode="resume",
+            reasons=(
+                "Existing checkpoint is incomplete and targets an older desired state; "
+                "rerunning from the start conservatively.",
+            ),
+            applicable_phases=applicable_phases,
+            phases_to_run=applicable_phases,
+            preserved_phases=(),
+            initial_completed_steps=(),
+            start_phase=applicable_phases[0] if applicable_phases else None,
+            raw_equivalent=raw_equivalent,
+            desired_equivalent=desired_equivalent,
+        )
     if existing_applied.completed_steps == applicable_phases:
         return LifecyclePlan(
             mode="noop",

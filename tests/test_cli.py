@@ -232,6 +232,9 @@ def test_build_live_drift_report_classifies_required_collision_types(
     manual_entries = [
         entry for entry in report["entries"] if entry["classification"] == "manual_collision"
     ]
+    unknown_entries = [
+        entry for entry in report["entries"] if entry["classification"] == "unknown_unmanaged"
+    ]
     assert any(entry["live_name"] == "openclaw-manual" for entry in manual_entries)
     assert any(
         entry["live_name"] == f"{desired_state.stack_name}-my-farm-advisor"
@@ -337,6 +340,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     cloudflared_container = "openmerge-cloudflared-ghphch-openmerge-cloudflared-1"
     auth_probe_container = "openmerge-dokploy-wizard-auth-probe-ocm4ux-auth-probe-1"
     coder_workspace_container = "coder-clayton-openmergeme-workspace-2026-04-21"
+    coder_named_template_container = "coder-clayton-openwork"
     my_farm_hostname = desired_state.hostnames["my-farm-advisor"]
     onlyoffice_hostname = desired_state.hostnames["onlyoffice"]
 
@@ -470,6 +474,11 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                 "status": "Up 2 minutes",
                 "labels": {},
             },
+            {
+                "name": coder_named_template_container,
+                "status": "Up 2 minutes",
+                "labels": {},
+            },
         ),
     )
     monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", ())
@@ -562,6 +571,8 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     assert not any(entry["live_name"] == cloudflared_container for entry in manual_entries)
     assert not any(entry["live_name"] == auth_probe_container for entry in manual_entries)
     assert not any(entry["live_name"] == coder_workspace_container for entry in manual_entries)
+    assert not any(entry["live_name"] == coder_named_template_container for entry in manual_entries)
+    assert not any(entry["live_name"] == runtime_container for entry in unknown_entries)
     assert report["summary"]["wizard_managed"] == 11
     assert report["summary"]["manual_collision"] == 0
 
@@ -592,9 +603,9 @@ def test_guided_install_prompts_include_dokploy_guidance() -> None:
             "secret-123",
             "",
             "n",
-            "n",
             "cf-token",
             "account-123",
+            "",
             "",
         ]
     )
@@ -617,6 +628,7 @@ def test_guided_install_prompts_include_dokploy_guidance() -> None:
     assert "Private network mode" in combined
     assert "Need help finding your Cloudflare token" in combined
     assert "Cloudflare zone ID (optional; press Enter to look up from example.com)" in combined
+    assert "Default AI API key for Hermes, K-Dense BYOK, and advisor backup models" in combined
     assert "Tailscale auth key" not in combined
 
 
@@ -630,9 +642,9 @@ def test_guided_install_defaults_dokploy_admin_password_to_change_me_soon() -> N
             "",
             "",
             "n",
-            "n",
             "cf-token",
             "account-123",
+            "",
             "",
         ]
     )
@@ -684,6 +696,8 @@ def test_guided_install_writes_env_file_and_runs_install(
             dokploy_subdomain="dokploy",
             dokploy_admin_email="clayton@superiorbyteworks.com",
             dokploy_admin_password="secret-123",
+            ai_default_api_key="ai-key-123",
+            ai_default_base_url="https://opencode.ai/zen/go/v1",
             enable_headscale=True,
             cloudflare_api_token="token-123",
             cloudflare_account_id="account-123",
@@ -726,6 +740,8 @@ def test_guided_install_writes_env_file_and_runs_install(
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
     env_contents = env_file.read_text(encoding="utf-8")
     assert "STACK_NAME=guided-stack" in env_contents
+    assert "AI_DEFAULT_API_KEY=ai-key-123" in env_contents
+    assert "AI_DEFAULT_BASE_URL=https://opencode.ai/zen/go/v1" in env_contents
     assert "ROOT_DOMAIN=example.com" in env_contents
     assert "DOKPLOY_SUBDOMAIN=dokploy" in env_contents
     assert "DOKPLOY_ADMIN_EMAIL=clayton@superiorbyteworks.com" in env_contents
@@ -788,6 +804,8 @@ def test_guided_install_reuses_existing_seaweedfs_credentials(
             dokploy_subdomain="dokploy",
             dokploy_admin_email="clayton@superiorbyteworks.com",
             dokploy_admin_password="secret-123",
+            ai_default_api_key=None,
+            ai_default_base_url=None,
             enable_headscale=True,
             cloudflare_api_token="token-123",
             cloudflare_account_id="account-123",
@@ -1563,6 +1581,7 @@ def test_guided_dry_run_does_not_require_dokploy_admin_password() -> None:
             "cf-token",
             "account-123",
             "",
+            "",
         ]
     )
 
@@ -1592,6 +1611,7 @@ def test_guided_install_tailscale_mode_prompts_for_auth_key() -> None:
             "n",
             "cf-token",
             "account-123",
+            "",
             "",
         ]
     )
@@ -1627,6 +1647,7 @@ def test_guided_install_can_emit_cloudflare_help(capsys: pytest.CaptureFixture[s
             "cf-token",
             "account-123",
             "",
+            "",
         ]
     )
 
@@ -1636,6 +1657,8 @@ def test_guided_install_can_emit_cloudflare_help(capsys: pytest.CaptureFixture[s
     captured = capsys.readouterr()
     assert "https://dash.cloudflare.com/profile/api-tokens" in captured.out
     assert "Zone -> DNS -> Edit" in captured.out
+    assert "Zone -> SSL and Certificates -> Edit" in captured.out
+    assert "Advanced Certificate Manager must be enabled for the zone" in captured.out
 
 
 def test_guided_install_sanitizes_bracketed_paste_sequences() -> None:
@@ -1651,6 +1674,7 @@ def test_guided_install_sanitizes_bracketed_paste_sequences() -> None:
             "\x1b[200~cf-token\x1b[201~",
             "\x1b[200~account-123\x1b[201~",
             "\x1b[200~zone-123\x1b[201~",
+            "",
         ]
     )
 
@@ -1674,6 +1698,7 @@ def test_guided_install_sanitizes_caret_notation_paste_sequences() -> None:
             "^[[200~cf-token^[[201~",
             "^[[200~account-123^[[201~",
             "^[[200~zone-123^[[201~",
+            "",
         ]
     )
 
@@ -1746,7 +1771,7 @@ def test_guided_install_defaults_openclaw_to_telegram_when_matrix_disabled() -> 
             "y",  # openrouter key default yes
             "or-key",
             "",  # primary model default nvidia/moonshotai/kimi-k2.5
-            "",  # fallback model default openrouter/openrouter/free
+            "",  # fallback model default opencode-go/deepseek-v4-flash
             "bot-token",
             "123456789",
             "n",  # my farm advisor default no
@@ -1768,7 +1793,7 @@ def test_guided_install_defaults_openclaw_to_telegram_when_matrix_disabled() -> 
     }
     assert selection.advisor_env == {
         "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
-        "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
+        "OPENCLAW_FALLBACK_MODELS": "opencode-go/deepseek-v4-flash",
         "OPENCLAW_NVIDIA_API_KEY": "nv-key",
         "OPENCLAW_OPENROUTER_API_KEY": "or-key",
         "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
@@ -1816,7 +1841,7 @@ def test_guided_install_keeps_matrix_default_for_openclaw_when_matrix_enabled() 
     }
     assert selection.advisor_env["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
     assert selection.advisor_env["OPENCLAW_PRIMARY_MODEL"] == "nvidia/moonshotai/kimi-k2.5"
-    assert selection.advisor_env["OPENCLAW_FALLBACK_MODELS"] == "openrouter/openrouter/free"
+    assert selection.advisor_env["OPENCLAW_FALLBACK_MODELS"] == "opencode-go/deepseek-v4-flash"
     assert "OPENCLAW_TELEGRAM_BOT_TOKEN" not in selection.advisor_env
 
 
