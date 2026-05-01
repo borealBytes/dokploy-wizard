@@ -82,6 +82,7 @@ from dokploy_wizard.packs.matrix import (
 )
 from dokploy_wizard.packs.moodle import MoodleBackend, MoodleError, ShellMoodleBackend
 from dokploy_wizard.packs.nextcloud import (
+    NextcloudAdvisorWorkspaceMountContract,
     NextcloudBackend,
     NextcloudError,
     NextcloudOpenClawWorkspaceContract,
@@ -1607,6 +1608,10 @@ def _build_nextcloud_backend(
     admin_user = raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
     admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon")
     nexa_enabled = _has_openclaw_nexa_env(raw_env)
+    advisor_workspace_mounts = _build_nextcloud_advisor_workspace_mounts(
+        raw_env=raw_env,
+        desired_state=desired_state,
+    )
     nexa_agent_password = None
     if nexa_enabled:
         nexa_agent_password = raw_env.values.get("OPENCLAW_NEXA_AGENT_PASSWORD") or raw_env.values.get(
@@ -1625,14 +1630,10 @@ def _build_nextcloud_backend(
         integration_secret_ref=f"{desired_state.stack_name}-nextcloud-onlyoffice-jwt-secret",
         admin_user=admin_user,
         admin_password=admin_password,
+        advisor_workspace_mounts=advisor_workspace_mounts,
         openclaw_volume_name=(
             f"{desired_state.stack_name}-openclaw-data"
             if "openclaw" in desired_state.enabled_packs
-            else None
-        ),
-        openclaw_workspace_contract=(
-            _build_nextcloud_openclaw_workspace_contract(desired_state)
-            if nexa_enabled and "openclaw" in desired_state.enabled_packs
             else None
         ),
         nexa_agent_user_id=(raw_env.values.get("OPENCLAW_NEXA_AGENT_USER_ID") if nexa_enabled else None),
@@ -1972,7 +1973,6 @@ def _has_openclaw_nexa_env(raw_env: RawEnvInput) -> bool:
 def _build_nextcloud_openclaw_workspace_contract(
     desired_state: DesiredState,
 ) -> NextcloudOpenClawWorkspaceContract:
-    stack_name = desired_state.stack_name
     return NextcloudOpenClawWorkspaceContract(
         enabled=True,
         external_mount_name="/OpenClaw",
@@ -1985,6 +1985,85 @@ def _build_nextcloud_openclaw_workspace_contract(
             "Credential values and identity-bearing fields remain server-owned and must not be overridden from workspace files.",
         ),
     )
+
+
+def _build_nextcloud_my_farm_advisor_workspace_mounts(
+    desired_state: DesiredState,
+) -> tuple[NextcloudAdvisorWorkspaceMountContract, NextcloudAdvisorWorkspaceMountContract]:
+    volume_name = f"{desired_state.stack_name}-my-farm-advisor-data"
+    return (
+        NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="my-farm-advisor",
+            volume_name=volume_name,
+            container_mount_root="/mnt/my-farm-advisor",
+            external_mount_name="/Nexa Farm",
+            external_mount_path="/mnt/my-farm-advisor/field-operations",
+            visible_root="/mnt/my-farm-advisor/field-operations/workspace",
+            contract_path=None,
+            runtime_state_source="wizard-managed service workspace",
+            rescan_schedule_identity="my-farm-advisor-field-operations",
+            notes=("Field operations workspace.",),
+        ),
+        NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="my-farm-advisor",
+            volume_name=volume_name,
+            container_mount_root="/mnt/my-farm-advisor",
+            external_mount_name="/Nexa Farm Data Pipeline",
+            external_mount_path="/mnt/my-farm-advisor/data-pipeline",
+            visible_root="/mnt/my-farm-advisor/data-pipeline/workspace",
+            contract_path=None,
+            runtime_state_source="wizard-managed data pipeline workspace",
+            rescan_schedule_identity="my-farm-advisor-data-pipeline",
+            notes=("Data pipeline workspace.",),
+        ),
+    )
+
+
+def _build_nextcloud_advisor_workspace_mounts(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+) -> tuple[NextcloudAdvisorWorkspaceMountContract, ...]:
+    if "nextcloud" not in desired_state.enabled_packs:
+        return ()
+    mounts: list[NextcloudAdvisorWorkspaceMountContract] = []
+    if "openclaw" in desired_state.enabled_packs:
+        if _has_openclaw_nexa_env(raw_env):
+            mounts.append(
+                NextcloudAdvisorWorkspaceMountContract(
+                    advisor_id="openclaw",
+                    volume_name=f"{desired_state.stack_name}-openclaw-data",
+                    container_mount_root="/mnt/openclaw",
+                    external_mount_name="/OpenClaw",
+                    external_mount_path="/mnt/openclaw/workspace",
+                    visible_root="/mnt/openclaw/workspace/nexa",
+                    contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+                    runtime_state_source="server-owned env + durable state JSON",
+                    rescan_schedule_identity="openclaw",
+                    notes=(
+                        "Nextcloud exposes the Nexa workspace as an operator/user surface only.",
+                        "Credential values and identity-bearing fields remain server-owned and must not be overridden from workspace files.",
+                    ),
+                )
+            )
+        else:
+            mounts.append(
+                NextcloudAdvisorWorkspaceMountContract(
+                    advisor_id="openclaw",
+                    volume_name=f"{desired_state.stack_name}-openclaw-data",
+                    container_mount_root="/mnt/openclaw",
+                    external_mount_name="/Nexa Claw",
+                    external_mount_path="/mnt/openclaw/workspace",
+                    visible_root="/mnt/openclaw/workspace",
+                    contract_path=None,
+                    runtime_state_source="server-owned env + durable state JSON",
+                    rescan_schedule_identity="openclaw",
+                    notes=("Operator-facing OpenClaw workspace.",),
+                )
+            )
+    if "my-farm-advisor" in desired_state.enabled_packs:
+        mounts.extend(_build_nextcloud_my_farm_advisor_workspace_mounts(desired_state))
+    return tuple(mounts)
 
 
 def _dokploy_api_auth_required(

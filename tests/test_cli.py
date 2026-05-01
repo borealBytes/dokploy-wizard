@@ -202,6 +202,9 @@ def test_build_live_drift_report_classifies_required_collision_types(
             "STACK_NAME": "openmerge",
             "ROOT_DOMAIN": "openmerge.me",
             "PACKS": "my-farm-advisor,nextcloud,openclaw,coder,seaweedfs",
+            "AI_DEFAULT_API_KEY": "shared-key",
+            "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+            "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
             "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
         },
@@ -305,6 +308,9 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
             "STACK_NAME": "openmerge",
             "ROOT_DOMAIN": "openmerge.me",
             "PACKS": "my-farm-advisor,nextcloud,openclaw,coder,seaweedfs",
+            "AI_DEFAULT_API_KEY": "shared-key",
+            "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+            "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
             "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
         },
@@ -1214,6 +1220,9 @@ def test_install_resume_tolerates_required_ports_used_by_existing_dokploy_stack(
             "DOKPLOY_API_KEY": "dokp-key-123",
             "SEAWEEDFS_ACCESS_KEY": "seaweed-existing",
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret-existing",
+            "AI_DEFAULT_API_KEY": "shared-key",
+            "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+            "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
             "MY_FARM_ADVISOR_CHANNELS": "matrix",
             "PACKS": "matrix,my-farm-advisor,nextcloud,openclaw,seaweedfs",
         },
@@ -1376,6 +1385,9 @@ def test_install_rehydrates_guided_retry_keys_from_persisted_state(
             "DOKPLOY_API_KEY": "dokp-key-123",
             "SEAWEEDFS_ACCESS_KEY": "seaweed-existing",
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret-existing",
+            "AI_DEFAULT_API_KEY": "shared-key",
+            "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+            "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
             "MY_FARM_ADVISOR_CHANNELS": "matrix",
             "PACKS": "matrix,my-farm-advisor,nextcloud,openclaw,seaweedfs",
         },
@@ -3949,6 +3961,151 @@ def test_invalid_subcommand_fails_cleanly() -> None:
     assert "usage:" in combined_output
     assert "invalid choice" in combined_output
     assert "unknown-command" in combined_output
+
+
+def test_build_nextcloud_backend_passes_all_selected_advisor_workspace_mounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, desired_state, backend_kwargs = _capture_nextcloud_backend_kwargs(
+        monkeypatch,
+        packs="nextcloud,openclaw,my-farm-advisor",
+        include_nexa_env=True,
+    )
+
+    mounts = backend_kwargs["advisor_workspace_mounts"]
+    assert len(mounts) == 3
+    assert [mount.volume_name for mount in mounts] == [
+        f"{desired_state.stack_name}-openclaw-data",
+        f"{desired_state.stack_name}-my-farm-advisor-data",
+        f"{desired_state.stack_name}-my-farm-advisor-data",
+    ]
+    assert [mount.external_mount_name for mount in mounts] == [
+        "/OpenClaw",
+        "/Nexa Farm",
+        "/Nexa Farm Data Pipeline",
+    ]
+    assert [mount.external_mount_path for mount in mounts] == [
+        "/mnt/openclaw/workspace",
+        "/mnt/my-farm-advisor/field-operations",
+        "/mnt/my-farm-advisor/data-pipeline",
+    ]
+    assert [mount.visible_root for mount in mounts] == [
+        "/mnt/openclaw/workspace/nexa",
+        "/mnt/my-farm-advisor/field-operations/workspace",
+        "/mnt/my-farm-advisor/data-pipeline/workspace",
+    ]
+
+
+def test_build_nextcloud_backend_passes_farm_mounts_without_openclaw_nexa_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, desired_state, backend_kwargs = _capture_nextcloud_backend_kwargs(
+        monkeypatch,
+        packs="nextcloud,my-farm-advisor",
+        include_nexa_env=False,
+    )
+
+    mounts = backend_kwargs["advisor_workspace_mounts"]
+    assert len(mounts) == 2
+    assert {mount.volume_name for mount in mounts} == {f"{desired_state.stack_name}-my-farm-advisor-data"}
+    assert [mount.external_mount_name for mount in mounts] == [
+        "/Nexa Farm",
+        "/Nexa Farm Data Pipeline",
+    ]
+    assert [mount.external_mount_path for mount in mounts] == [
+        "/mnt/my-farm-advisor/field-operations",
+        "/mnt/my-farm-advisor/data-pipeline",
+    ]
+    assert backend_kwargs["nexa_agent_user_id"] is None
+    assert backend_kwargs["nexa_agent_display_name"] is None
+    assert backend_kwargs["nexa_agent_password"] is None
+    assert backend_kwargs["nexa_agent_email"] is None
+
+
+def test_build_nextcloud_backend_preserves_openclaw_only_workspace_contract_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, desired_state, backend_kwargs = _capture_nextcloud_backend_kwargs(
+        monkeypatch,
+        packs="nextcloud,openclaw",
+        include_nexa_env=True,
+    )
+
+    mounts = backend_kwargs["advisor_workspace_mounts"]
+    assert len(mounts) == 1
+    contract = mounts[0]
+    assert contract.advisor_id == "openclaw"
+    assert contract.volume_name == f"{desired_state.stack_name}-openclaw-data"
+    assert contract.external_mount_name == "/OpenClaw"
+    assert contract.external_mount_path == "/mnt/openclaw/workspace"
+    assert contract.visible_root == "/mnt/openclaw/workspace/nexa"
+    assert contract.contract_path == "/mnt/openclaw/workspace/nexa/contract.json"
+    assert contract.runtime_state_source == "server-owned env + durable state JSON"
+
+
+def test_build_nextcloud_backend_passes_zero_advisor_mounts_when_no_advisor_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, backend_kwargs = _capture_nextcloud_backend_kwargs(
+        monkeypatch,
+        packs="nextcloud",
+        include_nexa_env=False,
+    )
+
+    assert backend_kwargs["advisor_workspace_mounts"] == ()
+    assert backend_kwargs["openclaw_volume_name"] is None
+
+
+def _nextcloud_backend_raw_env(*, packs: str, include_nexa_env: bool) -> RawEnvInput:
+    values = {
+        **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
+        "DOKPLOY_MOCK_API_MODE": "false",
+        "PACKS": packs,
+    }
+    if "my-farm-advisor" in packs:
+        values.update(
+            {
+                "AI_DEFAULT_API_KEY": "shared-key",
+                "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+                "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+            }
+        )
+    if include_nexa_env:
+        values.update(
+            {
+                "OPENCLAW_NEXA_AGENT_PASSWORD": "nexa-password-123",
+                "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-user-123",
+                "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
+                "OPENCLAW_NEXA_AGENT_EMAIL": "nexa@example.com",
+            }
+        )
+    return RawEnvInput(format_version=1, values=values)
+
+
+def _capture_nextcloud_backend_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    packs: str,
+    include_nexa_env: bool,
+) -> tuple[RawEnvInput, Any, dict[str, Any]]:
+    raw_env = _nextcloud_backend_raw_env(packs=packs, include_nexa_env=include_nexa_env)
+    desired_state = resolve_desired_state(raw_env)
+    recorded: dict[str, Any] = {}
+    sentinel_backend = object()
+    sentinel_client = object()
+
+    def record_backend(**kwargs: Any) -> object:
+        recorded.update(kwargs)
+        return sentinel_backend
+
+    monkeypatch.setattr(cli, "DokployNextcloudBackend", record_backend)
+    monkeypatch.setattr(cli, "_build_dokploy_api_client", lambda **_: sentinel_client)
+
+    backend = cli._build_nextcloud_backend(raw_env=raw_env, desired_state=desired_state)
+
+    assert backend is sentinel_backend
+    assert recorded["client"] is sentinel_client
+    return raw_env, desired_state, recorded
 
 
 class _FakeBootstrapBackend:
