@@ -46,7 +46,8 @@ _RUNTIME_APP_ENV_KEYS = (
     "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
 )
 _DEFAULT_NVIDIA_PRIMARY_MODEL = "nvidia/moonshotai/kimi-k2.5"
-_DEFAULT_OPENROUTER_FALLBACK_MODEL = "openrouter/openrouter/free"
+_DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
+_DEFAULT_REMOTE_FALLBACK_MODEL = "opencode-go/deepseek-v4-flash"
 _DEFAULT_DOKPLOY_ADMIN_EMAIL = "clayton@superiorbyteworks.com"
 _OPENCLAW_RUNTIME_ENV_KEYS = tuple(
     key for key in _RUNTIME_APP_ENV_KEYS if key.startswith("OPENCLAW_")
@@ -63,6 +64,8 @@ class GuidedInstallValues:
     dokploy_subdomain: str
     dokploy_admin_email: str
     dokploy_admin_password: str | None
+    ai_default_api_key: str | None
+    ai_default_base_url: str | None
     enable_headscale: bool
     cloudflare_api_token: str
     cloudflare_account_id: str
@@ -118,6 +121,7 @@ def prompt_for_pack_selection(
     *,
     include_headscale_prompt: bool = True,
     headscale_default: bool = True,
+    shared_ai_default_configured: bool = False,
 ) -> PromptSelection:
     selected: list[str] = []
     disabled: list[str] = []
@@ -168,6 +172,7 @@ def prompt_for_pack_selection(
                 prompt=prompt,
                 label="OpenClaw",
                 env_prefix="OPENCLAW",
+                shared_ai_default_configured=shared_ai_default_configured,
             )
         )
         advisor_env.update(
@@ -204,6 +209,7 @@ def prompt_for_pack_selection(
                 prompt=prompt,
                 label="My Farm Advisor",
                 env_prefix="MY_FARM_ADVISOR",
+                shared_ai_default_configured=shared_ai_default_configured,
             )
         )
         advisor_env.update(
@@ -230,20 +236,28 @@ def prompt_for_pack_selection(
 
 
 def _prompt_advisor_runtime_config(
-    *, prompt: PromptFn, label: str, env_prefix: str
+    *,
+    prompt: PromptFn,
+    label: str,
+    env_prefix: str,
+    shared_ai_default_configured: bool,
 ) -> dict[str, str]:
     values: dict[str, str] = {}
     if _prompt_yes_no(
-        prompt, f"Configure a separate NVIDIA API key for {label}? [Y/n]: ", default=True
+        prompt,
+        f"Configure a separate NVIDIA API key for {label}? [{'y/N' if shared_ai_default_configured else 'Y/n'}]: ",
+        default=not shared_ai_default_configured,
     ):
         values[f"{env_prefix}_NVIDIA_API_KEY"] = _prompt_non_empty(
             prompt, f"{label} NVIDIA API key: "
         )
     if _prompt_yes_no(
-        prompt, f"Configure a separate OpenRouter API key for {label}? [Y/n]: ", default=True
+        prompt,
+        f"Configure a separate OpenAI-compatible fallback API key for {label}? [{'y/N' if shared_ai_default_configured else 'Y/n'}]: ",
+        default=not shared_ai_default_configured,
     ):
         values[f"{env_prefix}_OPENROUTER_API_KEY"] = _prompt_non_empty(
-            prompt, f"{label} OpenRouter API key: "
+            prompt, f"{label} fallback API key: "
         )
     primary_default = (
         _DEFAULT_NVIDIA_PRIMARY_MODEL if f"{env_prefix}_NVIDIA_API_KEY" in values else ""
@@ -258,10 +272,10 @@ def _prompt_advisor_runtime_config(
         values[f"{env_prefix}_PRIMARY_MODEL"] = primary_model
     fallback_models = _prompt_optional(
         prompt,
-        f"{label} backup models (comma separated provider/model refs, optional, default: {_DEFAULT_OPENROUTER_FALLBACK_MODEL}): ",
+        f"{label} backup models (comma separated provider/model refs, optional, default: {_DEFAULT_REMOTE_FALLBACK_MODEL}): ",
     )
     if fallback_models is None:
-        fallback_models = _DEFAULT_OPENROUTER_FALLBACK_MODEL
+        fallback_models = _DEFAULT_REMOTE_FALLBACK_MODEL
     if fallback_models is not None:
         values[f"{env_prefix}_FALLBACK_MODELS"] = ",".join(
             item.strip() for item in fallback_models.split(",") if item.strip()
@@ -369,19 +383,37 @@ def prompt_for_initial_install_values(
     ):
         _emit_cloudflare_help(output)
 
+    cloudflare_api_token = _prompt_non_empty(prompt, "Cloudflare API token: ")
+    cloudflare_account_id = _prompt_non_empty(prompt, "Cloudflare account ID: ")
+    cloudflare_zone_id = _prompt_optional(
+        prompt,
+        f"Cloudflare zone ID (optional; press Enter to look up from {root_domain}): ",
+    )
+
+    ai_default_api_key = _prompt_optional(
+        prompt,
+        "Default AI API key for Hermes, K-Dense BYOK, and advisor backup models (optional; press Enter to skip): ",
+    )
+    ai_default_base_url = None
+    if ai_default_api_key is not None:
+        ai_default_base_url = _prompt_default(
+            prompt,
+            f"Default AI base URL (default: {_DEFAULT_AI_DEFAULT_BASE_URL}): ",
+            default=_DEFAULT_AI_DEFAULT_BASE_URL,
+        )
+
     return GuidedInstallValues(
         stack_name=stack_name,
         root_domain=root_domain,
         dokploy_subdomain=dokploy_subdomain,
         dokploy_admin_email=dokploy_admin_email,
         dokploy_admin_password=dokploy_admin_password,
+        ai_default_api_key=ai_default_api_key,
+        ai_default_base_url=ai_default_base_url,
         enable_headscale=enable_headscale,
-        cloudflare_api_token=_prompt_non_empty(prompt, "Cloudflare API token: "),
-        cloudflare_account_id=_prompt_non_empty(prompt, "Cloudflare account ID: "),
-        cloudflare_zone_id=_prompt_optional(
-            prompt,
-            f"Cloudflare zone ID (optional; press Enter to look up from {root_domain}): ",
-        ),
+        cloudflare_api_token=cloudflare_api_token,
+        cloudflare_account_id=cloudflare_account_id,
+        cloudflare_zone_id=cloudflare_zone_id,
         enable_tailscale=enable_tailscale,
         tailscale_auth_key=tailscale_auth_key,
         tailscale_hostname=tailscale_hostname,
@@ -465,9 +497,13 @@ def _emit_cloudflare_help(output: Callable[[str], None]) -> None:
     output("     Create Custom Token")
     output("   Minimum token permissions for this wizard:")
     output("     Account -> Cloudflare Tunnel -> Edit")
+    output("     Cloudflare may show this in token summaries as Cloudflare One Connectors/cloudflared")
     output("     Zone -> DNS -> Edit")
     output("     Account -> Access: Apps and Policies -> Edit")
     output("     Account -> Access: Organizations, Identity Providers, and Groups -> Edit")
+    output("   If you want nested Coder app hosts like *.coder.<root-domain>:")
+    output("     Zone -> SSL and Certificates -> Edit")
+    output("     Advanced Certificate Manager must be enabled for the zone")
     output("")
     output("2. Account ID")
     output("   What it is:")

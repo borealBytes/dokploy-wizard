@@ -99,6 +99,8 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
             dokploy_subdomain="dokploy",
             dokploy_admin_email="clayton@superiorbyteworks.com",
             dokploy_admin_password=None,
+            ai_default_api_key="ai-key-123",
+            ai_default_base_url="https://opencode.ai/zen/go/v1",
             enable_headscale=True,
             cloudflare_api_token="token-123",
             cloudflare_account_id="account-123",
@@ -141,6 +143,8 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
     assert isinstance(raw_env, RawEnvInput)
     assert raw_env.values["DOKPLOY_SUBDOMAIN"] == "dokploy"
     assert raw_env.values["DOKPLOY_ADMIN_EMAIL"] == "clayton@superiorbyteworks.com"
+    assert raw_env.values["AI_DEFAULT_API_KEY"] == "ai-key-123"
+    assert raw_env.values["AI_DEFAULT_BASE_URL"] == "https://opencode.ai/zen/go/v1"
     assert raw_env.values["ENABLE_HEADSCALE"] == "true"
     assert "CLOUDFLARE_ZONE_ID" not in raw_env.values
     assert raw_env.values["PACKS"] == "openclaw"
