@@ -30,6 +30,11 @@ from dokploy_wizard.lifecycle import (
 )
 from dokploy_wizard.lifecycle import engine as lifecycle_engine
 from dokploy_wizard.lifecycle.drift import DriftEntry, DriftReport, LifecycleDriftError
+from dokploy_wizard.networking import planner as networking_planner
+from dokploy_wizard.networking.cloudflare import (
+    CloudflareAccessApplication,
+    CloudflareAccessPolicy,
+)
 from dokploy_wizard.packs import prompts as prompt_module
 from dokploy_wizard.packs.prompts import (
     GuidedInstallValues,
@@ -188,10 +193,137 @@ def test_handle_inspect_state_includes_live_drift_and_persists_snapshot(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["live_drift"] == expected_live_drift
+    assert payload["advisor_status"]["my_farm_advisor"]["display_name"] == "Nexa Farm"
     assert json.loads((state_dir / "desired-state.json").read_text(encoding="utf-8")) == payload
     assert (state_dir / "raw-input.json").exists()
     assert not (state_dir / "applied-state.json").exists()
     assert not (state_dir / "ownership-ledger.json").exists()
+
+
+def test_inspect_state_reports_farm_status_with_redacted_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / "inspect-farm.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "DOKPLOY_SUBDOMAIN=dokploy",
+                "DOKPLOY_ADMIN_EMAIL=operator@example.com",
+                "DOKPLOY_ADMIN_PASSWORD=super-secret-password",
+                "CLOUDFLARE_API_TOKEN=cf-secret-token",
+                "CLOUDFLARE_ACCOUNT_ID=account-123",
+                "PACKS=my-farm-advisor",
+                "AI_DEFAULT_API_KEY=shared-secret-key",
+                "AI_DEFAULT_BASE_URL=https://models.example.com/v1",
+                "MY_FARM_ADVISOR_PRIMARY_MODEL=anthropic/claude-sonnet-4",
+                "MY_FARM_ADVISOR_GATEWAY_PASSWORD=farm-secret-password",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "build_live_drift_report", lambda **_: {"status": "clean"})
+
+    assert (
+        cli._handle_inspect_state(
+            argparse.Namespace(env_file=env_file, state_dir=tmp_path / "state", dry_run=False)
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["advisor_status"]["my_farm_advisor"] == {
+        "display_name": "Nexa Farm",
+        "enabled": True,
+        "hostname": "farm.example.com",
+        "channels": [],
+        "workspace_mount_names": ["/Nexa Farm", "/Nexa Farm Data Pipeline"],
+    }
+    raw_snapshot = json.loads((tmp_path / "state" / "raw-input.json").read_text(encoding="utf-8"))
+    assert raw_snapshot["values"]["CLOUDFLARE_API_TOKEN"] == "<redacted>"
+    assert raw_snapshot["values"]["DOKPLOY_ADMIN_PASSWORD"] == "<redacted>"
+    assert raw_snapshot["values"]["AI_DEFAULT_API_KEY"] == "<redacted>"
+    assert "cf-secret-token" not in json.dumps(payload)
+    assert "shared-secret-key" not in json.dumps(payload)
+
+
+def test_inspect_state_reports_disabled_farm_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / "inspect-openclaw.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "DOKPLOY_SUBDOMAIN=dokploy",
+                "DOKPLOY_ADMIN_EMAIL=operator@example.com",
+                "CLOUDFLARE_API_TOKEN=cf-token",
+                "CLOUDFLARE_ACCOUNT_ID=account-123",
+                "PACKS=openclaw",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "build_live_drift_report", lambda **_: {"status": "clean"})
+
+    assert (
+        cli._handle_inspect_state(
+            argparse.Namespace(env_file=env_file, state_dir=tmp_path / "state", dry_run=True)
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["advisor_status"]["my_farm_advisor"] == {
+        "display_name": "Nexa Farm",
+        "enabled": False,
+        "hostname": None,
+        "channels": [],
+        "workspace_mount_names": [],
+    }
+
+
+def test_inspect_state_reports_both_advisors_with_user_visible_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / "inspect-both.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "DOKPLOY_SUBDOMAIN=dokploy",
+                "DOKPLOY_ADMIN_EMAIL=operator@example.com",
+                "CLOUDFLARE_API_TOKEN=cf-token",
+                "CLOUDFLARE_ACCOUNT_ID=account-123",
+                "PACKS=openclaw,my-farm-advisor",
+                "AI_DEFAULT_API_KEY=shared-key",
+                "AI_DEFAULT_BASE_URL=https://models.example.com/v1",
+                "MY_FARM_ADVISOR_PRIMARY_MODEL=anthropic/claude-sonnet-4",
+                "OPENCLAW_NEXA_AGENT_PASSWORD=nexa-password",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "build_live_drift_report", lambda **_: {"status": "clean"})
+
+    assert (
+        cli._handle_inspect_state(
+            argparse.Namespace(env_file=env_file, state_dir=tmp_path / "state", dry_run=True)
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["advisor_status"]["openclaw"]["display_name"] == "Nexa Claw"
+    assert payload["advisor_status"]["openclaw"]["workspace_mount_name"] == "/OpenClaw"
+    assert payload["advisor_status"]["my_farm_advisor"]["display_name"] == "Nexa Farm"
+    assert payload["advisor_status"]["my_farm_advisor"]["enabled"] is True
 
 
 def test_build_live_drift_report_classifies_required_collision_types(
@@ -4123,6 +4255,264 @@ def test_uninstall_help_lists_task_twelve_flags() -> None:
     assert "--confirm-file" in result.stdout
     assert "--non-interactive" in result.stdout
     assert result.stderr == ""
+
+
+def test_pack_disable_plan_uninstalls_only_farm_resources_when_openclaw_remains() -> None:
+    existing_raw = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "PACKS": "nextcloud,openclaw,my-farm-advisor",
+            "AI_DEFAULT_API_KEY": "shared-key",
+            "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+            "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
+        }
+    )
+    requested_raw = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "PACKS": "nextcloud,openclaw",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+    ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                "openclaw_service",
+                "svc-openclaw",
+                f"stack:{existing_desired.stack_name}:openclaw",
+            ),
+            OwnedResource(
+                "my_farm_advisor_service",
+                "svc-farm",
+                f"stack:{existing_desired.stack_name}:my-farm-advisor",
+            ),
+            OwnedResource(
+                "cloudflare_access_application",
+                "app-openclaw",
+                f"account:account-123:access-app:{existing_desired.hostnames['openclaw']}",
+            ),
+            OwnedResource(
+                "cloudflare_access_policy",
+                "policy-openclaw",
+                f"account:account-123:access-policy:{existing_desired.hostnames['openclaw']}",
+            ),
+            OwnedResource(
+                "cloudflare_access_application",
+                "app-farm",
+                f"account:account-123:access-app:{existing_desired.hostnames['my-farm-advisor']}",
+            ),
+            OwnedResource(
+                "cloudflare_access_policy",
+                "policy-farm",
+                f"account:account-123:access-policy:{existing_desired.hostnames['my-farm-advisor']}",
+            ),
+        ),
+    )
+
+    plan = cli.build_pack_disable_plan(
+        existing_desired=existing_desired,
+        requested_desired=requested_desired,
+        ownership_ledger=ledger,
+    )
+
+    deleted_ids = {item.resource.resource_id for item in plan.deletions}
+    assert deleted_ids == {"svc-farm", "app-farm", "policy-farm"}
+    assert {item.resource.resource_id for item in plan.deletions if item.phase == "openclaw"} == set()
+
+
+def test_pack_disable_plan_uninstalls_both_advisors_when_both_removed() -> None:
+    existing_raw = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "PACKS": "openclaw,my-farm-advisor",
+            "AI_DEFAULT_API_KEY": "shared-key",
+            "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+            "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
+        }
+    )
+    requested_raw = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+    ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource("openclaw_service", "svc-openclaw", "stack:wizard-stack:openclaw"),
+            OwnedResource(
+                "openclaw_mem0_service",
+                "svc-mem0",
+                "stack:wizard-stack:openclaw-sidecar:mem0",
+            ),
+            OwnedResource(
+                "openclaw_qdrant_service",
+                "svc-qdrant",
+                "stack:wizard-stack:openclaw-sidecar:qdrant",
+            ),
+            OwnedResource(
+                "openclaw_runtime_service",
+                "svc-runtime",
+                "stack:wizard-stack:openclaw-sidecar:nexa-runtime",
+            ),
+            OwnedResource(
+                "my_farm_advisor_service",
+                "svc-farm",
+                "stack:wizard-stack:my-farm-advisor",
+            ),
+        ),
+    )
+
+    plan = cli.build_pack_disable_plan(
+        existing_desired=existing_desired,
+        requested_desired=requested_desired,
+        ownership_ledger=ledger,
+    )
+
+    assert {item.resource.resource_id for item in plan.deletions} == {
+        "svc-openclaw",
+        "svc-mem0",
+        "svc-qdrant",
+        "svc-runtime",
+        "svc-farm",
+    }
+
+
+def test_pack_disable_plan_uninstalls_openclaw_only_and_preserves_farm() -> None:
+    existing_raw = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "PACKS": "openclaw,my-farm-advisor",
+            "AI_DEFAULT_API_KEY": "shared-key",
+            "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+            "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
+        }
+    )
+    requested_raw = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "PACKS": "my-farm-advisor",
+            "AI_DEFAULT_API_KEY": "shared-key",
+            "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+            "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+    ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource("openclaw_service", "svc-openclaw", "stack:wizard-stack:openclaw"),
+            OwnedResource(
+                "my_farm_advisor_service",
+                "svc-farm",
+                "stack:wizard-stack:my-farm-advisor",
+            ),
+        ),
+    )
+
+    plan = cli.build_pack_disable_plan(
+        existing_desired=existing_desired,
+        requested_desired=requested_desired,
+        ownership_ledger=ledger,
+    )
+
+    assert {item.resource.resource_id for item in plan.deletions} == {"svc-openclaw"}
+
+
+def test_cloudflare_access_names_use_user_visible_advisor_labels() -> None:
+    class _FakeAccessBackend:
+        def get_access_application(self, account_id: str, app_id: str) -> CloudflareAccessApplication | None:
+            del account_id, app_id
+            return None
+
+        def find_access_application_by_domain(
+            self, account_id: str, hostname: str
+        ) -> CloudflareAccessApplication | None:
+            del account_id, hostname
+            return None
+
+        def create_access_application(self, *args: object, **kwargs: object) -> CloudflareAccessApplication:
+            raise AssertionError("dry-run test should not create access apps")
+
+        def get_access_policy(self, account_id: str, app_id: str, policy_id: str) -> CloudflareAccessPolicy | None:
+            del account_id, app_id, policy_id
+            return None
+
+        def find_access_policy_by_name(
+            self, account_id: str, app_id: str, name: str
+        ) -> CloudflareAccessPolicy | None:
+            del account_id, app_id, name
+            return None
+
+        def create_access_policy(self, *args: object, **kwargs: object) -> CloudflareAccessPolicy:
+            raise AssertionError("dry-run test should not create access policies")
+
+    backend = cast(Any, _FakeAccessBackend())
+
+    openclaw_app, _ = networking_planner._resolve_access_application(
+        dry_run=True,
+        account_id="account-123",
+        pack_name="openclaw",
+        hostname="openclaw.example.com",
+        provider_id="provider-1",
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+    farm_app, _ = networking_planner._resolve_access_application(
+        dry_run=True,
+        account_id="account-123",
+        pack_name="my-farm-advisor",
+        hostname="farm.example.com",
+        provider_id="provider-1",
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+    openclaw_policy, _ = networking_planner._resolve_access_policy(
+        dry_run=True,
+        account_id="account-123",
+        pack_name="openclaw",
+        hostname="openclaw.example.com",
+        app_id="app-1",
+        emails=("operator@example.com",),
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+    farm_policy, _ = networking_planner._resolve_access_policy(
+        dry_run=True,
+        account_id="account-123",
+        pack_name="my-farm-advisor",
+        hostname="farm.example.com",
+        app_id="app-2",
+        emails=("operator@example.com",),
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert openclaw_app.name == "Nexa Claw protected"
+    assert farm_app.name == "Nexa Farm protected"
+    assert openclaw_policy.name == "Allow Nexa Claw"
+    assert farm_policy.name == "Allow Nexa Farm"
 
 
 def test_invalid_subcommand_fails_cleanly() -> None:

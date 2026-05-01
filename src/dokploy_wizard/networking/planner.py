@@ -200,7 +200,7 @@ def reconcile_cloudflare_access(
     credentials = _resolve_credentials(raw_env, desired_state, backend)
     emails = desired_state.cloudflare_access_otp_emails
     target_hostnames = tuple(
-        desired_state.hostnames[key]
+        (key, desired_state.hostnames[key])
         for key in ("openclaw", "my-farm-advisor")
         if key in desired_state.enabled_packs and key in desired_state.hostnames
     )
@@ -229,10 +229,11 @@ def reconcile_cloudflare_access(
     app_ids: dict[str, str] = {}
     policies: list[PlannedAccessPolicy] = []
     policy_ids: dict[str, str] = {}
-    for hostname in target_hostnames:
+    for pack_name, hostname in target_hostnames:
         app, app_action = _resolve_access_application(
             dry_run=dry_run,
             account_id=credentials.account_id,
+            pack_name=pack_name,
             hostname=hostname,
             provider_id=provider.provider_id,
             ownership_ledger=ownership_ledger,
@@ -246,6 +247,7 @@ def reconcile_cloudflare_access(
         policy, policy_action = _resolve_access_policy(
             dry_run=dry_run,
             account_id=credentials.account_id,
+            pack_name=pack_name,
             hostname=hostname,
             app_id=app.app_id,
             emails=emails,
@@ -433,12 +435,13 @@ def _resolve_access_application(
     *,
     dry_run: bool,
     account_id: str,
+    pack_name: str,
     hostname: str,
     provider_id: str,
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
 ) -> tuple[CloudflareAccessApplication, str]:
-    app_name = f"{hostname} protected"
+    app_name = f"{_access_display_name(pack_name)} protected"
     owned_app = _find_owned_access_resource(
         ownership_ledger,
         resource_type=ACCESS_APPLICATION_RESOURCE_TYPE,
@@ -492,13 +495,14 @@ def _resolve_access_policy(
     *,
     dry_run: bool,
     account_id: str,
+    pack_name: str,
     hostname: str,
     app_id: str,
     emails: tuple[str, ...],
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
 ) -> tuple[CloudflareAccessPolicy, str]:
-    policy_name = f"Allow {hostname}"
+    policy_name = f"Allow {_access_display_name(pack_name)}"
     owned_policy = _find_owned_access_resource(
         ownership_ledger,
         resource_type=ACCESS_POLICY_RESOURCE_TYPE,
@@ -542,6 +546,14 @@ def _resolve_access_policy(
         ),
         "create",
     )
+
+
+def _access_display_name(pack_name: str) -> str:
+    if pack_name == "openclaw":
+        return "Nexa Claw"
+    if pack_name == "my-farm-advisor":
+        return "Nexa Farm"
+    return pack_name
 
 
 def _resolve_dns_records(
