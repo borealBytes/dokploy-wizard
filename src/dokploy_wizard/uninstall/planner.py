@@ -303,7 +303,6 @@ def build_pack_disable_plan(
         for pack_name in removed_packs
         for key in _PACK_HOSTNAME_KEYS.get(pack_name, ())
         if key in existing_desired.hostnames
-        and existing_desired.hostnames[key] not in requested_desired.hostnames.values()
     }
     if (
         existing_desired.shared_core.requires_reconciliation()

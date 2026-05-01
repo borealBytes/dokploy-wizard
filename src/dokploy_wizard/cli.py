@@ -608,18 +608,78 @@ def _handle_inspect_state(args: argparse.Namespace) -> int:
         loaded_state = load_state_dir(args.state_dir)
         raw_env = parse_env_file(args.env_file)
         desired_state = resolve_desired_state(raw_env)
-        snapshot = desired_state.to_dict()
+        snapshot = _build_public_inspection_snapshot(raw_env=raw_env, desired_state=desired_state)
         snapshot["live_drift"] = build_live_drift_report(
             desired_state=desired_state,
             ownership_ledger=loaded_state.ownership_ledger,
         )
         if not args.dry_run:
-            write_inspection_snapshot(args.state_dir, raw_env, snapshot)
+            write_inspection_snapshot(args.state_dir, _redacted_raw_env_input(raw_env), snapshot)
     except (OSError, StateValidationError) as error:
         raise SystemExit(str(error)) from error
 
     print(json.dumps(snapshot, indent=2, sort_keys=True))
     return 0
+
+
+_INSPECT_REDACTION_VALUE = "<redacted>"
+_INSPECT_SECRET_KEYS = (
+    "API_KEY",
+    "PASSWORD",
+    "SECRET",
+    "TOKEN",
+    "AUTH_KEY",
+    "ACCESS_KEY",
+)
+
+
+def _build_public_inspection_snapshot(
+    *, raw_env: RawEnvInput, desired_state: DesiredState
+) -> dict[str, Any]:
+    snapshot = desired_state.to_dict()
+    for key in ("seaweedfs_access_key", "seaweedfs_secret_key", "openclaw_gateway_token"):
+        if snapshot.get(key) is not None:
+            snapshot[key] = _INSPECT_REDACTION_VALUE
+    snapshot["advisor_status"] = {
+        "openclaw": {
+            "display_name": "Nexa Claw",
+            "enabled": "openclaw" in desired_state.enabled_packs,
+            "hostname": desired_state.hostnames.get("openclaw"),
+            "channels": list(desired_state.openclaw_channels),
+            "workspace_mount_name": (
+                "/OpenClaw" if _has_openclaw_nexa_env(raw_env) else "/Nexa Claw"
+            )
+            if "openclaw" in desired_state.enabled_packs
+            else None,
+        },
+        "my_farm_advisor": {
+            "display_name": "Nexa Farm",
+            "enabled": "my-farm-advisor" in desired_state.enabled_packs,
+            "hostname": desired_state.hostnames.get("my-farm-advisor"),
+            "channels": list(desired_state.my_farm_advisor_channels),
+            "workspace_mount_names": (
+                ["/Nexa Farm", "/Nexa Farm Data Pipeline"]
+                if "my-farm-advisor" in desired_state.enabled_packs
+                else []
+            ),
+        },
+    }
+    return snapshot
+
+
+def _redacted_raw_env_input(raw_env: RawEnvInput) -> RawEnvInput:
+    return RawEnvInput(
+        format_version=raw_env.format_version,
+        values={
+            key: (_INSPECT_REDACTION_VALUE if _raw_env_value_is_sensitive(key) else value)
+            for key, value in raw_env.values.items()
+        },
+    )
+
+
+def _raw_env_value_is_sensitive(key: str) -> bool:
+    normalized = key.upper()
+    return any(token in normalized for token in _INSPECT_SECRET_KEYS)
 
 
 def run_install_flow(

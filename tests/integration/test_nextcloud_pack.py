@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from dokploy_wizard.cli import run_install_flow
+import dokploy_wizard.cli
+from dokploy_wizard.cli import run_install_flow, run_modify_flow
 from dokploy_wizard.core import SharedCoreResourceRecord
 from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.dokploy import (
@@ -21,6 +23,7 @@ from dokploy_wizard.dokploy import (
     DokployProjectSummary,
     DokployScheduleRecord,
 )
+from dokploy_wizard.dokploy import nextcloud as nextcloud_module
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,
     CloudflareAccessIdentityProvider,
@@ -724,6 +727,617 @@ def _owned_dns_records() -> dict[str, CloudflareDnsRecord]:
     }
 
 
+def _base_install_values(**overrides: str) -> dict[str, str]:
+    values = {
+        "STACK_NAME": "wizard-stack",
+        "ROOT_DOMAIN": "example.com",
+        "HOST_OS_ID": "ubuntu",
+        "HOST_OS_VERSION_ID": "24.04",
+        "HOST_CPU_COUNT": "4",
+        "HOST_MEMORY_GB": "8",
+        "HOST_DISK_GB": "100",
+        "HOST_DOCKER_INSTALLED": "true",
+        "HOST_DOCKER_DAEMON_REACHABLE": "true",
+        "HOST_PORT_80_IN_USE": "false",
+        "HOST_PORT_443_IN_USE": "false",
+        "HOST_PORT_3000_IN_USE": "false",
+        "HOST_ENVIRONMENT": "local",
+        "DOKPLOY_BOOTSTRAP_HEALTHY": "true",
+        "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+        "DOKPLOY_API_KEY": "api-key-123",
+        "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+        "DOKPLOY_ADMIN_PASSWORD": "secret-123",
+        "CLOUDFLARE_API_TOKEN": "token-123",
+        "CLOUDFLARE_ACCOUNT_ID": "account-123",
+        "CLOUDFLARE_ZONE_ID": "zone-123",
+        "CLOUDFLARE_TUNNEL_NAME": "wizard-stack-tunnel",
+    }
+    values.update(overrides)
+    return values
+
+
+def _passing_bundle_verification() -> NextcloudBundleVerification:
+    return NextcloudBundleVerification(
+        onlyoffice_document_server_check=NextcloudCommandCheck(
+            command="php occ onlyoffice:documentserver --check",
+            passed=True,
+        ),
+        talk=TalkRuntime(
+            app_id="spreed",
+            enabled=True,
+            enabled_check=NextcloudCommandCheck(
+                command="php occ app:list --output=json",
+                passed=True,
+            ),
+            signaling_check=NextcloudCommandCheck(
+                command="php occ talk:signaling:list --output=json",
+                passed=True,
+            ),
+            stun_check=NextcloudCommandCheck(
+                command="php occ talk:stun:list --output=json",
+                passed=True,
+            ),
+            turn_check=NextcloudCommandCheck(
+                command="php occ talk:turn:list --output=json",
+                passed=True,
+            ),
+        ),
+    )
+
+
+def _openclaw_nexa_values() -> dict[str, str]:
+    return {
+        "ENABLE_OPENCLAW": "true",
+        "OPENCLAW_CHANNELS": "telegram",
+        "OPENCLAW_NEXA_MEM0_BASE_URL": "https://mem0.internal.example.com",
+        "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
+        "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
+        "OPENCLAW_NEXA_AGENT_PASSWORD": "nexa-secret",
+        "OPENCLAW_NEXA_AGENT_EMAIL": "nexa@example.com",
+    }
+
+
+def _farm_values() -> dict[str, str]:
+    return {
+        "ENABLE_MY_FARM_ADVISOR": "true",
+        "MY_FARM_ADVISOR_CHANNELS": "telegram",
+        "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+    }
+
+
+@dataclass
+class RecordingNextcloudApi(FakeDokployApiClient):
+    compose_files_by_id: dict[str, str] = field(default_factory=dict)
+    compose_names_by_id: dict[str, str] = field(default_factory=dict)
+    schedules: list[DokployScheduleRecord] = field(default_factory=list)
+    update_compose_calls: int = 0
+
+    def create_compose(
+        self, *, name: str, environment_id: str, compose_file: str, app_name: str
+    ) -> DokployComposeRecord:
+        record = super().create_compose(
+            name=name,
+            environment_id=environment_id,
+            compose_file=compose_file,
+            app_name=app_name,
+        )
+        self.compose_files_by_id[record.compose_id] = compose_file
+        self.compose_names_by_id[record.compose_id] = name
+        return record
+
+    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
+        self.update_compose_calls += 1
+        self.compose_files_by_id[compose_id] = compose_file
+        return DokployComposeRecord(
+            compose_id=compose_id,
+            name=self.compose_names_by_id.get(compose_id, f"compose-{compose_id}"),
+        )
+
+    def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
+        del compose_id
+        return tuple(self.schedules)
+
+    def create_schedule(
+        self,
+        *,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        del compose_id
+        record = DokployScheduleRecord(
+            schedule_id=f"schedule-{len(self.schedules) + 1}",
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+        self.schedules.append(record)
+        return record
+
+    def update_schedule(
+        self,
+        *,
+        schedule_id: str,
+        name: str,
+        compose_id: str,
+        service_name: str,
+        cron_expression: str,
+        timezone: str,
+        shell_type: str,
+        command: str,
+        enabled: bool,
+    ) -> DokployScheduleRecord:
+        del compose_id
+        record = DokployScheduleRecord(
+            schedule_id=schedule_id,
+            name=name,
+            service_name=service_name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            shell_type=shell_type,
+            command=command,
+            enabled=enabled,
+        )
+        for index, existing in enumerate(self.schedules):
+            if existing.schedule_id == schedule_id:
+                self.schedules[index] = record
+                break
+        else:
+            self.schedules.append(record)
+        return record
+
+
+@dataclass
+class NextcloudOccRecorder:
+    mounts: list[dict[str, object]] = field(default_factory=list)
+    commands: list[tuple[str, ...]] = field(default_factory=list)
+    shell_commands: list[str] = field(default_factory=list)
+    next_mount_id: int = 1
+
+    def patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(nextcloud_module, "_nextcloud_status_ready", lambda url: True)
+        monkeypatch.setattr(nextcloud_module, "_local_https_health_check", lambda url: True)
+        monkeypatch.setattr(
+            nextcloud_module,
+            "_find_container_name",
+            lambda service_name: "nextcloud-container",
+        )
+        monkeypatch.setattr(nextcloud_module, "_ensure_admin_user", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            nextcloud_module,
+            "_ensure_nexa_service_account",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(nextcloud_module, "_nextcloud_user_exists", lambda *args, **kwargs: True)
+        monkeypatch.setattr(nextcloud_module, "_ensure_trusted_domain", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            nextcloud_module,
+            "_ensure_external_storage_path",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(nextcloud_module, "_list_external_storage_mounts", lambda _: tuple(self.mounts))
+        monkeypatch.setattr(nextcloud_module, "_run_occ", self._run_occ)
+        monkeypatch.setattr(nextcloud_module, "_run_occ_shell", self._run_occ_shell)
+        monkeypatch.setattr(
+            nextcloud_module,
+            "_verify_nextcloud_bundle",
+            lambda container_name: _passing_bundle_verification(),
+        )
+
+    def _run_occ_shell(self, container_name: str, shell_command: str) -> None:
+        assert container_name == "nextcloud-container"
+        self.shell_commands.append(shell_command)
+
+    def _run_occ(self, container_name: str, args: list[str]) -> None:
+        assert container_name == "nextcloud-container"
+        command = tuple(args)
+        self.commands.append(command)
+        if len(args) >= 6 and args[0] == "files_external:create":
+            self.mounts.append(
+                {
+                    "mount_id": self.next_mount_id,
+                    "mount_point": args[1],
+                    "configuration": {"datadir": args[5].split("=", 1)[1]},
+                }
+            )
+            self.next_mount_id += 1
+            return
+        if args[:2] == ["files_external:delete", "--yes"]:
+            self.mounts[:] = [item for item in self.mounts if str(item["mount_id"]) != args[2]]
+
+    def mount_pairs(self) -> set[tuple[str, str]]:
+        pairs: set[tuple[str, str]] = set()
+        for item in self.mounts:
+            configuration = item["configuration"]
+            assert isinstance(configuration, dict)
+            pairs.add((str(item["mount_point"]), str(configuration["datadir"])))
+        return pairs
+
+    def mount_id(self, mount_point: str) -> str | None:
+        for item in self.mounts:
+            if item["mount_point"] == mount_point:
+                return str(item["mount_id"])
+        return None
+
+
+def _files_external_create_commands(
+    commands: list[tuple[str, ...]],
+) -> list[tuple[str, ...]]:
+    return [command for command in commands if command[:1] == ("files_external:create",)]
+
+
+def _files_scan_commands(commands: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
+    return [command for command in commands if command[:1] == ("files:scan",)]
+
+
+def _patch_real_dokploy_nextcloud_backend(
+    monkeypatch: pytest.MonkeyPatch, api: RecordingNextcloudApi
+) -> None:
+    monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
+    monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+
+    def _build_backend(**kwargs: Any) -> DokployNextcloudBackend:
+        kwargs["client"] = api
+        return DokployNextcloudBackend(**kwargs)
+
+    monkeypatch.setattr(dokploy_wizard.cli, "DokployNextcloudBackend", _build_backend)
+
+
+def test_install_farm_only_nextcloud_creates_both_farm_external_mounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = RecordingNextcloudApi()
+    occ = NextcloudOccRecorder()
+    _patch_real_dokploy_nextcloud_backend(monkeypatch, api)
+    occ.patch(monkeypatch)
+
+    summary = run_install_flow(
+        env_file=tmp_path / "farm-only.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        raw_env=RawEnvInput(
+            format_version=1,
+            values=_base_install_values(
+                ENABLE_NEXTCLOUD="true",
+                AI_DEFAULT_API_KEY="shared-ai-key",
+                AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+                CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+                **_farm_values(),
+            ),
+        ),
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=None,
+        openclaw_backend=FakeOpenClawBackend(),
+    )
+
+    assert summary["nextcloud"]["outcome"] == "applied"
+    assert occ.mount_pairs() == {
+        ("/Nexa Farm", "/mnt/advisors/my-farm-advisor/field-operations"),
+        ("/Nexa Farm Data Pipeline", "/mnt/advisors/my-farm-advisor/data-pipeline"),
+    }
+    assert _files_external_create_commands(occ.commands) == [
+        (
+            "files_external:create",
+            "/Nexa Farm",
+            "local",
+            "null::null",
+            "-c",
+            "datadir=/mnt/advisors/my-farm-advisor/field-operations",
+        ),
+        (
+            "files_external:create",
+            "/Nexa Farm Data Pipeline",
+            "local",
+            "null::null",
+            "-c",
+            "datadir=/mnt/advisors/my-farm-advisor/data-pipeline",
+        ),
+    ]
+    assert (
+        "files:scan",
+        "--path=admin@example.com/files/Nexa Farm",
+    ) in _files_scan_commands(occ.commands)
+    assert (
+        "files:scan",
+        "--path=admin@example.com/files/Nexa Farm Data Pipeline",
+    ) in _files_scan_commands(occ.commands)
+
+
+def test_install_both_advisors_nextcloud_creates_openclaw_and_farm_mounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = RecordingNextcloudApi()
+    occ = NextcloudOccRecorder()
+    _patch_real_dokploy_nextcloud_backend(monkeypatch, api)
+    occ.patch(monkeypatch)
+
+    summary = run_install_flow(
+        env_file=tmp_path / "both-advisors.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        raw_env=RawEnvInput(
+            format_version=1,
+            values=_base_install_values(
+                ENABLE_NEXTCLOUD="true",
+                AI_DEFAULT_API_KEY="shared-ai-key",
+                AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+                CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+                **_openclaw_nexa_values(),
+                **_farm_values(),
+            ),
+        ),
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=None,
+        openclaw_backend=FakeOpenClawBackend(),
+    )
+
+    assert summary["nextcloud"]["outcome"] == "applied"
+    assert occ.mount_pairs() == {
+        ("/Nexa Claw", "/mnt/advisors/openclaw/workspace"),
+        ("/Nexa Farm", "/mnt/advisors/my-farm-advisor/field-operations"),
+        ("/Nexa Farm Data Pipeline", "/mnt/advisors/my-farm-advisor/data-pipeline"),
+    }
+    assert _files_external_create_commands(occ.commands) == [
+        (
+            "files_external:create",
+            "/Nexa Claw",
+            "local",
+            "null::null",
+            "-c",
+            "datadir=/mnt/advisors/openclaw/workspace",
+        ),
+        (
+            "files_external:create",
+            "/Nexa Farm",
+            "local",
+            "null::null",
+            "-c",
+            "datadir=/mnt/advisors/my-farm-advisor/field-operations",
+        ),
+        (
+            "files_external:create",
+            "/Nexa Farm Data Pipeline",
+            "local",
+            "null::null",
+            "-c",
+            "datadir=/mnt/advisors/my-farm-advisor/data-pipeline",
+        ),
+    ]
+    assert (
+        "files:scan",
+        "--path=admin@example.com/files/Nexa Claw",
+    ) in _files_scan_commands(occ.commands)
+
+
+def test_install_openclaw_only_nextcloud_preserves_legacy_openclaw_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = RecordingNextcloudApi()
+    occ = NextcloudOccRecorder()
+    _patch_real_dokploy_nextcloud_backend(monkeypatch, api)
+    occ.patch(monkeypatch)
+    occ.mounts.append(
+        {
+            "mount_id": 17,
+            "mount_point": "/OpenClaw",
+            "configuration": {"datadir": "/mnt/advisors/openclaw/workspace"},
+        }
+    )
+    occ.next_mount_id = 18
+
+    summary = run_install_flow(
+        env_file=tmp_path / "openclaw-only.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        raw_env=RawEnvInput(
+            format_version=1,
+            values=_base_install_values(
+                ENABLE_NEXTCLOUD="true",
+                AI_DEFAULT_API_KEY="shared-ai-key",
+                AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+                CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+                **_openclaw_nexa_values(),
+            ),
+        ),
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=None,
+        openclaw_backend=FakeOpenClawBackend(),
+    )
+
+    assert summary["nextcloud"]["outcome"] == "applied"
+    assert occ.mount_pairs() == {("/OpenClaw", "/mnt/advisors/openclaw/workspace")}
+    assert _files_external_create_commands(occ.commands) == []
+    assert not any(command[1] == "/Nexa Claw" for command in _files_external_create_commands(occ.commands))
+    assert (
+        "files:scan",
+        "--path=admin@example.com/files/OpenClaw",
+    ) in _files_scan_commands(occ.commands)
+
+
+def test_modify_adds_farm_mounts_to_existing_nextcloud_without_recreating_openclaw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "modify-add-farm.env"
+    api = RecordingNextcloudApi()
+    occ = NextcloudOccRecorder()
+    networking_backend = FakeCloudflareBackend()
+    shared_core_backend = FakeSharedCoreBackend()
+    openclaw_backend = FakeOpenClawBackend()
+    _patch_real_dokploy_nextcloud_backend(monkeypatch, api)
+    occ.patch(monkeypatch)
+    occ.mounts.append(
+        {
+            "mount_id": 17,
+            "mount_point": "/OpenClaw",
+            "configuration": {"datadir": "/mnt/advisors/openclaw/workspace"},
+        }
+    )
+    occ.next_mount_id = 18
+
+    initial_raw = RawEnvInput(
+        format_version=1,
+        values=_base_install_values(
+            ENABLE_NEXTCLOUD="true",
+            AI_DEFAULT_API_KEY="shared-ai-key",
+            AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+            CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+            **_openclaw_nexa_values(),
+        ),
+    )
+    modified_raw = RawEnvInput(
+        format_version=1,
+        values=_base_install_values(
+            ENABLE_NEXTCLOUD="true",
+            AI_DEFAULT_API_KEY="shared-ai-key",
+            AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+            CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+            **_openclaw_nexa_values(),
+            **_farm_values(),
+        ),
+    )
+
+    run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=initial_raw,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=None,
+        openclaw_backend=openclaw_backend,
+    )
+
+    openclaw_mount_id = occ.mount_id("/OpenClaw")
+    command_count_before_modify = len(occ.commands)
+    summary = run_modify_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=modified_raw,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=None,
+        openclaw_backend=openclaw_backend,
+    )
+    modify_commands = occ.commands[command_count_before_modify:]
+
+    assert {"nextcloud", "my-farm-advisor", "cloudflare_access"}.issubset(
+        set(summary["lifecycle"]["phases_to_run"])
+    )
+    assert occ.mount_id("/OpenClaw") == openclaw_mount_id
+    assert occ.mount_pairs() == {
+        ("/OpenClaw", "/mnt/advisors/openclaw/workspace"),
+        ("/Nexa Farm", "/mnt/advisors/my-farm-advisor/field-operations"),
+        ("/Nexa Farm Data Pipeline", "/mnt/advisors/my-farm-advisor/data-pipeline"),
+    }
+    assert _files_external_create_commands(modify_commands) == [
+        (
+            "files_external:create",
+            "/Nexa Farm",
+            "local",
+            "null::null",
+            "-c",
+            "datadir=/mnt/advisors/my-farm-advisor/field-operations",
+        ),
+        (
+            "files_external:create",
+            "/Nexa Farm Data Pipeline",
+            "local",
+            "null::null",
+            "-c",
+            "datadir=/mnt/advisors/my-farm-advisor/data-pipeline",
+        ),
+    ]
+    assert not any(command[1] in {"/OpenClaw", "/Nexa Claw"} for command in _files_external_create_commands(modify_commands))
+    assert not any(command[:2] == ("files_external:delete", "--yes") for command in modify_commands)
+    assert (
+        "files:scan",
+        "--path=admin@example.com/files/OpenClaw",
+    ) in _files_scan_commands(modify_commands)
+
+
+def test_rerun_with_both_advisors_is_idempotent_for_nextcloud_mounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "rerun-both-advisors.env"
+    api = RecordingNextcloudApi()
+    occ = NextcloudOccRecorder()
+    networking_backend = FakeCloudflareBackend()
+    shared_core_backend = FakeSharedCoreBackend()
+    openclaw_backend = FakeOpenClawBackend()
+    _patch_real_dokploy_nextcloud_backend(monkeypatch, api)
+    occ.patch(monkeypatch)
+
+    raw_env = RawEnvInput(
+        format_version=1,
+        values=_base_install_values(
+            ENABLE_NEXTCLOUD="true",
+            AI_DEFAULT_API_KEY="shared-ai-key",
+            AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+            CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+            **_openclaw_nexa_values(),
+            **_farm_values(),
+        ),
+    )
+
+    run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=None,
+        openclaw_backend=openclaw_backend,
+    )
+
+    command_count_before_rerun = len(occ.commands)
+    mount_pairs_before_rerun = occ.mount_pairs().copy()
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=None,
+        openclaw_backend=openclaw_backend,
+    )
+
+    assert summary["lifecycle"]["mode"] == "noop"
+    assert summary["nextcloud"]["outcome"] == "already_present"
+    assert len(occ.commands) == command_count_before_rerun
+    assert occ.mount_pairs() == mount_pairs_before_rerun
+
+
 def test_install_reconciles_nextcloud_pair_and_persists_runtime_ledger(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     summary = run_install_flow(
@@ -844,7 +1458,11 @@ def test_install_reconciles_nextcloud_pair_via_dokploy_backend(
         storage_url,
         jwt_secret,
         wait_for_documentserver_check=False,
+        advisor_workspace_mounts=(),
         openclaw_external_storage_enabled=False,
+        openclaw_external_storage_mount_point="/Nexa Claw",
+        openclaw_external_storage_datadir="/mnt/advisors/openclaw/workspace",
+        openclaw_external_storage_volume_root="/mnt/advisors/openclaw",
         admin_user="admin": None,
     )
     monkeypatch.setattr(
@@ -984,12 +1602,14 @@ def test_install_passes_nexa_workspace_contract_into_dokploy_nextcloud_backend(
     )
 
     assert summary["nextcloud"]["outcome"] == "applied"
-    workspace_contract = recording_backend.init_kwargs["openclaw_workspace_contract"]
-    assert workspace_contract is not None
-    assert workspace_contract.external_mount_path == "/mnt/openclaw/workspace"
-    assert workspace_contract.visible_root == "/mnt/openclaw/workspace/nexa"
-    assert workspace_contract.contract_path == "/mnt/openclaw/workspace/nexa/contract.json"
-    assert workspace_contract.runtime_state_source == "server-owned env + durable state JSON"
+    mounts = recording_backend.init_kwargs["advisor_workspace_mounts"]
+    assert len(mounts) == 1
+    assert mounts[0].advisor_id == "openclaw"
+    assert mounts[0].external_mount_name == "/OpenClaw"
+    assert mounts[0].external_mount_path == "/mnt/openclaw/workspace"
+    assert mounts[0].visible_root == "/mnt/openclaw/workspace/nexa"
+    assert mounts[0].contract_path == "/mnt/openclaw/workspace/nexa/contract.json"
+    assert mounts[0].runtime_state_source == "server-owned env + durable state JSON"
     assert recording_backend.init_kwargs["nexa_agent_user_id"] == "nexa-agent"
     assert recording_backend.init_kwargs["nexa_agent_display_name"] == "Nexa"
     assert recording_backend.init_kwargs["nexa_agent_password"] == "nexa-secret"
