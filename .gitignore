@@ -29,6 +29,6 @@ dist/
 
 .idea/
 .vscode/
-.install.env
+.install*.env
 .fresh-vps-validation.env
 .gstack/
