@@ -260,7 +260,7 @@ class FakeDokployApiClient:
         enabled: bool,
     ) -> DokployScheduleRecord:
         record = DokployScheduleRecord(
-            schedule_id="sch-1",
+            schedule_id=f"sch-{len(self.schedules) + 1}",
             name=name,
             service_name=service_name,
             cron_expression=cron_expression,
@@ -269,7 +269,7 @@ class FakeDokployApiClient:
             command=command,
             enabled=enabled,
         )
-        self.schedules = [record]
+        self.schedules.append(record)
         return record
 
     def update_schedule(
@@ -295,7 +295,9 @@ class FakeDokployApiClient:
             command=command,
             enabled=enabled,
         )
-        self.schedules = [record]
+        self.schedules = [
+            record if item.schedule_id == schedule_id else item for item in self.schedules
+        ]
         return record
 
     def delete_schedule(self, *, schedule_id: str) -> None:
@@ -903,6 +905,53 @@ def _my_farm_advisor_workspace_mounts() -> tuple[NextcloudAdvisorWorkspaceMountC
     )
 
 
+def _all_advisor_workspace_mounts() -> tuple[NextcloudAdvisorWorkspaceMountContract, ...]:
+    return (_openclaw_advisor_workspace_mount(), *_my_farm_advisor_workspace_mounts())
+
+
+def _build_nextcloud_backend_for_mounts(
+    *,
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
+    client: FakeDokployApiClient | None = None,
+    openclaw_rescan_cron: str = "*/15 * * * *",
+    openclaw_rescan_timezone: str = "UTC",
+) -> DokployNextcloudBackend:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    return DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        admin_user="clayton@superiorbyteworks.com",
+        advisor_workspace_mounts=advisor_workspace_mounts,
+        openclaw_rescan_cron=openclaw_rescan_cron,
+        openclaw_rescan_timezone=openclaw_rescan_timezone,
+        client=client or FakeDokployApiClient(),
+    )
+
+
 def _render_nextcloud_compose_for_mounts(
     *,
     advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...] = (),
@@ -1205,7 +1254,7 @@ def test_dokploy_nextcloud_backend_creates_openclaw_rescan_schedule() -> None:
     )
     monkeypatch.setattr(
         nextcloud_module,
-        "_ensure_openclaw_external_storage",
+        "_ensure_advisor_external_storage",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
@@ -1306,7 +1355,7 @@ def test_dokploy_nextcloud_backend_updates_existing_openclaw_rescan_schedule() -
     )
     monkeypatch.setattr(
         nextcloud_module,
-        "_ensure_openclaw_external_storage",
+        "_ensure_advisor_external_storage",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
@@ -1329,6 +1378,275 @@ def test_dokploy_nextcloud_backend_updates_existing_openclaw_rescan_schedule() -
             enabled=True,
         )
     ]
+
+
+def test_dokploy_nextcloud_backend_refreshes_all_advisor_external_storages_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeDokployApiClient()
+    backend = _build_nextcloud_backend_for_mounts(
+        advisor_workspace_mounts=_all_advisor_workspace_mounts(),
+        client=client,
+    )
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": "wizard_stack_nextcloud",
+            "postgres_password_secret_ref": "wizard-stack-nextcloud-postgres-password",
+            "postgres_user_name": "wizard_stack_nextcloud",
+            "redis_identity_name": "wizard-stack-nextcloud-redis",
+            "redis_password_secret_ref": "wizard-stack-nextcloud-redis-password",
+        },
+    )
+    mounts: list[dict[str, Any]] = []
+    next_mount_id = 1
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run_occ(container_name: str, args: list[str]) -> None:
+        nonlocal next_mount_id
+        assert container_name == "nextcloud-container"
+        command = tuple(args)
+        commands.append(command)
+        if command[:2] == ("files_external:create", "/Nexa Claw"):
+            mounts.append(
+                {
+                    "mount_id": next_mount_id,
+                    "mount_point": "/Nexa Claw",
+                    "configuration": {"datadir": "/mnt/advisors/openclaw/workspace"},
+                }
+            )
+            next_mount_id += 1
+        elif command[:2] == ("files_external:create", "/Nexa Farm"):
+            mounts.append(
+                {
+                    "mount_id": next_mount_id,
+                    "mount_point": "/Nexa Farm",
+                    "configuration": {"datadir": "/mnt/advisors/my-farm-advisor/field-operations"},
+                }
+            )
+            next_mount_id += 1
+        elif command[:2] == ("files_external:create", "/Nexa Farm Data Pipeline"):
+            mounts.append(
+                {
+                    "mount_id": next_mount_id,
+                    "mount_point": "/Nexa Farm Data Pipeline",
+                    "configuration": {"datadir": "/mnt/advisors/my-farm-advisor/data-pipeline"},
+                }
+            )
+            next_mount_id += 1
+        elif command[:2] == ("files_external:delete", "--yes"):
+            mounts[:] = [item for item in mounts if str(item["mount_id"]) != command[2]]
+
+    monkeypatch.setattr(nextcloud_module, "_find_container_name", lambda service_name: "nextcloud-container")
+    monkeypatch.setattr(nextcloud_module, "_ensure_external_storage_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nextcloud_module, "_list_external_storage_mounts", lambda _: tuple(mounts))
+    monkeypatch.setattr(nextcloud_module, "_run_occ", fake_run_occ)
+
+    backend.refresh_openclaw_external_storage(admin_user="clayton@superiorbyteworks.com")
+    backend.refresh_openclaw_external_storage(admin_user="clayton@superiorbyteworks.com")
+
+    assert mounts == [
+        {
+            "mount_id": 1,
+            "mount_point": "/Nexa Claw",
+            "configuration": {"datadir": "/mnt/advisors/openclaw/workspace"},
+        },
+        {
+            "mount_id": 2,
+            "mount_point": "/Nexa Farm",
+            "configuration": {"datadir": "/mnt/advisors/my-farm-advisor/field-operations"},
+        },
+        {
+            "mount_id": 3,
+            "mount_point": "/Nexa Farm Data Pipeline",
+            "configuration": {"datadir": "/mnt/advisors/my-farm-advisor/data-pipeline"},
+        },
+    ]
+    assert {item.name for item in client.schedules} == {
+        "wizard-stack-openclaw-rescan",
+        "wizard-stack-my-farm-advisor-field-operations-rescan",
+        "wizard-stack-my-farm-advisor-data-pipeline-rescan",
+    }
+    assert client.schedules[0].command == (
+        'php /var/www/html/occ files:scan '
+        '--path="clayton@superiorbyteworks.com/files/Nexa Claw"'
+    )
+    assert (
+        "files_external:create",
+        "/Nexa Farm",
+        "local",
+        "null::null",
+        "-c",
+        "datadir=/mnt/advisors/my-farm-advisor/field-operations",
+    ) in commands
+    assert ("files_external:option", "2", "readonly", "false") in commands
+    assert ("files_external:option", "3", "readonly", "false") in commands
+
+
+def test_dokploy_nextcloud_backend_preserves_unrelated_user_created_external_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _build_nextcloud_backend_for_mounts(
+        advisor_workspace_mounts=_all_advisor_workspace_mounts(),
+    )
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": "wizard_stack_nextcloud",
+            "postgres_password_secret_ref": "wizard-stack-nextcloud-postgres-password",
+            "postgres_user_name": "wizard_stack_nextcloud",
+            "redis_identity_name": "wizard-stack-nextcloud-redis",
+            "redis_password_secret_ref": "wizard-stack-nextcloud-redis-password",
+        },
+    )
+    mounts: list[dict[str, Any]] = [
+        {
+            "mount_id": 91,
+            "mount_point": "/Nexa Farm",
+            "configuration": {"datadir": "/srv/user-created/nexa-farm"},
+        }
+    ]
+    next_mount_id = 92
+
+    def fake_run_occ(container_name: str, args: list[str]) -> None:
+        nonlocal next_mount_id
+        assert container_name == "nextcloud-container"
+        if args[:2] == ["files_external:create", "/Nexa Claw"]:
+            mounts.append(
+                {
+                    "mount_id": next_mount_id,
+                    "mount_point": "/Nexa Claw",
+                    "configuration": {"datadir": "/mnt/advisors/openclaw/workspace"},
+                }
+            )
+            next_mount_id += 1
+        elif args[:2] == ["files_external:create", "/Nexa Farm"]:
+            mounts.append(
+                {
+                    "mount_id": next_mount_id,
+                    "mount_point": "/Nexa Farm",
+                    "configuration": {"datadir": "/mnt/advisors/my-farm-advisor/field-operations"},
+                }
+            )
+            next_mount_id += 1
+        elif args[:2] == ["files_external:create", "/Nexa Farm Data Pipeline"]:
+            mounts.append(
+                {
+                    "mount_id": next_mount_id,
+                    "mount_point": "/Nexa Farm Data Pipeline",
+                    "configuration": {"datadir": "/mnt/advisors/my-farm-advisor/data-pipeline"},
+                }
+            )
+            next_mount_id += 1
+        elif args[:2] == ["files_external:delete", "--yes"]:
+            mounts[:] = [item for item in mounts if str(item["mount_id"]) != args[2]]
+
+    monkeypatch.setattr(nextcloud_module, "_find_container_name", lambda service_name: "nextcloud-container")
+    monkeypatch.setattr(nextcloud_module, "_ensure_external_storage_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nextcloud_module, "_list_external_storage_mounts", lambda _: tuple(mounts))
+    monkeypatch.setattr(nextcloud_module, "_run_occ", fake_run_occ)
+
+    backend.refresh_openclaw_external_storage(admin_user="clayton@superiorbyteworks.com")
+
+    assert {
+        (item["mount_point"], item["configuration"]["datadir"])
+        for item in mounts
+    } == {
+        ("/Nexa Farm", "/srv/user-created/nexa-farm"),
+        ("/Nexa Claw", "/mnt/advisors/openclaw/workspace"),
+        ("/Nexa Farm", "/mnt/advisors/my-farm-advisor/field-operations"),
+        ("/Nexa Farm Data Pipeline", "/mnt/advisors/my-farm-advisor/data-pipeline"),
+    }
+
+
+def test_dokploy_nextcloud_backend_replaces_stale_wizard_owned_mount_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _build_nextcloud_backend_for_mounts(
+        advisor_workspace_mounts=_all_advisor_workspace_mounts(),
+    )
+    backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": "wizard_stack_nextcloud",
+            "postgres_password_secret_ref": "wizard-stack-nextcloud-postgres-password",
+            "postgres_user_name": "wizard_stack_nextcloud",
+            "redis_identity_name": "wizard-stack-nextcloud-redis",
+            "redis_password_secret_ref": "wizard-stack-nextcloud-redis-password",
+        },
+    )
+    mounts: list[dict[str, Any]] = [
+        {
+            "mount_id": 7,
+            "mount_point": "/OpenClaw",
+            "configuration": {"datadir": "/mnt/openclaw"},
+        },
+        {
+            "mount_id": 8,
+            "mount_point": "/Nexa Farm",
+            "configuration": {"datadir": "/mnt/my-farm-advisor/field-operations-old"},
+        },
+    ]
+    next_mount_id = 9
+
+    def fake_run_occ(container_name: str, args: list[str]) -> None:
+        nonlocal next_mount_id
+        assert container_name == "nextcloud-container"
+        if args[:2] == ["files_external:delete", "--yes"]:
+            mounts[:] = [item for item in mounts if str(item["mount_id"]) != args[2]]
+            return
+        if args[:2] == ["files_external:create", "/Nexa Claw"]:
+            mounts.append(
+                {
+                    "mount_id": next_mount_id,
+                    "mount_point": "/Nexa Claw",
+                    "configuration": {"datadir": "/mnt/advisors/openclaw/workspace"},
+                }
+            )
+        elif args[:2] == ["files_external:create", "/Nexa Farm"]:
+            mounts.append(
+                {
+                    "mount_id": next_mount_id,
+                    "mount_point": "/Nexa Farm",
+                    "configuration": {"datadir": "/mnt/advisors/my-farm-advisor/field-operations"},
+                }
+            )
+        elif args[:2] == ["files_external:create", "/Nexa Farm Data Pipeline"]:
+            mounts.append(
+                {
+                    "mount_id": next_mount_id,
+                    "mount_point": "/Nexa Farm Data Pipeline",
+                    "configuration": {"datadir": "/mnt/advisors/my-farm-advisor/data-pipeline"},
+                }
+            )
+        else:
+            return
+        next_mount_id += 1
+
+    monkeypatch.setattr(nextcloud_module, "_find_container_name", lambda service_name: "nextcloud-container")
+    monkeypatch.setattr(nextcloud_module, "_ensure_external_storage_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nextcloud_module, "_list_external_storage_mounts", lambda _: tuple(mounts))
+    monkeypatch.setattr(nextcloud_module, "_run_occ", fake_run_occ)
+
+    backend.refresh_openclaw_external_storage(admin_user="clayton@superiorbyteworks.com")
+
+    assert {
+        (item["mount_point"], item["configuration"]["datadir"])
+        for item in mounts
+    } == {
+        ("/Nexa Claw", "/mnt/advisors/openclaw/workspace"),
+        ("/Nexa Farm", "/mnt/advisors/my-farm-advisor/field-operations"),
+        ("/Nexa Farm Data Pipeline", "/mnt/advisors/my-farm-advisor/data-pipeline"),
+    }
 
 
 def test_dokploy_nextcloud_backend_updates_existing_compose_to_keep_onlyoffice_route_managed() -> (
@@ -1640,7 +1958,7 @@ def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
         lambda container_name, args: commands.append(tuple(args)),
     )
     monkeypatch.setattr(
-        "dokploy_wizard.dokploy.nextcloud._ensure_openclaw_external_storage_path",
+        "dokploy_wizard.dokploy.nextcloud._ensure_external_storage_path",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
@@ -1704,7 +2022,7 @@ def test_ensure_onlyoffice_app_config_reuses_legacy_openclaw_mount_idempotently(
         lambda container_name, args: commands.append(tuple(args)),
     )
     monkeypatch.setattr(
-        "dokploy_wizard.dokploy.nextcloud._ensure_openclaw_external_storage_path",
+        "dokploy_wizard.dokploy.nextcloud._ensure_external_storage_path",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
@@ -1763,7 +2081,7 @@ def test_ensure_onlyoffice_app_config_replaces_stale_openclaw_external_storage(
         lambda container_name, args: commands.append(tuple(args)),
     )
     monkeypatch.setattr(
-        "dokploy_wizard.dokploy.nextcloud._ensure_openclaw_external_storage_path",
+        "dokploy_wizard.dokploy.nextcloud._ensure_external_storage_path",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(

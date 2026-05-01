@@ -355,6 +355,7 @@ class DokployNextcloudBackend:
                 storage_url=storage_url,
                 jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
                 wait_for_documentserver_check=self._created_in_process,
+                advisor_workspace_mounts=self._advisor_workspace_mounts,
                 openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
                 openclaw_external_storage_mount_point=self._openclaw_external_mount_name,
                 openclaw_external_storage_datadir=self._openclaw_external_mount_path,
@@ -389,6 +390,7 @@ class DokployNextcloudBackend:
             storage_url=storage_url,
             jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
             wait_for_documentserver_check=self._created_in_process,
+            advisor_workspace_mounts=self._advisor_workspace_mounts,
             openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
             openclaw_external_storage_mount_point=self._openclaw_external_mount_name,
             openclaw_external_storage_datadir=self._openclaw_external_mount_path,
@@ -399,94 +401,88 @@ class DokployNextcloudBackend:
         return _verify_nextcloud_bundle(container)
 
     def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
-        if self._openclaw_volume_name is None:
+        if not self._advisor_workspace_mounts:
             return
         container = _find_container_name(_nextcloud_service_name(self._stack_name))
         if container is None:
             raise NextcloudError(
-                "Nextcloud container could not be located for OpenClaw external storage refresh."
+                "Nextcloud container could not be located for advisor external storage refresh."
             )
         _ensure_files_external_app(container)
-        _ensure_openclaw_external_storage(
-            container,
-            admin_user=admin_user,
-            mount_point=self._openclaw_external_mount_name,
-            datadir=self._openclaw_external_mount_path,
-            volume_root=self._openclaw_container_mount_root,
-        )
+        for contract in self._advisor_workspace_mounts:
+            _ensure_advisor_external_storage(
+                container,
+                admin_user=admin_user,
+                contract=contract,
+            )
         self._ensure_openclaw_rescan_schedule()
 
     def _ensure_openclaw_rescan_schedule(self) -> None:
-        if self._openclaw_volume_name is None:
+        if not self._advisor_workspace_mounts:
             return
         locator = self._find_compose_locator()
         if locator is None:
             raise NextcloudError(
                 "Nextcloud compose locator is unavailable for schedule reconciliation."
             )
-        schedule_name = f"{self._stack_name}-openclaw-rescan"
         service_name = _nextcloud_service_name(self._stack_name)
-        rescan_mount_name = self._resolve_openclaw_rescan_mount_name()
-        command = (
-            f'php /var/www/html/occ files:scan '
-            f'--path="{self._admin_user}/files{rescan_mount_name}"'
-        )
-        existing = next(
-            (
-                item
-                for item in self._client.list_compose_schedules(compose_id=locator.compose_id)
-                if item.name == schedule_name
-            ),
-            None,
-        )
-        if existing is None:
-            self._client.create_schedule(
-                name=schedule_name,
-                compose_id=locator.compose_id,
-                service_name=service_name,
-                cron_expression=self._openclaw_rescan_cron,
-                timezone=self._openclaw_rescan_timezone,
-                shell_type="bash",
-                command=command,
-                enabled=True,
+        existing_by_name = {
+            item.name: item for item in self._client.list_compose_schedules(compose_id=locator.compose_id)
+        }
+        for contract in self._advisor_workspace_mounts:
+            schedule_name = _advisor_rescan_schedule_name(self._stack_name, contract)
+            rescan_mount_name = self._resolve_openclaw_rescan_mount_name(contract)
+            command = (
+                f'php /var/www/html/occ files:scan '
+                f'--path="{self._admin_user}/files{rescan_mount_name}"'
             )
-            return
-        if (
-            existing.service_name != service_name
-            or existing.cron_expression != self._openclaw_rescan_cron
-            or existing.timezone != self._openclaw_rescan_timezone
-            or existing.shell_type != "bash"
-            or existing.command != command
-            or existing.enabled is not True
-        ):
-            self._client.update_schedule(
-                schedule_id=existing.schedule_id,
-                name=schedule_name,
-                compose_id=locator.compose_id,
-                service_name=service_name,
-                cron_expression=self._openclaw_rescan_cron,
-                timezone=self._openclaw_rescan_timezone,
-                shell_type="bash",
-                command=command,
-                enabled=True,
-            )
+            existing = existing_by_name.get(schedule_name)
+            if existing is None:
+                self._client.create_schedule(
+                    name=schedule_name,
+                    compose_id=locator.compose_id,
+                    service_name=service_name,
+                    cron_expression=self._openclaw_rescan_cron,
+                    timezone=self._openclaw_rescan_timezone,
+                    shell_type="bash",
+                    command=command,
+                    enabled=True,
+                )
+                continue
+            if (
+                existing.service_name != service_name
+                or existing.cron_expression != self._openclaw_rescan_cron
+                or existing.timezone != self._openclaw_rescan_timezone
+                or existing.shell_type != "bash"
+                or existing.command != command
+                or existing.enabled is not True
+            ):
+                self._client.update_schedule(
+                    schedule_id=existing.schedule_id,
+                    name=schedule_name,
+                    compose_id=locator.compose_id,
+                    service_name=service_name,
+                    cron_expression=self._openclaw_rescan_cron,
+                    timezone=self._openclaw_rescan_timezone,
+                    shell_type="bash",
+                    command=command,
+                    enabled=True,
+                )
 
-    def _resolve_openclaw_rescan_mount_name(self) -> str:
-        if self._openclaw_volume_name is None:
+    def _resolve_openclaw_rescan_mount_name(
+        self, contract: NextcloudAdvisorWorkspaceMountContract | None = None
+    ) -> str:
+        active_contract = contract or self._openclaw_mount
+        if active_contract is None:
             return _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME
         container = _find_container_name(_nextcloud_service_name(self._stack_name))
         if container is None:
-            return self._openclaw_external_mount_name
-        if (
-            _find_external_storage_mount_id(
-                container,
-                mount_point=_LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME,
-                datadir=self._openclaw_external_mount_path,
-            )
-            is not None
-        ):
-            return _LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME
-        return self._openclaw_external_mount_name
+            return active_contract.external_mount_name
+        _, active_mount_point = _resolve_existing_advisor_external_storage_mount(
+            container,
+            contract=active_contract,
+        )
+        return active_mount_point
 
     def _validate_service_inputs(
         self,
@@ -1341,6 +1337,7 @@ def _ensure_onlyoffice_app_config(
     storage_url: str,
     jwt_secret: str,
     wait_for_documentserver_check: bool = False,
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...] = (),
     openclaw_external_storage_enabled: bool = False,
     openclaw_external_storage_mount_point: str = _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
     openclaw_external_storage_datadir: str = _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
@@ -1401,15 +1398,28 @@ def _ensure_onlyoffice_app_config(
         _wait_for_onlyoffice_documentserver_check(container_name)
     else:
         _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
-    if openclaw_external_storage_enabled:
-        _ensure_files_external_app(container_name)
-        _ensure_openclaw_external_storage(
-            container_name,
-            admin_user=admin_user,
-            mount_point=openclaw_external_storage_mount_point,
-            datadir=openclaw_external_storage_datadir,
-            volume_root=openclaw_external_storage_volume_root,
+    effective_mounts = advisor_workspace_mounts
+    if not effective_mounts and openclaw_external_storage_enabled:
+        effective_mounts = (
+            NextcloudAdvisorWorkspaceMountContract(
+                advisor_id="openclaw",
+                volume_name="openclaw-data",
+                container_mount_root=openclaw_external_storage_volume_root,
+                external_mount_name=openclaw_external_storage_mount_point,
+                external_mount_path=openclaw_external_storage_datadir,
+                visible_root=openclaw_external_storage_datadir,
+                runtime_state_source="legacy OpenClaw external storage bootstrap",
+                notes=(),
+            ),
         )
+    if effective_mounts:
+        _ensure_files_external_app(container_name)
+        for contract in effective_mounts:
+            _ensure_advisor_external_storage(
+                container_name,
+                admin_user=admin_user,
+                contract=contract,
+            )
 
 
 def _wait_for_onlyoffice_documentserver_check(
@@ -1494,9 +1504,7 @@ def _find_external_storage_mount_id(
     return None
 
 
-def _ensure_openclaw_external_storage_path(
-    container_name: str, *, datadir: str, volume_root: str
-) -> None:
+def _ensure_external_storage_path(container_name: str, *, datadir: str, volume_root: str) -> None:
     path = shlex.quote(datadir)
     volume_root = shlex.quote(volume_root)
     result = subprocess.run(
@@ -1515,21 +1523,155 @@ def _ensure_openclaw_external_storage_path(
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise NextcloudError(
-            "Nextcloud OpenClaw external storage path could not be prepared"
+            "Nextcloud external storage path could not be prepared"
             f": {detail or 'unknown error'}"
         )
 
 
-def _delete_stale_external_storage_mounts(
-    container_name: str, *, mount_points: tuple[str, ...], datadir: str
+def _ensure_openclaw_external_storage_path(
+    container_name: str, *, datadir: str, volume_root: str
 ) -> None:
+    _ensure_external_storage_path(
+        container_name,
+        datadir=datadir,
+        volume_root=volume_root,
+    )
+
+
+def _external_storage_mount_name(mount: dict[str, object]) -> str | None:
+    mount_name = mount.get("mount_point") or mount.get("mountPoint") or mount.get("mount")
+    return mount_name if isinstance(mount_name, str) else None
+
+
+def _external_storage_mount_configuration_datadir(mount: dict[str, object]) -> str | None:
+    config = mount.get("configuration") or mount.get("config")
+    config_datadir = config.get("datadir") if isinstance(config, dict) else None
+    return config_datadir if isinstance(config_datadir, str) else None
+
+
+def _external_storage_mount_id(mount: dict[str, object]) -> str | None:
+    mount_id = mount.get("mount_id") or mount.get("mountId") or mount.get("id")
+    if mount_id is None:
+        return None
+    return str(mount_id)
+
+
+def _advisor_legacy_mount_points(
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> tuple[str, ...]:
+    if contract.advisor_id == "openclaw":
+        return (_LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME,)
+    return ()
+
+
+def _advisor_legacy_volume_roots(
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> tuple[str, ...]:
+    legacy_root = f"/mnt/{contract.advisor_id}"
+    if legacy_root == contract.container_mount_root:
+        return (contract.container_mount_root,)
+    return (contract.container_mount_root, legacy_root)
+
+
+def _path_is_under_root(path: str, root: str) -> bool:
+    return path == root or path.startswith(f"{root}/")
+
+
+def _is_wizard_owned_advisor_datadir(
+    datadir: str | None,
+    *,
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> bool:
+    if datadir is None:
+        return False
+    return any(_path_is_under_root(datadir, root) for root in _advisor_legacy_volume_roots(contract))
+
+
+def _delete_stale_advisor_external_storage_mounts(
+    container_name: str,
+    *,
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> None:
+    mount_points = (contract.external_mount_name, *_advisor_legacy_mount_points(contract))
     for mount in _list_external_storage_mounts(container_name):
-        mount_name = mount.get("mount_point") or mount.get("mountPoint") or mount.get("mount")
-        config = mount.get("configuration") or mount.get("config")
-        mount_id = mount.get("mount_id") or mount.get("mountId") or mount.get("id")
-        config_datadir = config.get("datadir") if isinstance(config, dict) else None
-        if mount_name in mount_points and config_datadir != datadir and mount_id is not None:
-            _run_occ(container_name, ["files_external:delete", "--yes", str(mount_id)])
+        mount_name = _external_storage_mount_name(mount)
+        config_datadir = _external_storage_mount_configuration_datadir(mount)
+        mount_id = _external_storage_mount_id(mount)
+        if (
+            mount_name in mount_points
+            and config_datadir != contract.external_mount_path
+            and mount_id is not None
+            and _is_wizard_owned_advisor_datadir(config_datadir, contract=contract)
+        ):
+            _run_occ(container_name, ["files_external:delete", "--yes", mount_id])
+
+
+def _resolve_existing_advisor_external_storage_mount(
+    container_name: str,
+    *,
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> tuple[str | None, str]:
+    for mount_point in (contract.external_mount_name, *_advisor_legacy_mount_points(contract)):
+        mount_id = _find_external_storage_mount_id(
+            container_name,
+            mount_point=mount_point,
+            datadir=contract.external_mount_path,
+        )
+        if mount_id is not None:
+            return mount_id, mount_point
+    return None, contract.external_mount_name
+
+
+def _ensure_advisor_external_storage(
+    container_name: str,
+    *,
+    admin_user: str,
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> None:
+    _ensure_external_storage_path(
+        container_name,
+        datadir=contract.external_mount_path,
+        volume_root=contract.container_mount_root,
+    )
+    _delete_stale_advisor_external_storage_mounts(
+        container_name,
+        contract=contract,
+    )
+    mount_id, active_mount_point = _resolve_existing_advisor_external_storage_mount(
+        container_name,
+        contract=contract,
+    )
+    if mount_id is None:
+        _run_occ(
+            container_name,
+            [
+                "files_external:create",
+                contract.external_mount_name,
+                "local",
+                "null::null",
+                "-c",
+                f"datadir={contract.external_mount_path}",
+            ],
+        )
+        mount_id = _find_external_storage_mount_id(
+            container_name,
+            mount_point=contract.external_mount_name,
+            datadir=contract.external_mount_path,
+        )
+        if mount_id is None:
+            raise NextcloudError(
+                "Nextcloud external storage mount for "
+                f"{contract.external_mount_name} was not created."
+            )
+    readonly_value = "false" if contract.read_write_mode else "true"
+    _run_occ(container_name, ["files_external:applicable", mount_id, f"--add-user={admin_user}"])
+    _run_occ(container_name, ["files_external:option", mount_id, "readonly", readonly_value])
+    _run_occ(container_name, ["files_external:verify", mount_id])
+    _run_occ(container_name, ["files_external:scan", mount_id])
+    _run_occ(
+        container_name,
+        ["files:scan", f"--path={admin_user}/files{active_mount_point}"],
+    )
 
 
 def _ensure_openclaw_external_storage(
@@ -1540,58 +1682,29 @@ def _ensure_openclaw_external_storage(
     datadir: str = _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
     volume_root: str = _DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH,
 ) -> None:
-    _ensure_openclaw_external_storage_path(
+    _ensure_advisor_external_storage(
         container_name,
-        datadir=datadir,
-        volume_root=volume_root,
+        admin_user=admin_user,
+        contract=NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="openclaw",
+            volume_name="openclaw-data",
+            container_mount_root=volume_root,
+            external_mount_name=mount_point,
+            external_mount_path=datadir,
+            visible_root=datadir,
+            runtime_state_source="legacy OpenClaw external storage helper",
+            notes=(),
+        ),
     )
-    _delete_stale_external_storage_mounts(
-        container_name,
-        mount_points=(mount_point, _LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME),
-        datadir=datadir,
-    )
-    active_mount_point = mount_point
-    mount_id = _find_external_storage_mount_id(
-        container_name,
-        mount_point=mount_point,
-        datadir=datadir,
-    )
-    if mount_id is None:
-        legacy_mount_id = _find_external_storage_mount_id(
-            container_name,
-            mount_point=_LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME,
-            datadir=datadir,
-        )
-        if legacy_mount_id is not None:
-            mount_id = legacy_mount_id
-            active_mount_point = _LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME
-    if mount_id is None:
-        _run_occ(
-            container_name,
-            [
-                "files_external:create",
-                mount_point,
-                "local",
-                "null::null",
-                "-c",
-                f"datadir={datadir}",
-            ],
-        )
-        mount_id = _find_external_storage_mount_id(
-            container_name,
-            mount_point=mount_point,
-            datadir=datadir,
-        )
-        if mount_id is None:
-            raise NextcloudError("Nextcloud external storage mount for OpenClaw was not created.")
-    _run_occ(container_name, ["files_external:applicable", mount_id, f"--add-user={admin_user}"])
-    _run_occ(container_name, ["files_external:option", mount_id, "readonly", "false"])
-    _run_occ(container_name, ["files_external:verify", mount_id])
-    _run_occ(container_name, ["files_external:scan", mount_id])
-    _run_occ(
-        container_name,
-        ["files:scan", f"--path={admin_user}/files{active_mount_point}"],
-    )
+
+
+def _advisor_rescan_schedule_name(
+    stack_name: str,
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> str:
+    if contract.rescan_schedule_identity == "openclaw":
+        return f"{stack_name}-openclaw-rescan"
+    return f"{stack_name}-{contract.rescan_schedule_identity}-rescan"
 
 
 def _ensure_spreed_app_enabled(container_name: str) -> None:
