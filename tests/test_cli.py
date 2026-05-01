@@ -5,6 +5,7 @@ import json
 import stat
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -27,6 +28,7 @@ from dokploy_wizard.lifecycle import (
     classify_install_request,
     classify_modify_request,
 )
+from dokploy_wizard.lifecycle import engine as lifecycle_engine
 from dokploy_wizard.lifecycle.drift import DriftEntry, DriftReport, LifecycleDriftError
 from dokploy_wizard.packs import prompts as prompt_module
 from dokploy_wizard.packs.prompts import (
@@ -1692,6 +1694,103 @@ def test_modify_add_my_farm_later_refreshes_nextcloud_without_openclaw() -> None
     )
 
 
+def test_lifecycle_install_refreshes_nextcloud_after_my_farm_phase(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    summary, refresh_calls, events = _run_lifecycle_refresh(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        values=_lifecycle_refresh_values(),
+        lifecycle_plan=_build_lifecycle_test_plan(
+            desired_state=resolve_desired_state(_raw_input(_lifecycle_refresh_values())),
+            mode="install",
+            phases_to_run=("nextcloud", "my-farm-advisor"),
+        ),
+    )
+
+    assert summary["nextcloud"]["phase"] == "nextcloud"
+    assert summary["my_farm_advisor"]["phase"] == "my-farm-advisor"
+    assert refresh_calls == ["operator@example.com"]
+    assert events == ["nextcloud", "my-farm-advisor", "refresh"]
+
+
+def test_lifecycle_install_refreshes_once_after_last_advisor_phase(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    values = _lifecycle_refresh_values(ENABLE_OPENCLAW="true")
+
+    _, refresh_calls, events = _run_lifecycle_refresh(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        values=values,
+        lifecycle_plan=_build_lifecycle_test_plan(
+            desired_state=resolve_desired_state(_raw_input(values)),
+            mode="install",
+            phases_to_run=("nextcloud", "openclaw", "my-farm-advisor"),
+        ),
+    )
+
+    assert refresh_calls == ["operator@example.com"]
+    assert events == ["nextcloud", "openclaw", "my-farm-advisor", "refresh"]
+
+
+def test_lifecycle_install_refreshes_after_openclaw_when_farm_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    values = _lifecycle_refresh_values(
+        ENABLE_OPENCLAW="true",
+        ENABLE_MY_FARM_ADVISOR="false",
+    )
+    values.pop("MY_FARM_ADVISOR_PRIMARY_MODEL")
+
+    _, refresh_calls, events = _run_lifecycle_refresh(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        values=values,
+        lifecycle_plan=_build_lifecycle_test_plan(
+            desired_state=resolve_desired_state(_raw_input(values)),
+            mode="install",
+            phases_to_run=("nextcloud", "openclaw"),
+        ),
+    )
+
+    assert refresh_calls == ["operator@example.com"]
+    assert events == ["nextcloud", "openclaw", "refresh"]
+
+
+def test_lifecycle_modify_adding_farm_triggers_single_nextcloud_refresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    existing_values = _lifecycle_refresh_values(ENABLE_MY_FARM_ADVISOR="false")
+    existing_values.pop("MY_FARM_ADVISOR_PRIMARY_MODEL")
+    requested_values = _lifecycle_refresh_values()
+    lifecycle_plan = _classify_modify_plan(
+        existing_values=existing_values,
+        requested_values=requested_values,
+    )
+    lifecycle_plan = LifecyclePlan(
+        mode=lifecycle_plan.mode,
+        reasons=lifecycle_plan.reasons,
+        applicable_phases=lifecycle_plan.applicable_phases,
+        phases_to_run=lifecycle_plan.phases_to_run,
+        preserved_phases=(),
+        initial_completed_steps=(),
+        start_phase=lifecycle_plan.start_phase,
+        raw_equivalent=lifecycle_plan.raw_equivalent,
+        desired_equivalent=lifecycle_plan.desired_equivalent,
+    )
+
+    _, refresh_calls, events = _run_lifecycle_refresh(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        values=requested_values,
+        lifecycle_plan=lifecycle_plan,
+    )
+
+    assert refresh_calls == ["operator@example.com"]
+    assert events == ["shared_core", "nextcloud", "my-farm-advisor", "refresh", "cloudflare_access"]
+
+
 def test_modify_remove_my_farm_later_runs_only_farm_phase() -> None:
     requested_values = _farm_modify_values(ENABLE_MY_FARM_ADVISOR="false")
     requested_values.pop("MY_FARM_ADVISOR_PRIMARY_MODEL")
@@ -1713,6 +1812,79 @@ def test_modify_remove_my_farm_later_runs_only_farm_phase() -> None:
     assert plan.mode == "modify"
     assert "ENABLE_MY_FARM_ADVISOR" in plan.reasons[0]
     assert plan.phases_to_run == ()
+    assert plan.preserved_phases[-1] == "nextcloud"
+
+
+def test_modify_same_farm_target_noops_with_farm_phase_preserved() -> None:
+    plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(ENABLE_OPENCLAW="true"),
+        requested_values=_farm_modify_values(ENABLE_OPENCLAW="true"),
+    )
+
+    assert plan.mode == "noop"
+    assert plan.phases_to_run == ()
+    assert "my-farm-advisor" in plan.preserved_phases
+    assert "openclaw" in plan.preserved_phases
+
+
+def test_modify_openclaw_only_to_both_advisors_refreshes_nextcloud_without_rerunning_openclaw() -> None:
+    existing_values = _farm_modify_values(
+        ENABLE_OPENCLAW="true",
+        ENABLE_MY_FARM_ADVISOR="false",
+    )
+    existing_values.pop("MY_FARM_ADVISOR_PRIMARY_MODEL")
+
+    plan = _classify_modify_plan(
+        existing_values=existing_values,
+        requested_values=_farm_modify_values(ENABLE_OPENCLAW="true"),
+    )
+
+    assert plan.mode == "modify"
+    assert "ENABLE_MY_FARM_ADVISOR" in plan.reasons[0]
+    assert plan.phases_to_run == (
+        "shared_core",
+        "nextcloud",
+        "my-farm-advisor",
+        "cloudflare_access",
+    )
+    assert "openclaw" not in plan.phases_to_run
+
+
+def test_modify_both_advisors_to_openclaw_only_runs_only_farm_teardown_phase() -> None:
+    existing_raw = _raw_input(_farm_modify_values(ENABLE_OPENCLAW="true"))
+    requested_values = _farm_modify_values(
+        ENABLE_OPENCLAW="true",
+        ENABLE_MY_FARM_ADVISOR="false",
+    )
+    requested_values.pop("MY_FARM_ADVISOR_PRIMARY_MODEL")
+    requested_raw = _raw_input(requested_values)
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(ENABLE_OPENCLAW="true"),
+        requested_values=requested_values,
+    )
+
+    assert lifecycle_changes._removed_pack_phases(existing_desired, requested_desired) == {
+        "my-farm-advisor"
+    }
+    assert plan.mode == "modify"
+    assert "ENABLE_MY_FARM_ADVISOR" in plan.reasons[0]
+    assert plan.phases_to_run == ()
+    assert "openclaw" not in plan.phases_to_run
+
+
+def test_modify_farm_only_to_both_advisors_runs_openclaw_without_rerunning_farm() -> None:
+    plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(),
+        requested_values=_farm_modify_values(ENABLE_OPENCLAW="true"),
+    )
+
+    assert plan.mode == "modify"
+    assert "ENABLE_OPENCLAW" in plan.reasons[0]
+    assert plan.phases_to_run == ("networking", "shared_core", "openclaw", "cloudflare_access")
+    assert "my-farm-advisor" not in plan.phases_to_run
 
 
 def test_guided_dry_run_does_not_require_dokploy_admin_password() -> None:
@@ -4054,6 +4226,189 @@ def test_build_nextcloud_backend_passes_zero_advisor_mounts_when_no_advisor_sele
 
     assert backend_kwargs["advisor_workspace_mounts"] == ()
     assert backend_kwargs["openclaw_volume_name"] is None
+
+
+class _LifecyclePhaseResult:
+    def __init__(self, phase: str, **payload: object) -> None:
+        self.phase = phase
+        for key, value in payload.items():
+            setattr(self, key, value)
+
+    def to_dict(self) -> dict[str, object]:
+        return {"phase": self.phase}
+
+
+class _FakeLifecycleNextcloudBackend:
+    def __init__(self, *, refresh_calls: list[str], events: list[str]) -> None:
+        self.refresh_calls = refresh_calls
+        self.events = events
+
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        self.refresh_calls.append(admin_user)
+        self.events.append("refresh")
+
+
+def _lifecycle_refresh_values(**overrides: str) -> dict[str, str]:
+    values = _farm_modify_values(DOKPLOY_ADMIN_EMAIL="operator@example.com")
+    values.update(overrides)
+    return values
+
+
+def _build_lifecycle_test_plan(
+    *, desired_state: Any, mode: str, phases_to_run: tuple[str, ...]
+) -> LifecyclePlan:
+    applicable_phases = applicable_phases_for(desired_state)
+    ordered_phases = tuple(phase for phase in applicable_phases if phase in phases_to_run)
+    return LifecyclePlan(
+        mode=mode,
+        reasons=("test",),
+        applicable_phases=applicable_phases,
+        phases_to_run=ordered_phases,
+        preserved_phases=(),
+        initial_completed_steps=(),
+        start_phase=ordered_phases[0] if ordered_phases else None,
+        raw_equivalent=False,
+        desired_equivalent=False,
+    )
+
+
+def _run_lifecycle_refresh(
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    values: dict[str, str],
+    lifecycle_plan: LifecyclePlan,
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    raw_env = _raw_input(values)
+    desired_state = resolve_desired_state(raw_env)
+    state_dir = tmp_path / "state"
+    events: list[str] = []
+    refresh_calls: list[str] = []
+    nextcloud_backend = _FakeLifecycleNextcloudBackend(
+        refresh_calls=refresh_calls,
+        events=events,
+    )
+
+    monkeypatch.setattr(
+        lifecycle_engine,
+        "reconcile_shared_core",
+        lambda **kwargs: (
+            events.append("shared_core")
+            or SimpleNamespace(
+                result=_LifecyclePhaseResult("shared_core"),
+                network_resource_id="network-1",
+                postgres_resource_id="postgres-1",
+                redis_resource_id="redis-1",
+                mail_relay_resource_id="mail-1",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        lifecycle_engine,
+        "reconcile_nextcloud",
+        lambda **kwargs: (
+            events.append("nextcloud")
+            or SimpleNamespace(
+                result=_LifecyclePhaseResult("nextcloud"),
+                nextcloud_service_resource_id="nextcloud-service-1",
+                onlyoffice_service_resource_id="onlyoffice-service-1",
+                nextcloud_volume_resource_id="nextcloud-volume-1",
+                onlyoffice_volume_resource_id="onlyoffice-volume-1",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        lifecycle_engine,
+        "reconcile_openclaw",
+        lambda **kwargs: (
+            events.append("openclaw")
+            or SimpleNamespace(
+                result=_LifecyclePhaseResult("openclaw"),
+                service_resource_id="openclaw-service-1",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        lifecycle_engine,
+        "reconcile_my_farm_advisor",
+        lambda **kwargs: (
+            events.append("my-farm-advisor")
+            or SimpleNamespace(
+                result=_LifecyclePhaseResult("my-farm-advisor"),
+                service_resource_id="farm-service-1",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        lifecycle_engine,
+        "reconcile_cloudflare_access",
+        lambda **kwargs: (
+            events.append("cloudflare_access")
+            or SimpleNamespace(
+                result=_LifecyclePhaseResult("cloudflare_access", account_id="account-123"),
+                provider_resource_id="provider-1",
+                application_resource_ids=("app-1",),
+                policy_resource_ids=("policy-1",),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        lifecycle_engine,
+        "build_shared_core_ledger",
+        lambda **kwargs: kwargs["existing_ledger"],
+    )
+    monkeypatch.setattr(
+        lifecycle_engine,
+        "build_nextcloud_ledger",
+        lambda **kwargs: kwargs["existing_ledger"],
+    )
+    monkeypatch.setattr(
+        lifecycle_engine,
+        "build_openclaw_ledger",
+        lambda **kwargs: kwargs["existing_ledger"],
+    )
+    monkeypatch.setattr(
+        lifecycle_engine,
+        "build_my_farm_advisor_ledger",
+        lambda **kwargs: kwargs["existing_ledger"],
+    )
+    monkeypatch.setattr(
+        lifecycle_engine,
+        "build_access_ledger",
+        lambda **kwargs: kwargs["existing_ledger"],
+    )
+
+    summary = lifecycle_engine.execute_lifecycle_plan(
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        preflight_report=PreflightReport(
+            host_facts=_host_facts(),
+            required_profile=derive_required_profile(desired_state),
+            checks=(PreflightCheck(name="preflight", status="pass", detail="passed"),),
+            advisories=(),
+        ),
+        lifecycle_plan=lifecycle_plan,
+        backends=lifecycle_engine.LifecycleBackends(
+            bootstrap=cast(Any, object()),
+            tailscale=cast(Any, object()),
+            networking=cast(Any, object()),
+            cloudflared=None,
+            shared_core=cast(Any, object()),
+            headscale=cast(Any, object()),
+            matrix=cast(Any, object()),
+            nextcloud=cast(Any, nextcloud_backend),
+            moodle=cast(Any, object()),
+            docuseal=cast(Any, object()),
+            seaweedfs=cast(Any, object()),
+            coder=cast(Any, object()),
+            openclaw=cast(Any, object()),
+        ),
+    )
+
+    return summary, refresh_calls, events
 
 
 def _nextcloud_backend_raw_env(*, packs: str, include_nexa_env: bool) -> RawEnvInput:

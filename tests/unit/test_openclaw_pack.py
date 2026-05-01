@@ -793,6 +793,238 @@ def test_build_my_farm_advisor_ledger_persists_pack_specific_scope() -> None:
     )
 
 
+def test_openclaw_only_render_and_state_remain_stable_without_farm_selection() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+                "OPENCLAW_GATEWAY_TOKEN": "fixed-token-123",
+            },
+        )
+    )
+
+    baseline_api = FakeDokployOpenClawApi()
+    baseline_backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        openclaw_gateway_password="openclaw-ui-generated",
+        openclaw_openrouter_api_key="openrouter-key",
+        openclaw_nvidia_api_key="nvidia-key",
+        openclaw_telegram_bot_token="telegram-token",
+        client=baseline_api,
+    )
+    farm_aware_api = FakeDokployOpenClawApi()
+    farm_aware_backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        openclaw_gateway_password="openclaw-ui-generated",
+        openclaw_openrouter_api_key="openrouter-key",
+        openclaw_nvidia_api_key="nvidia-key",
+        openclaw_telegram_bot_token="telegram-token",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-farm-key",
+        anthropic_api_key="anthropic-key",
+        telegram_field_operations_bot_token="field-token",
+        openclaw_sync_skills_on_start="1",
+        r2_bucket_name="farm-bucket",
+        workspace_data_r2_rclone_mount="1",
+        client=farm_aware_api,
+    )
+
+    baseline_record = baseline_backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+    farm_aware_record = farm_aware_backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    baseline_compose = baseline_api.last_create_compose_file
+    farm_aware_compose = farm_aware_api.last_create_compose_file
+    assert baseline_compose is not None
+    assert farm_aware_compose is not None
+    assert desired_state.enabled_packs == ("openclaw",)
+    assert desired_state.hostnames["openclaw"] == "openclaw.example.com"
+    assert "my-farm-advisor" not in desired_state.hostnames
+    assert baseline_record == farm_aware_record
+    assert baseline_compose == farm_aware_compose
+    assert _service_environment(baseline_compose, "wizard-stack-openclaw") == _service_environment(
+        farm_aware_compose,
+        "wizard-stack-openclaw",
+    )
+    assert "wizard-stack-openclaw-data:/home/node/.openclaw" in baseline_compose
+    assert "wizard-stack-my-farm-advisor-data" not in baseline_compose
+
+    baseline_ledger = build_openclaw_ledger(
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        stack_name="wizard-stack",
+        service_resource_id=baseline_record.resource_id,
+        nexa_sidecars_enabled=False,
+    )
+    farm_aware_ledger = build_openclaw_ledger(
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        stack_name="wizard-stack",
+        service_resource_id=farm_aware_record.resource_id,
+        nexa_sidecars_enabled=False,
+    )
+    assert baseline_ledger == farm_aware_ledger
+    assert baseline_ledger.resources == (
+        OwnedResource(
+            resource_type=OPENCLAW_SERVICE_RESOURCE_TYPE,
+            resource_id="dokploy-compose:compose-1:openclaw:replicas:1",
+            scope="stack:wizard-stack:openclaw",
+        ),
+    )
+
+
+def test_openclaw_and_farm_advisor_render_side_by_side_without_collisions() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+                "ENABLE_MY_FARM_ADVISOR": "true",
+                "ENABLE_MATRIX": "true",
+                "MY_FARM_ADVISOR_CHANNELS": "matrix,telegram",
+                "ANTHROPIC_API_KEY": "anthropic-key",
+            },
+        )
+    )
+    openclaw_api = FakeDokployOpenClawApi(created_compose_id="compose-openclaw")
+    openclaw_backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        openclaw_gateway_password="openclaw-ui-generated",
+        openclaw_openrouter_api_key="openclaw-key",
+        openclaw_nvidia_api_key="openclaw-nvidia-key",
+        openclaw_telegram_bot_token="openclaw-telegram-token",
+        client=openclaw_api,
+    )
+    farm_api = FakeDokployOpenClawApi(created_compose_id="compose-farm")
+    farm_backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-farm-key",
+        my_farm_nvidia_api_key="farm-nvidia-key",
+        my_farm_telegram_bot_token="farm-telegram-token",
+        my_farm_telegram_owner_user_id="123456",
+        anthropic_api_key="anthropic-key",
+        telegram_field_operations_bot_token="field-token",
+        client=farm_api,
+    )
+
+    openclaw_record = openclaw_backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname=desired_state.hostnames["openclaw"],
+        template_path=None,
+        variant="openclaw",
+        channels=desired_state.openclaw_channels,
+        replicas=1,
+        secret_refs=(),
+    )
+    farm_record = farm_backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname=desired_state.hostnames["my-farm-advisor"],
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=desired_state.my_farm_advisor_channels,
+        replicas=1,
+        secret_refs=(),
+    )
+
+    openclaw_compose = openclaw_api.last_create_compose_file
+    farm_compose = farm_api.last_create_compose_file
+    assert openclaw_compose is not None
+    assert farm_compose is not None
+
+    openclaw_env = _service_environment(openclaw_compose, "wizard-stack-openclaw")
+    farm_env = _service_environment(farm_compose, "wizard-stack-my-farm-advisor")
+    assert {"openclaw", "my-farm-advisor"} <= set(desired_state.enabled_packs)
+    assert desired_state.hostnames["openclaw"] == "openclaw.example.com"
+    assert desired_state.hostnames["my-farm-advisor"] == "farm.example.com"
+    assert desired_state.hostnames["openclaw"] != desired_state.hostnames["my-farm-advisor"]
+
+    assert openclaw_record.resource_name == "wizard-stack-openclaw"
+    assert farm_record.resource_name == "wizard-stack-my-farm-advisor"
+    assert openclaw_record.resource_id != farm_record.resource_id
+    assert "  wizard-stack-openclaw:\n" in openclaw_compose
+    assert "  wizard-stack-my-farm-advisor:\n" in farm_compose
+    assert "wizard-stack-my-farm-advisor" not in openclaw_compose
+    assert "wizard-stack-openclaw" not in farm_compose
+    assert "wizard-stack-openclaw-data:/home/node/.openclaw" in openclaw_compose
+    assert "wizard-stack-my-farm-advisor-data:/data" in farm_compose
+    assert "wizard-stack-my-farm-advisor-data" not in openclaw_compose
+    assert "wizard-stack-openclaw-data:/home/node/.openclaw" not in farm_compose
+    assert 'traefik.http.routers.wizard-stack-openclaw.rule: "Host(`openclaw.example.com`)"' in openclaw_compose
+    assert 'traefik.http.routers.wizard-stack-my-farm-advisor.rule: "Host(`farm.example.com`)"' in farm_compose
+
+    assert openclaw_env["ADVISOR_CANONICAL_HOSTNAME"] == "openclaw.example.com"
+    assert farm_env["ADVISOR_CANONICAL_HOSTNAME"] == "farm.example.com"
+    assert openclaw_env["OPENROUTER_API_KEY"] == "openclaw-key"
+    assert farm_env["OPENROUTER_API_KEY"] == "shared-farm-key"
+    assert openclaw_env["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
+    assert farm_env["OPENCLAW_GATEWAY_PASSWORD"] == "farm-ui-generated"
+    assert "MODEL_PROVIDER" in openclaw_env
+    assert "MODEL_NAME" in openclaw_env
+    assert "PRIMARY_MODEL" not in openclaw_env
+    assert "ANTHROPIC_API_KEY" not in openclaw_env
+    assert "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN" not in openclaw_env
+    assert farm_env["ANTHROPIC_API_KEY"] == "anthropic-key"
+    assert farm_env["TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN"] == "field-token"
+    assert "PRIMARY_MODEL" not in openclaw_env
+    assert "PRIMARY_MODEL" not in farm_env
+    assert "MODEL_PROVIDER" not in farm_env
+    assert "MODEL_NAME" not in farm_env
+    assert "DOKPLOY_WIZARD_NEXA_ENABLED" not in farm_env
+
+    combined_ledger = build_my_farm_advisor_ledger(
+        existing_ledger=build_openclaw_ledger(
+            existing_ledger=OwnershipLedger(format_version=1, resources=()),
+            stack_name="wizard-stack",
+            service_resource_id=openclaw_record.resource_id,
+            nexa_sidecars_enabled=False,
+        ),
+        stack_name="wizard-stack",
+        service_resource_id=farm_record.resource_id,
+    )
+    assert {resource.resource_type for resource in combined_ledger.resources} == {
+        OPENCLAW_SERVICE_RESOURCE_TYPE,
+        MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+    }
+    assert {resource.scope for resource in combined_ledger.resources} == {
+        "stack:wizard-stack:openclaw",
+        "stack:wizard-stack:my-farm-advisor",
+    }
+    assert len({resource.resource_id for resource in combined_ledger.resources}) == len(
+        combined_ledger.resources
+    )
+
+
 @dataclass
 class FakeDokployOpenClawApi:
     projects: tuple[DokployProjectSummary, ...] = ()

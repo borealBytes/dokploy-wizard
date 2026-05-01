@@ -96,6 +96,10 @@ def execute_lifecycle_plan(
     valid_phases = set(lifecycle_plan.initial_completed_steps)
     phase_results: dict[str, dict[str, Any]] = {}
     current_ledger = ownership_ledger
+    nextcloud_refresh_phase = _nextcloud_refresh_phase(
+        phases_to_run=lifecycle_plan.phases_to_run,
+        enabled_packs=desired_state.enabled_packs,
+    )
 
     phase_results["preflight"] = preflight_report.to_dict()
     if not dry_run and "preflight" not in valid_phases:
@@ -325,10 +329,6 @@ def execute_lifecycle_plan(
                     service_resource_id=advisor.service_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
-                if "nextcloud" in desired_state.enabled_packs:
-                    backends.nextcloud.refresh_openclaw_external_storage(
-                        admin_user=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
-                    )
         elif phase == "my-farm-advisor":
             advisor = reconcile_my_farm_advisor(
                 dry_run=dry_run,
@@ -363,6 +363,10 @@ def execute_lifecycle_plan(
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         if not dry_run:
+            if phase == nextcloud_refresh_phase:
+                backends.nextcloud.refresh_openclaw_external_storage(
+                    admin_user=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
+                )
             valid_phases.add(phase)
             _promote_preserved_phases(
                 lifecycle_plan.preserved_phases, applicable_phases, valid_phases
@@ -377,6 +381,18 @@ def execute_lifecycle_plan(
         phase_results=phase_results,
         state_status="existing" if lifecycle_plan.mode != "install" else "fresh",
     )
+
+
+def _nextcloud_refresh_phase(
+    *, phases_to_run: tuple[str, ...], enabled_packs: tuple[str, ...]
+) -> str | None:
+    if "nextcloud" not in enabled_packs:
+        return None
+    advisor_phases = {"openclaw", "my-farm-advisor"}
+    for phase in reversed(phases_to_run):
+        if phase in advisor_phases:
+            return phase
+    return None
 
 
 def _write_checkpoint(
