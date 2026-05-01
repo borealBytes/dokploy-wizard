@@ -146,11 +146,11 @@ def test_render_coder_compose_includes_root_and_wildcard_routes() -> None:
     assert "      - /var/run/docker.sock:/var/run/docker.sock" in compose
     assert 'traefik.http.routers.wizard-stack-coder.rule: "Host(`coder.example.com`)"' in compose
     assert (
-        'traefik.http.routers.wizard-stack-coder.middlewares: "wizard-stack-coder-forwarded-https"'
+        'traefik.http.routers.wizard-stack-coder.middlewares: "wizard-stack-coder-forwarded-https,wizard-stack-coder-forwarded-host"'
         in compose
     )
     assert (
-        'traefik.http.routers.wizard-stack-coder-wildcard.rule: "HostRegexp(`{subdomain:.+}.coder.example.com`)"'
+        'traefik.http.routers.wizard-stack-coder-wildcard.rule: "HostRegexp(`(?i)^[a-z0-9-]+(?:--[a-z0-9-]+){2,}\\\\.coder\\\\.example\\\\.com$`)"'
         in compose
     )
     assert (
@@ -162,7 +162,7 @@ def test_render_coder_compose_includes_root_and_wildcard_routes() -> None:
         in compose
     )
     assert (
-        'traefik.http.middlewares.wizard-stack-coder-forwarded-https.headers.customrequestheaders.X-Forwarded-Host: "coder.example.com"'
+        'traefik.http.middlewares.wizard-stack-coder-forwarded-host.headers.customrequestheaders.X-Forwarded-Host: "coder.example.com"'
         in compose
     )
     assert (
@@ -280,6 +280,113 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
     assert 'url       = "http://localhost:8788/health"' in template
 
 
+def test_default_kdense_byok_template_includes_upstream_parameterized_stack() -> None:
+    template = Path(
+        "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
+    ).read_text(encoding="utf-8")
+
+    assert 'resource "coder_script" "kdense_bootstrap"' in template
+    assert 'display_name       = "K-Dense BYOK Bootstrap"' in template
+    assert 'run_on_start       = true' in template
+    assert 'start_blocks_login = false' in template
+    assert 'timeout            = 3600' in template
+    assert "cat >/tmp/kdense-bootstrap.sh <<'BOOT'" in template
+    assert 'chmod +x /tmp/kdense-bootstrap.sh' in template
+    assert 'nohup bash /tmp/kdense-bootstrap.sh >/tmp/kdense-bootstrap.log 2>&1 &' in template
+    assert 'missing_packages=()' in template
+    assert 'for package in curl ca-certificates wget python3; do' in template
+    assert 'if ! command -v git >/dev/null 2>&1; then' in template
+    assert 'if ! command -v btop >/dev/null 2>&1; then' in template
+    assert '$_SUDO apt-get install -y "$${missing_packages[@]}"' in template
+    assert 'curl -LsSf https://astral.sh/uv/install.sh | sh' in template
+    assert 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt' in template
+    assert 'tar -xJf - -C /usr/local --strip-components=1 --no-same-owner' in template
+    assert 'NPM_CONFIG_PREFIX=/home/coder/.local npm install -g @google/gemini-cli' in template
+    assert 'data "coder_parameter" "kdense_provider" {' in template
+    assert 'data "coder_parameter" "kdense_default_model" {' in template
+    assert 'data "coder_parameter" "kdense_expert_model" {' in template
+    assert 'data "coder_parameter" "kdense_search_provider" {' in template
+    assert 'data "coder_parameter" "kdense_openrouter_api_key" {' in template
+    assert 'data "coder_parameter" "kdense_opencode_go_api_key" {' in template
+    assert 'data "coder_parameter" "kdense_exa_api_key" {' in template
+    assert 'data "coder_parameter" "kdense_parallel_api_key" {' in template
+    assert 'data "coder_parameter" "kdense_modal_token_id" {' in template
+    assert 'data "coder_parameter" "kdense_modal_token_secret" {' in template
+    assert 'default      = "openrouter"' in template
+    assert 'default      = "openrouter/anthropic/claude-opus-4.7"' in template
+    assert 'default      = "openrouter/google/gemini-3.1-pro-preview"' in template
+    assert 'default      = "disabled"' in template
+    assert 'export KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL="__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__"' in template
+    assert 'export KDENSE_TEMPLATE_OPENCODE_GO_API_KEY="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"' in template
+    assert 'KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL_PLACEHOLDER' not in template
+    assert 'KDENSE_TEMPLATE_OPENCODE_GO_API_KEY_PLACEHOLDER' not in template
+    assert 'sync_kdense_source() {' in template
+    assert 'EXPECTED_REPO_URL="https://github.com/K-Dense-AI/k-dense-byok.git"' in template
+    assert 'git clone --depth 1 --branch main https://github.com/K-Dense-AI/k-dense-byok.git "$KDENSE_SRC_DIR"' in template
+    assert 'curl -fsSL https://codeload.github.com/K-Dense-AI/k-dense-byok/tar.gz/refs/heads/main | tar -xz --strip-components=1 -C "$KDENSE_SRC_DIR"' in template
+    assert 'const streamdownComponents = { p: SafeParagraph } as unknown as ComponentProps<typeof Streamdown>["components"];' in template
+    assert 'status: "running" as const,' in template
+    assert 'text = re.sub(r\'status:\\s*"running",\', \'status: "running" as const,\', text, count=1)' in template
+    assert 'text = text.replace(\'// @ts-expect-error polyfill\\n\', \'\')' in template
+    assert 'KDENSE_REV=archive-main' in template
+    assert 'normalize_model_for_provider() {' in template
+    assert 'KDENSE_DEFAULT_MODEL_EFFECTIVE=$(normalize_model_for_provider "$KDENSE_PROVIDER" "$KDENSE_DEFAULT_MODEL")' in template
+    assert 'KDENSE_EXPERT_MODEL_EFFECTIVE=$(normalize_model_for_provider "$KDENSE_PROVIDER" "$KDENSE_EXPERT_MODEL")' in template
+    assert 'write_kdense_env_file() {' in template
+    assert 'DEFAULT_AGENT_MODEL=%s' in template
+    assert 'DEFAULT_EXPERT_MODEL=%s' in template
+    assert 'append_env OPENROUTER_API_KEY "$KDENSE_OPENROUTER_API_KEY" "$env_file"' in template
+    assert 'append_env OPENAI_API_KEY "$KDENSE_OPENCODE_GO_API_KEY" "$env_file"' in template
+    assert 'append_env OPENAI_API_BASE "$KDENSE_OPENCODE_GO_BASE_URL" "$env_file"' in template
+    assert 'append_env EXA_API_KEY "$KDENSE_EXA_API_KEY" "$env_file"' in template
+    assert 'append_env PARALLEL_API_KEY "$KDENSE_PARALLEL_API_KEY" "$env_file"' in template
+    assert 'append_env MODAL_TOKEN_ID "$KDENSE_MODAL_TOKEN_ID" "$env_file"' in template
+    assert 'append_env MODAL_TOKEN_SECRET "$KDENSE_MODAL_TOKEN_SECRET" "$env_file"' in template
+    assert 'if [ "$KDENSE_PROVIDER" = "openrouter" ] && [ -z "$KDENSE_OPENROUTER_API_KEY" ] && [ -n "$KDENSE_OPENCODE_GO_API_KEY" ]; then' in template
+    assert 'falling back to the wizard-managed OpenCode Go provider' in template
+    assert 'if [ "$KDENSE_PROVIDER" = "openrouter" ] && [ -z "$KDENSE_OPENROUTER_API_KEY" ]; then' in template
+    assert 'if [ "$KDENSE_PROVIDER" = "opencode_go" ] && [ -z "$KDENSE_OPENCODE_GO_API_KEY" ]; then' in template
+    assert 'KDENSE_UPSTREAM_LITELLM="$KDENSE_SRC_DIR/litellm_config.yaml"' in template
+    assert 'model_name: "openai/*"' in template
+    assert 'api_base: os.environ/OPENAI_API_BASE' in template
+    assert 'clone["id"] = "openai/" + str(model["id"])[len("openrouter/"):]' in template
+    assert 'clone["provider"] = "OpenCode Go"' in template
+    assert '"id": "openai/deepseek-v4-flash"' in template
+    assert 'KDENSE_SETUP_STAMP=/home/coder/.cache/kdense-byok-setup-rev' in template
+    assert 'KDENSE_SETUP_KEY=v10-upstream-main-parameterized' in template
+    assert 'KDENSE_SETUP_ID="$KDENSE_REV:$KDENSE_SETUP_KEY:$KDENSE_PROVIDER:$KDENSE_DEFAULT_MODEL_EFFECTIVE:$KDENSE_EXPERT_MODEL_EFFECTIVE"' in template
+    assert '[ ! -f "$KDENSE_SRC_DIR/web/.next/BUILD_ID" ]' in template
+    assert 'uv sync --python 3.13 --no-dev --quiet' in template
+    assert 'if [ -f web/package-lock.json ]; then' in template
+    assert '(cd web && NEXT_PUBLIC_ADK_API_URL= npm ci --silent && NEXT_PUBLIC_ADK_API_URL= npm run build)' in template
+    assert '(cd web && NEXT_PUBLIC_ADK_API_URL= npm install --silent && NEXT_PUBLIC_ADK_API_URL= npm run build)' in template
+    assert "printf '%s' \"$KDENSE_SETUP_ID\" > \"$KDENSE_SETUP_STAMP\"" in template
+    assert 'KDENSE_NEEDS_PREP=false' in template
+    assert 'if [ ! -d "$KDENSE_SRC_DIR/sandbox/.gemini/skills" ]; then' in template
+    assert 'KDENSE_NEEDS_PREP=true' in template
+    assert 'uv run python prep_sandbox.py' in template
+    assert '>/tmp/kdense-prep.log 2>&1 &' in template
+    assert 'pkill -f "next dev --hostname 127.0.0.1 --port $KDENSE_UI_PORT"' in template
+    assert 'pkill -f "next start --hostname 127.0.0.1 --port $KDENSE_UI_PORT"' in template
+    assert 'NEXT_PUBLIC_ADK_API_URL= npm run start -- --hostname 127.0.0.1 --port $KDENSE_UI_PORT' in template
+    assert 'const UI_PATHS = new Set(["/", "/favicon.ico", "/icon.png", "/site.webmanifest"]);' in template
+    assert 'function isUiPath(pathname) {' in template
+    assert 'return UI_PATHS.has(pathname) || pathname.startsWith("/_next/") || pathname.startsWith("/brand/");' in template
+    assert 'function filteredHeaders(headers) {' in template
+    assert 'if (["transfer-encoding", "connection"].includes(lowered)) continue;' in template
+    assert 'function targetForPath(pathname) {' in template
+    assert 'if (isUiPath(pathname)) return { host: UI_HOST, port: UI_PORT };' in template
+    assert 'return { host: API_HOST, port: API_PORT };' in template
+    assert 'path: req.url || "/",' in template
+    assert 'res.writeHead(upstreamRes.statusCode || 502, filteredHeaders(upstreamRes.headers));' in template
+    assert 'resource "coder_app" "kdense_byok"' in template
+    assert 'display_name = "K-Dense BYOK"' in template
+    assert 'icon         = "https://raw.githubusercontent.com/K-Dense-AI/k-dense-byok/main/web/public/brand/kdense-logo-dark.png"' in template
+    assert 'url          = "http://localhost:3001"' in template
+    assert 'subdomain    = true' in template
+    assert 'url       = "http://localhost:3001/health"' in template
+
+
 def test_default_hermes_template_includes_full_web_stack() -> None:
     template = Path("templates/coder/default-ubuntu-code-server-hermes/main.tf").read_text(
         encoding="utf-8"
@@ -294,19 +401,23 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert 'export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1' in template
     assert 'export HERMES_TEMPLATE_PROVIDER="__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__"' in template
     assert 'export HERMES_TEMPLATE_MODEL="__DOKPLOY_WIZARD_HERMES_MODEL__"' in template
-    assert 'export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_OPENCODE_GO_BASE_URL__"' in template
-    assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_OPENCODE_GO_API_KEY__"' in template
-    assert 'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_OPENCODE_GO_API_KEY__"' in template
+    assert 'export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__"' in template
+    assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"' in template
+    assert 'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"' in template
     assert 'export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"' in template
     assert 'export HERMES_MODEL="$${HERMES_MODEL:-$HERMES_TEMPLATE_MODEL}"' in template
-    assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$HERMES_TEMPLATE_BASE_URL}"' in template
-    assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$HERMES_TEMPLATE_API_KEY}"' in template
+    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-$HERMES_TEMPLATE_BASE_URL}"' in template
+    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-$HERMES_TEMPLATE_API_KEY}"' in template
+    assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
+    assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
+    assert 'upsert_env AI_DEFAULT_API_KEY "$AI_DEFAULT_API_KEY"' in template
     assert 'upsert_env OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"' in template
     assert 'API_SERVER_ENABLED=true' in template
-    assert 'OPENCODE_GO_API_KEY is required for the Hermes workspace template' in template
+    assert 'AI_DEFAULT_API_KEY is required for the Hermes workspace template' in template
+    assert "Provider 'opencode-go' requires OPENCODE_GO_API_KEY in the Hermes workspace template" in template
     assert 'hermes config set model.provider "$HERMES_INFERENCE_PROVIDER"' in template
     assert 'hermes config set model.default "$HERMES_MODEL"' in template
-    assert 'hermes config set model.base_url "$OPENCODE_GO_BASE_URL"' in template
+    assert 'hermes config set model.base_url "$AI_DEFAULT_BASE_URL"' in template
     assert 'hermes config set terminal.cwd /home/coder' in template
     assert 'export HERMES_DASHBOARD_PORT=9119' in template
     assert 'export HERMES_DASHBOARD_PROXY_PORT=9120' in template
@@ -380,7 +491,7 @@ def test_push_default_template_ignores_missing_terraform_lockfile(
             "docker",
             "exec",
             "-e",
-            "CODER_URL=https://coder.example.com/",
+            "CODER_URL=http://127.0.0.1:3000",
             "-e",
             "CODER_SESSION_TOKEN=session-123",
             "coder-container",
@@ -495,7 +606,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
             (
                 str(kwargs["hermes_inference_provider"]),
                 str(kwargs["hermes_model"]),
-                str(kwargs["opencode_go_base_url"]),
+                str(kwargs["ai_default_base_url"]),
             )
         ),
     )
@@ -514,6 +625,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-openwork'.",
+        "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
     )
 
@@ -807,6 +919,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     first_user_calls: list[tuple[str, str, str]] = []
     login_calls: list[tuple[str, str, str]] = []
     template_copy_calls: list[tuple[str, str, str]] = []
+    template_replacements_by_name: dict[str, dict[str, str] | None] = {}
     template_push_calls: list[tuple[str, str, str, str]] = []
     ensure_workspace_calls: list[tuple[str, str, str, str, str]] = []
     secret_sync_calls: list[tuple[str, str, str, str | None]] = []
@@ -836,7 +949,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
                 str(kwargs["container_name"]),
                 str(kwargs["hermes_inference_provider"]),
                 str(kwargs["hermes_model"]),
-                kwargs["opencode_go_api_key"],
+                kwargs["ai_default_api_key"],
             )
         ),
     )
@@ -845,7 +958,8 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "_copy_template_into_container",
         lambda *, container_name, template_dir, template_name, replacements: template_copy_calls.append(
             (container_name, str(template_dir), template_name)
-        ),
+        )
+        or template_replacements_by_name.setdefault(template_name, replacements),
     )
     monkeypatch.setattr(
         coder_module,
@@ -899,6 +1013,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         ),
         (
             "wizard-stack-coder-container",
+            str(coder_module._default_kdense_byok_template_dir()),
+            coder_module._default_kdense_byok_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
             str(coder_module._default_hermes_template_dir()),
             coder_module._default_hermes_template_name(),
         ),
@@ -926,9 +1045,25 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "wizard-stack-coder-container",
             "coder.example.com",
             "session-123",
+            coder_module._default_kdense_byok_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
+            "coder.example.com",
+            "session-123",
             coder_module._default_hermes_template_name(),
         )
     ]
+    assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "https://opencode.ai/zen/go/v1",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+    }
+    assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "https://opencode.ai/zen/go/v1",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+    }
     assert ensure_workspace_calls == [
         (
             "wizard-stack-coder-container",
@@ -951,6 +1086,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-openwork'.",
+        "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
         "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'clayton@openmerge.me'.",
     )

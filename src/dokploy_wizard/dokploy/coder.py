@@ -54,7 +54,7 @@ class _ComposeLocator:
 
 _DEFAULT_HERMES_INFERENCE_PROVIDER = "opencode-go"
 _DEFAULT_HERMES_MODEL = "deepseek-v4-flash"
-_DEFAULT_OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
+_DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 
 
 class DokployCoderBackend:
@@ -72,8 +72,8 @@ class DokployCoderBackend:
         postgres: SharedPostgresAllocation,
         hermes_inference_provider: str = _DEFAULT_HERMES_INFERENCE_PROVIDER,
         hermes_model: str = _DEFAULT_HERMES_MODEL,
-        opencode_go_base_url: str = _DEFAULT_OPENCODE_GO_BASE_URL,
-        opencode_go_api_key: str | None = None,
+        ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
+        ai_default_api_key: str | None = None,
         client: DokployCoderApi | None = None,
     ) -> None:
         self._stack_name = stack_name
@@ -86,8 +86,8 @@ class DokployCoderBackend:
         self._postgres = postgres
         self._hermes_inference_provider = hermes_inference_provider
         self._hermes_model = hermes_model
-        self._opencode_go_base_url = opencode_go_base_url
-        self._opencode_go_api_key = opencode_go_api_key
+        self._ai_default_base_url = ai_default_base_url
+        self._ai_default_api_key = ai_default_api_key
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
@@ -207,8 +207,8 @@ class DokployCoderBackend:
             session_token=session_token,
             hermes_inference_provider=self._hermes_inference_provider,
             hermes_model=self._hermes_model,
-            opencode_go_base_url=self._opencode_go_base_url,
-            opencode_go_api_key=self._opencode_go_api_key,
+            ai_default_base_url=self._ai_default_base_url,
+            ai_default_api_key=self._ai_default_api_key,
         )
         for template_name, template_dir, replacements in (
             (_default_template_name(), _default_template_dir(), None),
@@ -219,6 +219,18 @@ class DokployCoderBackend:
             ),
             (_default_openwork_template_name(), _default_openwork_template_dir(), None),
             (
+                _default_kdense_byok_template_name(),
+                _default_kdense_byok_template_dir(),
+                {
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                        self._ai_default_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                },
+            ),
+            (
                 _default_hermes_template_name(),
                 _default_hermes_template_dir(),
                 {
@@ -228,11 +240,11 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_HERMES_MODEL__": _shell_double_quote_escape(
                         self._hermes_model
                     ),
-                    "__DOKPLOY_WIZARD_OPENCODE_GO_BASE_URL__": _shell_double_quote_escape(
-                        self._opencode_go_base_url
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                        self._ai_default_base_url
                     ),
-                    "__DOKPLOY_WIZARD_OPENCODE_GO_API_KEY__": _shell_double_quote_escape(
-                        self._opencode_go_api_key or ""
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
                     ),
                 },
             ),
@@ -429,6 +441,7 @@ def _render_compose_file(
     data_name = _data_name(stack_name)
     shared_network = _shared_network_name(stack_name)
     wildcard_suffix = _wildcard_suffix(wildcard_hostname)
+    wildcard_host_pattern = re.escape(wildcard_suffix).replace("\\", "\\\\")
     pg_url = (
         f"postgres://{postgres.user_name}:change-me@{postgres_service_name}:5432/"
         f"{postgres.database_name}?sslmode=disable"
@@ -452,15 +465,15 @@ def _render_compose_file(
         '      traefik.enable: "true"\n'
         f'      traefik.http.routers.{service_name}.entrypoints: "websecure"\n'
         f'      traefik.http.routers.{service_name}.rule: "Host(`{hostname}`)"\n'
-        f'      traefik.http.routers.{service_name}.middlewares: "{service_name}-forwarded-https"\n'
+        f'      traefik.http.routers.{service_name}.middlewares: "{service_name}-forwarded-https,{service_name}-forwarded-host"\n'
         f'      traefik.http.routers.{service_name}.tls: "true"\n'
         f'      traefik.http.routers.{service_name}-wildcard.entrypoints: "websecure"\n'
-        f'      traefik.http.routers.{service_name}-wildcard.rule: "HostRegexp(`{{subdomain:.+}}.{wildcard_suffix}`)"\n'
+        f'      traefik.http.routers.{service_name}-wildcard.rule: "HostRegexp(`(?i)^[a-z0-9-]+(?:--[a-z0-9-]+){{2,}}\\\\.{wildcard_host_pattern}$`)"\n'
         f'      traefik.http.routers.{service_name}-wildcard.middlewares: "{service_name}-forwarded-https"\n'
         f'      traefik.http.routers.{service_name}-wildcard.tls: "true"\n'
         f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Proto: "https"\n'
-        f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Host: "{hostname}"\n'
         f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Port: "443"\n'
+        f'      traefik.http.middlewares.{service_name}-forwarded-host.headers.customrequestheaders.X-Forwarded-Host: "{hostname}"\n'
         f'      traefik.http.services.{service_name}.loadbalancer.server.port: "3000"\n'
         "    healthcheck:\n"
         "      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/healthz >/dev/null']\n"
@@ -686,6 +699,19 @@ def _default_openwork_template_name() -> str:
     return "ubuntu-vscode-openwork"
 
 
+def _default_kdense_byok_template_dir() -> Path:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "templates"
+        / "coder"
+        / "default-ubuntu-code-server-kdense-byok"
+    )
+
+
+def _default_kdense_byok_template_name() -> str:
+    return "ubuntu-vscode-kdense-byok"
+
+
 def _default_hermes_template_dir() -> Path:
     return (
         Path(__file__).resolve().parents[3]
@@ -785,6 +811,10 @@ def _docker_copy_template_dir(*, container_name: str, template_name: str, templa
         )
 
 
+def _coder_cli_url() -> str:
+    return "http://127.0.0.1:3000"
+
+
 def _push_default_template(
     *, container_name: str, hostname: str, session_token: str, template_name: str
 ) -> None:
@@ -793,7 +823,7 @@ def _push_default_template(
             "docker",
             "exec",
             "-e",
-            f"CODER_URL=https://{hostname}/",
+            f"CODER_URL={_coder_cli_url()}",
             "-e",
             f"CODER_SESSION_TOKEN={session_token}",
             container_name,
@@ -823,8 +853,8 @@ def _sync_hermes_workspace_secrets(
     session_token: str,
     hermes_inference_provider: str,
     hermes_model: str,
-    opencode_go_base_url: str,
-    opencode_go_api_key: str | None,
+    ai_default_base_url: str,
+    ai_default_api_key: str | None,
 ) -> None:
     managed_values = (
         (
@@ -840,10 +870,16 @@ def _sync_hermes_workspace_secrets(
             "Hermes model for wizard-managed workspaces.",
         ),
         (
+            "ai-default-base-url",
+            "AI_DEFAULT_BASE_URL",
+            ai_default_base_url,
+            "Default AI base URL for wizard-managed workspaces.",
+        ),
+        (
             "opencode-go-base-url",
             "OPENCODE_GO_BASE_URL",
-            opencode_go_base_url,
-            "OpenCode Go base URL for wizard-managed workspaces.",
+            ai_default_base_url,
+            "Legacy OpenCode Go base URL for wizard-managed workspaces.",
         ),
     )
     for secret_name, env_name, value, description in managed_values:
@@ -861,7 +897,20 @@ def _sync_hermes_workspace_secrets(
             if "unknown flag: --env" in str(error):
                 return
             raise
-    if opencode_go_api_key:
+    if ai_default_api_key:
+        try:
+            _upsert_coder_secret(
+                container_name=container_name,
+                hostname=hostname,
+                session_token=session_token,
+                secret_name="ai-default-api-key",
+                env_name="AI_DEFAULT_API_KEY",
+                value=ai_default_api_key,
+                description="Default AI API key for wizard-managed workspaces.",
+            )
+        except CoderError as error:
+            if "unknown flag: --env" not in str(error):
+                raise
         try:
             _upsert_coder_secret(
                 container_name=container_name,
@@ -869,8 +918,8 @@ def _sync_hermes_workspace_secrets(
                 session_token=session_token,
                 secret_name="opencode-go-api-key",
                 env_name="OPENCODE_GO_API_KEY",
-                value=opencode_go_api_key,
-                description="OpenCode Go API key for wizard-managed workspaces.",
+                value=ai_default_api_key,
+                description="Legacy OpenCode Go API key for wizard-managed workspaces.",
             )
         except CoderError as error:
             if "unknown flag: --env" not in str(error):
@@ -892,7 +941,7 @@ def _upsert_coder_secret(
         "exec",
         "-i",
         "-e",
-        f"CODER_URL=https://{hostname}/",
+        f"CODER_URL={_coder_cli_url()}",
         "-e",
         f"CODER_SESSION_TOKEN={session_token}",
         container_name,
@@ -952,7 +1001,7 @@ def _list_workspaces(*, container_name: str, hostname: str, session_token: str) 
             "docker",
             "exec",
             "-e",
-            f"CODER_URL=https://{hostname}/",
+            f"CODER_URL={_coder_cli_url()}",
             "-e",
             f"CODER_SESSION_TOKEN={session_token}",
             container_name,
@@ -998,7 +1047,7 @@ def _create_default_workspace(
             "docker",
             "exec",
             "-e",
-            f"CODER_URL=https://{hostname}/",
+            f"CODER_URL={_coder_cli_url()}",
             "-e",
             f"CODER_SESSION_TOKEN={session_token}",
             container_name,
