@@ -1483,7 +1483,8 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapp
     service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
     assert record.resource_id == "dokploy-compose:compose-existing:my-farm-advisor:replicas:3"
     assert "image: ghcr.io/borealbytes/my-farm-advisor:latest" in compose
-    assert "node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" in compose
+    assert "/app/scripts/entrypoint.sh" in compose
+    assert "exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" not in compose
     assert 'ADVISOR_VARIANT: "my-farm-advisor"' in compose
     assert 'ADVISOR_STARTUP_MODE: "my-farm-advisor"' in compose
     assert 'ADVISOR_CHANNELS: "matrix,telegram"' in compose
@@ -1492,6 +1493,7 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapp
     assert 'OPENCLAW_WORKSPACE_DIR: "/data/workspace"' in compose
     assert "/data/openclaw.json" in compose
     assert "/data/.openclaw/openclaw.json" in compose
+    assert "/data/workspace-data-pipeline" in compose
     assert "http://127.0.0.1:18789" in compose
     assert "https://farm.example.com" in compose
     assert 'user: "0:0"' in compose
@@ -1589,6 +1591,8 @@ def test_dokploy_openclaw_backend_keeps_openclaw_env_mapping_unchanged() -> None
     compose = api.last_create_compose_file
     assert compose is not None
     service_environment = _service_environment(compose, "wizard-stack-openclaw")
+    assert "exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" in compose
+    assert "/app/scripts/entrypoint.sh" not in compose
     assert service_environment["OPENCLAW_GATEWAY_TOKEN"] == "fixed-token-123"
     assert service_environment["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
     assert service_environment["OPENROUTER_API_KEY"] == "openrouter-key"
