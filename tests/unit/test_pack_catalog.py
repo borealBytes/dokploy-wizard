@@ -29,6 +29,8 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     assert get_pack_definition("seaweedfs").slot is None
     assert get_pack_definition("seaweedfs").hostnames[0].key == "s3"
     assert get_pack_definition("coder").hostnames[1].key == "coder-wildcard"
+    assert "AI_DEFAULT_API_KEY" in get_pack_definition("coder").mutable_env_keys
+    assert "AI_DEFAULT_BASE_URL" in get_pack_definition("coder").mutable_env_keys
     assert "HERMES_INFERENCE_PROVIDER" in get_pack_definition("coder").mutable_env_keys
     assert "HERMES_MODEL" in get_pack_definition("coder").mutable_env_keys
     assert "OPENCODE_GO_API_KEY" in get_pack_definition("coder").mutable_env_keys
