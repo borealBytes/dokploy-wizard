@@ -34,6 +34,14 @@ class CloudflareDnsRecord:
 
 
 @dataclass(frozen=True)
+class CloudflareCertificatePack:
+    pack_id: str
+    pack_type: str
+    status: str
+    hosts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class CloudflareAccessIdentityProvider:
     provider_id: str
     name: str
@@ -98,6 +106,12 @@ class CloudflareBackend(Protocol):
         content: str,
         proxied: bool,
     ) -> CloudflareDnsRecord: ...
+
+    def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]: ...
+
+    def order_advanced_certificate_pack(
+        self, zone_id: str, *, hosts: tuple[str, ...]
+    ) -> CloudflareCertificatePack: ...
 
     def get_access_identity_provider(
         self, account_id: str, provider_id: str
@@ -394,6 +408,49 @@ class CloudflareApiBackend:
             },
         )
         return _parse_dns_record(payload)
+
+    def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
+        if self._mock_zone_ok is not None:
+            return ()
+
+        payload = self._request_json(
+            method="GET",
+            path=f"/zones/{zone_id}/ssl/certificate_packs",
+            params={"status": "all"},
+        )
+        packs_payload = payload.get("result")
+        if not isinstance(packs_payload, list):
+            raise CloudflareError("Cloudflare returned an invalid certificate pack list.")
+        packs: list[CloudflareCertificatePack] = []
+        for item in packs_payload:
+            if not isinstance(item, dict):
+                raise CloudflareError("Cloudflare returned a malformed certificate pack entry.")
+            packs.append(_parse_certificate_pack(item))
+        return tuple(packs)
+
+    def order_advanced_certificate_pack(
+        self, zone_id: str, *, hosts: tuple[str, ...]
+    ) -> CloudflareCertificatePack:
+        if self._mock_zone_ok is not None:
+            return CloudflareCertificatePack(
+                pack_id=_mock_certificate_pack_id(hosts[-1]),
+                pack_type="advanced",
+                status="active",
+                hosts=hosts,
+            )
+
+        payload = self._request_json(
+            method="POST",
+            path=f"/zones/{zone_id}/ssl/certificate_packs/order",
+            body={
+                "certificate_authority": "lets_encrypt",
+                "hosts": list(hosts),
+                "type": "advanced",
+                "validation_method": "txt",
+                "validity_days": 14,
+            },
+        )
+        return _parse_certificate_pack(payload)
 
     def get_access_identity_provider(
         self, account_id: str, provider_id: str
@@ -695,6 +752,30 @@ def _parse_dns_record(payload: dict[str, Any]) -> CloudflareDnsRecord:
     )
 
 
+def _parse_certificate_pack(payload: dict[str, Any]) -> CloudflareCertificatePack:
+    result = payload.get("result", payload)
+    if not isinstance(result, dict):
+        raise CloudflareError("Cloudflare returned an invalid certificate pack payload.")
+    pack_id = result.get("id")
+    pack_type = result.get("type")
+    status = result.get("status")
+    hosts = result.get("hosts")
+    if not isinstance(pack_id, str) or pack_id == "":
+        raise CloudflareError("Cloudflare certificate pack payload is missing a valid id.")
+    if not isinstance(pack_type, str) or pack_type == "":
+        raise CloudflareError("Cloudflare certificate pack payload is missing a valid type.")
+    if not isinstance(status, str) or status == "":
+        raise CloudflareError("Cloudflare certificate pack payload is missing a valid status.")
+    if not isinstance(hosts, list) or not all(isinstance(item, str) and item for item in hosts):
+        raise CloudflareError("Cloudflare certificate pack payload is missing valid hosts.")
+    return CloudflareCertificatePack(
+        pack_id=pack_id,
+        pack_type=pack_type,
+        status=status,
+        hosts=tuple(hosts),
+    )
+
+
 def _parse_access_identity_provider(payload: dict[str, Any]) -> CloudflareAccessIdentityProvider:
     result = payload.get("result", payload)
     if not isinstance(result, dict):
@@ -808,6 +889,10 @@ def _require_env_value(values: dict[str, str], key: str) -> str:
 
 def _mock_dns_record_id(hostname: str) -> str:
     return hostname.lower().replace(".", "-")
+
+
+def _mock_certificate_pack_id(hostname: str) -> str:
+    return f"cert-{hostname.lower().replace('.', '-')}"
 
 
 def _mock_tunnel_id(tunnel_name: str) -> str:

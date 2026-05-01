@@ -37,7 +37,8 @@ _DEFAULT_NEXTCLOUD_ADMIN_USER = "admin"
 _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD = "ChangeMeSoon"
 _DEFAULT_SHARED_SERVICE_PASSWORD = "change-me"
 _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME = "/OpenClaw"
-_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH = "/mnt/openclaw"
+_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH = "/mnt/openclaw"
+_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH = f"{_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH}/workspace"
 _DEFAULT_OPENCLAW_RESCAN_CRON = "*/15 * * * *"
 _DEFAULT_OPENCLAW_RESCAN_TIMEZONE = "UTC"
 _DEFAULT_ONLYOFFICE_DEF_FORMATS = {
@@ -733,7 +734,7 @@ def _render_compose_file(
             f"{openclaw_workspace_contract.runtime_state_source}\n"
         )
     nextcloud_extra_mount = (
-        f"      - {openclaw_volume}:{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH}\n"
+        f"      - {openclaw_volume}:{_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH}\n"
         if openclaw_volume is not None
         else ""
     )
@@ -1257,13 +1258,55 @@ def _find_external_storage_mount_id(
         config = mount.get("configuration") or mount.get("config")
         mount_id = mount.get("mount_id") or mount.get("mountId") or mount.get("id")
         config_datadir = config.get("datadir") if isinstance(config, dict) else None
-        if mount_name == mount_point or config_datadir == datadir:
+        if mount_name == mount_point and config_datadir == datadir:
             if mount_id is not None:
                 return str(mount_id)
     return None
 
 
+def _ensure_openclaw_external_storage_path(container_name: str) -> None:
+    path = shlex.quote(_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH)
+    volume_root = shlex.quote(_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH)
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            container_name,
+            "sh",
+            "-lc",
+            f"mkdir -p {path} && chmod 0777 {volume_root} {path}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise NextcloudError(
+            "Nextcloud OpenClaw external storage path could not be prepared"
+            f": {detail or 'unknown error'}"
+        )
+
+
+def _delete_stale_external_storage_mounts(
+    container_name: str, *, mount_point: str, datadir: str
+) -> None:
+    for mount in _list_external_storage_mounts(container_name):
+        mount_name = mount.get("mount_point") or mount.get("mountPoint") or mount.get("mount")
+        config = mount.get("configuration") or mount.get("config")
+        mount_id = mount.get("mount_id") or mount.get("mountId") or mount.get("id")
+        config_datadir = config.get("datadir") if isinstance(config, dict) else None
+        if mount_name == mount_point and config_datadir != datadir and mount_id is not None:
+            _run_occ(container_name, ["files_external:delete", "--yes", str(mount_id)])
+
+
 def _ensure_openclaw_external_storage(container_name: str, *, admin_user: str) -> None:
+    _ensure_openclaw_external_storage_path(container_name)
+    _delete_stale_external_storage_mounts(
+        container_name,
+        mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+        datadir=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+    )
     mount_id = _find_external_storage_mount_id(
         container_name,
         mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
