@@ -173,6 +173,35 @@ class _ComposeLocator:
 
 
 @dataclass(frozen=True)
+class _FarmAdvisorRuntimeEnv:
+    anthropic_api_key: str | None
+    nvidia_base_url: str | None
+    telegram_field_operations_bot_token: str | None
+    telegram_field_operations_bot_pairing_code: str | None
+    telegram_field_operations_allowed_users: str | None
+    telegram_data_pipeline_bot_token: str | None
+    telegram_data_pipeline_bot_pairing_code: str | None
+    telegram_data_pipeline_allowed_users: str | None
+    telegram_data_pipeline_bot_allowed_users: str | None
+    telegram_allowed_users: str | None
+    telegram_group_policy: str | None
+    timezone: str | None
+    sync_skills_on_start: str | None
+    sync_skills_overwrite: str | None
+    force_skill_sync: str | None
+    bootstrap_refresh: str | None
+    memory_search_enabled: str | None
+    r2_bucket_name: str | None
+    r2_endpoint: str | None
+    r2_access_key_id: str | None
+    r2_secret_access_key: str | None
+    cf_account_id: str | None
+    data_mode: str | None
+    workspace_data_r2_rclone_mount: str | None
+    workspace_data_r2_prefix: str | None
+
+
+@dataclass(frozen=True)
 class _AdvisorRuntimeConfig:
     gateway_token: str | None
     gateway_password: str | None
@@ -192,6 +221,7 @@ class _AdvisorRuntimeConfig:
     nvidia_visible_devices: str
     nexa_env: dict[str, str]
     nexa_contract: OpenClawNexaDeploymentContract | None
+    farm_env: _FarmAdvisorRuntimeEnv | None
 
 
 class DokployOpenClawBackend:
@@ -223,6 +253,31 @@ class DokployOpenClawBackend:
         my_farm_nvidia_api_key: str | None = None,
         my_farm_telegram_bot_token: str | None = None,
         my_farm_telegram_owner_user_id: str | None = None,
+        anthropic_api_key: str | None = None,
+        nvidia_base_url: str | None = None,
+        telegram_field_operations_bot_token: str | None = None,
+        telegram_field_operations_bot_pairing_code: str | None = None,
+        telegram_field_operations_allowed_users: str | None = None,
+        telegram_data_pipeline_bot_token: str | None = None,
+        telegram_data_pipeline_bot_pairing_code: str | None = None,
+        telegram_data_pipeline_allowed_users: str | None = None,
+        telegram_data_pipeline_bot_allowed_users: str | None = None,
+        telegram_allowed_users: str | None = None,
+        openclaw_telegram_group_policy: str | None = None,
+        tz: str | None = None,
+        openclaw_sync_skills_on_start: str | None = None,
+        openclaw_sync_skills_overwrite: str | None = None,
+        openclaw_force_skill_sync: str | None = None,
+        openclaw_bootstrap_refresh: str | None = None,
+        openclaw_memory_search_enabled: str | None = None,
+        r2_bucket_name: str | None = None,
+        r2_endpoint: str | None = None,
+        r2_access_key_id: str | None = None,
+        r2_secret_access_key: str | None = None,
+        cf_account_id: str | None = None,
+        data_mode: str | None = None,
+        workspace_data_r2_rclone_mount: str | None = None,
+        workspace_data_r2_prefix: str | None = None,
         model_provider: str = _DEFAULT_MODEL_PROVIDER,
         model_name: str = _DEFAULT_MODEL_NAME,
         trusted_proxies: str = _DEFAULT_TRUSTED_PROXIES,
@@ -251,6 +306,7 @@ class DokployOpenClawBackend:
                 nvidia_visible_devices=nvidia_visible_devices,
                 nexa_env=resolved_openclaw_nexa_env,
                 nexa_contract=_build_nexa_deployment_contract(resolved_openclaw_nexa_env),
+                farm_env=None,
             ),
             "my-farm-advisor": _AdvisorRuntimeConfig(
                 gateway_token=gateway_token,
@@ -271,6 +327,33 @@ class DokployOpenClawBackend:
                 nvidia_visible_devices=nvidia_visible_devices,
                 nexa_env={},
                 nexa_contract=None,
+                farm_env=_FarmAdvisorRuntimeEnv(
+                    anthropic_api_key=anthropic_api_key,
+                    nvidia_base_url=nvidia_base_url,
+                    telegram_field_operations_bot_token=telegram_field_operations_bot_token,
+                    telegram_field_operations_bot_pairing_code=telegram_field_operations_bot_pairing_code,
+                    telegram_field_operations_allowed_users=telegram_field_operations_allowed_users,
+                    telegram_data_pipeline_bot_token=telegram_data_pipeline_bot_token,
+                    telegram_data_pipeline_bot_pairing_code=telegram_data_pipeline_bot_pairing_code,
+                    telegram_data_pipeline_allowed_users=telegram_data_pipeline_allowed_users,
+                    telegram_data_pipeline_bot_allowed_users=telegram_data_pipeline_bot_allowed_users,
+                    telegram_allowed_users=telegram_allowed_users,
+                    telegram_group_policy=openclaw_telegram_group_policy,
+                    timezone=tz,
+                    sync_skills_on_start=openclaw_sync_skills_on_start,
+                    sync_skills_overwrite=openclaw_sync_skills_overwrite,
+                    force_skill_sync=openclaw_force_skill_sync,
+                    bootstrap_refresh=openclaw_bootstrap_refresh,
+                    memory_search_enabled=openclaw_memory_search_enabled,
+                    r2_bucket_name=r2_bucket_name,
+                    r2_endpoint=r2_endpoint,
+                    r2_access_key_id=r2_access_key_id,
+                    r2_secret_access_key=r2_secret_access_key,
+                    cf_account_id=cf_account_id,
+                    data_mode=data_mode,
+                    workspace_data_r2_rclone_mount=workspace_data_r2_rclone_mount,
+                    workspace_data_r2_prefix=workspace_data_r2_prefix,
+                ),
             ),
         }
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
@@ -1072,21 +1155,24 @@ def _gateway_environment(
         "PORT": str(app_port),
         "TRUSTED_PROXIES": runtime_config.trusted_proxies,
     }
-    if runtime_config.primary_model is None and not runtime_config.fallback_models:
+    if variant == "openclaw" and runtime_config.primary_model is None and not runtime_config.fallback_models:
         environment["MODEL_PROVIDER"] = runtime_config.model_provider
         environment["MODEL_NAME"] = runtime_config.model_name
     if include_gateway_token and runtime_config.gateway_token is not None:
         environment["OPENCLAW_GATEWAY_TOKEN"] = runtime_config.gateway_token
     if runtime_config.gateway_password is not None:
         environment["OPENCLAW_GATEWAY_PASSWORD"] = runtime_config.gateway_password
-    if runtime_config.openrouter_api_key is not None:
-        environment["OPENROUTER_API_KEY"] = runtime_config.openrouter_api_key
-    elif runtime_config.ai_default_api_key is not None:
-        environment["OPENROUTER_API_KEY"] = runtime_config.ai_default_api_key
-    if runtime_config.nvidia_api_key is not None:
-        environment["NVIDIA_API_KEY"] = runtime_config.nvidia_api_key
-    if runtime_config.telegram_bot_token is not None:
-        environment["TELEGRAM_BOT_TOKEN"] = runtime_config.telegram_bot_token
+    if variant == "my-farm-advisor":
+        environment.update(_my_farm_gateway_environment(runtime_config))
+    else:
+        if runtime_config.openrouter_api_key is not None:
+            environment["OPENROUTER_API_KEY"] = runtime_config.openrouter_api_key
+        elif runtime_config.ai_default_api_key is not None:
+            environment["OPENROUTER_API_KEY"] = runtime_config.ai_default_api_key
+        if runtime_config.nvidia_api_key is not None:
+            environment["NVIDIA_API_KEY"] = runtime_config.nvidia_api_key
+        if runtime_config.telegram_bot_token is not None:
+            environment["TELEGRAM_BOT_TOKEN"] = runtime_config.telegram_bot_token
     if include_nexa and variant == "openclaw" and runtime_config.nexa_contract is not None:
         environment.update(runtime_config.nexa_env)
         environment.update(
@@ -1109,6 +1195,138 @@ def _gateway_environment(
         )
     if variant == "my-farm-advisor":
         environment["HOME"] = "/data"
+    return environment
+
+
+def _env_value_present(value: str | None) -> bool:
+    return value is not None and value.strip() != ""
+
+
+def _env_value_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _set_env_if_present(environment: dict[str, str], key: str, value: str | None) -> None:
+    if _env_value_present(value):
+        stripped_value = value.strip() if value is not None else ""
+        environment[key] = stripped_value
+
+
+def _my_farm_r2_data_enabled(farm_env: _FarmAdvisorRuntimeEnv | None) -> bool:
+    if farm_env is None:
+        return False
+    return all(
+        (
+            _env_value_present(farm_env.r2_bucket_name),
+            _env_value_present(farm_env.r2_access_key_id),
+            _env_value_present(farm_env.r2_secret_access_key),
+            _env_value_present(farm_env.r2_endpoint) or _env_value_present(farm_env.cf_account_id),
+            _env_value_truthy(farm_env.workspace_data_r2_rclone_mount),
+        )
+    )
+
+
+def _my_farm_gateway_environment(runtime_config: _AdvisorRuntimeConfig) -> dict[str, str]:
+    farm_env = runtime_config.farm_env
+    if farm_env is None:
+        return {}
+    environment: dict[str, str] = {}
+    if runtime_config.openrouter_api_key is not None:
+        environment["OPENROUTER_API_KEY"] = runtime_config.openrouter_api_key
+    elif runtime_config.ai_default_api_key is not None:
+        environment["OPENROUTER_API_KEY"] = runtime_config.ai_default_api_key
+    _set_env_if_present(environment, "NVIDIA_API_KEY", runtime_config.nvidia_api_key)
+    _set_env_if_present(environment, "PRIMARY_MODEL", runtime_config.primary_model)
+    if runtime_config.fallback_models:
+        environment["FALLBACK_MODELS"] = ",".join(runtime_config.fallback_models)
+    _set_env_if_present(environment, "ANTHROPIC_API_KEY", farm_env.anthropic_api_key)
+    _set_env_if_present(environment, "NVIDIA_BASE_URL", farm_env.nvidia_base_url)
+    _set_env_if_present(environment, "TELEGRAM_BOT_TOKEN", runtime_config.telegram_bot_token)
+    _set_env_if_present(environment, "TELEGRAM_OWNER_USER_ID", runtime_config.telegram_owner_user_id)
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
+        farm_env.telegram_field_operations_bot_token,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
+        farm_env.telegram_field_operations_bot_pairing_code,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
+        farm_env.telegram_field_operations_allowed_users,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
+        farm_env.telegram_data_pipeline_bot_token,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
+        farm_env.telegram_data_pipeline_bot_pairing_code,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
+        farm_env.telegram_data_pipeline_allowed_users,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
+        farm_env.telegram_data_pipeline_bot_allowed_users,
+    )
+    _set_env_if_present(environment, "TELEGRAM_ALLOWED_USERS", farm_env.telegram_allowed_users)
+    _set_env_if_present(
+        environment,
+        "OPENCLAW_TELEGRAM_GROUP_POLICY",
+        farm_env.telegram_group_policy,
+    )
+    _set_env_if_present(environment, "TZ", farm_env.timezone)
+    _set_env_if_present(environment, "OPENCLAW_BOOTSTRAP_REFRESH", farm_env.bootstrap_refresh)
+    _set_env_if_present(
+        environment,
+        "OPENCLAW_MEMORY_SEARCH_ENABLED",
+        farm_env.memory_search_enabled,
+    )
+    if _my_farm_r2_data_enabled(farm_env):
+        _set_env_if_present(environment, "R2_BUCKET_NAME", farm_env.r2_bucket_name)
+        _set_env_if_present(environment, "R2_ENDPOINT", farm_env.r2_endpoint)
+        _set_env_if_present(environment, "R2_ACCESS_KEY_ID", farm_env.r2_access_key_id)
+        _set_env_if_present(environment, "R2_SECRET_ACCESS_KEY", farm_env.r2_secret_access_key)
+        _set_env_if_present(environment, "CF_ACCOUNT_ID", farm_env.cf_account_id)
+        _set_env_if_present(environment, "DATA_MODE", farm_env.data_mode)
+        _set_env_if_present(
+            environment,
+            "WORKSPACE_DATA_R2_RCLONE_MOUNT",
+            farm_env.workspace_data_r2_rclone_mount,
+        )
+        _set_env_if_present(
+            environment,
+            "WORKSPACE_DATA_R2_PREFIX",
+            farm_env.workspace_data_r2_prefix,
+        )
+        _set_env_if_present(
+            environment,
+            "OPENCLAW_SYNC_SKILLS_ON_START",
+            farm_env.sync_skills_on_start,
+        )
+        _set_env_if_present(
+            environment,
+            "OPENCLAW_SYNC_SKILLS_OVERWRITE",
+            farm_env.sync_skills_overwrite,
+        )
+        _set_env_if_present(
+            environment,
+            "OPENCLAW_FORCE_SKILL_SYNC",
+            farm_env.force_skill_sync,
+        )
+    else:
+        environment["OPENCLAW_SYNC_SKILLS_ON_START"] = "0"
     return environment
 
 

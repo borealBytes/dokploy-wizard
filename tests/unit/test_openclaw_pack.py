@@ -164,6 +164,22 @@ def _service_block(compose: str, service_name: str) -> str:
     return match.group(0)
 
 
+def _service_environment(compose: str, service_name: str) -> dict[str, str]:
+    environment: dict[str, str] = {}
+    capture = False
+    for line in _service_block(compose, service_name).splitlines():
+        if line == "    environment:":
+            capture = True
+            continue
+        if not capture:
+            continue
+        if not line.startswith("      "):
+            break
+        key, raw_value = line.strip().split(": ", 1)
+        environment[key] = json.loads(raw_value)
+    return environment
+
+
 def test_reconcile_openclaw_plans_slot_runtime_for_openclaw_variant() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
@@ -227,6 +243,60 @@ def test_resolve_desired_state_rejects_unsupported_advisor_channel() -> None:
                     "ENABLE_MY_FARM_ADVISOR": "true",
                     "MY_FARM_ADVISOR_CHANNELS": "email",
                 },
+            )
+        )
+
+
+def _farm_env_values(**overrides: str) -> dict[str, str]:
+    values = {
+        "STACK_NAME": "wizard-stack",
+        "ROOT_DOMAIN": "example.com",
+        "ENABLE_MY_FARM_ADVISOR": "true",
+    }
+    values.update(overrides)
+    return values
+
+
+@pytest.mark.parametrize(
+    ("provider_env", "expected_present"),
+    [
+        ({"MY_FARM_ADVISOR_OPENROUTER_API_KEY": "openrouter-key"}, "my-farm-advisor"),
+        ({"MY_FARM_ADVISOR_NVIDIA_API_KEY": "nvidia-key"}, "my-farm-advisor"),
+        ({"ANTHROPIC_API_KEY": "anthropic-key"}, "my-farm-advisor"),
+        (
+            {
+                "AI_DEFAULT_API_KEY": "shared-ai-key",
+                "AI_DEFAULT_BASE_URL": "https://opencode.ai/zen/go/v1",
+            },
+            "my-farm-advisor",
+        ),
+    ],
+)
+def test_resolve_desired_state_accepts_farm_provider_paths(
+    provider_env: dict[str, str], expected_present: str
+) -> None:
+    desired_state = resolve_desired_state(RawEnvInput(format_version=1, values=_farm_env_values(**provider_env)))
+
+    assert expected_present in desired_state.enabled_packs
+
+
+def test_resolve_desired_state_rejects_farm_without_provider_config() -> None:
+    with pytest.raises(
+        StateValidationError,
+        match="My Farm Advisor requires at least one provider configuration",
+    ):
+        resolve_desired_state(RawEnvInput(format_version=1, values=_farm_env_values()))
+
+
+def test_resolve_desired_state_rejects_incomplete_shared_farm_provider_fallback() -> None:
+    with pytest.raises(
+        StateValidationError,
+        match="shared provider fallback requires both AI_DEFAULT_API_KEY and AI_DEFAULT_BASE_URL",
+    ):
+        resolve_desired_state(
+            RawEnvInput(
+                format_version=1,
+                values=_farm_env_values(AI_DEFAULT_API_KEY="shared-ai-key", AI_DEFAULT_BASE_URL=""),
             )
         )
 
@@ -300,6 +370,7 @@ def test_reconcile_my_farm_advisor_plans_runtime_independently() -> None:
                 "ENABLE_MY_FARM_ADVISOR": "true",
                 "ENABLE_MATRIX": "true",
                 "MY_FARM_ADVISOR_CHANNELS": "telegram,matrix",
+                "ANTHROPIC_API_KEY": "anthropic-key",
             },
         )
     )
@@ -330,6 +401,7 @@ def test_reconcile_my_farm_advisor_uses_healthz_for_health_check() -> None:
                 "ENABLE_MY_FARM_ADVISOR": "true",
                 "ENABLE_MATRIX": "true",
                 "MY_FARM_ADVISOR_CHANNELS": "telegram",
+                "ANTHROPIC_API_KEY": "anthropic-key",
             },
         )
     )
@@ -359,6 +431,7 @@ def test_resolve_desired_state_supports_both_advisor_packs_together() -> None:
                 "ENABLE_MATRIX": "true",
                 "OPENCLAW_CHANNELS": "telegram",
                 "MY_FARM_ADVISOR_CHANNELS": "telegram,matrix",
+                "ANTHROPIC_API_KEY": "anthropic-key",
             },
         )
     )
@@ -367,6 +440,46 @@ def test_resolve_desired_state_supports_both_advisor_packs_together() -> None:
     assert "my-farm-advisor" in desired_state.enabled_packs
     assert desired_state.openclaw_channels == ("telegram",)
     assert desired_state.my_farm_advisor_channels == ("matrix", "telegram")
+
+
+def test_resolve_desired_state_openclaw_only_does_not_require_farm_envs() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+            },
+        )
+    )
+
+    assert desired_state.enabled_packs == ("openclaw",)
+
+
+def test_resolve_desired_state_farm_only_does_not_require_openclaw_envs() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values=_farm_env_values(MY_FARM_ADVISOR_OPENROUTER_API_KEY="openrouter-key"),
+        )
+    )
+
+    assert desired_state.enabled_packs == ("my-farm-advisor",)
+
+
+def test_resolve_desired_state_rejects_configured_farm_env_without_farm_pack() -> None:
+    with pytest.raises(StateValidationError, match="require the 'my-farm-advisor' pack"):
+        resolve_desired_state(
+            RawEnvInput(
+                format_version=1,
+                values={
+                    "STACK_NAME": "wizard-stack",
+                    "ROOT_DOMAIN": "example.com",
+                    "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "openrouter-key",
+                },
+            )
+        )
 
 
 def test_reconcile_openclaw_skips_when_openclaw_is_disabled() -> None:
@@ -570,6 +683,7 @@ def test_reconcile_my_farm_advisor_reuses_existing_dokploy_managed_service() -> 
                 "ROOT_DOMAIN": "example.com",
                 "ENABLE_MY_FARM_ADVISOR": "true",
                 "MY_FARM_ADVISOR_CHANNELS": "telegram",
+                "ANTHROPIC_API_KEY": "anthropic-key",
             },
         )
     )
@@ -1293,7 +1407,7 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
     assert "channels" not in seeded or "telegram" not in seeded.get("channels", {})
 
 
-def test_dokploy_openclaw_backend_renders_my_farm_variant_with_same_backend_path() -> None:
+def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapping() -> None:
     environment = DokployEnvironmentSummary(
         environment_id="env-1",
         name="default",
@@ -1316,6 +1430,40 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_same_backend_path
         api_url="https://dokploy.example.com/api",
         api_key="key-123",
         stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_primary_model="nvidia/nemotron-3-super-120b-a12b:free",
+        my_farm_fallback_models=(
+            "openrouter/openrouter/healer-alpha",
+            "nvidia/moonshotai/kimi-k2.5",
+        ),
+        my_farm_ai_default_api_key="shared-ai-key",
+        anthropic_api_key="anthropic-key",
+        my_farm_nvidia_api_key="nvidia-key",
+        nvidia_base_url="https://integrate.api.nvidia.com/v1",
+        my_farm_telegram_bot_token="farm-telegram-token",
+        my_farm_telegram_owner_user_id="123456",
+        telegram_field_operations_bot_token="field-token",
+        telegram_field_operations_bot_pairing_code="field-pair",
+        telegram_field_operations_allowed_users="111,222",
+        telegram_data_pipeline_bot_token="pipeline-token",
+        telegram_data_pipeline_bot_pairing_code="pipeline-pair",
+        telegram_data_pipeline_allowed_users="333,444",
+        telegram_data_pipeline_bot_allowed_users="555,666",
+        telegram_allowed_users="777,888",
+        openclaw_telegram_group_policy="allowlist",
+        tz="America/Chicago",
+        openclaw_sync_skills_on_start="1",
+        openclaw_sync_skills_overwrite="1",
+        openclaw_force_skill_sync="0",
+        openclaw_bootstrap_refresh="1",
+        openclaw_memory_search_enabled="0",
+        r2_bucket_name="farm-bucket",
+        cf_account_id="cf-account-1",
+        r2_access_key_id="r2-access-key",
+        r2_secret_access_key="r2-secret-key",
+        data_mode="volume",
+        workspace_data_r2_rclone_mount="1",
+        workspace_data_r2_prefix="workspace/data",
         client=api,
     )
 
@@ -1332,6 +1480,7 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_same_backend_path
 
     compose = api.last_update_compose_file
     assert compose is not None
+    service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
     assert record.resource_id == "dokploy-compose:compose-existing:my-farm-advisor:replicas:3"
     assert "image: ghcr.io/borealbytes/my-farm-advisor:latest" in compose
     assert "node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" in compose
@@ -1356,7 +1505,152 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_same_backend_path
         'traefik.http.services.wizard-stack-my-farm-advisor.loadbalancer.server.port: "18789"'
         in compose
     )
-    assert 'MODEL_PROVIDER: "openai"' in compose
+    assert service_environment == {
+        "ADVISOR_VARIANT": "my-farm-advisor",
+        "ADVISOR_CHANNELS": "matrix,telegram",
+        "ADVISOR_CANONICAL_HOSTNAME": "farm.example.com",
+        "ADVISOR_CANONICAL_URL": "https://farm.example.com",
+        "ADVISOR_PUBLIC_URL": "https://farm.example.com",
+        "ADVISOR_STARTUP_MODE": "my-farm-advisor",
+        "CONTROL_UI_ALLOWED_ORIGINS": "https://farm.example.com",
+        "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+        "NVIDIA_VISIBLE_DEVICES": "all",
+        "OPENCLAW_DISABLE_BONJOUR": "1",
+        "OPENCLAW_CONFIG_PATH": "/data/openclaw.json",
+        "OPENCLAW_STATE_DIR": "/data",
+        "OPENCLAW_WORKSPACE_DIR": "/data/workspace",
+        "PORT": "18789",
+        "TRUSTED_PROXIES": "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+        "OPENCLAW_GATEWAY_PASSWORD": "farm-ui-generated",
+        "OPENROUTER_API_KEY": "shared-ai-key",
+        "NVIDIA_API_KEY": "nvidia-key",
+        "PRIMARY_MODEL": "nvidia/nemotron-3-super-120b-a12b:free",
+        "FALLBACK_MODELS": "openrouter/openrouter/healer-alpha,nvidia/moonshotai/kimi-k2.5",
+        "ANTHROPIC_API_KEY": "anthropic-key",
+        "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
+        "TELEGRAM_BOT_TOKEN": "farm-telegram-token",
+        "TELEGRAM_OWNER_USER_ID": "123456",
+        "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN": "field-token",
+        "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE": "field-pair",
+        "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS": "111,222",
+        "TELEGRAM_DATA_PIPELINE_BOT_TOKEN": "pipeline-token",
+        "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE": "pipeline-pair",
+        "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS": "333,444",
+        "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS": "555,666",
+        "TELEGRAM_ALLOWED_USERS": "777,888",
+        "OPENCLAW_TELEGRAM_GROUP_POLICY": "allowlist",
+        "TZ": "America/Chicago",
+        "OPENCLAW_BOOTSTRAP_REFRESH": "1",
+        "OPENCLAW_MEMORY_SEARCH_ENABLED": "0",
+        "R2_BUCKET_NAME": "farm-bucket",
+        "R2_ACCESS_KEY_ID": "r2-access-key",
+        "R2_SECRET_ACCESS_KEY": "r2-secret-key",
+        "CF_ACCOUNT_ID": "cf-account-1",
+        "DATA_MODE": "volume",
+        "WORKSPACE_DATA_R2_RCLONE_MOUNT": "1",
+        "WORKSPACE_DATA_R2_PREFIX": "workspace/data",
+        "OPENCLAW_SYNC_SKILLS_ON_START": "1",
+        "OPENCLAW_SYNC_SKILLS_OVERWRITE": "1",
+        "OPENCLAW_FORCE_SKILL_SYNC": "0",
+        "HOME": "/data",
+    }
+
+
+def test_dokploy_openclaw_backend_keeps_openclaw_env_mapping_unchanged() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        openclaw_gateway_password="openclaw-ui-generated",
+        openclaw_openrouter_api_key="openrouter-key",
+        openclaw_nvidia_api_key="nvidia-key",
+        openclaw_telegram_bot_token="telegram-token",
+        anthropic_api_key="anthropic-key",
+        nvidia_base_url="https://integrate.api.nvidia.com/v1",
+        telegram_field_operations_bot_token="field-token",
+        openclaw_sync_skills_on_start="1",
+        r2_bucket_name="farm-bucket",
+        workspace_data_r2_rclone_mount="1",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    service_environment = _service_environment(compose, "wizard-stack-openclaw")
+    assert service_environment["OPENCLAW_GATEWAY_TOKEN"] == "fixed-token-123"
+    assert service_environment["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
+    assert service_environment["OPENROUTER_API_KEY"] == "openrouter-key"
+    assert service_environment["NVIDIA_API_KEY"] == "nvidia-key"
+    assert service_environment["TELEGRAM_BOT_TOKEN"] == "telegram-token"
+    assert service_environment["MODEL_PROVIDER"] == "openai"
+    assert service_environment["MODEL_NAME"] == "gpt-4o-mini"
+    assert "ANTHROPIC_API_KEY" not in service_environment
+    assert "PRIMARY_MODEL" not in service_environment
+    assert "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN" not in service_environment
+    assert "OPENCLAW_SYNC_SKILLS_ON_START" not in service_environment
+
+
+def test_dokploy_openclaw_backend_omits_partial_my_farm_optional_data_envs() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-ai-key",
+        my_farm_telegram_bot_token="farm-telegram-token",
+        openclaw_sync_skills_on_start="1",
+        openclaw_sync_skills_overwrite="1",
+        openclaw_force_skill_sync="1",
+        openclaw_bootstrap_refresh="1",
+        openclaw_memory_search_enabled="1",
+        r2_bucket_name="farm-bucket",
+        r2_access_key_id="r2-access-key",
+        data_mode="volume",
+        workspace_data_r2_rclone_mount="1",
+        workspace_data_r2_prefix="workspace/data",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
+    assert service_environment["OPENROUTER_API_KEY"] == "shared-ai-key"
+    assert service_environment["OPENCLAW_SYNC_SKILLS_ON_START"] == "0"
+    assert service_environment["OPENCLAW_BOOTSTRAP_REFRESH"] == "1"
+    assert service_environment["OPENCLAW_MEMORY_SEARCH_ENABLED"] == "1"
+    assert "R2_BUCKET_NAME" not in service_environment
+    assert "R2_ACCESS_KEY_ID" not in service_environment
+    assert "R2_SECRET_ACCESS_KEY" not in service_environment
+    assert "CF_ACCOUNT_ID" not in service_environment
+    assert "R2_ENDPOINT" not in service_environment
+    assert "DATA_MODE" not in service_environment
+    assert "WORKSPACE_DATA_R2_RCLONE_MOUNT" not in service_environment
+    assert "WORKSPACE_DATA_R2_PREFIX" not in service_environment
+    assert "OPENCLAW_SYNC_SKILLS_OVERWRITE" not in service_environment
+    assert "OPENCLAW_FORCE_SKILL_SYNC" not in service_environment
 
 
 def test_dokploy_openclaw_backend_accepts_legacy_advisor_service_resource_id() -> None:

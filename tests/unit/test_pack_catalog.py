@@ -11,6 +11,46 @@ from dokploy_wizard.state.models import StateValidationError
 from dokploy_wizard.state import RawEnvInput, resolve_desired_state
 
 
+_MY_FARM_ADVISOR_EXPECTED_MUTABLE_ENV_KEYS = {
+    "ADVISOR_GATEWAY_PASSWORD",
+    "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
+    "MY_FARM_ADVISOR_CHANNELS",
+    "AI_DEFAULT_API_KEY",
+    "AI_DEFAULT_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
+    "MY_FARM_ADVISOR_NVIDIA_API_KEY",
+    "NVIDIA_BASE_URL",
+    "MY_FARM_ADVISOR_PRIMARY_MODEL",
+    "MY_FARM_ADVISOR_FALLBACK_MODELS",
+    "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
+    "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
+    "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
+    "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
+    "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
+    "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
+    "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
+    "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
+    "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
+    "TELEGRAM_ALLOWED_USERS",
+    "OPENCLAW_TELEGRAM_GROUP_POLICY",
+    "TZ",
+    "OPENCLAW_SYNC_SKILLS_ON_START",
+    "OPENCLAW_SYNC_SKILLS_OVERWRITE",
+    "OPENCLAW_FORCE_SKILL_SYNC",
+    "OPENCLAW_BOOTSTRAP_REFRESH",
+    "OPENCLAW_MEMORY_SEARCH_ENABLED",
+    "R2_BUCKET_NAME",
+    "R2_ENDPOINT",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+    "CF_ACCOUNT_ID",
+    "DATA_MODE",
+    "WORKSPACE_DATA_R2_RCLONE_MOUNT",
+    "WORKSPACE_DATA_R2_PREFIX",
+}
+
+
 def test_catalog_exposes_expected_pack_metadata() -> None:
     names = [pack.name for pack in iter_pack_catalog()]
 
@@ -42,6 +82,10 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     assert "OPENCLAW_NEXA_MEM0_BASE_URL" in get_pack_definition("openclaw").mutable_env_keys
     assert "OPENCLAW_NEXA_PRESENCE_POLICY" in get_pack_definition("openclaw").mutable_env_keys
     assert "OPENCLAW_NEXA_TALK_SHARED_SECRET" in get_pack_definition("openclaw").mutable_env_keys
+    assert get_pack_definition("my-farm-advisor").depends_on == ()
+    assert _MY_FARM_ADVISOR_EXPECTED_MUTABLE_ENV_KEYS <= set(
+        get_pack_definition("my-farm-advisor").mutable_env_keys
+    )
     assert get_pack_definition("my-farm-advisor").mutable_resource_keys == (
         "MY_FARM_ADVISOR_REPLICAS",
     )
@@ -78,12 +122,7 @@ def test_resolver_allows_both_advisor_packs_together() -> None:
         root_domain="example.com",
     )
 
-    assert selection.enabled_packs == (
-        "headscale",
-        "matrix",
-        "my-farm-advisor",
-        "openclaw",
-    )
+    assert selection.enabled_packs == ("matrix", "my-farm-advisor", "openclaw")
     assert selection.openclaw_channels == ("telegram",)
     assert selection.my_farm_advisor_channels == ("matrix", "telegram")
 
@@ -137,12 +176,13 @@ def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
                 "STACK_NAME": "catalog-stack",
                 "ROOT_DOMAIN": "example.com",
                 "PACKS": "matrix,my-farm-advisor",
+                "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
             },
         )
     )
 
     assert desired_state.selected_packs == ("matrix", "my-farm-advisor")
-    assert desired_state.enabled_packs == ("headscale", "matrix", "my-farm-advisor")
+    assert desired_state.enabled_packs == ("matrix", "my-farm-advisor")
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
         "matrix",
         "my-farm-advisor",

@@ -91,6 +91,38 @@ class OnlyofficeServiceConfig:
 
 
 @dataclass(frozen=True)
+class NextcloudAdvisorWorkspaceMountContract:
+    external_mount_name: str
+    external_mount_path: str
+    visible_root: str
+    runtime_state_source: str
+    notes: tuple[str, ...]
+    advisor_id: str = "openclaw"
+    volume_name: str = "openclaw-data"
+    container_mount_root: str = "/mnt/openclaw"
+    contract_path: str | None = None
+    read_write_mode: bool = True
+    rescan_schedule_identity: str = "openclaw"
+    enabled: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "advisor_id": self.advisor_id,
+            "container_mount_root": self.container_mount_root,
+            "contract_path": self.contract_path,
+            "enabled": self.enabled,
+            "external_mount_name": self.external_mount_name,
+            "external_mount_path": self.external_mount_path,
+            "notes": list(self.notes),
+            "read_write_mode": self.read_write_mode,
+            "rescan_schedule_identity": self.rescan_schedule_identity,
+            "runtime_state_source": self.runtime_state_source,
+            "visible_root": self.visible_root,
+            "volume_name": self.volume_name,
+        }
+
+
+@dataclass(frozen=True)
 class NextcloudOpenClawWorkspaceContract:
     enabled: bool
     external_mount_name: str
@@ -100,16 +132,25 @@ class NextcloudOpenClawWorkspaceContract:
     runtime_state_source: str
     notes: tuple[str, ...]
 
+    @property
+    def advisor_mount(self) -> NextcloudAdvisorWorkspaceMountContract:
+        return NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="openclaw",
+            volume_name="openclaw-data",
+            container_mount_root="/mnt/openclaw",
+            external_mount_name=self.external_mount_name,
+            external_mount_path=self.external_mount_path,
+            visible_root=self.visible_root,
+            contract_path=self.contract_path,
+            runtime_state_source=self.runtime_state_source,
+            read_write_mode=True,
+            rescan_schedule_identity="openclaw",
+            notes=self.notes,
+            enabled=self.enabled,
+        )
+
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "contract_path": self.contract_path,
-            "enabled": self.enabled,
-            "external_mount_name": self.external_mount_name,
-            "external_mount_path": self.external_mount_path,
-            "notes": list(self.notes),
-            "runtime_state_source": self.runtime_state_source,
-            "visible_root": self.visible_root,
-        }
+        return self.advisor_mount.to_dict()
 
 
 @dataclass(frozen=True)
