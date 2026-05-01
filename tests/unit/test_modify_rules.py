@@ -120,6 +120,42 @@ def test_modify_cloudflare_auth_rotation_only_reruns_networking() -> None:
     assert plan.phases_to_run == ("networking",)
 
 
+def test_same_target_with_incomplete_checkpoint_and_stale_fingerprint_reruns_from_start() -> None:
+    raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_CODER": "true",
+            "CODER_WILDCARD_SUBDOMAIN": "*.coder",
+        }
+    )
+    desired = resolve_desired_state(raw)
+
+    plan = classify_modify_request(
+        existing_raw=raw,
+        existing_desired=desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="stale-fingerprint",
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=raw,
+        requested_desired=desired,
+    )
+
+    assert plan.mode == "resume"
+    assert plan.start_phase == "preflight"
+    assert plan.preserved_phases == ()
+    assert plan.initial_completed_steps == ()
+    assert plan.phases_to_run == plan.applicable_phases
+
+
 def test_modify_access_email_change_reruns_access_phase() -> None:
     existing_raw = _raw(
         {
@@ -387,6 +423,8 @@ def test_modify_rejects_unmodeled_env_changes() -> None:
 def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
     assert get_mutable_pack_env_keys() == (
         "ADVISOR_GATEWAY_PASSWORD",
+        "AI_DEFAULT_API_KEY",
+        "AI_DEFAULT_BASE_URL",
         "HERMES_INFERENCE_PROVIDER",
         "HERMES_MODEL",
         "MY_FARM_ADVISOR_CHANNELS",
@@ -490,16 +528,16 @@ def test_modify_coder_hermes_env_change_reruns_coder() -> None:
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
             "ENABLE_CODER": "true",
-            "OPENCODE_GO_API_KEY": "old-key",
+            "AI_DEFAULT_API_KEY": "old-key",
             "HERMES_INFERENCE_PROVIDER": "opencode-go",
             "HERMES_MODEL": "deepseek-v4-flash",
-            "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
+            "AI_DEFAULT_BASE_URL": "https://opencode.ai/zen/go/v1",
         }
     )
     requested_raw = _raw(
         {
             **existing_raw.values,
-            "OPENCODE_GO_API_KEY": "new-key",
+            "AI_DEFAULT_API_KEY": "new-key",
         }
     )
 
