@@ -62,6 +62,10 @@ _DEFAULT_LOCAL_MODEL_ID = "unsloth-active"
 _DEFAULT_LOCAL_MODEL_REF = "local/unsloth-active"
 _DEFAULT_LOCAL_MODEL_BASE_URL = "http://tuxdesktop.tailb12aa5.ts.net:61434/v1"
 _DEFAULT_LOCAL_MODEL_API_KEY = "sk-no-key-required"
+_DEFAULT_AI_DEFAULT_PROVIDER_ID = "opencode-go"
+_DEFAULT_AI_DEFAULT_MODEL_ID = "deepseek-v4-flash"
+_DEFAULT_AI_DEFAULT_MODEL_REF = "opencode-go/deepseek-v4-flash"
+_DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_GENERAL_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace"
 _DEFAULT_TELLY_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace-telly"
 _CLOUDFLARE_ACCESS_USER_HEADER = "cf-access-authenticated-user-email"
@@ -177,6 +181,8 @@ class _AdvisorRuntimeConfig:
     primary_model: str | None
     fallback_models: tuple[str, ...]
     openrouter_api_key: str | None
+    ai_default_api_key: str | None
+    ai_default_base_url: str
     nvidia_api_key: str | None
     telegram_bot_token: str | None
     telegram_owner_user_id: str | None
@@ -203,6 +209,8 @@ class DokployOpenClawBackend:
         openclaw_primary_model: str | None = None,
         openclaw_fallback_models: tuple[str, ...] = (),
         openclaw_openrouter_api_key: str | None = None,
+        openclaw_ai_default_api_key: str | None = None,
+        openclaw_ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
         openclaw_nvidia_api_key: str | None = None,
         openclaw_telegram_bot_token: str | None = None,
         openclaw_telegram_owner_user_id: str | None = None,
@@ -210,6 +218,8 @@ class DokployOpenClawBackend:
         my_farm_primary_model: str | None = None,
         my_farm_fallback_models: tuple[str, ...] = (),
         my_farm_openrouter_api_key: str | None = None,
+        my_farm_ai_default_api_key: str | None = None,
+        my_farm_ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
         my_farm_nvidia_api_key: str | None = None,
         my_farm_telegram_bot_token: str | None = None,
         my_farm_telegram_owner_user_id: str | None = None,
@@ -230,6 +240,8 @@ class DokployOpenClawBackend:
                 primary_model=openclaw_primary_model,
                 fallback_models=openclaw_fallback_models,
                 openrouter_api_key=openclaw_openrouter_api_key,
+                ai_default_api_key=openclaw_ai_default_api_key,
+                ai_default_base_url=openclaw_ai_default_base_url,
                 nvidia_api_key=openclaw_nvidia_api_key,
                 telegram_bot_token=openclaw_telegram_bot_token,
                 telegram_owner_user_id=openclaw_telegram_owner_user_id,
@@ -248,6 +260,8 @@ class DokployOpenClawBackend:
                 primary_model=my_farm_primary_model,
                 fallback_models=my_farm_fallback_models,
                 openrouter_api_key=my_farm_openrouter_api_key,
+                ai_default_api_key=my_farm_ai_default_api_key,
+                ai_default_base_url=my_farm_ai_default_base_url,
                 nvidia_api_key=my_farm_nvidia_api_key,
                 telegram_bot_token=my_farm_telegram_bot_token,
                 telegram_owner_user_id=my_farm_telegram_owner_user_id,
@@ -1067,6 +1081,8 @@ def _gateway_environment(
         environment["OPENCLAW_GATEWAY_PASSWORD"] = runtime_config.gateway_password
     if runtime_config.openrouter_api_key is not None:
         environment["OPENROUTER_API_KEY"] = runtime_config.openrouter_api_key
+    elif runtime_config.ai_default_api_key is not None:
+        environment["OPENROUTER_API_KEY"] = runtime_config.ai_default_api_key
     if runtime_config.nvidia_api_key is not None:
         environment["NVIDIA_API_KEY"] = runtime_config.nvidia_api_key
     if runtime_config.telegram_bot_token is not None:
@@ -1094,6 +1110,30 @@ def _gateway_environment(
     if variant == "my-farm-advisor":
         environment["HOME"] = "/data"
     return environment
+
+
+def _model_refs_for_provider(
+    runtime_config: _AdvisorRuntimeConfig, *, provider_id: str
+) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for model_ref in _allowed_models(runtime_config):
+        if not model_ref.startswith(f"{provider_id}/"):
+            continue
+        model_id = model_ref.split("/", 1)[1].strip()
+        if model_id == "" or model_id in seen:
+            continue
+        seen.add(model_id)
+        ordered.append(model_id)
+    return tuple(ordered)
+
+
+def _remote_fallback_base_url(runtime_config: _AdvisorRuntimeConfig) -> str:
+    if runtime_config.openrouter_api_key is not None:
+        return "https://openrouter.ai/api/v1"
+    if runtime_config.ai_default_api_key is not None:
+        return runtime_config.ai_default_base_url
+    return "https://openrouter.ai/api/v1"
 
 
 def _render_gateway_service_block(
@@ -1180,8 +1220,12 @@ def _render_openclaw_nexa_sidecar_services(
         "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL": _DEFAULT_LOCAL_MODEL_BASE_URL,
         "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY": _DEFAULT_LOCAL_MODEL_API_KEY,
         "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
-        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
-        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_API_KEY": runtime_config.openrouter_api_key or "",
+        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL": _remote_fallback_base_url(
+            runtime_config
+        ),
+        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_API_KEY": (
+            runtime_config.openrouter_api_key or runtime_config.ai_default_api_key or ""
+        ),
         "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY": runtime_config.nvidia_api_key or "",
         "DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH": _nexa_runtime_volume_path(
             runtime_config.nexa_contract.runtime_contract_path
@@ -1434,34 +1478,64 @@ def _command_for_variant(
             model_defaults["fallbacks"] = list(runtime_config.fallback_models)
         defaults_payload["model"] = model_defaults
         defaults_payload["models"] = {model_ref: {} for model_ref in allowed_models}
+        providers: dict[str, object] = {
+            _DEFAULT_LOCAL_PROVIDER_ID: {
+                "baseUrl": _DEFAULT_LOCAL_MODEL_BASE_URL,
+                "apiKey": _DEFAULT_LOCAL_MODEL_API_KEY,
+                "api": "openai-completions",
+                "models": [
+                    {
+                        "id": _DEFAULT_LOCAL_MODEL_ID,
+                        "name": "Unsloth Active",
+                        "reasoning": True,
+                        "input": ["text"],
+                        "cost": {
+                            "input": 0,
+                            "output": 0,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                        },
+                        "contextWindow": 262144,
+                        "maxTokens": 32768,
+                        "compat": {
+                            "requiresStringContent": True,
+                        },
+                    }
+                ],
+            }
+        }
+        ai_default_models = _model_refs_for_provider(
+            runtime_config, provider_id=_DEFAULT_AI_DEFAULT_PROVIDER_ID
+        )
+        if ai_default_models and runtime_config.ai_default_api_key is not None:
+            providers[_DEFAULT_AI_DEFAULT_PROVIDER_ID] = {
+                "baseUrl": runtime_config.ai_default_base_url,
+                "apiKey": runtime_config.ai_default_api_key,
+                "api": "openai-completions",
+                "models": [
+                    {
+                        "id": model_id,
+                        "name": model_id,
+                        "reasoning": True,
+                        "input": ["text"],
+                        "cost": {
+                            "input": 0,
+                            "output": 0,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                        },
+                        "contextWindow": 262144,
+                        "maxTokens": 32768,
+                        "compat": {
+                            "requiresStringContent": True,
+                        },
+                    }
+                    for model_id in ai_default_models
+                ],
+            }
         payload["models"] = {
             "mode": "merge",
-            "providers": {
-                _DEFAULT_LOCAL_PROVIDER_ID: {
-                    "baseUrl": _DEFAULT_LOCAL_MODEL_BASE_URL,
-                    "apiKey": _DEFAULT_LOCAL_MODEL_API_KEY,
-                    "api": "openai-completions",
-                    "models": [
-                        {
-                            "id": _DEFAULT_LOCAL_MODEL_ID,
-                            "name": "Unsloth Active",
-                            "reasoning": True,
-                            "input": ["text"],
-                            "cost": {
-                                "input": 0,
-                                "output": 0,
-                                "cacheRead": 0,
-                                "cacheWrite": 0,
-                            },
-                            "contextWindow": 262144,
-                            "maxTokens": 32768,
-                            "compat": {
-                                "requiresStringContent": True,
-                            },
-                        }
-                    ],
-                }
-            },
+            "providers": providers,
         }
     if include_runtime_seed:
         payload["tools"] = {
