@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 from dokploy_wizard import cli
+from dokploy_wizard.lifecycle import changes as lifecycle_changes
 from dokploy_wizard.dokploy import (
     DokployApiError,
     DokployBootstrapAuthError,
@@ -20,7 +21,12 @@ from dokploy_wizard.dokploy import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
-from dokploy_wizard.lifecycle import LifecyclePlan, applicable_phases_for, classify_install_request
+from dokploy_wizard.lifecycle import (
+    LifecyclePlan,
+    applicable_phases_for,
+    classify_install_request,
+    classify_modify_request,
+)
 from dokploy_wizard.lifecycle.drift import DriftEntry, DriftReport, LifecycleDriftError
 from dokploy_wizard.packs import prompts as prompt_module
 from dokploy_wizard.packs.prompts import (
@@ -62,6 +68,45 @@ def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,
+    )
+
+
+def _raw_input(values: dict[str, str]) -> RawEnvInput:
+    return RawEnvInput(format_version=1, values=values)
+
+
+def _farm_modify_values(**overrides: str) -> dict[str, str]:
+    values = {
+        "STACK_NAME": "wizard-stack",
+        "ROOT_DOMAIN": "example.com",
+        "ENABLE_NEXTCLOUD": "true",
+        "ENABLE_MY_FARM_ADVISOR": "true",
+        "AI_DEFAULT_API_KEY": "shared-key",
+        "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+        "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+    }
+    values.update(overrides)
+    return values
+
+
+def _classify_modify_plan(
+    *, existing_values: dict[str, str], requested_values: dict[str, str]
+) -> LifecyclePlan:
+    existing_raw = _raw_input(existing_values)
+    requested_raw = _raw_input(requested_values)
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+    return classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=applicable_phases_for(existing_desired),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
     )
 
 
@@ -493,6 +538,9 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     ]
     manual_entries = [
         entry for entry in report["entries"] if entry["classification"] == "manual_collision"
+    ]
+    unknown_entries = [
+        entry for entry in report["entries"] if entry["classification"] == "unknown"
     ]
 
     assert any(
@@ -1567,6 +1615,92 @@ def test_install_resumes_from_first_preserved_phase_drift(monkeypatch: pytest.Mo
     assert resumed.phases_to_run == ("nextcloud", "seaweedfs", "openclaw")
     assert resumed.initial_completed_steps == resumed.preserved_phases
     assert "resuming from the first unhealthy preserved phase" in resumed.reasons[-1]
+
+
+def test_modify_farm_env_change_reruns_only_my_farm_phase() -> None:
+    plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(ENABLE_OPENCLAW="true"),
+        requested_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            MY_FARM_ADVISOR_PRIMARY_MODEL="anthropic/claude-opus-4.1",
+        ),
+    )
+
+    assert plan.mode == "modify"
+    assert "MY_FARM_ADVISOR_PRIMARY_MODEL" in plan.reasons[0]
+    assert plan.phases_to_run == ("my-farm-advisor",)
+
+
+def test_modify_disabled_farm_ignores_empty_pack_only_env_drift() -> None:
+    base_values = _farm_modify_values(ENABLE_MY_FARM_ADVISOR="false")
+    base_values.pop("MY_FARM_ADVISOR_PRIMARY_MODEL")
+
+    plan = _classify_modify_plan(
+        existing_values=base_values,
+        requested_values={**base_values, "MY_FARM_ADVISOR_PRIMARY_MODEL": ""},
+    )
+
+    assert plan.mode == "noop"
+    assert plan.phases_to_run == ()
+
+
+def test_modify_shared_ai_defaults_rerun_only_selected_advisor_phases() -> None:
+    farm_only_plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(),
+        requested_values=_farm_modify_values(AI_DEFAULT_API_KEY="shared-key-2"),
+    )
+    both_advisors_plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(ENABLE_OPENCLAW="true"),
+        requested_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            AI_DEFAULT_BASE_URL="https://models.example.com/v2",
+        ),
+    )
+
+    assert farm_only_plan.phases_to_run == ("my-farm-advisor",)
+    assert both_advisors_plan.phases_to_run == ("openclaw", "my-farm-advisor")
+
+
+def test_modify_add_my_farm_later_refreshes_nextcloud_without_openclaw() -> None:
+    existing_values = _farm_modify_values(ENABLE_MY_FARM_ADVISOR="false")
+    existing_values.pop("MY_FARM_ADVISOR_PRIMARY_MODEL")
+
+    plan = _classify_modify_plan(
+        existing_values=existing_values,
+        requested_values=_farm_modify_values(),
+    )
+
+    assert plan.mode == "modify"
+    assert "ENABLE_MY_FARM_ADVISOR" in plan.reasons[0]
+    assert plan.phases_to_run == (
+        "shared_core",
+        "nextcloud",
+        "my-farm-advisor",
+        "cloudflare_access",
+    )
+
+
+def test_modify_remove_my_farm_later_runs_only_farm_phase() -> None:
+    requested_values = _farm_modify_values(ENABLE_MY_FARM_ADVISOR="false")
+    requested_values.pop("MY_FARM_ADVISOR_PRIMARY_MODEL")
+
+    existing_raw = _raw_input(_farm_modify_values())
+    requested_raw = _raw_input(requested_values)
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    assert lifecycle_changes._removed_pack_phases(existing_desired, requested_desired) == {
+        "my-farm-advisor"
+    }
+
+    plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(),
+        requested_values=requested_values,
+    )
+
+    assert plan.mode == "modify"
+    assert "ENABLE_MY_FARM_ADVISOR" in plan.reasons[0]
+    assert plan.phases_to_run == ()
 
 
 def test_guided_dry_run_does_not_require_dokploy_admin_password() -> None:
