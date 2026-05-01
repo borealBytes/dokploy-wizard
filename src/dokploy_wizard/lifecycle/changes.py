@@ -9,9 +9,9 @@ from dokploy_wizard.packs.catalog import (
     get_mutable_pack_resource_keys,
 )
 from dokploy_wizard.state.models import (
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
-    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,

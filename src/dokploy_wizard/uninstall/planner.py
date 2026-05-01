@@ -17,7 +17,10 @@ from dokploy_wizard.networking import (
     TUNNEL_RESOURCE_TYPE,
 )
 from dokploy_wizard.packs.coder import CODER_DATA_RESOURCE_TYPE, CODER_SERVICE_RESOURCE_TYPE
-from dokploy_wizard.packs.docuseal import DOCUSEAL_DATA_RESOURCE_TYPE, DOCUSEAL_SERVICE_RESOURCE_TYPE
+from dokploy_wizard.packs.docuseal import (
+    DOCUSEAL_DATA_RESOURCE_TYPE,
+    DOCUSEAL_SERVICE_RESOURCE_TYPE,
+)
 from dokploy_wizard.packs.headscale import HEADSCALE_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.matrix import MATRIX_DATA_RESOURCE_TYPE, MATRIX_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.moodle import MOODLE_DATA_RESOURCE_TYPE, MOODLE_SERVICE_RESOURCE_TYPE
@@ -101,9 +104,15 @@ _RULES: dict[str, DeletionRule] = {
         phase="cloudflare_access", retain_safe=True, priority=9
     ),
     OPENCLAW_SERVICE_RESOURCE_TYPE: DeletionRule(phase="openclaw", retain_safe=True, priority=10),
-    OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE: DeletionRule(phase="openclaw", retain_safe=True, priority=11),
-    OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE: DeletionRule(phase="openclaw", retain_safe=True, priority=12),
-    OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE: DeletionRule(phase="openclaw", retain_safe=True, priority=13),
+    OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE: DeletionRule(
+        phase="openclaw", retain_safe=True, priority=11
+    ),
+    OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE: DeletionRule(
+        phase="openclaw", retain_safe=True, priority=12
+    ),
+    OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE: DeletionRule(
+        phase="openclaw", retain_safe=True, priority=13
+    ),
     MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE: DeletionRule(
         phase="my-farm-advisor", retain_safe=True, priority=11
     ),
@@ -274,7 +283,9 @@ def build_pack_disable_plan(
         set(existing_desired.enabled_packs) - set(requested_desired.enabled_packs)
     )
 
-    tailscale_disable_only = existing_desired.enable_tailscale and not requested_desired.enable_tailscale
+    tailscale_disable_only = (
+        existing_desired.enable_tailscale and not requested_desired.enable_tailscale
+    )
     access_disable_only = (
         bool(existing_desired.cloudflare_access_otp_emails)
         and not bool(requested_desired.cloudflare_access_otp_emails)

@@ -6,8 +6,18 @@ from pathlib import Path
 
 from dokploy_wizard.cli import run_install_flow
 from dokploy_wizard.state import RawEnvInput, parse_env_file
+from dokploy_wizard.tailscale import ShellTailscaleBackend
 
-from tests.integration.test_nextcloud_pack import FakeCloudflareBackend, FakeDokployBackend
+from tests.integration.test_networking_reconciler import FakeCoderBackend
+from tests.integration.test_nextcloud_pack import (
+    FakeCloudflareBackend,
+    FakeDokployBackend,
+    FakeNextcloudBackend,
+    FakeOpenClawBackend,
+    FakeSeaweedFsBackend,
+    FakeSharedCoreBackend,
+)
+from tests.unit.test_tailscale_phase import FakeRunner
 
 
 def _repo_root() -> Path:
@@ -16,10 +26,16 @@ def _repo_root() -> Path:
 
 def _load_mvp_env_with_host_facts() -> RawEnvInput:
     raw_env = parse_env_file(_repo_root() / ".install.env")
+    values = {
+        key: value
+        for key, value in raw_env.values.items()
+        if key != "ENABLE_TAILSCALE" and not key.startswith("TAILSCALE_")
+    }
     return RawEnvInput(
         format_version=raw_env.format_version,
         values={
-            **raw_env.values,
+            **values,
+            "PACKS": "nextcloud,openclaw,seaweedfs,coder",
             "HOST_OS_ID": "ubuntu",
             "HOST_OS_VERSION_ID": "24.04",
             "HOST_CPU_COUNT": "6",
@@ -43,6 +59,12 @@ def test_root_mvp_env_emits_current_install_order_contract(tmp_path: Path) -> No
         raw_env=_load_mvp_env_with_host_facts(),
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        tailscale_backend=ShellTailscaleBackend(_load_mvp_env_with_host_facts(), runner=FakeRunner()),
+        nextcloud_backend=FakeNextcloudBackend(),
+        seaweedfs_backend=FakeSeaweedFsBackend(),
+        coder_backend=FakeCoderBackend(),
+        openclaw_backend=FakeOpenClawBackend(),
     )
 
     assert summary["desired_state"]["selected_packs"] == [

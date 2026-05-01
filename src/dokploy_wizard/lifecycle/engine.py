@@ -13,7 +13,7 @@ from dokploy_wizard.core import (
     build_shared_core_ledger,
     reconcile_shared_core,
 )
-from dokploy_wizard.lifecycle.changes import LifecyclePlan, applicable_phases_for
+from dokploy_wizard.lifecycle.changes import LifecyclePlan
 from dokploy_wizard.networking import (
     CloudflareBackend,
     build_access_ledger,
@@ -53,9 +53,9 @@ from dokploy_wizard.packs.seaweedfs import (
 )
 from dokploy_wizard.preflight import PreflightReport
 from dokploy_wizard.state import (
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
-    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     OwnershipLedger,
     RawEnvInput,
     write_applied_checkpoint,
