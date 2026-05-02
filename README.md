@@ -13,7 +13,7 @@ Today this repo is not a scaffold or mock planner. It performs real deployment, 
 - **Shared Core** services used by packs
   - PostgreSQL
   - Redis
-- **Nextcloud + OnlyOffice**
+- **Nextcloud + OnlyOffice + Talk**
 - **Moodle**
 - **DocuSeal**
 - **OpenClaw** (user-visible name: **Nexa Claw**)
@@ -144,9 +144,9 @@ Shared Core is the common substrate for packs that need databases or cache servi
 
 These are wizard-owned resources, tracked in the ownership ledger, and reused across modify / rerun operations.
 
-### Nextcloud + OnlyOffice
+### Nextcloud + OnlyOffice + Talk
 
-The `nextcloud` pack always includes OnlyOffice as its paired document editor runtime.
+The `nextcloud` pack always includes OnlyOffice as its paired document editor runtime and Talk for real-time chat/voice/video.
 
 What the wizard wires today:
 
@@ -215,11 +215,15 @@ On first successful bootstrap the wizard:
 
 - provisions the initial Coder admin
 - pushes the seeded templates:
-  - `ubuntu-vscode`
-  - `ubuntu-vscode-opencode-web`
-  - `ubuntu-vscode-openwork`
-  - `ubuntu-vscode-kdense-byok`
-  - `ubuntu-vscode-hermes`
+
+  | Template | What it provides |
+  |---|---|
+  | `ubuntu-vscode` | Base Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `opencode`, `zellij` |
+  | `ubuntu-vscode-opencode-web` | OpenCode Web (browser-based IDE) |
+  | `ubuntu-vscode-openwork` | OpenWork (AI-assisted workspace) |
+  | `ubuntu-vscode-kdense-byok` | K-Dense BYOK (Bring Your Own Key for local model inference) |
+  | `ubuntu-vscode-hermes` | Hermes (on-device AI assistant) |
+
 - creates a default workspace for the operator
 
 That default template installs:
