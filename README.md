@@ -16,13 +16,14 @@ Today this repo is not a scaffold or mock planner. It performs real deployment, 
 - **Nextcloud + OnlyOffice**
 - **Moodle**
 - **DocuSeal**
-- **OpenClaw**
+- **OpenClaw** (user-visible name: **Nexa Claw**)
 - **Nexa**, embedded inside OpenClaw as the Nextcloud/Talk/OnlyOffice-facing agent runtime
 - **Telly**, embedded inside OpenClaw as the Telegram-facing agent persona
+- **My Farm Advisor** (user-visible name: **Nexa Farm**) — separate advisor runtime with Field Operations and Data Pipeline workspaces
 - **SeaweedFS** for S3-compatible object storage
 - **Coder** with a seeded Ubuntu + VS Code workspace template
 
-Optional packs also include Headscale, Matrix, and My Farm Advisor.
+Optional packs also include Headscale, Matrix, and Coder. My Farm Advisor is optional but can run side-by-side with OpenClaw.
 
 ## Current reality
 
