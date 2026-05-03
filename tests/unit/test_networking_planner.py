@@ -228,6 +228,7 @@ def test_litellm_admin_access_planned_without_advisor_packs() -> None:
         "http://wizard-stack-shared-litellm:4000" in note for note in access_phase.result.notes
     )
     assert any("https://litellm.example.com" in note for note in access_phase.result.notes)
+    assert any("302/401/403" in note for note in access_phase.result.notes)
     assert all(
         record.hostname != "litellm.example.com" for record in networking_phase.result.dns_records
     )

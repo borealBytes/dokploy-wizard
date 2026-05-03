@@ -131,6 +131,9 @@ def test_readme_documents_litellm_core_gateway_contract() -> None:
     assert "not written back" in readme.lower() or "not written" in readme.lower()
     assert "litellm." in readme
     assert "Cloudflare Access" in readme
+    assert "302" in readme and "403" in readme
+    assert "docker run --rm --network" in readme
+    assert "tailscale ssh" in readme
     assert "migration" in readme.lower() or "migrating" in readme.lower()
     assert "direct provider" in readme.lower() or "upstream" in readme.lower()
     assert "pytest" in readme

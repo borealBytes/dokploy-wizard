@@ -269,6 +269,9 @@ class DokploySharedCoreBackend:
             resource_name=resource_name,
         )
 
+    def refresh_compose(self) -> None:
+        self._ensure_compose_applied()
+
     def _lookup_locator(self, resource_id: str, kind: str) -> _ComposeLocator | None:
         compose_id = _parse_resource_id(resource_id, kind)
         if compose_id is None:
@@ -588,7 +591,13 @@ def build_litellm_consumer_model_allowlists(
         if isinstance(entry, dict) and isinstance(entry.get("model_name"), str)
     )
     available_aliases = set(configured_aliases)
-    default_aliases = tuple(alias for alias in plan.litellm.default_model_alias_order if alias in available_aliases)
+    default_aliases = tuple(
+        dict.fromkeys(
+            resolved_alias
+            for alias in plan.litellm.default_model_alias_order
+            if (resolved_alias := _resolve_litellm_default_alias(alias, available_aliases)) is not None
+        )
+    )
     return {
         "coder-hermes": default_aliases,
         "coder-kdense": tuple(alias for alias in ("openai/*",) if alias in available_aliases),
@@ -628,6 +637,14 @@ def _advisor_alias_allowlist(
             if normalized in available_aliases:
                 aliases.append(normalized)
     return tuple(dict.fromkeys(aliases))
+
+
+def _resolve_litellm_default_alias(alias: str, available_aliases: set[str]) -> str | None:
+    if alias in available_aliases:
+        return alias
+    if alias == "opencode-go/*" and "openai/*" in available_aliases:
+        return "openai/*"
+    return None
 
 
 def _optional_value(flat_env: dict[str, str], key: str) -> str | None:

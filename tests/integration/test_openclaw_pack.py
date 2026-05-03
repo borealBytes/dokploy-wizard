@@ -1262,6 +1262,73 @@ def test_install_fresh_with_both_advisors_renders_non_conflicting_compose_apps(
     )
 
 
+def test_dual_advisors_use_distinct_litellm_virtual_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "both-advisors-litellm.env"
+    api = RecordingDokployOpenClawApi()
+
+    _patch_real_dokploy_openclaw_backend(monkeypatch, api)
+
+    summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=RawEnvInput(
+            format_version=1,
+            values=_base_install_values(
+                ENABLE_OPENCLAW="true",
+                OPENCLAW_CHANNELS="telegram",
+                ENABLE_MY_FARM_ADVISOR="true",
+                MY_FARM_ADVISOR_CHANNELS="telegram",
+                AI_DEFAULT_API_KEY="shared-ai-key",
+                AI_DEFAULT_BASE_URL="https://models.example.com/v1",
+                MY_FARM_ADVISOR_PRIMARY_MODEL="anthropic/claude-sonnet-4",
+                CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
+            ),
+        ),
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=FakeCloudflareBackend(),
+        shared_core_backend=FakeSharedCoreBackend(),
+        headscale_backend=FakeHeadscaleBackend(),
+        matrix_backend=FakeMatrixBackend(),
+        nextcloud_backend=RecordingNextcloudBackend(),
+        openclaw_backend=None,
+    )
+
+    openclaw_env = _service_environment(
+        api.compose_files_by_name["wizard-stack-openclaw"],
+        "wizard-stack-openclaw",
+    )
+    farm_env = _service_environment(
+        api.compose_files_by_name["wizard-stack-my-farm-advisor"],
+        "wizard-stack-my-farm-advisor",
+    )
+
+    assert summary["lifecycle"]["phases_to_run"] == [
+        "dokploy_bootstrap",
+        "networking",
+        "shared_core",
+        "openclaw",
+        "my-farm-advisor",
+        "cloudflare_access",
+    ]
+    assert openclaw_env["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert farm_env["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert openclaw_env["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert farm_env["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert openclaw_env["OPENAI_API_KEY"] != farm_env["OPENAI_API_KEY"]
+    assert openclaw_env["LITELLM_VIRTUAL_KEY_OPENCLAW"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert farm_env["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == (
+        "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    )
+    assert "OPENROUTER_API_KEY" not in openclaw_env
+    assert "MY_FARM_ADVISOR_OPENROUTER_API_KEY" not in farm_env
+    assert "ANTHROPIC_API_KEY" not in openclaw_env
+    assert "ANTHROPIC_API_KEY" not in farm_env
+
+
 def test_modify_adding_farm_later_reruns_nextcloud_without_rerunning_openclaw(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

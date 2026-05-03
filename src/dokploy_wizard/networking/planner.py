@@ -572,14 +572,21 @@ def _access_target_hostnames(
         for key in ("openclaw", "my-farm-advisor")
         if key in desired_state.enabled_packs and key in desired_state.hostnames
     ]
-    if desired_state.shared_core.litellm is not None:
+    litellm_hostname = resolve_litellm_admin_hostname(raw_env=raw_env, desired_state=desired_state)
+    if litellm_hostname is not None:
         target_hostnames.append(
             (
                 _LITELLM_ADMIN_ACCESS_KEY,
-                _shared_service_admin_hostname(raw_env=raw_env, desired_state=desired_state),
+                litellm_hostname,
             )
         )
     return tuple(target_hostnames)
+
+
+def resolve_litellm_admin_hostname(*, raw_env: RawEnvInput, desired_state: DesiredState) -> str | None:
+    if desired_state.shared_core.litellm is None:
+        return None
+    return _shared_service_admin_hostname(raw_env=raw_env, desired_state=desired_state)
 
 
 def _shared_service_admin_hostname(*, raw_env: RawEnvInput, desired_state: DesiredState) -> str:
@@ -623,6 +630,7 @@ def _litellm_access_notes(*, desired_state: DesiredState, hostname: str) -> tupl
     return (
         f"LiteLLM internal containers should keep using '{internal_url}'.",
         f"LiteLLM admin access is planned separately at '{admin_url}' behind Cloudflare Access.",
+        "LiteLLM admin QA must treat 302/401/403 as protected success and must never accept an unauthenticated 200.",
         "LiteLLM admin DNS and tunnel ingress must remain separate from the internal service URL until Access protection is in place.",
     )
 
