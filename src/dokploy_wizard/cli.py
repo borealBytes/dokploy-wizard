@@ -1000,8 +1000,10 @@ def _run_lifecycle_flow(
         )
     if not dry_run and not existing_state:
         persist_install_scaffold(state_dir, raw_env, desired_state)
+    litellm_generated_keys = load_litellm_generated_keys(state_dir)
     if not dry_run:
         ensure_litellm_generated_keys(state_dir)
+        litellm_generated_keys = load_litellm_generated_keys(state_dir)
     require_real_dokploy_auth = _dokploy_api_auth_required(
         desired_state=desired_state,
         shared_core_backend=shared_core_backend,

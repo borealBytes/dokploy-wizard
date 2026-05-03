@@ -1162,7 +1162,14 @@ def test_install_fresh_my_farm_only_renders_compose_and_persists_lifecycle_state
     assert service_environment["ADVISOR_VARIANT"] == "my-farm-advisor"
     assert service_environment["ADVISOR_CANONICAL_HOSTNAME"] == "farm.example.com"
     assert service_environment["PRIMARY_MODEL"] == "anthropic/claude-sonnet-4"
-    assert service_environment["OPENROUTER_API_KEY"] == "shared-ai-key"
+    assert service_environment["OPENAI_BASE_URL"] == "http://farm-stack-shared-litellm:4000"
+    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == (
+        "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    )
+    assert "OPENROUTER_API_KEY" not in service_environment
+    assert "NVIDIA_API_KEY" not in service_environment
+    assert "ANTHROPIC_API_KEY" not in service_environment
     assert service_environment["HOME"] == "/data"
     assert service_environment["OPENCLAW_SYNC_SKILLS_ON_START"] == "0"
     assert loaded_state.applied_state is not None
