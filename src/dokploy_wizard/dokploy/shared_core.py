@@ -323,6 +323,7 @@ class DokploySharedCoreBackend:
                                 self._plan,
                                 self._mail_relay_config,
                                 self._litellm_env,
+                                self._litellm_generated_keys,
                             ),
                         )
                         self._client.deploy_compose(
@@ -345,6 +346,7 @@ class DokploySharedCoreBackend:
                         self._plan,
                         self._mail_relay_config,
                         self._litellm_env,
+                        self._litellm_generated_keys,
                     ),
                     app_name=self._compose_name,
                 )
@@ -374,6 +376,7 @@ class DokploySharedCoreBackend:
                     self._plan,
                     self._mail_relay_config,
                     self._litellm_env,
+                    self._litellm_generated_keys,
                 ),
                 app_name=self._compose_name,
             )
@@ -435,6 +438,7 @@ def _render_compose_file(
     plan: SharedCorePlan,
     mail_relay_config: dict[str, str],
     litellm_env: dict[str, str] | None = None,
+    litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> str:
     litellm_env = litellm_env or {}
     postgres_block = ""
@@ -490,7 +494,7 @@ def _render_compose_file(
     config_block = ""
     if plan.litellm is not None:
         litellm_image = litellm_env.get("LITELLM_IMAGE", "ghcr.io/berriai/litellm").strip() or "ghcr.io/berriai/litellm"
-        litellm_tag = litellm_env.get("LITELLM_IMAGE_TAG", "main-v1.40.14-stable").strip() or "main-v1.40.14-stable"
+        litellm_tag = litellm_env.get("LITELLM_IMAGE_TAG", "v1.83.14-stable").strip() or "v1.83.14-stable"
         litellm_config = render_litellm_config_yaml(
             build_litellm_config(litellm_env, _build_litellm_upstream_creds(litellm_env))
         )
@@ -499,6 +503,11 @@ def _render_compose_file(
         )
         postgres_password_env = _compose_env_var_name(plan.litellm.postgres.password_secret_ref)
         config_name = f"{plan.litellm.service_name}-config"
+        master_key_line = '      MASTER_KEY: "${LITELLM_MASTER_KEY}"\n'
+        salt_key_line = '      SALT_KEY: "${LITELLM_SALT_KEY}"\n'
+        if litellm_generated_keys is not None:
+            master_key_line = f'      MASTER_KEY: "{litellm_generated_keys.master_key}"\n'
+            salt_key_line = f'      SALT_KEY: "{litellm_generated_keys.salt_key}"\n'
         litellm_block = (
             f"  {plan.litellm.service_name}:\n"
             f"    image: {litellm_image}:{litellm_tag}\n"
@@ -506,8 +515,8 @@ def _render_compose_file(
             "    command: [\"--config\", \"/app/config.yaml\", \"--port\", \"4000\"]\n"
             "    environment:\n"
             f'      DATABASE_URL: "postgresql://{plan.litellm.postgres.user_name}:${{{postgres_password_env}:-change-me}}@{postgres_service_name}:5432/{plan.litellm.postgres.database_name}"\n'
-            '      MASTER_KEY: "${LITELLM_MASTER_KEY}"\n'
-            '      SALT_KEY: "${LITELLM_SALT_KEY}"\n'
+            f"{master_key_line}"
+            f"{salt_key_line}"
             "    configs:\n"
             f"      - source: {config_name}\n"
             "        target: /app/config.yaml\n"
