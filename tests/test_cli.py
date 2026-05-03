@@ -12,7 +12,6 @@ from typing import Any, cast
 import pytest
 
 from dokploy_wizard import cli
-from dokploy_wizard.lifecycle import changes as lifecycle_changes
 from dokploy_wizard.dokploy import (
     DokployApiError,
     DokployBootstrapAuthError,
@@ -29,6 +28,7 @@ from dokploy_wizard.lifecycle import (
     classify_install_request,
     classify_modify_request,
 )
+from dokploy_wizard.lifecycle import changes as lifecycle_changes
 from dokploy_wizard.lifecycle import engine as lifecycle_engine
 from dokploy_wizard.lifecycle.drift import DriftEntry, DriftReport, LifecycleDriftError
 from dokploy_wizard.networking import planner as networking_planner
@@ -456,9 +456,6 @@ def test_build_live_drift_report_classifies_required_collision_types(
     assert wizard_entry["health"] == "unhealthy"
     manual_entries = [
         entry for entry in report["entries"] if entry["classification"] == "manual_collision"
-    ]
-    unknown_entries = [
-        entry for entry in report["entries"] if entry["classification"] == "unknown_unmanaged"
     ]
     assert any(entry["live_name"] == "openclaw-manual" for entry in manual_entries)
     assert any(

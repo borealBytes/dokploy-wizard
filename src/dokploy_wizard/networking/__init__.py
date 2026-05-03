@@ -20,8 +20,8 @@ from dokploy_wizard.networking.models import (
     PlannedAccessIdentityProvider,
     PlannedAccessPolicy,
     PlannedDnsRecord,
-    PlannedTunnelConnector,
     PlannedTunnel,
+    PlannedTunnelConnector,
 )
 from dokploy_wizard.networking.planner import (
     ACCESS_APPLICATION_RESOURCE_TYPE,

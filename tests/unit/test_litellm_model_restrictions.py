@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """T17 model restriction/discovery QA harness.
 
 Default offline contract:
@@ -19,20 +17,25 @@ can make upstream model calls. Discovery checks use `/v1/models` and `/model/inf
 the completion probe uses a forbidden explicit alias that should fail before any paid call.
 """
 
+from __future__ import annotations
+
 import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import cast
 from urllib import error, request
 
 import pytest
 
 from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.dokploy.shared_core import build_litellm_consumer_model_allowlists
-from dokploy_wizard.litellm.admin import LiteLLMGatewayManager, LiteLLMTeamRecord, LiteLLMVirtualKeyRecord
+from dokploy_wizard.litellm.admin import (
+    LiteLLMGatewayManager,
+    LiteLLMTeamRecord,
+    LiteLLMVirtualKeyRecord,
+)
 from dokploy_wizard.litellm.config_renderer import build_litellm_config
-
 
 EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
     "my-farm-advisor": (

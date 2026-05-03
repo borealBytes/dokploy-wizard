@@ -7,7 +7,6 @@ from pathlib import Path
 from dokploy_wizard.cli import run_install_flow
 from dokploy_wizard.state import RawEnvInput, parse_env_file
 from dokploy_wizard.tailscale import ShellTailscaleBackend
-
 from tests.integration.test_networking_reconciler import FakeCoderBackend
 from tests.integration.test_nextcloud_pack import (
     FakeCloudflareBackend,
@@ -18,7 +17,6 @@ from tests.integration.test_nextcloud_pack import (
     FakeSharedCoreBackend,
 )
 from tests.unit.test_tailscale_phase import FakeRunner
-
 
 _CORE_ONLY_STRIPPED_PREFIXES = (
     "ENABLE_",

@@ -5,12 +5,13 @@ from __future__ import annotations
 import re
 import ssl
 import time
-from http import cookiejar
 from dataclasses import dataclass
 from hashlib import sha256
+from http import cookiejar
 from typing import Protocol
 from urllib import error as urlerror
-from urllib import parse, request as urlrequest
+from urllib import parse
+from urllib import request as urlrequest
 
 from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.dokploy.client import (
@@ -519,7 +520,7 @@ def _local_https_health_check(url: str) -> bool:
     try:
         with urlrequest.urlopen(req, timeout=15, context=context):  # noqa: S310
             return True
-    except urlerror.HTTPError as exc:
+    except urlerror.HTTPError:
         return False
     except (urlerror.URLError, TimeoutError):
         return False

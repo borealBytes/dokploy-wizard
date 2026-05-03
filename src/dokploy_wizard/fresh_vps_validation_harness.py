@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import pexpect
 import posixpath
 import shlex
 import shutil
@@ -12,6 +11,8 @@ import tarfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+import pexpect
 
 ENV_PREFIX = "DOKPLOY_WIZARD_VPS_"
 DEFAULT_CONFIG_FILE = ".fresh-vps-validation.env"

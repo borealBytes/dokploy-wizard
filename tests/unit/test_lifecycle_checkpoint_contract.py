@@ -13,8 +13,8 @@ from dokploy_wizard.lifecycle import (
     validate_completed_steps,
 )
 from dokploy_wizard.state import (
-    AppliedStateCheckpoint,
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+    AppliedStateCheckpoint,
     RawEnvInput,
     StateValidationError,
     parse_env_file,
@@ -68,6 +68,7 @@ def test_root_mvp_env_applicable_phases_follow_required_order_and_keep_coder() -
         "nextcloud",
         "coder",
         "openclaw",
+        "my-farm-advisor",
         "cloudflare_access",
     )
 

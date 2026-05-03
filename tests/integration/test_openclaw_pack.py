@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 
 import dokploy_wizard.cli
+from dokploy_wizard.cli import run_install_flow, run_modify_flow
+from dokploy_wizard.core import SharedCoreResourceRecord
 from dokploy_wizard.dokploy import (
     DokployComposeRecord,
     DokployComposeSummary,
@@ -17,8 +19,6 @@ from dokploy_wizard.dokploy import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
-from dokploy_wizard.cli import run_install_flow, run_modify_flow
-from dokploy_wizard.core import SharedCoreResourceRecord
 from dokploy_wizard.dokploy.openclaw import DokployOpenClawBackend
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,

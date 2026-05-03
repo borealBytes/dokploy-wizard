@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from .nexa_scope import NexaScopeContext, build_onlyoffice_scope  # pyright: ignore[reportMissingImports]
+from .nexa_scope import (  # pyright: ignore[reportMissingImports]
+    NexaScopeContext,
+    build_onlyoffice_scope,
+)
 
 NexaOnlyofficeProcessingAction = Literal["reconcile", "await_final_close", "ignore"]
 NexaOnlyofficeSaveClass = Literal["final_close", "force_save", "non_save_signal"]

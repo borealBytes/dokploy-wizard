@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
-
 from dokploy_wizard.core import build_shared_core_plan
 from dokploy_wizard.packs.catalog import get_pack_definition, iter_pack_catalog
 from dokploy_wizard.packs.resolver import resolve_pack_selection
-from dokploy_wizard.state.models import StateValidationError
 from dokploy_wizard.state import RawEnvInput, resolve_desired_state
-
 
 _MY_FARM_ADVISOR_EXPECTED_MUTABLE_ENV_KEYS = {
     "ADVISOR_GATEWAY_PASSWORD",

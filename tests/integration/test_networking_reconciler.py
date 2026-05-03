@@ -18,7 +18,6 @@ from dokploy_wizard.networking import (
     CloudflareError,
     CloudflareTunnel,
 )
-from dokploy_wizard.preflight import HostFacts, PreflightCheck, PreflightReport, ResourceProfile
 from dokploy_wizard.packs.coder import CoderResourceRecord
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.nextcloud import (
@@ -28,6 +27,7 @@ from dokploy_wizard.packs.nextcloud import (
     TalkRuntime,
 )
 from dokploy_wizard.packs.openclaw import OpenClawResourceRecord
+from dokploy_wizard.preflight import HostFacts, PreflightCheck, PreflightReport, ResourceProfile
 from dokploy_wizard.state import load_state_dir
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
@@ -519,6 +519,9 @@ def test_install_non_dry_run_reconciles_networking_and_persists_ledger(tmp_path:
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
+        ("shared_core_network", "stack:wizard-stack:shared-network"),
+        ("shared_core_postgres", "stack:wizard-stack:shared-postgres"),
+        ("shared_core_litellm", "stack:wizard-stack:shared-litellm"),
         ("headscale_service", "stack:wizard-stack:headscale"),
     }
 
@@ -622,7 +625,8 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
     loaded_state = load_state_dir(state_dir)
     assert summary["cloudflare_access"]["outcome"] == "applied"
     assert [item["hostname"] for item in summary["cloudflare_access"]["applications"]] == [
-        "openclaw.example.com"
+        "openclaw.example.com",
+        "litellm.example.com",
     ]
     assert loaded_state.applied_state is not None
     assert loaded_state.applied_state.completed_steps[:5] == (
@@ -697,7 +701,7 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
 
     assert "farm.example.com" in dns_hostnames
     assert "office.example.com" in dns_hostnames
-    assert access_hostnames == ["farm.example.com"]
+    assert access_hostnames == ["farm.example.com", "litellm.example.com"]
     assert "office.example.com" not in access_hostnames
 
 

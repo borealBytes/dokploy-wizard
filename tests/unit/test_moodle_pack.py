@@ -20,7 +20,11 @@ from dokploy_wizard.dokploy import (
     DokployProjectSummary,
 )
 from dokploy_wizard.dokploy.client import DokployScheduleRecord
-from dokploy_wizard.dokploy.moodle import DokployMoodleApi, _local_https_health_check, _render_compose_file
+from dokploy_wizard.dokploy.moodle import (
+    DokployMoodleApi,
+    _local_https_health_check,
+    _render_compose_file,
+)
 from dokploy_wizard.packs.moodle import (
     MOODLE_DATA_RESOURCE_TYPE,
     MOODLE_SERVICE_RESOURCE_TYPE,

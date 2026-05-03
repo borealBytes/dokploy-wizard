@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Mapping, Literal
+from typing import Any, Callable, Literal, Mapping
 
 from .nexa_scope import NexaScopeContext
 

@@ -345,9 +345,9 @@ def test_install_non_dry_run_persists_scaffold_and_marks_bootstrap_steps(tmp_pat
         "shared_core",
         "headscale",
     )
-    assert len(loaded_state.ownership_ledger.resources) == 4
+    assert len(loaded_state.ownership_ledger.resources) == 7
     assert summary["networking"]["outcome"] == "applied"
-    assert summary["shared_core"]["outcome"] == "not_required"
+    assert summary["shared_core"]["outcome"] == "applied"
     assert summary["headscale"]["outcome"] == "applied"
 
 
@@ -447,7 +447,9 @@ def test_install_auth_failure_leaves_fresh_scaffold_on_disk(
     loaded_state = load_state_dir(state_dir)
 
     assert state_dir.exists()
-    assert sorted(path.name for path in state_dir.iterdir()) == sorted(STATE_DOCUMENT_FILES)
+    assert sorted(path.name for path in state_dir.iterdir()) == sorted(
+        [*STATE_DOCUMENT_FILES, "litellm-generated-keys.json"]
+    )
     assert loaded_state.raw_input is not None
     assert loaded_state.desired_state is not None
     assert loaded_state.applied_state is not None
