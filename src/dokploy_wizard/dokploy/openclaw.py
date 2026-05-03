@@ -35,6 +35,7 @@ _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 _DEFAULT_NVIDIA_VISIBLE_DEVICES = "all"
 _DEFAULT_APP_PORT = 18789
 _MY_FARM_ADVISOR_PORT = 18789
+_DEFAULT_LITELLM_INTERNAL_PORT = 4000
 _MY_FARM_ADVISOR_STATE_ROOT = "/data"
 _MY_FARM_ADVISOR_WORKSPACE_ROOT = f"{_MY_FARM_ADVISOR_STATE_ROOT}/workspace"
 _MY_FARM_ADVISOR_PIPELINE_WORKSPACE_ROOT = (
@@ -84,6 +85,7 @@ _DEFAULT_AI_DEFAULT_PROVIDER_ID = "opencode-go"
 _DEFAULT_AI_DEFAULT_MODEL_ID = "deepseek-v4-flash"
 _DEFAULT_AI_DEFAULT_MODEL_REF = "opencode-go/deepseek-v4-flash"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
+_DEFAULT_LITELLM_PROVIDER_ID = "ai-default"
 _DEFAULT_GENERAL_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace"
 _DEFAULT_TELLY_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace-telly"
 _CLOUDFLARE_ACCESS_USER_HEADER = "cf-access-authenticated-user-email"
@@ -904,6 +906,7 @@ def _render_compose_file(
     if split_gateway:
         public_service_name = f"{service_name}-public"
         internal_environment = _gateway_environment(
+            stack_name=stack_name,
             hostname=hostname,
             app_port=app_port,
             channel_list=channel_list,
@@ -919,6 +922,7 @@ def _render_compose_file(
                 service_name=service_name,
                 image=image,
                 command=_command_for_variant(
+                    stack_name=stack_name,
                     variant=variant,
                     hostname=hostname,
                     app_port=app_port,
@@ -944,6 +948,7 @@ def _render_compose_file(
             )
         )
         public_environment = _gateway_environment(
+            stack_name=stack_name,
             hostname=hostname,
             app_port=app_port,
             channel_list=channel_list,
@@ -959,6 +964,7 @@ def _render_compose_file(
                 service_name=public_service_name,
                 image=image,
                 command=_command_for_variant(
+                    stack_name=stack_name,
                     variant=variant,
                     hostname=hostname,
                     app_port=app_port,
@@ -983,6 +989,7 @@ def _render_compose_file(
     else:
         labels = _gateway_labels(service_name, hostname, app_port, slot_name, variant)
         environment = _gateway_environment(
+            stack_name=stack_name,
             hostname=hostname,
             app_port=app_port,
             channel_list=channel_list,
@@ -1012,6 +1019,7 @@ def _render_compose_file(
                 service_name=service_name,
                 image=image,
                 command=_command_for_variant(
+                    stack_name=stack_name,
                     variant=variant,
                     hostname=hostname,
                     app_port=app_port,
@@ -1156,6 +1164,7 @@ def _gateway_labels(
 
 def _gateway_environment(
     *,
+    stack_name: str,
     hostname: str,
     app_port: int,
     channel_list: str,
@@ -1191,14 +1200,9 @@ def _gateway_environment(
     if runtime_config.gateway_password is not None:
         environment["OPENCLAW_GATEWAY_PASSWORD"] = runtime_config.gateway_password
     if variant == "my-farm-advisor":
-        environment.update(_my_farm_gateway_environment(runtime_config))
+        environment.update(_my_farm_gateway_environment(stack_name=stack_name, runtime_config=runtime_config))
     else:
-        if runtime_config.openrouter_api_key is not None:
-            environment["OPENROUTER_API_KEY"] = runtime_config.openrouter_api_key
-        elif runtime_config.ai_default_api_key is not None:
-            environment["OPENROUTER_API_KEY"] = runtime_config.ai_default_api_key
-        if runtime_config.nvidia_api_key is not None:
-            environment["NVIDIA_API_KEY"] = runtime_config.nvidia_api_key
+        environment.update(_openclaw_gateway_environment(stack_name=stack_name))
         if runtime_config.telegram_bot_token is not None:
             environment["TELEGRAM_BOT_TOKEN"] = runtime_config.telegram_bot_token
     if include_nexa and variant == "openclaw" and runtime_config.nexa_contract is not None:
@@ -1226,6 +1230,15 @@ def _gateway_environment(
     return environment
 
 
+def _openclaw_gateway_environment(*, stack_name: str) -> dict[str, str]:
+    virtual_key_ref = _litellm_virtual_key_ref("openclaw")
+    return {
+        "LITELLM_VIRTUAL_KEY_OPENCLAW": virtual_key_ref,
+        "OPENAI_API_KEY": virtual_key_ref,
+        "OPENAI_BASE_URL": _litellm_internal_base_url(stack_name),
+    }
+
+
 def _env_value_present(value: str | None) -> bool:
     return value is not None and value.strip() != ""
 
@@ -1242,6 +1255,10 @@ def _set_env_if_present(environment: dict[str, str], key: str, value: str | None
         environment[key] = stripped_value
 
 
+def _litellm_internal_base_url(stack_name: str) -> str:
+    return f"http://{stack_name}-shared-litellm:{_DEFAULT_LITELLM_INTERNAL_PORT}"
+
+
 def _my_farm_r2_data_enabled(farm_env: _FarmAdvisorRuntimeEnv | None) -> bool:
     if farm_env is None:
         return False
@@ -1256,24 +1273,21 @@ def _my_farm_r2_data_enabled(farm_env: _FarmAdvisorRuntimeEnv | None) -> bool:
     )
 
 
-def _my_farm_gateway_environment(runtime_config: _AdvisorRuntimeConfig) -> dict[str, str]:
+def _my_farm_gateway_environment(*, stack_name: str, runtime_config: _AdvisorRuntimeConfig) -> dict[str, str]:
     farm_env = runtime_config.farm_env
     if farm_env is None:
         return {}
+    virtual_key_ref = _litellm_virtual_key_ref("my-farm-advisor")
     environment: dict[str, str] = {}
+    environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] = virtual_key_ref
+    environment["OPENAI_API_KEY"] = virtual_key_ref
+    environment["OPENAI_BASE_URL"] = _litellm_internal_base_url(stack_name)
     if runtime_config.primary_model is None and not runtime_config.fallback_models:
         environment["MODEL_PROVIDER"] = runtime_config.model_provider
         environment["MODEL_NAME"] = runtime_config.model_name
-    if runtime_config.openrouter_api_key is not None:
-        environment["OPENROUTER_API_KEY"] = runtime_config.openrouter_api_key
-    elif runtime_config.ai_default_api_key is not None:
-        environment["OPENROUTER_API_KEY"] = runtime_config.ai_default_api_key
-    _set_env_if_present(environment, "NVIDIA_API_KEY", runtime_config.nvidia_api_key)
     _set_env_if_present(environment, "PRIMARY_MODEL", runtime_config.primary_model)
     if runtime_config.fallback_models:
         environment["FALLBACK_MODELS"] = ",".join(runtime_config.fallback_models)
-    _set_env_if_present(environment, "ANTHROPIC_API_KEY", farm_env.anthropic_api_key)
-    _set_env_if_present(environment, "NVIDIA_BASE_URL", farm_env.nvidia_base_url)
     _set_env_if_present(environment, "TELEGRAM_BOT_TOKEN", runtime_config.telegram_bot_token)
     _set_env_if_present(environment, "TELEGRAM_OWNER_USER_ID", runtime_config.telegram_owner_user_id)
     _set_env_if_present(
@@ -1383,6 +1397,35 @@ def _remote_fallback_base_url(runtime_config: _AdvisorRuntimeConfig) -> str:
     if runtime_config.ai_default_api_key is not None:
         return runtime_config.ai_default_base_url
     return "https://openrouter.ai/api/v1"
+def _litellm_virtual_key_ref(consumer: str) -> str:
+    env_name = consumer.upper().replace("-", "_")
+    return f"${{LITELLM_VIRTUAL_KEY_{env_name}}}"
+
+
+def _generic_provider_model_entry(model_id: str) -> dict[str, object]:
+    return {
+        "id": model_id,
+        "name": model_id,
+        "reasoning": True,
+        "input": ["text"],
+        "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+        },
+        "contextWindow": 262144,
+        "maxTokens": 32768,
+    }
+
+
+def _litellm_provider_config(*, stack_name: str, model_ids: tuple[str, ...]) -> dict[str, object]:
+    return {
+        "baseUrl": _litellm_internal_base_url(stack_name),
+        "apiKey": _litellm_virtual_key_ref("openclaw"),
+        "api": "openai-completions",
+        "models": [_generic_provider_model_entry(model_id) for model_id in model_ids],
+    }
 
 
 def _render_gateway_service_block(
@@ -1635,6 +1678,7 @@ def _health_path_for_variant(variant: str) -> str:
 
 def _command_for_variant(
     *,
+    stack_name: str,
     variant: str,
     hostname: str,
     app_port: int,
@@ -1750,32 +1794,29 @@ def _command_for_variant(
                 ],
             }
         }
-        ai_default_models = _model_refs_for_provider(
-            runtime_config, provider_id=_DEFAULT_AI_DEFAULT_PROVIDER_ID
+        remote_model_ids: list[str] = []
+        remote_provider_ids = tuple(
+            dict.fromkeys(
+                _provider_for_model_ref(model_ref, default="")
+                for model_ref in _allowed_models(runtime_config)
+                if _provider_for_model_ref(model_ref, default="")
+                not in {"", _DEFAULT_LOCAL_PROVIDER_ID}
+            )
         )
-        if ai_default_models and runtime_config.ai_default_api_key is not None:
-            providers[_DEFAULT_AI_DEFAULT_PROVIDER_ID] = {
-                "baseUrl": runtime_config.ai_default_base_url,
-                "apiKey": runtime_config.ai_default_api_key,
-                "api": "openai-completions",
-                "models": [
-                    {
-                        "id": model_id,
-                        "name": model_id,
-                        "reasoning": True,
-                        "input": ["text"],
-                        "cost": {
-                            "input": 0,
-                            "output": 0,
-                            "cacheRead": 0,
-                            "cacheWrite": 0,
-                        },
-                        "contextWindow": 262144,
-                        "maxTokens": 32768,
-                    }
-                    for model_id in ai_default_models
-                ],
-            }
+        for provider_id in remote_provider_ids:
+            model_ids = _model_refs_for_provider(runtime_config, provider_id=provider_id)
+            if not model_ids:
+                continue
+            providers[provider_id] = _litellm_provider_config(
+                stack_name=stack_name,
+                model_ids=model_ids,
+            )
+            remote_model_ids.extend(model_ids)
+        if remote_model_ids:
+            providers[_DEFAULT_LITELLM_PROVIDER_ID] = _litellm_provider_config(
+                stack_name=stack_name,
+                model_ids=tuple(dict.fromkeys(remote_model_ids)),
+            )
         payload["models"] = {
             "mode": "merge",
             "providers": providers,

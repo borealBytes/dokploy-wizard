@@ -310,6 +310,17 @@ def test_resolve_desired_state_rejects_incomplete_shared_farm_provider_fallback(
         )
 
 
+def test_my_farm_advisor_accepts_litellm_canonical_env() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values=_farm_env_values(LITELLM_LOCAL_BASE_URL="http://100.64.0.10:8000/v1"),
+        )
+    )
+
+    assert "my-farm-advisor" in desired_state.enabled_packs
+
+
 def test_resolve_desired_state_rejects_openclaw_replicas_without_advisor_pack() -> None:
     with pytest.raises(StateValidationError, match="OPENCLAW_REPLICAS requires"):
         resolve_desired_state(
@@ -477,18 +488,19 @@ def test_resolve_desired_state_farm_only_does_not_require_openclaw_envs() -> Non
     assert desired_state.enabled_packs == ("my-farm-advisor",)
 
 
-def test_resolve_desired_state_rejects_configured_farm_env_without_farm_pack() -> None:
-    with pytest.raises(StateValidationError, match="require the 'my-farm-advisor' pack"):
-        resolve_desired_state(
-            RawEnvInput(
-                format_version=1,
-                values={
-                    "STACK_NAME": "wizard-stack",
-                    "ROOT_DOMAIN": "example.com",
-                    "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "openrouter-key",
-                },
-            )
+def test_resolve_desired_state_ignores_configured_farm_env_without_farm_pack() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "openrouter-key",
+            },
         )
+    )
+
+    assert desired_state.enabled_packs == ()
 
 
 def test_reconcile_openclaw_skips_when_openclaw_is_disabled() -> None:
@@ -996,8 +1008,12 @@ def test_openclaw_and_farm_advisor_render_side_by_side_without_collisions() -> N
 
     assert openclaw_env["ADVISOR_CANONICAL_HOSTNAME"] == "openclaw.example.com"
     assert farm_env["ADVISOR_CANONICAL_HOSTNAME"] == "farm.example.com"
-    assert openclaw_env["OPENROUTER_API_KEY"] == "openclaw-key"
-    assert farm_env["OPENROUTER_API_KEY"] == "shared-farm-key"
+    assert openclaw_env["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert openclaw_env["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert openclaw_env["LITELLM_VIRTUAL_KEY_OPENCLAW"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert farm_env["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert farm_env["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert farm_env["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
     assert openclaw_env["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
     assert farm_env["OPENCLAW_GATEWAY_PASSWORD"] == "farm-ui-generated"
     assert "MODEL_PROVIDER" in openclaw_env
@@ -1005,7 +1021,9 @@ def test_openclaw_and_farm_advisor_render_side_by_side_without_collisions() -> N
     assert "PRIMARY_MODEL" not in openclaw_env
     assert "ANTHROPIC_API_KEY" not in openclaw_env
     assert "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN" not in openclaw_env
-    assert farm_env["ANTHROPIC_API_KEY"] == "anthropic-key"
+    assert "OPENROUTER_API_KEY" not in farm_env
+    assert "NVIDIA_API_KEY" not in farm_env
+    assert "ANTHROPIC_API_KEY" not in farm_env
     assert farm_env["TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN"] == "field-token"
     assert "PRIMARY_MODEL" not in openclaw_env
     assert "PRIMARY_MODEL" not in farm_env
@@ -1288,7 +1306,7 @@ def test_dokploy_my_farm_backend_uses_trusted_proxy_mode_for_single_gateway_when
     assert "payload.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;" not in compose
 
 
-def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys() -> None:
+def test_openclaw_seeded_config_routes_through_litellm() -> None:
     api = FakeDokployOpenClawApi()
     backend = DokployOpenClawBackend(
         api_url="https://dokploy.example.com/api",
@@ -1319,11 +1337,15 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
 
     compose = api.last_create_compose_file
     assert compose is not None
-    assert 'OPENROUTER_API_KEY: "or-key"' in compose
-    assert 'NVIDIA_API_KEY: "nv-key"' in compose
     assert 'TELEGRAM_BOT_TOKEN: "bot-token"' in compose
     assert "MODEL_PROVIDER:" not in compose
     assert "MODEL_NAME:" not in compose
+    service_environment = _service_environment(compose, "wizard-stack-openclaw")
+    assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert service_environment["LITELLM_VIRTUAL_KEY_OPENCLAW"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert "OPENROUTER_API_KEY" not in service_environment
+    assert "NVIDIA_API_KEY" not in service_environment
 
     seeded = _decode_seeded_gateway_payload(compose)
     assert seeded["agents"]["defaults"]["model"]["primary"] == "nvidia/moonshotai/kimi-k2.5"
@@ -1358,6 +1380,83 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
         "nvidia/moonshotai/kimi-k2.5": {},
         "openrouter/openrouter/free": {},
         "openrouter/google/gemma-4-31b-it:free": {},
+    }
+    assert seeded["models"]["providers"]["local"] == {
+        "baseUrl": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
+        "apiKey": "sk-no-key-required",
+        "api": "openai-completions",
+        "models": [
+            {
+                "id": "unsloth-active",
+                "name": "Unsloth Active",
+                "reasoning": True,
+                "input": ["text"],
+                "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                },
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+            }
+        ],
+    }
+    assert seeded["models"]["providers"]["openrouter"] == {
+        "baseUrl": "http://wizard-stack-shared-litellm:4000",
+        "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
+        "api": "openai-completions",
+        "models": [
+            {
+                "id": "openrouter/free",
+                "name": "openrouter/free",
+                "reasoning": True,
+                "input": ["text"],
+                "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                },
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+            },
+            {
+                "id": "google/gemma-4-31b-it:free",
+                "name": "google/gemma-4-31b-it:free",
+                "reasoning": True,
+                "input": ["text"],
+                "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                },
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+            },
+        ],
+    }
+    assert seeded["models"]["providers"]["nvidia"] == {
+        "baseUrl": "http://wizard-stack-shared-litellm:4000",
+        "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
+        "api": "openai-completions",
+        "models": [
+            {
+                "id": "moonshotai/kimi-k2.5",
+                "name": "moonshotai/kimi-k2.5",
+                "reasoning": True,
+                "input": ["text"],
+                "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                },
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+            }
+        ],
     }
     assert seeded["channels"]["telegram"] == {
         "botToken": "bot-token",
@@ -1818,12 +1917,11 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapp
         "PORT": "18789",
         "TRUSTED_PROXIES": "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
         "OPENCLAW_GATEWAY_PASSWORD": "farm-ui-generated",
-        "OPENROUTER_API_KEY": "shared-ai-key",
-        "NVIDIA_API_KEY": "nvidia-key",
+        "LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR": "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}",
+        "OPENAI_API_KEY": "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}",
+        "OPENAI_BASE_URL": "http://wizard-stack-shared-litellm:4000",
         "PRIMARY_MODEL": "nvidia/nemotron-3-super-120b-a12b:free",
         "FALLBACK_MODELS": "openrouter/openrouter/healer-alpha,nvidia/moonshotai/kimi-k2.5",
-        "ANTHROPIC_API_KEY": "anthropic-key",
-        "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
         "TELEGRAM_BOT_TOKEN": "farm-telegram-token",
         "TELEGRAM_OWNER_USER_ID": "123456",
         "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN": "field-token",
@@ -1852,7 +1950,7 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapp
     }
 
 
-def test_dokploy_openclaw_backend_keeps_openclaw_env_mapping_unchanged() -> None:
+def test_openclaw_upstream_keys_do_not_leak() -> None:
     api = FakeDokployOpenClawApi()
     backend = DokployOpenClawBackend(
         api_url="https://dokploy.example.com/api",
@@ -1889,11 +1987,14 @@ def test_dokploy_openclaw_backend_keeps_openclaw_env_mapping_unchanged() -> None
     assert "/app/scripts/entrypoint.sh" not in compose
     assert service_environment["OPENCLAW_GATEWAY_TOKEN"] == "fixed-token-123"
     assert service_environment["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
-    assert service_environment["OPENROUTER_API_KEY"] == "openrouter-key"
-    assert service_environment["NVIDIA_API_KEY"] == "nvidia-key"
     assert service_environment["TELEGRAM_BOT_TOKEN"] == "telegram-token"
     assert service_environment["MODEL_PROVIDER"] == "openai"
     assert service_environment["MODEL_NAME"] == "gpt-4o-mini"
+    assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert service_environment["LITELLM_VIRTUAL_KEY_OPENCLAW"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert "OPENROUTER_API_KEY" not in service_environment
+    assert "NVIDIA_API_KEY" not in service_environment
     assert "ANTHROPIC_API_KEY" not in service_environment
     assert "PRIMARY_MODEL" not in service_environment
     assert "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN" not in service_environment
@@ -1935,7 +2036,9 @@ def test_dokploy_openclaw_backend_omits_partial_my_farm_optional_data_envs() -> 
     compose = api.last_create_compose_file
     assert compose is not None
     service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
-    assert service_environment["OPENROUTER_API_KEY"] == "shared-ai-key"
+    assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
     assert service_environment["OPENCLAW_SYNC_SKILLS_ON_START"] == "0"
     assert service_environment["OPENCLAW_BOOTSTRAP_REFRESH"] == "1"
     assert service_environment["OPENCLAW_MEMORY_SEARCH_ENABLED"] == "1"
@@ -1949,6 +2052,47 @@ def test_dokploy_openclaw_backend_omits_partial_my_farm_optional_data_envs() -> 
     assert "WORKSPACE_DATA_R2_PREFIX" not in service_environment
     assert "OPENCLAW_SYNC_SKILLS_OVERWRITE" not in service_environment
     assert "OPENCLAW_FORCE_SKILL_SYNC" not in service_environment
+
+
+def test_farm_consumes_litellm_only() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_primary_model="local/unsloth-active",
+        my_farm_fallback_models=("openai/*", "openrouter/openrouter/free"),
+        my_farm_openrouter_api_key="openrouter-key",
+        my_farm_nvidia_api_key="nvidia-key",
+        anthropic_api_key="anthropic-key",
+        my_farm_telegram_bot_token="farm-telegram-token",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
+
+    assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["PRIMARY_MODEL"] == "local/unsloth-active"
+    assert service_environment["FALLBACK_MODELS"] == "openai/*,openrouter/openrouter/free"
+    assert service_environment["TELEGRAM_BOT_TOKEN"] == "farm-telegram-token"
+    assert "OPENROUTER_API_KEY" not in service_environment
+    assert "NVIDIA_API_KEY" not in service_environment
+    assert "ANTHROPIC_API_KEY" not in service_environment
 
 
 def test_dokploy_my_farm_backend_uses_default_model_env_when_no_explicit_models() -> None:
@@ -1978,7 +2122,9 @@ def test_dokploy_my_farm_backend_uses_default_model_env_when_no_explicit_models(
     compose = api.last_create_compose_file
     assert compose is not None
     service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
-    assert service_environment["OPENROUTER_API_KEY"] == "shared-ai-key"
+    assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
     assert service_environment["MODEL_PROVIDER"] == "local"
     assert service_environment["MODEL_NAME"] == "unsloth-active"
     assert "PRIMARY_MODEL" not in service_environment
