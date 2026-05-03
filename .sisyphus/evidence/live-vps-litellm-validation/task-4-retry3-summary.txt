@@ -1,0 +1,38 @@
+Task 4 retry3 summary
+=====================
+
+Date: 2026-05-03
+Host: 217.216.82.51
+
+Code changes included:
+- Removed LiteLLM runtime reconciliation from shared-core compose apply.
+- Deferred LiteLLM runtime reconciliation until after Postgres allocation provisioning.
+
+Remote cleanup performed:
+- Removed all Docker containers.
+- Removed all Docker volumes.
+- Removed `/root/.dokploy-wizard-state`.
+- Removed `/root/dokploy-wizard/.dokploy-wizard-state`.
+- Removed lingering Dokploy swarm services (`dokploy`, `dokploy-postgres`, `dokploy-redis`).
+
+Repo sync evidence:
+- Remote git HEAD reset to `7f6fac2dec314bac230aa5d3867a8d69c1a68d2e` before overlaying the current local worktree.
+- Remote `.install.env` preserved at mode `600`.
+
+Fresh install retry result:
+- Installer still exited non-zero with:
+  `LiteLLM did not become ready before the timeout. ... LiteLLM admin API request failed: [Errno -3] Temporary failure in name resolution.`
+
+Post-failure remote evidence:
+- Shared Postgres role `openmerge_litellm` now exists.
+- LiteLLM container eventually became `healthy`.
+- Internal readiness probe returned:
+  `{"status":"healthy","db":"connected",...}`
+- LiteLLM logs show successful Prisma migration and startup:
+  - `prisma migrate deploy completed`
+  - `Script executed successfully.`
+  - `Uvicorn running on http://0.0.0.0:4000`
+
+Interpretation:
+- The original lifecycle-ordering / missing-role failure is fixed.
+- Retry3 exposed a separate post-start/admin-DNS timing issue after LiteLLM and Postgres became healthy.

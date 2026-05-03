@@ -216,6 +216,10 @@ def reconcile_shared_core(
                     if allocation.postgres is not None
                 )
             )
+    if not dry_run:
+        reconcile_litellm = getattr(backend, "reconcile_litellm_runtime", None)
+        if callable(reconcile_litellm):
+            reconcile_litellm()
     actions = [network.action]
     if postgres is not None:
         actions.append(postgres.action)

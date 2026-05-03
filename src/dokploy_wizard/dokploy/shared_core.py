@@ -273,6 +273,9 @@ class DokploySharedCoreBackend:
     def refresh_compose(self) -> None:
         self._ensure_compose_applied()
 
+    def reconcile_litellm_runtime(self) -> None:
+        self._ensure_litellm_runtime_ready_and_reconciled()
+
     def _lookup_locator(self, resource_id: str, kind: str) -> _ComposeLocator | None:
         compose_id = _parse_resource_id(resource_id, kind)
         if compose_id is None:
@@ -331,7 +334,6 @@ class DokploySharedCoreBackend:
                             title="dokploy-wizard shared core reconcile",
                             description="Update shared core compose app",
                         )
-                        self._ensure_litellm_runtime_ready_and_reconciled()
                         locator = _ComposeLocator(
                             project_id=project.project_id,
                             environment_id=environment.environment_id,
@@ -355,7 +357,6 @@ class DokploySharedCoreBackend:
                     title="dokploy-wizard shared core reconcile",
                     description="Create shared core compose app",
                 )
-                self._ensure_litellm_runtime_ready_and_reconciled()
                 locator = _ComposeLocator(
                     project_id=project.project_id,
                     environment_id=environment.environment_id,
@@ -385,7 +386,6 @@ class DokploySharedCoreBackend:
                 title="dokploy-wizard shared core reconcile",
                 description="Create shared core compose app",
             )
-            self._ensure_litellm_runtime_ready_and_reconciled()
         except DokployApiError as error:
             raise SharedCoreError(str(error)) from error
         locator = _ComposeLocator(
