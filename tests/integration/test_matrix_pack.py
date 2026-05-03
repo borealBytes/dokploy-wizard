@@ -219,9 +219,11 @@ class FakeSharedCoreBackend:
     network: SharedCoreResourceRecord | None = None
     postgres: SharedCoreResourceRecord | None = None
     redis: SharedCoreResourceRecord | None = None
+    litellm: SharedCoreResourceRecord | None = None
     create_network_calls: int = 0
     create_postgres_calls: int = 0
     create_redis_calls: int = 0
+    create_litellm_calls: int = 0
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self.network is not None and self.network.resource_id == resource_id:
@@ -287,6 +289,24 @@ class FakeSharedCoreBackend:
 
     def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
         raise AssertionError(f"Matrix should not provision mail relay: {resource_name}")
+
+    def get_litellm_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_id == resource_id:
+            return self.litellm
+        return None
+
+    def find_litellm_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_name == resource_name:
+            return self.litellm
+        return None
+
+    def create_litellm_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        self.create_litellm_calls += 1
+        self.litellm = SharedCoreResourceRecord(
+            resource_id="litellm-1",
+            resource_name=resource_name,
+        )
+        return self.litellm
 
 
 @dataclass
@@ -507,6 +527,7 @@ def test_install_reconciles_matrix_and_persists_runtime_ledger(tmp_path: Path) -
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:matrix.example.com"),
+        ("shared_core_litellm", "stack:matrix-stack:shared-litellm"),
         ("shared_core_network", "stack:matrix-stack:shared-network"),
         ("shared_core_postgres", "stack:matrix-stack:shared-postgres"),
         ("shared_core_redis", "stack:matrix-stack:shared-redis"),

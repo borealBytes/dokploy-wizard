@@ -1,3 +1,4 @@
+# pyright: reportOptionalMemberAccess=false
 from __future__ import annotations
 
 import argparse
@@ -526,6 +527,11 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
                 f"stack:{desired_state.stack_name}:seaweedfs-service",
             ),
             OwnedResource(
+                "shared_core_litellm",
+                "svc-shared-litellm",
+                f"stack:{desired_state.stack_name}:shared-litellm",
+            ),
+            OwnedResource(
                 "shared_core_postgres",
                 "svc-shared-postgres",
                 f"stack:{desired_state.stack_name}:shared-postgres",
@@ -803,7 +809,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     assert not any(entry["live_name"] == coder_workspace_container for entry in manual_entries)
     assert not any(entry["live_name"] == coder_named_template_container for entry in manual_entries)
     assert not any(entry["live_name"] == runtime_container for entry in unknown_entries)
-    assert report["summary"]["wizard_managed"] == 11
+    assert report["summary"]["wizard_managed"] == 12
     assert report["summary"]["manual_collision"] == 0
 
 
@@ -1880,6 +1886,17 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
     assert plan.phases_to_run == ("shared_core", "coder", "openclaw", "my-farm-advisor")
 
 
+def test_modify_litellm_consumer_removal_reruns_shared_core() -> None:
+    plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(ENABLE_OPENCLAW="true"),
+        requested_values=_farm_modify_values(ENABLE_OPENCLAW="false"),
+    )
+
+    assert plan.mode == "modify"
+    assert "ENABLE_OPENCLAW" in plan.reasons[0]
+    assert plan.phases_to_run == ("networking", "shared_core", "cloudflare_access")
+
+
 def test_modify_add_my_farm_later_refreshes_nextcloud_without_openclaw() -> None:
     existing_values = _farm_modify_values(ENABLE_MY_FARM_ADVISOR="false")
     existing_values.pop("MY_FARM_ADVISOR_PRIMARY_MODEL")
@@ -2016,7 +2033,7 @@ def test_modify_remove_my_farm_later_runs_only_farm_phase() -> None:
 
     assert plan.mode == "modify"
     assert "ENABLE_MY_FARM_ADVISOR" in plan.reasons[0]
-    assert plan.phases_to_run == ()
+    assert plan.phases_to_run == ("shared_core",)
     assert plan.preserved_phases[-1] == "nextcloud"
 
 
@@ -2076,7 +2093,7 @@ def test_modify_both_advisors_to_openclaw_only_runs_only_farm_teardown_phase() -
     }
     assert plan.mode == "modify"
     assert "ENABLE_MY_FARM_ADVISOR" in plan.reasons[0]
-    assert plan.phases_to_run == ()
+    assert plan.phases_to_run == ("shared_core",)
     assert "openclaw" not in plan.phases_to_run
 
 
@@ -4763,6 +4780,7 @@ def _run_lifecycle_refresh(
                 postgres_resource_id="postgres-1",
                 redis_resource_id="redis-1",
                 mail_relay_resource_id="mail-1",
+                litellm_resource_id="litellm-1",
             )
         ),
     )

@@ -287,7 +287,13 @@ def _validate_phase(
                 return DriftEntry(phase=phase, status="ok", detail="Shared core is not required.")
             actions = {
                 resource.action
-                for resource in (shared_core.network, shared_core.postgres, shared_core.redis)
+                for resource in (
+                    shared_core.network,
+                    shared_core.postgres,
+                    shared_core.redis,
+                    shared_core.mail_relay,
+                    shared_core.litellm,
+                )
                 if resource is not None
             }
             if actions - {"reuse_owned"}:
@@ -301,6 +307,14 @@ def _validate_phase(
             )
             if callable(validate_allocations):
                 postgres_allocations = tuple(
+                    allocation
+                    for allocation in (
+                        desired_state.shared_core.litellm.postgres
+                        if desired_state.shared_core.litellm is not None
+                        else None,
+                    )
+                    if allocation is not None
+                ) + tuple(
                     allocation.postgres
                     for allocation in desired_state.shared_core.allocations
                     if allocation.postgres is not None
@@ -313,6 +327,17 @@ def _validate_phase(
                             "Shared-core Postgres allocations are not ready for all preserved "
                             "packs; "
                             "rerun the phase."
+                        ),
+                    )
+            validate_litellm_config = getattr(shared_core_backend, "validate_litellm_config", None)
+            if callable(validate_litellm_config) and desired_state.shared_core.litellm is not None:
+                if not validate_litellm_config(desired_state=desired_state):
+                    return DriftEntry(
+                        phase=phase,
+                        status="drift",
+                        detail=(
+                            "LiteLLM config no longer matches the desired wizard inputs; "
+                            "rerun the shared-core phase."
                         ),
                     )
             return DriftEntry(
@@ -483,7 +508,8 @@ def _validate_phase(
                     status="drift",
                     detail=f"DocuSeal expected owned reuse, found actions {sorted(actions)}.",
                 )
-            if getattr(docuseal, "bootstrap_state", None) is not None and not docuseal.bootstrap_state.initialized:
+            bootstrap_state = getattr(docuseal, "bootstrap_state", None)
+            if bootstrap_state is not None and not bootstrap_state.initialized:
                 return DriftEntry(
                     phase=phase,
                     status="drift",

@@ -234,6 +234,7 @@ class FakeSharedCoreBackend:
     network: SharedCoreResourceRecord | None = None
     postgres: SharedCoreResourceRecord | None = None
     redis: SharedCoreResourceRecord | None = None
+    litellm: SharedCoreResourceRecord | None = None
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self.network is not None and self.network.resource_id == resource_id:
@@ -296,6 +297,23 @@ class FakeSharedCoreBackend:
 
     def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
         raise AssertionError(f"OpenClaw should not provision mail relay: {resource_name}")
+
+    def get_litellm_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_id == resource_id:
+            return self.litellm
+        return None
+
+    def find_litellm_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_name == resource_name:
+            return self.litellm
+        return None
+
+    def create_litellm_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        self.litellm = SharedCoreResourceRecord(
+            resource_id="shared-litellm-1",
+            resource_name=resource_name,
+        )
+        return self.litellm
 
 
 @dataclass
@@ -747,6 +765,7 @@ def test_install_reconciles_openclaw_and_persists_slot_ledger(tmp_path: Path) ->
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:matrix.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:openclaw.example.com"),
+        ("shared_core_litellm", "stack:openclaw-stack:shared-litellm"),
         ("shared_core_network", "stack:openclaw-stack:shared-network"),
         ("shared_core_postgres", "stack:openclaw-stack:shared-postgres"),
         ("shared_core_redis", "stack:openclaw-stack:shared-redis"),
@@ -819,6 +838,10 @@ def test_install_rerun_reuses_owned_advisor_service(tmp_path: Path) -> None:
             network=SharedCoreResourceRecord(
                 resource_id="shared-network-1",
                 resource_name="openclaw-stack-shared",
+            ),
+            litellm=SharedCoreResourceRecord(
+                resource_id="shared-litellm-1",
+                resource_name="openclaw-stack-shared-litellm",
             ),
             postgres=SharedCoreResourceRecord(
                 resource_id="shared-postgres-1",
@@ -1393,7 +1416,7 @@ def test_modify_removing_farm_later_removes_owned_farm_resources_only(
     }
 
     assert summary["lifecycle"]["mode"] == "modify"
-    assert summary["lifecycle"]["phases_to_run"] == []
+    assert summary["lifecycle"]["phases_to_run"] == ["shared_core"]
     assert MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE in deleted_types
     assert OPENCLAW_SERVICE_RESOURCE_TYPE not in deleted_types
     assert loaded_state.ownership_ledger is not None

@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from dokploy_wizard.core import (
+    SHARED_LITELLM_RESOURCE_TYPE,
     SHARED_NETWORK_RESOURCE_TYPE,
     SHARED_POSTGRES_RESOURCE_TYPE,
     SHARED_REDIS_RESOURCE_TYPE,
 )
+from dokploy_wizard.lifecycle.changes import applicable_phases_for
 from dokploy_wizard.networking import (
     ACCESS_APPLICATION_RESOURCE_TYPE,
     ACCESS_OTP_PROVIDER_RESOURCE_TYPE,
@@ -79,6 +81,7 @@ class UninstallPlan:
     deletions: tuple[PlannedDeletion, ...]
     retained_resources: tuple[OwnedResource, ...]
     warnings: tuple[str, ...]
+    completed_steps_ceiling: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -137,6 +140,7 @@ _RULES: dict[str, DeletionRule] = {
     MATRIX_SERVICE_RESOURCE_TYPE: DeletionRule(phase="matrix", retain_safe=True, priority=30),
     MATRIX_DATA_RESOURCE_TYPE: DeletionRule(phase="matrix", retain_safe=False, priority=31),
     HEADSCALE_SERVICE_RESOURCE_TYPE: DeletionRule(phase="headscale", retain_safe=True, priority=40),
+    SHARED_LITELLM_RESOURCE_TYPE: DeletionRule(phase="shared_core", retain_safe=True, priority=49),
     SHARED_NETWORK_RESOURCE_TYPE: DeletionRule(phase="shared_core", retain_safe=True, priority=50),
     SHARED_POSTGRES_RESOURCE_TYPE: DeletionRule(
         phase="shared_core", retain_safe=False, priority=51
@@ -270,6 +274,7 @@ def build_uninstall_plan(
         deletions=tuple(deletions),
         retained_resources=tuple(retained_resources),
         warnings=tuple(warnings),
+        completed_steps_ceiling=None,
     )
 
 
@@ -386,6 +391,11 @@ def build_pack_disable_plan(
             "Pack disable retains wizard-owned data resources when delete semantics are not "
             "proven safe by the current ownership-ledger model."
         )
+    completed_steps_ceiling = _completed_steps_ceiling_for_pack_disable(
+        existing_desired=existing_desired,
+        requested_desired=requested_desired,
+        removed_packs=removed_packs,
+    )
 
     return UninstallPlan(
         mode="retain",
@@ -393,6 +403,7 @@ def build_pack_disable_plan(
         deletions=tuple(deletions),
         retained_resources=tuple(retained_resources),
         warnings=tuple(warnings),
+        completed_steps_ceiling=completed_steps_ceiling,
     )
 
 
@@ -502,6 +513,10 @@ def _shared_core_complete(
         resources_by_type, SHARED_REDIS_RESOURCE_TYPE
     ):
         return False
+    if desired_state.shared_core.litellm is not None and not _has_resource_type(
+        resources_by_type, SHARED_LITELLM_RESOURCE_TYPE
+    ):
+        return False
     return True
 
 
@@ -552,3 +567,32 @@ def _dns_scope_matches_any_hostname(scope: str, hostnames: set[str]) -> bool:
 
 def _access_scope_matches_any_hostname(scope: str, hostnames: set[str]) -> bool:
     return any(scope.endswith(f":{hostname.lower()}") for hostname in hostnames)
+
+
+def _completed_steps_ceiling_for_pack_disable(
+    *,
+    existing_desired: DesiredState,
+    requested_desired: DesiredState,
+    removed_packs: list[str],
+) -> tuple[str, ...] | None:
+    if not _shared_core_dirty_after_pack_disable(
+        existing_desired=existing_desired,
+        requested_desired=requested_desired,
+        removed_packs=removed_packs,
+    ):
+        return None
+    applicable_phases = applicable_phases_for(requested_desired)
+    if "shared_core" not in applicable_phases:
+        return None
+    return applicable_phases[: applicable_phases.index("shared_core")]
+
+
+def _shared_core_dirty_after_pack_disable(
+    *,
+    existing_desired: DesiredState,
+    requested_desired: DesiredState,
+    removed_packs: list[str],
+) -> bool:
+    if existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict():
+        return True
+    return bool({"openclaw", "my-farm-advisor"} & set(removed_packs))

@@ -199,6 +199,7 @@ def execute_lifecycle_plan(
                     postgres_resource_id=shared_core.postgres_resource_id,
                     redis_resource_id=shared_core.redis_resource_id,
                     mail_relay_resource_id=shared_core.mail_relay_resource_id,
+                    litellm_resource_id=shared_core.litellm_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "headscale":

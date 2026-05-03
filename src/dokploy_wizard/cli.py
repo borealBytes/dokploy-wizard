@@ -1590,6 +1590,7 @@ def _build_shared_core_backend(
             api_key=api_key,
             stack_name=desired_state.stack_name,
             plan=desired_state.shared_core,
+            litellm_env=dict(raw_env.values),
             mail_relay_config={
                 key: value
                 for key, value in raw_env.values.items()

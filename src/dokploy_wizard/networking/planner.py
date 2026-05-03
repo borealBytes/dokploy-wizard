@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from dokploy_wizard.networking.cloudflare import (
@@ -46,6 +47,7 @@ _LITELLM_ADMIN_ACCESS_KEY = "litellm-admin"
 _LITELLM_ADMIN_SUBDOMAIN_ENV_KEY = "LITELLM_ADMIN_SUBDOMAIN"
 _LITELLM_ADMIN_DEFAULT_SUBDOMAIN = "litellm"
 _LITELLM_INTERNAL_PORT = 4000
+_DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 @dataclass(frozen=True)
@@ -202,7 +204,7 @@ def reconcile_cloudflare_access(
     backend: CloudflareBackend,
 ) -> AccessPhase:
     credentials = _resolve_credentials(raw_env, desired_state, backend)
-    emails = desired_state.cloudflare_access_otp_emails
+    emails = _access_target_emails(raw_env=raw_env, desired_state=desired_state)
     target_hostnames = _access_target_hostnames(raw_env=raw_env, desired_state=desired_state)
     if not emails or not target_hostnames:
         return AccessPhase(
@@ -588,7 +590,27 @@ def _shared_service_admin_hostname(*, raw_env: RawEnvInput, desired_state: Desir
     )
     if not subdomain:
         subdomain = _LITELLM_ADMIN_DEFAULT_SUBDOMAIN
-    return f"{subdomain}.{desired_state.root_domain}"
+    if _DNS_LABEL_PATTERN.fullmatch(subdomain) is None:
+        raise CloudflareError(
+            f"{_LITELLM_ADMIN_SUBDOMAIN_ENV_KEY} must be a single DNS label containing only lowercase letters, digits, or hyphens."
+        )
+    hostname = f"{subdomain}.{desired_state.root_domain}"
+    if hostname in set(desired_state.hostnames.values()):
+        raise CloudflareError(
+            f"LiteLLM admin hostname '{hostname}' collides with an existing desired hostname. Choose a different {_LITELLM_ADMIN_SUBDOMAIN_ENV_KEY}."
+        )
+    return hostname
+
+
+def _access_target_emails(*, raw_env: RawEnvInput, desired_state: DesiredState) -> tuple[str, ...]:
+    if desired_state.cloudflare_access_otp_emails:
+        return desired_state.cloudflare_access_otp_emails
+    if desired_state.shared_core.litellm is None:
+        return ()
+    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "").strip().lower()
+    if admin_email and "@" in admin_email:
+        return (admin_email,)
+    return ()
 
 
 def _litellm_access_notes(*, desired_state: DesiredState, hostname: str) -> tuple[str, ...]:

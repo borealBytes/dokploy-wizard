@@ -227,10 +227,12 @@ class FakeSharedCoreBackend:
     postgres: SharedCoreResourceRecord | None = None
     redis: SharedCoreResourceRecord | None = None
     mail_relay: SharedCoreResourceRecord | None = None
+    litellm: SharedCoreResourceRecord | None = None
     create_network_calls: int = 0
     create_postgres_calls: int = 0
     create_redis_calls: int = 0
     create_mail_relay_calls: int = 0
+    create_litellm_calls: int = 0
     ensured_allocations: tuple[SharedPostgresAllocation, ...] = ()
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
@@ -304,6 +306,24 @@ class FakeSharedCoreBackend:
             resource_name=resource_name,
         )
         return self.mail_relay
+
+    def get_litellm_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_id == resource_id:
+            return self.litellm
+        return None
+
+    def find_litellm_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_name == resource_name:
+            return self.litellm
+        return None
+
+    def create_litellm_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        self.create_litellm_calls += 1
+        self.litellm = SharedCoreResourceRecord(
+            resource_id="litellm-1",
+            resource_name=resource_name,
+        )
+        return self.litellm
 
     def ensure_postgres_allocations(
         self, allocations: tuple[SharedPostgresAllocation, ...]
@@ -559,6 +579,7 @@ def test_install_plans_and_persists_shared_core_once_for_nextcloud(tmp_path: Pat
         ("cloudflare_dns_record", "zone:zone-123:nextcloud.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:office.example.com"),
         ("headscale_service", "stack:nextcloud-stack:headscale"),
+        ("shared_core_litellm", "stack:nextcloud-stack:shared-litellm"),
         ("shared_core_network", "stack:nextcloud-stack:shared-network"),
         ("shared_core_postgres", "stack:nextcloud-stack:shared-postgres"),
         ("shared_core_redis", "stack:nextcloud-stack:shared-redis"),
@@ -632,9 +653,11 @@ def test_install_rerun_reuses_owned_shared_core_resources(tmp_path: Path) -> Non
     )
 
     assert summary["shared_core"]["outcome"] == "already_present"
+    assert summary["shared_core"]["litellm"]["action"] == "reuse_owned"
     assert summary["shared_core"]["network"]["action"] == "reuse_owned"
     assert summary["shared_core"]["postgres"]["action"] == "reuse_owned"
     assert summary["shared_core"]["redis"]["action"] == "reuse_owned"
+    assert shared_backend.create_litellm_calls == 1
     assert shared_backend.create_network_calls == 1
     assert shared_backend.create_postgres_calls == 1
     assert shared_backend.create_redis_calls == 1

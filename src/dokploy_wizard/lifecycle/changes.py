@@ -389,9 +389,7 @@ def classify_modify_request(
             "AI_DEFAULT_BASE_URL",
             "ADVISOR_GATEWAY_PASSWORD",
         }
-    removed_packs = sorted(
-        set(existing_desired.enabled_packs) - set(requested_desired.enabled_packs)
-    )
+    removed_packs = set(existing_desired.enabled_packs) - set(requested_desired.enabled_packs)
     unsupported_keys = sorted(effective_changed_keys - _SUPPORTED_MODIFY_KEYS - {"STACK_NAME"})
     if existing_desired.stack_name != requested_desired.stack_name:
         reasons.append("STACK_NAME changes are unsupported in Task 11.")
@@ -472,10 +470,9 @@ def classify_modify_request(
             phases_to_run.add("moodle")
         if "docuseal" in requested_desired.enabled_packs:
             phases_to_run.add("docuseal")
-    if (
-        existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict()
-        and not removed_packs
-    ):
+    if existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict():
+        phases_to_run.add("shared_core")
+    if set(removed_packs) & {"openclaw", "my-farm-advisor"}:
         phases_to_run.add("shared_core")
     phases_to_run.update(_hostname_change_phases(existing_desired, requested_desired))
     phases_to_run.update(_new_pack_phases(existing_desired, requested_desired))

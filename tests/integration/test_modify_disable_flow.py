@@ -89,18 +89,23 @@ def _seed_nextcloud_state(state_dir: Path) -> None:
                 ),
                 OwnedResource(
                     "shared_core_network",
-                    "nextcloud-stack-core",
+                    "nextcloud-stack-shared",
                     "stack:nextcloud-stack:shared-network",
                 ),
                 OwnedResource(
                     "shared_core_postgres",
-                    "nextcloud-stack-postgres",
+                    "nextcloud-stack-shared-postgres",
                     "stack:nextcloud-stack:shared-postgres",
                 ),
                 OwnedResource(
                     "shared_core_redis",
-                    "nextcloud-stack-redis",
+                    "nextcloud-stack-shared-redis",
                     "stack:nextcloud-stack:shared-redis",
+                ),
+                OwnedResource(
+                    "shared_core_litellm",
+                    "nextcloud-stack-shared-litellm",
+                    "stack:nextcloud-stack:shared-litellm",
                 ),
                 OwnedResource(
                     "headscale_service",
@@ -162,7 +167,6 @@ def test_modify_disable_nextcloud_deletes_runtime_and_preserves_data(tmp_path: P
         "cloudflare_dns_record",
         "nextcloud_service",
         "onlyoffice_service",
-        "shared_core_network",
     }
     assert loaded.ownership_ledger is not None
     assert {resource.resource_type for resource in loaded.ownership_ledger.resources} == {
@@ -171,8 +175,9 @@ def test_modify_disable_nextcloud_deletes_runtime_and_preserves_data(tmp_path: P
         "headscale_service",
         "nextcloud_volume",
         "onlyoffice_volume",
+        "shared_core_litellm",
+        "shared_core_network",
         "shared_core_postgres",
-        "shared_core_redis",
     }
     assert loaded.applied_state is not None
     assert loaded.applied_state.completed_steps == (

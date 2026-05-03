@@ -14,6 +14,7 @@ from dokploy_wizard.core.models import (
 )
 from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.core.reconciler import (
+    SHARED_LITELLM_RESOURCE_TYPE,
     SHARED_NETWORK_RESOURCE_TYPE,
     SHARED_POSTGRES_RESOURCE_TYPE,
     SHARED_REDIS_RESOURCE_TYPE,
@@ -26,6 +27,7 @@ from dokploy_wizard.core.reconciler import (
 
 __all__ = [
     "PackSharedAllocation",
+    "SHARED_LITELLM_RESOURCE_TYPE",
     "SHARED_NETWORK_RESOURCE_TYPE",
     "SHARED_POSTGRES_RESOURCE_TYPE",
     "SHARED_REDIS_RESOURCE_TYPE",
