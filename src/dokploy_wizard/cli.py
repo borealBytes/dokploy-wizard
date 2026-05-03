@@ -116,9 +116,11 @@ from dokploy_wizard.state import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
+    LiteLLMGeneratedKeys,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
+    load_litellm_generated_keys,
     load_state_dir,
     parse_env_file,
     persist_install_scaffold,
@@ -607,7 +609,11 @@ def _handle_inspect_state(args: argparse.Namespace) -> int:
         loaded_state = load_state_dir(args.state_dir)
         raw_env = parse_env_file(args.env_file)
         desired_state = resolve_desired_state(raw_env)
-        snapshot = _build_public_inspection_snapshot(raw_env=raw_env, desired_state=desired_state)
+        snapshot = _build_public_inspection_snapshot(
+            raw_env=raw_env,
+            desired_state=desired_state,
+            litellm_generated_keys=load_litellm_generated_keys(args.state_dir),
+        )
         snapshot["live_drift"] = build_live_drift_report(
             desired_state=desired_state,
             ownership_ledger=loaded_state.ownership_ledger,
@@ -624,16 +630,22 @@ def _handle_inspect_state(args: argparse.Namespace) -> int:
 _INSPECT_REDACTION_VALUE = "<redacted>"
 _INSPECT_SECRET_KEYS = (
     "API_KEY",
+    "MASTER_KEY",
     "PASSWORD",
+    "SALT_KEY",
     "SECRET",
     "TOKEN",
     "AUTH_KEY",
     "ACCESS_KEY",
+    "VIRTUAL_KEY",
 )
 
 
 def _build_public_inspection_snapshot(
-    *, raw_env: RawEnvInput, desired_state: DesiredState
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> dict[str, Any]:
     snapshot = desired_state.to_dict()
     for key in ("seaweedfs_access_key", "seaweedfs_secret_key", "openclaw_gateway_token"):
@@ -663,6 +675,15 @@ def _build_public_inspection_snapshot(
             ),
         },
     }
+    if litellm_generated_keys is not None:
+        snapshot["litellm"] = {
+            "master_key": _INSPECT_REDACTION_VALUE,
+            "salt_key": _INSPECT_REDACTION_VALUE,
+            "virtual_keys": {
+                consumer: _INSPECT_REDACTION_VALUE
+                for consumer in sorted(litellm_generated_keys.virtual_keys)
+            },
+        }
     return snapshot
 
 

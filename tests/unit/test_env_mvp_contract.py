@@ -6,6 +6,9 @@ from pathlib import Path
 
 from dokploy_wizard.state import parse_env_file, resolve_desired_state
 from dokploy_wizard.packs.resolver import resolve_pack_selection
+from dokploy_wizard.state.models import RawEnvInput, StateValidationError
+
+import pytest
 
 
 def _repo_root() -> Path:
@@ -14,6 +17,29 @@ def _repo_root() -> Path:
 
 def _load_root_env():
     return parse_env_file(_repo_root() / ".install.env")
+
+
+def _farm_litellm_env(**overrides: str) -> RawEnvInput:
+    values = {
+        "STACK_NAME": "wizard-stack",
+        "ROOT_DOMAIN": "example.com",
+        "ENABLE_MY_FARM_ADVISOR": "true",
+        "LITELLM_IMAGE": "ghcr.io/berriai/litellm",
+        "LITELLM_IMAGE_TAG": "main-v1.40.14-stable",
+        "LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
+        "LITELLM_LOCAL_MODEL": "unsloth/Qwen2.5-Coder-32B-Instruct",
+        "LITELLM_ADMIN_SUBDOMAIN": "litellm",
+        "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
+        "OPENCODE_GO_API_KEY": "opencode-go-upstream-key",
+        "LITELLM_OPENROUTER_MODELS": (
+            "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini,"
+            "openrouter/healer-alpha=openrouter/anthropic/claude-3.5-sonnet"
+        ),
+        "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-upstream-key",
+        "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
+    }
+    values.update(overrides)
+    return RawEnvInput(format_version=1, values=values)
 
 
 def test_root_install_env_resolves_current_mvp_pack_contract() -> None:
@@ -54,3 +80,33 @@ def test_root_install_env_keeps_headscale_disabled_while_preserving_tailscale() 
     assert desired_state.tailscale_hostname == "openmerge"
     assert desired_state.enabled_features == ("dokploy",)
     assert "tailscale" not in desired_state.hostnames
+
+
+def test_litellm_canonical_env_validates_without_direct_consumer_provider_keys() -> None:
+    desired_state = resolve_desired_state(
+        _farm_litellm_env(
+            MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
+            MY_FARM_ADVISOR_NVIDIA_API_KEY="",
+            ANTHROPIC_API_KEY="",
+            AI_DEFAULT_API_KEY="",
+            AI_DEFAULT_BASE_URL="",
+        )
+    )
+
+    assert "my-farm-advisor" in desired_state.enabled_packs
+
+
+def test_litellm_canonical_env_rejects_missing_local_endpoint_with_actionable_error() -> None:
+    with pytest.raises(StateValidationError, match="LITELLM_LOCAL_BASE_URL"):
+        resolve_desired_state(
+            _farm_litellm_env(
+                MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
+                MY_FARM_ADVISOR_NVIDIA_API_KEY="",
+                ANTHROPIC_API_KEY="",
+                AI_DEFAULT_API_KEY="",
+                AI_DEFAULT_BASE_URL="",
+                LITELLM_LOCAL_BASE_URL="",
+                OPENCODE_GO_API_KEY="",
+                OPENCODE_GO_BASE_URL="",
+            )
+        )

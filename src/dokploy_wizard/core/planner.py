@@ -5,6 +5,7 @@ from __future__ import annotations
 from dokploy_wizard.core.models import (
     PackSharedAllocation,
     SharedCorePlan,
+    SharedLiteLLMServicePlan,
     SharedMailRelayServicePlan,
     SharedPostgresAllocation,
     SharedPostgresServicePlan,
@@ -13,6 +14,13 @@ from dokploy_wizard.core.models import (
 )
 from dokploy_wizard.packs.catalog import get_pack_definition
 
+_DEFAULT_LITELLM_ALIAS_ORDER = (
+    "local/unsloth-active",
+    "opencode-go/*",
+    "openrouter/auto",
+    "openrouter/openrouter/free",
+)
+
 
 def build_shared_core_plan(
     stack_name: str,
@@ -20,7 +28,12 @@ def build_shared_core_plan(
     values: dict[str, str] | None = None,
 ) -> SharedCorePlan:
     allocations: list[PackSharedAllocation] = []
-    requires_postgres = False
+    litellm_postgres = SharedPostgresAllocation(
+        database_name=f"{stack_name}_litellm".replace("-", "_"),
+        user_name=f"{stack_name}_litellm".replace("-", "_")[:63],
+        password_secret_ref=f"{stack_name}-litellm-postgres-password",
+    )
+    requires_postgres = True
     requires_redis = False
     values = values or {}
 
@@ -54,6 +67,11 @@ def build_shared_core_plan(
     return SharedCorePlan(
         network_name=f"{stack_name}-shared",
         mail_relay=_build_shared_mail_relay_plan(stack_name, enabled_packs, values),
+        litellm=SharedLiteLLMServicePlan(
+            service_name=f"{stack_name}-shared-litellm",
+            postgres=litellm_postgres,
+            default_model_alias_order=_DEFAULT_LITELLM_ALIAS_ORDER,
+        ),
         postgres=(
             None
             if not requires_postgres

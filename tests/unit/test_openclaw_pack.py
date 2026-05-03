@@ -154,6 +154,15 @@ def _decode_extra_seeded_files(compose: str) -> dict[str, str]:
     }
 
 
+def _decode_embedded_python_script(compose: str) -> str:
+    match = re.search(
+        r'python3 -c .*?base64\.b64decode\((?:\\?[\"\"])??([A-Za-z0-9+/=]+)(?:\\?[\"\"])??\)',
+        compose,
+    )
+    assert match is not None
+    return base64.b64decode(match.group(1)).decode("utf-8")
+
+
 def _service_block(compose: str, service_name: str) -> str:
     match = re.search(
         rf"^  {re.escape(service_name)}:\n(?P<body>(?:    .*\n)*)",
@@ -1000,8 +1009,8 @@ def test_openclaw_and_farm_advisor_render_side_by_side_without_collisions() -> N
     assert farm_env["TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN"] == "field-token"
     assert "PRIMARY_MODEL" not in openclaw_env
     assert "PRIMARY_MODEL" not in farm_env
-    assert "MODEL_PROVIDER" not in farm_env
-    assert "MODEL_NAME" not in farm_env
+    assert farm_env["MODEL_PROVIDER"] == "openai"
+    assert farm_env["MODEL_NAME"] == "gpt-4o-mini"
     assert "DOKPLOY_WIZARD_NEXA_ENABLED" not in farm_env
 
     combined_ledger = build_my_farm_advisor_ledger(
@@ -1765,6 +1774,17 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapp
     assert "requiresStringContent" not in compose
     assert "/data/openclaw.json" in compose
     assert "/data/.openclaw/openclaw.json" in compose
+    assert "/data/skills/my-farm-advisor-skills" in compose
+    assert "/data/skills/scientific-agent-skills" in compose
+    assert "/data/workspace/skills" in compose
+    assert "git clone --depth 1 https://github.com/borealBytes/my-farm-advisor-skills.git" in compose
+    assert "git clone --depth 1 https://github.com/K-Dense-AI/scientific-agent-skills.git" in compose
+    assert "git -C /data/skills/my-farm-advisor-skills fetch --depth 1 origin" in compose
+    assert "git -C /data/skills/scientific-agent-skills fetch --depth 1 origin" in compose
+    sync_script = _decode_embedded_python_script(compose)
+    assert "farm_repo = Path(\"/data/skills/my-farm-advisor-skills\")" in sync_script
+    assert "scientific_root = Path(\"/data/skills/scientific-agent-skills/scientific-skills\")" in sync_script
+    assert "for source in sorted(scientific_root.iterdir())" in sync_script
     assert "/data/workspace-data-pipeline" in compose
     assert "http://127.0.0.1:18789" in compose
     assert "https://farm.example.com" in compose
@@ -1929,6 +1949,39 @@ def test_dokploy_openclaw_backend_omits_partial_my_farm_optional_data_envs() -> 
     assert "WORKSPACE_DATA_R2_PREFIX" not in service_environment
     assert "OPENCLAW_SYNC_SKILLS_OVERWRITE" not in service_environment
     assert "OPENCLAW_FORCE_SKILL_SYNC" not in service_environment
+
+
+def test_dokploy_my_farm_backend_uses_default_model_env_when_no_explicit_models() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-ai-key",
+        my_farm_telegram_bot_token="farm-telegram-token",
+        model_provider="local",
+        model_name="unsloth-active",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
+    assert service_environment["OPENROUTER_API_KEY"] == "shared-ai-key"
+    assert service_environment["MODEL_PROVIDER"] == "local"
+    assert service_environment["MODEL_NAME"] == "unsloth-active"
+    assert "PRIMARY_MODEL" not in service_environment
 
 
 def test_dokploy_openclaw_backend_accepts_legacy_advisor_service_resource_id() -> None:

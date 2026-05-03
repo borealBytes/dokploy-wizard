@@ -45,6 +45,20 @@ _MY_FARM_ADVISOR_SHARED_PROVIDER_ENV_KEYS = {
     "AI_DEFAULT_BASE_URL",
     "ANTHROPIC_API_KEY",
 }
+_LITELLM_CANONICAL_ENV_KEYS = {
+    "LITELLM_IMAGE",
+    "LITELLM_IMAGE_TAG",
+    "LITELLM_VERSION",
+    "LITELLM_ADMIN_SUBDOMAIN",
+    "LITELLM_LOCAL_BASE_URL",
+    "LITELLM_LOCAL_MODEL",
+    "LITELLM_OPENROUTER_MODELS",
+    "LITELLM_NVIDIA_MODELS",
+    "OPENCODE_GO_API_KEY",
+    "OPENCODE_GO_BASE_URL",
+    "OPENROUTER_API_KEY",
+    "NVIDIA_BASE_URL",
+}
 _MY_FARM_ADVISOR_OPTIONAL_ENV_KEYS = {
     "MY_FARM_ADVISOR_PRIMARY_MODEL",
     "MY_FARM_ADVISOR_FALLBACK_MODELS",
@@ -392,9 +406,31 @@ def _validate_my_farm_advisor_env(
             "My Farm Advisor shared provider fallback requires both AI_DEFAULT_API_KEY and "
             "AI_DEFAULT_BASE_URL. Empty strings count as unset."
         )
+
+    has_legacy_opencode_go_api_key = _has_configured_value(values, "OPENCODE_GO_API_KEY")
+    has_legacy_opencode_go_base_url = _has_configured_value(values, "OPENCODE_GO_BASE_URL")
+    if has_legacy_opencode_go_api_key and has_legacy_opencode_go_base_url:
+        return
+    if has_legacy_opencode_go_api_key or has_legacy_opencode_go_base_url:
+        raise StateValidationError(
+            "LiteLLM OpenCode Go compatibility requires both OPENCODE_GO_API_KEY and "
+            "OPENCODE_GO_BASE_URL. Empty strings count as unset."
+        )
+
+    if _has_configured_value(values, "LITELLM_LOCAL_BASE_URL"):
+        return
+    if _has_configured_value(values, "LITELLM_LOCAL_MODEL") or any(
+        _has_configured_value(values, key) for key in _LITELLM_CANONICAL_ENV_KEYS
+    ):
+        raise StateValidationError(
+            "LiteLLM canonical local mode for My Farm Advisor requires LITELLM_LOCAL_BASE_URL. "
+            "Point it at the reachable Tailnet/local vLLM endpoint. Empty strings count as unset."
+        )
+
     raise StateValidationError(
         "My Farm Advisor requires at least one provider configuration when enabled. Set "
         "MY_FARM_ADVISOR_OPENROUTER_API_KEY, MY_FARM_ADVISOR_NVIDIA_API_KEY, "
-        "ANTHROPIC_API_KEY, or both AI_DEFAULT_API_KEY and AI_DEFAULT_BASE_URL. "
-        "Empty strings count as unset."
+        "ANTHROPIC_API_KEY, both AI_DEFAULT_API_KEY and AI_DEFAULT_BASE_URL, both "
+        "OPENCODE_GO_API_KEY and OPENCODE_GO_BASE_URL, or LITELLM_LOCAL_BASE_URL for "
+        "LiteLLM canonical local mode. Empty strings count as unset."
     )

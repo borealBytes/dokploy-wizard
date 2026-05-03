@@ -42,6 +42,10 @@ ACCESS_APPLICATION_RESOURCE_TYPE = "cloudflare_access_application"
 ACCESS_POLICY_RESOURCE_TYPE = "cloudflare_access_policy"
 
 _NON_PUBLIC_HOSTNAME_KEYS = {"openclaw-internal"}
+_LITELLM_ADMIN_ACCESS_KEY = "litellm-admin"
+_LITELLM_ADMIN_SUBDOMAIN_ENV_KEY = "LITELLM_ADMIN_SUBDOMAIN"
+_LITELLM_ADMIN_DEFAULT_SUBDOMAIN = "litellm"
+_LITELLM_INTERNAL_PORT = 4000
 
 
 @dataclass(frozen=True)
@@ -199,11 +203,7 @@ def reconcile_cloudflare_access(
 ) -> AccessPhase:
     credentials = _resolve_credentials(raw_env, desired_state, backend)
     emails = desired_state.cloudflare_access_otp_emails
-    target_hostnames = tuple(
-        (key, desired_state.hostnames[key])
-        for key in ("openclaw", "my-farm-advisor")
-        if key in desired_state.enabled_packs and key in desired_state.hostnames
-    )
+    target_hostnames = _access_target_hostnames(raw_env=raw_env, desired_state=desired_state)
     if not emails or not target_hostnames:
         return AccessPhase(
             result=AccessResult(
@@ -271,6 +271,12 @@ def reconcile_cloudflare_access(
         *(item.action for item in policies),
     }
     outcome = "plan_only" if dry_run else ("applied" if "create" in actions else "already_present")
+    notes = [
+        "Cloudflare Access self-hosted applications are applied to advisor hostnames and the LiteLLM admin hostname."
+    ]
+    litellm_hostname = dict(target_hostnames).get(_LITELLM_ADMIN_ACCESS_KEY)
+    if litellm_hostname is not None:
+        notes.extend(_litellm_access_notes(desired_state=desired_state, hostname=litellm_hostname))
     return AccessPhase(
         result=AccessResult(
             outcome=outcome,
@@ -282,9 +288,7 @@ def reconcile_cloudflare_access(
             ),
             applications=tuple(apps),
             policies=tuple(policies),
-            notes=(
-                "Cloudflare Access self-hosted applications are applied only to advisor hostnames.",
-            ),
+            notes=tuple(notes),
         ),
         provider_resource_id=None if dry_run else provider.provider_id,
         application_resource_ids=app_ids,
@@ -553,7 +557,52 @@ def _access_display_name(pack_name: str) -> str:
         return "Nexa Claw"
     if pack_name == "my-farm-advisor":
         return "Nexa Farm"
+    if pack_name == _LITELLM_ADMIN_ACCESS_KEY:
+        return "LiteLLM Admin"
     return pack_name
+
+
+def _access_target_hostnames(
+    *, raw_env: RawEnvInput, desired_state: DesiredState
+) -> tuple[tuple[str, str], ...]:
+    target_hostnames: list[tuple[str, str]] = [
+        (key, desired_state.hostnames[key])
+        for key in ("openclaw", "my-farm-advisor")
+        if key in desired_state.enabled_packs and key in desired_state.hostnames
+    ]
+    if desired_state.shared_core.litellm is not None:
+        target_hostnames.append(
+            (
+                _LITELLM_ADMIN_ACCESS_KEY,
+                _shared_service_admin_hostname(raw_env=raw_env, desired_state=desired_state),
+            )
+        )
+    return tuple(target_hostnames)
+
+
+def _shared_service_admin_hostname(*, raw_env: RawEnvInput, desired_state: DesiredState) -> str:
+    subdomain = (
+        raw_env.values.get(_LITELLM_ADMIN_SUBDOMAIN_ENV_KEY, _LITELLM_ADMIN_DEFAULT_SUBDOMAIN)
+        .strip()
+        .lower()
+    )
+    if not subdomain:
+        subdomain = _LITELLM_ADMIN_DEFAULT_SUBDOMAIN
+    return f"{subdomain}.{desired_state.root_domain}"
+
+
+def _litellm_access_notes(*, desired_state: DesiredState, hostname: str) -> tuple[str, ...]:
+    if desired_state.shared_core.litellm is None:
+        return ()
+    internal_url = (
+        f"http://{desired_state.shared_core.litellm.service_name}:{_LITELLM_INTERNAL_PORT}"
+    )
+    admin_url = f"https://{hostname}"
+    return (
+        f"LiteLLM internal containers should keep using '{internal_url}'.",
+        f"LiteLLM admin access is planned separately at '{admin_url}' behind Cloudflare Access.",
+        "LiteLLM admin DNS and tunnel ingress must remain separate from the internal service URL until Access protection is in place.",
+    )
 
 
 def _resolve_dns_records(
