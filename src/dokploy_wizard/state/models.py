@@ -331,6 +331,67 @@ def _require_optional_string(payload: dict[str, Any], key: str) -> str | None:
     return value
 
 
+LITELLM_CONSUMER_VIRTUAL_KEY_NAMES = (
+    "coder-hermes",
+    "coder-kdense",
+    "my-farm-advisor",
+    "openclaw",
+)
+
+
+@dataclass(frozen=True)
+class LiteLLMGeneratedKeys:
+    """Wizard-managed LiteLLM secrets persisted outside install.env."""
+
+    format_version: int
+    master_key: str
+    salt_key: str
+    virtual_keys: dict[str, str]
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        if self.master_key == "" or self.salt_key == "":
+            msg = "LiteLLM master_key and salt_key must be non-empty strings."
+            raise StateValidationError(msg)
+
+        missing_consumers = sorted(
+            consumer
+            for consumer in LITELLM_CONSUMER_VIRTUAL_KEY_NAMES
+            if self.virtual_keys.get(consumer, "") == ""
+        )
+        if missing_consumers:
+            msg = (
+                "LiteLLM virtual_keys must contain non-empty values for "
+                f"{missing_consumers}."
+            )
+            raise StateValidationError(msg)
+        if any(key == "" or value == "" for key, value in self.virtual_keys.items()):
+            msg = "LiteLLM virtual_keys must use non-empty names and values."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format_version": self.format_version,
+            "master_key": self.master_key,
+            "salt_key": self.salt_key,
+            "virtual_keys": dict(sorted(self.virtual_keys.items())),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> LiteLLMGeneratedKeys:
+        return cls(
+            format_version=_require_format_version(payload),
+            master_key=_require_string(payload, "master_key"),
+            salt_key=_require_string(payload, "salt_key"),
+            virtual_keys=_require_string_map(payload, "virtual_keys"),
+        )
+
+
 @dataclass(frozen=True)
 class AppliedStateCheckpoint:
     """Last known successfully applied state."""

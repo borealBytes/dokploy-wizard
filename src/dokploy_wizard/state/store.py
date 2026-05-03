@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from importlib import import_module
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,7 @@ from dokploy_wizard.state.models import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
+    LiteLLMGeneratedKeys,
     OwnershipLedger,
     RawEnvInput,
     STATE_FORMAT_VERSION,
@@ -35,6 +37,7 @@ OWNERSHIP_LEDGER_FILE = "ownership-ledger.json"
 INBOX_EVENTS_FILE = "inbox-events.json"
 JOB_QUEUE_FILE = "job-queue.json"
 OUTBOUND_DELIVERIES_FILE = "outbound-deliveries.json"
+LITELLM_GENERATED_KEYS_FILE = "litellm-generated-keys.json"
 STATE_DOCUMENT_FILES = (
     RAW_INPUT_FILE,
     DESIRED_STATE_FILE,
@@ -444,6 +447,40 @@ def write_inspection_snapshot(
     _write_document(state_dir / DESIRED_STATE_FILE, desired_state_snapshot)
 
 
+def load_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys | None:
+    return _load_optional_document(
+        state_dir / LITELLM_GENERATED_KEYS_FILE,
+        LiteLLMGeneratedKeys.from_dict,
+    )
+
+
+def write_litellm_generated_keys(state_dir: Path, generated_keys: LiteLLMGeneratedKeys) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / LITELLM_GENERATED_KEYS_FILE
+    _write_document(path, generated_keys.to_dict())
+    path.chmod(0o600)
+
+
+def ensure_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys:
+    existing = load_litellm_generated_keys(state_dir)
+    if existing is not None:
+        return existing
+
+    generated_keys = LiteLLMGeneratedKeys(
+        format_version=STATE_FORMAT_VERSION,
+        master_key=_generate_secret(prefix="litellm-master"),
+        salt_key=_generate_secret(prefix="litellm-salt"),
+        virtual_keys={
+            "coder-hermes": _generate_secret(prefix="litellm-coder-hermes"),
+            "coder-kdense": _generate_secret(prefix="litellm-coder-kdense"),
+            "my-farm-advisor": _generate_secret(prefix="litellm-my-farm-advisor"),
+            "openclaw": _generate_secret(prefix="litellm-openclaw"),
+        },
+    )
+    write_litellm_generated_keys(state_dir, generated_keys)
+    return generated_keys
+
+
 def validate_install_state(loaded_state: LoadedState, desired_state: DesiredState) -> bool:
     """Validate existing install state and report whether it already exists."""
 
@@ -639,6 +676,10 @@ def _read_json_file(path: Path) -> Any:
 
 def _write_document(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _generate_secret(*, prefix: str) -> str:
+    return f"{prefix}-{secrets.token_urlsafe(24)}"
 
 
 def _queue_policy_module() -> Any:

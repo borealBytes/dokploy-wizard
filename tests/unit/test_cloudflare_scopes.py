@@ -428,6 +428,7 @@ def test_access_only_targets_advisor_hostnames() -> None:
     assert [item.hostname for item in phase.result.applications] == [
         "openclaw.example.com",
         "farm.example.com",
+        "litellm.example.com",
     ]
     assert all(
         hostname not in {"dokploy.example.com", "headscale.example.com", "matrix.example.com"}
@@ -460,6 +461,13 @@ def test_access_rerun_reuses_owned_resources() -> None:
                 domain="openclaw.example.com",
                 app_type="self_hosted",
                 allowed_identity_provider_ids=("otp-provider-1",),
+            ),
+            "litellm.example.com": CloudflareAccessApplication(
+                app_id="app-litellm",
+                name="LiteLLM Admin protected",
+                domain="litellm.example.com",
+                app_type="self_hosted",
+                allowed_identity_provider_ids=("otp-provider-1",),
             )
         },
         access_policies={
@@ -467,6 +475,13 @@ def test_access_rerun_reuses_owned_resources() -> None:
                 policy_id="policy-openclaw",
                 app_id="app-openclaw",
                 name="Allow openclaw.example.com",
+                decision="allow",
+                emails=("owner@example.com",),
+            ),
+            "app-litellm": CloudflareAccessPolicy(
+                policy_id="policy-litellm",
+                app_id="app-litellm",
+                name="Allow LiteLLM Admin",
                 decision="allow",
                 emails=("owner@example.com",),
             )
@@ -494,6 +509,16 @@ def test_access_rerun_reuses_owned_resources() -> None:
                     resource_type="cloudflare_access_policy",
                     resource_id="policy-openclaw",
                     scope="account:account-123:access-policy:openclaw.example.com",
+                ),
+                OwnedResource(
+                    resource_type="cloudflare_access_application",
+                    resource_id="app-litellm",
+                    scope="account:account-123:access-app:litellm.example.com",
+                ),
+                OwnedResource(
+                    resource_type="cloudflare_access_policy",
+                    resource_id="policy-litellm",
+                    scope="account:account-123:access-policy:litellm.example.com",
                 ),
             ),
         ),

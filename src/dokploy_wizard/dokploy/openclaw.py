@@ -40,6 +40,19 @@ _MY_FARM_ADVISOR_WORKSPACE_ROOT = f"{_MY_FARM_ADVISOR_STATE_ROOT}/workspace"
 _MY_FARM_ADVISOR_PIPELINE_WORKSPACE_ROOT = (
     f"{_MY_FARM_ADVISOR_STATE_ROOT}/workspace-data-pipeline"
 )
+_MY_FARM_ADVISOR_MANAGED_SKILLS_ROOT = f"{_MY_FARM_ADVISOR_STATE_ROOT}/skills"
+_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_URL = (
+    "https://github.com/borealBytes/my-farm-advisor-skills.git"
+)
+_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_DIR = (
+    f"{_MY_FARM_ADVISOR_MANAGED_SKILLS_ROOT}/my-farm-advisor-skills"
+)
+_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_URL = (
+    "https://github.com/K-Dense-AI/scientific-agent-skills.git"
+)
+_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_DIR = (
+    f"{_MY_FARM_ADVISOR_MANAGED_SKILLS_ROOT}/scientific-agent-skills"
+)
 _DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace/nexa"
 _DEFAULT_NEXA_RUNTIME_CONTRACT_PATH = "/home/node/.openclaw/.nexa/runtime-contract.json"
 _DEFAULT_NEXA_WORKSPACE_CONTRACT_PATH = f"{_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT}/contract.json"
@@ -1248,6 +1261,9 @@ def _my_farm_gateway_environment(runtime_config: _AdvisorRuntimeConfig) -> dict[
     if farm_env is None:
         return {}
     environment: dict[str, str] = {}
+    if runtime_config.primary_model is None and not runtime_config.fallback_models:
+        environment["MODEL_PROVIDER"] = runtime_config.model_provider
+        environment["MODEL_NAME"] = runtime_config.model_name
     if runtime_config.openrouter_api_key is not None:
         environment["OPENROUTER_API_KEY"] = runtime_config.openrouter_api_key
     elif runtime_config.ai_default_api_key is not None:
@@ -1928,6 +1944,7 @@ def _command_for_variant(
         seed_command = (
             f"mkdir -p {_MY_FARM_ADVISOR_STATE_ROOT} {_MY_FARM_ADVISOR_STATE_ROOT}/.openclaw "
             f"{_MY_FARM_ADVISOR_WORKSPACE_ROOT} {_MY_FARM_ADVISOR_PIPELINE_WORKSPACE_ROOT} && "
+            f"{_my_farm_skills_preload_command()} && "
             f"node -e {shlex.quote(node_script)}"
         )
         return json.dumps(
@@ -1990,6 +2007,71 @@ def _specialized_agent_model_defaults(
     fallback_candidates = runtime_config.fallback_models or default_fallbacks
     fallbacks = [model for model in fallback_candidates if model != primary]
     return {"primary": primary, "fallbacks": fallbacks}
+
+
+def _my_farm_skills_preload_command() -> str:
+    skills_root = shlex.quote(_MY_FARM_ADVISOR_MANAGED_SKILLS_ROOT)
+    farm_repo_dir = shlex.quote(_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_DIR)
+    farm_repo_git_dir = shlex.quote(f"{_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_DIR}/.git")
+    farm_repo_url = shlex.quote(_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_URL)
+    scientific_repo_dir = shlex.quote(_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_DIR)
+    scientific_repo_git_dir = shlex.quote(f"{_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_DIR}/.git")
+    scientific_repo_url = shlex.quote(_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_URL)
+    workspace_skills_root = shlex.quote(f"{_MY_FARM_ADVISOR_WORKSPACE_ROOT}/skills")
+    sync_script = (
+        "from pathlib import Path\n"
+        "import shutil\n"
+        f"workspace = Path({json.dumps(f'{_MY_FARM_ADVISOR_WORKSPACE_ROOT}/skills')})\n"
+        f"farm_repo = Path({json.dumps(_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_DIR)})\n"
+        f"scientific_root = Path({json.dumps(f'{_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_DIR}/scientific-skills')})\n"
+        "workspace.mkdir(parents=True, exist_ok=True)\n"
+        "for child in workspace.iterdir():\n"
+        "    if child.is_dir():\n"
+        "        shutil.rmtree(child)\n"
+        "    else:\n"
+        "        child.unlink()\n"
+        "for name in ('my-farm-advisor', 'my-farm-breeding-trial-management', 'my-farm-qtl-analysis'):\n"
+        "    source = farm_repo / name\n"
+        "    if source.is_dir():\n"
+        "        shutil.copytree(source, workspace / name)\n"
+        "if scientific_root.is_dir():\n"
+        "    for source in sorted(scientific_root.iterdir()):\n"
+        "        if not source.is_dir():\n"
+        "            continue\n"
+        "        target = workspace / source.name\n"
+        "        if target.exists():\n"
+        "            shutil.rmtree(target)\n"
+        "        shutil.copytree(source, target)\n"
+        "marker = '---\\n'\n"
+        "for skill_md in workspace.glob('*/SKILL.md'):\n"
+        "    text = skill_md.read_text()\n"
+        "    idx = text.find(marker) if text.startswith('<!--') else -1\n"
+        "    if idx > 0:\n"
+        "        skill_md.write_text(text[idx:])\n"
+    )
+    sync_script_b64 = base64.b64encode(sync_script.encode("utf-8")).decode("ascii")
+    return (
+        f"mkdir -p {skills_root} && "
+        "if ! command -v git >/dev/null 2>&1; then "
+        "echo 'git is required to preload my-farm-advisor skills' >&2; exit 1; "
+        "fi && "
+        f"if [ -d {farm_repo_git_dir} ]; then "
+        f"git -C {farm_repo_dir} fetch --depth 1 origin && "
+        f"git -C {farm_repo_dir} reset --hard FETCH_HEAD || "
+        "echo 'warning: failed to refresh my-farm-advisor managed skills; continuing with cached copy' >&2; "
+        "else "
+        f"rm -rf {farm_repo_dir} && git clone --depth 1 {farm_repo_url} {farm_repo_dir}; "
+        "fi && "
+        f"if [ -d {scientific_repo_git_dir} ]; then "
+        f"git -C {scientific_repo_dir} fetch --depth 1 origin && "
+        f"git -C {scientific_repo_dir} reset --hard FETCH_HEAD || "
+        "echo 'warning: failed to refresh scientific-agent skills; continuing with cached copy' >&2; "
+        "else "
+        f"rm -rf {scientific_repo_dir} && git clone --depth 1 {scientific_repo_url} {scientific_repo_dir}; "
+        "fi && "
+        f"mkdir -p {workspace_skills_root} && "
+        f"python3 -c {shlex.quote(f'import base64; exec(base64.b64decode({json.dumps(sync_script_b64)}))')}"
+    )
 
 
 def _provider_for_model_ref(model_ref: str, *, default: str) -> str:

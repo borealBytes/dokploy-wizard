@@ -35,6 +35,10 @@ PHASE_ORDER: tuple[str, ...] = (
     "cloudflare_access",
 )
 
+# LiteLLM is always installed as shared-core infrastructure, not as a standalone
+# lifecycle phase or optional pack.
+_LITELLM_PHASE = "shared_core"
+
 _SUPPORTED_AUTH_KEYS = {
     "CLOUDFLARE_API_TOKEN",
     "CLOUDFLARE_ACCOUNT_ID",
@@ -218,6 +222,30 @@ _CODER_RUNTIME_ENV_KEYS = {
     "OPENCODE_GO_API_KEY",
     "OPENCODE_GO_BASE_URL",
 }
+_LITELLM_SHARED_CONFIG_ENV_KEYS = {
+    "AI_DEFAULT_API_KEY",
+    "AI_DEFAULT_BASE_URL",
+    "OPENCODE_GO_API_KEY",
+    "OPENCODE_GO_BASE_URL",
+    "NVIDIA_BASE_URL",
+    "LITELLM_LOCAL_BASE_URL",
+    "LITELLM_LOCAL_MODEL",
+    "LITELLM_OPENROUTER_MODELS",
+    "LITELLM_NVIDIA_MODELS",
+}
+_OPENCLAW_LITELLM_UPSTREAM_ENV_KEYS = {
+    "OPENCLAW_OPENROUTER_API_KEY",
+    "OPENCLAW_NVIDIA_API_KEY",
+}
+_MY_FARM_LITELLM_UPSTREAM_ENV_KEYS = {
+    "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
+    "MY_FARM_ADVISOR_NVIDIA_API_KEY",
+}
+_LITELLM_MUTABLE_ENV_KEYS = (
+    _LITELLM_SHARED_CONFIG_ENV_KEYS
+    | _OPENCLAW_LITELLM_UPSTREAM_ENV_KEYS
+    | _MY_FARM_LITELLM_UPSTREAM_ENV_KEYS
+)
 
 _SUPPORTED_MODIFY_KEYS |= (
     _OPENCLAW_RUNTIME_ENV_KEYS
@@ -225,6 +253,7 @@ _SUPPORTED_MODIFY_KEYS |= (
     | _MY_FARM_RUNTIME_ENV_KEYS
     | _OUTBOUND_MAIL_ENV_KEYS
     | _CODER_RUNTIME_ENV_KEYS
+    | _LITELLM_MUTABLE_ENV_KEYS
 )
 
 @dataclass(frozen=True)
@@ -400,6 +429,11 @@ def classify_modify_request(
         and "coder" in requested_desired.enabled_packs
     ):
         phases_to_run.add("coder")
+    if effective_changed_keys & _LITELLM_MUTABLE_ENV_KEYS:
+        phases_to_run.add(_LITELLM_PHASE)
+        phases_to_run.update(
+            _litellm_dependent_consumer_phases(effective_changed_keys, requested_desired)
+        )
     if (
         existing_desired.cloudflare_access_otp_emails
         != requested_desired.cloudflare_access_otp_emails
@@ -648,3 +682,17 @@ def _sorted_reasons(changed_keys: set[str], phases_to_run: set[str]) -> tuple[st
 
 def _access_enabled(desired_state: DesiredState) -> bool:
     return bool({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs))
+
+
+def _litellm_dependent_consumer_phases(
+    changed_keys: set[str], desired_state: DesiredState
+) -> set[str]:
+    phases: set[str] = set()
+    enabled_packs = set(desired_state.enabled_packs)
+    if changed_keys & _LITELLM_SHARED_CONFIG_ENV_KEYS:
+        phases.update(enabled_packs & {"coder", "openclaw", "my-farm-advisor"})
+    if changed_keys & _OPENCLAW_LITELLM_UPSTREAM_ENV_KEYS and "openclaw" in enabled_packs:
+        phases.add("openclaw")
+    if changed_keys & _MY_FARM_LITELLM_UPSTREAM_ENV_KEYS and "my-farm-advisor" in enabled_packs:
+        phases.add("my-farm-advisor")
+    return phases

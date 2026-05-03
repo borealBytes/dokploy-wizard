@@ -287,6 +287,48 @@ def test_inspect_state_reports_disabled_farm_status(
     }
 
 
+def test_inspect_state_redacts_litellm_generated_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / "inspect-litellm.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "DOKPLOY_SUBDOMAIN=dokploy",
+                "DOKPLOY_ADMIN_EMAIL=operator@example.com",
+                "DOKPLOY_ADMIN_PASSWORD=super-secret-password",
+                "ENABLE_MY_FARM_ADVISOR=true",
+                "LITELLM_LOCAL_BASE_URL=http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
+                "LITELLM_MASTER_KEY=litellm-master-secret",
+                "LITELLM_SALT_KEY=litellm-salt-secret",
+                "LITELLM_VIRTUAL_KEY_OPENCLAW=litellm-virtual-secret",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "build_live_drift_report", lambda **_: {"status": "clean"})
+
+    assert (
+        cli._handle_inspect_state(
+            argparse.Namespace(env_file=env_file, state_dir=tmp_path / "state", dry_run=False)
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    raw_snapshot = json.loads((tmp_path / "state" / "raw-input.json").read_text(encoding="utf-8"))
+
+    assert raw_snapshot["values"]["LITELLM_MASTER_KEY"] == "<redacted>"
+    assert raw_snapshot["values"]["LITELLM_SALT_KEY"] == "<redacted>"
+    assert raw_snapshot["values"]["LITELLM_VIRTUAL_KEY_OPENCLAW"] == "<redacted>"
+    assert "litellm-master-secret" not in json.dumps(payload)
+    assert "litellm-salt-secret" not in json.dumps(payload)
+    assert "litellm-virtual-secret" not in json.dumps(payload)
+
+
 def test_inspect_state_reports_both_advisors_with_user_visible_names(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1803,8 +1845,39 @@ def test_modify_shared_ai_defaults_rerun_only_selected_advisor_phases() -> None:
         ),
     )
 
-    assert farm_only_plan.phases_to_run == ("my-farm-advisor",)
-    assert both_advisors_plan.phases_to_run == ("openclaw", "my-farm-advisor")
+    assert farm_only_plan.phases_to_run == ("shared_core", "my-farm-advisor")
+    assert both_advisors_plan.phases_to_run == (
+        "shared_core",
+        "openclaw",
+        "my-farm-advisor",
+    )
+
+
+def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() -> None:
+    plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            OPENCODE_GO_API_KEY="opencode-go-key",
+            LITELLM_OPENROUTER_MODELS=(
+                "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"
+            ),
+        ),
+        requested_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            OPENCODE_GO_API_KEY="opencode-go-key",
+            LITELLM_OPENROUTER_MODELS=(
+                "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini,"
+                "openrouter/healer-alpha=openrouter/anthropic/claude-3.7-sonnet"
+            ),
+        ),
+    )
+
+    assert plan.mode == "modify"
+    assert "LITELLM_OPENROUTER_MODELS" in plan.reasons[0]
+    assert plan.start_phase == "shared_core"
+    assert plan.phases_to_run == ("shared_core", "coder", "openclaw", "my-farm-advisor")
 
 
 def test_modify_add_my_farm_later_refreshes_nextcloud_without_openclaw() -> None:
