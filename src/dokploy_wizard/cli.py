@@ -61,6 +61,7 @@ from dokploy_wizard.lifecycle import (
     execute_lifecycle_plan,
     validate_preserved_phases,
 )
+from dokploy_wizard.litellm import LiteLLMAdminClient
 from dokploy_wizard.networking import (
     CloudflareApiBackend,
     CloudflareError,
@@ -132,7 +133,6 @@ from dokploy_wizard.state import (
     write_inspection_snapshot,
     write_target_state,
 )
-from dokploy_wizard.litellm import LiteLLMAdminClient
 from dokploy_wizard.state.inspection import build_live_drift_report
 from dokploy_wizard.tailscale import ShellTailscaleBackend, TailscaleBackend, TailscaleError
 from dokploy_wizard.uninstall import (

@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
 import difflib
 import re
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Callable, Literal, Mapping, Protocol
 
-from dokploy_wizard.state import load_inbox_event_log, load_outbound_delivery_log
-from dokploy_wizard.state import DurableJobRecord
+from dokploy_wizard.state import DurableJobRecord, load_inbox_event_log, load_outbound_delivery_log
 
 from .nexa_mem0_client import (
     NexaMem0Client,
@@ -196,6 +195,7 @@ def run_queued_nexa_job(
 ) -> NexaQueuedJobResult:
     """Run one leased Nexa job and persist terminal queue state."""
 
+    result: NexaTalkRuntimeResult | NexaOnlyofficeRuntimeResult
     try:
         if job.kind == "nexa.talk.process_message":
             result = process_talk_job(job, store=store, env=env, dependencies=dependencies, now=now)

@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import json
 import secrets
-from importlib import import_module
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from dokploy_wizard.state.models import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+    STATE_FORMAT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
     LiteLLMGeneratedKeys,
     OwnershipLedger,
     RawEnvInput,
-    STATE_FORMAT_VERSION,
     StateValidationError,
 )
 from dokploy_wizard.state.queue_models import (

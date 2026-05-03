@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-import subprocess
 from typing import cast
 
-import dokploy_wizard.dokploy.coder as coder_module
 import pytest
+
+import dokploy_wizard.dokploy.coder as coder_module
 from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.dokploy.coder import DokployCoderApi, DokployCoderBackend, _render_compose_file
 from dokploy_wizard.packs.coder import build_coder_ledger, reconcile_coder
@@ -335,7 +336,6 @@ def test_default_kdense_byok_template_includes_upstream_parameterized_stack() ->
     assert 'write_kdense_env_file() {' in template
     assert 'DEFAULT_AGENT_MODEL=%s' in template
     assert 'DEFAULT_EXPERT_MODEL=%s' in template
-    assert 'append_env OPENROUTER_API_KEY "$KDENSE_OPENROUTER_API_KEY" "$env_file"' in template
     assert 'append_env OPENAI_API_KEY "$KDENSE_CENTRAL_LITELLM_API_KEY" "$env_file"' in template
     assert 'append_env OPENAI_API_BASE "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
     assert 'append_env OPENAI_BASE_URL "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
@@ -343,6 +343,9 @@ def test_default_kdense_byok_template_includes_upstream_parameterized_stack() ->
     assert 'append_env PARALLEL_API_KEY "$KDENSE_PARALLEL_API_KEY" "$env_file"' in template
     assert 'append_env MODAL_TOKEN_ID "$KDENSE_MODAL_TOKEN_ID" "$env_file"' in template
     assert 'append_env MODAL_TOKEN_SECRET "$KDENSE_MODAL_TOKEN_SECRET" "$env_file"' in template
+    assert 'append_env OPENROUTER_API_KEY ' not in template
+    assert 'append_env NVIDIA_API_KEY ' not in template
+    assert 'append_env ANTHROPIC_API_KEY ' not in template
     assert 'KDENSE_CENTRAL_LITELLM_API_KEY="$${KDENSE_OPENCODE_GO_API_KEY:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY}"' in template
     assert 'KDENSE_CENTRAL_LITELLM_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL}"' in template
     assert 'KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"' in template
@@ -446,6 +449,9 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert 'upsert_env OPENAI_API_KEY "$OPENAI_API_KEY"' in template
     assert 'upsert_env OPENAI_API_BASE "$OPENAI_API_BASE"' in template
     assert 'upsert_env AI_DEFAULT_API_KEY "$AI_DEFAULT_API_KEY"' in template
+    assert 'upsert_env OPENROUTER_API_KEY ' not in template
+    assert 'upsert_env NVIDIA_API_KEY ' not in template
+    assert 'upsert_env ANTHROPIC_API_KEY ' not in template
     assert 'API_SERVER_ENABLED=true' in template
     assert 'OPENAI_API_KEY is required for the Hermes workspace template' in template
     assert 'hermes config set model.provider "$HERMES_INFERENCE_PROVIDER"' in template

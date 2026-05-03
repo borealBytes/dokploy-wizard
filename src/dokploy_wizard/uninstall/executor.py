@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Protocol
 
 from dokploy_wizard.state import (
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
-    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     OwnershipLedger,
     RawEnvInput,
     clear_state_documents,

@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from dokploy_wizard.state import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
+from dokploy_wizard.state import (
+    DesiredState,
+    OwnedResource,
+    OwnershipLedger,
+    RawEnvInput,
+    resolve_desired_state,
+)
 from dokploy_wizard.uninstall import (
     UninstallConfirmationError,
     UninstallPlanningError,

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from email.message import Message
-from urllib import parse
 from typing import Any, cast
 from urllib import error as urlerror
+from urllib import parse
 
 import pytest
 

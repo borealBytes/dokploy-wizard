@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
 DEFAULT_LOCAL_ALIAS = "local/unsloth-active"
 DEFAULT_LOCAL_MODEL = "unsloth/Qwen2.5-Coder-32B-Instruct"

@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from dokploy_wizard.cli import run_install_flow
-
 from tests.integration.test_nextcloud_pack import (
     FIXTURES_DIR,
     FakeCloudflareBackend,

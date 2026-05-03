@@ -595,7 +595,6 @@ PY
       printf 'GEMINI_API_KEY=sk-litellm-local\n' >> "$env_file"
       printf 'DEFAULT_AGENT_MODEL=%s\n' "$KDENSE_DEFAULT_MODEL_EFFECTIVE" >> "$env_file"
       printf 'DEFAULT_EXPERT_MODEL=%s\n' "$KDENSE_EXPERT_MODEL_EFFECTIVE" >> "$env_file"
-      append_env OPENROUTER_API_KEY "$KDENSE_OPENROUTER_API_KEY" "$env_file"
       append_env OPENAI_API_KEY "$KDENSE_CENTRAL_LITELLM_API_KEY" "$env_file"
       append_env OPENAI_API_BASE "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"
       append_env OPENAI_BASE_URL "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"

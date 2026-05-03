@@ -343,7 +343,7 @@ def test_modify_disabling_nextcloud_is_supported_via_networking_only() -> None:
 
     assert plan.mode == "modify"
     assert plan.start_phase == "networking"
-    assert plan.phases_to_run == ("networking",)
+    assert plan.phases_to_run == ("networking", "shared_core")
     assert plan.initial_completed_steps == ("preflight", "dokploy_bootstrap")
 
 
@@ -585,8 +585,8 @@ def test_modify_coder_hermes_env_change_reruns_coder() -> None:
         requested_desired=resolve_desired_state(requested_raw),
     )
 
-    assert plan.start_phase == "coder"
-    assert plan.phases_to_run == ("coder",)
+    assert plan.start_phase == "shared_core"
+    assert plan.phases_to_run == ("shared_core", "coder")
 
 
 def test_modify_uses_explicit_pack_mutable_resource_contract() -> None:

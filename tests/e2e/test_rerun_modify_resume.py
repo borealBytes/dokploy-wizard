@@ -4,10 +4,11 @@ import json
 import subprocess
 from pathlib import Path
 
-import dokploy_wizard.cli as cli
 import pytest
-from dokploy_wizard.core import SharedCoreResourceRecord
+
+import dokploy_wizard.cli as cli
 from dokploy_wizard.cli import run_install_flow, run_modify_flow
+from dokploy_wizard.core import SharedCoreResourceRecord
 from dokploy_wizard.lifecycle import applicable_phases_for
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
@@ -277,6 +278,21 @@ def test_cli_install_then_rerun_surfaces_explicit_noop(tmp_path: Path) -> None:
                     "cloudflare_dns_record",
                     "headscale-example-com",
                     "zone:zone-123:headscale.example.com",
+                ),
+                OwnedResource(
+                    "shared_core_network",
+                    "lifecycle-stack-shared",
+                    "stack:lifecycle-stack:shared-network",
+                ),
+                OwnedResource(
+                    "shared_core_postgres",
+                    "lifecycle-stack-shared-postgres",
+                    "stack:lifecycle-stack:shared-postgres",
+                ),
+                OwnedResource(
+                    "shared_core_litellm",
+                    "lifecycle-stack-shared-litellm",
+                    "stack:lifecycle-stack:shared-litellm",
                 ),
                 OwnedResource(
                     "headscale_service",

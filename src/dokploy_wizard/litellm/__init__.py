@@ -1,4 +1,3 @@
-from .config_renderer import build_litellm_config, render_litellm_config_yaml
 from .admin import (
     LiteLLMAdminApi,
     LiteLLMAdminClient,
@@ -8,6 +7,7 @@ from .admin import (
     LiteLLMTeamRecord,
     LiteLLMVirtualKeyRecord,
 )
+from .config_renderer import build_litellm_config, render_litellm_config_yaml
 from .qa_harness import (
     LiteLLMAdminAccessCheckError,
     LiteLLMAdminQaCheck,

@@ -132,9 +132,6 @@ def apply_prompt_selection(raw_env: RawEnvInput, selection: PromptSelection) -> 
             updated_values.pop(key, None)
         for key in _MY_FARM_ADVISOR_PACK_ONLY_ENV_KEYS:
             updated_values.pop(key, None)
-    resulting_packs = {
-        item.strip() for item in updated_values.get("PACKS", "").split(",") if item.strip()
-    }
     updated_values.update(selection.advisor_env)
     return RawEnvInput(format_version=raw_env.format_version, values=updated_values)
 
