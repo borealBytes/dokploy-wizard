@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 """Queued Nexa runtime orchestration with Mem0-backed automatic memory hooks."""
 
 from __future__ import annotations

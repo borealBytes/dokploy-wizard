@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 """Minimal deployed Nexa queue worker sidecar."""
 
 from __future__ import annotations

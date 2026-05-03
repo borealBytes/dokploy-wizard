@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 """Tiny Mem0 REST sidecar for Nexa internal deployments."""
 

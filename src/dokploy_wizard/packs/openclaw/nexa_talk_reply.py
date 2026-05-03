@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Narrow Talk outbound reply adapter with retry-safe delivery recording."""
 
 from __future__ import annotations

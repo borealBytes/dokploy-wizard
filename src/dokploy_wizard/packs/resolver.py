@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Deterministic pack selection parsing and dependency resolution."""
 
 from __future__ import annotations

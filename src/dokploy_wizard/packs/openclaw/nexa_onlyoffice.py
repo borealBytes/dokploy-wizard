@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """ONLYOFFICE save-triggered reconciliation and write-back policy for Nexa v1."""
 
 from __future__ import annotations

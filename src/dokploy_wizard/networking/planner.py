@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Cloudflare networking planner and reconciler."""
 
 from __future__ import annotations

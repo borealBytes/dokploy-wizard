@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Minimal CLI helpers for guided pack selection."""
 
 from __future__ import annotations

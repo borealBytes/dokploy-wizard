@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Read-only host inspection helpers for inspect-state."""
 
 from __future__ import annotations

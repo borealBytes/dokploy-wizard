@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Typed shared-core planning and reconciliation models."""
 
 from __future__ import annotations

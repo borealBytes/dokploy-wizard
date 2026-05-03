@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Baseline host prerequisite detection for Dokploy wizard installs."""
 
 from __future__ import annotations

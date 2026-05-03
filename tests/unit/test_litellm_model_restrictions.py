@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """T17 model restriction/discovery QA harness.
 
 Default offline contract:

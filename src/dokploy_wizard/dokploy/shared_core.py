@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Dokploy-backed shared-core backend using a compose-first deployment flow."""
 
 from __future__ import annotations

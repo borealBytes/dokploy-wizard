@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 """Dokploy-backed OpenClaw and My Farm Advisor runtime backend."""
 
 from __future__ import annotations

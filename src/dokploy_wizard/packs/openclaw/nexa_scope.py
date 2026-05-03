@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Explicit Nexa scope and correlation helpers."""
 
 from __future__ import annotations
