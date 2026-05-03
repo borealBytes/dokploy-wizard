@@ -470,13 +470,13 @@ def ensure_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys:
 
     generated_keys = LiteLLMGeneratedKeys(
         format_version=STATE_FORMAT_VERSION,
-        master_key=_generate_secret(prefix="litellm-master"),
+        master_key=_generate_secret(prefix="sk-litellm-master"),
         salt_key=_generate_secret(prefix="litellm-salt"),
         virtual_keys={
-            "coder-hermes": _generate_secret(prefix="litellm-coder-hermes"),
-            "coder-kdense": _generate_secret(prefix="litellm-coder-kdense"),
-            "my-farm-advisor": _generate_secret(prefix="litellm-my-farm-advisor"),
-            "openclaw": _generate_secret(prefix="litellm-openclaw"),
+            "coder-hermes": _generate_secret(prefix="sk-litellm-coder-hermes"),
+            "coder-kdense": _generate_secret(prefix="sk-litellm-coder-kdense"),
+            "my-farm-advisor": _generate_secret(prefix="sk-litellm-my-farm-advisor"),
+            "openclaw": _generate_secret(prefix="sk-litellm-openclaw"),
         },
     )
     write_litellm_generated_keys(state_dir, generated_keys)

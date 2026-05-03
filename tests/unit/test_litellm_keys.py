@@ -87,6 +87,14 @@ def test_empty_state_generates_consumer_keys_and_existing_state_reuses_them(
         "my-farm-advisor",
         "openclaw",
     }
+    assert generated_keys.master_key.startswith("sk-litellm-master-")
+    assert generated_keys.salt_key.startswith("litellm-salt-")
+    assert generated_keys.virtual_keys["coder-hermes"].startswith("sk-litellm-coder-hermes-")
+    assert generated_keys.virtual_keys["coder-kdense"].startswith("sk-litellm-coder-kdense-")
+    assert generated_keys.virtual_keys["my-farm-advisor"].startswith(
+        "sk-litellm-my-farm-advisor-"
+    )
+    assert generated_keys.virtual_keys["openclaw"].startswith("sk-litellm-openclaw-")
     assert all(value for value in generated_keys.virtual_keys.values())
 
     existing_keys = LiteLLMGeneratedKeys(
