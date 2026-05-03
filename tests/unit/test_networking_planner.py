@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pytest
+
 from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,
@@ -248,6 +250,47 @@ def test_litellm_admin_access_uses_configured_subdomain() -> None:
     assert any("https://ai-admin.example.com" in note for note in phase.result.notes)
 
 
+def test_litellm_admin_access_falls_back_to_dokploy_admin_email() -> None:
+    backend = FakeCloudflareBackend()
+
+    phase = reconcile_cloudflare_access(
+        dry_run=True,
+        raw_env=_raw_env({"DOKPLOY_ADMIN_EMAIL": "owner@example.com"}),
+        desired_state=_desired_state(cloudflare_access_otp_emails=()),
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert [item.hostname for item in phase.result.applications] == ["litellm.example.com"]
+    assert phase.result.policies[0].emails == ("owner@example.com",)
+
+
+def test_litellm_admin_access_rejects_hostname_collisions() -> None:
+    backend = FakeCloudflareBackend()
+
+    with pytest.raises(Exception, match="collides with an existing desired hostname"):
+        reconcile_cloudflare_access(
+            dry_run=True,
+            raw_env=_raw_env({"LITELLM_ADMIN_SUBDOMAIN": "dokploy"}),
+            desired_state=_desired_state(),
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=backend,
+        )
+
+
+def test_litellm_admin_access_rejects_invalid_subdomain() -> None:
+    backend = FakeCloudflareBackend()
+
+    with pytest.raises(Exception, match="must be a single DNS label"):
+        reconcile_cloudflare_access(
+            dry_run=True,
+            raw_env=_raw_env({"LITELLM_ADMIN_SUBDOMAIN": "admin.ops"}),
+            desired_state=_desired_state(),
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=backend,
+        )
+
+
 def _raw_env(overrides: dict[str, str] | None = None) -> RawEnvInput:
     values = {
         "CLOUDFLARE_ACCOUNT_ID": "account-123",
@@ -264,7 +307,7 @@ def _raw_env(overrides: dict[str, str] | None = None) -> RawEnvInput:
     )
 
 
-def _desired_state() -> DesiredState:
+def _desired_state(*, cloudflare_access_otp_emails: tuple[str, ...] = ("owner@example.com",)) -> DesiredState:
     return DesiredState(
         format_version=1,
         stack_name="wizard-stack",
@@ -276,7 +319,7 @@ def _desired_state() -> DesiredState:
         tailscale_enable_ssh=False,
         tailscale_tags=(),
         tailscale_subnet_routes=(),
-        cloudflare_access_otp_emails=("owner@example.com",),
+        cloudflare_access_otp_emails=cloudflare_access_otp_emails,
         enabled_features=(),
         selected_packs=(),
         enabled_packs=(),

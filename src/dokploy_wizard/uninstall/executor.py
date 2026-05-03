@@ -102,20 +102,26 @@ def execute_uninstall_plan(
     if dry_run:
         return UninstallExecutionResult(
             deleted_resources=plan.deletions,
-            remaining_completed_steps=compute_remaining_completed_steps(
-                desired_state=desired_state,
-                raw_input=raw_input,
-                ownership_ledger=ownership_ledger,
+            remaining_completed_steps=_cap_completed_steps(
+                compute_remaining_completed_steps(
+                    desired_state=desired_state,
+                    raw_input=raw_input,
+                    ownership_ledger=ownership_ledger,
+                ),
+                plan.completed_steps_ceiling,
             ),
             state_cleared=False,
         )
 
     deleted_resources: list[PlannedDeletion] = []
     current_ledger = ownership_ledger
-    remaining_completed_steps = compute_remaining_completed_steps(
-        desired_state=desired_state,
-        raw_input=raw_input,
-        ownership_ledger=current_ledger,
+    remaining_completed_steps = _cap_completed_steps(
+        compute_remaining_completed_steps(
+            desired_state=desired_state,
+            raw_input=raw_input,
+            ownership_ledger=current_ledger,
+        ),
+        plan.completed_steps_ceiling,
     )
     for deletion in plan.deletions:
         backend.delete(deletion)
@@ -133,10 +139,13 @@ def execute_uninstall_plan(
             ),
         )
         write_ownership_ledger(state_dir, current_ledger)
-        remaining_completed_steps = compute_remaining_completed_steps(
-            desired_state=desired_state,
-            raw_input=raw_input,
-            ownership_ledger=current_ledger,
+        remaining_completed_steps = _cap_completed_steps(
+            compute_remaining_completed_steps(
+                desired_state=desired_state,
+                raw_input=raw_input,
+                ownership_ledger=current_ledger,
+            ),
+            plan.completed_steps_ceiling,
         )
         write_applied_checkpoint(
             state_dir,
@@ -157,3 +166,11 @@ def execute_uninstall_plan(
         remaining_completed_steps=remaining_completed_steps,
         state_cleared=state_cleared,
     )
+
+
+def _cap_completed_steps(
+    completed_steps: tuple[str, ...], ceiling: tuple[str, ...] | None
+) -> tuple[str, ...]:
+    if ceiling is None or len(completed_steps) <= len(ceiling):
+        return completed_steps
+    return ceiling

@@ -162,6 +162,7 @@ class FakeSharedCoreBackend:
     network: SharedCoreResourceRecord | None = None
     postgres: SharedCoreResourceRecord | None = None
     redis: SharedCoreResourceRecord | None = None
+    litellm: SharedCoreResourceRecord | None = None
 
     def get_network(self, resource_id: str):
         if self.network is not None and self.network.resource_id == resource_id:
@@ -219,6 +220,22 @@ class FakeSharedCoreBackend:
 
     def create_mail_relay_service(self, resource_name: str):
         raise AssertionError(f"SeaweedFS should not provision mail relay: {resource_name}")
+
+    def get_litellm_service(self, resource_id: str):
+        if self.litellm is not None and self.litellm.resource_id == resource_id:
+            return self.litellm
+        return None
+
+    def find_litellm_service_by_name(self, resource_name: str):
+        if self.litellm is not None and self.litellm.resource_name == resource_name:
+            return self.litellm
+        return None
+
+    def create_litellm_service(self, resource_name: str):
+        self.litellm = SharedCoreResourceRecord(
+            resource_id="litellm-1", resource_name=resource_name
+        )
+        return self.litellm
 
 
 @dataclass

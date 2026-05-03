@@ -1,7 +1,8 @@
-# pyright: reportMissingImports=false
+# pyright: reportMissingImports=false, reportArgumentType=false, reportOptionalMemberAccess=false
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -36,6 +37,7 @@ from dokploy_wizard.state import (
     OwnedResource,
     OwnershipLedger,
     RawEnvInput,
+    ensure_litellm_generated_keys,
     resolve_desired_state,
 )
 
@@ -290,6 +292,15 @@ def test_validate_preserved_phases_rejects_invalid_shared_core_postgres_allocati
         create_redis_service=lambda resource_name: SimpleNamespace(
             resource_id=resource_name, resource_name=resource_name
         ),
+        get_litellm_service=lambda resource_id: SimpleNamespace(
+            resource_id=resource_id, resource_name="openmerge-shared-litellm"
+        ),
+        find_litellm_service_by_name=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        create_litellm_service=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
         validate_postgres_allocations=lambda allocations: False,
     )
 
@@ -316,6 +327,216 @@ def test_validate_preserved_phases_rejects_invalid_shared_core_postgres_allocati
                         resource_type="shared_core_redis",
                         resource_id="redis-1",
                         scope="stack:openmerge:shared-redis",
+                    ),
+                    OwnedResource(
+                        resource_type="shared_core_litellm",
+                        resource_id="litellm-1",
+                        scope="stack:openmerge:shared-litellm",
+                    ),
+                ),
+            ),
+            preserved_phases=("shared_core",),
+            bootstrap_backend=_UNUSED_BACKEND,
+            tailscale_backend=_UNUSED_BACKEND,
+            networking_backend=_UNUSED_BACKEND,
+            shared_core_backend=shared_core_backend,
+            headscale_backend=_UNUSED_BACKEND,
+            matrix_backend=_UNUSED_BACKEND,
+            nextcloud_backend=_UNUSED_BACKEND,
+            seaweedfs_backend=_UNUSED_BACKEND,
+            openclaw_backend=_UNUSED_BACKEND,
+            coder_backend=_UNUSED_BACKEND,
+        )
+
+
+def test_litellm_rerun_preserves_keys_and_ownership(tmp_path: Path) -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openmerge",
+                "ROOT_DOMAIN": "openmerge.me",
+            },
+        )
+    )
+    first_keys = ensure_litellm_generated_keys(tmp_path)
+    second_keys = ensure_litellm_generated_keys(tmp_path)
+    shared_core_backend = SimpleNamespace(
+        get_network=lambda resource_id: SimpleNamespace(
+            resource_id=resource_id, resource_name="openmerge-shared"
+        ),
+        find_network_by_name=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        create_network=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        get_postgres_service=lambda resource_id: SimpleNamespace(
+            resource_id=resource_id, resource_name="openmerge-shared-postgres"
+        ),
+        find_postgres_service_by_name=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        create_postgres_service=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        get_redis_service=lambda resource_id: None,
+        find_redis_service_by_name=lambda resource_name: None,
+        create_redis_service=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        get_mail_relay_service=lambda resource_id: None,
+        find_mail_relay_service_by_name=lambda resource_name: None,
+        create_mail_relay_service=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        get_litellm_service=lambda resource_id: SimpleNamespace(
+            resource_id=resource_id, resource_name="openmerge-shared-litellm"
+        ),
+        find_litellm_service_by_name=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        create_litellm_service=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        validate_postgres_allocations=lambda allocations: allocations
+        == (desired_state.shared_core.litellm.postgres,),
+        validate_litellm_config=lambda *, desired_state: desired_state.shared_core.litellm is not None,
+    )
+
+    assert second_keys == first_keys
+
+    report = validate_preserved_phases(
+        raw_env=RawEnvInput(
+            format_version=1,
+            values={"STACK_NAME": "openmerge", "ROOT_DOMAIN": "openmerge.me"},
+        ),
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(
+            format_version=1,
+            resources=(
+                OwnedResource(
+                    resource_type="shared_core_network",
+                    resource_id="net-1",
+                    scope="stack:openmerge:shared-network",
+                ),
+                OwnedResource(
+                    resource_type="shared_core_postgres",
+                    resource_id="pg-1",
+                    scope="stack:openmerge:shared-postgres",
+                ),
+                OwnedResource(
+                    resource_type="shared_core_litellm",
+                    resource_id="litellm-1",
+                    scope="stack:openmerge:shared-litellm",
+                ),
+            ),
+        ),
+        preserved_phases=("shared_core",),
+        bootstrap_backend=_UNUSED_BACKEND,
+        tailscale_backend=_UNUSED_BACKEND,
+        networking_backend=_UNUSED_BACKEND,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=_UNUSED_BACKEND,
+        matrix_backend=_UNUSED_BACKEND,
+        nextcloud_backend=_UNUSED_BACKEND,
+        seaweedfs_backend=_UNUSED_BACKEND,
+        openclaw_backend=_UNUSED_BACKEND,
+        coder_backend=_UNUSED_BACKEND,
+    )
+
+    assert len(report.entries) == 1
+    assert report.entries[0].phase == "shared_core"
+    assert report.entries[0].status == "ok"
+
+
+def test_validate_preserved_phases_rejects_stale_litellm_shared_core_config() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openmerge",
+                "ROOT_DOMAIN": "openmerge.me",
+                "ENABLE_MY_FARM_ADVISOR": "true",
+                "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+                "AI_DEFAULT_API_KEY": "shared-key",
+                "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+            },
+        )
+    )
+    shared_core_backend = SimpleNamespace(
+        get_network=lambda resource_id: SimpleNamespace(
+            resource_id=resource_id, resource_name="openmerge-shared"
+        ),
+        find_network_by_name=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        create_network=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        get_postgres_service=lambda resource_id: SimpleNamespace(
+            resource_id=resource_id, resource_name="openmerge-shared-postgres"
+        ),
+        find_postgres_service_by_name=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        create_postgres_service=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        get_redis_service=lambda resource_id: None,
+        find_redis_service_by_name=lambda resource_name: None,
+        create_redis_service=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        get_mail_relay_service=lambda resource_id: None,
+        find_mail_relay_service_by_name=lambda resource_name: None,
+        create_mail_relay_service=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        get_litellm_service=lambda resource_id: SimpleNamespace(
+            resource_id=resource_id, resource_name="openmerge-shared-litellm"
+        ),
+        find_litellm_service_by_name=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        create_litellm_service=lambda resource_name: SimpleNamespace(
+            resource_id=resource_name, resource_name=resource_name
+        ),
+        validate_postgres_allocations=lambda allocations: True,
+        validate_litellm_config=lambda **_: False,
+    )
+
+    with pytest.raises(LifecycleDriftError, match="LiteLLM config no longer matches"):
+        validate_preserved_phases(
+            raw_env=RawEnvInput(
+                format_version=1,
+                values={
+                    "STACK_NAME": "openmerge",
+                    "ROOT_DOMAIN": "openmerge.me",
+                    "ENABLE_MY_FARM_ADVISOR": "true",
+                    "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+                    "AI_DEFAULT_API_KEY": "shared-key",
+                    "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+                },
+            ),
+            desired_state=desired_state,
+            ownership_ledger=OwnershipLedger(
+                format_version=1,
+                resources=(
+                    OwnedResource(
+                        resource_type="shared_core_network",
+                        resource_id="net-1",
+                        scope="stack:openmerge:shared-network",
+                    ),
+                    OwnedResource(
+                        resource_type="shared_core_postgres",
+                        resource_id="pg-1",
+                        scope="stack:openmerge:shared-postgres",
+                    ),
+                    OwnedResource(
+                        resource_type="shared_core_litellm",
+                        resource_id="litellm-1",
+                        scope="stack:openmerge:shared-litellm",
                     ),
                 ),
             ),

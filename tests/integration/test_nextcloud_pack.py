@@ -233,6 +233,7 @@ class FakeSharedCoreBackend:
     network: SharedCoreResourceRecord | None = None
     postgres: SharedCoreResourceRecord | None = None
     redis: SharedCoreResourceRecord | None = None
+    litellm: SharedCoreResourceRecord | None = None
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self.network is not None and self.network.resource_id == resource_id:
@@ -295,6 +296,22 @@ class FakeSharedCoreBackend:
         self, allocations: tuple[SharedPostgresAllocation, ...]
     ) -> None:
         del allocations
+
+    def get_litellm_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_id == resource_id:
+            return self.litellm
+        return None
+
+    def find_litellm_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_name == resource_name:
+            return self.litellm
+        return None
+
+    def create_litellm_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        self.litellm = SharedCoreResourceRecord(
+            resource_id="litellm-1", resource_name=resource_name
+        )
+        return self.litellm
 
 
 @dataclass
@@ -1398,6 +1415,7 @@ def test_install_reconciles_nextcloud_pair_and_persists_runtime_ledger(tmp_path:
         ("cloudflare_dns_record", "zone:zone-123:nextcloud.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:office.example.com"),
         ("headscale_service", "stack:nextcloud-stack:headscale"),
+        ("shared_core_litellm", "stack:nextcloud-stack:shared-litellm"),
         ("shared_core_network", "stack:nextcloud-stack:shared-network"),
         ("shared_core_postgres", "stack:nextcloud-stack:shared-postgres"),
         ("shared_core_redis", "stack:nextcloud-stack:shared-redis"),
@@ -1644,6 +1662,9 @@ def test_install_rerun_reuses_owned_nextcloud_resources(tmp_path: Path) -> None:
         shared_core_backend=FakeSharedCoreBackend(
             network=SharedCoreResourceRecord(
                 resource_id="network-1", resource_name="nextcloud-stack-shared"
+            ),
+            litellm=SharedCoreResourceRecord(
+                resource_id="litellm-1", resource_name="nextcloud-stack-shared-litellm"
             ),
             postgres=SharedCoreResourceRecord(
                 resource_id="postgres-1", resource_name="nextcloud-stack-shared-postgres"

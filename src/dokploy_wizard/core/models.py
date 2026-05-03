@@ -357,6 +357,7 @@ class SharedCoreResult:
     allocations: tuple[PackSharedAllocation, ...]
     notes: tuple[str, ...]
     mail_relay: SharedCoreManagedResource | None = None
+    litellm: SharedCoreManagedResource | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -365,6 +366,7 @@ class SharedCoreResult:
             "notes": list(self.notes),
             "outcome": self.outcome,
             "mail_relay": None if self.mail_relay is None else self.mail_relay.to_dict(),
+            "litellm": None if self.litellm is None else self.litellm.to_dict(),
             "postgres": None if self.postgres is None else self.postgres.to_dict(),
             "redis": None if self.redis is None else self.redis.to_dict(),
         }
@@ -377,6 +379,7 @@ class SharedCorePhase:
     postgres_resource_id: str | None
     redis_resource_id: str | None
     mail_relay_resource_id: str | None = None
+    litellm_resource_id: str | None = None
 
 
 @dataclass(frozen=True)

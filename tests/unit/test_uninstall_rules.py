@@ -68,6 +68,9 @@ def test_uninstall_plan_retains_data_by_default() -> None:
                 "shared_core_postgres", "postgres-1", "stack:nextcloud-stack:shared-postgres"
             ),
             OwnedResource("shared_core_redis", "redis-1", "stack:nextcloud-stack:shared-redis"),
+            OwnedResource(
+                "shared_core_litellm", "litellm-1", "stack:nextcloud-stack:shared-litellm"
+            ),
             OwnedResource("headscale_service", "headscale-1", "stack:nextcloud-stack:headscale"),
             OwnedResource(
                 "nextcloud_service", "nextcloud-1", "stack:nextcloud-stack:nextcloud-service"
@@ -126,6 +129,7 @@ def test_uninstall_plan_retains_data_by_default() -> None:
         "onlyoffice_service",
         "coder_service",
         "headscale_service",
+        "shared_core_litellm",
         "shared_core_network",
         "cloudflare_dns_record",
         "cloudflare_tunnel",
@@ -161,6 +165,9 @@ def test_compute_remaining_completed_steps_shrinks_after_runtime_delete() -> Non
                 "shared_core_postgres", "postgres-1", "stack:nextcloud-stack:shared-postgres"
             ),
             OwnedResource("shared_core_redis", "redis-1", "stack:nextcloud-stack:shared-redis"),
+            OwnedResource(
+                "shared_core_litellm", "litellm-1", "stack:nextcloud-stack:shared-litellm"
+            ),
             OwnedResource("openclaw_service", "openclaw-1", "stack:nextcloud-stack:openclaw"),
             OwnedResource(
                 "openclaw_mem0_service",
@@ -231,6 +238,75 @@ def test_build_pack_disable_plan_deletes_tailscale_node_even_without_pack_remova
     )
 
     assert [item.resource.resource_type for item in plan.deletions] == ["tailscale_node"]
+
+
+def test_build_pack_disable_plan_caps_checkpoint_before_shared_core_for_litellm_consumer_removal() -> None:
+    existing = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "ENABLE_MY_FARM_ADVISOR": "true",
+                "AI_DEFAULT_API_KEY": "shared-key",
+                "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+                "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
+            },
+        )
+    )
+    requested = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_MY_FARM_ADVISOR": "true",
+                "AI_DEFAULT_API_KEY": "shared-key",
+                "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+                "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
+            },
+        )
+    )
+
+    plan = build_pack_disable_plan(
+        existing_desired=existing,
+        requested_desired=requested,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+    )
+
+    assert plan.completed_steps_ceiling == ("preflight", "dokploy_bootstrap", "networking")
+
+
+def test_uninstall_plan_retains_litellm_shared_core_for_no_ai_pack_install() -> None:
+    desired = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+            },
+        )
+    )
+    ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource("shared_core_network", "network-1", "stack:wizard-stack:shared-network"),
+            OwnedResource("shared_core_postgres", "postgres-1", "stack:wizard-stack:shared-postgres"),
+        ),
+    )
+
+    plan = build_uninstall_plan(
+        raw_input=_raw({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"}),
+        desired_state=desired,
+        ownership_ledger=ledger,
+        destroy_data=False,
+    )
+
+    assert [item.resource.resource_type for item in plan.deletions] == ["shared_core_network"]
+    assert [resource.resource_type for resource in plan.retained_resources] == ["shared_core_postgres"]
 
 
 def test_destroy_confirmation_requires_three_strong_lines(tmp_path: Path) -> None:

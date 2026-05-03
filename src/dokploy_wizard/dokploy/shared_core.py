@@ -24,6 +24,7 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
+from dokploy_wizard.litellm import build_litellm_config, render_litellm_config_yaml
 
 
 class DokploySharedCoreApi(Protocol):
@@ -60,6 +61,7 @@ class DokploySharedCoreBackend:
         stack_name: str,
         plan: SharedCorePlan,
         mail_relay_config: dict[str, str] | None = None,
+        litellm_env: dict[str, str] | None = None,
         client: DokploySharedCoreApi | None = None,
         allocation_provisioner: Callable[[tuple[SharedPostgresAllocation, ...]], None]
         | None = None,
@@ -68,6 +70,7 @@ class DokploySharedCoreBackend:
         self._plan = plan
         self._compose_name = plan.network_name
         self._mail_relay_config = mail_relay_config or {}
+        self._litellm_env = litellm_env or {}
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._allocation_provisioner = allocation_provisioner
@@ -224,6 +227,34 @@ class DokploySharedCoreBackend:
             resource_name=resource_name,
         )
 
+    def get_litellm_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        if self._plan.litellm is None or self._lookup_locator(resource_id, "litellm") is None:
+            return None
+        return SharedCoreResourceRecord(
+            resource_id=resource_id,
+            resource_name=self._plan.litellm.service_name,
+        )
+
+    def find_litellm_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        if self._plan.litellm is None or resource_name != self._plan.litellm.service_name:
+            return None
+        locator = self._find_compose_locator()
+        if locator is None:
+            return None
+        return SharedCoreResourceRecord(
+            resource_id=_resource_id(locator.compose_id, "litellm"),
+            resource_name=resource_name,
+        )
+
+    def create_litellm_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        if self._plan.litellm is None or resource_name != self._plan.litellm.service_name:
+            raise SharedCoreError("Shared-core LiteLLM name does not match the active plan.")
+        locator = self._ensure_compose_applied()
+        return SharedCoreResourceRecord(
+            resource_id=_resource_id(locator.compose_id, "litellm"),
+            resource_name=resource_name,
+        )
+
     def _lookup_locator(self, resource_id: str, kind: str) -> _ComposeLocator | None:
         compose_id = _parse_resource_id(resource_id, kind)
         if compose_id is None:
@@ -270,7 +301,11 @@ class DokploySharedCoreBackend:
                     if compose.name == self._compose_name:
                         updated = self._client.update_compose(
                             compose_id=compose.compose_id,
-                            compose_file=_render_compose_file(self._plan, self._mail_relay_config),
+                            compose_file=_render_compose_file(
+                                self._plan,
+                                self._mail_relay_config,
+                                self._litellm_env,
+                            ),
                         )
                         self._client.deploy_compose(
                             compose_id=updated.compose_id,
@@ -287,7 +322,11 @@ class DokploySharedCoreBackend:
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
-                    compose_file=_render_compose_file(self._plan, self._mail_relay_config),
+                    compose_file=_render_compose_file(
+                        self._plan,
+                        self._mail_relay_config,
+                        self._litellm_env,
+                    ),
                     app_name=self._compose_name,
                 )
                 self._client.deploy_compose(
@@ -311,7 +350,11 @@ class DokploySharedCoreBackend:
             created_compose = self._client.create_compose(
                 name=self._compose_name,
                 environment_id=created_project.environment_id,
-                compose_file=_render_compose_file(self._plan, self._mail_relay_config),
+                compose_file=_render_compose_file(
+                    self._plan,
+                    self._mail_relay_config,
+                    self._litellm_env,
+                ),
                 app_name=self._compose_name,
             )
             self._client.deploy_compose(
@@ -352,7 +395,12 @@ def _parse_resource_id(resource_id: str, kind: str) -> str | None:
     return compose_id or None
 
 
-def _render_compose_file(plan: SharedCorePlan, mail_relay_config: dict[str, str]) -> str:
+def _render_compose_file(
+    plan: SharedCorePlan,
+    mail_relay_config: dict[str, str],
+    litellm_env: dict[str, str] | None = None,
+) -> str:
+    litellm_env = litellm_env or {}
     postgres_block = ""
     volume_block = ""
     if plan.postgres is not None:
@@ -402,17 +450,102 @@ def _render_compose_file(plan: SharedCorePlan, mail_relay_config: dict[str, str]
             "      - shared\n"
         )
         volume_block += f"  {mail_volume}:\n"
+    litellm_block = ""
+    config_block = ""
+    if plan.litellm is not None:
+        litellm_image = litellm_env.get("LITELLM_IMAGE", "ghcr.io/berriai/litellm").strip() or "ghcr.io/berriai/litellm"
+        litellm_tag = litellm_env.get("LITELLM_IMAGE_TAG", "main-v1.40.14-stable").strip() or "main-v1.40.14-stable"
+        litellm_config = render_litellm_config_yaml(
+            build_litellm_config(litellm_env, _build_litellm_upstream_creds(litellm_env))
+        )
+        postgres_service_name = (
+            plan.postgres.service_name if plan.postgres is not None else "shared-postgres"
+        )
+        postgres_password_env = _compose_env_var_name(plan.litellm.postgres.password_secret_ref)
+        config_name = f"{plan.litellm.service_name}-config"
+        litellm_block = (
+            f"  {plan.litellm.service_name}:\n"
+            f"    image: {litellm_image}:{litellm_tag}\n"
+            "    restart: unless-stopped\n"
+            "    command: [\"--config\", \"/app/config.yaml\", \"--port\", \"4000\"]\n"
+            "    environment:\n"
+            f'      DATABASE_URL: "postgresql://{plan.litellm.postgres.user_name}:${{{postgres_password_env}:-change-me}}@{postgres_service_name}:5432/{plan.litellm.postgres.database_name}"\n'
+            '      MASTER_KEY: "${LITELLM_MASTER_KEY}"\n'
+            '      SALT_KEY: "${LITELLM_SALT_KEY}"\n'
+            "    configs:\n"
+            f"      - source: {config_name}\n"
+            "        target: /app/config.yaml\n"
+            "    expose:\n"
+            '      - "4000"\n'
+            "    healthcheck:\n"
+            '      test: ["CMD-SHELL", "python -c \'import urllib.request; urllib.request.urlopen(\\\"http://127.0.0.1:4000/health/liveliness\\\", timeout=5)\'"]\n'
+            "      interval: 30s\n"
+            "      timeout: 5s\n"
+            "      retries: 5\n"
+            "      start_period: 15s\n"
+            "    networks:\n"
+            "      shared:\n"
+            "        aliases:\n"
+            f"          - {plan.litellm.service_name}\n"
+        )
+        config_block = (
+            "configs:\n"
+            f"  {config_name}:\n"
+            "    content: |\n"
+            f"{_indent_block(litellm_config, 6)}"
+        )
     return (
         "services:\n"
         f"{postgres_block}"
         f"{redis_block}"
         f"{mail_block}"
+        f"{litellm_block}"
         "networks:\n"
         "  shared:\n"
         f"    name: {plan.network_name}\n"
         "volumes:\n"
         f"{volume_block or '  {}\n'}"
+        f"{config_block}"
     )
+
+
+def _build_litellm_upstream_creds(litellm_env: dict[str, str]) -> dict[str, str]:
+    upstream_creds = {"opencode_go_api_key_env": "OPENCODE_GO_API_KEY"}
+    openrouter_env_name = _first_configured_env_name(
+        litellm_env,
+        "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
+        "OPENCLAW_OPENROUTER_API_KEY",
+        "AI_DEFAULT_API_KEY",
+        "OPENROUTER_API_KEY",
+    )
+    if openrouter_env_name is not None:
+        upstream_creds["openrouter_api_key_env"] = openrouter_env_name
+    nvidia_env_name = _first_configured_env_name(
+        litellm_env,
+        "MY_FARM_ADVISOR_NVIDIA_API_KEY",
+        "OPENCLAW_NVIDIA_API_KEY",
+        "NVIDIA_API_KEY",
+    )
+    if nvidia_env_name is not None:
+        upstream_creds["nvidia_api_key_env"] = nvidia_env_name
+    return upstream_creds
+
+
+def _first_configured_env_name(litellm_env: dict[str, str], *candidates: str) -> str | None:
+    for candidate in candidates:
+        value = litellm_env.get(candidate)
+        if value is not None and value.strip() != "":
+            return candidate
+    return None
+
+
+def _compose_env_var_name(secret_ref: str) -> str:
+    return "".join(character if character.isalnum() else "_" for character in secret_ref).upper()
+
+
+def _indent_block(text: str, spaces: int) -> str:
+    prefix = " " * spaces
+    return "".join(f"{prefix}{line}\n" for line in text.rstrip("\n").splitlines())
 
 
 def _find_container_name(service_name: str) -> str | None:

@@ -363,6 +363,21 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "scope": f"stack:{desired_state.stack_name}:shared-postfix",
             }
         )
+    if desired_state.shared_core.litellm is not None:
+        litellm_service_name = desired_state.shared_core.litellm.service_name
+        candidates.append(
+            {
+                "aliases": ("shared-litellm", "litellm"),
+                "hostname": None,
+                "managed_container_labels": {
+                    "com.docker.compose.service": litellm_service_name,
+                },
+                "port": str(4000),
+                "expected_service_name": litellm_service_name,
+                "pack": "shared-core",
+                "scope": f"stack:{desired_state.stack_name}:shared-litellm",
+            }
+        )
     if "openclaw" in desired_state.enabled_packs:
         candidates.append(
             {
