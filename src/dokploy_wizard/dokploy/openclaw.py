@@ -872,9 +872,9 @@ def _render_compose_file(
 ) -> str:
     app_port = _app_port_for_variant(variant)
     stack_name = (
-        service_name.removesuffix("-openclaw")
+        service_name.removesuffix("-my-farm-advisor")
+        .removesuffix("-openclaw")
         .removesuffix("-advisor")
-        .removesuffix("-my-farm-advisor")
     )
     shared_network = _shared_network_name(stack_name)
     channel_list = ",".join(channels)
@@ -887,9 +887,7 @@ def _render_compose_file(
         "services:",
     ]
     split_gateway = variant == "openclaw" and runtime_config.internal_hostname is not None
-    single_gateway_trusted_proxy = (
-        variant == "openclaw" and not split_gateway and bool(runtime_config.trusted_proxy_emails)
-    )
+    single_gateway_trusted_proxy = not split_gateway and bool(runtime_config.trusted_proxy_emails)
     if split_gateway:
         public_service_name = f"{service_name}-public"
         internal_environment = _gateway_environment(
@@ -1732,9 +1730,6 @@ def _command_for_variant(
                         },
                         "contextWindow": 262144,
                         "maxTokens": 32768,
-                        "compat": {
-                            "requiresStringContent": True,
-                        },
                     }
                 ],
             }
@@ -1761,9 +1756,6 @@ def _command_for_variant(
                         },
                         "contextWindow": 262144,
                         "maxTokens": 32768,
-                        "compat": {
-                            "requiresStringContent": True,
-                        },
                     }
                     for model_id in ai_default_models
                 ],

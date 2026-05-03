@@ -980,6 +980,8 @@ def test_openclaw_and_farm_advisor_render_side_by_side_without_collisions() -> N
     assert "wizard-stack-my-farm-advisor-data:/data" in farm_compose
     assert "wizard-stack-my-farm-advisor-data" not in openclaw_compose
     assert "wizard-stack-openclaw-data:/home/node/.openclaw" not in farm_compose
+    assert "      - wizard-stack-shared" in farm_compose
+    assert "  wizard-stack-shared:\n    external: true" in farm_compose
     assert 'traefik.http.routers.wizard-stack-openclaw.rule: "Host(`openclaw.example.com`)"' in openclaw_compose
     assert 'traefik.http.routers.wizard-stack-my-farm-advisor.rule: "Host(`farm.example.com`)"' in farm_compose
 
@@ -1219,6 +1221,43 @@ def test_dokploy_openclaw_backend_uses_trusted_proxy_mode_for_single_gateway_whe
         hostname="openclaw.example.com",
         template_path=None,
         variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    assert 'OPENCLAW_GATEWAY_TOKEN: "fixed-token-123"' not in compose
+    seeded = _decode_seeded_gateway_payload(compose)
+    assert seeded["gateway"]["mode"] == "local"
+    assert seeded["gateway"]["auth"] == {
+        "mode": "trusted-proxy",
+        "trustedProxy": {
+            "userHeader": "cf-access-authenticated-user-email",
+            "allowUsers": ["admin@example.com"],
+        },
+    }
+    assert "remote" not in seeded["gateway"]
+    assert "payload.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;" not in compose
+
+
+def test_dokploy_my_farm_backend_uses_trusted_proxy_mode_for_single_gateway_when_access_emails_present() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        trusted_proxy_emails=("admin@example.com",),
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
         channels=("telegram",),
         replicas=1,
         secret_refs=(),
@@ -1723,6 +1762,7 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapp
     assert 'HOME: "/data"' in compose
     assert 'OPENCLAW_STATE_DIR: "/data"' in compose
     assert 'OPENCLAW_WORKSPACE_DIR: "/data/workspace"' in compose
+    assert "requiresStringContent" not in compose
     assert "/data/openclaw.json" in compose
     assert "/data/.openclaw/openclaw.json" in compose
     assert "/data/workspace-data-pipeline" in compose
@@ -1730,6 +1770,8 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapp
     assert "https://farm.example.com" in compose
     assert 'user: "0:0"' in compose
     assert "wizard-stack-my-farm-advisor-data:/data" in compose
+    assert "      - wizard-stack-shared" in compose
+    assert "  wizard-stack-shared:\n    external: true" in compose
     assert "http://127.0.0.1:18789/healthz" in compose
     assert (
         'traefik.http.routers.wizard-stack-my-farm-advisor.rule: "Host(`farm.example.com`)"'
