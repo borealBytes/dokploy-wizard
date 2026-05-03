@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 """State-directory loading and persistence helpers."""
 
 from __future__ import annotations

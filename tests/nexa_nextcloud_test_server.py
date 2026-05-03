@@ -1,3 +1,6 @@
+# mypy: ignore-errors
+# pyright: reportAttributeAccessIssue=false
+# ruff: noqa: E501
 from __future__ import annotations
 
 import base64

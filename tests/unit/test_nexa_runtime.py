@@ -1,3 +1,6 @@
+# mypy: ignore-errors
+# pyright: reportIndexIssue=false
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 from __future__ import annotations

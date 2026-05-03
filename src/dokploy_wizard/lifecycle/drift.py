@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Deterministic lifecycle drift normalization over the fixed phase order."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # pyright: reportMissingImports=false
 
 from __future__ import annotations

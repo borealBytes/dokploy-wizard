@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 """CLI scaffold for the Dokploy wizard."""

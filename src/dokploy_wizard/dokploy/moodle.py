@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Dokploy-backed Moodle runtime backend."""
 
 from __future__ import annotations

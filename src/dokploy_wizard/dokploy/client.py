@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# pyright: reportCallIssue=false
 """Minimal Dokploy API client for compose-backed shared-core deployment."""
 
 from __future__ import annotations

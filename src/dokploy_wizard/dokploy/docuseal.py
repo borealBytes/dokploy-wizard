@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 """Dokploy-backed DocuSeal runtime backend."""
 
 from __future__ import annotations

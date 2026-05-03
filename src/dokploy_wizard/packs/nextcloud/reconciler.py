@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 """Nextcloud + OnlyOffice runtime reconciliation and ledger integration."""

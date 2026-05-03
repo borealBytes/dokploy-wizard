@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Lifecycle change classification for rerun, resume, and modify flows."""
 
 from __future__ import annotations

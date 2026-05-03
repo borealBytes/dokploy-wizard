@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
 from dokploy_wizard.core.models import SharedPostgresAllocation

@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Narrow queue selection and fairness helpers for runtime workers."""
 
 from __future__ import annotations

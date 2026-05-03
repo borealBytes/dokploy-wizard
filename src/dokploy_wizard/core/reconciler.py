@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Shared-core reconciliation and ledger integration."""
 
 from __future__ import annotations

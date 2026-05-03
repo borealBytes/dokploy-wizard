@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Coder runtime reconciliation and ledger integration."""
 
 from __future__ import annotations

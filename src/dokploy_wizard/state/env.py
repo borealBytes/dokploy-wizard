@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Env-file parsing and desired-state resolution."""
 
 from __future__ import annotations

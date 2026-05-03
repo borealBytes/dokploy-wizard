@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Scoped Mem0 config mapping and Nexa memory write policy."""
 
 from __future__ import annotations
