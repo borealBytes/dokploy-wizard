@@ -7,7 +7,6 @@ from pathlib import Path
 from urllib import parse
 
 from dokploy_wizard.core.planner import build_shared_core_plan
-from dokploy_wizard.packs.resolver import resolve_pack_selection
 from dokploy_wizard.state.models import DesiredState, RawEnvInput, StateValidationError
 
 _ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -120,6 +119,8 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
     hostnames: dict[str, str] = {
         "dokploy": _join_hostname(dokploy_subdomain, root_domain),
     }
+    from dokploy_wizard.packs.resolver import resolve_pack_selection
+
     pack_selection = resolve_pack_selection(values, root_domain=root_domain)
     _validate_openclaw_nexa_env(values, enabled_packs=pack_selection.enabled_packs)
     _validate_my_farm_advisor_env(values, enabled_packs=pack_selection.enabled_packs)

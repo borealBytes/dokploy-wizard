@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from dokploy_wizard.state import parse_env_file, resolve_desired_state
-from dokploy_wizard.packs.resolver import resolve_pack_selection
-from dokploy_wizard.state.models import RawEnvInput, StateValidationError
-
 import pytest
+
+from dokploy_wizard.packs.resolver import resolve_pack_selection
+from dokploy_wizard.state import parse_env_file, resolve_desired_state
+from dokploy_wizard.state.models import RawEnvInput, StateValidationError
 
 
 def _repo_root() -> Path:
@@ -110,3 +110,31 @@ def test_litellm_canonical_env_rejects_missing_local_endpoint_with_actionable_er
                 OPENCODE_GO_BASE_URL="",
             )
         )
+
+
+def test_readme_documents_litellm_core_gateway_contract() -> None:
+    readme = (_repo_root() / "README.md").read_text(encoding="utf-8")
+
+    assert "LiteLLM" in readme
+    assert "always installed" in readme or "core infrastructure" in readme
+    assert "optional" not in readme.lower().split("liteLLM")[0].split("litellm")[0][-200:].lower()
+    assert ".install.env" in readme
+    assert "flat" in readme.lower()
+    assert "local/unsloth-active" in readme
+    assert "OpenCode Go" in readme or "opencode" in readme.lower()
+    assert "wildcard" in readme.lower()
+    assert "explicit" in readme.lower() and "OpenRouter" in readme
+    assert "virtual key" in readme.lower()
+    assert "generated" in readme.lower()
+    assert "stable" in readme.lower()
+    assert "state" in readme.lower()
+    assert "not written back" in readme.lower() or "not written" in readme.lower()
+    assert "litellm." in readme
+    assert "Cloudflare Access" in readme
+    assert "migration" in readme.lower() or "migrating" in readme.lower()
+    assert "direct provider" in readme.lower() or "upstream" in readme.lower()
+    assert "pytest" in readme
+    assert "ruff" in readme
+    assert "sk-or-v1-" not in readme
+    assert "sk-ant-" not in readme
+    assert "nvapi-" not in readme
