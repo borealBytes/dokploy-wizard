@@ -5,7 +5,12 @@ from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.core.reconciler import build_shared_core_ledger
 from dokploy_wizard.dokploy.shared_core import _render_compose_file
-from dokploy_wizard.state.models import OwnedResource, OwnershipLedger
+from dokploy_wizard.state.models import (
+    STATE_FORMAT_VERSION,
+    LiteLLMGeneratedKeys,
+    OwnedResource,
+    OwnershipLedger,
+)
 
 
 def test_litellm_plan_exists_without_ai_packs() -> None:
@@ -68,7 +73,9 @@ def test_rendered_compose_includes_pinned_litellm_service() -> None:
     assert "image: ghcr.io/berriai/litellm:main-v1.40.14-stable" in rendered
     assert "image: ghcr.io/berriai/litellm:latest" not in rendered
     assert 'DATABASE_URL: "postgresql://wizard_stack_litellm:${WIZARD_STACK_LITELLM_POSTGRES_PASSWORD:-change-me}@wizard-stack-shared-postgres:5432/wizard_stack_litellm"' in rendered
+    assert 'LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"' in rendered
     assert 'MASTER_KEY: "${LITELLM_MASTER_KEY}"' in rendered
+    assert 'LITELLM_SALT_KEY: "${LITELLM_SALT_KEY}"' in rendered
     assert 'SALT_KEY: "${LITELLM_SALT_KEY}"' in rendered
     assert "healthcheck:\n" in rendered
     assert "source: wizard-stack-shared-litellm-config" in rendered
@@ -78,6 +85,34 @@ def test_rendered_compose_includes_pinned_litellm_service() -> None:
     assert "    aliases:\n          - wizard-stack-shared-litellm\n" in rendered
     assert '      - "127.0.0.1:4000:4000"' in rendered
     assert "    expose:\n" not in rendered
+
+
+def test_rendered_compose_inlines_documented_and_legacy_litellm_keys_when_generated() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(
+        plan,
+        {},
+        {},
+        litellm_generated_keys=LiteLLMGeneratedKeys(
+            format_version=STATE_FORMAT_VERSION,
+            master_key="sk-master-generated",
+            salt_key="sk-salt-generated",
+            virtual_keys={
+                "coder-hermes": "sk-hermes-generated",
+                "coder-kdense": "sk-kdense-generated",
+                "my-farm-advisor": "sk-farm-generated",
+                "openclaw": "sk-openclaw-generated",
+            },
+        ),
+    )
+
+    assert 'LITELLM_MASTER_KEY: "sk-master-generated"' in rendered
+    assert 'MASTER_KEY: "sk-master-generated"' in rendered
+    assert 'LITELLM_SALT_KEY: "sk-salt-generated"' in rendered
+    assert 'SALT_KEY: "sk-salt-generated"' in rendered
+    assert '${LITELLM_MASTER_KEY}' not in rendered
+    assert '${LITELLM_SALT_KEY}' not in rendered
 
 
 def test_litellm_ledger_resource_is_owned() -> None:
