@@ -36,7 +36,7 @@ class FakeReadinessApi:
 
 class FakeTransientReadinessApi(FakeReadinessApi):
     def __init__(self) -> None:
-        super().__init__([{"status": "connected", "db": "connected"}])
+        super().__init__([{"status": "healthy", "db": "connected"}])
         self._failed_once = False
 
     def readiness(self) -> dict[str, object]:
@@ -52,7 +52,7 @@ def test_litellm_readiness_gate_retries_until_healthy() -> None:
         [
             {"status": "starting", "db": "Not connected"},
             {"status": "connected", "db": "Not connected"},
-            {"status": "connected", "db": "connected"},
+            {"status": "healthy", "db": "connected"},
         ]
     )
     sleeps: list[float] = []
