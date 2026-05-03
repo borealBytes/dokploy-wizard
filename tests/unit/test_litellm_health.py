@@ -34,6 +34,19 @@ class FakeReadinessApi:
         raise AssertionError("unexpected create_key call")
 
 
+class FakeTransientReadinessApi(FakeReadinessApi):
+    def __init__(self) -> None:
+        super().__init__([{"status": "connected", "db": "connected"}])
+        self._failed_once = False
+
+    def readiness(self) -> dict[str, object]:
+        if not self._failed_once:
+            self._failed_once = True
+            self.calls += 1
+            raise ConnectionResetError(104, "Connection reset by peer")
+        return super().readiness()
+
+
 def test_litellm_readiness_gate_retries_until_healthy() -> None:
     api = FakeReadinessApi(
         [
@@ -51,6 +64,19 @@ def test_litellm_readiness_gate_retries_until_healthy() -> None:
 
     assert api.calls == 3
     assert sleeps == [0.25, 0.25]
+
+
+def test_litellm_readiness_gate_retries_transient_connection_errors() -> None:
+    api = FakeTransientReadinessApi()
+    sleeps: list[float] = []
+
+    LiteLLMGatewayManager(api=api, sleep_fn=sleeps.append).wait_until_ready(
+        attempts=3,
+        delay_seconds=0.5,
+    )
+
+    assert api.calls == 2
+    assert sleeps == [0.5]
 
 
 def test_litellm_readiness_gate_times_out_with_actionable_error() -> None:
