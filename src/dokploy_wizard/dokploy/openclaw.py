@@ -84,6 +84,7 @@ _DEFAULT_LOCAL_MODEL_API_KEY = "sk-no-key-required"
 _DEFAULT_AI_DEFAULT_PROVIDER_ID = "opencode-go"
 _DEFAULT_AI_DEFAULT_MODEL_ID = "deepseek-v4-flash"
 _DEFAULT_AI_DEFAULT_MODEL_REF = "opencode-go/deepseek-v4-flash"
+_DEFAULT_LITELLM_WILDCARD_MODEL_REF = "openai/*"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_PROVIDER_ID = "ai-default"
 _DEFAULT_GENERAL_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace"
@@ -1501,6 +1502,8 @@ def _render_openclaw_nexa_sidecar_services(
     if runtime_config.nexa_contract is None:
         msg = "Expected a Nexa deployment contract before rendering sidecar services."
         raise OpenClawError(msg)
+    planner_api_key = _litellm_virtual_key_ref("openclaw")
+    planner_base_url = _litellm_internal_base_url(stack_name)
     runtime_environment = {
         **runtime_config.nexa_env,
         "DOKPLOY_WIZARD_OPENCLAW_INTERNAL_URL": f"http://{service_name}:{_DEFAULT_APP_PORT}",
@@ -1509,16 +1512,12 @@ def _render_openclaw_nexa_sidecar_services(
             runtime_config.primary_model or _DEFAULT_LOCAL_MODEL_REF,
             default=_DEFAULT_LOCAL_PROVIDER_ID,
         ),
-        "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL": _DEFAULT_LOCAL_MODEL_BASE_URL,
-        "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY": _DEFAULT_LOCAL_MODEL_API_KEY,
-        "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
-        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL": _remote_fallback_base_url(
-            runtime_config
-        ),
-        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_API_KEY": (
-            runtime_config.openrouter_api_key or runtime_config.ai_default_api_key or ""
-        ),
-        "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY": runtime_config.nvidia_api_key or "",
+        "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL": planner_base_url,
+        "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY": planner_api_key,
+        "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL": planner_base_url,
+        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL": planner_base_url,
+        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_API_KEY": planner_api_key,
+        "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY": planner_api_key,
         "DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH": _nexa_runtime_volume_path(
             runtime_config.nexa_contract.runtime_contract_path
         ),
@@ -1760,8 +1759,12 @@ def _command_for_variant(
         agents_payload["defaults"] = defaults_payload
     defaults_payload["workspace"] = f"{state_root}/workspace"
     defaults_payload["timeoutSeconds"] = 300
+    allowed_models = _openclaw_seed_model_refs(
+        runtime_config,
+        channels=channels,
+        include_runtime_seed=include_runtime_seed and variant == "openclaw",
+    )
     if runtime_config.primary_model is not None or runtime_config.fallback_models:
-        allowed_models = _allowed_models(runtime_config)
         if _DEFAULT_LOCAL_MODEL_REF not in allowed_models:
             allowed_models = (_DEFAULT_LOCAL_MODEL_REF, *allowed_models)
         model_defaults: dict[str, object] = {}
@@ -1771,45 +1774,33 @@ def _command_for_variant(
             model_defaults["fallbacks"] = list(runtime_config.fallback_models)
         defaults_payload["model"] = model_defaults
         defaults_payload["models"] = {model_ref: {} for model_ref in allowed_models}
+    if allowed_models:
         providers: dict[str, object] = {
-            _DEFAULT_LOCAL_PROVIDER_ID: {
-                "baseUrl": _DEFAULT_LOCAL_MODEL_BASE_URL,
-                "apiKey": _DEFAULT_LOCAL_MODEL_API_KEY,
-                "api": "openai-completions",
-                "models": [
-                    {
-                        "id": _DEFAULT_LOCAL_MODEL_ID,
-                        "name": "Unsloth Active",
-                        "reasoning": True,
-                        "input": ["text"],
-                        "cost": {
-                            "input": 0,
-                            "output": 0,
-                            "cacheRead": 0,
-                            "cacheWrite": 0,
-                        },
-                        "contextWindow": 262144,
-                        "maxTokens": 32768,
-                    }
-                ],
-            }
+            _DEFAULT_LOCAL_PROVIDER_ID: _litellm_provider_config(
+                stack_name=stack_name,
+                model_ids=(_DEFAULT_LOCAL_MODEL_ID,),
+            )
         }
         remote_model_ids: list[str] = []
         remote_provider_ids = tuple(
             dict.fromkeys(
                 _provider_for_model_ref(model_ref, default="")
-                for model_ref in _allowed_models(runtime_config)
+                for model_ref in allowed_models
                 if _provider_for_model_ref(model_ref, default="")
                 not in {"", _DEFAULT_LOCAL_PROVIDER_ID}
             )
         )
         for provider_id in remote_provider_ids:
-            model_ids = _model_refs_for_provider(runtime_config, provider_id=provider_id)
+            model_ids = tuple(
+                model_ref.split("/", 1)[1].strip()
+                for model_ref in allowed_models
+                if model_ref.startswith(f"{provider_id}/") and model_ref.split("/", 1)[1].strip() != ""
+            )
             if not model_ids:
                 continue
             providers[provider_id] = _litellm_provider_config(
                 stack_name=stack_name,
-                model_ids=model_ids,
+                model_ids=tuple(dict.fromkeys(model_ids)),
             )
             remote_model_ids.extend(model_ids)
         if remote_model_ids:
@@ -1853,11 +1844,7 @@ def _command_for_variant(
                 "name": runtime_config.nexa_env.get(
                     "OPENCLAW_NEXA_AGENT_DISPLAY_NAME", _DEFAULT_NEXA_AGENT_NAME
                 ),
-                "model": _specialized_agent_model_defaults(
-                    runtime_config,
-                    default_primary="openrouter/auto",
-                    default_fallbacks=("openrouter/openrouter/free",),
-                ),
+                "model": _nexa_model_defaults(runtime_config),
                 "tools": {
                     "profile": "coding",
                     "elevated": {
@@ -1905,10 +1892,7 @@ def _command_for_variant(
                 {
                     "id": "telly",
                     "name": "Telly",
-                    "model": {
-                        "primary": _DEFAULT_LOCAL_MODEL_REF,
-                        "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
-                    },
+                    "model": _telly_model_defaults(),
                     "tools": {
                         "profile": "coding",
                         "elevated": {
@@ -2035,6 +2019,56 @@ def _allowed_models(runtime_config: _AdvisorRuntimeConfig) -> tuple[str, ...]:
             continue
         seen.add(model_ref)
         ordered.append(model_ref)
+    return tuple(ordered)
+
+
+def _nexa_model_defaults(runtime_config: _AdvisorRuntimeConfig) -> dict[str, object]:
+    return _specialized_agent_model_defaults(
+        runtime_config,
+        default_primary=_DEFAULT_LOCAL_MODEL_REF,
+        default_fallbacks=(_DEFAULT_LITELLM_WILDCARD_MODEL_REF,),
+    )
+
+
+def _telly_model_defaults() -> dict[str, object]:
+    return {
+        "primary": _DEFAULT_LOCAL_MODEL_REF,
+        "fallbacks": [_DEFAULT_LITELLM_WILDCARD_MODEL_REF],
+    }
+
+
+def _openclaw_seed_model_refs(
+    runtime_config: _AdvisorRuntimeConfig,
+    *,
+    channels: tuple[str, ...],
+    include_runtime_seed: bool,
+) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def _append(model_ref: str) -> None:
+        if model_ref in seen:
+            return
+        seen.add(model_ref)
+        ordered.append(model_ref)
+
+    for model_ref in _allowed_models(runtime_config):
+        _append(model_ref)
+    if not include_runtime_seed:
+        return tuple(ordered)
+    if runtime_config.nexa_contract is not None:
+        nexa_defaults = _nexa_model_defaults(runtime_config)
+        primary = nexa_defaults.get("primary")
+        if isinstance(primary, str):
+            _append(primary)
+        fallbacks = nexa_defaults.get("fallbacks")
+        if isinstance(fallbacks, list):
+            for model_ref in fallbacks:
+                if isinstance(model_ref, str):
+                    _append(model_ref)
+    if "telegram" in channels:
+        _append(_DEFAULT_LOCAL_MODEL_REF)
+        _append(_DEFAULT_LITELLM_WILDCARD_MODEL_REF)
     return tuple(ordered)
 
 

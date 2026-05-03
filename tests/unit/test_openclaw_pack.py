@@ -1155,7 +1155,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+                "fallbacks": ["openai/*"],
             },
             "tools": {
                 "profile": "coding",
@@ -1360,7 +1360,7 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+                "fallbacks": ["openai/*"],
             },
             "tools": {
                 "profile": "coding",
@@ -1377,18 +1377,19 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
     assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert seeded["agents"]["defaults"]["models"] == {
         "local/unsloth-active": {},
+        "openai/*": {},
         "nvidia/moonshotai/kimi-k2.5": {},
         "openrouter/openrouter/free": {},
         "openrouter/google/gemma-4-31b-it:free": {},
     }
     assert seeded["models"]["providers"]["local"] == {
-        "baseUrl": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
-        "apiKey": "sk-no-key-required",
+        "baseUrl": "http://wizard-stack-shared-litellm:4000",
+        "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
         "api": "openai-completions",
         "models": [
             {
                 "id": "unsloth-active",
-                "name": "Unsloth Active",
+                "name": "unsloth-active",
                 "reasoning": True,
                 "input": ["text"],
                 "cost": {
@@ -1605,10 +1606,10 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
     assert 'DOKPLOY_WIZARD_OPENCLAW_INTERNAL_URL: "http://wizard-stack-openclaw:18789"' in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL: "local/unsloth-active"' in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL_PROVIDER: "local"' in runtime_block
-    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL: "http://tuxdesktop.tailb12aa5.ts.net:61434/v1"' in runtime_block
-    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY: "sk-no-key-required"' in runtime_block
-    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL: "https://integrate.api.nvidia.com/v1"' in runtime_block
-    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL: "https://openrouter.ai/api/v1"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL: "http://wizard-stack-shared-litellm:4000"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY: "${LITELLM_VIRTUAL_KEY_OPENCLAW}"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL: "http://wizard-stack-shared-litellm:4000"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL: "http://wizard-stack-shared-litellm:4000"' in runtime_block
     assert 'OPENCLAW_NEXA_NEXTCLOUD_BASE_URL: "http://wizard-stack-nextcloud"' in runtime_block
     assert 'OPENCLAW_NEXA_MEM0_BASE_URL: "http://mem0:8000"' in runtime_block
     assert 'OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL: "http://qdrant:6333"' in runtime_block
@@ -1637,8 +1638,8 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "nexa",
             "name": "Nexa",
             "model": {
-                "primary": "openrouter/auto",
-                "fallbacks": ["openrouter/openrouter/free"],
+                "primary": "local/unsloth-active",
+                "fallbacks": ["openai/*"],
             },
             "tools": {
                 "profile": "coding",
@@ -1656,7 +1657,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+                "fallbacks": ["openai/*"],
             },
             "tools": {
                 "profile": "coding",
@@ -1768,7 +1769,7 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+                "fallbacks": ["openai/*"],
             },
             "tools": {
                 "profile": "coding",
@@ -1784,6 +1785,103 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
     ]
     assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert "channels" not in seeded or "telegram" not in seeded.get("channels", {})
+
+
+def test_telly_keeps_local_first_through_litellm() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    seeded = _decode_seeded_gateway_payload(compose)
+    telly = next(agent for agent in seeded["agents"]["list"] if agent["id"] == "telly")
+
+    assert telly["model"] == {
+        "primary": "local/unsloth-active",
+        "fallbacks": ["openai/*"],
+    }
+    assert seeded["models"]["providers"]["local"] == {
+        "baseUrl": "http://wizard-stack-shared-litellm:4000",
+        "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
+        "api": "openai-completions",
+        "models": [
+            {
+                "id": "unsloth-active",
+                "name": "unsloth-active",
+                "reasoning": True,
+                "input": ["text"],
+                "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                },
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+            }
+        ],
+    }
+
+
+def test_nexa_model_routing_uses_litellm_without_openrouter_secret() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        openclaw_openrouter_api_key="or-key",
+        openclaw_nvidia_api_key="nv-key",
+        openclaw_nexa_env={
+            "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
+            "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
+            "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL": "https://nextcloud.example.com",
+            "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET": "office-shared-secret",
+            "OPENCLAW_NEXA_TALK_SHARED_SECRET": "talk-shared-secret",
+            "OPENCLAW_NEXA_TALK_SIGNING_SECRET": "talk-signing-secret",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD": "webdav-app-password",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_USER": "nexa-agent",
+        },
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    runtime_env = _service_environment(compose, "nexa-runtime")
+
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_MODEL"] == "local/unsloth-active"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert "or-key" not in runtime_env.values()
+    assert "nv-key" not in runtime_env.values()
 
 
 def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapping() -> None:

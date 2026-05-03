@@ -500,6 +500,53 @@ pytest tests/test_cli.py -q
 - Nexa features are env-gated, not universal defaults. For your deployment that is fine, because `.install.env` already carries the required `OPENCLAW_NEXA_*` values.
 - Some channel/runtime behavior still depends on the upstream OpenClaw image, so operational behavior can evolve as that image evolves.
 
+## LiteLLM core gateway
+
+LiteLLM is always installed as core infrastructure. It is not a pack you opt into, and it runs as a shared-core service alongside Postgres and Redis. Every AI consumer in the stack, including My Farm Advisor, OpenClaw, and Coder templates, routes model calls through LiteLLM using a per-consumer virtual key.
+
+### Flat env inputs
+
+The operator env file stays flat. `.install.env` contains only key=value pairs. The wizard generates the nested LiteLLM `config.yaml` internally during deployment. You do not edit raw LiteLLM proxy config by hand.
+
+### Model allowlist and default order
+
+The generated LiteLLM config enforces a strict precedence:
+
+1. `local/unsloth-active` — the local vLLM or Tailnet endpoint, when `LITELLM_LOCAL_BASE_URL` is configured
+2. OpenCode Go wildcard — a single `openai/*` route that covers the OpenCode Go provider fleet
+3. Explicit OpenRouter aliases — each alias is declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS`
+
+OpenRouter wildcard routes are not allowed. The config renderer rejects `openrouter/*` or broad `*` aliases.
+
+### Virtual keys
+
+The wizard auto-generates stable virtual keys for each consumer:
+
+- My Farm Advisor
+- OpenClaw
+- Coder Hermes
+- Coder K-Dense
+
+These keys are generated once and reused across reruns and modify operations. They are stored in the wizard state directory, not written back into `.install.env`. If you need to rotate a key, that is a future operator action, not something that happens silently on reinstall.
+
+### Admin access
+
+LiteLLM management UI and API are reachable at `litellm.<root-domain>`. This hostname is protected by Cloudflare Access before any public DNS or tunnel routing is created. Internal consumers use the Docker network URL `http://<stack-name>-shared-litellm:4000`, not the public admin hostname.
+
+### Migration from direct provider envs
+
+If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, consumers no longer receive those raw upstream keys. Instead, each consumer gets its own LiteLLM virtual key and the internal base URL. Upstream secrets terminate at the LiteLLM proxy.
+
+### Validation
+
+Quick checks:
+
+```bash
+pytest -q
+ruff check .
+mypy .
+```
+
 ## My Farm Advisor operator reference
 
 ### Required env keys
@@ -513,9 +560,9 @@ My Farm Advisor is enabled with `ENABLE_MY_FARM_ADVISOR=true`. When it is enable
 | `MY_FARM_ADVISOR_SUBDOMAIN` | `farm` | Defaults to `farm` |
 | `MY_FARM_ADVISOR_GATEWAY_PASSWORD` | `changeme` | Browser/control UI password. `ADVISOR_GATEWAY_PASSWORD` is a shared fallback for both advisors. |
 | **Provider (at least one)** | | |
-| `MY_FARM_ADVISOR_OPENROUTER_API_KEY` | `sk-or-v1-...` | Farm-only OpenRouter key |
-| `MY_FARM_ADVISOR_NVIDIA_API_KEY` | `nvapi-...` | Farm-only NVIDIA key |
-| `ANTHROPIC_API_KEY` | `sk-ant-...` | Shared across packs |
+| `MY_FARM_ADVISOR_OPENROUTER_API_KEY` | `<your-openrouter-key>` | Farm-only OpenRouter key |
+| `MY_FARM_ADVISOR_NVIDIA_API_KEY` | `<your-nvidia-key>` | Farm-only NVIDIA key |
+| `ANTHROPIC_API_KEY` | `<your-anthropic-key>` | Shared across packs |
 | `AI_DEFAULT_API_KEY` + `AI_DEFAULT_BASE_URL` | `sk-...` + `https://...` | Shared fallback pair; both must be present to count as a valid provider path |
 
 ### Optional env keys
