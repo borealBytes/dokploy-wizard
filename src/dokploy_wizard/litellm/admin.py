@@ -167,7 +167,7 @@ class LiteLLMGatewayManager:
                 last_snapshot = self._api.readiness()
                 if _readiness_is_healthy(last_snapshot):
                     return
-            except LiteLLMAdminError as exc:
+            except Exception as exc:
                 last_error = exc
             if attempt < attempts - 1:
                 self._sleep_fn(delay_seconds)
