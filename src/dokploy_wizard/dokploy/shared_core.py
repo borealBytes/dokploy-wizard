@@ -542,8 +542,8 @@ def _render_compose_file(
             "    configs:\n"
             f"      - source: {config_name}\n"
             "        target: /app/config.yaml\n"
-            "    expose:\n"
-            '      - "4000"\n'
+            "    ports:\n"
+            '      - "127.0.0.1:4000:4000"\n'
             "    healthcheck:\n"
             '      test: ["CMD-SHELL", "python -c \'import urllib.request; urllib.request.urlopen(\\\"http://127.0.0.1:4000/health/liveliness\\\", timeout=5)\'"]\n'
             "      interval: 30s\n"

@@ -76,8 +76,8 @@ def test_rendered_compose_includes_pinned_litellm_service() -> None:
     assert "os.environ/MY_FARM_ADVISOR_OPENROUTER_API_KEY" in rendered
     assert "os.environ/OPENCODE_GO_API_KEY" in rendered
     assert "    aliases:\n          - wizard-stack-shared-litellm\n" in rendered
-    assert '      - "4000"' in rendered
-    assert '      - "4000:4000"' not in rendered
+    assert '      - "127.0.0.1:4000:4000"' in rendered
+    assert "    expose:\n" not in rendered
 
 
 def test_litellm_ledger_resource_is_owned() -> None:
