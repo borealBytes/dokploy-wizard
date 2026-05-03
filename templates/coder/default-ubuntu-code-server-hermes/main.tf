@@ -90,9 +90,9 @@ resource "coder_agent" "main" {
     export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
     export HERMES_TEMPLATE_PROVIDER="__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__"
     export HERMES_TEMPLATE_MODEL="__DOKPLOY_WIZARD_HERMES_MODEL__"
-    export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__"
-    export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"
-    export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"
+    export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_HERMES_BASE_URL__"
+    export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_HERMES_API_KEY__"
+    export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY__"
 
     if ! command -v hermes >/dev/null 2>&1; then
       HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup
@@ -108,8 +108,10 @@ resource "coder_agent" "main" {
 
     export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"
     export HERMES_MODEL="$${HERMES_MODEL:-$HERMES_TEMPLATE_MODEL}"
-    export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-$HERMES_TEMPLATE_BASE_URL}"
-    export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-$HERMES_TEMPLATE_API_KEY}"
+    export OPENAI_API_BASE="$${OPENAI_API_BASE:-$HERMES_TEMPLATE_BASE_URL}"
+    export OPENAI_API_KEY="$${OPENAI_API_KEY:-$HERMES_TEMPLATE_API_KEY}"
+    export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-$OPENAI_API_BASE}"
+    export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-$OPENAI_API_KEY}"
     export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"
     export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"
     export API_SERVER_ENABLED=true
@@ -130,8 +132,9 @@ resource "coder_agent" "main" {
       chmod 600 "$file"
     }
 
+    upsert_env OPENAI_API_KEY "$OPENAI_API_KEY"
+    upsert_env OPENAI_API_BASE "$OPENAI_API_BASE"
     upsert_env AI_DEFAULT_API_KEY "$AI_DEFAULT_API_KEY"
-    upsert_env OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"
     upsert_env HERMES_INFERENCE_PROVIDER "$HERMES_INFERENCE_PROVIDER"
     upsert_env HERMES_MODEL "$HERMES_MODEL"
     upsert_env AI_DEFAULT_BASE_URL "$AI_DEFAULT_BASE_URL"
@@ -141,22 +144,22 @@ resource "coder_agent" "main" {
     upsert_env API_SERVER_PORT "$API_SERVER_PORT"
     upsert_env API_SERVER_KEY "$API_SERVER_KEY"
 
-    if [ "$HERMES_TEMPLATE_API_KEY" = "$HERMES_TEMPLATE_API_KEY_PLACEHOLDER" ] && [ -z "$${AI_DEFAULT_API_KEY:-}" ]; then
-      echo "AI_DEFAULT_API_KEY is required for the Hermes workspace template" >&2
+    if [ "$HERMES_TEMPLATE_API_KEY" = "$HERMES_TEMPLATE_API_KEY_PLACEHOLDER" ] && [ -z "$${OPENAI_API_KEY:-}" ]; then
+      echo "OPENAI_API_KEY is required for the Hermes workspace template" >&2
       exit 1
     fi
-    if [ -z "$AI_DEFAULT_API_KEY" ]; then
-      echo "AI_DEFAULT_API_KEY is required for the Hermes workspace template" >&2
+    if [ -z "$OPENAI_API_KEY" ]; then
+      echo "OPENAI_API_KEY is required for the Hermes workspace template" >&2
       exit 1
     fi
-    if [ "$HERMES_INFERENCE_PROVIDER" = "opencode-go" ] && [ -z "$OPENCODE_GO_API_KEY" ]; then
-      echo "Provider 'opencode-go' requires OPENCODE_GO_API_KEY in the Hermes workspace template" >&2
+    if [ -z "$OPENAI_API_BASE" ]; then
+      echo "OPENAI_API_BASE is required for the Hermes workspace template" >&2
       exit 1
     fi
 
     hermes config set model.provider "$HERMES_INFERENCE_PROVIDER"
     hermes config set model.default "$HERMES_MODEL"
-    hermes config set model.base_url "$AI_DEFAULT_BASE_URL"
+    hermes config set model.base_url "$OPENAI_API_BASE"
     hermes config set terminal.backend local
     hermes config set terminal.cwd /home/coder
 
