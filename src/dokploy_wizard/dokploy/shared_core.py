@@ -443,8 +443,30 @@ def _render_compose_file(
     litellm_env = litellm_env or {}
     postgres_block = ""
     volume_block = ""
+    config_entries: list[str] = []
     if plan.postgres is not None:
         postgres_volume = f"{plan.postgres.service_name}-data"
+        postgres_allocations = [
+            allocation.postgres
+            for allocation in plan.allocations
+            if allocation.postgres is not None
+        ]
+        if plan.litellm is not None:
+            postgres_allocations.append(plan.litellm.postgres)
+        postgres_config_mount_block = ""
+        postgres_init_sql = _render_postgres_init_sql(tuple(postgres_allocations))
+        if postgres_init_sql:
+            postgres_init_config_name = f"{plan.postgres.service_name}-init"
+            postgres_config_mount_block = (
+                "    configs:\n"
+                f"      - source: {postgres_init_config_name}\n"
+                "        target: /docker-entrypoint-initdb.d/01-init.sql\n"
+            )
+            config_entries.append(
+                f"  {postgres_init_config_name}:\n"
+                "    content: |\n"
+                f"{_indent_block(postgres_init_sql, 6)}"
+            )
         postgres_block = (
             f"  {plan.postgres.service_name}:\n"
             "    image: postgres:16-alpine\n"
@@ -454,6 +476,7 @@ def _render_compose_file(
             "      POSTGRES_USER: postgres\n"
             "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}\n"
             f"    volumes:\n      - {postgres_volume}:/var/lib/postgresql/data\n"
+            f"{postgres_config_mount_block}"
             "    networks:\n      - shared\n"
         )
         volume_block += f"  {postgres_volume}:\n"
@@ -491,7 +514,6 @@ def _render_compose_file(
         )
         volume_block += f"  {mail_volume}:\n"
     litellm_block = ""
-    config_block = ""
     if plan.litellm is not None:
         litellm_image = litellm_env.get("LITELLM_IMAGE", "ghcr.io/berriai/litellm").strip() or "ghcr.io/berriai/litellm"
         litellm_tag = litellm_env.get("LITELLM_IMAGE_TAG", "v1.83.14-stable").strip() or "v1.83.14-stable"
@@ -533,12 +555,12 @@ def _render_compose_file(
             "        aliases:\n"
             f"          - {plan.litellm.service_name}\n"
         )
-        config_block = (
-            "configs:\n"
+        config_entries.append(
             f"  {config_name}:\n"
             "    content: |\n"
             f"{_indent_block(litellm_config, 6)}"
         )
+    config_block = f"configs:\n{''.join(config_entries)}" if config_entries else ""
     return (
         "services:\n"
         f"{postgres_block}"
@@ -667,6 +689,31 @@ def _optional_value(flat_env: dict[str, str], key: str) -> str | None:
 
 def _compose_env_var_name(secret_ref: str) -> str:
     return "".join(character if character.isalnum() else "_" for character in secret_ref).upper()
+
+
+def _render_postgres_init_sql(allocations: tuple[SharedPostgresAllocation, ...]) -> str:
+    statements: list[str] = []
+    for allocation in allocations:
+        user_name = _quote_postgres_identifier(allocation.user_name)
+        database_name = _quote_postgres_identifier(allocation.database_name)
+        password = _quote_postgres_literal(_postgres_password_for_allocation(allocation))
+        statements.extend(
+            (
+                f"CREATE ROLE {user_name} WITH LOGIN PASSWORD {password};",
+                f"CREATE DATABASE {database_name} OWNER {user_name};",
+                f"GRANT ALL PRIVILEGES ON DATABASE {database_name} TO {user_name};",
+                "",
+            )
+        )
+    return "\n".join(statements).rstrip()
+
+
+def _quote_postgres_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _quote_postgres_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _indent_block(text: str, spaces: int) -> str:
