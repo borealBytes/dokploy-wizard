@@ -245,9 +245,7 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_HERMES_BASE_URL__": _shell_double_quote_escape(
                         hermes_litellm_base_url
                     ),
-                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
-                    ),
+                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _litellm_virtual_key_ref("coder-hermes"),
                 },
             ),
         ):
@@ -809,7 +807,9 @@ def _copy_template_into_container(
     )
 
 
-def _docker_copy_template_dir(*, container_name: str, template_name: str, template_dir: Path) -> None:
+def _docker_copy_template_dir(
+    *, container_name: str, template_name: str, template_dir: Path
+) -> None:
     result = subprocess.run(
         ["docker", "cp", str(template_dir), f"{container_name}:/tmp/{template_name}"],
         check=False,
@@ -979,12 +979,7 @@ def _upsert_coder_secret(
 
 
 def _shell_double_quote_escape(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("$", "\\$")
-        .replace("`", "\\`")
-    )
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 
 def _list_workspaces(*, container_name: str, hostname: str, session_token: str) -> tuple[str, ...]:

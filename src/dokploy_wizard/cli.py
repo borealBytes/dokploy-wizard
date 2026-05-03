@@ -1083,6 +1083,7 @@ def _run_lifecycle_flow(
     )
     coder_phase_backend = coder_backend or _build_coder_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
@@ -1717,9 +1718,9 @@ def _build_nextcloud_backend(
     )
     nexa_agent_password = None
     if nexa_enabled:
-        nexa_agent_password = raw_env.values.get("OPENCLAW_NEXA_AGENT_PASSWORD") or raw_env.values.get(
-            "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD"
-        )
+        nexa_agent_password = raw_env.values.get(
+            "OPENCLAW_NEXA_AGENT_PASSWORD"
+        ) or raw_env.values.get("OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD")
     return DokployNextcloudBackend(
         api_url=api_url,
         api_key=api_key,
@@ -1739,12 +1740,16 @@ def _build_nextcloud_backend(
             if "openclaw" in desired_state.enabled_packs
             else None
         ),
-        nexa_agent_user_id=(raw_env.values.get("OPENCLAW_NEXA_AGENT_USER_ID") if nexa_enabled else None),
+        nexa_agent_user_id=(
+            raw_env.values.get("OPENCLAW_NEXA_AGENT_USER_ID") if nexa_enabled else None
+        ),
         nexa_agent_display_name=(
             raw_env.values.get("OPENCLAW_NEXA_AGENT_DISPLAY_NAME") if nexa_enabled else None
         ),
         nexa_agent_password=nexa_agent_password,
-        nexa_agent_email=(raw_env.values.get("OPENCLAW_NEXA_AGENT_EMAIL") if nexa_enabled else None),
+        nexa_agent_email=(
+            raw_env.values.get("OPENCLAW_NEXA_AGENT_EMAIL") if nexa_enabled else None
+        ),
         openclaw_rescan_cron=raw_env.values.get("NEXTCLOUD_OPENCLAW_RESCAN_CRON", "*/15 * * * *"),
         openclaw_rescan_timezone=raw_env.values.get("NEXTCLOUD_OPENCLAW_RESCAN_TIMEZONE", "UTC"),
         client=_build_dokploy_api_client(
@@ -1922,6 +1927,7 @@ def _build_seaweedfs_backend(
 def _build_coder_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> CoderBackend:
@@ -1939,6 +1945,7 @@ def _build_coder_backend(
         return ShellCoderBackend()
     if allocation.postgres is None or desired_state.shared_core.postgres is None:
         return ShellCoderBackend()
+    litellm_generated_keys = ensure_litellm_generated_keys(state_dir)
     return DokployCoderBackend(
         api_url=api_url,
         api_key=api_key,
@@ -1949,12 +1956,10 @@ def _build_coder_backend(
         admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
-        hermes_inference_provider=raw_env.values.get(
-            "HERMES_INFERENCE_PROVIDER", "opencode-go"
-        ),
+        hermes_inference_provider=raw_env.values.get("HERMES_INFERENCE_PROVIDER", "opencode-go"),
         hermes_model=raw_env.values.get("HERMES_MODEL", "deepseek-v4-flash"),
         ai_default_base_url=_shared_ai_default_base_url(raw_env),
-        ai_default_api_key=_shared_ai_default_api_key(raw_env),
+        ai_default_api_key=litellm_generated_keys.virtual_keys["coder-hermes"],
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,

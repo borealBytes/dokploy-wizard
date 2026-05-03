@@ -36,7 +36,6 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
-ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -44,21 +43,3 @@ files = ["src", "tests"]
 strict = true
 warn_unreachable = true
 show_error_codes = true
-ignore_missing_imports = true
-disable_error_code = [
-  "arg-type",
-  "attr-defined",
-  "call-arg",
-  "exit-return",
-  "func-returns-value",
-  "import-not-found",
-  "import-untyped",
-  "index",
-  "no-any-return",
-  "no-redef",
-  "no-untyped-call",
-  "no-untyped-def",
-  "union-attr",
-  "unreachable",
-  "unused-ignore",
-]

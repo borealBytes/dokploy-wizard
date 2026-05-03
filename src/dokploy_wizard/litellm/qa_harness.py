@@ -6,6 +6,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from urllib import error, request
 
 from dokploy_wizard.networking import resolve_litellm_admin_hostname
@@ -45,7 +46,9 @@ def build_litellm_admin_qa_harness(
 ) -> LiteLLMAdminQaHarness:
     admin_hostname = resolve_litellm_admin_hostname(raw_env=raw_env, desired_state=desired_state)
     if admin_hostname is None or desired_state.shared_core.litellm is None:
-        raise LiteLLMAdminQaHarnessError("LiteLLM shared-core admin QA requires a planned LiteLLM service.")
+        raise LiteLLMAdminQaHarnessError(
+            "LiteLLM shared-core admin QA requires a planned LiteLLM service."
+        )
 
     internal_url = f"http://{desired_state.shared_core.litellm.service_name}:4000{_READINESS_PATH}"
     admin_url = f"https://{admin_hostname}"
@@ -113,8 +116,10 @@ def verify_public_litellm_admin_access(
             f"LiteLLM public admin access check failed: {exc.reason}."
         ) from exc
 
-    with response as http_response:  # type: ignore[assignment]
-        status = getattr(http_response, "status", None)
+    status = getattr(response, "status", None)
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
     if status in _ACCESS_ALLOWED_STATUSES:
         return
     if status == 200:
@@ -139,7 +144,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    raw_env = parse_env_file(args.env_file)
+    raw_env = parse_env_file(Path(args.env_file))
     desired_state = resolve_desired_state(raw_env)
     harness = build_litellm_admin_qa_harness(raw_env=raw_env, desired_state=desired_state)
 
@@ -196,14 +201,22 @@ def _tailnet_readiness_command(
 def _public_access_shell_command(url: str) -> str:
     return (
         f"status=$(curl -ksS -o /tmp/litellm-access-body.$$ -w '%{{http_code}}' {shlex.quote(url)}) && "
-        "case \"$status\" in 302|401|403) exit 0 ;; 200) "
+        'case "$status" in 302|401|403) exit 0 ;; 200) '
         "echo 'unauthenticated 200 from LiteLLM admin is forbidden' >&2; exit 1 ;; *) "
-        "echo \"unexpected LiteLLM admin status $status\" >&2; exit 1 ;; esac"
+        'echo "unexpected LiteLLM admin status $status" >&2; exit 1 ;; esac'
     )
 
 
 class _NoRedirectHandler(request.HTTPRedirectHandler):
-    def redirect_request(self, req: request.Request, fp: object, code: int, msg: str, headers: object, newurl: str) -> None:  # type: ignore[override]
+    def redirect_request(
+        self,
+        req: request.Request,
+        fp: object,
+        code: int,
+        msg: str,
+        headers: object,
+        newurl: str,
+    ) -> request.Request | None:
         del req, fp, code, msg, headers, newurl
         return None
 
