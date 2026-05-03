@@ -33,6 +33,7 @@ from dokploy_wizard.networking.planner import (
     build_networking_ledger,
     reconcile_cloudflare_access,
     reconcile_networking,
+    resolve_litellm_admin_hostname,
 )
 
 __all__ = [
@@ -64,4 +65,5 @@ __all__ = [
     "build_networking_ledger",
     "reconcile_cloudflare_access",
     "reconcile_networking",
+    "resolve_litellm_admin_hostname",
 ]

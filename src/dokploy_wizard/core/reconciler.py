@@ -120,6 +120,9 @@ class ShellSharedCoreBackend:
     ) -> None:
         del allocations
 
+    def refresh_compose(self) -> None:
+        return None
+
 
 def reconcile_shared_core(
     *,
@@ -198,6 +201,10 @@ def reconcile_shared_core(
         find_by_name=backend.find_litellm_service_by_name,
         create_resource=backend.create_litellm_service,
     )
+    if not dry_run:
+        refresh_compose = getattr(backend, "refresh_compose", None)
+        if callable(refresh_compose):
+            refresh_compose()
     if not dry_run and postgres is not None:
         ensure_postgres_allocations = getattr(backend, "ensure_postgres_allocations", None)
         if callable(ensure_postgres_allocations):

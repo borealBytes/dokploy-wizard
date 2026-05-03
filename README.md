@@ -533,6 +533,37 @@ These keys are generated once and reused across reruns and modify operations. Th
 
 LiteLLM management UI and API are reachable at `litellm.<root-domain>`. This hostname is protected by Cloudflare Access before any public DNS or tunnel routing is created. Internal consumers use the Docker network URL `http://<stack-name>-shared-litellm:4000`, not the public admin hostname.
 
+### Post-deploy LiteLLM admin QA harness
+
+The public LiteLLM admin URL is supposed to be protected, not publicly healthy. Anonymous checks should return a Cloudflare Access challenge or denial such as `302`, `401`, or `403`. An unauthenticated `200` is a failure.
+
+From repo root, agents can print or execute the post-deploy QA harness without completing a human OTP flow:
+
+```bash
+python -m src.dokploy_wizard.litellm.qa_harness --env-file ./.install.env --print-commands
+python -m src.dokploy_wizard.litellm.qa_harness --env-file ./.install.env
+```
+
+The harness verifies three paths:
+
+1. Public admin ingress stays Access-protected and never returns unauthenticated `200`.
+2. Internal LiteLLM readiness stays reachable from the shared Docker network:
+
+   ```bash
+   docker run --rm --network <stack-name>-shared curlimages/curl:8.7.1 -fsS \
+     http://<stack-name>-shared-litellm:4000/health/readiness
+   ```
+
+3. When Tailscale host access and Tailscale SSH are enabled, the same internal readiness probe can be executed over the Tailnet without OTP:
+
+   ```bash
+   tailscale ssh <tailscale-hostname> \
+     docker run --rm --network <stack-name>-shared curlimages/curl:8.7.1 -fsS \
+     http://<stack-name>-shared-litellm:4000/health/readiness
+   ```
+
+This keeps admin verification aligned with the intended trust boundary: public admin ingress must challenge anonymous users, while container-to-container and Tailnet-admin paths stay testable by automation.
+
 ### Migration from direct provider envs
 
 If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, consumers no longer receive those raw upstream keys. Instead, each consumer gets its own LiteLLM virtual key and the internal base URL. Upstream secrets terminate at the LiteLLM proxy.
