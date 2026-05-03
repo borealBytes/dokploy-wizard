@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from dokploy_wizard.litellm.admin import (
@@ -77,6 +79,13 @@ def test_litellm_readiness_gate_retries_transient_connection_errors() -> None:
 
     assert api.calls == 2
     assert sleeps == [0.5]
+
+
+def test_litellm_readiness_gate_uses_extended_first_boot_defaults() -> None:
+    signature = inspect.signature(LiteLLMGatewayManager.wait_until_ready)
+
+    assert signature.parameters["attempts"].default == 120
+    assert signature.parameters["delay_seconds"].default == 5.0
 
 
 def test_litellm_readiness_gate_times_out_with_actionable_error() -> None:
