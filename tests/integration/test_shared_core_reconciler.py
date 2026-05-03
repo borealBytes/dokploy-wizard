@@ -235,6 +235,9 @@ class FakeSharedCoreBackend:
     create_mail_relay_calls: int = 0
     create_litellm_calls: int = 0
     ensured_allocations: tuple[SharedPostgresAllocation, ...] = ()
+    refresh_compose_calls: int = 0
+    reconcile_litellm_runtime_calls: int = 0
+    call_order: list[str] = field(default_factory=list)
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self.network is not None and self.network.resource_id == resource_id:
@@ -248,6 +251,7 @@ class FakeSharedCoreBackend:
 
     def create_network(self, resource_name: str) -> SharedCoreResourceRecord:
         self.create_network_calls += 1
+        self.call_order.append("create_network")
         self.network = SharedCoreResourceRecord(
             resource_id="network-1",
             resource_name=resource_name,
@@ -266,6 +270,7 @@ class FakeSharedCoreBackend:
 
     def create_postgres_service(self, resource_name: str) -> SharedCoreResourceRecord:
         self.create_postgres_calls += 1
+        self.call_order.append("create_postgres_service")
         self.postgres = SharedCoreResourceRecord(
             resource_id="postgres-1",
             resource_name=resource_name,
@@ -284,6 +289,7 @@ class FakeSharedCoreBackend:
 
     def create_redis_service(self, resource_name: str) -> SharedCoreResourceRecord:
         self.create_redis_calls += 1
+        self.call_order.append("create_redis_service")
         self.redis = SharedCoreResourceRecord(
             resource_id="redis-1",
             resource_name=resource_name,
@@ -302,6 +308,7 @@ class FakeSharedCoreBackend:
 
     def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
         self.create_mail_relay_calls += 1
+        self.call_order.append("create_mail_relay_service")
         self.mail_relay = SharedCoreResourceRecord(
             resource_id="postfix-1",
             resource_name=resource_name,
@@ -320,6 +327,7 @@ class FakeSharedCoreBackend:
 
     def create_litellm_service(self, resource_name: str) -> SharedCoreResourceRecord:
         self.create_litellm_calls += 1
+        self.call_order.append("create_litellm_service")
         self.litellm = SharedCoreResourceRecord(
             resource_id="litellm-1",
             resource_name=resource_name,
@@ -329,7 +337,16 @@ class FakeSharedCoreBackend:
     def ensure_postgres_allocations(
         self, allocations: tuple[SharedPostgresAllocation, ...]
     ) -> None:
+        self.call_order.append("ensure_postgres_allocations")
         self.ensured_allocations = allocations
+
+    def refresh_compose(self) -> None:
+        self.refresh_compose_calls += 1
+        self.call_order.append("refresh_compose")
+
+    def reconcile_litellm_runtime(self) -> None:
+        self.reconcile_litellm_runtime_calls += 1
+        self.call_order.append("reconcile_litellm_runtime")
 
 
 @dataclass
@@ -812,6 +829,73 @@ def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_re
     assert client.create_compose_calls == 1
     assert client.update_compose_calls == 0
     assert client.deploy_calls == 1
+
+
+def test_shared_core_reconciles_litellm_after_postgres_allocations() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "nextcloud-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+    backend = FakeSharedCoreBackend()
+
+    phase = reconcile_shared_core(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert phase.result.outcome == "applied"
+    assert backend.refresh_compose_calls == 1
+    assert backend.reconcile_litellm_runtime_calls == 1
+    assert backend.call_order.index("ensure_postgres_allocations") < backend.call_order.index(
+        "reconcile_litellm_runtime"
+    )
+
+
+def test_dokploy_shared_core_backend_defers_litellm_runtime_until_explicit_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "nextcloud-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "DOKPLOY_API_URL": "https://dokploy.example.com",
+                "DOKPLOY_API_KEY": "dokp-key-123",
+            },
+        )
+    )
+    client = FakeDokployApiClient()
+    backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        plan=desired_state.shared_core,
+        client=client,
+    )
+    reconcile_calls: list[str] = []
+    monkeypatch.setattr(
+        backend,
+        "_ensure_litellm_runtime_ready_and_reconciled",
+        lambda: reconcile_calls.append("reconciled"),
+    )
+
+    backend.create_network(desired_state.shared_core.network_name)
+
+    assert reconcile_calls == []
+
+    backend.reconcile_litellm_runtime()
+
+    assert reconcile_calls == ["reconciled"]
 
 
 def test_dokploy_shared_core_backend_updates_existing_compose_when_mail_relay_container_is_missing(
