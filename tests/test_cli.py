@@ -55,6 +55,7 @@ from dokploy_wizard.state import (
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
+    ensure_litellm_generated_keys,
     load_state_dir,
     parse_env_file,
     resolve_desired_state,
@@ -724,9 +725,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     manual_entries = [
         entry for entry in report["entries"] if entry["classification"] == "manual_collision"
     ]
-    unknown_entries = [
-        entry for entry in report["entries"] if entry["classification"] == "unknown"
-    ]
+    unknown_entries = [entry for entry in report["entries"] if entry["classification"] == "unknown"]
 
     assert any(
         entry["pack"] == "my-farm-advisor"
@@ -1087,6 +1086,48 @@ def test_guided_install_reuses_existing_seaweedfs_credentials(
     assert isinstance(raw_env, RawEnvInput)
     assert raw_env.values["SEAWEEDFS_ACCESS_KEY"] == "seaweed-existing"
     assert raw_env.values["SEAWEEDFS_SECRET_KEY"] == "seaweed-secret-existing"
+
+
+def test_build_coder_backend_uses_litellm_virtual_key_for_hermes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "coder",
+            "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+            "DOKPLOY_API_KEY": "dokploy-api-key",
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "ChangeMeSoon",
+            "AI_DEFAULT_API_KEY": "upstream-shared-key",
+            "AI_DEFAULT_BASE_URL": "https://upstream.example.invalid/v1",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+    state_dir = tmp_path / "state"
+    generated_keys = ensure_litellm_generated_keys(state_dir)
+    captured: dict[str, object] = {}
+    sentinel_client = object()
+
+    monkeypatch.setattr(cli, "_build_dokploy_api_client", lambda **kwargs: sentinel_client)
+    monkeypatch.setattr(
+        cli,
+        "DokployCoderBackend",
+        lambda **kwargs: captured.update(kwargs) or cast(Any, object()),
+    )
+
+    backend = cli._build_coder_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+    )
+
+    assert backend is not None
+    assert captured["ai_default_api_key"] == generated_keys.virtual_keys["coder-hermes"]
+    assert captured["ai_default_api_key"] != raw_env.values["AI_DEFAULT_API_KEY"]
+    assert captured["client"] is sentinel_client
 
 
 def test_install_persists_post_auth_target_before_later_failure(
@@ -1862,9 +1903,7 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
             ENABLE_OPENCLAW="true",
             ENABLE_CODER="true",
             OPENCODE_GO_API_KEY="opencode-go-key",
-            LITELLM_OPENROUTER_MODELS=(
-                "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"
-            ),
+            LITELLM_OPENROUTER_MODELS=("openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"),
         ),
         requested_values=_farm_modify_values(
             ENABLE_OPENCLAW="true",
@@ -2046,7 +2085,9 @@ def test_modify_same_farm_target_noops_with_farm_phase_preserved() -> None:
     assert "openclaw" in plan.preserved_phases
 
 
-def test_modify_openclaw_only_to_both_advisors_refreshes_nextcloud_without_rerunning_openclaw() -> None:
+def test_modify_openclaw_only_to_both_advisors_refreshes_nextcloud_without_rerunning_openclaw() -> (
+    None
+):
     existing_values = _farm_modify_values(
         ENABLE_OPENCLAW="true",
         ENABLE_MY_FARM_ADVISOR="false",
@@ -4412,7 +4453,9 @@ def test_pack_disable_plan_uninstalls_only_farm_resources_when_openclaw_remains(
 
     deleted_ids = {item.resource.resource_id for item in plan.deletions}
     assert deleted_ids == {"svc-farm", "app-farm", "policy-farm"}
-    assert {item.resource.resource_id for item in plan.deletions if item.phase == "openclaw"} == set()
+    assert {
+        item.resource.resource_id for item in plan.deletions if item.phase == "openclaw"
+    } == set()
 
 
 def test_pack_disable_plan_uninstalls_both_advisors_when_both_removed() -> None:
@@ -4529,7 +4572,9 @@ def test_pack_disable_plan_uninstalls_openclaw_only_and_preserves_farm() -> None
 
 def test_cloudflare_access_names_use_user_visible_advisor_labels() -> None:
     class _FakeAccessBackend:
-        def get_access_application(self, account_id: str, app_id: str) -> CloudflareAccessApplication | None:
+        def get_access_application(
+            self, account_id: str, app_id: str
+        ) -> CloudflareAccessApplication | None:
             del account_id, app_id
             return None
 
@@ -4539,10 +4584,14 @@ def test_cloudflare_access_names_use_user_visible_advisor_labels() -> None:
             del account_id, hostname
             return None
 
-        def create_access_application(self, *args: object, **kwargs: object) -> CloudflareAccessApplication:
+        def create_access_application(
+            self, *args: object, **kwargs: object
+        ) -> CloudflareAccessApplication:
             raise AssertionError("dry-run test should not create access apps")
 
-        def get_access_policy(self, account_id: str, app_id: str, policy_id: str) -> CloudflareAccessPolicy | None:
+        def get_access_policy(
+            self, account_id: str, app_id: str, policy_id: str
+        ) -> CloudflareAccessPolicy | None:
             del account_id, app_id, policy_id
             return None
 
@@ -4656,7 +4705,9 @@ def test_build_nextcloud_backend_passes_farm_mounts_without_openclaw_nexa_env(
 
     mounts = backend_kwargs["advisor_workspace_mounts"]
     assert len(mounts) == 2
-    assert {mount.volume_name for mount in mounts} == {f"{desired_state.stack_name}-my-farm-advisor-data"}
+    assert {mount.volume_name for mount in mounts} == {
+        f"{desired_state.stack_name}-my-farm-advisor-data"
+    }
     assert [mount.external_mount_name for mount in mounts] == [
         "/Nexa Farm",
         "/Nexa Farm Data Pipeline",
