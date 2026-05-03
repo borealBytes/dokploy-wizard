@@ -43,6 +43,7 @@ from dokploy_wizard.dokploy import (
     DokployOpenClawBackend,
     DokploySeaweedFsBackend,
     DokploySharedCoreBackend,
+    build_litellm_consumer_model_allowlists,
 )
 from dokploy_wizard.host_prereqs import (
     DOCKER_APT_PACKAGES,
@@ -120,6 +121,7 @@ from dokploy_wizard.state import (
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
+    ensure_litellm_generated_keys,
     load_litellm_generated_keys,
     load_state_dir,
     parse_env_file,
@@ -130,6 +132,7 @@ from dokploy_wizard.state import (
     write_inspection_snapshot,
     write_target_state,
 )
+from dokploy_wizard.litellm import LiteLLMAdminClient
 from dokploy_wizard.state.inspection import build_live_drift_report
 from dokploy_wizard.tailscale import ShellTailscaleBackend, TailscaleBackend, TailscaleError
 from dokploy_wizard.uninstall import (
@@ -997,6 +1000,8 @@ def _run_lifecycle_flow(
         )
     if not dry_run and not existing_state:
         persist_install_scaffold(state_dir, raw_env, desired_state)
+    if not dry_run:
+        ensure_litellm_generated_keys(state_dir)
     require_real_dokploy_auth = _dokploy_api_auth_required(
         desired_state=desired_state,
         shared_core_backend=shared_core_backend,
@@ -1042,6 +1047,7 @@ def _run_lifecycle_flow(
         raw_env=raw_env,
         desired_state=desired_state,
         session_client=dokploy_session_client,
+        litellm_generated_keys=litellm_generated_keys,
     )
     headscale_phase_backend = headscale_backend or _build_headscale_backend(
         raw_env=raw_env,
@@ -1579,6 +1585,7 @@ def _build_shared_core_backend(
     raw_env: RawEnvInput,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
+    litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> SharedCoreBackend:
     if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
         return ShellSharedCoreBackend()
@@ -1591,6 +1598,19 @@ def _build_shared_core_backend(
             stack_name=desired_state.stack_name,
             plan=desired_state.shared_core,
             litellm_env=dict(raw_env.values),
+            litellm_generated_keys=litellm_generated_keys,
+            litellm_consumer_model_allowlists=build_litellm_consumer_model_allowlists(
+                flat_env=dict(raw_env.values),
+                plan=desired_state.shared_core,
+            ),
+            litellm_admin_api=(
+                None
+                if litellm_generated_keys is None or desired_state.shared_core.litellm is None
+                else LiteLLMAdminClient(
+                    api_url=f"http://{desired_state.shared_core.litellm.service_name}:4000",
+                    master_key=litellm_generated_keys.master_key,
+                )
+            ),
             mail_relay_config={
                 key: value
                 for key, value in raw_env.values.items()

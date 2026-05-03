@@ -24,7 +24,13 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
-from dokploy_wizard.litellm import build_litellm_config, render_litellm_config_yaml
+from dokploy_wizard.litellm import (
+    LiteLLMAdminApi,
+    LiteLLMGatewayManager,
+    build_litellm_config,
+    render_litellm_config_yaml,
+)
+from dokploy_wizard.state.models import LiteLLMGeneratedKeys
 
 
 class DokploySharedCoreApi(Protocol):
@@ -65,6 +71,10 @@ class DokploySharedCoreBackend:
         client: DokploySharedCoreApi | None = None,
         allocation_provisioner: Callable[[tuple[SharedPostgresAllocation, ...]], None]
         | None = None,
+        litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
+        litellm_consumer_model_allowlists: dict[str, tuple[str, ...]] | None = None,
+        litellm_admin_api: LiteLLMAdminApi | None = None,
+        sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
         self._stack_name = stack_name
         self._plan = plan
@@ -74,6 +84,10 @@ class DokploySharedCoreBackend:
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._allocation_provisioner = allocation_provisioner
+        self._litellm_generated_keys = litellm_generated_keys
+        self._litellm_consumer_model_allowlists = litellm_consumer_model_allowlists or {}
+        self._litellm_admin_api = litellm_admin_api
+        self._sleep_fn = sleep_fn
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self._lookup_locator(resource_id, "network") is None:
@@ -312,6 +326,7 @@ class DokploySharedCoreBackend:
                             title="dokploy-wizard shared core reconcile",
                             description="Update shared core compose app",
                         )
+                        self._ensure_litellm_runtime_ready_and_reconciled()
                         locator = _ComposeLocator(
                             project_id=project.project_id,
                             environment_id=environment.environment_id,
@@ -334,6 +349,7 @@ class DokploySharedCoreBackend:
                     title="dokploy-wizard shared core reconcile",
                     description="Create shared core compose app",
                 )
+                self._ensure_litellm_runtime_ready_and_reconciled()
                 locator = _ComposeLocator(
                     project_id=project.project_id,
                     environment_id=environment.environment_id,
@@ -362,6 +378,7 @@ class DokploySharedCoreBackend:
                 title="dokploy-wizard shared core reconcile",
                 description="Create shared core compose app",
             )
+            self._ensure_litellm_runtime_ready_and_reconciled()
         except DokployApiError as error:
             raise SharedCoreError(str(error)) from error
         locator = _ComposeLocator(
@@ -371,6 +388,21 @@ class DokploySharedCoreBackend:
         )
         self._applied_locator = locator
         return locator
+
+    def _ensure_litellm_runtime_ready_and_reconciled(self) -> None:
+        if self._plan.litellm is None or self._litellm_generated_keys is None:
+            return
+        if self._litellm_admin_api is None:
+            return
+        manager = LiteLLMGatewayManager(api=self._litellm_admin_api, sleep_fn=self._sleep_fn)
+        try:
+            manager.wait_until_ready()
+            manager.reconcile_virtual_keys(
+                generated_keys=self._litellm_generated_keys.virtual_keys,
+                consumer_model_allowlists=self._litellm_consumer_model_allowlists,
+            )
+        except Exception as error:
+            raise SharedCoreError(str(error)) from error
 
 
 def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSummary | None:
@@ -537,6 +569,73 @@ def _first_configured_env_name(litellm_env: dict[str, str], *candidates: str) ->
         if value is not None and value.strip() != "":
             return candidate
     return None
+
+
+def build_litellm_consumer_model_allowlists(
+    *,
+    flat_env: dict[str, str],
+    plan: SharedCorePlan,
+) -> dict[str, tuple[str, ...]]:
+    if plan.litellm is None:
+        return {}
+    config = build_litellm_config(flat_env, _build_litellm_upstream_creds(flat_env))
+    model_list = config.get("model_list")
+    if not isinstance(model_list, list):
+        return {}
+    configured_aliases = tuple(
+        entry["model_name"]
+        for entry in model_list
+        if isinstance(entry, dict) and isinstance(entry.get("model_name"), str)
+    )
+    available_aliases = set(configured_aliases)
+    default_aliases = tuple(alias for alias in plan.litellm.default_model_alias_order if alias in available_aliases)
+    return {
+        "coder-hermes": default_aliases,
+        "coder-kdense": tuple(alias for alias in ("openai/*",) if alias in available_aliases),
+        "my-farm-advisor": _advisor_alias_allowlist(
+            flat_env,
+            primary_key="MY_FARM_ADVISOR_PRIMARY_MODEL",
+            fallback_key="MY_FARM_ADVISOR_FALLBACK_MODELS",
+            available_aliases=available_aliases,
+            default_aliases=default_aliases,
+        ),
+        "openclaw": _advisor_alias_allowlist(
+            flat_env,
+            primary_key="OPENCLAW_PRIMARY_MODEL",
+            fallback_key="OPENCLAW_FALLBACK_MODELS",
+            available_aliases=available_aliases,
+            default_aliases=default_aliases,
+        ),
+    }
+
+
+def _advisor_alias_allowlist(
+    flat_env: dict[str, str],
+    *,
+    primary_key: str,
+    fallback_key: str,
+    available_aliases: set[str],
+    default_aliases: tuple[str, ...],
+) -> tuple[str, ...]:
+    aliases = list(default_aliases)
+    primary_model = _optional_value(flat_env, primary_key)
+    if primary_model is not None and primary_model in available_aliases:
+        aliases.append(primary_model)
+    fallback_models = _optional_value(flat_env, fallback_key)
+    if fallback_models is not None:
+        for model in fallback_models.split(","):
+            normalized = model.strip()
+            if normalized in available_aliases:
+                aliases.append(normalized)
+    return tuple(dict.fromkeys(aliases))
+
+
+def _optional_value(flat_env: dict[str, str], key: str) -> str | None:
+    value = flat_env.get(key)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _compose_env_var_name(secret_ref: str) -> str:
