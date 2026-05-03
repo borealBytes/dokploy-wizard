@@ -230,7 +230,7 @@ class LiteLLMGatewayManager:
 def _readiness_is_healthy(snapshot: Mapping[str, Any]) -> bool:
     status = snapshot.get("status")
     db_status = snapshot.get("db")
-    return status == "connected" and db_status == "connected"
+    return status in ("connected", "healthy") and db_status == "connected"
 
 
 def _readiness_failure_detail(
