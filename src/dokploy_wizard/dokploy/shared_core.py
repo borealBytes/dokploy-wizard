@@ -525,11 +525,23 @@ def _render_compose_file(
         )
         postgres_password_env = _compose_env_var_name(plan.litellm.postgres.password_secret_ref)
         config_name = f"{plan.litellm.service_name}-config"
-        master_key_line = '      MASTER_KEY: "${LITELLM_MASTER_KEY}"\n'
-        salt_key_line = '      SALT_KEY: "${LITELLM_SALT_KEY}"\n'
+        master_key_lines = (
+            '      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"\n'
+            '      MASTER_KEY: "${LITELLM_MASTER_KEY}"\n'
+        )
+        salt_key_lines = (
+            '      LITELLM_SALT_KEY: "${LITELLM_SALT_KEY}"\n'
+            '      SALT_KEY: "${LITELLM_SALT_KEY}"\n'
+        )
         if litellm_generated_keys is not None:
-            master_key_line = f'      MASTER_KEY: "{litellm_generated_keys.master_key}"\n'
-            salt_key_line = f'      SALT_KEY: "{litellm_generated_keys.salt_key}"\n'
+            master_key_lines = (
+                f'      LITELLM_MASTER_KEY: "{litellm_generated_keys.master_key}"\n'
+                f'      MASTER_KEY: "{litellm_generated_keys.master_key}"\n'
+            )
+            salt_key_lines = (
+                f'      LITELLM_SALT_KEY: "{litellm_generated_keys.salt_key}"\n'
+                f'      SALT_KEY: "{litellm_generated_keys.salt_key}"\n'
+            )
         litellm_block = (
             f"  {plan.litellm.service_name}:\n"
             f"    image: {litellm_image}:{litellm_tag}\n"
@@ -537,8 +549,8 @@ def _render_compose_file(
             "    command: [\"--config\", \"/app/config.yaml\", \"--port\", \"4000\"]\n"
             "    environment:\n"
             f'      DATABASE_URL: "postgresql://{plan.litellm.postgres.user_name}:${{{postgres_password_env}:-change-me}}@{postgres_service_name}:5432/{plan.litellm.postgres.database_name}"\n'
-            f"{master_key_line}"
-            f"{salt_key_line}"
+            f"{master_key_lines}"
+            f"{salt_key_lines}"
             "    configs:\n"
             f"      - source: {config_name}\n"
             "        target: /app/config.yaml\n"
