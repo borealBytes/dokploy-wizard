@@ -1611,7 +1611,7 @@ def _build_shared_core_backend(
                 None
                 if litellm_generated_keys is None or desired_state.shared_core.litellm is None
                 else LiteLLMAdminClient(
-                    api_url=f"http://{desired_state.shared_core.litellm.service_name}:4000",
+                    api_url="http://127.0.0.1:4000",
                     master_key=litellm_generated_keys.master_key,
                 )
             ),
