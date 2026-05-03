@@ -316,8 +316,8 @@ def test_default_kdense_byok_template_includes_upstream_parameterized_stack() ->
     assert 'default      = "openrouter/anthropic/claude-opus-4.7"' in template
     assert 'default      = "openrouter/google/gemini-3.1-pro-preview"' in template
     assert 'default      = "disabled"' in template
-    assert 'export KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL="__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__"' in template
-    assert 'export KDENSE_TEMPLATE_OPENCODE_GO_API_KEY="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"' in template
+    assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"' in template
+    assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"' in template
     assert 'KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL_PLACEHOLDER' not in template
     assert 'KDENSE_TEMPLATE_OPENCODE_GO_API_KEY_PLACEHOLDER' not in template
     assert 'sync_kdense_source() {' in template
@@ -336,16 +336,20 @@ def test_default_kdense_byok_template_includes_upstream_parameterized_stack() ->
     assert 'DEFAULT_AGENT_MODEL=%s' in template
     assert 'DEFAULT_EXPERT_MODEL=%s' in template
     assert 'append_env OPENROUTER_API_KEY "$KDENSE_OPENROUTER_API_KEY" "$env_file"' in template
-    assert 'append_env OPENAI_API_KEY "$KDENSE_OPENCODE_GO_API_KEY" "$env_file"' in template
-    assert 'append_env OPENAI_API_BASE "$KDENSE_OPENCODE_GO_BASE_URL" "$env_file"' in template
+    assert 'append_env OPENAI_API_KEY "$KDENSE_CENTRAL_LITELLM_API_KEY" "$env_file"' in template
+    assert 'append_env OPENAI_API_BASE "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
+    assert 'append_env OPENAI_BASE_URL "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
     assert 'append_env EXA_API_KEY "$KDENSE_EXA_API_KEY" "$env_file"' in template
     assert 'append_env PARALLEL_API_KEY "$KDENSE_PARALLEL_API_KEY" "$env_file"' in template
     assert 'append_env MODAL_TOKEN_ID "$KDENSE_MODAL_TOKEN_ID" "$env_file"' in template
     assert 'append_env MODAL_TOKEN_SECRET "$KDENSE_MODAL_TOKEN_SECRET" "$env_file"' in template
-    assert 'if [ "$KDENSE_PROVIDER" = "openrouter" ] && [ -z "$KDENSE_OPENROUTER_API_KEY" ] && [ -n "$KDENSE_OPENCODE_GO_API_KEY" ]; then' in template
+    assert 'KDENSE_CENTRAL_LITELLM_API_KEY="$${KDENSE_OPENCODE_GO_API_KEY:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY}"' in template
+    assert 'KDENSE_CENTRAL_LITELLM_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL}"' in template
+    assert 'KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"' in template
+    assert 'if [ "$KDENSE_PROVIDER" = "openrouter" ] && [ -z "$KDENSE_OPENROUTER_API_KEY" ] && [ -n "$KDENSE_CENTRAL_LITELLM_API_KEY" ]; then' in template
     assert 'falling back to the wizard-managed OpenCode Go provider' in template
     assert 'if [ "$KDENSE_PROVIDER" = "openrouter" ] && [ -z "$KDENSE_OPENROUTER_API_KEY" ]; then' in template
-    assert 'if [ "$KDENSE_PROVIDER" = "opencode_go" ] && [ -z "$KDENSE_OPENCODE_GO_API_KEY" ]; then' in template
+    assert 'if [ "$KDENSE_PROVIDER" = "opencode_go" ] && [ -z "$KDENSE_CENTRAL_LITELLM_API_KEY" ]; then' in template
     assert 'KDENSE_UPSTREAM_LITELLM="$KDENSE_SRC_DIR/litellm_config.yaml"' in template
     assert 'model_name: "openai/*"' in template
     assert 'api_base: os.environ/OPENAI_API_BASE' in template
@@ -387,6 +391,33 @@ def test_default_kdense_byok_template_includes_upstream_parameterized_stack() ->
     assert 'url       = "http://localhost:3001/health"' in template
 
 
+def test_kdense_calls_central_litellm() -> None:
+    template = Path(
+        "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
+    ).read_text(encoding="utf-8")
+
+    assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"' in template
+    assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"' in template
+    assert 'KDENSE_CENTRAL_LITELLM_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL}"' in template
+    assert 'KDENSE_CENTRAL_LITELLM_API_KEY="$${KDENSE_OPENCODE_GO_API_KEY:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY}"' in template
+    assert 'KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"' in template
+    assert 'printf \'GOOGLE_GEMINI_BASE_URL=%s\\n\' "$KDENSE_LOCAL_LITELLM_BASE_URL" >> "$env_file"' in template
+    assert 'append_env OPENAI_API_KEY "$KDENSE_CENTRAL_LITELLM_API_KEY" "$env_file"' in template
+    assert 'append_env OPENAI_API_BASE "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
+    assert 'append_env OPENAI_BASE_URL "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
+
+
+def test_no_openrouter_wildcard_in_kdense_config() -> None:
+    template = Path(
+        "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
+    ).read_text(encoding="utf-8")
+
+    assert '# Central LiteLLM gateway owns the OpenCode Go wildcard route.' in template
+    assert '# Workspace-local LiteLLM stays on localhost for the Gemini/OpenAI shim only.' in template
+    assert 'model_name: "openrouter/*"' not in template
+    assert 'model_name: "openai/*"' in template
+
+
 def test_default_hermes_template_includes_full_web_stack() -> None:
     template = Path("templates/coder/default-ubuntu-code-server-hermes/main.tf").read_text(
         encoding="utf-8"
@@ -401,23 +432,25 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert 'export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1' in template
     assert 'export HERMES_TEMPLATE_PROVIDER="__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__"' in template
     assert 'export HERMES_TEMPLATE_MODEL="__DOKPLOY_WIZARD_HERMES_MODEL__"' in template
-    assert 'export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__"' in template
-    assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"' in template
-    assert 'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"' in template
+    assert 'export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_HERMES_BASE_URL__"' in template
+    assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_HERMES_API_KEY__"' in template
+    assert 'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY__"' in template
     assert 'export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"' in template
     assert 'export HERMES_MODEL="$${HERMES_MODEL:-$HERMES_TEMPLATE_MODEL}"' in template
-    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-$HERMES_TEMPLATE_BASE_URL}"' in template
-    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-$HERMES_TEMPLATE_API_KEY}"' in template
+    assert 'export OPENAI_API_BASE="$${OPENAI_API_BASE:-$HERMES_TEMPLATE_BASE_URL}"' in template
+    assert 'export OPENAI_API_KEY="$${OPENAI_API_KEY:-$HERMES_TEMPLATE_API_KEY}"' in template
+    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-$OPENAI_API_BASE}"' in template
+    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-$OPENAI_API_KEY}"' in template
     assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
     assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
+    assert 'upsert_env OPENAI_API_KEY "$OPENAI_API_KEY"' in template
+    assert 'upsert_env OPENAI_API_BASE "$OPENAI_API_BASE"' in template
     assert 'upsert_env AI_DEFAULT_API_KEY "$AI_DEFAULT_API_KEY"' in template
-    assert 'upsert_env OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"' in template
     assert 'API_SERVER_ENABLED=true' in template
-    assert 'AI_DEFAULT_API_KEY is required for the Hermes workspace template' in template
-    assert "Provider 'opencode-go' requires OPENCODE_GO_API_KEY in the Hermes workspace template" in template
+    assert 'OPENAI_API_KEY is required for the Hermes workspace template' in template
     assert 'hermes config set model.provider "$HERMES_INFERENCE_PROVIDER"' in template
     assert 'hermes config set model.default "$HERMES_MODEL"' in template
-    assert 'hermes config set model.base_url "$AI_DEFAULT_BASE_URL"' in template
+    assert 'hermes config set model.base_url "$OPENAI_API_BASE"' in template
     assert 'hermes config set terminal.cwd /home/coder' in template
     assert 'export HERMES_DASHBOARD_PORT=9119' in template
     assert 'export HERMES_DASHBOARD_PROXY_PORT=9120' in template
@@ -466,6 +499,130 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert 'HERMEIS_OPENCODE_GO_MODEL' not in template
     assert 'HERMIES_BASE_USL' not in template
     assert 'HERMIES_API_MODE' not in template
+
+
+def test_hermes_template_uses_litellm_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="clayton@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        hermes_inference_provider="openai",
+        hermes_model="openai/deepseek-v4-flash",
+        ai_default_base_url="https://upstream.example.invalid/v1",
+        ai_default_api_key="litellm-coder-hermes-key",
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    template_replacements_by_name: dict[str, dict[str, str] | None] = {}
+    secret_sync_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_sync_hermes_workspace_secrets",
+        lambda **kwargs: secret_sync_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda *, container_name, template_dir, template_name, replacements: template_replacements_by_name.setdefault(
+            template_name, replacements
+        ),
+    )
+    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+
+    backend.ensure_application_ready()
+
+    assert secret_sync_calls == [
+        {
+            "container_name": "wizard-stack-coder-container",
+            "hostname": "coder.example.com",
+            "session_token": "session-123",
+            "hermes_inference_provider": "openai",
+            "hermes_model": "openai/deepseek-v4-flash",
+            "ai_default_base_url": "http://wizard-stack-shared-litellm:4000",
+            "ai_default_api_key": "litellm-coder-hermes-key",
+        }
+    ]
+    assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "openai",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "openai/deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "litellm-coder-hermes-key",
+    }
+
+
+def test_base_opencode_web_openwork_templates_do_not_receive_litellm_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="clayton@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        hermes_inference_provider="openai",
+        hermes_model="openai/deepseek-v4-flash",
+        ai_default_api_key="litellm-coder-hermes-key",
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    template_replacements_by_name: dict[str, dict[str, str] | None] = {}
+
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda *, container_name, template_dir, template_name, replacements: template_replacements_by_name.setdefault(
+            template_name, replacements
+        ),
+    )
+    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+
+    backend.ensure_application_ready()
+
+    assert template_replacements_by_name[coder_module._default_template_name()] is None
+    assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] is None
+    assert template_replacements_by_name[coder_module._default_openwork_template_name()] is None
+    assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
+        "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
+    }
 
 
 def test_push_default_template_ignores_missing_terraform_lockfile(
@@ -618,7 +775,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
 
     assert waits == ["coder.example.com"]
     assert secret_sync_calls == [
-        ("opencode-go", "deepseek-v4-flash", "https://opencode.ai/zen/go/v1")
+        ("openai", "openai/deepseek-v4-flash", "http://wizard-stack-shared-litellm:4000")
     ]
     assert notes == (
         "Provisioned initial Coder admin for 'admin@example.com'.",
@@ -1055,14 +1212,14 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         )
     ]
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "https://opencode.ai/zen/go/v1",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+        "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
     }
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
-        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "deepseek-v4-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "https://opencode.ai/zen/go/v1",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "openai",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "openai/deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
     }
     assert ensure_workspace_calls == [
         (
@@ -1076,8 +1233,8 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert secret_sync_calls == [
         (
             "wizard-stack-coder-container",
-            "opencode-go",
-            "deepseek-v4-flash",
+            "openai",
+            "openai/deepseek-v4-flash",
             None,
         )
     ]

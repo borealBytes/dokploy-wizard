@@ -52,9 +52,10 @@ class _ComposeLocator:
     compose_id: str
 
 
-_DEFAULT_HERMES_INFERENCE_PROVIDER = "opencode-go"
-_DEFAULT_HERMES_MODEL = "deepseek-v4-flash"
+_DEFAULT_HERMES_INFERENCE_PROVIDER = "openai"
+_DEFAULT_HERMES_MODEL = "openai/deepseek-v4-flash"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
+_DEFAULT_LITELLM_INTERNAL_PORT = 4000
 
 
 class DokployCoderBackend:
@@ -201,13 +202,14 @@ class DokployCoderBackend:
         container_name = _coder_container_name(_service_name(self._stack_name))
         if container_name is None:
             raise CoderError("Coder container is not running; cannot finish application bootstrap.")
+        hermes_litellm_base_url = _litellm_internal_base_url(self._stack_name)
         _sync_hermes_workspace_secrets(
             container_name=container_name,
             hostname=self._hostname,
             session_token=session_token,
             hermes_inference_provider=self._hermes_inference_provider,
             hermes_model=self._hermes_model,
-            ai_default_base_url=self._ai_default_base_url,
+            ai_default_base_url=hermes_litellm_base_url,
             ai_default_api_key=self._ai_default_api_key,
         )
         for template_name, template_dir, replacements in (
@@ -222,11 +224,11 @@ class DokployCoderBackend:
                 _default_kdense_byok_template_name(),
                 _default_kdense_byok_template_dir(),
                 {
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
-                        self._ai_default_base_url
+                    "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": _shell_double_quote_escape(
+                        _litellm_internal_base_url(self._stack_name)
                     ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
+                    "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": _litellm_virtual_key_ref(
+                        "coder-kdense"
                     ),
                 },
             ),
@@ -240,10 +242,10 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_HERMES_MODEL__": _shell_double_quote_escape(
                         self._hermes_model
                     ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
-                        self._ai_default_base_url
+                    "__DOKPLOY_WIZARD_HERMES_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
                     ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
                         self._ai_default_api_key or ""
                     ),
                 },
@@ -421,6 +423,15 @@ def _data_name(stack_name: str) -> str:
 
 def _shared_network_name(stack_name: str) -> str:
     return f"{stack_name}-shared"
+
+
+def _litellm_internal_base_url(stack_name: str) -> str:
+    return f"http://{stack_name}-shared-litellm:{_DEFAULT_LITELLM_INTERNAL_PORT}"
+
+
+def _litellm_virtual_key_ref(consumer: str) -> str:
+    normalized = consumer.strip().replace("-", "_").upper()
+    return f"${{LITELLM_VIRTUAL_KEY_{normalized}}}"
 
 
 def _wildcard_suffix(wildcard_hostname: str) -> str:
@@ -870,16 +881,10 @@ def _sync_hermes_workspace_secrets(
             "Hermes model for wizard-managed workspaces.",
         ),
         (
-            "ai-default-base-url",
-            "AI_DEFAULT_BASE_URL",
+            "hermes-openai-api-base",
+            "OPENAI_API_BASE",
             ai_default_base_url,
-            "Default AI base URL for wizard-managed workspaces.",
-        ),
-        (
-            "opencode-go-base-url",
-            "OPENCODE_GO_BASE_URL",
-            ai_default_base_url,
-            "Legacy OpenCode Go base URL for wizard-managed workspaces.",
+            "Hermes LiteLLM base URL for wizard-managed workspaces.",
         ),
     )
     for secret_name, env_name, value, description in managed_values:
@@ -903,23 +908,10 @@ def _sync_hermes_workspace_secrets(
                 container_name=container_name,
                 hostname=hostname,
                 session_token=session_token,
-                secret_name="ai-default-api-key",
-                env_name="AI_DEFAULT_API_KEY",
+                secret_name="hermes-openai-api-key",
+                env_name="OPENAI_API_KEY",
                 value=ai_default_api_key,
-                description="Default AI API key for wizard-managed workspaces.",
-            )
-        except CoderError as error:
-            if "unknown flag: --env" not in str(error):
-                raise
-        try:
-            _upsert_coder_secret(
-                container_name=container_name,
-                hostname=hostname,
-                session_token=session_token,
-                secret_name="opencode-go-api-key",
-                env_name="OPENCODE_GO_API_KEY",
-                value=ai_default_api_key,
-                description="Legacy OpenCode Go API key for wizard-managed workspaces.",
+                description="Hermes LiteLLM virtual key for wizard-managed workspaces.",
             )
         except CoderError as error:
             if "unknown flag: --env" not in str(error):
