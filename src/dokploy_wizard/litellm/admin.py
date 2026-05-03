@@ -159,7 +159,7 @@ class LiteLLMGatewayManager:
         self._api = api
         self._sleep_fn = sleep_fn
 
-    def wait_until_ready(self, *, attempts: int = 20, delay_seconds: float = 3.0) -> None:
+    def wait_until_ready(self, *, attempts: int = 120, delay_seconds: float = 5.0) -> None:
         last_snapshot: dict[str, Any] | None = None
         last_error: Exception | None = None
         for attempt in range(attempts):
