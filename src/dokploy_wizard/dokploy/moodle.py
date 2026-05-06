@@ -8,6 +8,7 @@ import shlex
 import ssl
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 from urllib import error as urlerror
@@ -32,11 +33,14 @@ _DEFAULT_MOODLE_FULLNAME = "Moodle"
 _DEFAULT_MOODLE_SHORTNAME = "Moodle"
 _DEFAULT_MOODLE_CRON = "* * * * *"
 _DEFAULT_MOODLE_CRON_TIMEZONE = "UTC"
+_DEFAULT_MOODLE_UPGRADE_RETRY_ATTEMPTS = 36
+_DEFAULT_MOODLE_UPGRADE_RETRY_DELAY_SECONDS = 5.0
 _DEFAULT_MOODLE_CONFIG_CACHE = "/var/moodledata/config.php"
 _DEFAULT_MOODLE_DATAROOT = "/var/moodledata/files"
 _DEFAULT_MOODLE_DOCROOT = "/var/www/html"
 _DEFAULT_MOODLE_SOURCE_REF = "MOODLE_500_STABLE"
 _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+_MOODLE_UPGRADE_IN_PROGRESS_TEXT = "Site is being upgraded, please retry later"
 _DEFAULT_MOODLE_PLUGIN_PARENT_PATHS = (
     "/var/www/html/admin/tool",
     "/var/www/html/assign/feedback",
@@ -769,11 +773,31 @@ def _configure_moodle_smtp(
         f"php {cfg} --name=smtppass --set=''",
         f"php {cfg} --name=noreplyaddress --set={shlex.quote(from_address)}",
     ]
-    _run_container_shell(
-        container_name,
-        "set -eu && " + " && ".join(commands),
-        error_prefix="Unable to configure Moodle SMTP",
+    _run_moodle_upgrade_retry(
+        lambda: _run_container_shell(
+            container_name,
+            "set -eu && " + " && ".join(commands),
+            error_prefix="Unable to configure Moodle SMTP",
+        )
     )
+
+
+def _run_moodle_upgrade_retry(
+    action: Callable[[], None],
+    *,
+    attempts: int = _DEFAULT_MOODLE_UPGRADE_RETRY_ATTEMPTS,
+    delay_seconds: float = _DEFAULT_MOODLE_UPGRADE_RETRY_DELAY_SECONDS,
+) -> None:
+    for attempt in range(attempts):
+        try:
+            action()
+            return
+        except MoodleError as exc:
+            if _MOODLE_UPGRADE_IN_PROGRESS_TEXT not in str(exc):
+                raise
+            if attempt >= attempts - 1:
+                raise
+            time.sleep(delay_seconds)
 
 
 def _repair_moodle_config_file(container_name: str, config_path: str) -> None:

@@ -306,6 +306,65 @@ def test_configure_moodle_smtp_uses_local_postfix_sender() -> None:
     ]
 
 
+def test_configure_moodle_smtp_retries_transient_upgrade_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_run_container_shell(
+        container_name: str,
+        shell_command: str,
+        *,
+        error_prefix: str,
+    ) -> None:
+        del container_name, error_prefix
+        calls.append(shell_command)
+        if len(calls) < 3:
+            raise MoodleError("Unable to configure Moodle SMTP: !!! Site is being upgraded, please retry later. !!!")
+
+    monkeypatch.setattr(moodle_module, "_run_container_shell", fake_run_container_shell)
+    monkeypatch.setattr(moodle_module.time, "sleep", sleeps.append)
+
+    moodle_module._configure_moodle_smtp(
+        "moodle-container",
+        smtp_host="wizard-stack-shared-postfix",
+        smtp_port=587,
+        from_address="DoNotReply@example.com",
+    )
+
+    assert len(calls) == 3
+    assert sleeps == [moodle_module._DEFAULT_MOODLE_UPGRADE_RETRY_DELAY_SECONDS] * 2
+
+
+def test_configure_moodle_smtp_fails_fast_for_non_transient_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    def fake_run_container_shell(
+        container_name: str,
+        shell_command: str,
+        *,
+        error_prefix: str,
+    ) -> None:
+        del container_name, shell_command, error_prefix
+        raise MoodleError("Unable to configure Moodle SMTP: permission denied")
+
+    monkeypatch.setattr(moodle_module, "_run_container_shell", fake_run_container_shell)
+    monkeypatch.setattr(moodle_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(MoodleError, match="permission denied"):
+        moodle_module._configure_moodle_smtp(
+            "moodle-container",
+            smtp_host="wizard-stack-shared-postfix",
+            smtp_port=587,
+            from_address="DoNotReply@example.com",
+        )
+
+    assert sleeps == []
+
+
 def test_dokploy_moodle_backend_create_and_update_paths_keep_single_compose_stable() -> None:
     create_client = FakeDokployMoodleApiClient()
     create_backend = DokployMoodleBackend(
