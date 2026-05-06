@@ -55,7 +55,7 @@ class _ComposeLocator:
 
 
 _DEFAULT_HERMES_INFERENCE_PROVIDER = "openai"
-_DEFAULT_HERMES_MODEL = "openai/deepseek-v4-flash"
+_DEFAULT_HERMES_MODEL = "unsloth-active"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_INTERNAL_PORT = 4000
 
@@ -214,18 +214,20 @@ class DokployCoderBackend:
             ai_default_base_url=hermes_litellm_base_url,
             ai_default_api_key=self._ai_default_api_key,
         )
+        shared_network_name = _shared_network_name(self._stack_name)
         for template_name, template_dir, replacements in (
-            (_default_template_name(), _default_template_dir(), None),
+            (_default_template_name(), _default_template_dir(), {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name}),
             (
                 _default_opencode_web_template_name(),
                 _default_opencode_web_template_dir(),
-                None,
+                {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name},
             ),
-            (_default_openwork_template_name(), _default_openwork_template_dir(), None),
+            (_default_openwork_template_name(), _default_openwork_template_dir(), {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name}),
             (
                 _default_kdense_byok_template_name(),
                 _default_kdense_byok_template_dir(),
                 {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
                     "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": _shell_double_quote_escape(
                         _litellm_internal_base_url(self._stack_name)
                     ),
@@ -238,6 +240,7 @@ class DokployCoderBackend:
                 _default_hermes_template_name(),
                 _default_hermes_template_dir(),
                 {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
                     "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": _shell_double_quote_escape(
                         self._hermes_inference_provider
                     ),
@@ -247,7 +250,9 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_HERMES_BASE_URL__": _shell_double_quote_escape(
                         hermes_litellm_base_url
                     ),
-                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _litellm_virtual_key_ref("coder-hermes"),
+                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
                 },
             ),
         ):
@@ -431,7 +436,7 @@ def _litellm_internal_base_url(stack_name: str) -> str:
 
 def _litellm_virtual_key_ref(consumer: str) -> str:
     normalized = consumer.strip().replace("-", "_").upper()
-    return f"${{LITELLM_VIRTUAL_KEY_{normalized}}}"
+    return f"$${{LITELLM_VIRTUAL_KEY_{normalized}}}"
 
 
 def _wildcard_suffix(wildcard_hostname: str) -> str:

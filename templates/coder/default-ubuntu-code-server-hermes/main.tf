@@ -21,6 +21,10 @@ provider "docker" {
   host = var.docker_socket != "" ? var.docker_socket : null
 }
 
+data "docker_network" "shared" {
+  name = "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__"
+}
+
 locals {
   username = data.coder_workspace_owner.me.name
 }
@@ -92,7 +96,7 @@ resource "coder_agent" "main" {
     export HERMES_TEMPLATE_MODEL="__DOKPLOY_WIZARD_HERMES_MODEL__"
     export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_HERMES_BASE_URL__"
     export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_HERMES_API_KEY__"
-    export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY__"
+    export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__"
 
     if ! command -v hermes >/dev/null 2>&1; then
       HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup
@@ -132,6 +136,21 @@ resource "coder_agent" "main" {
       chmod 600 "$file"
     }
 
+    upsert_bashrc() {
+      key="$1"
+      value="$2"
+      file="/home/coder/.bashrc"
+      marker="# dokploy-wizard-hermes-env"
+      line="export $key=\"$value\""
+      if [ -f "$file" ]; then
+        grep -v "^export $key=" "$file" > "$file.tmp" || true
+        grep -v "$marker" "$file.tmp" > "$file" || true
+        rm -f "$file.tmp"
+      fi
+      printf '%s\n%s\n' "$marker" "$line" >> "$file"
+      chown coder:coder "$file"
+    }
+
     upsert_env OPENAI_API_KEY "$OPENAI_API_KEY"
     upsert_env OPENAI_API_BASE "$OPENAI_API_BASE"
     upsert_env AI_DEFAULT_API_KEY "$AI_DEFAULT_API_KEY"
@@ -143,6 +162,15 @@ resource "coder_agent" "main" {
     upsert_env API_SERVER_HOST "$API_SERVER_HOST"
     upsert_env API_SERVER_PORT "$API_SERVER_PORT"
     upsert_env API_SERVER_KEY "$API_SERVER_KEY"
+
+    upsert_bashrc OPENAI_API_KEY "$OPENAI_API_KEY"
+    upsert_bashrc OPENAI_API_BASE "$OPENAI_API_BASE"
+    upsert_bashrc AI_DEFAULT_API_KEY "$AI_DEFAULT_API_KEY"
+    upsert_bashrc AI_DEFAULT_BASE_URL "$AI_DEFAULT_BASE_URL"
+    upsert_bashrc HERMES_INFERENCE_PROVIDER "$HERMES_INFERENCE_PROVIDER"
+    upsert_bashrc HERMES_MODEL "$HERMES_MODEL"
+    upsert_bashrc OPENCODE_GO_BASE_URL "$OPENCODE_GO_BASE_URL"
+    upsert_bashrc OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"
 
     if [ "$HERMES_TEMPLATE_API_KEY" = "$HERMES_TEMPLATE_API_KEY_PLACEHOLDER" ] && [ -z "$${OPENAI_API_KEY:-}" ]; then
       echo "OPENAI_API_KEY is required for the Hermes workspace template" >&2
@@ -649,6 +677,10 @@ resource "docker_container" "workspace" {
   host {
     host = "host.docker.internal"
     ip   = "host-gateway"
+  }
+
+  networks_advanced {
+    name = data.docker_network.shared.name
   }
 
   volumes {
