@@ -43,6 +43,7 @@ def test_build_litellm_admin_qa_harness_requires_access_challenge_and_internal_p
     assert [check.name for check in harness.checks] == [
         "public-admin-access",
         "shared-network-readiness",
+        "shared-network-chat-completion",
     ]
     assert "302/401/403" in harness.checks[0].success_criteria
     assert "must never return unauthenticated 200" in harness.checks[0].failure_criteria
@@ -50,6 +51,14 @@ def test_build_litellm_admin_qa_harness_requires_access_challenge_and_internal_p
     assert "docker run --rm --network wizard-stack-shared" in harness.checks[1].shell_command
     assert "curlimages/curl:8.7.1" in harness.checks[1].shell_command
     assert "http://wizard-stack-shared-litellm:4000/health/readiness" in harness.checks[1].shell_command
+    assert "local/unsloth-active" in harness.checks[2].shell_command
+    assert "/v1/chat/completions" in harness.checks[2].shell_command
+    assert "litellm-generated-keys.json" in harness.checks[2].shell_command
+    assert harness.checks[2].command == (
+        "sh",
+        "-lc",
+        harness.checks[2].shell_command,
+    )
 
 
 def test_build_litellm_admin_qa_harness_adds_tailnet_probe_when_tailscale_ssh_is_enabled() -> None:
@@ -61,9 +70,10 @@ def test_build_litellm_admin_qa_harness_adds_tailnet_probe_when_tailscale_ssh_is
     assert [check.name for check in harness.checks] == [
         "public-admin-access",
         "shared-network-readiness",
+        "shared-network-chat-completion",
         "tailnet-host-readiness",
     ]
-    tailnet_check = harness.checks[2]
+    tailnet_check = harness.checks[3]
     assert "tailscale ssh wizard-tailnet" in tailnet_check.shell_command
     assert "docker run --rm --network wizard-stack-shared" in tailnet_check.shell_command
     assert "http://wizard-stack-shared-litellm:4000/health/readiness" in tailnet_check.shell_command

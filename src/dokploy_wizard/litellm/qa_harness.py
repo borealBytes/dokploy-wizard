@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import subprocess
 import sys
@@ -16,6 +17,8 @@ from dokploy_wizard.state import DesiredState, RawEnvInput, parse_env_file, reso
 _ACCESS_ALLOWED_STATUSES = (302, 401, 403)
 _CURL_IMAGE = "curlimages/curl:8.7.1"
 _READINESS_PATH = "/health/readiness"
+_CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+_SMOKE_MODEL = "local/unsloth-active"
 
 
 class LiteLLMAdminAccessCheckError(RuntimeError):
@@ -71,6 +74,25 @@ def build_litellm_admin_qa_harness(
             command=shared_network_command,
             success_criteria="Shared Docker network can reach LiteLLM readiness over service DNS.",
             failure_criteria="Container-network probe cannot reach the internal LiteLLM readiness endpoint.",
+        ),
+        LiteLLMAdminQaCheck(
+            name="shared-network-chat-completion",
+            shell_command=_shared_network_chat_completion_shell_command(
+                state_dir=Path(".dokploy-wizard-state"),
+                stack_name=desired_state.stack_name,
+                service_name=desired_state.shared_core.litellm.service_name,
+            ),
+            command=(
+                "sh",
+                "-lc",
+                _shared_network_chat_completion_shell_command(
+                    state_dir=Path(".dokploy-wizard-state"),
+                    stack_name=desired_state.stack_name,
+                    service_name=desired_state.shared_core.litellm.service_name,
+                ),
+            ),
+            success_criteria="Shared Docker network can perform an authenticated chat completion against LiteLLM using model local/unsloth-active.",
+            failure_criteria="Internal LiteLLM chat completion cannot authenticate or cannot access the local/unsloth-active alias.",
         ),
     ]
 
@@ -185,6 +207,34 @@ def _shared_network_readiness_command(*, stack_name: str, internal_url: str) -> 
         _CURL_IMAGE,
         "-fsS",
         internal_url,
+    )
+
+
+def _shared_network_chat_completion_shell_command(
+    *, state_dir: Path, stack_name: str, service_name: str
+) -> str:
+    state_dir_value = json.dumps(str(state_dir))
+    internal_url = f"http://{service_name}:4000{_CHAT_COMPLETIONS_PATH}"
+    payload = json.dumps(
+        {
+            "model": _SMOKE_MODEL,
+            "messages": [{"role": "user", "content": "Reply with exactly: ok"}],
+            "max_tokens": 8,
+        },
+        separators=(",", ":"),
+    )
+    return (
+        "key=$(python3 - <<'PY'\n"
+        "import json\n"
+        "from pathlib import Path\n"
+        f"payload = json.loads((Path({state_dir_value}) / 'litellm-generated-keys.json').read_text())\n"
+        "print(payload['virtual_keys']['openclaw'])\n"
+        "PY\n"
+        ") && "
+        f"docker run --rm --network {shlex.quote(f'{stack_name}-shared')} {_CURL_IMAGE} -fsS "
+        "-H \"Authorization: Bearer $key\" "
+        f"-H {shlex.quote('Content-Type: application/json')} "
+        f"-d {shlex.quote(payload)} {shlex.quote(internal_url)}"
     )
 
 
