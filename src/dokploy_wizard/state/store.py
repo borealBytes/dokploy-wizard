@@ -15,6 +15,8 @@ from typing import Any, Callable, TypeVar
 
 from dokploy_wizard.state.models import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+    LITELLM_GENERATED_MASTER_KEY_PREFIX,
+    LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES,
     STATE_FORMAT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
@@ -22,6 +24,7 @@ from dokploy_wizard.state.models import (
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
+    litellm_key_uses_virtual_key_format,
 )
 from dokploy_wizard.state.queue_models import (
     DurableJobRecord,
@@ -466,21 +469,46 @@ def write_litellm_generated_keys(state_dir: Path, generated_keys: LiteLLMGenerat
 def ensure_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys:
     existing = load_litellm_generated_keys(state_dir)
     if existing is not None:
-        return existing
+        repaired_existing = _repair_litellm_generated_keys(existing)
+        if repaired_existing != existing:
+            write_litellm_generated_keys(state_dir, repaired_existing)
+        return repaired_existing
 
-    generated_keys = LiteLLMGeneratedKeys(
-        format_version=STATE_FORMAT_VERSION,
-        master_key=_generate_secret(prefix="sk-litellm-master"),
-        salt_key=_generate_secret(prefix="litellm-salt"),
-        virtual_keys={
-            "coder-hermes": _generate_secret(prefix="sk-litellm-coder-hermes"),
-            "coder-kdense": _generate_secret(prefix="sk-litellm-coder-kdense"),
-            "my-farm-advisor": _generate_secret(prefix="sk-litellm-my-farm-advisor"),
-            "openclaw": _generate_secret(prefix="sk-litellm-openclaw"),
-        },
-    )
+    generated_keys = _build_litellm_generated_keys()
     write_litellm_generated_keys(state_dir, generated_keys)
     return generated_keys
+
+
+def _build_litellm_generated_keys() -> LiteLLMGeneratedKeys:
+    return LiteLLMGeneratedKeys(
+        format_version=STATE_FORMAT_VERSION,
+        master_key=_generate_secret(prefix=LITELLM_GENERATED_MASTER_KEY_PREFIX),
+        salt_key=_generate_secret(prefix="litellm-salt"),
+        virtual_keys={
+            consumer: _generate_secret(prefix=prefix)
+            for consumer, prefix in LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES.items()
+        },
+    )
+
+
+def _repair_litellm_generated_keys(existing: LiteLLMGeneratedKeys) -> LiteLLMGeneratedKeys:
+    master_key = existing.master_key
+    if not litellm_key_uses_virtual_key_format(master_key):
+        master_key = _generate_secret(prefix=LITELLM_GENERATED_MASTER_KEY_PREFIX)
+
+    virtual_keys = dict(existing.virtual_keys)
+    for consumer, prefix in LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES.items():
+        current_key = virtual_keys[consumer]
+        if litellm_key_uses_virtual_key_format(current_key):
+            continue
+        virtual_keys[consumer] = _generate_secret(prefix=prefix)
+
+    return LiteLLMGeneratedKeys(
+        format_version=existing.format_version,
+        master_key=master_key,
+        salt_key=existing.salt_key,
+        virtual_keys=virtual_keys,
+    )
 
 
 def validate_install_state(loaded_state: LoadedState, desired_state: DesiredState) -> bool:

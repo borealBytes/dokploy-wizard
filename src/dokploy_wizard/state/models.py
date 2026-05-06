@@ -338,6 +338,18 @@ LITELLM_CONSUMER_VIRTUAL_KEY_NAMES = (
     "openclaw",
 )
 
+LITELLM_GENERATED_MASTER_KEY_PREFIX = "sk-litellm-master"
+LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES = {
+    "coder-hermes": "sk-litellm-coder-hermes",
+    "coder-kdense": "sk-litellm-coder-kdense",
+    "my-farm-advisor": "sk-litellm-my-farm-advisor",
+    "openclaw": "sk-litellm-openclaw",
+}
+
+
+def litellm_key_uses_virtual_key_format(value: str) -> bool:
+    return value.startswith("sk-")
+
 
 @dataclass(frozen=True)
 class LiteLLMGeneratedKeys:
