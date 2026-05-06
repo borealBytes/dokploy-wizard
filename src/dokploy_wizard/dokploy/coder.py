@@ -948,6 +948,13 @@ def _seed_template(
         == desired_version_name
     ):
         return False
+    if desired_version_name in _template_version_names(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+        template_name=template_name,
+    ):
+        return False
     _copy_template_into_container(
         container_name=container_name,
         template_dir=template_dir,
@@ -1281,6 +1288,39 @@ def _list_templates(
 def _active_template_version_name(
     *, container_name: str, hostname: str, session_token: str, template_name: str
 ) -> str | None:
+    for item in _list_template_versions(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+        template_name=template_name,
+    ):
+        if item.get("active") is True:
+            name = item.get("name")
+            if isinstance(name, str) and name:
+                return name
+            return None
+    return None
+
+
+def _template_version_names(
+    *, container_name: str, hostname: str, session_token: str, template_name: str
+) -> tuple[str, ...]:
+    names: list[str] = []
+    for item in _list_template_versions(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+        template_name=template_name,
+    ):
+        name = item.get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return tuple(names)
+
+
+def _list_template_versions(
+    *, container_name: str, hostname: str, session_token: str, template_name: str
+) -> tuple[dict[str, object], ...]:
     template_exists = False
     for item in _list_templates(
         container_name=container_name,
@@ -1292,7 +1332,7 @@ def _active_template_version_name(
             template_exists = True
             break
     if not template_exists:
-        return None
+        return ()
     result = subprocess.run(
         [
             "docker",
@@ -1336,13 +1376,7 @@ def _active_template_version_name(
         raise CoderError(
             f"Coder template version list for '{template_name}' returned an unexpected payload shape."
         )
-    for item in versions:
-        if item.get("active") is True:
-            name = item.get("name")
-            if isinstance(name, str) and name:
-                return name
-            return None
-    return None
+    return tuple(versions)
 
 
 def _create_default_workspace(
