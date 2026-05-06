@@ -144,7 +144,11 @@ def test_fresh_strict_proof_runs_second_install_after_verification(
     transport = make_fake_transport()
     session = _build_session(remote_transport_subject, transport=transport)
 
-    session.run_proof(fresh=True, confirm_file=Path("fixtures/destroy.confirm"), strict_idempotency=True)
+    session.run_proof(
+        fresh=True,
+        confirm_file=Path("fixtures/destroy.confirm"),
+        strict_idempotency=True,
+    )
 
     assert [subcommand for subcommand, _command in transport.commands] == [
         "mutate-uninstall-destroy-data",
@@ -234,7 +238,10 @@ def test_verify_service_failures_bubble_through_proof(
 ) -> None:
     transport = make_fake_transport(
         failures={
-            "verify-services": '{"entries":[{"detail":"OPENCLAW_VIRTUAL_KEY=<REDACTED>","service_id":"openclaw","status":"fail"}],"status":"fail"}'
+            "verify-services": (
+                '{"entries":[{"detail":"OPENCLAW_VIRTUAL_KEY=<REDACTED>",'
+                '"service_id":"openclaw","status":"fail"}],"status":"fail"}'
+            )
         }
     )
     session = _build_session(remote_transport_subject, transport=transport)

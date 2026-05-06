@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from dokploy_wizard import cli
+from dokploy_wizard.bootstrap import LOCAL_HEALTH_URL
 from dokploy_wizard.dokploy import openclaw as openclaw_module
 from dokploy_wizard.state import (
     RawEnvInput,
@@ -24,7 +25,12 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m dokploy_wizard.service_verification_runner",
         description="Run post-install service verification checks.",
     )
-    parser.add_argument("--env-file", type=Path, required=True, help="path to the reusable env file")
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        required=True,
+        help="path to the reusable env file",
+    )
     parser.add_argument(
         "--state-dir",
         type=Path,
@@ -48,7 +54,7 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
     litellm_generated_keys = load_litellm_generated_keys(state_dir)
     dokploy_session_client = cli._build_dokploy_session_client(
         raw_env=raw_env,
-        api_url=desired_state.dokploy_api_url or cli.LOCAL_HEALTH_URL,
+        api_url=desired_state.dokploy_api_url or LOCAL_HEALTH_URL,
     )
     shared_core_backend = cli._build_shared_core_backend(
         raw_env=raw_env,

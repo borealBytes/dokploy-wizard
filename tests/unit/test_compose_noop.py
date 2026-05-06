@@ -170,10 +170,11 @@ def test_missing_hash_triggers_deploy_and_persists_new_hash(tmp_path: Path) -> N
     client.assert_single_update_deploy_pair(service_name)
     applied_state = load_state_dir(tmp_path).applied_state
     assert applied_state is not None
-    assert applied_state.compose_artifact_hashes[service_name] == ComposeArtifactHashState.from_rendered_compose(
+    expected_hash_state = ComposeArtifactHashState.from_rendered_compose(
         service_id=service_name,
         rendered_compose=compose_file,
     )
+    assert applied_state.compose_artifact_hashes[service_name] == expected_hash_state
 
 
 def _write_empty_checkpoint(state_dir: Path) -> None:

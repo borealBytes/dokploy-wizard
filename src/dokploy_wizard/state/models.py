@@ -510,9 +510,7 @@ class AppliedStateCheckpoint:
             if not isinstance(service_key, str) or service_key == "":
                 msg = "Applied state compose artifact hash keys must be non-empty strings."
                 raise StateValidationError(msg)
-            if not isinstance(artifact_hash, ComposeArtifactHashState):
-                msg = "Applied state compose artifact hashes must be ComposeArtifactHashState values."
-                raise StateValidationError(msg)
+            artifact_hash.service_id
         if self.lifecycle_checkpoint_contract_version not in {
             LEGACY_LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
             LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,

@@ -3,19 +3,27 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from dokploy_wizard.service_verification_runner import _merge_persisted_retry_keys, main
 from dokploy_wizard.state import RawEnvInput
 
 
 def test_main_returns_success_and_prints_payload(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     env_file = tmp_path / ".install.env"
     env_file.write_text("ROOT_DOMAIN=example.com\n", encoding="utf-8")
 
+    success_payload = {
+        "passed": True,
+        "results": [{"service_name": "shared-core", "status": "pass"}],
+    }
     monkeypatch.setattr(
         "dokploy_wizard.service_verification_runner.run_service_verification",
-        lambda **_: {"passed": True, "results": [{"service_name": "shared-core", "status": "pass"}]},
+        lambda **_: success_payload,
     )
 
     exit_code = main(["--env-file", str(env_file), "--state-dir", str(tmp_path / "state")])
@@ -27,13 +35,21 @@ def test_main_returns_success_and_prints_payload(
     }
 
 
-def test_main_returns_failure_for_failed_payload(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_main_returns_failure_for_failed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     env_file = tmp_path / ".install.env"
     env_file.write_text("ROOT_DOMAIN=example.com\n", encoding="utf-8")
 
+    failed_payload = {
+        "passed": False,
+        "results": [{"service_name": "coder", "status": "fail"}],
+    }
     monkeypatch.setattr(
         "dokploy_wizard.service_verification_runner.run_service_verification",
-        lambda **_: {"passed": False, "results": [{"service_name": "coder", "status": "fail"}]},
+        lambda **_: failed_payload,
     )
 
     exit_code = main(["--env-file", str(env_file), "--state-dir", str(tmp_path / "state")])
