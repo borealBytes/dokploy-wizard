@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any
 
@@ -80,6 +80,22 @@ def _require_format_version(payload: dict[str, Any]) -> int:
     return version
 
 
+def _normalize_rendered_compose(value: str) -> str:
+    """Normalize rendered compose content before hashing."""
+
+    return "\n".join(
+        line.rstrip() for line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    ).strip()
+
+
+def _require_sha256_hex(payload: dict[str, Any], key: str) -> str:
+    value = _require_string(payload, key)
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        msg = f"Expected 64-character lowercase SHA-256 hex string for '{key}'."
+        raise StateValidationError(msg)
+    return value
+
+
 def _require_lifecycle_checkpoint_contract_version(payload: dict[str, Any]) -> int:
     version = payload.get(
         "lifecycle_checkpoint_contract_version",
@@ -100,6 +116,69 @@ def _require_lifecycle_checkpoint_contract_version(payload: dict[str, Any]) -> i
         )
         raise StateValidationError(msg)
     return version
+
+
+@dataclass(frozen=True)
+class ComposeArtifactHashState:
+    """Persisted rendered compose metadata without storing raw YAML."""
+
+    service_id: str
+    rendered_compose_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.service_id == "":
+            msg = "Compose artifact service_id cannot be empty."
+            raise StateValidationError(msg)
+        if len(self.rendered_compose_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in self.rendered_compose_sha256
+        ):
+            msg = "Compose artifact hash must be a 64-character lowercase SHA-256 hex string."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "service_id": self.service_id,
+            "rendered_compose_sha256": self.rendered_compose_sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> ComposeArtifactHashState:
+        return cls(
+            service_id=_require_string(payload, "service_id"),
+            rendered_compose_sha256=_require_sha256_hex(payload, "rendered_compose_sha256"),
+        )
+
+    @classmethod
+    def from_rendered_compose(
+        cls, *, service_id: str, rendered_compose: str
+    ) -> ComposeArtifactHashState:
+        normalized = _normalize_rendered_compose(rendered_compose)
+        return cls(
+            service_id=service_id,
+            rendered_compose_sha256=sha256(normalized.encode("utf-8")).hexdigest(),
+        )
+
+
+def _require_compose_artifact_hashes(
+    payload: dict[str, Any], key: str
+) -> dict[str, ComposeArtifactHashState]:
+    value = payload.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        msg = f"Expected object for '{key}'."
+        raise StateValidationError(msg)
+
+    normalized: dict[str, ComposeArtifactHashState] = {}
+    for service_key, service_payload in value.items():
+        if not isinstance(service_key, str) or service_key == "":
+            msg = f"Expected non-empty string keys in '{key}'."
+            raise StateValidationError(msg)
+        if not isinstance(service_payload, dict):
+            msg = f"Expected object values in '{key}'."
+            raise StateValidationError(msg)
+        normalized[service_key] = ComposeArtifactHashState.from_dict(service_payload)
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -411,6 +490,7 @@ class AppliedStateCheckpoint:
     format_version: int
     desired_state_fingerprint: str
     completed_steps: tuple[str, ...]
+    compose_artifact_hashes: dict[str, ComposeArtifactHashState] = field(default_factory=dict)
     lifecycle_checkpoint_contract_version: int = LIFECYCLE_CHECKPOINT_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
@@ -426,6 +506,13 @@ class AppliedStateCheckpoint:
         if any(step == "" for step in self.completed_steps):
             msg = "Applied state steps must be non-empty strings."
             raise StateValidationError(msg)
+        for service_key, artifact_hash in self.compose_artifact_hashes.items():
+            if not isinstance(service_key, str) or service_key == "":
+                msg = "Applied state compose artifact hash keys must be non-empty strings."
+                raise StateValidationError(msg)
+            if not isinstance(artifact_hash, ComposeArtifactHashState):
+                msg = "Applied state compose artifact hashes must be ComposeArtifactHashState values."
+                raise StateValidationError(msg)
         if self.lifecycle_checkpoint_contract_version not in {
             LEGACY_LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
             LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
@@ -443,6 +530,10 @@ class AppliedStateCheckpoint:
             "format_version": self.format_version,
             "desired_state_fingerprint": self.desired_state_fingerprint,
             "completed_steps": list(self.completed_steps),
+            "compose_artifact_hashes": {
+                service_key: artifact_hash.to_dict()
+                for service_key, artifact_hash in sorted(self.compose_artifact_hashes.items())
+            },
             "lifecycle_checkpoint_contract_version": self.lifecycle_checkpoint_contract_version,
         }
 
@@ -452,6 +543,9 @@ class AppliedStateCheckpoint:
             format_version=_require_format_version(payload),
             desired_state_fingerprint=_require_string(payload, "desired_state_fingerprint"),
             completed_steps=_require_string_list(payload, "completed_steps"),
+            compose_artifact_hashes=_require_compose_artifact_hashes(
+                payload, "compose_artifact_hashes"
+            ),
             lifecycle_checkpoint_contract_version=_require_lifecycle_checkpoint_contract_version(
                 payload
             ),

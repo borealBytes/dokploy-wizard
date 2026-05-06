@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import re
@@ -12,6 +13,8 @@ import ssl
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -256,15 +259,15 @@ class DokployCoderBackend:
                 },
             ),
         ):
-            _seed_template(
+            if _seed_template(
                 container_name=container_name,
                 hostname=self._hostname,
                 session_token=session_token,
                 template_name=template_name,
                 template_dir=template_dir,
                 replacements=replacements,
-            )
-            notes.append(f"Seeded default Coder template '{template_name}'.")
+            ):
+                notes.append(f"Seeded default Coder template '{template_name}'.")
         workspace_name = _default_workspace_name(self._hostname)
         try:
             if _ensure_default_workspace(
@@ -761,7 +764,21 @@ def _seed_template(
     template_name: str,
     template_dir: Path,
     replacements: dict[str, str] | None,
-) -> None:
+) -> bool:
+    desired_version_name = _template_version_name(
+        template_dir=template_dir,
+        replacements=replacements,
+    )
+    if (
+        _active_template_version_name(
+            container_name=container_name,
+            hostname=hostname,
+            session_token=session_token,
+            template_name=template_name,
+        )
+        == desired_version_name
+    ):
+        return False
     _copy_template_into_container(
         container_name=container_name,
         template_dir=template_dir,
@@ -773,7 +790,20 @@ def _seed_template(
         hostname=hostname,
         session_token=session_token,
         template_name=template_name,
+        template_version_name=desired_version_name,
     )
+    return True
+
+
+def _template_version_name(*, template_dir: Path, replacements: dict[str, str] | None) -> str:
+    digest = hashlib.sha256()
+    with _rendered_template_dir(template_dir=template_dir, replacements=replacements) as rendered_dir:
+        for path in sorted(path for path in rendered_dir.rglob("*") if path.is_file()):
+            digest.update(path.relative_to(rendered_dir).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    return f"dokploy-wizard-{digest.hexdigest()[:16]}"
 
 
 def _copy_template_into_container(
@@ -783,35 +813,38 @@ def _copy_template_into_container(
     template_name: str,
     replacements: dict[str, str] | None,
 ) -> None:
-    if not template_dir.exists():
-        raise CoderError(f"Default Coder template directory is missing: {template_dir}")
     subprocess.run(
         ["docker", "exec", container_name, "rm", "-rf", f"/tmp/{template_name}"],
         check=False,
         capture_output=True,
         text=True,
     )
-    copy_source = template_dir
-    if replacements:
-        with tempfile.TemporaryDirectory(prefix="dokploy-wizard-coder-template-") as tmp_dir:
-            rendered_dir = Path(tmp_dir) / template_dir.name
-            shutil.copytree(template_dir, rendered_dir)
-            rendered_main_tf = rendered_dir / "main.tf"
-            contents = rendered_main_tf.read_text(encoding="utf-8")
-            for placeholder, value in replacements.items():
-                contents = contents.replace(placeholder, value)
-            rendered_main_tf.write_text(contents, encoding="utf-8")
-            _docker_copy_template_dir(
-                container_name=container_name,
-                template_name=template_name,
-                template_dir=rendered_dir,
-            )
-            return
-    _docker_copy_template_dir(
-        container_name=container_name,
-        template_name=template_name,
-        template_dir=copy_source,
-    )
+    with _rendered_template_dir(template_dir=template_dir, replacements=replacements) as copy_source:
+        _docker_copy_template_dir(
+            container_name=container_name,
+            template_name=template_name,
+            template_dir=copy_source,
+        )
+
+
+@contextmanager
+def _rendered_template_dir(
+    *, template_dir: Path, replacements: dict[str, str] | None
+) -> Iterator[Path]:
+    if not template_dir.exists():
+        raise CoderError(f"Default Coder template directory is missing: {template_dir}")
+    if not replacements:
+        yield template_dir
+        return
+    with tempfile.TemporaryDirectory(prefix="dokploy-wizard-coder-template-") as tmp_dir:
+        rendered_dir = Path(tmp_dir) / template_dir.name
+        shutil.copytree(template_dir, rendered_dir)
+        rendered_main_tf = rendered_dir / "main.tf"
+        contents = rendered_main_tf.read_text(encoding="utf-8")
+        for placeholder, value in replacements.items():
+            contents = contents.replace(placeholder, value)
+        rendered_main_tf.write_text(contents, encoding="utf-8")
+        yield rendered_dir
 
 
 def _docker_copy_template_dir(
@@ -834,26 +867,38 @@ def _coder_cli_url() -> str:
 
 
 def _push_default_template(
-    *, container_name: str, hostname: str, session_token: str, template_name: str
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+    template_name: str,
+    template_version_name: str | None = None,
 ) -> None:
-    result = subprocess.run(
+    command = [
+        "docker",
+        "exec",
+        "-e",
+        f"CODER_URL={_coder_cli_url()}",
+        "-e",
+        f"CODER_SESSION_TOKEN={session_token}",
+        container_name,
+        "/opt/coder",
+        "templates",
+        "push",
+        template_name,
+    ]
+    if template_version_name:
+        command.extend(["--name", template_version_name])
+    command.extend(
         [
-            "docker",
-            "exec",
-            "-e",
-            f"CODER_URL={_coder_cli_url()}",
-            "-e",
-            f"CODER_SESSION_TOKEN={session_token}",
-            container_name,
-            "/opt/coder",
-            "templates",
-            "push",
-            template_name,
             "--directory",
             f"/tmp/{template_name}",
             "--ignore-lockfile",
             "--yes",
-        ],
+        ]
+    )
+    result = subprocess.run(
+        command,
         check=False,
         capture_output=True,
         text=True,
@@ -1026,6 +1071,109 @@ def _list_workspaces(*, container_name: str, hostname: str, session_token: str) 
         if isinstance(name, str) and name:
             names.append(name)
     return tuple(names)
+
+
+def _list_templates(
+    *, container_name: str, hostname: str, session_token: str
+) -> tuple[dict[str, object], ...]:
+    del hostname
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "templates",
+            "list",
+            "--output",
+            "json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise CoderError(
+            f"Unable to list Coder templates: {(result.stderr or result.stdout).strip()}"
+        )
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise CoderError("Coder template list returned invalid JSON.") from exc
+    if not isinstance(payload, list):
+        raise CoderError("Coder template list returned an unexpected payload shape.")
+    return tuple(item for item in payload if isinstance(item, dict))
+
+
+def _active_template_version_name(
+    *, container_name: str, hostname: str, session_token: str, template_name: str
+) -> str | None:
+    template_exists = False
+    for item in _list_templates(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+    ):
+        name = item.get("name")
+        if isinstance(name, str) and name == template_name:
+            template_exists = True
+            break
+    if not template_exists:
+        return None
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "templates",
+            "versions",
+            "list",
+            template_name,
+            "--output",
+            "json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise CoderError(
+            f"Unable to list Coder template versions for '{template_name}': {(result.stderr or result.stdout).strip()}"
+        )
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise CoderError(f"Coder template version list for '{template_name}' returned invalid JSON.") from exc
+    versions: list[dict[str, object]]
+    if isinstance(payload, list):
+        versions = [item for item in payload if isinstance(item, dict)]
+    elif isinstance(payload, dict):
+        raw_versions = payload.get("versions")
+        if not isinstance(raw_versions, list):
+            raise CoderError(
+                f"Coder template version list for '{template_name}' returned an unexpected payload shape."
+            )
+        versions = [item for item in raw_versions if isinstance(item, dict)]
+    else:
+        raise CoderError(
+            f"Coder template version list for '{template_name}' returned an unexpected payload shape."
+        )
+    for item in versions:
+        if item.get("active") is True:
+            name = item.get("name")
+            if isinstance(name, str) and name:
+                return name
+            return None
+    return None
 
 
 def _create_default_workspace(

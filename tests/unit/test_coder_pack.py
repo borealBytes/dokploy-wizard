@@ -525,6 +525,25 @@ def test_no_openrouter_wildcard_in_kdense_config() -> None:
     assert 'model_name: "openai/*"' in template
 
 
+def test_kdense_template_preserves_restored_byok_source_state() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'data "coder_parameter" "kdense_opencode_go_base_url" {' in template
+    assert 'display_name = "Central LiteLLM Base URL"' in template
+    assert 'default      = "https://opencode.ai/zen/go/v1"' in template
+    assert (
+        'KDENSE_CENTRAL_LITELLM_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL}"'
+        in template
+    )
+    assert "KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL_PLACEHOLDER" not in template
+    assert "KDENSE_TEMPLATE_OPENCODE_GO_API_KEY_PLACEHOLDER" not in template
+    assert 'append_env OPENROUTER_API_KEY ' not in template
+    assert 'append_env NVIDIA_API_KEY ' not in template
+    assert 'append_env ANTHROPIC_API_KEY ' not in template
+
+
 def test_default_hermes_template_includes_full_web_stack() -> None:
     template = Path("templates/coder/default-ubuntu-code-server-hermes/main.tf").read_text(
         encoding="utf-8"
@@ -671,6 +690,7 @@ def test_hermes_template_uses_litellm_credentials(
         "_coder_container_name",
         lambda service_name: "wizard-stack-coder-container",
     )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
     monkeypatch.setattr(
         coder_module,
         "_sync_hermes_workspace_secrets",
@@ -742,6 +762,7 @@ def test_base_opencode_web_openwork_templates_do_not_receive_litellm_credentials
         "_coder_container_name",
         lambda service_name: "wizard-stack-coder-container",
     )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
     monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
     monkeypatch.setattr(
         coder_module,
@@ -903,6 +924,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     monkeypatch.setattr(
         coder_module, "_coder_container_name", lambda service_name: "coder-container"
     )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
     secret_sync_calls: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         coder_module,
@@ -933,6 +955,109 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
     )
+
+
+def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    first_user_exists = False
+    first_user_calls: list[tuple[str, str, str]] = []
+    template_versions: dict[str, str] = {}
+    template_copy_calls: list[str] = []
+    template_push_calls: list[tuple[str, str | None]] = []
+    created_workspaces: list[tuple[str, str]] = []
+    workspaces: set[str] = set()
+
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: first_user_exists)
+
+    def fake_create_first_user(*, hostname: str, email: str, password: str) -> None:
+        nonlocal first_user_exists
+        first_user_calls.append((hostname, email, password))
+        first_user_exists = True
+
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", fake_create_first_user)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_active_template_version_name",
+        lambda **kwargs: template_versions.get(str(kwargs["template_name"])),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda *, template_name, **kwargs: template_copy_calls.append(template_name),
+    )
+
+    def fake_push_default_template(*, template_name: str, template_version_name: str | None = None, **kwargs: object) -> None:
+        template_push_calls.append((template_name, template_version_name))
+        if template_version_name is not None:
+            template_versions[template_name] = template_version_name
+
+    monkeypatch.setattr(coder_module, "_push_default_template", fake_push_default_template)
+    monkeypatch.setattr(
+        coder_module,
+        "_default_workspace_name",
+        lambda hostname: "openmergeme-workspace-2026-04-18",
+    )
+    monkeypatch.setattr(coder_module, "_list_workspaces", lambda **kwargs: tuple(sorted(workspaces)))
+
+    def fake_create_default_workspace(*, workspace_name: str, template_name: str, **kwargs: object) -> None:
+        created_workspaces.append((workspace_name, template_name))
+        workspaces.add(workspace_name)
+
+    monkeypatch.setattr(coder_module, "_create_default_workspace", fake_create_default_workspace)
+
+    first_notes = backend.ensure_application_ready()
+    second_notes = backend.ensure_application_ready()
+
+    expected_template_names = {
+        coder_module._default_template_name(),
+        coder_module._default_opencode_web_template_name(),
+        coder_module._default_openwork_template_name(),
+        coder_module._default_kdense_byok_template_name(),
+        coder_module._default_hermes_template_name(),
+    }
+    assert first_user_calls == [("coder.example.com", "admin@openmerge.me", "ChangeMeSoon")]
+    assert set(template_copy_calls) == expected_template_names
+    assert len(template_copy_calls) == len(expected_template_names)
+    assert {name for name, _ in template_push_calls} == expected_template_names
+    assert len(template_push_calls) == len(expected_template_names)
+    assert all(version_name and version_name.startswith("dokploy-wizard-") for _, version_name in template_push_calls)
+    assert created_workspaces == [
+        ("openmergeme-workspace-2026-04-18", coder_module._default_template_name())
+    ]
+    assert first_notes == (
+        "Provisioned initial Coder admin for 'admin@openmerge.me'.",
+        "Seeded default Coder template 'ubuntu-vscode'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
+        "Seeded default Coder template 'ubuntu-vscode-openwork'.",
+        "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes'.",
+        "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'admin@openmerge.me'.",
+    )
+    assert second_notes == ()
 
 
 def test_build_coder_ledger_replaces_existing_resources() -> None:
@@ -1248,6 +1373,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "_coder_container_name",
         lambda service_name: "wizard-stack-coder-container",
     )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
     monkeypatch.setattr(
         coder_module,
         "_sync_hermes_workspace_secrets",
@@ -1277,7 +1403,8 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         container_name,
         hostname,
         session_token,
-        template_name: template_push_calls.append(
+        template_name,
+        template_version_name=None: template_push_calls.append(
             (container_name, hostname, session_token, template_name)
         ),
     )

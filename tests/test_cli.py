@@ -53,6 +53,7 @@ from dokploy_wizard.preflight import (
 )
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
+    ComposeArtifactHashState,
     OwnedResource,
     OwnershipLedger,
     RawEnvInput,
@@ -118,6 +119,94 @@ def _classify_modify_plan(
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
         requested_raw=requested_raw,
         requested_desired=requested_desired,
+    )
+
+
+def test_compose_hash_state_round_trips_through_applied_checkpoint() -> None:
+    compose_hash = ComposeArtifactHashState.from_rendered_compose(
+        service_id="svc-openclaw",
+        rendered_compose=(
+            "services:\r\n"
+            "  app:  \r\n"
+            "    image: ghcr.io/example/openclaw:latest\r\n"
+            "    environment:\r\n"
+            "      SECRET_TOKEN: should-not-be-persisted\r\n"
+        ),
+    )
+    checkpoint = AppliedStateCheckpoint(
+        format_version=1,
+        desired_state_fingerprint="abc123",
+        completed_steps=("preflight", "openclaw"),
+        compose_artifact_hashes={"openclaw": compose_hash},
+    )
+
+    payload = checkpoint.to_dict()
+    round_trip = AppliedStateCheckpoint.from_dict(json.loads(json.dumps(payload)))
+
+    assert payload["compose_artifact_hashes"] == {
+        "openclaw": {
+            "service_id": "svc-openclaw",
+            "rendered_compose_sha256": compose_hash.rendered_compose_sha256,
+        }
+    }
+    assert "SECRET_TOKEN" not in json.dumps(payload)
+    assert "should-not-be-persisted" not in json.dumps(payload)
+    assert round_trip == checkpoint
+
+
+def test_compose_hash_state_loads_missing_hash_metadata_for_backward_compatibility(
+    tmp_path: Path,
+) -> None:
+    applied_state_path = tmp_path / "applied-state.json"
+    applied_state_path.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "desired_state_fingerprint": "abc123",
+                "completed_steps": ["preflight", "openclaw"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded_state = load_state_dir(tmp_path)
+
+    assert loaded_state.applied_state is not None
+    assert loaded_state.applied_state.compose_artifact_hashes == {}
+
+
+def test_compose_hash_state_changes_when_rendered_compose_changes() -> None:
+    original = ComposeArtifactHashState.from_rendered_compose(
+        service_id="svc-farm",
+        rendered_compose=(
+            "services:\n"
+            "  farm:\n"
+            "    image: ghcr.io/borealbytes/my-farm-advisor:latest\n"
+            "    environment:\n"
+            "      MODEL=anthropic/claude-sonnet-4\n"
+        ),
+    )
+    changed = ComposeArtifactHashState.from_rendered_compose(
+        service_id="svc-farm",
+        rendered_compose=(
+            "services:\n"
+            "  farm:\n"
+            "    image: ghcr.io/borealbytes/my-farm-advisor:latest\n"
+            "    environment:\n"
+            "      MODEL=openrouter/openrouter/hunter-alpha\n"
+        ),
+    )
+
+    checkpoint = AppliedStateCheckpoint(
+        format_version=1,
+        desired_state_fingerprint="abc123",
+        completed_steps=("preflight", "my-farm-advisor"),
+        compose_artifact_hashes={"my-farm-advisor": changed},
+    )
+
+    assert changed.rendered_compose_sha256 != original.rendered_compose_sha256
+    assert checkpoint.to_dict()["compose_artifact_hashes"]["my-farm-advisor"]["service_id"] == (
+        "svc-farm"
     )
 
 
@@ -1238,11 +1327,12 @@ def test_build_openclaw_backend_uses_generated_litellm_virtual_keys(
         desired_state=desired_state,
         litellm_generated_keys=generated_keys,
     )
+    captured_keys = cast(Any, captured["litellm_generated_keys"])
 
     assert backend is not None
     assert captured["litellm_generated_keys"] is generated_keys
-    assert captured["litellm_generated_keys"].virtual_keys["openclaw"] == generated_keys.virtual_keys["openclaw"]
-    assert captured["litellm_generated_keys"].virtual_keys["my-farm-advisor"] == generated_keys.virtual_keys["my-farm-advisor"]
+    assert captured_keys.virtual_keys["openclaw"] == generated_keys.virtual_keys["openclaw"]
+    assert captured_keys.virtual_keys["my-farm-advisor"] == generated_keys.virtual_keys["my-farm-advisor"]
     assert captured["client"] is sentinel_client
 
 
