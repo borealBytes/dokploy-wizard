@@ -120,9 +120,11 @@ def _core_only_raw_env(**overrides: str) -> RawEnvInput:
 def _litellm_shared_core_backend(
     raw_env: RawEnvInput,
     client: RecordingDokploySharedCoreApi,
+    *,
+    state_dir: Path,
 ) -> DokploySharedCoreBackend:
     desired_state = resolve_desired_state(raw_env)
-    return DokploySharedCoreBackend(
+    backend = DokploySharedCoreBackend(
         api_url=desired_state.dokploy_api_url or "https://dokploy.example.com/api",
         api_key=raw_env.values["DOKPLOY_API_KEY"],
         stack_name=desired_state.stack_name,
@@ -135,7 +137,10 @@ def _litellm_shared_core_backend(
         allocation_provisioner=lambda allocations: None,
         client=client,
         sleep_fn=lambda _: None,
+        state_dir=state_dir,
     )
+    setattr(backend, "_wait_for_shared_core_containers", lambda: None)
+    return backend
 
 
 def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
@@ -152,7 +157,7 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
         raw_env=raw_env,
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=networking_backend,
-        shared_core_backend=_litellm_shared_core_backend(raw_env, api),
+        shared_core_backend=_litellm_shared_core_backend(raw_env, api, state_dir=state_dir),
     )
 
     compose = api.compose_files_by_name["wizard-stack-shared"]
@@ -209,7 +214,7 @@ def test_core_only_rerun_is_noop_and_preserves_litellm_keys(
     raw_env = _core_only_raw_env()
     api = RecordingDokploySharedCoreApi()
     networking_backend = FakeCloudflareBackend()
-    shared_core_backend = _litellm_shared_core_backend(raw_env, api)
+    shared_core_backend = _litellm_shared_core_backend(raw_env, api, state_dir=state_dir)
 
     run_install_flow(
         env_file=env_file,
@@ -300,7 +305,11 @@ def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_f
         raw_env=initial_raw,
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=networking_backend,
-        shared_core_backend=_litellm_shared_core_backend(initial_raw, shared_core_api),
+        shared_core_backend=_litellm_shared_core_backend(
+            initial_raw,
+            shared_core_api,
+            state_dir=state_dir,
+        ),
         headscale_backend=FakeHeadscaleBackend(),
         matrix_backend=FakeMatrixBackend(),
         coder_backend=coder_backend,
@@ -315,7 +324,11 @@ def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_f
         raw_env=modified_raw,
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=networking_backend,
-        shared_core_backend=_litellm_shared_core_backend(modified_raw, shared_core_api),
+        shared_core_backend=_litellm_shared_core_backend(
+            modified_raw,
+            shared_core_api,
+            state_dir=state_dir,
+        ),
         headscale_backend=FakeHeadscaleBackend(),
         matrix_backend=FakeMatrixBackend(),
         coder_backend=coder_backend,

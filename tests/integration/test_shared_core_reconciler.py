@@ -35,14 +35,27 @@ from dokploy_wizard.packs.nextcloud import (
     TalkRuntime,
 )
 from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
     OwnedResource,
     OwnershipLedger,
     RawEnvInput,
     load_state_dir,
     resolve_desired_state,
+    write_applied_checkpoint,
 )
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
+
+
+def _write_empty_applied_checkpoint(state_dir: Path) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("shared_core",),
+        ),
+    )
 
 
 @dataclass
@@ -750,7 +763,11 @@ def test_install_fails_closed_when_shared_core_owned_resource_drifted(tmp_path: 
         )
 
 
-def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_resources() -> None:
+def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_resources(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    _write_empty_applied_checkpoint(state_dir)
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -772,7 +789,9 @@ def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_re
         plan=desired_state.shared_core,
         client=client,
         allocation_provisioner=lambda allocations: provisioned.append(allocations),
+        state_dir=state_dir,
     )
+    setattr(backend, "_wait_for_shared_core_containers", lambda: None)
 
     phase = reconcile_shared_core(
         dry_run=False,
@@ -861,7 +880,10 @@ def test_shared_core_reconciles_litellm_after_postgres_allocations() -> None:
 
 def test_dokploy_shared_core_backend_defers_litellm_runtime_until_explicit_reconcile(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    state_dir = tmp_path / "state"
+    _write_empty_applied_checkpoint(state_dir)
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -881,7 +903,9 @@ def test_dokploy_shared_core_backend_defers_litellm_runtime_until_explicit_recon
         stack_name=desired_state.stack_name,
         plan=desired_state.shared_core,
         client=client,
+        state_dir=state_dir,
     )
+    setattr(backend, "_wait_for_shared_core_containers", lambda: None)
     reconcile_calls: list[str] = []
     monkeypatch.setattr(
         backend,
@@ -900,7 +924,10 @@ def test_dokploy_shared_core_backend_defers_litellm_runtime_until_explicit_recon
 
 def test_dokploy_shared_core_backend_updates_existing_compose_when_mail_relay_container_is_missing(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    state_dir = tmp_path / "state"
+    _write_empty_applied_checkpoint(state_dir)
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -940,7 +967,9 @@ def test_dokploy_shared_core_backend_updates_existing_compose_when_mail_relay_co
         plan=desired_state.shared_core,
         client=client,
         allocation_provisioner=lambda allocations: provisioned.append(allocations),
+        state_dir=state_dir,
     )
+    setattr(backend, "_wait_for_shared_core_containers", lambda: None)
     assert desired_state.shared_core.mail_relay is not None
     mail_relay_service_name = desired_state.shared_core.mail_relay.service_name
     monkeypatch.setattr(

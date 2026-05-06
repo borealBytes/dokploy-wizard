@@ -468,6 +468,7 @@ def test_install_reconciles_headscale_via_dokploy_backend(
         headscale_backend=DokployHeadscaleBackend(
             api_url="https://dokploy.example.com",
             api_key="dokp-key-123",
+            state_dir=state_dir,
             stack_name="headscale-stack",
             hostname="headscale.example.com",
             client=client,

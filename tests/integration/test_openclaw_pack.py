@@ -49,6 +49,7 @@ from dokploy_wizard.state import (
     load_state_dir,
     write_ownership_ledger,
 )
+from dokploy_wizard.verification import make_verification_result
 from tests.unit.test_openclaw_pack import FakeDokployOpenClawApi, _service_environment
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
@@ -620,6 +621,16 @@ def _patch_real_dokploy_openclaw_backend(
     )
     monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
     monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr(
+        DokployOpenClawBackend,
+        "_verify_service_runtime",
+        lambda self, *, service_name, variant, url: make_verification_result(
+            service_name=service_name,
+            tier="app",
+            passed=True,
+            detail="Test stubbed runtime verification.",
+        ),
+    )
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda service_name: True)
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.openclaw._wait_for_container_http_health",
@@ -627,6 +638,10 @@ def _patch_real_dokploy_openclaw_backend(
     )
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda url: True)
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", lambda service_name, url: True)
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.shared_core._can_connect_as_allocation",
+        lambda container_name, allocation: True,
+    )
 
 
 def _base_install_values(**overrides: str) -> dict[str, str]:
@@ -1595,6 +1610,16 @@ def test_install_passes_nexa_env_into_dokploy_openclaw_backend(
     monkeypatch.setattr(dokploy_wizard.cli, "DokployOpenClawBackend", _build_backend)
     monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
     monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr(
+        DokployOpenClawBackend,
+        "_verify_service_runtime",
+        lambda self, *, service_name, variant, url: make_verification_result(
+            service_name=service_name,
+            tier="app",
+            passed=True,
+            detail="Test stubbed runtime verification.",
+        ),
+    )
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda service_name: True)
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.openclaw._wait_for_container_http_health",
@@ -1665,6 +1690,16 @@ def test_install_renders_internal_nexa_runtime_sidecar_into_openclaw_compose(
     monkeypatch.setattr(dokploy_wizard.cli, "DokployOpenClawBackend", _build_backend)
     monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
     monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr(
+        DokployOpenClawBackend,
+        "_verify_service_runtime",
+        lambda self, *, service_name, variant, url: make_verification_result(
+            service_name=service_name,
+            tier="app",
+            passed=True,
+            detail="Test stubbed runtime verification.",
+        ),
+    )
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._docker_container_is_up", lambda service_name: True)
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.openclaw._wait_for_container_http_health",

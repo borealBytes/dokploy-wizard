@@ -578,6 +578,7 @@ def test_install_reconciles_matrix_via_dokploy_backend(
         matrix_backend=DokployMatrixBackend(
             api_url="https://dokploy.example.com",
             api_key="dokp-key-123",
+            state_dir=state_dir,
             stack_name=desired_state.stack_name,
             hostname=desired_state.hostnames["matrix"],
             shared_allocation=allocation,

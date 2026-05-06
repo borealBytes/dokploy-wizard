@@ -386,6 +386,7 @@ def test_install_reconciles_seaweedfs_pack_via_dokploy_backend(
         seaweedfs_backend=DokploySeaweedFsBackend(
             api_url="https://dokploy.example.com",
             api_key="dokp-key-123",
+            state_dir=state_dir,
             stack_name=desired_state.stack_name,
             hostname=desired_state.hostnames["s3"],
             access_key="seaweed-access",
