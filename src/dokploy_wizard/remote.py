@@ -469,7 +469,7 @@ def _should_skip(relative: Path) -> bool:
         return True
     if parts[0] == ".sisyphus" and len(parts) > 1 and parts[1] == "evidence":
         return True
-    if relative.name in {".install.env", ".fresh-vps-validation.env", "openclaw-compose-fixed.yml"}:
+    if relative.name in {".install.env", ".fresh-vps-validation.env"}:
         return True
     if relative.suffix == ".swp":
         return True
