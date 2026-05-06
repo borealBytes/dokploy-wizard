@@ -63,6 +63,36 @@ What the helper does:
 
 The helper targets a single fresh host. It uses password authentication over SSH. It does not support authentication via stored private keys or unattended login, and it is not designed for orchestrating more than one host at a time.
 
+### Proof command (verification-first)
+
+The preferred operator path for fresh-VPS validation is `proof`:
+
+```bash
+./bin/dokploy-wizard-remote proof \
+  --host <host> \
+  --password <password> \
+  --env-file ./.install.env
+```
+
+What the proof flow does:
+
+1. Packages the repo.
+2. Uploads the repo plus `.install.env` to the remote host.
+3. Runs the wizard install non-interactively.
+4. Runs service verification for all enabled services.
+5. Runs `inspect-state`.
+6. Collects remote state and logs locally.
+
+By default, proof does **not** run a second install pass. It is verification-first: install once, verify services, inspect state. Use `--strict-idempotency` when you want an explicit double-install check that asserts unchanged healthy services stay no-op.
+
+```bash
+./bin/dokploy-wizard-remote proof \
+  --host <host> \
+  --password <password> \
+  --env-file ./.install.env \
+  --strict-idempotency
+```
+
 ## .install.env
 
 `.install.env` is the working operator env file. It stays at repo root and contains flat `key=value` pairs for credentials, domains, pack flags, and model provider settings.

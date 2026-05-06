@@ -31,6 +31,7 @@ Optional packs also include Headscale, Matrix, and Coder. My Farm Advisor is opt
 - Same-host rerun / noop proof works
 - fresh-VPS install, rerun, and inspect-state flows are part of the validation path
 - OpenClaw, Nexa, Nextcloud Talk, OnlyOffice, SeaweedFS, and Coder are all part of the wizard-managed path
+- Unchanged healthy services skip Dokploy update/deploy on rerun through compose artifact hash tracking
 
 ## High-level architecture
 
@@ -395,8 +396,9 @@ Important details:
 The repo includes a real fresh-VPS proof flow with:
 
 - first install success
-- same-host rerun/noop success
+- service verification after install
 - `inspect-state` execution as part of the proof loop
+- optional strict idempotency mode for explicit double-install checks
 
 The local proof artifacts live under:
 
@@ -407,8 +409,41 @@ What that means in practice:
 - the wizard can package the repo and install env
 - copy both to a fresh host
 - run the installer non-interactively
-- rerun it on the same host
+- verify that all enabled services are healthy and reachable
 - inspect the resulting state as part of the same reproducibility loop
+
+### Default proof behavior (verification-first)
+
+By default, proof installs once, runs service verification, and then captures `inspect-state`. It does not run a second install pass. This is the standard operator path for validating a fresh host.
+
+```bash
+./bin/dokploy-wizard-remote proof \
+  --host <host> \
+  --password <redacted> \
+  --env-file ./.install.env
+```
+
+### Strict idempotency mode
+
+Use `--strict-idempotency` when you want an explicit double-install check. The second install pass should produce zero Dokploy update/deploy calls for unchanged healthy services because compose artifact hash tracking skips mutations when the rendered compose is unchanged and verification passes.
+
+```bash
+./bin/dokploy-wizard-remote proof \
+  --host <host> \
+  --password <redacted> \
+  --env-file ./.install.env \
+  --strict-idempotency
+```
+
+### Service verification runner
+
+The proof flow invokes the service verification runner after install. You can also run it independently:
+
+```bash
+python3 -m dokploy_wizard.service_verification_runner \
+  --env-file ./.install.env \
+  --state-dir .dokploy-wizard-state
+```
 
 The checked-in proof artifact is useful as a concrete example run, but it should not be treated as the only source of truth for current drift status after later inspection fixes.
 
@@ -461,9 +496,11 @@ What it does:
 - packages the repo
 - uploads repo + `.install.env`
 - runs wizard install
-- reruns the same install for noop proof
+- runs service verification
 - runs `inspect-state`
 - collects remote state and logs locally
+
+The harness does not rerun install by default. Use `--strict-idempotency` with `./bin/dokploy-wizard-remote proof` when you need an explicit unchanged-healthy idempotency check.
 
 ## Local validation
 
@@ -493,6 +530,7 @@ pytest tests/test_cli.py -q
 - The chosen state directory stores wizard metadata and the generated env file, not the Docker volumes themselves.
 - The ownership ledger is the uninstall authority.
 - OpenClaw/Nexa/Telly behavior is now wizard-managed, not just manually drifted on one VPS.
+- Reruns and modify operations skip Dokploy update/deploy for services whose rendered compose hash matches the stored hash and whose verification checks pass. Changed compose or unhealthy services still redeploy normally.
 
 ## Current caveats
 
