@@ -701,6 +701,7 @@ def test_hermes_template_uses_litellm_credentials(
         lambda service_name: "wizard-stack-coder-container",
     )
     monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
     monkeypatch.setattr(
         coder_module,
         "_sync_hermes_workspace_secrets",
@@ -773,6 +774,7 @@ def test_base_opencode_web_openwork_templates_do_not_receive_litellm_credentials
         lambda service_name: "wizard-stack-coder-container",
     )
     monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
     monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
     monkeypatch.setattr(
         coder_module,
@@ -935,6 +937,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
         coder_module, "_coder_container_name", lambda service_name: "coder-container"
     )
     monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
     secret_sync_calls: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         coder_module,
@@ -1016,6 +1019,11 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     )
     monkeypatch.setattr(
         coder_module,
+        "_template_version_names",
+        lambda **kwargs: tuple(template_versions.values()),
+    )
+    monkeypatch.setattr(
+        coder_module,
         "_copy_template_into_container",
         lambda *, template_name, **kwargs: template_copy_calls.append(template_name),
     )
@@ -1068,6 +1076,142 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
         "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'clayton@openmerge.me'.",
     )
     assert second_notes == ()
+
+
+def test_seed_template_skips_push_when_desired_version_is_already_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "main.tf").write_text("resource \"x\" \"y\" {}\n", encoding="utf-8")
+    desired_version_name = coder_module._template_version_name(
+        template_dir=template_dir,
+        replacements=None,
+    )
+    copy_calls: list[str] = []
+    push_calls: list[str] = []
+
+    monkeypatch.setattr(
+        coder_module,
+        "_active_template_version_name",
+        lambda **kwargs: desired_version_name,
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_template_version_names",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not list versions")),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda **kwargs: copy_calls.append("copy"),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_push_default_template",
+        lambda **kwargs: push_calls.append("push"),
+    )
+
+    seeded = coder_module._seed_template(
+        container_name="coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        template_name="ubuntu-vscode",
+        template_dir=template_dir,
+        replacements=None,
+    )
+
+    assert seeded is False
+    assert copy_calls == []
+    assert push_calls == []
+
+
+def test_seed_template_skips_push_when_desired_version_already_exists_but_is_not_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "main.tf").write_text("resource \"x\" \"y\" {}\n", encoding="utf-8")
+    desired_version_name = coder_module._template_version_name(
+        template_dir=template_dir,
+        replacements=None,
+    )
+    copy_calls: list[str] = []
+    push_calls: list[str] = []
+
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: "older-version")
+    monkeypatch.setattr(
+        coder_module,
+        "_template_version_names",
+        lambda **kwargs: ("older-version", desired_version_name),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda **kwargs: copy_calls.append("copy"),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_push_default_template",
+        lambda **kwargs: push_calls.append("push"),
+    )
+
+    seeded = coder_module._seed_template(
+        container_name="coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        template_name="ubuntu-vscode",
+        template_dir=template_dir,
+        replacements=None,
+    )
+
+    assert seeded is False
+    assert copy_calls == []
+    assert push_calls == []
+
+
+def test_seed_template_pushes_when_desired_version_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "main.tf").write_text("resource \"x\" \"y\" {}\n", encoding="utf-8")
+    copy_calls: list[str] = []
+    push_calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: "older-version")
+    monkeypatch.setattr(
+        coder_module,
+        "_template_version_names",
+        lambda **kwargs: ("older-version",),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda **kwargs: copy_calls.append(str(kwargs["template_name"])),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_push_default_template",
+        lambda **kwargs: push_calls.append(
+            (str(kwargs["template_name"]), kwargs.get("template_version_name"))
+        ),
+    )
+
+    seeded = coder_module._seed_template(
+        container_name="coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        template_name="ubuntu-vscode",
+        template_dir=template_dir,
+        replacements=None,
+    )
+
+    assert seeded is True
+    assert copy_calls == ["ubuntu-vscode"]
+    assert push_calls == [("ubuntu-vscode", push_calls[0][1])]
+    assert push_calls[0][1] is not None
+    assert push_calls[0][1].startswith("dokploy-wizard-")
 
 
 def test_build_coder_ledger_replaces_existing_resources() -> None:
@@ -1608,6 +1752,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         lambda service_name: "wizard-stack-coder-container",
     )
     monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
     monkeypatch.setattr(
         coder_module,
         "_sync_hermes_workspace_secrets",
