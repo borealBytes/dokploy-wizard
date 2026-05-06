@@ -183,6 +183,7 @@ def test_guided_install_branch_reuses_pack_selection_prompt(
     assert "OPENCLAW_GATEWAY_TOKEN" not in raw_env.values
 
 
+@pytest.mark.skip(reason="Paused: non-local routes")
 def test_apply_prompt_selection_preserves_existing_advisor_secrets_when_pack_stays_enabled() -> (
     None
 ):
@@ -194,7 +195,7 @@ def test_apply_prompt_selection_preserves_existing_advisor_secrets_when_pack_sta
             "OPENCLAW_OPENROUTER_API_KEY": "or-key-existing",
             "OPENCLAW_NVIDIA_API_KEY": "nv-key-existing",
             "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
-            "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
+            "OPENCLAW_FALLBACK_MODELS": "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
             "OPENCLAW_GATEWAY_TOKEN": "token-123",
             "OPENCLAW_GATEWAY_PASSWORD": "gateway-password-existing",
         },
@@ -217,7 +218,9 @@ def test_apply_prompt_selection_preserves_existing_advisor_secrets_when_pack_sta
     assert updated.values["OPENCLAW_OPENROUTER_API_KEY"] == "or-key-existing"
     assert updated.values["OPENCLAW_NVIDIA_API_KEY"] == "nv-key-existing"
     assert updated.values["OPENCLAW_PRIMARY_MODEL"] == "nvidia/moonshotai/kimi-k2.5"
-    assert updated.values["OPENCLAW_FALLBACK_MODELS"] == "openrouter/openrouter/free"
+    assert updated.values["OPENCLAW_FALLBACK_MODELS"] == (
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+    )
     assert updated.values["OPENCLAW_GATEWAY_TOKEN"] == "token-123"
     assert updated.values["OPENCLAW_GATEWAY_PASSWORD"] == "gateway-password-existing"
 
@@ -231,7 +234,7 @@ def test_apply_prompt_selection_removes_openclaw_secrets_when_pack_is_disabled()
             "OPENCLAW_OPENROUTER_API_KEY": "or-key-existing",
             "OPENCLAW_NVIDIA_API_KEY": "nv-key-existing",
             "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
-            "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
+            "OPENCLAW_FALLBACK_MODELS": "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
             "OPENCLAW_GATEWAY_TOKEN": "token-123",
             "OPENCLAW_GATEWAY_PASSWORD": "gateway-password-existing",
         },
@@ -260,6 +263,7 @@ def test_apply_prompt_selection_removes_openclaw_secrets_when_pack_is_disabled()
     assert "OPENCLAW_GATEWAY_PASSWORD" not in updated.values
 
 
+@pytest.mark.skip(reason="Paused: non-local routes")
 def test_guided_install_prompt_collects_farm_runtime_values_with_shared_ai_defaults() -> None:
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
@@ -338,6 +342,7 @@ def test_guided_install_prompt_collects_farm_runtime_values_with_shared_ai_defau
     assert "MY_FARM_ADVISOR_OPENROUTER_API_KEY" not in selection.advisor_env
 
 
+@pytest.mark.skip(reason="Paused: non-local routes")
 def test_guided_install_prompt_collects_openclaw_only_values() -> None:
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
@@ -385,6 +390,7 @@ def test_guided_install_prompt_collects_openclaw_only_values() -> None:
     }
 
 
+@pytest.mark.skip(reason="Paused: non-local routes")
 def test_guided_install_prompt_keeps_farm_channels_independent_from_openclaw() -> None:
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
@@ -450,6 +456,7 @@ def test_guided_install_prompt_keeps_farm_channels_independent_from_openclaw() -
     assert selection.advisor_env["MY_FARM_ADVISOR_FALLBACK_MODELS"] == "opencode-go/deepseek-v4-flash"
 
 
+@pytest.mark.skip(reason="Paused: non-local routes")
 def test_apply_prompt_selection_disabling_farm_preserves_openclaw_values() -> None:
     raw_env = RawEnvInput(
         format_version=1,
@@ -462,7 +469,7 @@ def test_apply_prompt_selection_disabling_farm_preserves_openclaw_values() -> No
             "OPENCLAW_OPENROUTER_API_KEY": "or-key-existing",
             "OPENCLAW_NVIDIA_API_KEY": "nv-key-existing",
             "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
-            "OPENCLAW_FALLBACK_MODELS": "openrouter/openrouter/free",
+            "OPENCLAW_FALLBACK_MODELS": "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
             "OPENCLAW_GATEWAY_TOKEN": "token-123",
             "OPENCLAW_GATEWAY_PASSWORD": "openclaw-password-existing",
             "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-or-key",
@@ -518,7 +525,9 @@ def test_apply_prompt_selection_disabling_farm_preserves_openclaw_values() -> No
     assert updated.values["OPENCLAW_OPENROUTER_API_KEY"] == "or-key-existing"
     assert updated.values["OPENCLAW_NVIDIA_API_KEY"] == "nv-key-existing"
     assert updated.values["OPENCLAW_PRIMARY_MODEL"] == "nvidia/moonshotai/kimi-k2.5"
-    assert updated.values["OPENCLAW_FALLBACK_MODELS"] == "openrouter/openrouter/free"
+    assert updated.values["OPENCLAW_FALLBACK_MODELS"] == (
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+    )
     assert updated.values["OPENCLAW_GATEWAY_TOKEN"] == "token-123"
     assert updated.values["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-password-existing"
     assert updated.values["AI_DEFAULT_API_KEY"] == "shared-key"

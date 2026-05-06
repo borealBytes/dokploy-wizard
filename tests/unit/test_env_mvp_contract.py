@@ -28,7 +28,7 @@ def _farm_litellm_env(**overrides: str) -> RawEnvInput:
         "LITELLM_IMAGE": "ghcr.io/berriai/litellm",
         "LITELLM_IMAGE_TAG": "main-v1.40.14-stable",
         "LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
-        "LITELLM_LOCAL_MODEL": "unsloth/Qwen2.5-Coder-32B-Instruct",
+        "LITELLM_LOCAL_MODEL": "unsloth-active",
         "LITELLM_ADMIN_SUBDOMAIN": "litellm",
         "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
         "OPENCODE_GO_API_KEY": "opencode-go-upstream-key",

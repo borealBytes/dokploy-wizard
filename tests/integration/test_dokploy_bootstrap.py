@@ -283,7 +283,8 @@ def _auth_email_only_raw_env() -> RawEnvInput:
             "OPENCLAW_CHANNELS": "telegram",
             "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
             "OPENCLAW_FALLBACK_MODELS": (
-                "openrouter/openrouter/free,openrouter/google/gemma-4-31b-it:free"
+                "openrouter/nvidia/nemotron-3-super-120b-a12b:free,"
+                "openrouter/google/gemma-4-31b-it:free"
             ),
             "OPENCLAW_NVIDIA_API_KEY": "nvapi-test-key",
             "OPENCLAW_OPENROUTER_API_KEY": "sk-or-test-key",

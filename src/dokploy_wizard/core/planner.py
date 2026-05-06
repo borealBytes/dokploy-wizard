@@ -16,9 +16,10 @@ from dokploy_wizard.packs.catalog import get_pack_definition
 
 _DEFAULT_LITELLM_ALIAS_ORDER = (
     "local/unsloth-active",
-    "opencode-go/*",
-    "openrouter/auto",
-    "openrouter/openrouter/free",
+    # PAUSED: OpenCode Go route — will re-enable later.
+    # "opencode-go/*",
+    # PAUSED: OpenRouter route — will re-enable later.
+    # "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
 )
 
 
