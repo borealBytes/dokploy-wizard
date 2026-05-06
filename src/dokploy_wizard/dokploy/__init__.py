@@ -9,6 +9,12 @@ from dokploy_wizard.dokploy.bootstrap_auth import (
     DokployBootstrapAuthError,
     DokployBootstrapAuthResult,
 )
+from dokploy_wizard.dokploy.compose_noop import (
+    ComposeApplyResult,
+    apply_compose_noop_guard,
+    load_compose_artifact_hash,
+    persist_compose_artifact_hash,
+)
 from dokploy_wizard.dokploy.client import (
     DokployApiClient,
     DokployApiError,
@@ -40,6 +46,7 @@ __all__ = [
     "DokployBootstrapAuthClient",
     "DokployBootstrapAuthError",
     "DokployBootstrapAuthResult",
+    "ComposeApplyResult",
     "DokployComposeRecord",
     "DokployComposeSummary",
     "DokployCloudflaredBackend",
@@ -58,6 +65,9 @@ __all__ = [
     "DokployScheduleRecord",
     "DokploySharedCoreBackend",
     "build_litellm_consumer_model_allowlists",
+    "apply_compose_noop_guard",
+    "load_compose_artifact_hash",
+    "persist_compose_artifact_hash",
     "API_KEY_CREATE_PATH",
     "AUTH_SESSION_PATHS",
     "AUTH_SIGN_IN_PATHS",
