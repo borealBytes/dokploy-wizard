@@ -53,6 +53,8 @@ class LiteLLMAdminApi(Protocol):
 
 
 class LiteLLMAdminClient:
+    _KEY_LIST_PAGE_SIZE = 100
+
     def __init__(
         self,
         *,
@@ -87,11 +89,22 @@ class LiteLLMAdminClient:
         return _parse_team(payload)
 
     def list_keys(self) -> tuple[LiteLLMVirtualKeyRecord, ...]:
-        query = parse.urlencode({"page": 1, "size": 1000, "return_full_object": "true"})
-        payload = self._request_json("GET", f"/key/list?{query}")
-        if not isinstance(payload, list):
-            raise LiteLLMAdminError("LiteLLM key.list response must be a list.")
-        return tuple(_parse_key(item) for item in payload)
+        records: list[LiteLLMVirtualKeyRecord] = []
+        page = 1
+        while True:
+            query = parse.urlencode(
+                {
+                    "page": page,
+                    "size": self._KEY_LIST_PAGE_SIZE,
+                    "return_full_object": "true",
+                }
+            )
+            payload = self._request_json("GET", f"/key/list?{query}")
+            page_items = _parse_key_list_payload(payload)
+            records.extend(_parse_key(item) for item in page_items)
+            if len(page_items) < self._KEY_LIST_PAGE_SIZE:
+                return tuple(records)
+            page += 1
 
     def create_key(
         self,
@@ -275,6 +288,27 @@ def _parse_key(
         team_id=team_id,
         models=_tuple_of_strings(payload.get("models")),
     )
+
+
+def _parse_key_list_payload(payload: Any) -> tuple[dict[str, Any], ...]:
+    if isinstance(payload, list):
+        return tuple(_ensure_key_payload(item) for item in payload)
+    if isinstance(payload, dict):
+        for candidate_key in ("keys", "data", "items", "results"):
+            candidate_value = payload.get(candidate_key)
+            if isinstance(candidate_value, list):
+                return tuple(_ensure_key_payload(item) for item in candidate_value)
+        raise LiteLLMAdminError(
+            "LiteLLM key.list response must contain a list under one of "
+            "('keys', 'data', 'items', 'results') when the top-level payload is an object."
+        )
+    raise LiteLLMAdminError("LiteLLM key.list response must be a list or paginated object.")
+
+
+def _ensure_key_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise LiteLLMAdminError("LiteLLM key record must be an object.")
+    return payload
 
 
 def _first_string(payload: Mapping[str, Any], *keys: str, default: str | None = None) -> str:

@@ -39,26 +39,10 @@ from dokploy_wizard.litellm.admin import (
 from dokploy_wizard.litellm.config_renderer import build_litellm_config
 
 EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
-    "my-farm-advisor": (
-        "local/unsloth-active",
-        "openai/*",
-        "openrouter/auto",
-        "openrouter/openrouter/free",
-    ),
-    "openclaw": (
-        "local/unsloth-active",
-        "openai/*",
-        "openrouter/auto",
-        "openrouter/openrouter/free",
-        "nvidia/moonshotai/kimi-k2.5",
-    ),
-    "coder-hermes": (
-        "local/unsloth-active",
-        "openai/*",
-        "openrouter/auto",
-        "openrouter/openrouter/free",
-    ),
-    "coder-kdense": ("openai/*",),
+    "my-farm-advisor": ("local/unsloth-active", "unsloth-active"),
+    "openclaw": ("local/unsloth-active", "unsloth-active"),
+    "coder-hermes": ("local/unsloth-active", "unsloth-active"),
+    "coder-kdense": (),
 }
 
 LIVE_KEY_ENV_BY_CONSUMER = {
@@ -247,18 +231,8 @@ def _qa_flat_env() -> dict[str, str]:
         "STACK_NAME": "wizard-stack",
         "ROOT_DOMAIN": "example.com",
         "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
-        "LITELLM_LOCAL_MODEL": "unsloth/Qwen2.5-Coder-32B-Instruct",
-        "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
-        "OPENCODE_GO_API_KEY": "opencode-go-upstream-key",
-        "LITELLM_OPENROUTER_MODELS": (
-            "openrouter/auto=openrouter/openai/gpt-4.1-mini,"
-            "openrouter/openrouter/free=openrouter/google/gemma-4-31b-it:free"
-        ),
-        "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-upstream-key",
-        "LITELLM_NVIDIA_MODELS": "nvidia/moonshotai/kimi-k2.5=nvidia/moonshotai/kimi-k2.5",
-        "OPENCLAW_NVIDIA_API_KEY": "openclaw-nvidia-upstream-key",
-        "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
-        "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
+        "LITELLM_LOCAL_MODEL": "unsloth-active",
+        "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
     }
 
 
@@ -358,10 +332,7 @@ def test_fake_v1_models_farm_key_shows_local_and_opencode_go_wildcard(
     response = fake_harness.v1_models(_consumer_api_key("my-farm-advisor"))
 
     assert response.status_code == 200
-    assert _model_names_from_v1_models(response)[:2] == (
-        "local/unsloth-active",
-        "openai/*",
-    )
+    assert _model_names_from_v1_models(response) == ("local/unsloth-active", "unsloth-active")
     assert "openrouter/*" not in _model_names_from_v1_models(response)
 
 
@@ -413,10 +384,10 @@ def test_fake_opencode_go_wildcard_is_isolated_to_intended_alias_policy(
     }
 
     assert visible_wildcards == {
-        "my-farm-advisor": ("openai/*",),
-        "openclaw": ("openai/*",),
-        "coder-hermes": ("openai/*",),
-        "coder-kdense": ("openai/*",),
+        "my-farm-advisor": (),
+        "openclaw": (),
+        "coder-hermes": (),
+        "coder-kdense": (),
     }
 
 
@@ -439,7 +410,7 @@ def test_fake_coder_kdense_rejects_advisor_only_openrouter_alias(
 ) -> None:
     response = fake_harness.chat_completion(
         _consumer_api_key("coder-kdense"),
-        model="openrouter/openrouter/free",
+        model="openrouter/nvidia/nemotron-3-super-120b-a12b:free",
     )
 
     assert response.status_code in {400, 403}

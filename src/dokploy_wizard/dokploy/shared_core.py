@@ -8,6 +8,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Protocol
 
 from dokploy_wizard.core import (
@@ -272,9 +273,27 @@ class DokploySharedCoreBackend:
 
     def refresh_compose(self) -> None:
         self._ensure_compose_applied()
+        self._wait_for_shared_core_containers()
 
     def reconcile_litellm_runtime(self) -> None:
         self._ensure_litellm_runtime_ready_and_reconciled()
+
+    def _wait_for_shared_core_containers(
+        self, *, attempts: int = 30, delay_seconds: float = 2.0
+    ) -> None:
+        services_to_wait = [self._plan.network_name]
+        if self._plan.postgres is not None:
+            services_to_wait.append(self._plan.postgres.service_name)
+        if self._plan.redis is not None:
+            services_to_wait.append(self._plan.redis.service_name)
+        if self._plan.litellm is not None:
+            services_to_wait.append(self._plan.litellm.service_name)
+        if self._plan.mail_relay is not None:
+            services_to_wait.append(self._plan.mail_relay.service_name)
+        for service_name in services_to_wait:
+            _wait_for_container_name(
+                service_name, attempts=attempts, delay_seconds=delay_seconds
+            )
 
     def _lookup_locator(self, resource_id: str, kind: str) -> _ComposeLocator | None:
         compose_id = _parse_resource_id(resource_id, kind)
@@ -517,14 +536,20 @@ def _render_compose_file(
     if plan.litellm is not None:
         litellm_image = litellm_env.get("LITELLM_IMAGE", "ghcr.io/berriai/litellm").strip() or "ghcr.io/berriai/litellm"
         litellm_tag = litellm_env.get("LITELLM_IMAGE_TAG", "v1.83.14-stable").strip() or "v1.83.14-stable"
-        litellm_config = render_litellm_config_yaml(
-            build_litellm_config(litellm_env, _build_litellm_upstream_creds(litellm_env))
-        )
+        upstream_creds = _build_litellm_upstream_creds(litellm_env)
+        litellm_config_payload = build_litellm_config(litellm_env, upstream_creds)
+        _inline_litellm_secret_refs(litellm_config_payload, litellm_env)
+        litellm_config = render_litellm_config_yaml(litellm_config_payload)
         postgres_service_name = (
             plan.postgres.service_name if plan.postgres is not None else "shared-postgres"
         )
         postgres_password_env = _compose_env_var_name(plan.litellm.postgres.password_secret_ref)
-        config_name = f"{plan.litellm.service_name}-config"
+        config_name = _config_name_with_hash(
+            f"{plan.litellm.service_name}-config", litellm_config
+        )
+        provider_env_lines = _render_litellm_upstream_env_lines(
+            litellm_env=litellm_env, upstream_creds=upstream_creds
+        )
         master_key_lines = (
             '      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"\n'
             '      MASTER_KEY: "${LITELLM_MASTER_KEY}"\n'
@@ -549,6 +574,7 @@ def _render_compose_file(
             "    command: [\"--config\", \"/app/config.yaml\", \"--port\", \"4000\"]\n"
             "    environment:\n"
             f'      DATABASE_URL: "postgresql://{plan.litellm.postgres.user_name}:${{{postgres_password_env}:-change-me}}@{postgres_service_name}:5432/{plan.litellm.postgres.database_name}"\n'
+            f"{provider_env_lines}"
             f"{master_key_lines}"
             f"{salt_key_lines}"
             "    configs:\n"
@@ -589,16 +615,19 @@ def _render_compose_file(
 
 
 def _build_litellm_upstream_creds(litellm_env: dict[str, str]) -> dict[str, str]:
-    upstream_creds = {"opencode_go_api_key_env": "OPENCODE_GO_API_KEY"}
-    openrouter_env_name = _first_configured_env_name(
-        litellm_env,
-        "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
-        "OPENCLAW_OPENROUTER_API_KEY",
-        "AI_DEFAULT_API_KEY",
-        "OPENROUTER_API_KEY",
-    )
-    if openrouter_env_name is not None:
-        upstream_creds["openrouter_api_key_env"] = openrouter_env_name
+    upstream_creds: dict[str, str] = {}
+    # PAUSED: OpenCode Go route — will re-enable later.
+    # upstream_creds["opencode_go_api_key_env"] = "OPENCODE_GO_API_KEY"
+    # PAUSED: OpenRouter route — will re-enable later.
+    # openrouter_env_name = _first_configured_env_name(
+    #     litellm_env,
+    #     "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
+    #     "OPENCLAW_OPENROUTER_API_KEY",
+    #     "AI_DEFAULT_API_KEY",
+    #     "OPENROUTER_API_KEY",
+    # )
+    # if openrouter_env_name is not None:
+    #     upstream_creds["openrouter_api_key_env"] = openrouter_env_name
     nvidia_env_name = _first_configured_env_name(
         litellm_env,
         "MY_FARM_ADVISOR_NVIDIA_API_KEY",
@@ -616,6 +645,46 @@ def _first_configured_env_name(litellm_env: dict[str, str], *candidates: str) ->
         if value is not None and value.strip() != "":
             return candidate
     return None
+
+
+def _config_name_with_hash(base_name: str, content: str) -> str:
+    return f"{base_name}-{sha256(content.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _render_litellm_upstream_env_lines(
+    *, litellm_env: dict[str, str], upstream_creds: dict[str, str]
+) -> str:
+    lines: list[str] = []
+    rendered_names: set[str] = set()
+    for env_name in upstream_creds.values():
+        if env_name in rendered_names:
+            continue
+        value = litellm_env.get(env_name)
+        if value is None or value.strip() == "":
+            continue
+        lines.append(f'      {env_name}: "{value.replace(chr(34), r"\\\"")}"\n')
+        rendered_names.add(env_name)
+    return "".join(lines)
+
+
+def _inline_litellm_secret_refs(config: dict[str, object], litellm_env: dict[str, str]) -> None:
+    model_list = config.get("model_list")
+    if not isinstance(model_list, list):
+        return
+    for entry in model_list:
+        if not isinstance(entry, dict):
+            continue
+        litellm_params = entry.get("litellm_params")
+        if not isinstance(litellm_params, dict):
+            continue
+        api_key_ref = litellm_params.get("api_key")
+        if not isinstance(api_key_ref, str) or not api_key_ref.startswith("os.environ/"):
+            continue
+        env_name = api_key_ref.removeprefix("os.environ/")
+        value = litellm_env.get(env_name)
+        if value is None or value.strip() == "":
+            continue
+        litellm_params["api_key"] = value
 
 
 def build_litellm_consumer_model_allowlists(
@@ -642,22 +711,23 @@ def build_litellm_consumer_model_allowlists(
             if (resolved_alias := _resolve_litellm_default_alias(alias, available_aliases)) is not None
         )
     )
+    expanded_defaults = _expand_aliases_with_bare_names(default_aliases)
     return {
-        "coder-hermes": default_aliases,
+        "coder-hermes": expanded_defaults,
         "coder-kdense": tuple(alias for alias in ("openai/*",) if alias in available_aliases),
         "my-farm-advisor": _advisor_alias_allowlist(
             flat_env,
             primary_key="MY_FARM_ADVISOR_PRIMARY_MODEL",
             fallback_key="MY_FARM_ADVISOR_FALLBACK_MODELS",
             available_aliases=available_aliases,
-            default_aliases=default_aliases,
+            default_aliases=expanded_defaults,
         ),
         "openclaw": _advisor_alias_allowlist(
             flat_env,
             primary_key="OPENCLAW_PRIMARY_MODEL",
             fallback_key="OPENCLAW_FALLBACK_MODELS",
             available_aliases=available_aliases,
-            default_aliases=default_aliases,
+            default_aliases=expanded_defaults,
         ),
     }
 
@@ -674,13 +744,38 @@ def _advisor_alias_allowlist(
     primary_model = _optional_value(flat_env, primary_key)
     if primary_model is not None and primary_model in available_aliases:
         aliases.append(primary_model)
+        # My Farm Advisor splits provider/model strings such as local/unsloth-active
+        # and sends the bare model name to LiteLLM. Allow both forms.
+        if "/" in primary_model:
+            bare_name = primary_model.split("/", 1)[1]
+            if bare_name not in aliases:
+                aliases.append(bare_name)
     fallback_models = _optional_value(flat_env, fallback_key)
     if fallback_models is not None:
         for model in fallback_models.split(","):
             normalized = model.strip()
             if normalized in available_aliases:
                 aliases.append(normalized)
+                if "/" in normalized:
+                    bare_name = normalized.split("/", 1)[1]
+                    if bare_name not in aliases:
+                        aliases.append(bare_name)
     return tuple(dict.fromkeys(aliases))
+
+
+def _expand_aliases_with_bare_names(aliases: tuple[str, ...]) -> tuple[str, ...]:
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        if alias not in seen:
+            expanded.append(alias)
+            seen.add(alias)
+        if "/" in alias:
+            bare_name = alias.split("/", 1)[1]
+            if bare_name not in seen:
+                expanded.append(bare_name)
+                seen.add(bare_name)
+    return tuple(expanded)
 
 
 def _resolve_litellm_default_alias(alias: str, available_aliases: set[str]) -> str | None:

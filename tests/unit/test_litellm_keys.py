@@ -99,13 +99,13 @@ def test_empty_state_generates_consumer_keys_and_existing_state_reuses_them(
 
     existing_keys = LiteLLMGeneratedKeys(
         format_version=1,
-        master_key="existing-master-key",
+        master_key="sk-litellm-master-existing",
         salt_key="existing-salt-key",
         virtual_keys={
-            "coder-hermes": "existing-coder-hermes-key",
-            "coder-kdense": "existing-coder-kdense-key",
-            "my-farm-advisor": "existing-my-farm-key",
-            "openclaw": "existing-openclaw-key",
+            "coder-hermes": "sk-litellm-coder-hermes-existing",
+            "coder-kdense": "sk-litellm-coder-kdense-existing",
+            "my-farm-advisor": "sk-litellm-my-farm-advisor-existing",
+            "openclaw": "sk-litellm-openclaw-existing",
         },
     )
     write_litellm_generated_keys(state_dir, existing_keys)
@@ -113,6 +113,39 @@ def test_empty_state_generates_consumer_keys_and_existing_state_reuses_them(
     reused_keys = ensure_litellm_generated_keys(state_dir)
 
     assert reused_keys == existing_keys
+
+
+def test_ensure_litellm_generated_keys_repairs_legacy_non_sk_values(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    legacy_keys = LiteLLMGeneratedKeys(
+        format_version=1,
+        master_key="legacy-master-key",
+        salt_key="existing-salt-key",
+        virtual_keys={
+            "coder-hermes": "sk-litellm-coder-hermes-existing",
+            "coder-kdense": "legacy-coder-kdense-key",
+            "my-farm-advisor": "345elegacy5043",
+            "openclaw": "existing-openclaw-key",
+        },
+    )
+    write_litellm_generated_keys(state_dir, legacy_keys)
+
+    repaired_keys = ensure_litellm_generated_keys(state_dir)
+
+    assert repaired_keys.master_key.startswith("sk-litellm-master-")
+    assert repaired_keys.master_key != legacy_keys.master_key
+    assert repaired_keys.salt_key == legacy_keys.salt_key
+    assert repaired_keys.virtual_keys["coder-hermes"] == "sk-litellm-coder-hermes-existing"
+    assert repaired_keys.virtual_keys["coder-kdense"].startswith("sk-litellm-coder-kdense-")
+    assert repaired_keys.virtual_keys["coder-kdense"] != "legacy-coder-kdense-key"
+    assert repaired_keys.virtual_keys["my-farm-advisor"].startswith(
+        "sk-litellm-my-farm-advisor-"
+    )
+    assert repaired_keys.virtual_keys["my-farm-advisor"] != "345elegacy5043"
+    assert repaired_keys.virtual_keys["openclaw"].startswith("sk-litellm-openclaw-")
+    assert repaired_keys.virtual_keys["openclaw"] != "existing-openclaw-key"
+
+    assert ensure_litellm_generated_keys(state_dir) == repaired_keys
 
 
 class FakeLiteLLMAdminApi:
