@@ -1092,6 +1092,7 @@ def _run_lifecycle_flow(
         raw_env=raw_env,
         desired_state=desired_state,
         session_client=dokploy_session_client,
+        litellm_generated_keys=litellm_generated_keys,
     )
     lifecycle_backends = LifecycleBackends(
         bootstrap=backend,
@@ -1957,8 +1958,8 @@ def _build_coder_backend(
         admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
-        hermes_inference_provider=raw_env.values.get("HERMES_INFERENCE_PROVIDER", "opencode-go"),
-        hermes_model=raw_env.values.get("HERMES_MODEL", "deepseek-v4-flash"),
+        hermes_inference_provider=raw_env.values.get("HERMES_INFERENCE_PROVIDER", "openai"),
+        hermes_model=raw_env.values.get("HERMES_MODEL", "unsloth-active"),
         ai_default_base_url=_shared_ai_default_base_url(raw_env),
         ai_default_api_key=litellm_generated_keys.virtual_keys["coder-hermes"],
         client=_build_dokploy_api_client(
@@ -1975,6 +1976,7 @@ def _build_openclaw_backend(
     raw_env: RawEnvInput,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
+    litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> OpenClawBackend:
     if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
         return ShellOpenClawBackend(raw_env)
@@ -2054,6 +2056,7 @@ def _build_openclaw_backend(
             api_key=api_key,
             session_client=session_client,
         ),
+        litellm_generated_keys=litellm_generated_keys,
     )
 
 
