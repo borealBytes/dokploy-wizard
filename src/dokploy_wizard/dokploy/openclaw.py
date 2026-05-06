@@ -30,6 +30,7 @@ from dokploy_wizard.packs.openclaw.models import (
     OpenClawResourceRecord,
 )
 from dokploy_wizard.packs.openclaw.reconciler import OpenClawError
+from dokploy_wizard.state.models import LiteLLMGeneratedKeys
 
 _DEFAULT_MODEL_PROVIDER = "openai"
 _DEFAULT_MODEL_NAME = "gpt-4o-mini"
@@ -86,7 +87,6 @@ _DEFAULT_LOCAL_MODEL_API_KEY = "sk-no-key-required"
 _DEFAULT_AI_DEFAULT_PROVIDER_ID = "opencode-go"
 _DEFAULT_AI_DEFAULT_MODEL_ID = "deepseek-v4-flash"
 _DEFAULT_AI_DEFAULT_MODEL_REF = "opencode-go/deepseek-v4-flash"
-_DEFAULT_LITELLM_WILDCARD_MODEL_REF = "openai/*"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_PROVIDER_ID = "ai-default"
 _DEFAULT_GENERAL_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace"
@@ -306,9 +306,11 @@ class DokployOpenClawBackend:
         trusted_proxies: str = _DEFAULT_TRUSTED_PROXIES,
         nvidia_visible_devices: str = _DEFAULT_NVIDIA_VISIBLE_DEVICES,
         client: DokployOpenClawApi | None = None,
+        litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
     ) -> None:
         resolved_openclaw_nexa_env = _resolve_openclaw_nexa_env(stack_name, openclaw_nexa_env or {})
         self._stack_name = stack_name
+        self._litellm_generated_keys = litellm_generated_keys
         self._runtime_configs = {
             "openclaw": _AdvisorRuntimeConfig(
                 gateway_token=gateway_token,
@@ -536,6 +538,7 @@ class DokployOpenClawBackend:
             channels=channels,
             replicas=replicas,
             runtime_config=self._runtime_configs[variant],
+            generated_keys=self._litellm_generated_keys,
         )
         try:
             projects = self._client.list_projects()
@@ -887,6 +890,7 @@ def _render_compose_file(
     channels: tuple[str, ...],
     replicas: int,
     runtime_config: _AdvisorRuntimeConfig,
+    generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> str:
     app_port = _app_port_for_variant(variant)
     stack_name = (
@@ -919,6 +923,7 @@ def _render_compose_file(
             state_root=_DEFAULT_OPENCLAW_STATE_ROOT,
             include_gateway_token=True,
             include_nexa=True,
+            generated_keys=generated_keys,
         )
         lines.extend(
             _render_gateway_service_block(
@@ -961,6 +966,7 @@ def _render_compose_file(
             state_root=_DEFAULT_OPENCLAW_PUBLIC_STATE_ROOT,
             include_gateway_token=False,
             include_nexa=False,
+            generated_keys=generated_keys,
         )
         lines.extend(
             _render_gateway_service_block(
@@ -1006,6 +1012,7 @@ def _render_compose_file(
             ),
             include_gateway_token=not single_gateway_trusted_proxy,
             include_nexa=variant == "openclaw",
+            generated_keys=generated_keys,
         )
         volume_name = (
             f"{service_name}-data"
@@ -1057,6 +1064,7 @@ def _render_compose_file(
                     runtime_config,
                     service_name=service_name,
                     shared_network=shared_network,
+                    generated_keys=generated_keys,
                 )
             )
         lines.extend(["volumes:"])
@@ -1177,6 +1185,7 @@ def _gateway_environment(
     state_root: str,
     include_gateway_token: bool,
     include_nexa: bool,
+    generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> dict[str, str]:
     environment = {
         "ADVISOR_VARIANT": variant,
@@ -1203,9 +1212,9 @@ def _gateway_environment(
     if runtime_config.gateway_password is not None:
         environment["OPENCLAW_GATEWAY_PASSWORD"] = runtime_config.gateway_password
     if variant == "my-farm-advisor":
-        environment.update(_my_farm_gateway_environment(stack_name=stack_name, runtime_config=runtime_config))
+        environment.update(_my_farm_gateway_environment(stack_name=stack_name, runtime_config=runtime_config, generated_keys=generated_keys))
     else:
-        environment.update(_openclaw_gateway_environment(stack_name=stack_name))
+        environment.update(_openclaw_gateway_environment(stack_name=stack_name, generated_keys=generated_keys))
         if runtime_config.telegram_bot_token is not None:
             environment["TELEGRAM_BOT_TOKEN"] = runtime_config.telegram_bot_token
     if include_nexa and variant == "openclaw" and runtime_config.nexa_contract is not None:
@@ -1225,7 +1234,7 @@ def _gateway_environment(
                 "DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH": (
                     runtime_config.nexa_contract.workspace_contract_path
                 ),
-                "DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT": _DEFAULT_NEXA_VISIBLE_WORKSPACE_ROOT,
+                "DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT": runtime_config.nexa_contract.workspace_root,
             }
         )
     if variant == "my-farm-advisor":
@@ -1233,11 +1242,11 @@ def _gateway_environment(
     return environment
 
 
-def _openclaw_gateway_environment(*, stack_name: str) -> dict[str, str]:
-    virtual_key_ref = _litellm_virtual_key_ref("openclaw")
+def _openclaw_gateway_environment(*, stack_name: str, generated_keys: LiteLLMGeneratedKeys | None = None) -> dict[str, str]:
+    virtual_key = _litellm_virtual_key_value("openclaw", generated_keys)
     return {
-        "LITELLM_VIRTUAL_KEY_OPENCLAW": virtual_key_ref,
-        "OPENAI_API_KEY": virtual_key_ref,
+        "LITELLM_VIRTUAL_KEY_OPENCLAW": virtual_key,
+        "OPENAI_API_KEY": virtual_key,
         "OPENAI_BASE_URL": _litellm_internal_base_url(stack_name),
     }
 
@@ -1276,14 +1285,14 @@ def _my_farm_r2_data_enabled(farm_env: _FarmAdvisorRuntimeEnv | None) -> bool:
     )
 
 
-def _my_farm_gateway_environment(*, stack_name: str, runtime_config: _AdvisorRuntimeConfig) -> dict[str, str]:
+def _my_farm_gateway_environment(*, stack_name: str, runtime_config: _AdvisorRuntimeConfig, generated_keys: LiteLLMGeneratedKeys | None = None) -> dict[str, str]:
     farm_env = runtime_config.farm_env
     if farm_env is None:
         return {}
-    virtual_key_ref = _litellm_virtual_key_ref("my-farm-advisor")
+    virtual_key = _litellm_virtual_key_value("my-farm-advisor", generated_keys)
     environment: dict[str, str] = {}
-    environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] = virtual_key_ref
-    environment["OPENAI_API_KEY"] = virtual_key_ref
+    environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] = virtual_key
+    environment["OPENAI_API_KEY"] = virtual_key
     environment["OPENAI_BASE_URL"] = _litellm_internal_base_url(stack_name)
     if runtime_config.primary_model is None and not runtime_config.fallback_models:
         environment["MODEL_PROVIDER"] = runtime_config.model_provider
@@ -1405,6 +1414,12 @@ def _litellm_virtual_key_ref(consumer: str) -> str:
     return f"${{LITELLM_VIRTUAL_KEY_{env_name}}}"
 
 
+def _litellm_virtual_key_value(consumer: str, generated_keys: LiteLLMGeneratedKeys | None) -> str:
+    if generated_keys is not None and consumer in generated_keys.virtual_keys:
+        return generated_keys.virtual_keys[consumer]
+    return _litellm_virtual_key_ref(consumer)
+
+
 def _generic_provider_model_entry(model_id: str) -> dict[str, object]:
     return {
         "id": model_id,
@@ -1422,10 +1437,10 @@ def _generic_provider_model_entry(model_id: str) -> dict[str, object]:
     }
 
 
-def _litellm_provider_config(*, stack_name: str, model_ids: tuple[str, ...]) -> dict[str, object]:
+def _litellm_provider_config(*, stack_name: str, model_ids: tuple[str, ...], consumer: str = "openclaw") -> dict[str, object]:
     return {
         "baseUrl": _litellm_internal_base_url(stack_name),
-        "apiKey": _litellm_virtual_key_ref("openclaw"),
+        "apiKey": _litellm_virtual_key_ref(consumer),
         "api": "openai-completions",
         "models": [_generic_provider_model_entry(model_id) for model_id in model_ids],
     }
@@ -1484,6 +1499,7 @@ def _render_openclaw_nexa_sidecar_services(
     *,
     service_name: str,
     shared_network: str,
+    generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> list[str]:
     mem0_config_json = json.dumps(_build_mem0_sidecar_config(runtime_config.nexa_env), separators=(",", ":"))
     mem0_environment = {
@@ -1504,7 +1520,7 @@ def _render_openclaw_nexa_sidecar_services(
     if runtime_config.nexa_contract is None:
         msg = "Expected a Nexa deployment contract before rendering sidecar services."
         raise OpenClawError(msg)
-    planner_api_key = _litellm_virtual_key_ref("openclaw")
+    planner_api_key = _litellm_virtual_key_value("openclaw", generated_keys)
     planner_base_url = _litellm_internal_base_url(stack_name)
     runtime_environment = {
         **runtime_config.nexa_env,
@@ -1724,6 +1740,7 @@ def _command_for_variant(
     ]
     auth_payload: dict[str, object] = {"mode": auth_mode}
     if auth_mode == "trusted-proxy":
+        gateway_payload["controlUi"]["dangerouslyDisableDeviceAuth"] = True
         trusted_proxy_config: dict[str, object] = {
             "userHeader": _CLOUDFLARE_ACCESS_USER_HEADER,
         }
@@ -1781,6 +1798,7 @@ def _command_for_variant(
             _DEFAULT_LOCAL_PROVIDER_ID: _litellm_provider_config(
                 stack_name=stack_name,
                 model_ids=(_DEFAULT_LOCAL_MODEL_ID,),
+                consumer=variant,
             )
         }
         remote_model_ids: list[str] = []
@@ -1803,12 +1821,14 @@ def _command_for_variant(
             providers[provider_id] = _litellm_provider_config(
                 stack_name=stack_name,
                 model_ids=tuple(dict.fromkeys(model_ids)),
+                consumer=variant,
             )
             remote_model_ids.extend(model_ids)
         if remote_model_ids:
             providers[_DEFAULT_LITELLM_PROVIDER_ID] = _litellm_provider_config(
                 stack_name=stack_name,
                 model_ids=tuple(dict.fromkeys(remote_model_ids)),
+                consumer=variant,
             )
         payload["models"] = {
             "mode": "merge",
@@ -1986,7 +2006,8 @@ def _command_for_variant(
         )
     seed_command = (
         f"mkdir -p {state_root} {state_root}/workspace "
-        f"{state_root}/workspace/nexa {state_root}/workspace-telly {state_root}/.nexa && "
+        f"{state_root}/workspace/nexa {state_root}/workspace-telly {state_root}/.nexa "
+        f"{state_root}/agents/main/sessions {state_root}/agents/nexa/sessions {state_root}/agents/telly/sessions && "
         f"node -e {shlex.quote(node_script)}"
     )
     return json.dumps(
@@ -2028,14 +2049,14 @@ def _nexa_model_defaults(runtime_config: _AdvisorRuntimeConfig) -> dict[str, obj
     return _specialized_agent_model_defaults(
         runtime_config,
         default_primary=_DEFAULT_LOCAL_MODEL_REF,
-        default_fallbacks=(_DEFAULT_LITELLM_WILDCARD_MODEL_REF,),
+        default_fallbacks=(),
     )
 
 
 def _telly_model_defaults() -> dict[str, object]:
     return {
         "primary": _DEFAULT_LOCAL_MODEL_REF,
-        "fallbacks": [_DEFAULT_LITELLM_WILDCARD_MODEL_REF],
+        "fallbacks": [],
     }
 
 
@@ -2070,7 +2091,6 @@ def _openclaw_seed_model_refs(
                     _append(model_ref)
     if "telegram" in channels:
         _append(_DEFAULT_LOCAL_MODEL_REF)
-        _append(_DEFAULT_LITELLM_WILDCARD_MODEL_REF)
     return tuple(ordered)
 
 

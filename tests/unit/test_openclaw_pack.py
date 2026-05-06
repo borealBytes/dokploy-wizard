@@ -1157,7 +1157,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openai/*"],
+                "fallbacks": [],
             },
             "tools": {
                 "profile": "coding",
@@ -1267,6 +1267,7 @@ def test_dokploy_openclaw_backend_uses_trusted_proxy_mode_for_single_gateway_whe
             "allowUsers": ["admin@example.com"],
         },
     }
+    assert seeded["gateway"]["controlUi"]["dangerouslyDisableDeviceAuth"] is True
     assert "remote" not in seeded["gateway"]
     assert "payload.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;" not in compose
 
@@ -1304,6 +1305,7 @@ def test_dokploy_my_farm_backend_uses_trusted_proxy_mode_for_single_gateway_when
             "allowUsers": ["admin@example.com"],
         },
     }
+    assert seeded["gateway"]["controlUi"]["dangerouslyDisableDeviceAuth"] is True
     assert "remote" not in seeded["gateway"]
     assert "payload.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;" not in compose
 
@@ -1362,7 +1364,7 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openai/*"],
+                "fallbacks": [],
             },
             "tools": {
                 "profile": "coding",
@@ -1379,7 +1381,6 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
     assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert seeded["agents"]["defaults"]["models"] == {
         "local/unsloth-active": {},
-        "openai/*": {},
         "nvidia/moonshotai/kimi-k2.5": {},
         "openrouter/openrouter/free": {},
         "openrouter/google/gemma-4-31b-it:free": {},
@@ -1501,6 +1502,9 @@ def test_dokploy_openclaw_backend_renders_split_public_and_internal_gateways() -
     assert 'OPENCLAW_CONFIG_PATH: "/home/node/.openclaw/openclaw.json"' in internal_block
     assert 'OPENCLAW_CONFIG_PATH: "/home/node/.openclaw-public/openclaw.json"' in public_block
     assert 'OPENCLAW_STATE_DIR: "/home/node/.openclaw-public"' in public_block
+    assert "/home/node/.openclaw/agents/main/sessions" in internal_block
+    assert "/home/node/.openclaw/agents/nexa/sessions" in internal_block
+    assert "/home/node/.openclaw/agents/telly/sessions" in internal_block
     assert "wizard-stack-openclaw-public-data:/home/node/.openclaw-public" in compose
     assert "      - wizard-stack-openclaw" in public_block
     assert 'traefik.http.routers.wizard-stack-openclaw-public.rule: "Host(`openclaw.example.com`)"' in compose
@@ -1571,7 +1575,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
     assert 'DOKPLOY_WIZARD_NEXA_MEM0_MODE: "rest"' in compose
     assert 'DOKPLOY_WIZARD_NEXA_CREDENTIAL_MEDIATION_MODE: "server-owned-env"' in compose
     assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_ROOT: "/home/node/.openclaw/workspace/nexa"' in compose
-    assert 'DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT: "/mnt/openclaw/workspace/nexa"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT: "/home/node/.openclaw/workspace/nexa"' in compose
     assert "  mem0:\n" in compose
     assert "  qdrant:\n" in compose
     assert "  nexa-runtime:\n" in compose
@@ -1641,7 +1645,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "name": "Nexa",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openai/*"],
+                "fallbacks": [],
             },
             "tools": {
                 "profile": "coding",
@@ -1659,7 +1663,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openai/*"],
+                "fallbacks": [],
             },
             "tools": {
                 "profile": "coding",
@@ -1771,7 +1775,7 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openai/*"],
+                "fallbacks": [],
             },
             "tools": {
                 "profile": "coding",
@@ -1815,7 +1819,7 @@ def test_telly_keeps_local_first_through_litellm() -> None:
 
     assert telly["model"] == {
         "primary": "local/unsloth-active",
-        "fallbacks": ["openai/*"],
+        "fallbacks": [],
     }
     assert seeded["models"]["providers"]["local"] == {
         "baseUrl": "http://wizard-stack-shared-litellm:4000",
