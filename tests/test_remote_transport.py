@@ -85,7 +85,7 @@ def test_upload_records_remote_path_and_env_chmod(
     assert transport.chmod_calls == [("/root/dokploy-wizard/.install.env", 0o600)]
 
 
-def test_proof_runs_install_rerun_inspect_in_order(
+def test_proof_runs_install_verify_inspect_in_order(
     remote_transport_subject: ModuleType,
     make_fake_transport: Any,
 ) -> None:
@@ -95,8 +95,8 @@ def test_proof_runs_install_rerun_inspect_in_order(
     session.run_proof()
 
     assert [subcommand for subcommand, _command in transport.commands] == [
-        "install",
-        "install-rerun-noop",
+        "mutate-install",
+        "verify-services",
         "inspect-state",
     ]
     assert [command for _subcommand, command in transport.commands] == [
@@ -105,8 +105,9 @@ def test_proof_runs_install_rerun_inspect_in_order(
             "--state-dir /root/dokploy-wizard/state --non-interactive"
         ),
         (
-            "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
-            "--state-dir /root/dokploy-wizard/state --non-interactive"
+            "'PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}' python3 -m "
+            "dokploy_wizard.service_verification_runner --env-file "
+            "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state"
         ),
         (
             "./bin/dokploy-wizard inspect-state --env-file /root/dokploy-wizard/.install.env "
@@ -115,12 +116,51 @@ def test_proof_runs_install_rerun_inspect_in_order(
     ]
 
 
+def test_strict_proof_runs_second_install_after_verification(
+    remote_transport_subject: ModuleType,
+    make_fake_transport: Any,
+) -> None:
+    transport = make_fake_transport()
+    session = _build_session(remote_transport_subject, transport=transport)
+
+    session.run_proof(strict_idempotency=True)
+
+    assert [subcommand for subcommand, _command in transport.commands] == [
+        "mutate-install",
+        "verify-services",
+        "assert-strict-idempotency",
+        "inspect-state",
+    ]
+    assert transport.commands[2][1] == (
+        "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
+        "--state-dir /root/dokploy-wizard/state --non-interactive"
+    )
+
+
+def test_fresh_strict_proof_runs_second_install_after_verification(
+    remote_transport_subject: ModuleType,
+    make_fake_transport: Any,
+) -> None:
+    transport = make_fake_transport()
+    session = _build_session(remote_transport_subject, transport=transport)
+
+    session.run_proof(fresh=True, confirm_file=Path("fixtures/destroy.confirm"), strict_idempotency=True)
+
+    assert [subcommand for subcommand, _command in transport.commands] == [
+        "mutate-uninstall-destroy-data",
+        "mutate-install",
+        "verify-services",
+        "assert-strict-idempotency",
+        "inspect-state",
+    ]
+
+
 def test_redacts_password_from_failures(
     remote_transport_subject: ModuleType,
     make_fake_transport: Any,
 ) -> None:
     secret = "SuperSecretPassword123!"
-    transport = make_fake_transport(failures={"install": f"remote stderr leaked {secret}"})
+    transport = make_fake_transport(failures={"mutate-install": f"remote stderr leaked {secret}"})
     session = _build_session(remote_transport_subject, transport=transport)
 
     with pytest.raises(remote_transport_subject.RemoteCommandFailure) as excinfo:
@@ -161,9 +201,9 @@ def test_fresh_proof_runs_destroy_uninstall_before_proof(
     session.run_proof(fresh=True, confirm_file=Path("fixtures/destroy.confirm"))
 
     assert [subcommand for subcommand, _command in transport.commands] == [
-        "uninstall-destroy-data",
-        "install",
-        "install-rerun-noop",
+        "mutate-uninstall-destroy-data",
+        "mutate-install",
+        "verify-services",
         "inspect-state",
     ]
     assert [command for _subcommand, command in transport.commands] == [
@@ -177,11 +217,31 @@ def test_fresh_proof_runs_destroy_uninstall_before_proof(
             "--state-dir /root/dokploy-wizard/state --non-interactive"
         ),
         (
-            "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
-            "--state-dir /root/dokploy-wizard/state --non-interactive"
+            "'PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}' python3 -m "
+            "dokploy_wizard.service_verification_runner --env-file "
+            "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state"
         ),
         (
             "./bin/dokploy-wizard inspect-state --env-file /root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state"
         ),
     ]
+
+
+def test_verify_service_failures_bubble_through_proof(
+    remote_transport_subject: ModuleType,
+    make_fake_transport: Any,
+) -> None:
+    transport = make_fake_transport(
+        failures={
+            "verify-services": '{"entries":[{"detail":"OPENCLAW_VIRTUAL_KEY=<REDACTED>","service_id":"openclaw","status":"fail"}],"status":"fail"}'
+        }
+    )
+    session = _build_session(remote_transport_subject, transport=transport)
+
+    with pytest.raises(remote_transport_subject.RemoteCommandFailure) as excinfo:
+        session.run_proof(password="SuperSecretPassword123!")
+
+    message = str(excinfo.value)
+    assert "verify-services" in message
+    assert "<REDACTED>" in message

@@ -49,6 +49,9 @@ def test_remote_parser_defaults_match_contract() -> None:
     install_args = parser.parse_args(["install", "--host", "example.com"])
     modify_args = parser.parse_args(["modify", "--host", "example.com"])
     proof_args = parser.parse_args(["proof", "--host", "example.com"])
+    strict_proof_args = parser.parse_args(
+        ["proof", "--host", "example.com", "--strict-idempotency"]
+    )
 
     assert install_args.user == "root"
     assert str(install_args.remote_path) == "/root/dokploy-wizard"
@@ -61,6 +64,8 @@ def test_remote_parser_defaults_match_contract() -> None:
     assert proof_args.user == "root"
     assert str(proof_args.remote_path) == "/root/dokploy-wizard"
     assert str(proof_args.env_file) == ".install.env"
+    assert proof_args.strict_idempotency is False
+    assert strict_proof_args.strict_idempotency is True
 
 
 @pytest.mark.parametrize(
@@ -94,6 +99,16 @@ def test_install_help_surfaces_fresh_flag() -> None:
 
     assert result.returncode == 0
     assert "--fresh" in result.stdout
+    assert result.stderr == ""
+
+
+def test_proof_help_surfaces_strict_idempotency_flag() -> None:
+    assert CLI.exists(), f"expected remote CLI wrapper at {CLI}"
+
+    result = run_cli("proof", "--help")
+
+    assert result.returncode == 0
+    assert "--strict-idempotency" in result.stdout
     assert result.stderr == ""
 
 

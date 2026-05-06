@@ -100,13 +100,23 @@ def build_parser() -> argparse.ArgumentParser:
         "proof",
         help="run remote proof flow",
         description=(
-            "Run the remote proof flow. Defaults: --user root, --remote-path /root/dokploy-wizard, "
-            "--env-file .install.env. --fresh is destructive and requires --confirm-file before "
-            "any remote action."
+            "Run the remote proof flow. By default this installs once, runs service verification, "
+            "and then captures inspect-state. Use --strict-idempotency to rerun install as an "
+            "explicit unchanged-healthy idempotency check. Defaults: --user root, --remote-path "
+            "/root/dokploy-wizard, --env-file .install.env. --fresh is destructive and requires "
+            "--confirm-file before any remote action."
         ),
     )
     _add_remote_common_arguments(proof_parser)
     _add_fresh_arguments(proof_parser)
+    proof_parser.add_argument(
+        "--strict-idempotency",
+        action="store_true",
+        help=(
+            "rerun install after the verification phase to assert the unchanged healthy stack "
+            "stays no-op"
+        ),
+    )
 
     parser.epilog = (
         "Lifecycle commands: install, modify, uninstall, inspect-state, proof. "
@@ -219,6 +229,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             password=args.password,
             fresh=args.fresh,
             confirm_file=args.confirm_file,
+            strict_idempotency=args.strict_idempotency,
         )
         return 0
     except (OSError, RemoteCommandFailure, RuntimeError, ValueError) as error:
