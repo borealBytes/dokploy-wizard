@@ -244,7 +244,7 @@ def test_remote_proof_default_flow_is_verification_first_after_install() -> None
         ),
         (
             "verify-services",
-            "'PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}' python3 -m "
+            "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state",
         ),
@@ -270,7 +270,7 @@ def test_remote_proof_strict_mode_keeps_explicit_idempotency_install() -> None:
         ),
         (
             "verify-services",
-            "'PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}' python3 -m "
+            "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state",
         ),

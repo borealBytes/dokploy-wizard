@@ -112,16 +112,20 @@ class RemoteTransportSession:
         )
 
     def _build_verify_services_command(self) -> str:
-        return self._shell_join(
+        return " ".join(
             [
                 "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}",
-                "python3",
-                "-m",
-                "dokploy_wizard.service_verification_runner",
-                "--env-file",
-                self.remote_install_env_path,
-                "--state-dir",
-                self.remote_state_dir,
+                self._shell_join(
+                    [
+                        "python3",
+                        "-m",
+                        "dokploy_wizard.service_verification_runner",
+                        "--env-file",
+                        self.remote_install_env_path,
+                        "--state-dir",
+                        self.remote_state_dir,
+                    ]
+                ),
             ]
         )
 

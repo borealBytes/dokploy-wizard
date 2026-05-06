@@ -105,7 +105,7 @@ def test_proof_runs_install_verify_inspect_in_order(
             "--state-dir /root/dokploy-wizard/state --non-interactive"
         ),
         (
-            "'PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}' python3 -m "
+            "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state"
         ),
@@ -221,7 +221,7 @@ def test_fresh_proof_runs_destroy_uninstall_before_proof(
             "--state-dir /root/dokploy-wizard/state --non-interactive"
         ),
         (
-            "'PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}' python3 -m "
+            "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state"
         ),
@@ -230,6 +230,20 @@ def test_fresh_proof_runs_destroy_uninstall_before_proof(
             "--state-dir /root/dokploy-wizard/state"
         ),
     ]
+
+
+def test_verify_services_command_uses_unquoted_pythonpath_assignment(
+    remote_transport_subject: ModuleType,
+    make_fake_transport: Any,
+) -> None:
+    transport = make_fake_transport()
+    session = _build_session(remote_transport_subject, transport=transport)
+
+    session.run_proof()
+
+    verify_command = dict(transport.commands)["verify-services"]
+    assert verify_command.startswith("PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} ")
+    assert "python3 -m dokploy_wizard.service_verification_runner" in verify_command
 
 
 def test_verify_service_failures_bubble_through_proof(
