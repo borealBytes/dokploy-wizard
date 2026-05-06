@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from dokploy_wizard.core import (
     SHARED_LITELLM_RESOURCE_TYPE,
+    SHARED_MAIL_RELAY_RESOURCE_TYPE,
     SHARED_NETWORK_RESOURCE_TYPE,
     SHARED_POSTGRES_RESOURCE_TYPE,
     SHARED_REDIS_RESOURCE_TYPE,
@@ -141,11 +142,12 @@ _RULES: dict[str, DeletionRule] = {
     MATRIX_DATA_RESOURCE_TYPE: DeletionRule(phase="matrix", retain_safe=False, priority=31),
     HEADSCALE_SERVICE_RESOURCE_TYPE: DeletionRule(phase="headscale", retain_safe=True, priority=40),
     SHARED_LITELLM_RESOURCE_TYPE: DeletionRule(phase="shared_core", retain_safe=True, priority=49),
+    SHARED_MAIL_RELAY_RESOURCE_TYPE: DeletionRule(phase="shared_core", retain_safe=True, priority=50),
     SHARED_NETWORK_RESOURCE_TYPE: DeletionRule(phase="shared_core", retain_safe=True, priority=50),
     SHARED_POSTGRES_RESOURCE_TYPE: DeletionRule(
-        phase="shared_core", retain_safe=False, priority=51
+        phase="shared_core", retain_safe=False, priority=52
     ),
-    SHARED_REDIS_RESOURCE_TYPE: DeletionRule(phase="shared_core", retain_safe=False, priority=52),
+    SHARED_REDIS_RESOURCE_TYPE: DeletionRule(phase="shared_core", retain_safe=False, priority=53),
     DNS_RESOURCE_TYPE: DeletionRule(phase="networking", retain_safe=True, priority=60),
     TUNNEL_RESOURCE_TYPE: DeletionRule(phase="networking", retain_safe=True, priority=61),
 }

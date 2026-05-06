@@ -78,6 +78,9 @@ def test_uninstall_plan_retains_data_by_default() -> None:
             OwnedResource(
                 "shared_core_litellm", "litellm-1", "stack:nextcloud-stack:shared-litellm"
             ),
+            OwnedResource(
+                "shared_core_mail_relay", "postfix-1", "stack:nextcloud-stack:shared-postfix"
+            ),
             OwnedResource("headscale_service", "headscale-1", "stack:nextcloud-stack:headscale"),
             OwnedResource(
                 "nextcloud_service", "nextcloud-1", "stack:nextcloud-stack:nextcloud-service"
@@ -138,6 +141,7 @@ def test_uninstall_plan_retains_data_by_default() -> None:
         "headscale_service",
         "shared_core_litellm",
         "shared_core_network",
+        "shared_core_mail_relay",
         "cloudflare_dns_record",
         "cloudflare_tunnel",
     ]
