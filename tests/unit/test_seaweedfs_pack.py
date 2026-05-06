@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ssl
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib import request
 
 import pytest
@@ -17,7 +18,11 @@ from dokploy_wizard.dokploy import (
     DokployProjectSummary,
     DokploySeaweedFsBackend,
 )
-from dokploy_wizard.dokploy.seaweedfs import _docker_container_is_up, _local_https_health_check
+from dokploy_wizard.dokploy.seaweedfs import (
+    _docker_container_is_up,
+    _local_https_health_check,
+    _render_compose_file,
+)
 from dokploy_wizard.packs.seaweedfs import (
     SEAWEEDFS_DATA_RESOURCE_TYPE,
     SEAWEEDFS_SERVICE_RESOURCE_TYPE,
@@ -25,7 +30,17 @@ from dokploy_wizard.packs.seaweedfs import (
     build_seaweedfs_ledger,
     reconcile_seaweedfs,
 )
-from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    ComposeArtifactHashState,
+    OwnedResource,
+    OwnershipLedger,
+    RawEnvInput,
+    resolve_desired_state,
+    write_applied_checkpoint,
+)
+
+from .fake_dokploy import FakeDokployApiClient as SharedFakeDokployApiClient
 
 
 @dataclass
@@ -326,6 +341,7 @@ def test_dokploy_seaweedfs_backend_creates_one_compose_for_service_and_data() ->
     backend = DokploySeaweedFsBackend(
         api_url="https://dokploy.example.com",
         api_key="dokp-key-123",
+        state_dir=Path("/tmp/state"),
         stack_name="wizard-stack",
         hostname="s3.example.com",
         access_key="seaweed-access",
@@ -418,3 +434,70 @@ def test_local_https_health_check_uses_host_header(monkeypatch: pytest.MonkeyPat
             True,
         )
     ]
+
+
+def test_dokploy_seaweedfs_backend_skips_redeploy_when_hash_matches_and_container_is_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = _render_compose_file(
+        stack_name="wizard-stack",
+        hostname="s3.example.com",
+        access_key="seaweed-access",
+        secret_key="seaweed-secret",
+    )
+    _write_hash_checkpoint(
+        tmp_path,
+        service_name="wizard-stack-seaweedfs",
+        rendered_compose=compose_file,
+    )
+    client = SharedFakeDokployApiClient()
+    client.seed_existing_service(
+        service_name="wizard-stack-seaweedfs",
+        compose_id="cmp-seaweedfs",
+        project_name="wizard-stack",
+        compose_file=compose_file,
+    )
+    backend = DokploySeaweedFsBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        state_dir=tmp_path,
+        stack_name="wizard-stack",
+        hostname="s3.example.com",
+        access_key="seaweed-access",
+        secret_key="seaweed-secret",
+        client=client,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.seaweedfs._docker_container_is_up",
+        lambda service_name: service_name == "wizard-stack-seaweedfs",
+    )
+
+    data = backend.create_persistent_data("wizard-stack-seaweedfs-data")
+    service = backend.create_service(
+        resource_name="wizard-stack-seaweedfs",
+        hostname="s3.example.com",
+        access_key="seaweed-access",
+        secret_key="seaweed-secret",
+        data_resource_name="wizard-stack-seaweedfs-data",
+    )
+
+    assert data.resource_id == "dokploy-compose:cmp-seaweedfs:seaweedfs-data"
+    assert service.resource_id == "dokploy-compose:cmp-seaweedfs:seaweedfs-service"
+    client.assert_unchanged_service("wizard-stack-seaweedfs")
+
+
+def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: str) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("seaweedfs",),
+            compose_artifact_hashes={
+                service_name: ComposeArtifactHashState.from_rendered_compose(
+                    service_id=service_name,
+                    rendered_compose=rendered_compose,
+                )
+            },
+        ),
+    )

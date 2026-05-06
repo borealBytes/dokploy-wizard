@@ -17,7 +17,17 @@ from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.dokploy.coder import DokployCoderApi, DokployCoderBackend, _render_compose_file
 from dokploy_wizard.packs.coder import build_coder_ledger, reconcile_coder
 from dokploy_wizard.packs.coder.models import CoderResourceRecord
-from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    ComposeArtifactHashState,
+    OwnedResource,
+    OwnershipLedger,
+    RawEnvInput,
+    resolve_desired_state,
+    write_applied_checkpoint,
+)
+
+from .fake_dokploy import FakeDokployApiClient
 
 
 @dataclass
@@ -1127,6 +1137,230 @@ def test_dokploy_coder_backend_renders_compose_on_create() -> None:
     assert 'CODER_WILDCARD_ACCESS_URL: "*.coder.example.com"' in compose
 
 
+def test_dokploy_coder_backend_skips_healthy_unchanged_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose = _render_compose_file(
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+    )
+    _write_coder_hash_checkpoint(
+        tmp_path,
+        service_name="wizard-stack-coder",
+        compose_file=compose,
+    )
+    client = FakeDokployApiClient()
+    client.seed_existing_service(
+        service_name="wizard-stack-coder",
+        compose_id="cmp-coder",
+        project_name="wizard-stack",
+        compose_file=compose,
+    )
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        state_dir=tmp_path,
+        client=cast(DokployCoderApi, client),
+    )
+    wait_calls: list[str] = []
+    monkeypatch.setattr(coder_module, "_local_https_health_check", lambda url: True)
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_wait_for_coder_bootstrap_api_ready",
+        lambda hostname: wait_calls.append(hostname),
+    )
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: True)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_list_templates",
+        lambda **kwargs: tuple(
+            {"name": template_name}
+            for template_name in coder_module._required_template_names()
+        ),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_list_workspaces",
+        lambda **kwargs: (coder_module._default_workspace_name("coder.example.com"),),
+    )
+
+    record = backend.create_service(
+        resource_name="wizard-stack-coder",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        data_resource_name="wizard-stack-coder-data",
+    )
+
+    assert record == CoderResourceRecord(
+        resource_id="dokploy-compose:cmp-coder:service",
+        resource_name="wizard-stack-coder",
+    )
+    assert backend._created_in_process is False
+    assert wait_calls == ["coder.example.com"]
+    client.assert_unchanged_service("wizard-stack-coder")
+
+
+def test_dokploy_coder_verification_confirms_bootstrap_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    monkeypatch.setattr(coder_module, "_local_https_health_check", lambda url: True)
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(coder_module, "_wait_for_coder_bootstrap_api_ready", lambda hostname: None)
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: True)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_list_templates",
+        lambda **kwargs: tuple(
+            {"name": template_name}
+            for template_name in coder_module._required_template_names()
+        ),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_list_workspaces",
+        lambda **kwargs: (coder_module._default_workspace_name("coder.example.com"),),
+    )
+
+    result = backend._verify_current_compose_application()
+
+    assert result.passed is True
+    assert result.tier == "bootstrap"
+    assert "first user bootstrap" in result.detail
+    assert "seeded templates" in result.detail
+    assert "default workspace" in result.detail
+
+
+def test_dokploy_coder_backend_unhealthy_api_blocks_noop_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose = _render_compose_file(
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+    )
+    _write_coder_hash_checkpoint(
+        tmp_path,
+        service_name="wizard-stack-coder",
+        compose_file=compose,
+    )
+    client = FakeDokployApiClient()
+    client.seed_existing_service(
+        service_name="wizard-stack-coder",
+        compose_id="cmp-coder",
+        project_name="wizard-stack",
+        compose_file=compose,
+    )
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        state_dir=tmp_path,
+        client=cast(DokployCoderApi, client),
+    )
+    monkeypatch.setattr(coder_module, "_local_https_health_check", lambda url: True)
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+
+    def fail_api_ready(hostname: str) -> None:
+        raise coder_module.CoderError(
+            "Coder bootstrap API did not become ready before first-user setup."
+        )
+
+    monkeypatch.setattr(coder_module, "_wait_for_coder_bootstrap_api_ready", fail_api_ready)
+
+    record = backend.create_service(
+        resource_name="wizard-stack-coder",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        data_resource_name="wizard-stack-coder-data",
+    )
+
+    assert record == CoderResourceRecord(
+        resource_id="dokploy-compose:cmp-coder:service",
+        resource_name="wizard-stack-coder",
+    )
+    assert backend._created_in_process is True
+    client.assert_single_update_deploy_pair("wizard-stack-coder")
+
+
 def test_dokploy_coder_health_accepts_immediate_public_success(monkeypatch) -> None:
     backend = DokployCoderBackend(
         api_url="https://dokploy.example.com/api",
@@ -1527,4 +1761,23 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
         "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'clayton@openmerge.me'.",
+    )
+
+
+def _write_coder_hash_checkpoint(
+    state_dir: Path, *, service_name: str, compose_file: str
+) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("coder",),
+            compose_artifact_hashes={
+                service_name: ComposeArtifactHashState.from_rendered_compose(
+                    service_id=service_name,
+                    rendered_compose=compose_file,
+                )
+            },
+        ),
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import pytest
 
@@ -25,7 +26,17 @@ from dokploy_wizard.packs.matrix import (
     build_matrix_ledger,
     reconcile_matrix,
 )
-from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    ComposeArtifactHashState,
+    OwnedResource,
+    OwnershipLedger,
+    RawEnvInput,
+    resolve_desired_state,
+    write_applied_checkpoint,
+)
+
+from .fake_dokploy import FakeDokployApiClient as SharedFakeDokployApiClient
 
 
 @dataclass
@@ -430,6 +441,7 @@ def test_dokploy_matrix_backend_creates_one_compose_for_service_and_data() -> No
     backend = DokployMatrixBackend(
         api_url="https://dokploy.example.com",
         api_key="dokp-key-123",
+        state_dir=Path("/tmp/state"),
         stack_name=desired_state.stack_name,
         hostname=desired_state.hostnames["matrix"],
         shared_allocation=allocation,
@@ -463,7 +475,7 @@ def test_dokploy_matrix_backend_creates_one_compose_for_service_and_data() -> No
     assert client.deploy_calls == 1
 
 
-def test_dokploy_matrix_backend_redeploys_existing_compose_resources() -> None:
+def test_dokploy_matrix_backend_redeploys_existing_compose_resources(tmp_path: Path) -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -501,9 +513,11 @@ def test_dokploy_matrix_backend_redeploys_existing_compose_resources() -> None:
             )
         ]
     )
+    _write_empty_checkpoint(tmp_path)
     backend = DokployMatrixBackend(
         api_url="https://dokploy.example.com",
         api_key="dokp-key-123",
+        state_dir=tmp_path,
         stack_name=desired_state.stack_name,
         hostname=desired_state.hostnames["matrix"],
         shared_allocation=allocation,
@@ -593,6 +607,7 @@ def test_dokploy_matrix_health_prefers_local_container_state(
     backend = DokployMatrixBackend(
         api_url="https://dokploy.example.com",
         api_key="dokp-key-123",
+        state_dir=Path("/tmp/state"),
         stack_name=desired_state.stack_name,
         hostname=desired_state.hostnames["matrix"],
         shared_allocation=allocation,
@@ -618,4 +633,112 @@ def test_dokploy_matrix_health_prefers_local_container_state(
             url="https://matrix.example.com/_matrix/client/versions",
         )
         is True
+    )
+
+
+def test_dokploy_matrix_backend_skips_redeploy_when_hash_matches_and_container_is_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_MATRIX": "true",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "matrix"
+    )
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    compose_file = _render_compose_file(
+        stack_name=desired_state.stack_name,
+        hostname=desired_state.hostnames["matrix"],
+        shared_allocation=allocation,
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        secret_refs=(
+            "wizard-stack-matrix-registration-shared-secret",
+            "wizard-stack-matrix-macaroon-secret-key",
+        ),
+    )
+    _write_hash_checkpoint(
+        tmp_path,
+        service_name="wizard-stack-matrix",
+        rendered_compose=compose_file,
+    )
+    client = SharedFakeDokployApiClient()
+    client.seed_existing_service(
+        service_name="wizard-stack-matrix",
+        compose_id="cmp-matrix",
+        project_name="wizard-stack",
+        compose_file=compose_file,
+    )
+    backend = DokployMatrixBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        state_dir=tmp_path,
+        stack_name=desired_state.stack_name,
+        hostname=desired_state.hostnames["matrix"],
+        shared_allocation=allocation,
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        secret_refs=(
+            "wizard-stack-matrix-registration-shared-secret",
+            "wizard-stack-matrix-macaroon-secret-key",
+        ),
+        client=client,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.matrix._docker_container_is_up",
+        lambda compose_name: compose_name == "wizard-stack-matrix",
+    )
+
+    data = backend.create_persistent_data("wizard-stack-matrix-data")
+    service = backend.create_service(
+        resource_name="wizard-stack-matrix",
+        hostname="matrix.example.com",
+        secret_refs=(
+            "wizard-stack-matrix-registration-shared-secret",
+            "wizard-stack-matrix-macaroon-secret-key",
+        ),
+        shared_allocation=allocation,
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        data_resource_name="wizard-stack-matrix-data",
+    )
+
+    assert data.resource_id == "dokploy-compose:cmp-matrix:matrix-data"
+    assert service.resource_id == "dokploy-compose:cmp-matrix:matrix-service"
+    client.assert_unchanged_service("wizard-stack-matrix")
+
+
+def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: str) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("matrix",),
+            compose_artifact_hashes={
+                service_name: ComposeArtifactHashState.from_rendered_compose(
+                    service_id=service_name,
+                    rendered_compose=rendered_compose,
+                )
+            },
+        ),
+    )
+
+
+def _write_empty_checkpoint(state_dir: Path) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("matrix",),
+        ),
     )

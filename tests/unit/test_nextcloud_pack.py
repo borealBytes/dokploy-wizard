@@ -7,6 +7,7 @@ from __future__ import annotations
 import ssl
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib import request
 
@@ -58,6 +59,11 @@ from dokploy_wizard.packs.nextcloud import (
     reconcile_nextcloud,
 )
 from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    ComposeArtifactHashState,
+    write_applied_checkpoint,
+)
 
 
 @dataclass
@@ -304,6 +310,54 @@ class FakeDokployApiClient:
 
     def delete_schedule(self, *, schedule_id: str) -> None:
         self.schedules = [item for item in self.schedules if item.schedule_id != schedule_id]
+
+
+def _passing_bundle_verification() -> NextcloudBundleVerification:
+    return NextcloudBundleVerification(
+        onlyoffice_document_server_check=NextcloudCommandCheck(
+            command="php occ onlyoffice:documentserver --check",
+            passed=True,
+        ),
+        talk=TalkRuntime(
+            app_id="spreed",
+            enabled=True,
+            enabled_check=NextcloudCommandCheck(
+                command="php occ app:list --output=json",
+                passed=True,
+            ),
+            signaling_check=NextcloudCommandCheck(
+                command="php occ talk:signaling:list --output=json",
+                passed=True,
+            ),
+            stun_check=NextcloudCommandCheck(
+                command="php occ talk:stun:list --output=json",
+                passed=True,
+            ),
+            turn_check=NextcloudCommandCheck(
+                command="php occ talk:turn:list --output=json",
+                passed=True,
+            ),
+        ),
+    )
+
+
+def _write_compose_hash_checkpoint(
+    state_dir: Path, *, service_key: str, rendered_compose: str
+) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("preflight", "dokploy_bootstrap", "networking", "shared_core"),
+            compose_artifact_hashes={
+                service_key: ComposeArtifactHashState.from_rendered_compose(
+                    service_id=service_key,
+                    rendered_compose=rendered_compose,
+                )
+            },
+        ),
+    )
 
 
 def test_reconcile_nextcloud_plans_paired_runtime_when_enabled() -> None:
@@ -1750,6 +1804,119 @@ def test_dokploy_nextcloud_backend_updates_existing_compose_to_keep_onlyoffice_r
     assert 'traefik.http.services.wizard-stack-onlyoffice.loadbalancer.server.port: "80"' in compose
 
 
+def test_dokploy_nextcloud_backend_skips_redeploy_when_hash_and_readiness_match(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    existing_project = DokployProjectSummary(
+        project_id="proj-1",
+        name="wizard-stack",
+        environments=(
+            DokployEnvironmentSummary(
+                environment_id="env-1",
+                name="production",
+                is_default=True,
+                composes=(
+                    DokployComposeSummary(
+                        compose_id="cmp-existing",
+                        name="wizard-stack-nextcloud",
+                        status="done",
+                    ),
+                ),
+            ),
+        ),
+    )
+    compose_file = nextcloud_module._render_compose_file(
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        admin_user="admin",
+        admin_password="ChangeMeSoon",
+        advisor_workspace_mounts=(),
+    )
+    _write_compose_hash_checkpoint(
+        tmp_path,
+        service_key="wizard-stack-nextcloud",
+        rendered_compose=compose_file,
+    )
+    client = FakeDokployApiClient(projects=[existing_project])
+    backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        state_dir=tmp_path,
+        client=client,
+    )
+    readiness_calls: list[str] = []
+
+    monkeypatch.setattr(nextcloud_module, "_find_container_name", lambda _: "nextcloud-container")
+    monkeypatch.setattr(nextcloud_module, "_container_health_ready", lambda _: True)
+    monkeypatch.setattr(nextcloud_module, "_nextcloud_status_ready", lambda _: True)
+    monkeypatch.setattr(nextcloud_module, "_local_https_health_check", lambda _: True)
+    monkeypatch.setattr(nextcloud_module, "_ensure_admin_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nextcloud_module, "_ensure_nexa_service_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nextcloud_module, "_ensure_trusted_domain", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_onlyoffice_app_config",
+        lambda container_name, **kwargs: readiness_calls.append(container_name),
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_verify_nextcloud_bundle",
+        lambda _: _passing_bundle_verification(),
+    )
+    monkeypatch.setattr(backend, "_ensure_openclaw_rescan_schedule", lambda: None)
+
+    record = backend.create_service(
+        resource_name="wizard-stack-nextcloud",
+        hostname="nextcloud.example.com",
+        data_volume_name="wizard-stack-nextcloud-data",
+        config={
+            "onlyoffice_url": "https://office.example.com",
+            "postgres_database_name": allocation.postgres.database_name,
+            "postgres_password_secret_ref": allocation.postgres.password_secret_ref,
+            "postgres_user_name": allocation.postgres.user_name,
+            "redis_identity_name": allocation.redis.identity_name,
+            "redis_password_secret_ref": allocation.redis.password_secret_ref,
+        },
+    )
+
+    assert record.resource_id == "dokploy-compose:cmp-existing:nextcloud-service"
+    assert client.create_compose_calls == 0
+    assert client.update_compose_calls == 0
+    assert client.deploy_calls == 0
+    assert readiness_calls == ["nextcloud-container"]
+
+
 def test_dokploy_nextcloud_onlyoffice_health_accepts_immediate_public_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1879,6 +2046,7 @@ def test_dokploy_nextcloud_backend_uses_extended_first_boot_container_wait(
 ) -> None:
     backend = _build_nextcloud_backend_for_mounts(advisor_workspace_mounts=())
     waited: list[tuple[str, str, int, float]] = []
+    setup_calls: list[tuple[str, str]] = []
     expected = object()
 
     monkeypatch.setattr(nextcloud_module, "_nextcloud_status_ready", lambda _: False)
@@ -1890,11 +2058,31 @@ def test_dokploy_nextcloud_backend_uses_extended_first_boot_container_wait(
         )
         or "nextcloud-container",
     )
-    monkeypatch.setattr(nextcloud_module, "_ensure_admin_user", lambda *args, **kwargs: None)
-    monkeypatch.setattr(nextcloud_module, "_ensure_nexa_service_account", lambda *args, **kwargs: None)
-    monkeypatch.setattr(nextcloud_module, "_ensure_trusted_domain", lambda *args, **kwargs: None)
-    monkeypatch.setattr(nextcloud_module, "_ensure_onlyoffice_app_config", lambda *args, **kwargs: None)
-    monkeypatch.setattr(nextcloud_module, "_verify_nextcloud_bundle", lambda _: expected)
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_admin_user",
+        lambda container_name, *args, **kwargs: setup_calls.append(("admin", container_name)),
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_nexa_service_account",
+        lambda container_name, *args, **kwargs: setup_calls.append(("nexa", container_name)),
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_trusted_domain",
+        lambda container_name, *args, **kwargs: setup_calls.append(("trusted", container_name)),
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_onlyoffice_app_config",
+        lambda container_name, **kwargs: setup_calls.append(("onlyoffice", container_name)),
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_verify_nextcloud_bundle",
+        lambda container_name: setup_calls.append(("verify", container_name)) or expected,
+    )
     monkeypatch.setattr(
         backend,
         "_ensure_openclaw_rescan_schedule",
@@ -1914,6 +2102,13 @@ def test_dokploy_nextcloud_backend_uses_extended_first_boot_container_wait(
             nextcloud_module._NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_ATTEMPTS,
             nextcloud_module._NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_DELAY_SECONDS,
         )
+    ]
+    assert setup_calls == [
+        ("admin", "nextcloud-container"),
+        ("nexa", "nextcloud-container"),
+        ("trusted", "nextcloud-container"),
+        ("onlyoffice", "nextcloud-container"),
+        ("verify", "nextcloud-container"),
     ]
     assert nextcloud_module._NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_ATTEMPTS > 60
 
