@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -530,7 +531,11 @@ def _matches_candidate(live_name: str, candidate: dict[str, Any]) -> bool:
     normalized_name = live_name.lower()
     if normalized_name == candidate["expected_service_name"].lower():
         return True
-    return any(alias in normalized_name for alias in candidate["aliases"])
+    for alias in candidate["aliases"]:
+        escaped_alias = re.escape(alias)
+        if re.search(rf"(^|[^a-z0-9]){escaped_alias}([^a-z0-9]|$)", normalized_name):
+            return True
+    return False
 
 
 def _unknown_unmanaged_live_items(

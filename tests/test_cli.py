@@ -811,6 +811,75 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     assert report["summary"]["manual_collision"] == 0
 
 
+def test_build_live_drift_report_does_not_match_seaweedfs_alias_by_random_substring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
+            "STACK_NAME": "openmerge",
+            "ROOT_DOMAIN": "openmerge.me",
+            "PACKS": "seaweedfs",
+            "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
+            "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+    ownership_ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                "seaweedfs_service",
+                "svc-seaweedfs",
+                f"stack:{desired_state.stack_name}:seaweedfs-service",
+            ),
+        ),
+    )
+
+    monkeypatch.setattr(inspection_module, "_docker_cli_available", lambda: True)
+    monkeypatch.setattr(inspection_module, "_list_docker_services", lambda: ())
+    monkeypatch.setattr(
+        inspection_module,
+        "_list_docker_containers",
+        lambda: (
+            {
+                "name": "dokploy-redis.1.k28bbjjkc7u0s36hc5tq8lhlz",
+                "status": "Up 35 minutes",
+                "labels": {
+                    "com.docker.swarm.service.name": "dokploy-redis",
+                },
+            },
+            {
+                "name": "openmerge-seaweedfs-good123-openmerge-seaweedfs-1",
+                "status": "Up 5 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-seaweedfs",
+                },
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        inspection_module,
+        "_list_service_task_statuses",
+        lambda service_name: () if service_name == f"{desired_state.stack_name}-seaweedfs" else (),
+    )
+    monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", ())
+
+    report = inspection_module.build_live_drift_report(
+        desired_state=desired_state,
+        ownership_ledger=ownership_ledger,
+    )
+
+    manual_entries = [
+        entry for entry in report["entries"] if entry["classification"] == "manual_collision"
+    ]
+    assert not any(
+        entry["live_name"] == "dokploy-redis.1.k28bbjjkc7u0s36hc5tq8lhlz"
+        for entry in manual_entries
+    )
+
+
 def test_install_help_lists_task_three_flags() -> None:
     result = run_cli("install", "--help")
 
