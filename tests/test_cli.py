@@ -38,6 +38,7 @@ from dokploy_wizard.networking.cloudflare import (
     CloudflareAccessApplication,
     CloudflareAccessPolicy,
 )
+from dokploy_wizard.remote_transport import RemoteTransportSession
 from dokploy_wizard.packs import prompts as prompt_module
 from dokploy_wizard.packs.prompts import (
     GuidedInstallValues,
@@ -120,6 +121,23 @@ def _classify_modify_plan(
         requested_raw=requested_raw,
         requested_desired=requested_desired,
     )
+
+
+class _ProofTransport:
+    def __init__(self) -> None:
+        self.commands: list[tuple[str, str]] = []
+
+    def ensure_dir(self, remote_path: str) -> None:
+        del remote_path
+
+    def upload(self, local_path: Path, remote_path: str) -> None:
+        del local_path, remote_path
+
+    def chmod(self, remote_path: str, mode: int) -> None:
+        del remote_path, mode
+
+    def run(self, subcommand: str, command: str) -> None:
+        self.commands.append((subcommand, command))
 
 
 def test_compose_hash_state_round_trips_through_applied_checkpoint() -> None:
@@ -208,6 +226,63 @@ def test_compose_hash_state_changes_when_rendered_compose_changes() -> None:
     assert checkpoint.to_dict()["compose_artifact_hashes"]["my-farm-advisor"]["service_id"] == (
         "svc-farm"
     )
+
+
+def test_remote_proof_default_flow_is_verification_first_after_install() -> None:
+    transport = _ProofTransport()
+    session = RemoteTransportSession(transport=transport, remote_root="/root/dokploy-wizard")
+
+    session.run_proof()
+
+    assert transport.commands == [
+        (
+            "mutate-install",
+            "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
+            "--state-dir /root/dokploy-wizard/state --non-interactive",
+        ),
+        (
+            "verify-services",
+            "'PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}' python3 -m "
+            "dokploy_wizard.service_verification_runner --env-file "
+            "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state",
+        ),
+        (
+            "inspect-state",
+            "./bin/dokploy-wizard inspect-state --env-file /root/dokploy-wizard/.install.env "
+            "--state-dir /root/dokploy-wizard/state",
+        ),
+    ]
+
+
+def test_remote_proof_strict_mode_keeps_explicit_idempotency_install() -> None:
+    transport = _ProofTransport()
+    session = RemoteTransportSession(transport=transport, remote_root="/root/dokploy-wizard")
+
+    session.run_proof(strict_idempotency=True)
+
+    assert transport.commands == [
+        (
+            "mutate-install",
+            "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
+            "--state-dir /root/dokploy-wizard/state --non-interactive",
+        ),
+        (
+            "verify-services",
+            "'PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}' python3 -m "
+            "dokploy_wizard.service_verification_runner --env-file "
+            "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state",
+        ),
+        (
+            "assert-strict-idempotency",
+            "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
+            "--state-dir /root/dokploy-wizard/state --non-interactive",
+        ),
+        (
+            "inspect-state",
+            "./bin/dokploy-wizard inspect-state --env-file /root/dokploy-wizard/.install.env "
+            "--state-dir /root/dokploy-wizard/state",
+        ),
+    ]
 
 
 def test_help_lists_expected_subcommands() -> None:

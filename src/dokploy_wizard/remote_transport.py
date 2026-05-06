@@ -60,6 +60,7 @@ class RemoteTransportSession:
         *,
         fresh: bool = False,
         confirm_file: Path | None = None,
+        strict_idempotency: bool = False,
     ) -> None:
         commands: list[tuple[str, str]] = []
         if fresh:
@@ -68,67 +69,22 @@ class RemoteTransportSession:
             remote_confirm_path = self._remote_path(confirm_file)
             commands.append(
                 (
-                    "uninstall-destroy-data",
-                    " ".join(
-                        [
-                            "./bin/dokploy-wizard",
-                            "uninstall",
-                            "--state-dir",
-                            self.remote_state_dir,
-                            "--destroy-data",
-                            "--non-interactive",
-                            "--confirm-file",
-                            remote_confirm_path,
-                        ]
-                    ),
+                    "mutate-uninstall-destroy-data",
+                    self._build_uninstall_destroy_command(remote_confirm_path),
                 )
             )
 
         commands.extend(
             [
-                (
-                    "install",
-                    " ".join(
-                        [
-                            "./bin/dokploy-wizard",
-                            "install",
-                            "--env-file",
-                            self.remote_install_env_path,
-                            "--state-dir",
-                            self.remote_state_dir,
-                            "--non-interactive",
-                        ]
-                    ),
-                ),
-                (
-                    "install-rerun-noop",
-                    " ".join(
-                        [
-                            "./bin/dokploy-wizard",
-                            "install",
-                            "--env-file",
-                            self.remote_install_env_path,
-                            "--state-dir",
-                            self.remote_state_dir,
-                            "--non-interactive",
-                        ]
-                    ),
-                ),
-                (
-                    "inspect-state",
-                    " ".join(
-                        [
-                            "./bin/dokploy-wizard",
-                            "inspect-state",
-                            "--env-file",
-                            self.remote_install_env_path,
-                            "--state-dir",
-                            self.remote_state_dir,
-                        ]
-                    ),
-                ),
+                ("mutate-install", self._build_install_command()),
+                ("verify-services", self._build_verify_services_command()),
             ]
         )
+
+        if strict_idempotency:
+            commands.append(("assert-strict-idempotency", self._build_install_command()))
+
+        commands.append(("inspect-state", self._build_inspect_state_command()))
 
         for subcommand, command in commands:
             try:
@@ -141,6 +97,62 @@ class RemoteTransportSession:
                     error=error,
                     password=password,
                 ) from error
+
+    def _build_install_command(self) -> str:
+        return self._shell_join(
+            [
+                "./bin/dokploy-wizard",
+                "install",
+                "--env-file",
+                self.remote_install_env_path,
+                "--state-dir",
+                self.remote_state_dir,
+                "--non-interactive",
+            ]
+        )
+
+    def _build_verify_services_command(self) -> str:
+        return self._shell_join(
+            [
+                "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}",
+                "python3",
+                "-m",
+                "dokploy_wizard.service_verification_runner",
+                "--env-file",
+                self.remote_install_env_path,
+                "--state-dir",
+                self.remote_state_dir,
+            ]
+        )
+
+    def _build_inspect_state_command(self) -> str:
+        return self._shell_join(
+            [
+                "./bin/dokploy-wizard",
+                "inspect-state",
+                "--env-file",
+                self.remote_install_env_path,
+                "--state-dir",
+                self.remote_state_dir,
+            ]
+        )
+
+    def _build_uninstall_destroy_command(self, remote_confirm_path: str) -> str:
+        return self._shell_join(
+            [
+                "./bin/dokploy-wizard",
+                "uninstall",
+                "--state-dir",
+                self.remote_state_dir,
+                "--destroy-data",
+                "--non-interactive",
+                "--confirm-file",
+                remote_confirm_path,
+            ]
+        )
+
+    def _shell_join(self, arguments: list[str]) -> str:
+        return " ".join(shlex.quote(argument) for argument in arguments)
 
     def _remote_path(self, path: Path) -> str:
         remote_path = path.as_posix()
