@@ -11,7 +11,6 @@ import pytest
 
 from dokploy_wizard import cli
 from dokploy_wizard.cli import run_install_flow
-from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.dokploy import (
     DokployBootstrapAuthError,
     DokployBootstrapAuthResult,
@@ -25,18 +24,18 @@ from dokploy_wizard.dokploy import (
 )
 from dokploy_wizard.dokploy import coder as coder_module
 from dokploy_wizard.dokploy import openclaw as openclaw_module
-from dokploy_wizard.dokploy import shared_core as shared_core_module
 from dokploy_wizard.dokploy import seaweedfs as seaweedfs_module
+from dokploy_wizard.dokploy import shared_core as shared_core_module
 from dokploy_wizard.networking import (
     CloudflareAccessApplication,
-    CloudflareCertificatePack,
     CloudflareAccessIdentityProvider,
     CloudflareAccessPolicy,
+    CloudflareCertificatePack,
     CloudflareDnsRecord,
     CloudflareTunnel,
 )
-from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.docuseal import DocuSealBootstrapState
+from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.state import (
     RAW_INPUT_FILE,
     STATE_DOCUMENT_FILES,
@@ -760,11 +759,20 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
         "openclaw": (1, 0, 1),
     }
 
-    _persist_missing_compose_hashes(state_dir=state_dir, clients=clients, service_names=service_names)
+    _persist_missing_compose_hashes(
+        state_dir=state_dir,
+        clients=clients,
+        service_names=service_names,
+    )
     loaded_state = load_state_dir(state_dir)
     assert loaded_state.applied_state is not None
-    assert set(loaded_state.applied_state.compose_artifact_hashes) >= set(service_names.values())
-    _rewind_applied_steps(state_dir, completed_steps=("preflight", "dokploy_bootstrap", "networking"))
+    assert set(loaded_state.applied_state.compose_artifact_hashes) >= set(
+        service_names.values()
+    )
+    _rewind_applied_steps(
+        state_dir,
+        completed_steps=("preflight", "dokploy_bootstrap", "networking"),
+    )
 
     second_clients_before = _mutation_counts(clients, service_names)
     _, second_backends, _ = _build_full_stack_backends(
@@ -788,9 +796,15 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
     )
     second_clients_after = _mutation_counts(clients, service_names)
 
-    assert {"shared_core", "nextcloud", "moodle", "docuseal", "seaweedfs", "coder", "openclaw"}.issubset(
-        set(second_summary["lifecycle"]["phases_to_run"])
-    )
+    assert {
+        "shared_core",
+        "nextcloud",
+        "moodle",
+        "docuseal",
+        "seaweedfs",
+        "coder",
+        "openclaw",
+    }.issubset(set(second_summary["lifecycle"]["phases_to_run"]))
     assert second_summary["shared_core"]["outcome"] == "already_present"
     assert second_summary["nextcloud"]["outcome"] == "already_present"
     assert second_summary["moodle"]["outcome"] == "already_present"
@@ -836,7 +850,11 @@ def test_full_stack_deploy_rerun_only_redeploys_service_with_changed_compose(
         openclaw_backend=first_backends.openclaw,
     )
 
-    _persist_missing_compose_hashes(state_dir=state_dir, clients=clients, service_names=service_names)
+    _persist_missing_compose_hashes(
+        state_dir=state_dir,
+        clients=clients,
+        service_names=service_names,
+    )
     mutation_counts_before = _mutation_counts(clients, service_names)
     _, modify_backends, _ = _build_full_stack_backends(
         raw_env=modified_raw_env,
@@ -909,8 +927,15 @@ def test_full_stack_deploy_rerun_redeploys_unhealthy_service_instead_of_skipping
         openclaw_backend=first_backends.openclaw,
     )
 
-    _persist_missing_compose_hashes(state_dir=state_dir, clients=clients, service_names=service_names)
-    _rewind_applied_steps(state_dir, completed_steps=("preflight", "dokploy_bootstrap", "networking"))
+    _persist_missing_compose_hashes(
+        state_dir=state_dir,
+        clients=clients,
+        service_names=service_names,
+    )
+    _rewind_applied_steps(
+        state_dir,
+        completed_steps=("preflight", "dokploy_bootstrap", "networking"),
+    )
     mutation_counts_before = _mutation_counts(clients, service_names)
     _, unhealthy_backends, _ = _build_full_stack_backends(
         raw_env=raw_env,
@@ -1081,7 +1106,9 @@ def _build_full_stack_backends(
     monkeypatch.setattr(
         seaweedfs_module,
         "_docker_container_is_up",
-        lambda service_name: service_name != service_names["seaweedfs"] or "seaweedfs" not in unhealthy,
+        lambda service_name: (
+            service_name != service_names["seaweedfs"] or "seaweedfs" not in unhealthy
+        ),
     )
 
     shared_core_backend = DokploySharedCoreBackend(
@@ -1271,7 +1298,9 @@ def _rewind_applied_steps(state_dir: Path, *, completed_steps: tuple[str, ...]) 
             desired_state_fingerprint=applied_state.desired_state_fingerprint,
             completed_steps=completed_steps,
             compose_artifact_hashes=dict(applied_state.compose_artifact_hashes),
-            lifecycle_checkpoint_contract_version=applied_state.lifecycle_checkpoint_contract_version,
+            lifecycle_checkpoint_contract_version=(
+                applied_state.lifecycle_checkpoint_contract_version
+            ),
         ),
     )
 
@@ -1284,13 +1313,24 @@ def _persist_missing_compose_hashes(
     applied_state = loaded_state.applied_state
     compose_hashes = dict(applied_state.compose_artifact_hashes)
     rendered_compose_by_service = {
-        service_names["shared_core"]: clients.shared_core.compose_files_by_name[service_names["shared_core"]],
+        service_names["shared_core"]: clients.shared_core.compose_files_by_name[
+            service_names["shared_core"]
+        ],
         service_names["nextcloud"]: next(iter(clients.nextcloud.compose_files_by_id.values())),
-        service_names["moodle"]: clients.moodle.last_create_compose_file or clients.moodle.last_update_compose_file,
-        service_names["docuseal"]: clients.docuseal.last_create_compose_file or clients.docuseal.last_update_compose_file,
-        service_names["seaweedfs"]: clients.seaweedfs.compose_files_by_name[service_names["seaweedfs"]],
+        service_names["moodle"]: (
+            clients.moodle.last_create_compose_file or clients.moodle.last_update_compose_file
+        ),
+        service_names["docuseal"]: (
+            clients.docuseal.last_create_compose_file
+            or clients.docuseal.last_update_compose_file
+        ),
+        service_names["seaweedfs"]: clients.seaweedfs.compose_files_by_name[
+            service_names["seaweedfs"]
+        ],
         service_names["coder"]: clients.coder.compose_files_by_name[service_names["coder"]],
-        service_names["openclaw"]: clients.openclaw.compose_files_by_name[service_names["openclaw"]],
+        service_names["openclaw"]: clients.openclaw.compose_files_by_name[
+            service_names["openclaw"]
+        ],
     }
     for service_name, rendered_compose in rendered_compose_by_service.items():
         if service_name in compose_hashes:
@@ -1356,7 +1396,11 @@ def _mutation_deltas(
 
 
 def _verification_result(
-    *, service_name: str, passed: bool, detail: str, tier: Literal["app", "bootstrap", "downstream"] = "app"
+    *,
+    service_name: str,
+    passed: bool,
+    detail: str,
+    tier: Literal["app", "bootstrap", "downstream"] = "app",
 ) -> ServiceVerificationResult:
     return ServiceVerificationResult(
         service_name=service_name,
