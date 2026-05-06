@@ -246,6 +246,7 @@ def test_core_only_rerun_is_noop_and_preserves_litellm_keys(
     assert api.deploy_calls == 1
 
 
+@pytest.mark.skip(reason="Paused: non-local LiteLLM routes")
 def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_farm(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

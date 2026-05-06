@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 DEFAULT_LOCAL_ALIAS = "local/unsloth-active"
-DEFAULT_LOCAL_MODEL = "unsloth/Qwen2.5-Coder-32B-Instruct"
+DEFAULT_LOCAL_MODEL = "openai/unsloth-active"
+DEFAULT_LOCAL_API_KEY = "sk-no-key-required"
 DEFAULT_OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 
 
@@ -14,44 +15,63 @@ def build_litellm_config(
 
     local_base_url = _optional(flat_env, "LITELLM_LOCAL_BASE_URL")
     if local_base_url is not None:
+        local_model = _normalize_local_model_ref(
+            _optional(flat_env, "LITELLM_LOCAL_MODEL") or DEFAULT_LOCAL_MODEL
+        )
+        local_api_key = _optional(flat_env, "LITELLM_LOCAL_API_KEY") or DEFAULT_LOCAL_API_KEY
         model_list.append(
             {
                 "model_name": DEFAULT_LOCAL_ALIAS,
                 "litellm_params": {
-                    "model": _optional(flat_env, "LITELLM_LOCAL_MODEL") or DEFAULT_LOCAL_MODEL,
+                    "model": local_model,
                     "api_base": local_base_url,
-                    "api_key": "none",
+                    "api_key": local_api_key,
                 },
             }
         )
-
-    opencode_go_api_key_env = _required_env_name(upstream_creds, "opencode_go_api_key_env")
-    model_list.append(
-        {
-            "model_name": "openai/*",
-            "litellm_params": {
-                "model": "openai/*",
-                "api_base": _opencode_go_base_url(flat_env),
-                "api_key": _env_ref(opencode_go_api_key_env),
-            },
-        }
-    )
-
-    openrouter_api_key_env = _optional_env_name(upstream_creds, "openrouter_api_key_env")
-    for alias, target_model in _parse_alias_models(flat_env, "LITELLM_OPENROUTER_MODELS"):
-        if alias in {"openrouter/*", "*"} or target_model in {"openrouter/*", "*"}:
-            raise ValueError("OpenRouter wildcard routes are not allowed")
-        if openrouter_api_key_env is None:
-            raise ValueError("Missing upstream OpenRouter env name for explicit alias routes")
+        # My Farm Advisor splits provider/model strings and sends the bare model name.
+        # Also register the bare alias so LiteLLM can route it.
+        bare_alias = DEFAULT_LOCAL_ALIAS.split("/", 1)[1]
         model_list.append(
             {
-                "model_name": alias,
+                "model_name": bare_alias,
                 "litellm_params": {
-                    "model": _normalize_model_ref(target_model),
-                    "api_key": _env_ref(openrouter_api_key_env),
+                    "model": local_model,
+                    "api_base": local_base_url,
+                    "api_key": local_api_key,
                 },
             }
         )
+
+    # PAUSED: OpenCode Go route — will re-enable later.
+    # opencode_go_api_key_env = _required_env_name(upstream_creds, "opencode_go_api_key_env")
+    # model_list.append(
+    #     {
+    #         "model_name": "openai/*",
+    #         "litellm_params": {
+    #             "model": "openai/*",
+    #             "api_base": _opencode_go_base_url(flat_env),
+    #             "api_key": _env_ref(opencode_go_api_key_env),
+    #         },
+    #     }
+    # )
+
+    # PAUSED: OpenRouter route — will re-enable later.
+    # openrouter_api_key_env = _optional_env_name(upstream_creds, "openrouter_api_key_env")
+    # for alias, target_model in _parse_alias_models(flat_env, "LITELLM_OPENROUTER_MODELS"):
+    #     if alias in {"openrouter/*", "*"} or target_model in {"openrouter/*", "*"}:
+    #         raise ValueError("OpenRouter wildcard routes are not allowed")
+    #     if openrouter_api_key_env is None:
+    #         raise ValueError("Missing upstream OpenRouter env name for explicit alias routes")
+    #     model_list.append(
+    #         {
+    #             "model_name": alias,
+    #             "litellm_params": {
+    #                 "model": _normalize_model_ref(target_model),
+    #                 "api_key": _env_ref(openrouter_api_key_env),
+    #             },
+    #         }
+    #     )
 
     nvidia_api_key_env = _optional_env_name(upstream_creds, "nvidia_api_key_env")
     nvidia_base_url = _optional(flat_env, "NVIDIA_BASE_URL")
@@ -69,7 +89,7 @@ def build_litellm_config(
             }
         )
 
-    return {"model_list": model_list}
+    return {"model_list": model_list, "litellm_settings": {"drop_params": True}}
 
 
 def render_litellm_config_yaml(config: Mapping[str, object]) -> str:
@@ -133,6 +153,27 @@ def _normalize_model_ref(model_ref: str) -> str:
         "nvidia/moonshot/kimi-k2.5": "nvidia/moonshotai/kimi-k2.5",
     }
     return legacy_aliases.get(model_ref, model_ref)
+
+
+def _normalize_local_model_ref(model_ref: str) -> str:
+    normalized = _normalize_model_ref(model_ref)
+    if "/" not in normalized:
+        return f"openai/{normalized}"
+    provider, _, _ = normalized.partition("/")
+    if provider in {
+        "openai",
+        "azure",
+        "anthropic",
+        "bedrock",
+        "vertex_ai",
+        "gemini",
+        "nvidia",
+        "huggingface",
+        "ollama",
+        "openrouter",
+    }:
+        return normalized
+    return f"openai/{normalized}"
 
 
 def _render_yaml_node(value: object, *, indent: int = 0) -> str:
