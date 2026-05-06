@@ -544,7 +544,7 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert 'export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_HERMES_BASE_URL__"' in template
     assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_HERMES_API_KEY__"' in template
     assert (
-        'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY__"' in template
+        'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__"' in template
     )
     assert (
         'export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"'
@@ -655,7 +655,7 @@ def test_hermes_template_uses_litellm_credentials(
             password_secret_ref="wizard-stack-coder-postgres-password",
         ),
         hermes_inference_provider="openai",
-        hermes_model="openai/deepseek-v4-flash",
+        hermes_model="unsloth-active",
         ai_default_base_url="https://upstream.example.invalid/v1",
         ai_default_api_key="litellm-coder-hermes-key",
         client=cast(DokployCoderApi, FakeCoderApi()),
@@ -696,16 +696,17 @@ def test_hermes_template_uses_litellm_credentials(
             "hostname": "coder.example.com",
             "session_token": "session-123",
             "hermes_inference_provider": "openai",
-            "hermes_model": "openai/deepseek-v4-flash",
+            "hermes_model": "unsloth-active",
             "ai_default_base_url": "http://wizard-stack-shared-litellm:4000",
             "ai_default_api_key": "litellm-coder-hermes-key",
         }
     ]
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "openai",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "openai/deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "${LITELLM_VIRTUAL_KEY_CODER_HERMES}",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "litellm-coder-hermes-key",
     }
 
 
@@ -727,7 +728,7 @@ def test_base_opencode_web_openwork_templates_do_not_receive_litellm_credentials
             password_secret_ref="wizard-stack-coder-postgres-password",
         ),
         hermes_inference_provider="openai",
-        hermes_model="openai/deepseek-v4-flash",
+        hermes_model="unsloth-active",
         ai_default_api_key="litellm-coder-hermes-key",
         client=cast(DokployCoderApi, FakeCoderApi()),
     )
@@ -756,12 +757,19 @@ def test_base_opencode_web_openwork_templates_do_not_receive_litellm_credentials
 
     backend.ensure_application_ready()
 
-    assert template_replacements_by_name[coder_module._default_template_name()] is None
-    assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] is None
-    assert template_replacements_by_name[coder_module._default_openwork_template_name()] is None
+    assert template_replacements_by_name[coder_module._default_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+    }
+    assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+    }
+    assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+    }
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
+        "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
     }
 
 
@@ -915,7 +923,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
 
     assert waits == ["coder.example.com"]
     assert secret_sync_calls == [
-        ("openai", "openai/deepseek-v4-flash", "http://wizard-stack-shared-litellm:4000")
+        ("openai", "unsloth-active", "http://wizard-stack-shared-litellm:4000")
     ]
     assert notes == (
         "Provisioned initial Coder admin for 'admin@example.com'.",
@@ -1356,14 +1364,16 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         ),
     ]
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
+        "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
     }
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "openai",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "openai/deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "${LITELLM_VIRTUAL_KEY_CODER_HERMES}",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
     }
     assert ensure_workspace_calls == [
         (
@@ -1378,7 +1388,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         (
             "wizard-stack-coder-container",
             "openai",
-            "openai/deepseek-v4-flash",
+            "unsloth-active",
             None,
         )
     ]
