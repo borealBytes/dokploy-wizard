@@ -25,6 +25,7 @@ from dokploy_wizard.dokploy import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.compose_noop import persist_compose_artifact_hash
 from dokploy_wizard.lifecycle import (
     LifecyclePlan,
     applicable_phases_for,
@@ -5226,6 +5227,96 @@ def _run_lifecycle_refresh(
     )
 
     return summary, refresh_calls, events
+
+
+def test_execute_lifecycle_plan_initializes_checkpoint_before_compose_hash_persistence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_env = _raw_input(_lifecycle_refresh_values())
+    desired_state = resolve_desired_state(raw_env)
+    applicable_phases = applicable_phases_for(desired_state)
+    lifecycle_plan = LifecyclePlan(
+        mode="install",
+        reasons=("resume shared core",),
+        applicable_phases=applicable_phases,
+        phases_to_run=("shared_core",),
+        preserved_phases=(),
+        initial_completed_steps=("preflight", "dokploy_bootstrap", "networking"),
+        start_phase="shared_core",
+        raw_equivalent=False,
+        desired_equivalent=False,
+    )
+    state_dir = tmp_path / "state"
+    service_key = f"{desired_state.stack_name}-shared-core"
+    rendered_compose = "services:\n  postgres:\n    image: postgres:16\n"
+
+    def _reconcile_shared_core(**kwargs: Any) -> SimpleNamespace:
+        del kwargs
+        persist_compose_artifact_hash(
+            state_dir=state_dir,
+            service_key=service_key,
+            rendered_compose=rendered_compose,
+        )
+        return SimpleNamespace(
+            result=_LifecyclePhaseResult("shared_core"),
+            network_resource_id="network-1",
+            postgres_resource_id="postgres-1",
+            redis_resource_id="redis-1",
+            mail_relay_resource_id="mail-1",
+            litellm_resource_id="litellm-1",
+        )
+
+    monkeypatch.setattr(lifecycle_engine, "reconcile_shared_core", _reconcile_shared_core)
+    monkeypatch.setattr(
+        lifecycle_engine,
+        "build_shared_core_ledger",
+        lambda **kwargs: kwargs["existing_ledger"],
+    )
+
+    lifecycle_engine.execute_lifecycle_plan(
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        preflight_report=PreflightReport(
+            host_facts=_host_facts(),
+            required_profile=derive_required_profile(desired_state),
+            checks=(PreflightCheck(name="preflight", status="pass", detail="passed"),),
+            advisories=(),
+        ),
+        lifecycle_plan=lifecycle_plan,
+        backends=lifecycle_engine.LifecycleBackends(
+            bootstrap=cast(Any, object()),
+            tailscale=cast(Any, object()),
+            networking=cast(Any, object()),
+            cloudflared=None,
+            shared_core=cast(Any, object()),
+            headscale=cast(Any, object()),
+            matrix=cast(Any, object()),
+            nextcloud=cast(Any, object()),
+            moodle=cast(Any, object()),
+            docuseal=cast(Any, object()),
+            seaweedfs=cast(Any, object()),
+            coder=cast(Any, object()),
+            openclaw=cast(Any, object()),
+        ),
+    )
+
+    applied_state = load_state_dir(state_dir).applied_state
+    assert applied_state is not None
+    assert applied_state.completed_steps == (
+        "preflight",
+        "dokploy_bootstrap",
+        "networking",
+        "shared_core",
+    )
+    assert applied_state.compose_artifact_hashes[service_key] == (
+        ComposeArtifactHashState.from_rendered_compose(
+            service_id=service_key,
+            rendered_compose=rendered_compose,
+        )
+    )
 
 
 def _nextcloud_backend_raw_env(*, packs: str, include_nexa_env: bool) -> RawEnvInput:

@@ -95,6 +95,8 @@ def execute_lifecycle_plan(
 ) -> dict[str, Any]:
     applicable_phases = lifecycle_plan.applicable_phases
     valid_phases = set(lifecycle_plan.initial_completed_steps)
+    if not dry_run and load_state_dir(state_dir).applied_state is None:
+        _write_checkpoint(state_dir, desired_state, applicable_phases, valid_phases)
     phase_results: dict[str, dict[str, Any]] = {}
     current_ledger = ownership_ledger
     nextcloud_refresh_phase = _nextcloud_refresh_phase(
