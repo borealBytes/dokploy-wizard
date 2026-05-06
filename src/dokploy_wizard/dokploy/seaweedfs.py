@@ -20,7 +20,7 @@ from dokploy_wizard.dokploy.client import (
 )
 from dokploy_wizard.dokploy.compose_noop import apply_compose_noop_guard
 from dokploy_wizard.packs.seaweedfs import SeaweedFsError, SeaweedFsResourceRecord
-from dokploy_wizard.verification import make_verification_result
+from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 
 class DokploySeaweedFsApi(Protocol):
@@ -315,7 +315,7 @@ class DokploySeaweedFsBackend:
         self._applied_locator = locator
         return locator
 
-    def _verify_current_service(self):
+    def _verify_current_service(self) -> ServiceVerificationResult:
         is_up = _docker_container_is_up(self._compose_name)
         return make_verification_result(
             service_name=self._compose_name,
