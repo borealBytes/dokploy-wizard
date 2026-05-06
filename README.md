@@ -499,6 +499,7 @@ pytest tests/test_cli.py -q
 - Dokploy itself is not yet protected by Cloudflare Access because the wizard still needs a safe machine-auth/control path.
 - Nexa features are env-gated, not universal defaults. For your deployment that is fine, because `.install.env` already carries the required `OPENCLAW_NEXA_*` values.
 - Some channel/runtime behavior still depends on the upstream OpenClaw image, so operational behavior can evolve as that image evolves.
+- For the OpenClaw trusted-proxy control UI scope regression and the bootstrap fixes that keep fresh installs repeatable, see `docs/incidents/openclaw-trusted-proxy-scopes.md`.
 
 ## LiteLLM core gateway
 
