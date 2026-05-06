@@ -1874,6 +1874,116 @@ def test_dokploy_nextcloud_onlyoffice_health_fails_closed_without_first_apply_wa
     assert wait_calls == []
 
 
+def test_dokploy_nextcloud_backend_uses_extended_first_boot_container_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _build_nextcloud_backend_for_mounts(advisor_workspace_mounts=())
+    waited: list[tuple[str, str, int, float]] = []
+    expected = object()
+
+    monkeypatch.setattr(nextcloud_module, "_nextcloud_status_ready", lambda _: False)
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_wait_for_nextcloud_first_boot_ready",
+        lambda service_name, status_url, *, attempts, delay_seconds: waited.append(
+            (service_name, status_url, attempts, delay_seconds)
+        )
+        or "nextcloud-container",
+    )
+    monkeypatch.setattr(nextcloud_module, "_ensure_admin_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nextcloud_module, "_ensure_nexa_service_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nextcloud_module, "_ensure_trusted_domain", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nextcloud_module, "_ensure_onlyoffice_app_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nextcloud_module, "_verify_nextcloud_bundle", lambda _: expected)
+    monkeypatch.setattr(
+        backend,
+        "_ensure_openclaw_rescan_schedule",
+        lambda: None,
+    )
+
+    verification = backend.ensure_application_ready(
+        nextcloud_url="https://nextcloud.example.com",
+        onlyoffice_url="https://office.example.com",
+    )
+
+    assert verification == expected
+    assert waited == [
+        (
+            "wizard-stack-nextcloud",
+            "https://nextcloud.example.com/status.php",
+            nextcloud_module._NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_ATTEMPTS,
+            nextcloud_module._NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_DELAY_SECONDS,
+        )
+    ]
+    assert nextcloud_module._NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_ATTEMPTS > 60
+
+
+def test_wait_for_nextcloud_first_boot_ready_waits_for_health_before_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    states = iter(
+        [
+            None,
+            "nextcloud-container",
+            "nextcloud-container",
+            "nextcloud-container",
+        ]
+    )
+    health_checks: list[str] = []
+    status_checks: list[str] = []
+    sleep_calls: list[float] = []
+    health_ready = iter([False, True, True])
+    status_ready = iter([False, True])
+
+    monkeypatch.setattr(nextcloud_module, "_find_container_name", lambda _: next(states))
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_container_health_ready",
+        lambda container_name: health_checks.append(container_name) or next(health_ready),
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_nextcloud_status_ready",
+        lambda url: status_checks.append(url) or next(status_ready),
+    )
+    monkeypatch.setattr(nextcloud_module.time, "sleep", lambda delay: sleep_calls.append(delay))
+
+    container = nextcloud_module._wait_for_nextcloud_first_boot_ready(
+        "wizard-stack-nextcloud",
+        "https://nextcloud.example.com/status.php",
+        attempts=4,
+        delay_seconds=1.5,
+    )
+
+    assert container == "nextcloud-container"
+    assert health_checks == ["nextcloud-container", "nextcloud-container", "nextcloud-container"]
+    assert status_checks == [
+        "https://nextcloud.example.com/status.php",
+        "https://nextcloud.example.com/status.php",
+    ]
+    assert sleep_calls == [1.5, 1.5, 1.5]
+
+
+def test_dokploy_nextcloud_backend_raises_health_specific_error_when_container_never_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _build_nextcloud_backend_for_mounts(advisor_workspace_mounts=())
+
+    monkeypatch.setattr(nextcloud_module, "_nextcloud_status_ready", lambda _: False)
+    monkeypatch.setattr(nextcloud_module, "_wait_for_nextcloud_first_boot_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nextcloud_module, "_find_container_name", lambda _: "nextcloud-container")
+    monkeypatch.setattr(nextcloud_module, "_container_health_ready", lambda _: False)
+
+    with pytest.raises(
+        NextcloudError,
+        match="Nextcloud container did not become healthy before application configuration was attempted.",
+    ):
+        backend.ensure_application_ready(
+            nextcloud_url="https://nextcloud.example.com",
+            onlyoffice_url="https://office.example.com",
+        )
+
+
 def test_local_https_health_check_uses_host_header(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, dict[str, str], bool]] = []
 

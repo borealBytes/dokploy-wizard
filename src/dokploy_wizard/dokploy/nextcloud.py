@@ -60,6 +60,10 @@ _DEFAULT_ONLYOFFICE_EDIT_FORMATS = {
 }
 _ONLYOFFICE_DOCUMENTSERVER_CHECK_ATTEMPTS = 180
 _ONLYOFFICE_DOCUMENTSERVER_CHECK_DELAY_SECONDS = 5.0
+_NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_ATTEMPTS = 240
+_NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_DELAY_SECONDS = 5.0
+_NEXTCLOUD_FIRST_BOOT_STATUS_WAIT_ATTEMPTS = 60
+_NEXTCLOUD_FIRST_BOOT_STATUS_WAIT_DELAY_SECONDS = 5.0
 _NEXTCLOUD_APPSTORE_APPS_JSON_URL = "https://apps.nextcloud.com/api/v1/apps.json"
 
 
@@ -365,12 +369,24 @@ class DokployNextcloudBackend:
             )
             self._ensure_openclaw_rescan_schedule()
             return _verify_nextcloud_bundle(container)
-        container = _wait_for_container_name(_nextcloud_service_name(self._stack_name))
+        service_name = _nextcloud_service_name(self._stack_name)
+        container = _wait_for_nextcloud_first_boot_ready(
+            service_name,
+            f"{nextcloud_url}/status.php",
+            attempts=_NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_ATTEMPTS,
+            delay_seconds=_NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_DELAY_SECONDS,
+        )
         if container is None:
-            raise NextcloudError(
-                "Nextcloud container is not running; cannot finish application bootstrap."
-            )
-        if not _wait_for_nextcloud_status_ready(f"{nextcloud_url}/status.php"):
+            container = _find_container_name(service_name)
+            if container is None:
+                raise NextcloudError(
+                    "Nextcloud container is not running; cannot finish application bootstrap."
+                )
+            if not _container_health_ready(container):
+                raise NextcloudError(
+                    "Nextcloud container did not become healthy before application "
+                    "configuration was attempted."
+                )
             raise NextcloudError(
                 "Nextcloud did not finish its container bootstrap before application "
                 "configuration was attempted."
@@ -1173,6 +1189,48 @@ def _wait_for_container_name(
         container_name = _find_container_name(service_name)
         if container_name is not None:
             return container_name
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return None
+
+
+def _container_health_ready(container_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                "{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}",
+                container_name,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    return result.stdout.strip() == "healthy"
+
+
+def _wait_for_nextcloud_first_boot_ready(
+    service_name: str,
+    status_url: str,
+    *,
+    attempts: int = _NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_ATTEMPTS,
+    delay_seconds: float = _NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_DELAY_SECONDS,
+) -> str | None:
+    status_attempts_remaining = _NEXTCLOUD_FIRST_BOOT_STATUS_WAIT_ATTEMPTS
+    for attempt in range(attempts):
+        container_name = _find_container_name(service_name)
+        if container_name is not None and _container_health_ready(container_name):
+            if _nextcloud_status_ready(status_url):
+                return container_name
+            status_attempts_remaining -= 1
+            if status_attempts_remaining <= 0:
+                return None
         if attempt < attempts - 1:
             time.sleep(delay_seconds)
     return None
