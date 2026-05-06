@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import re
 import shlex
 import ssl
@@ -14,6 +15,10 @@ from typing import Callable, Protocol
 from urllib import error, parse, request
 
 from dokploy_wizard.core.models import SharedPostgresAllocation, SharedRedisAllocation
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    persist_compose_artifact_hash,
+)
 from dokploy_wizard.dokploy.client import (
     DokployApiClient,
     DokployApiError,
@@ -33,6 +38,8 @@ from dokploy_wizard.packs.nextcloud.models import (
     TalkRuntime,
 )
 from dokploy_wizard.packs.nextcloud.reconciler import NextcloudError
+from dokploy_wizard.state import load_state_dir
+from dokploy_wizard.verification import ServiceVerificationResult
 
 _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 _DEFAULT_NEXTCLOUD_ADMIN_USER = "admin"
@@ -148,6 +155,7 @@ class DokployNextcloudBackend:
         nexa_agent_email: str | None = None,
         openclaw_rescan_cron: str = _DEFAULT_OPENCLAW_RESCAN_CRON,
         openclaw_rescan_timezone: str = _DEFAULT_OPENCLAW_RESCAN_TIMEZONE,
+        state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployNextcloudApi | None = None,
     ) -> None:
         self._stack_name = stack_name
@@ -198,6 +206,7 @@ class DokployNextcloudBackend:
         self._nexa_agent_email = nexa_agent_email
         self._openclaw_rescan_cron = openclaw_rescan_cron
         self._openclaw_rescan_timezone = openclaw_rescan_timezone
+        self._state_dir = state_dir
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
@@ -576,6 +585,7 @@ class DokployNextcloudBackend:
     def _ensure_compose_applied(self) -> _ComposeLocator:
         if self._applied_locator is not None and self._created_in_process:
             return self._applied_locator
+        can_use_stateful_noop_guard = self._can_use_stateful_noop_guard()
         compose_file = _render_compose_file(
             stack_name=self._stack_name,
             nextcloud_hostname=self._nextcloud_hostname,
@@ -591,21 +601,42 @@ class DokployNextcloudBackend:
         )
         try:
             if self._applied_locator is not None:
-                updated = self._client.update_compose(
-                    compose_id=self._applied_locator.compose_id,
-                    compose_file=compose_file,
-                )
-                self._client.deploy_compose(
-                    compose_id=updated.compose_id,
-                    title="dokploy-wizard nextcloud reconcile",
-                    description="Update Nextcloud + OnlyOffice compose app",
-                )
-                self._created_in_process = True
-                self._applied_locator = _ComposeLocator(
-                    project_id=self._applied_locator.project_id,
-                    environment_id=self._applied_locator.environment_id,
-                    compose_id=updated.compose_id,
-                )
+                if can_use_stateful_noop_guard:
+                    applied_locator = self._applied_locator
+                    result = apply_compose_noop_guard(
+                        rendered_compose=compose_file,
+                        service_key=self._compose_name,
+                        state_dir=self._state_dir,
+                        client=self._client,
+                        locator=applied_locator,
+                        compose_id=applied_locator.compose_id,
+                        title="dokploy-wizard nextcloud reconcile",
+                        description="Update Nextcloud + OnlyOffice compose app",
+                        verify_current=self._verify_current_application,
+                        locator_factory=lambda compose_id: _ComposeLocator(
+                            project_id=applied_locator.project_id,
+                            environment_id=applied_locator.environment_id,
+                            compose_id=compose_id,
+                        ),
+                    )
+                    self._created_in_process = result.status == "applied"
+                    self._applied_locator = result.locator
+                else:
+                    updated = self._client.update_compose(
+                        compose_id=self._applied_locator.compose_id,
+                        compose_file=compose_file,
+                    )
+                    self._client.deploy_compose(
+                        compose_id=updated.compose_id,
+                        title="dokploy-wizard nextcloud reconcile",
+                        description="Update Nextcloud + OnlyOffice compose app",
+                    )
+                    self._created_in_process = True
+                    self._applied_locator = _ComposeLocator(
+                        project_id=self._applied_locator.project_id,
+                        environment_id=self._applied_locator.environment_id,
+                        compose_id=updated.compose_id,
+                    )
                 return self._applied_locator
             projects = self._client.list_projects()
             for project in projects:
@@ -616,6 +647,31 @@ class DokployNextcloudBackend:
                     break
                 for compose in environment.composes:
                     if compose.name == self._compose_name:
+                        if can_use_stateful_noop_guard:
+                            locator = _ComposeLocator(
+                                project_id=project.project_id,
+                                environment_id=environment.environment_id,
+                                compose_id=compose.compose_id,
+                            )
+                            result = apply_compose_noop_guard(
+                                rendered_compose=compose_file,
+                                service_key=self._compose_name,
+                                state_dir=self._state_dir,
+                                client=self._client,
+                                locator=locator,
+                                compose_id=compose.compose_id,
+                                title="dokploy-wizard nextcloud reconcile",
+                                description="Update Nextcloud + OnlyOffice compose app",
+                                verify_current=self._verify_current_application,
+                                locator_factory=lambda compose_id: _ComposeLocator(
+                                    project_id=project.project_id,
+                                    environment_id=environment.environment_id,
+                                    compose_id=compose_id,
+                                ),
+                            )
+                            self._created_in_process = result.status == "applied"
+                            self._applied_locator = result.locator
+                            return result.locator
                         updated = self._client.update_compose(
                             compose_id=compose.compose_id,
                             compose_file=compose_file,
@@ -630,6 +686,7 @@ class DokployNextcloudBackend:
                             environment_id=environment.environment_id,
                             compose_id=updated.compose_id,
                         )
+                        self._created_in_process = True
                         self._applied_locator = locator
                         return locator
                 created = self._client.create_compose(
@@ -648,6 +705,12 @@ class DokployNextcloudBackend:
                     environment_id=environment.environment_id,
                     compose_id=created.compose_id,
                 )
+                if can_use_stateful_noop_guard:
+                    persist_compose_artifact_hash(
+                        state_dir=self._state_dir,
+                        service_key=self._compose_name,
+                        rendered_compose=compose_file,
+                    )
                 self._created_in_process = True
                 self._applied_locator = locator
                 return locator
@@ -675,9 +738,84 @@ class DokployNextcloudBackend:
             environment_id=created_project.environment_id,
             compose_id=created_compose.compose_id,
         )
+        if can_use_stateful_noop_guard:
+            persist_compose_artifact_hash(
+                state_dir=self._state_dir,
+                service_key=self._compose_name,
+                rendered_compose=compose_file,
+            )
         self._created_in_process = True
         self._applied_locator = locator
         return locator
+
+    def _can_use_stateful_noop_guard(self) -> bool:
+        return load_state_dir(self._state_dir).applied_state is not None
+
+    def _verify_current_application(self) -> ServiceVerificationResult:
+        nextcloud_container = _find_container_name(_nextcloud_service_name(self._stack_name))
+        if nextcloud_container is None:
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="app",
+                status="fail",
+                detail="Nextcloud container is not running; compose app is not ready for a no-op skip.",
+            )
+        if not _container_health_ready(nextcloud_container):
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="app",
+                status="fail",
+                detail="Nextcloud container health check is not ready; compose app is not ready for a no-op skip.",
+            )
+        nextcloud_url = f"https://{self._nextcloud_hostname}"
+        onlyoffice_url = f"https://{self._onlyoffice_hostname}"
+        status_url = f"{nextcloud_url}/status.php"
+        if not _nextcloud_status_ready(status_url):
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="app",
+                status="fail",
+                detail="Nextcloud status.php is not app-ready; compose app is not ready for a no-op skip.",
+            )
+        if not self.check_health(
+            service=NextcloudResourceRecord(
+                resource_id="dokploy-compose:verification:onlyoffice-service",
+                resource_name=_onlyoffice_service_name(self._stack_name),
+            ),
+            url=f"{onlyoffice_url}/healthcheck",
+        ):
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="downstream",
+                status="fail",
+                detail="OnlyOffice health check is not ready; compose app is not ready for a no-op skip.",
+            )
+        try:
+            verification = self.ensure_application_ready(
+                nextcloud_url=nextcloud_url,
+                onlyoffice_url=onlyoffice_url,
+            )
+        except NextcloudError as error:
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="bootstrap",
+                status="fail",
+                detail=str(error),
+            )
+        verification_failure = _nextcloud_bundle_verification_failure(verification)
+        if verification_failure is not None:
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="downstream",
+                status="fail",
+                detail=verification_failure,
+            )
+        return ServiceVerificationResult(
+            service_name=self._compose_name,
+            tier="downstream",
+            status="pass",
+            detail="Nextcloud, OnlyOffice, and Talk readiness checks passed.",
+        )
 
 
 def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSummary | None:
@@ -1526,6 +1664,25 @@ def _verify_nextcloud_bundle(container_name: str) -> NextcloudBundleVerification
             ),
         ),
     )
+
+
+def _nextcloud_bundle_verification_failure(
+    verification: NextcloudBundleVerification,
+) -> str | None:
+    talk_runtime = verification.talk
+    if talk_runtime.enabled is not True:
+        return "Nextcloud Talk app 'spreed' is not enabled after bootstrap."
+    if talk_runtime.enabled_check.passed is not True:
+        return "Nextcloud Talk verification failed while checking app:list output."
+    if talk_runtime.signaling_check.passed is not True:
+        return "Nextcloud Talk signaling verification failed."
+    if talk_runtime.stun_check.passed is not True:
+        return "Nextcloud Talk STUN verification failed."
+    if talk_runtime.turn_check.passed is not True:
+        return "Nextcloud Talk TURN verification failed."
+    if verification.onlyoffice_document_server_check.passed is not True:
+        return "OnlyOffice document-server verification failed."
+    return None
 
 
 def _ensure_files_external_app(container_name: str) -> None:

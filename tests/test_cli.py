@@ -1324,6 +1324,7 @@ def test_build_openclaw_backend_uses_generated_litellm_virtual_keys(
 
     backend = cli._build_openclaw_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         litellm_generated_keys=generated_keys,
     )
@@ -1334,6 +1335,7 @@ def test_build_openclaw_backend_uses_generated_litellm_virtual_keys(
     assert captured_keys.virtual_keys["openclaw"] == generated_keys.virtual_keys["openclaw"]
     assert captured_keys.virtual_keys["my-farm-advisor"] == generated_keys.virtual_keys["my-farm-advisor"]
     assert captured["client"] is sentinel_client
+    assert captured["state_dir"] == state_dir
 
 
 def test_install_persists_post_auth_target_before_later_failure(

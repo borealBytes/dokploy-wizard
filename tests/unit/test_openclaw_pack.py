@@ -9,6 +9,7 @@ import json
 import re
 from dataclasses import dataclass
 from email.message import Message
+from pathlib import Path
 from typing import Any
 from urllib import error
 
@@ -47,12 +48,17 @@ from dokploy_wizard.packs.openclaw import (
 )
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
+    ComposeArtifactHashState,
     OwnedResource,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
     resolve_desired_state,
+    write_applied_checkpoint,
 )
+from dokploy_wizard.verification import ServiceVerificationResult
+
+from .fake_dokploy import FakeDokployApiClient
 
 
 @dataclass
@@ -189,6 +195,34 @@ def _service_environment(compose: str, service_name: str) -> dict[str, str]:
         key, raw_value = line.strip().split(": ", 1)
         environment[key] = json.loads(raw_value)
     return environment
+
+
+def _write_compose_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: str) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("openclaw",),
+            compose_artifact_hashes={
+                service_name: ComposeArtifactHashState.from_rendered_compose(
+                    service_id=service_name,
+                    rendered_compose=rendered_compose,
+                )
+            },
+        ),
+    )
+
+
+def _write_empty_applied_checkpoint(state_dir: Path) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("openclaw",),
+        ),
+    )
 
 
 def test_reconcile_openclaw_plans_slot_runtime_for_openclaw_variant() -> None:
@@ -1096,6 +1130,110 @@ class FakeDokployOpenClawApi:
         del title, description
         self.deploy_calls += 1
         return DokployDeployResult(success=True, compose_id=compose_id, message=None)
+
+
+def test_dokploy_openclaw_backend_healthy_unchanged_rerun_skips_update_and_deploy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service_name = "wizard-stack-openclaw"
+    client = FakeDokployApiClient()
+    _write_empty_applied_checkpoint(tmp_path)
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=client,
+        state_dir=tmp_path,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_verify_service_runtime",
+        lambda *, service_name, variant, url: ServiceVerificationResult(
+            service_name=service_name,
+            tier="app",
+            status="pass",
+            detail=f"{variant} runtime healthy at {url}",
+        ),
+    )
+
+    created = backend.create_service(
+        resource_name=service_name,
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+    compose = client.compose_files_by_name[service_name]
+    _write_compose_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=compose)
+
+    updated = backend.update_service(
+        resource_id=created.resource_id,
+        resource_name=service_name,
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    assert updated == created
+    client.assert_mutation_counts(service_name, create=1, update=0, deploy=1)
+
+
+def test_dokploy_my_farm_backend_healthy_unchanged_rerun_skips_update_and_deploy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service_name = "wizard-stack-my-farm-advisor"
+    client = FakeDokployApiClient()
+    _write_empty_applied_checkpoint(tmp_path)
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-ai-key",
+        client=client,
+        state_dir=tmp_path,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_verify_service_runtime",
+        lambda *, service_name, variant, url: ServiceVerificationResult(
+            service_name=service_name,
+            tier="app",
+            status="pass",
+            detail=f"{variant} runtime healthy at {url}",
+        ),
+    )
+
+    created = backend.create_service(
+        resource_name=service_name,
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+    compose = client.compose_files_by_name[service_name]
+    _write_compose_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=compose)
+
+    updated = backend.update_service(
+        resource_id=created.resource_id,
+        resource_name=service_name,
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    assert updated == created
+    client.assert_mutation_counts(service_name, create=1, update=0, deploy=1)
 
 
 def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
@@ -2593,7 +2731,19 @@ def test_check_health_succeeds_when_container_http_probe_passes(
         "dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda _: False
     )
     monkeypatch.setattr(
-        "dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", lambda *_: True
+        "dokploy_wizard.dokploy.openclaw._load_runtime_config_payload",
+        lambda service_name: {
+            "gateway": {"controlUi": {"allowedOrigins": ["https://openclaw.example.com"]}},
+            "agents": {"list": [{"id": "main", "default": True}]},
+            "bindings": [],
+        },
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._container_paths_are_writable", lambda *args: True
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._container_litellm_models_accessible",
+        lambda *args: True,
     )
 
     assert backend.check_health(service=service, url="https://openclaw.example.com/health") is True
@@ -2627,21 +2777,34 @@ def test_check_health_falls_back_to_local_https_before_control_ui_probe(
         calls.append(("local", url))
         return True
 
-    def fake_control(service_name: str, url: str) -> bool:
-        calls.append((service_name, url))
-        return True
+    def fake_load_config(service_name: str) -> dict[str, object]:
+        calls.append((service_name, "config"))
+        return {
+            "gateway": {"controlUi": {"allowedOrigins": ["https://openclaw.example.com"]}},
+            "agents": {"list": [{"id": "main", "default": True}]},
+            "bindings": [],
+        }
 
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.openclaw._wait_for_container_http_health", fake_container_wait
     )
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", fake_wait)
-    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", fake_control)
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._load_runtime_config_payload", fake_load_config
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._container_paths_are_writable", lambda *args: True
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._container_litellm_models_accessible",
+        lambda *args: True,
+    )
 
     assert backend.check_health(service=service, url="https://openclaw.example.com/health") is True
     assert calls == [
         ("container", "wizard-stack-openclaw:18789:https://openclaw.example.com/health"),
         ("local", "https://openclaw.example.com/health"),
-        ("wizard-stack-openclaw", "https://openclaw.example.com/health"),
+        ("wizard-stack-openclaw", "config"),
     ]
 
 

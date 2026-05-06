@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
+from pathlib import Path
 from typing import Protocol
 
 from dokploy_wizard.core import (
@@ -25,6 +26,10 @@ from dokploy_wizard.dokploy.client import (
     DokployDeployResult,
     DokployEnvironmentSummary,
     DokployProjectSummary,
+)
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    persist_compose_artifact_hash,
 )
 from dokploy_wizard.litellm import (
     LiteLLMAdminApi,
@@ -77,6 +82,7 @@ class DokploySharedCoreBackend:
         litellm_consumer_model_allowlists: dict[str, tuple[str, ...]] | None = None,
         litellm_admin_api: LiteLLMAdminApi | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
+        state_dir: Path = Path(".dokploy-wizard-state"),
     ) -> None:
         self._stack_name = stack_name
         self._plan = plan
@@ -90,6 +96,7 @@ class DokploySharedCoreBackend:
         self._litellm_consumer_model_allowlists = litellm_consumer_model_allowlists or {}
         self._litellm_admin_api = litellm_admin_api
         self._sleep_fn = sleep_fn
+        self._state_dir = state_dir
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self._lookup_locator(resource_id, "network") is None:
@@ -329,6 +336,13 @@ class DokploySharedCoreBackend:
     def _ensure_compose_applied(self) -> _ComposeLocator:
         if self._applied_locator is not None:
             return self._applied_locator
+        rendered_compose = _render_compose_file(
+            self._plan,
+            self._mail_relay_config,
+            self._litellm_env,
+            self._litellm_generated_keys,
+        )
+        reconcile_title = "dokploy-wizard shared core reconcile"
         try:
             projects = self._client.list_projects()
             for project in projects:
@@ -339,42 +353,47 @@ class DokploySharedCoreBackend:
                     break
                 for compose in environment.composes:
                     if compose.name == self._compose_name:
-                        updated = self._client.update_compose(
+                        result = apply_compose_noop_guard(
+                            rendered_compose=rendered_compose,
+                            service_key=self._compose_name,
+                            state_dir=self._state_dir,
+                            client=self._client,
+                            locator=_ComposeLocator(
+                                project_id=project.project_id,
+                                environment_id=environment.environment_id,
+                                compose_id=compose.compose_id,
+                            ),
                             compose_id=compose.compose_id,
-                            compose_file=_render_compose_file(
-                                self._plan,
-                                self._mail_relay_config,
-                                self._litellm_env,
-                                self._litellm_generated_keys,
+                            title=reconcile_title,
+                            description="Update shared core compose app",
+                            verify_current=self._shared_core_runtime_ready_for_noop,
+                            locator_factory=lambda compose_id: _ComposeLocator(
+                                project_id=project.project_id,
+                                environment_id=environment.environment_id,
+                                compose_id=compose_id,
                             ),
                         )
-                        self._client.deploy_compose(
-                            compose_id=updated.compose_id,
-                            title="dokploy-wizard shared core reconcile",
-                            description="Update shared core compose app",
-                        )
-                        locator = _ComposeLocator(
-                            project_id=project.project_id,
-                            environment_id=environment.environment_id,
-                            compose_id=updated.compose_id,
-                        )
-                        self._applied_locator = locator
-                        return locator
+                        self._applied_locator = result.locator
+                        return result.locator
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
-                    compose_file=_render_compose_file(
-                        self._plan,
-                        self._mail_relay_config,
-                        self._litellm_env,
-                        self._litellm_generated_keys,
-                    ),
+                    compose_file=rendered_compose,
                     app_name=self._compose_name,
                 )
-                self._client.deploy_compose(
+                deployment = self._client.deploy_compose(
                     compose_id=created.compose_id,
-                    title="dokploy-wizard shared core reconcile",
+                    title=reconcile_title,
                     description="Create shared core compose app",
+                )
+                if not deployment.success:
+                    raise SharedCoreError(
+                        "Dokploy deploy for shared core compose app did not report success."
+                    )
+                persist_compose_artifact_hash(
+                    state_dir=self._state_dir,
+                    service_key=self._compose_name,
+                    rendered_compose=rendered_compose,
                 )
                 locator = _ComposeLocator(
                     project_id=project.project_id,
@@ -392,18 +411,22 @@ class DokploySharedCoreBackend:
             created_compose = self._client.create_compose(
                 name=self._compose_name,
                 environment_id=created_project.environment_id,
-                compose_file=_render_compose_file(
-                    self._plan,
-                    self._mail_relay_config,
-                    self._litellm_env,
-                    self._litellm_generated_keys,
-                ),
+                compose_file=rendered_compose,
                 app_name=self._compose_name,
             )
-            self._client.deploy_compose(
+            deployment = self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
-                title="dokploy-wizard shared core reconcile",
+                title=reconcile_title,
                 description="Create shared core compose app",
+            )
+            if not deployment.success:
+                raise SharedCoreError(
+                    "Dokploy deploy for shared core compose app did not report success."
+                )
+            persist_compose_artifact_hash(
+                state_dir=self._state_dir,
+                service_key=self._compose_name,
+                rendered_compose=rendered_compose,
             )
         except DokployApiError as error:
             raise SharedCoreError(str(error)) from error
@@ -429,6 +452,34 @@ class DokploySharedCoreBackend:
             )
         except Exception as error:
             raise SharedCoreError(str(error)) from error
+
+    def _shared_core_runtime_ready_for_noop(self) -> bool:
+        postgres_allocations = tuple(
+            allocation.postgres for allocation in self._plan.allocations if allocation.postgres is not None
+        )
+        if self._plan.postgres is not None and not self.validate_postgres_allocations(
+            postgres_allocations
+        ):
+            return False
+        if self._plan.redis is not None:
+            container_name = _find_container_name(self._plan.redis.service_name)
+            if container_name is None or not _redis_is_ready(container_name):
+                return False
+        return self._litellm_runtime_ready_for_noop()
+
+    def _litellm_runtime_ready_for_noop(self) -> bool:
+        if self._plan.litellm is None:
+            return True
+        if self._litellm_admin_api is None:
+            return False
+        try:
+            LiteLLMGatewayManager(api=self._litellm_admin_api, sleep_fn=self._sleep_fn).wait_until_ready(
+                attempts=1,
+                delay_seconds=0,
+            )
+        except Exception:
+            return False
+        return True
 
 
 def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSummary | None:
@@ -888,6 +939,16 @@ def _wait_for_postgres_ready(
         "Shared-core Postgres did not become ready for allocation provisioning: "
         f"{detail or 'unknown error'}"
     )
+
+
+def _redis_is_ready(container_name: str) -> bool:
+    result = subprocess.run(
+        ["docker", "exec", container_name, "sh", "-lc", 'redis-cli -a "$REDIS_PASSWORD" ping'],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "PONG"
 
 
 def _postgres_password_for_allocation(allocation: SharedPostgresAllocation) -> str:

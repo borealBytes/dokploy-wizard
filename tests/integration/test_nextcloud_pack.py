@@ -922,6 +922,7 @@ class NextcloudOccRecorder:
 
     def patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(nextcloud_module, "_nextcloud_status_ready", lambda url: True)
+        monkeypatch.setattr(nextcloud_module, "_container_health_ready", lambda container_name: True)
         monkeypatch.setattr(nextcloud_module, "_local_https_health_check", lambda url: True)
         monkeypatch.setattr(
             nextcloud_module,
@@ -1353,6 +1354,95 @@ def test_rerun_with_both_advisors_is_idempotent_for_nextcloud_mounts(
     assert summary["nextcloud"]["outcome"] == "already_present"
     assert len(occ.commands) == command_count_before_rerun
     assert occ.mount_pairs() == mount_pairs_before_rerun
+
+
+def test_dokploy_nextcloud_rerun_skips_update_and_deploy_when_hash_and_readiness_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "state"
+    env_file = tmp_path / "nextcloud-noop.env"
+    raw_env = RawEnvInput(
+        format_version=1,
+        values=_base_install_values(ENABLE_NEXTCLOUD="true"),
+    )
+    desired_state = resolve_desired_state(raw_env)
+    allocation = next(
+        item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"
+    )
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.redis is not None
+    client = RecordingNextcloudApi()
+    occ = NextcloudOccRecorder()
+    networking_backend = FakeCloudflareBackend()
+    shared_core_backend = FakeSharedCoreBackend()
+    occ.patch(monkeypatch)
+    first_backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        state_dir=state_dir,
+        client=client,
+    )
+
+    first_summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=first_backend,
+    )
+
+    loaded_state = load_state_dir(state_dir)
+    assert first_summary["nextcloud"]["outcome"] == "applied"
+    assert loaded_state.applied_state is not None
+    assert "wizard-stack-nextcloud" in loaded_state.applied_state.compose_artifact_hashes
+
+    second_backend = DokployNextcloudBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        nextcloud_hostname=desired_state.hostnames["nextcloud"],
+        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        redis_service_name=desired_state.shared_core.redis.service_name,
+        postgres=allocation.postgres,
+        redis=allocation.redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        state_dir=state_dir,
+        client=client,
+    )
+    update_calls_before_rerun = client.update_compose_calls
+    deploy_calls_before_rerun = client.deploy_calls
+
+    rerun_summary = run_install_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=FakeDokployBackend(True, True),
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=FakeHeadscaleBackend(),
+        nextcloud_backend=second_backend,
+    )
+
+    assert rerun_summary["lifecycle"]["mode"] == "noop"
+    assert rerun_summary["nextcloud"]["outcome"] == "already_present"
+    assert client.update_compose_calls == update_calls_before_rerun
+    assert client.deploy_calls == deploy_calls_before_rerun
 
 
 def test_install_reconciles_nextcloud_pair_and_persists_runtime_ledger(tmp_path: Path) -> None:

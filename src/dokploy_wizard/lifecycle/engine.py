@@ -58,6 +58,7 @@ from dokploy_wizard.state import (
     DesiredState,
     OwnershipLedger,
     RawEnvInput,
+    load_state_dir,
     write_applied_checkpoint,
     write_ownership_ledger,
 )
@@ -403,12 +404,16 @@ def _write_checkpoint(
     valid_phases: set[str],
 ) -> None:
     completed_steps = _longest_prefix(applicable_phases, valid_phases)
+    existing_applied = load_state_dir(state_dir).applied_state
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
             format_version=desired_state.format_version,
             desired_state_fingerprint=desired_state.fingerprint(),
             completed_steps=completed_steps,
+            compose_artifact_hashes=(
+                {} if existing_applied is None else dict(existing_applied.compose_artifact_hashes)
+            ),
             lifecycle_checkpoint_contract_version=LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
         ),
     )

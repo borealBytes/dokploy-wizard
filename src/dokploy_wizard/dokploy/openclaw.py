@@ -25,12 +25,17 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    persist_compose_artifact_hash,
+)
 from dokploy_wizard.packs.openclaw.models import (
     OpenClawNexaDeploymentContract,
     OpenClawResourceRecord,
 )
 from dokploy_wizard.packs.openclaw.reconciler import OpenClawError
 from dokploy_wizard.state.models import LiteLLMGeneratedKeys
+from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 _DEFAULT_MODEL_PROVIDER = "openai"
 _DEFAULT_MODEL_NAME = "gpt-4o-mini"
@@ -307,6 +312,7 @@ class DokployOpenClawBackend:
         nvidia_visible_devices: str = _DEFAULT_NVIDIA_VISIBLE_DEVICES,
         client: DokployOpenClawApi | None = None,
         litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
+        state_dir: Path | None = None,
     ) -> None:
         resolved_openclaw_nexa_env = _resolve_openclaw_nexa_env(stack_name, openclaw_nexa_env or {})
         self._stack_name = stack_name
@@ -382,6 +388,7 @@ class DokployOpenClawBackend:
             ),
         }
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
+        self._state_dir = state_dir
 
     def get_service(self, resource_id: str) -> OpenClawResourceRecord | None:
         parsed = _parse_resource_id(resource_id)
@@ -467,16 +474,14 @@ class DokployOpenClawBackend:
         )
 
     def check_health(self, *, service: OpenClawResourceRecord, url: str) -> bool:
-        if not _wait_for_docker_container_is_up(service.resource_name):
-            return False
         variant = _variant_from_service_name(self._stack_name, service.resource_name)
-        app_port = _app_port_for_variant(variant or "openclaw")
-        if not _wait_for_container_http_health(service.resource_name, url, app_port=app_port):
-            https_ok = _wait_for_local_https_health(url)
-            if not https_ok:
-                return False
-        _control_ui_origin_ready(service.resource_name, url)
-        return True
+        if variant is None:
+            return False
+        return self._verify_service_runtime(
+            service_name=service.resource_name,
+            variant=variant,
+            url=url,
+        ).passed
 
     def _validate_inputs(
         self,
@@ -540,6 +545,7 @@ class DokployOpenClawBackend:
             runtime_config=self._runtime_configs[variant],
             generated_keys=self._litellm_generated_keys,
         )
+        health_url = _external_health_url(hostname=hostname, variant=variant)
         try:
             projects = self._client.list_projects()
             for project in projects:
@@ -550,15 +556,53 @@ class DokployOpenClawBackend:
                     break
                 for compose in environment.composes:
                     if compose.name == resource_name:
+                        locator = _ComposeLocator(
+                            project_id=project.project_id,
+                            environment_id=environment.environment_id,
+                            compose_id=compose.compose_id,
+                        )
+                        if self._state_dir is not None:
+                            applied = apply_compose_noop_guard(
+                                rendered_compose=compose_file,
+                                service_key=resource_name,
+                                state_dir=self._state_dir,
+                                client=self._client,
+                                locator=locator,
+                                compose_id=compose.compose_id,
+                                title=f"dokploy-wizard {variant} reconcile",
+                                description=f"Update {variant} compose app",
+                                verify_current=lambda: self._verify_service_runtime(
+                                    service_name=resource_name,
+                                    variant=variant,
+                                    url=health_url,
+                                ),
+                                locator_factory=lambda compose_id: _ComposeLocator(
+                                    project_id=project.project_id,
+                                    environment_id=environment.environment_id,
+                                    compose_id=compose_id,
+                                ),
+                            )
+                            return applied.locator
                         updated = self._client.update_compose(
                             compose_id=compose.compose_id,
                             compose_file=compose_file,
                         )
-                        self._client.deploy_compose(
+                        deployment = self._client.deploy_compose(
                             compose_id=updated.compose_id,
                             title=f"dokploy-wizard {variant} reconcile",
                             description=f"Update {variant} compose app",
                         )
+                        if not deployment.success:
+                            msg = (
+                                f"Dokploy deploy for compose service '{resource_name}' did not report success."
+                            )
+                            raise OpenClawError(msg)
+                        if self._state_dir is not None:
+                            persist_compose_artifact_hash(
+                                state_dir=self._state_dir,
+                                service_key=resource_name,
+                                rendered_compose=compose_file,
+                            )
                         return _ComposeLocator(
                             project_id=project.project_id,
                             environment_id=environment.environment_id,
@@ -570,11 +614,20 @@ class DokployOpenClawBackend:
                     compose_file=compose_file,
                     app_name=resource_name,
                 )
-                self._client.deploy_compose(
+                deployment = self._client.deploy_compose(
                     compose_id=created.compose_id,
                     title=f"dokploy-wizard {variant} reconcile",
                     description=f"Create {variant} compose app",
                 )
+                if not deployment.success:
+                    msg = f"Dokploy deploy for compose service '{resource_name}' did not report success."
+                    raise OpenClawError(msg)
+                if self._state_dir is not None:
+                    persist_compose_artifact_hash(
+                        state_dir=self._state_dir,
+                        service_key=resource_name,
+                        rendered_compose=compose_file,
+                    )
                 return _ComposeLocator(
                     project_id=project.project_id,
                     environment_id=environment.environment_id,
@@ -592,17 +645,179 @@ class DokployOpenClawBackend:
                 compose_file=compose_file,
                 app_name=resource_name,
             )
-            self._client.deploy_compose(
+            deployment = self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
                 title=f"dokploy-wizard {variant} reconcile",
                 description=f"Create {variant} compose app",
             )
+            if not deployment.success:
+                msg = f"Dokploy deploy for compose service '{resource_name}' did not report success."
+                raise OpenClawError(msg)
+            if self._state_dir is not None:
+                persist_compose_artifact_hash(
+                    state_dir=self._state_dir,
+                    service_key=resource_name,
+                    rendered_compose=compose_file,
+                )
         except DokployApiError as error:
             raise OpenClawError(str(error)) from error
         return _ComposeLocator(
             project_id=created_project.project_id,
             environment_id=created_project.environment_id,
             compose_id=created_compose.compose_id,
+        )
+
+    def _verify_service_runtime(
+        self,
+        *,
+        service_name: str,
+        variant: str,
+        url: str,
+    ) -> ServiceVerificationResult:
+        runtime_config = self._runtime_configs[variant]
+        if not _wait_for_docker_container_is_up(service_name):
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail="Container health verification failed because the advisor container is not running.",
+                evidence_command=["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
+            )
+
+        app_port = _app_port_for_variant(variant)
+        if not _wait_for_container_http_health(service_name, url, app_port=app_port):
+            if not _wait_for_local_https_health(url):
+                return make_verification_result(
+                    service_name=service_name,
+                    tier="app",
+                    passed=False,
+                    detail=(
+                        "Container health verification failed because neither the in-container HTTP "
+                        "probe nor the local HTTPS ingress probe succeeded."
+                    ),
+                    evidence_command=["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
+                )
+
+        config_service_name = service_name
+        control_ui_service_name = (
+            f"{service_name}-public"
+            if variant == "openclaw" and runtime_config.internal_hostname is not None
+            else service_name
+        )
+        config_payload = _load_runtime_config_payload(config_service_name)
+        if config_payload is None:
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail="Runtime verification failed because the generated OpenClaw config could not be read.",
+                evidence_command=[
+                    "docker",
+                    "exec",
+                    _find_container_name(config_service_name) or config_service_name,
+                    "sh",
+                    "-lc",
+                    _runtime_config_dump_command(),
+                ],
+            )
+
+        control_ui_payload = (
+            config_payload
+            if control_ui_service_name == config_service_name
+            else _load_runtime_config_payload(control_ui_service_name)
+        )
+        if control_ui_payload is None:
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail=(
+                    "Runtime verification failed because the control UI gateway config could not be read "
+                    "for trusted-proxy validation."
+                ),
+                evidence_command=[
+                    "docker",
+                    "exec",
+                    _find_container_name(control_ui_service_name) or control_ui_service_name,
+                    "sh",
+                    "-lc",
+                    _runtime_config_dump_command(),
+                ],
+            )
+
+        if not _control_ui_origin_allowed(control_ui_payload, url):
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail="Runtime verification failed because the control UI allowedOrigins list is missing the public advisor origin.",
+            )
+
+        if runtime_config.trusted_proxy_emails and not _trusted_proxy_gateway_ready(
+            control_ui_payload, runtime_config=runtime_config
+        ):
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail=(
+                    "Runtime verification failed because the trusted-proxy control UI config is not "
+                    "ready with retained operator scopes."
+                ),
+            )
+
+        if variant == "openclaw":
+            seeded_config_ok, seeded_detail = _openclaw_seeded_config_ready(
+                config_payload,
+                runtime_config=runtime_config,
+            )
+            if not seeded_config_ok:
+                return make_verification_result(
+                    service_name=service_name,
+                    tier="app",
+                    passed=False,
+                    detail=seeded_detail,
+                )
+
+        runtime_dirs = _runtime_directory_paths(variant=variant, runtime_config=runtime_config)
+        if not _container_paths_are_writable(service_name, runtime_dirs):
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail="Runtime verification failed because one or more managed advisor directories are missing or not writable.",
+                evidence_command=[
+                    "docker",
+                    "exec",
+                    _find_container_name(service_name) or service_name,
+                    "sh",
+                    "-lc",
+                    _paths_are_writable_command(runtime_dirs),
+                ],
+            )
+
+        expected_models = _expected_litellm_model_aliases(variant)
+        if not _container_litellm_models_accessible(service_name, expected_models):
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail=(
+                    "Runtime verification failed because the advisor's LiteLLM virtual key does not "
+                    "expose the expected local model aliases."
+                ),
+                evidence_command=["docker", "exec", _find_container_name(service_name) or service_name, "node", "-e", _litellm_model_probe_script(), *expected_models],
+            )
+
+        return make_verification_result(
+            service_name=service_name,
+            tier="app",
+            passed=True,
+            detail=(
+                "Advisor runtime verification passed: container health, trusted-proxy readiness, "
+                "generated config, writable runtime directories, seeded bindings, and LiteLLM "
+                "local model access are all healthy."
+            ),
         )
 
 
@@ -740,36 +955,241 @@ def _wait_for_docker_container_is_up(
 
 
 def _control_ui_origin_ready(service_name: str, url: str) -> bool:
+    payload = _load_runtime_config_payload(service_name)
+    if payload is None:
+        return False
+    return _control_ui_origin_allowed(payload, url)
+
+
+def _control_ui_origin_allowed(payload: dict[str, object], url: str) -> bool:
     parsed = parse.urlsplit(url)
     if not parsed.hostname:
         return False
+    gateway = payload.get("gateway")
+    if not isinstance(gateway, dict):
+        return False
+    control_ui = gateway.get("controlUi")
+    if not isinstance(control_ui, dict):
+        return False
+    origins = control_ui.get("allowedOrigins", [])
+    if not isinstance(origins, list):
+        return False
+    return f"https://{parsed.hostname}" in origins
+
+
+def _trusted_proxy_gateway_ready(
+    payload: dict[str, object], *, runtime_config: _AdvisorRuntimeConfig
+) -> bool:
+    gateway = payload.get("gateway")
+    if not isinstance(gateway, dict):
+        return False
+    auth = gateway.get("auth")
+    if not isinstance(auth, dict) or auth.get("mode") != "trusted-proxy":
+        return False
+    control_ui = gateway.get("controlUi")
+    if not isinstance(control_ui, dict):
+        return False
+    if control_ui.get("dangerouslyDisableDeviceAuth") is not True:
+        return False
+    trusted_proxy = auth.get("trustedProxy")
+    if not isinstance(trusted_proxy, dict):
+        return False
+    if trusted_proxy.get("userHeader") != _CLOUDFLARE_ACCESS_USER_HEADER:
+        return False
+    allow_users = trusted_proxy.get("allowUsers")
+    if not isinstance(allow_users, list):
+        return False
+    expected_users = set(runtime_config.trusted_proxy_emails)
+    nexa_agent_user = runtime_config.nexa_env.get("OPENCLAW_NEXA_AGENT_USER_ID")
+    if nexa_agent_user is not None and nexa_agent_user.strip() != "":
+        expected_users.add(nexa_agent_user.strip())
+    return expected_users.issubset({str(item) for item in allow_users})
+
+
+def _openclaw_seeded_config_ready(
+    payload: dict[str, object], *, runtime_config: _AdvisorRuntimeConfig
+) -> tuple[bool, str]:
+    agents = payload.get("agents")
+    if not isinstance(agents, dict):
+        return False, "Runtime verification failed because the generated OpenClaw config is missing the agents block."
+    agent_list = agents.get("list")
+    if not isinstance(agent_list, list):
+        return False, "Runtime verification failed because the generated OpenClaw config is missing the seeded agent list."
+    agent_ids = {
+        item.get("id")
+        for item in agent_list
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    if "main" not in agent_ids:
+        return False, "Runtime verification failed because the generated OpenClaw config is missing the main agent."
+    bindings = payload.get("bindings", [])
+    if not isinstance(bindings, list):
+        return False, "Runtime verification failed because the generated OpenClaw config bindings block is invalid."
+    if runtime_config.nexa_contract is not None:
+        if "nexa" not in agent_ids:
+            return False, "Runtime verification failed because the generated OpenClaw config is missing the nexa agent."
+        if not any(
+            isinstance(item, dict)
+            and item.get("agentId") == "nexa"
+            and isinstance(item.get("match"), dict)
+            and item.get("match", {}).get("channel") == "nextcloud-talk"
+            for item in bindings
+        ):
+            return False, "Runtime verification failed because the generated OpenClaw config is missing the nexa nextcloud-talk binding."
+    has_telegram_binding = any(
+        isinstance(item, dict)
+        and item.get("agentId") == "telly"
+        and isinstance(item.get("match"), dict)
+        and item.get("match", {}).get("channel") == "telegram"
+        for item in bindings
+    )
+    if runtime_config.telegram_bot_token is not None or has_telegram_binding:
+        if "telly" not in agent_ids:
+            return False, "Runtime verification failed because the generated OpenClaw config is missing the telly agent."
+        if not has_telegram_binding:
+            return False, "Runtime verification failed because the generated OpenClaw config is missing the telly telegram binding."
+    return True, "ok"
+
+
+def _runtime_directory_paths(
+    *, variant: str, runtime_config: _AdvisorRuntimeConfig
+) -> tuple[str, ...]:
+    if variant == "my-farm-advisor":
+        return (
+            _MY_FARM_ADVISOR_STATE_ROOT,
+            f"{_MY_FARM_ADVISOR_STATE_ROOT}/.openclaw",
+            _MY_FARM_ADVISOR_WORKSPACE_ROOT,
+            _MY_FARM_ADVISOR_PIPELINE_WORKSPACE_ROOT,
+            _MY_FARM_ADVISOR_MANAGED_SKILLS_ROOT,
+            f"{_MY_FARM_ADVISOR_WORKSPACE_ROOT}/skills",
+        )
+    paths = [
+        _DEFAULT_OPENCLAW_STATE_ROOT,
+        _DEFAULT_GENERAL_OPENCLAW_WORKSPACE_ROOT,
+        _DEFAULT_TELLY_OPENCLAW_WORKSPACE_ROOT,
+        f"{_DEFAULT_OPENCLAW_STATE_ROOT}/agents/main/sessions",
+        f"{_DEFAULT_OPENCLAW_STATE_ROOT}/agents/telly/sessions",
+    ]
+    if runtime_config.nexa_contract is not None:
+        paths.extend(
+            [
+                _DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT,
+                f"{_DEFAULT_OPENCLAW_STATE_ROOT}/agents/nexa/sessions",
+                f"{_DEFAULT_OPENCLAW_STATE_ROOT}/.nexa",
+            ]
+        )
+    return tuple(paths)
+
+
+def _expected_litellm_model_aliases(variant: str) -> tuple[str, ...]:
+    if variant == "my-farm-advisor":
+        return (_DEFAULT_LOCAL_MODEL_REF, _DEFAULT_LOCAL_MODEL_ID)
+    return (_DEFAULT_LOCAL_MODEL_REF,)
+
+
+def _external_health_url(*, hostname: str, variant: str) -> str:
+    return f"https://{hostname}{_external_health_path_for_variant(variant)}"
+
+
+def _external_health_path_for_variant(variant: str) -> str:
+    if variant == "my-farm-advisor":
+        return "/healthz"
+    return "/health"
+
+
+def _runtime_config_dump_command() -> str:
+    return (
+        "cat /home/node/.openclaw/openclaw.json 2>/dev/null "
+        "|| cat /data/.openclaw/openclaw.json 2>/dev/null "
+        "|| cat /data/openclaw.json 2>/dev/null || true"
+    )
+
+
+def _load_runtime_config_payload(service_name: str) -> dict[str, object] | None:
     container_name = _find_container_name(service_name)
     if container_name is None:
-        return False
+        return None
     result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            container_name,
-            "sh",
-            "-lc",
-            "cat /home/node/.openclaw/openclaw.json 2>/dev/null "
-            "|| cat /data/.openclaw/openclaw.json 2>/dev/null || true",
-        ],
+        ["docker", "exec", container_name, "sh", "-lc", _runtime_config_dump_command()],
         check=False,
         capture_output=True,
         text=True,
     )
     if result.returncode != 0 or result.stdout.strip() == "":
-        return False
+        return None
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _paths_are_writable_command(paths: tuple[str, ...]) -> str:
+    quoted_paths = " ".join(shlex.quote(path) for path in paths)
+    return (
+        f"for path in {quoted_paths}; do "
+        'test -d "$path" || exit 10; '
+        'test -w "$path" || exit 11; '
+        "done"
+    )
+
+
+def _container_paths_are_writable(service_name: str, paths: tuple[str, ...]) -> bool:
+    container_name = _find_container_name(service_name)
+    if container_name is None:
         return False
-    origins = payload.get("gateway", {}).get("controlUi", {}).get("allowedOrigins", [])
-    if not isinstance(origins, list):
+    result = subprocess.run(
+        ["docker", "exec", container_name, "sh", "-lc", _paths_are_writable_command(paths)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _litellm_model_probe_script() -> str:
+    return (
+        "const expected = new Set(process.argv.slice(1));"
+        "const base = (process.env.OPENAI_BASE_URL || '').replace(/\\/$/, '');"
+        "const apiKey = process.env.OPENAI_API_KEY || '';"
+        "if (!base || !apiKey) process.exit(1);"
+        "fetch(`${base}/v1/models`, {headers: {Authorization: `Bearer ${apiKey}`, Accept: 'application/json'}})"
+        ".then(async (response) => {"
+        "if (!response.ok) process.exit(1);"
+        "const payload = await response.json();"
+        "const entries = Array.isArray(payload.data) ? payload.data : [];"
+        "const ids = new Set(entries.map((item) => item && item.id).filter((item) => typeof item === 'string'));"
+        "process.exit([...expected].every((item) => ids.has(item)) ? 0 : 1);"
+        "})"
+        ".catch(() => process.exit(1));"
+    )
+
+
+def _container_litellm_models_accessible(service_name: str, expected_models: tuple[str, ...]) -> bool:
+    if not expected_models:
+        return True
+    container_name = _find_container_name(service_name)
+    if container_name is None:
         return False
-    return f"https://{parsed.hostname}" in origins
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                container_name,
+                "node",
+                "-e",
+                _litellm_model_probe_script(),
+                *expected_models,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0
 
 
 def _find_container_name(service_name: str) -> str | None:
@@ -1740,7 +2160,9 @@ def _command_for_variant(
     ]
     auth_payload: dict[str, object] = {"mode": auth_mode}
     if auth_mode == "trusted-proxy":
-        gateway_payload["controlUi"]["dangerouslyDisableDeviceAuth"] = True
+        control_ui_payload = gateway_payload.get("controlUi")
+        if isinstance(control_ui_payload, dict):
+            control_ui_payload["dangerouslyDisableDeviceAuth"] = True
         trusted_proxy_config: dict[str, object] = {
             "userHeader": _CLOUDFLARE_ACCESS_USER_HEADER,
         }

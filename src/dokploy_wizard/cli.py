@@ -1043,22 +1043,26 @@ def _run_lifecycle_flow(
     if networking_backend is None:
         cloudflared_connector_backend = _build_cloudflared_connector_backend(
             raw_env=raw_env,
+            state_dir=state_dir,
             desired_state=desired_state,
             session_client=dokploy_session_client,
         )
     shared_core_phase_backend = shared_core_backend or _build_shared_core_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
         litellm_generated_keys=litellm_generated_keys,
     )
     headscale_phase_backend = headscale_backend or _build_headscale_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     matrix_phase_backend = matrix_backend or _build_matrix_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
@@ -1079,6 +1083,7 @@ def _run_lifecycle_flow(
     )
     seaweedfs_phase_backend = seaweedfs_backend or _build_seaweedfs_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
@@ -1090,6 +1095,7 @@ def _run_lifecycle_flow(
     )
     openclaw_phase_backend = openclaw_backend or _build_openclaw_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
         litellm_generated_keys=litellm_generated_keys,
@@ -1148,6 +1154,11 @@ def _run_lifecycle_flow(
                         format_version=desired_state.format_version,
                         desired_state_fingerprint=desired_state.fingerprint(),
                         completed_steps=lifecycle_plan.initial_completed_steps,
+                        compose_artifact_hashes=(
+                            {}
+                            if loaded_state.applied_state is None
+                            else dict(loaded_state.applied_state.compose_artifact_hashes)
+                        ),
                         lifecycle_checkpoint_contract_version=(
                             LIFECYCLE_CHECKPOINT_CONTRACT_VERSION
                         ),
@@ -1588,6 +1599,7 @@ def _live_drift_entry_message(entry: dict[str, Any]) -> str:
 def _build_shared_core_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
     litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
@@ -1608,6 +1620,7 @@ def _build_shared_core_backend(
                 flat_env=dict(raw_env.values),
                 plan=desired_state.shared_core,
             ),
+            state_dir=state_dir,
             litellm_admin_api=(
                 None
                 if litellm_generated_keys is None or desired_state.shared_core.litellm is None
@@ -1634,6 +1647,7 @@ def _build_shared_core_backend(
 def _build_cloudflared_connector_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> Any | None:
@@ -1646,6 +1660,7 @@ def _build_cloudflared_connector_backend(
     return DokployCloudflaredBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         public_url=desired_state.dokploy_url,
         client=_build_dokploy_api_client(
@@ -1660,6 +1675,7 @@ def _build_cloudflared_connector_backend(
 def _build_headscale_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> HeadscaleBackend:
@@ -1672,6 +1688,7 @@ def _build_headscale_backend(
         return DokployHeadscaleBackend(
             api_url=api_url,
             api_key=api_key,
+            state_dir=state_dir,
             stack_name=desired_state.stack_name,
             hostname=hostname,
             client=_build_dokploy_api_client(
@@ -1766,6 +1783,7 @@ def _build_nextcloud_backend(
 def _build_matrix_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> MatrixBackend:
@@ -1790,6 +1808,7 @@ def _build_matrix_backend(
     return DokployMatrixBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         shared_allocation=allocation,
@@ -1898,6 +1917,7 @@ def _build_docuseal_backend(
 def _build_seaweedfs_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> SeaweedFsBackend:
@@ -1913,6 +1933,7 @@ def _build_seaweedfs_backend(
     return DokploySeaweedFsBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         access_key=access_key,
@@ -1974,6 +1995,7 @@ def _build_coder_backend(
 def _build_openclaw_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
     litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
@@ -2057,6 +2079,7 @@ def _build_openclaw_backend(
             session_client=session_client,
         ),
         litellm_generated_keys=litellm_generated_keys,
+        state_dir=state_dir,
     )
 
 

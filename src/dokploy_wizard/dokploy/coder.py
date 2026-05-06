@@ -24,6 +24,10 @@ from urllib import parse
 from urllib import request as urlrequest
 
 from dokploy_wizard.core.models import SharedPostgresAllocation
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    persist_compose_artifact_hash,
+)
 from dokploy_wizard.dokploy.client import (
     DokployApiClient,
     DokployApiError,
@@ -34,6 +38,8 @@ from dokploy_wizard.dokploy.client import (
     DokployProjectSummary,
 )
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
+from dokploy_wizard.state import load_state_dir
+from dokploy_wizard.verification import make_verification_result
 
 
 class DokployCoderApi(Protocol):
@@ -80,6 +86,7 @@ class DokployCoderBackend:
         hermes_model: str = _DEFAULT_HERMES_MODEL,
         ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
         ai_default_api_key: str | None = None,
+        state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployCoderApi | None = None,
     ) -> None:
         self._stack_name = stack_name
@@ -94,6 +101,7 @@ class DokployCoderBackend:
         self._hermes_model = hermes_model
         self._ai_default_base_url = ai_default_base_url
         self._ai_default_api_key = ai_default_api_key
+        self._state_dir = state_dir
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
@@ -190,8 +198,11 @@ class DokployCoderBackend:
         notes: list[str] = []
         if self._created_in_process:
             _wait_for_coder_bootstrap_api_ready(self._hostname)
+        bootstrap_ready = False
+        if not self._created_in_process:
+            bootstrap_ready = self._verify_current_compose_application().passed
         first_user_provisioned = False
-        if not _coder_first_user_exists(self._hostname):
+        if not bootstrap_ready and not _coder_first_user_exists(self._hostname):
             _create_coder_first_user(
                 hostname=self._hostname,
                 email=self._admin_email,
@@ -217,6 +228,8 @@ class DokployCoderBackend:
             ai_default_base_url=hermes_litellm_base_url,
             ai_default_api_key=self._ai_default_api_key,
         )
+        if bootstrap_ready:
+            return ()
         shared_network_name = _shared_network_name(self._stack_name)
         for template_name, template_dir, replacements in (
             (_default_template_name(), _default_template_dir(), {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name}),
@@ -323,19 +336,9 @@ class DokployCoderBackend:
         )
         try:
             if self._applied_locator is not None:
-                updated = self._client.update_compose(
-                    compose_id=self._applied_locator.compose_id, compose_file=compose_file
-                )
-                self._client.deploy_compose(
-                    compose_id=updated.compose_id,
-                    title="dokploy-wizard coder reconcile",
-                    description="Update Coder compose app",
-                )
-                self._created_in_process = True
-                self._applied_locator = _ComposeLocator(
-                    project_id=self._applied_locator.project_id,
-                    environment_id=self._applied_locator.environment_id,
-                    compose_id=updated.compose_id,
+                self._applied_locator = self._apply_existing_compose(
+                    locator=self._applied_locator,
+                    compose_file=compose_file,
                 )
                 return self._applied_locator
             projects = self._client.list_projects()
@@ -352,19 +355,25 @@ class DokployCoderBackend:
                             environment_id=environment.environment_id,
                             compose_id=compose.compose_id,
                         )
-                        self._applied_locator = locator
-                        return locator
+                        self._applied_locator = self._apply_existing_compose(
+                            locator=locator,
+                            compose_file=compose_file,
+                        )
+                        return self._applied_locator
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
                     compose_file=compose_file,
                     app_name=self._compose_name,
                 )
-                self._client.deploy_compose(
+                deployment = self._client.deploy_compose(
                     compose_id=created.compose_id,
                     title="dokploy-wizard coder reconcile",
                     description="Create Coder compose app",
                 )
+                if not deployment.success:
+                    msg = "Dokploy deploy for compose service 'coder' did not report success."
+                    raise RuntimeError(msg)
                 locator = _ComposeLocator(
                     project_id=project.project_id,
                     environment_id=environment.environment_id,
@@ -372,6 +381,7 @@ class DokployCoderBackend:
                 )
                 self._applied_locator = locator
                 self._created_in_process = True
+                self._persist_compose_hash_if_checkpoint_present(compose_file)
                 return locator
             created_project = self._client.create_project(
                 name=self._stack_name, description="Managed by dokploy-wizard", env=None
@@ -382,12 +392,15 @@ class DokployCoderBackend:
                 compose_file=compose_file,
                 app_name=self._compose_name,
             )
-            self._client.deploy_compose(
+            deployment = self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
                 title="dokploy-wizard coder reconcile",
                 description="Create Coder compose app",
             )
-        except DokployApiError as error:
+            if not deployment.success:
+                msg = "Dokploy deploy for compose service 'coder' did not report success."
+                raise RuntimeError(msg)
+        except (DokployApiError, RuntimeError) as error:
             raise CoderError(str(error)) from error
         locator = _ComposeLocator(
             project_id=created_project.project_id,
@@ -396,7 +409,153 @@ class DokployCoderBackend:
         )
         self._applied_locator = locator
         self._created_in_process = True
+        self._persist_compose_hash_if_checkpoint_present(compose_file)
         return locator
+
+    def _apply_existing_compose(
+        self, *, locator: _ComposeLocator, compose_file: str
+    ) -> _ComposeLocator:
+        if not self._has_applied_state_checkpoint():
+            updated = self._client.update_compose(
+                compose_id=locator.compose_id,
+                compose_file=compose_file,
+            )
+            deployment = self._client.deploy_compose(
+                compose_id=updated.compose_id,
+                title="dokploy-wizard coder reconcile",
+                description="Update Coder compose app",
+            )
+            if not deployment.success:
+                msg = "Dokploy deploy for compose service 'coder' did not report success."
+                raise RuntimeError(msg)
+            self._created_in_process = True
+            return _ComposeLocator(
+                project_id=locator.project_id,
+                environment_id=locator.environment_id,
+                compose_id=updated.compose_id,
+            )
+        apply_result = apply_compose_noop_guard(
+            rendered_compose=compose_file,
+            service_key=self._compose_name,
+            state_dir=self._state_dir,
+            client=self._client,
+            locator=locator,
+            compose_id=locator.compose_id,
+            title="dokploy-wizard coder reconcile",
+            description="Update Coder compose app",
+            verify_current=self._verify_current_compose_application,
+            locator_factory=lambda compose_id: _ComposeLocator(
+                project_id=locator.project_id,
+                environment_id=locator.environment_id,
+                compose_id=compose_id,
+            ),
+        )
+        self._created_in_process = apply_result.status == "applied"
+        return apply_result.locator
+
+    def _has_applied_state_checkpoint(self) -> bool:
+        return load_state_dir(self._state_dir).applied_state is not None
+
+    def _persist_compose_hash_if_checkpoint_present(self, compose_file: str) -> None:
+        if not self._has_applied_state_checkpoint():
+            return
+        persist_compose_artifact_hash(
+            state_dir=self._state_dir,
+            service_key=self._compose_name,
+            rendered_compose=compose_file,
+        )
+
+    def _verify_current_compose_application(self):
+        service_name = _service_name(self._stack_name)
+        health_url = f"https://{self._hostname}/healthz"
+        if not self.check_health(
+            service=CoderResourceRecord(
+                resource_id=_resource_id(self._compose_name, "service"),
+                resource_name=service_name,
+            ),
+            url=health_url,
+        ):
+            return make_verification_result(
+                service_name=self._compose_name,
+                tier="app",
+                passed=False,
+                detail=f"Coder health checks failed for '{health_url}'.",
+            )
+        container_name = _coder_container_name(service_name)
+        if container_name is None:
+            return make_verification_result(
+                service_name=self._compose_name,
+                tier="bootstrap",
+                passed=False,
+                detail="Coder container is not running.",
+            )
+        try:
+            _wait_for_coder_bootstrap_api_ready(self._hostname)
+            if not _coder_first_user_exists(self._hostname):
+                return make_verification_result(
+                    service_name=self._compose_name,
+                    tier="bootstrap",
+                    passed=False,
+                    detail=f"Coder first user '{self._admin_email}' is not provisioned.",
+                )
+            session_token = _coder_login(
+                hostname=self._hostname,
+                email=self._admin_email,
+                password=self._admin_password,
+            )
+            template_names = {
+                item.get("name")
+                for item in _list_templates(
+                    container_name=container_name,
+                    hostname=self._hostname,
+                    session_token=session_token,
+                )
+                if isinstance(item.get("name"), str)
+            }
+            missing_templates = [
+                template_name
+                for template_name in _required_template_names()
+                if template_name not in template_names
+            ]
+            if missing_templates:
+                return make_verification_result(
+                    service_name=self._compose_name,
+                    tier="bootstrap",
+                    passed=False,
+                    detail=(
+                        "Coder templates are missing or not visible: "
+                        + ", ".join(missing_templates)
+                        + "."
+                    ),
+                )
+            workspace_name = _default_workspace_name(self._hostname)
+            if workspace_name not in _list_workspaces(
+                container_name=container_name,
+                hostname=self._hostname,
+                session_token=session_token,
+            ):
+                return make_verification_result(
+                    service_name=self._compose_name,
+                    tier="bootstrap",
+                    passed=False,
+                    detail=f"Coder default workspace '{workspace_name}' is missing.",
+                )
+        except CoderError as error:
+            return make_verification_result(
+                service_name=self._compose_name,
+                tier="bootstrap",
+                passed=False,
+                detail=str(error),
+            )
+        return make_verification_result(
+            service_name=self._compose_name,
+            tier="bootstrap",
+            passed=True,
+            detail=(
+                "Coder container/API, first user bootstrap, seeded templates, "
+                "and default workspace are ready."
+            ),
+        )
 
 
 def _resource_id(compose_id: str, kind: str) -> str:
@@ -754,6 +913,16 @@ def _default_workspace_name(hostname: str, *, today: date | None = None) -> str:
     max_root_length = max(1, 32 - len(suffix))
     normalized_root = (root_token or "workspace")[:max_root_length]
     return f"{normalized_root}{suffix}"
+
+
+def _required_template_names() -> tuple[str, ...]:
+    return (
+        _default_template_name(),
+        _default_opencode_web_template_name(),
+        _default_openwork_template_name(),
+        _default_kdense_byok_template_name(),
+        _default_hermes_template_name(),
+    )
 
 
 def _seed_template(
