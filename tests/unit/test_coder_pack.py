@@ -845,6 +845,58 @@ def test_push_default_template_ignores_missing_terraform_lockfile(
     ]
 
 
+def test_push_default_template_treats_duplicate_deterministic_version_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    template_version_name = "dokploy-wizard-0a966b668508e2d3"
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            stdout="",
+            stderr=(
+                f'error: A template version with name "{template_version_name}" '
+                "already exists for this template."
+            ),
+        )
+
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
+    coder_module._push_default_template(
+        container_name="coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        template_name="ubuntu-vscode-opencode-web",
+        template_version_name=template_version_name,
+    )
+
+
+def test_push_default_template_raises_for_unrelated_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            stdout="",
+            stderr="error: failed to reach provisioner registry",
+        )
+
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
+    with pytest.raises(coder_module.CoderError, match="failed to reach provisioner registry"):
+        coder_module._push_default_template(
+            container_name="coder-container",
+            hostname="coder.example.com",
+            session_token="session-123",
+            template_name="ubuntu-vscode-opencode-web",
+            template_version_name="dokploy-wizard-0a966b668508e2d3",
+        )
+
+
 def test_reconcile_coder_creates_service_and_data() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(

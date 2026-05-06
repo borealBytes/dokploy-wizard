@@ -1080,9 +1080,29 @@ def _push_default_template(
         text=True,
     )
     if result.returncode != 0:
+        output = "\n".join(part for part in (result.stderr, result.stdout) if part).strip()
+        if template_version_name and _is_duplicate_template_version_error(
+            output=output,
+            template_version_name=template_version_name,
+        ):
+            return
         raise CoderError(
-            f"Unable to push default Coder template '{template_name}': {(result.stderr or result.stdout).strip()}"
+            f"Unable to push default Coder template '{template_name}': {output}"
         )
+
+
+def _is_duplicate_template_version_error(*, output: str, template_version_name: str) -> bool:
+    if not output:
+        return False
+    normalized_output = output.lower()
+    if template_version_name.lower() not in normalized_output:
+        return False
+    if "template version" not in normalized_output:
+        return False
+    return (
+        "already exists" in normalized_output
+        or "already in use" in normalized_output
+    )
 
 
 def _sync_hermes_workspace_secrets(
