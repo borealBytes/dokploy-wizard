@@ -65,16 +65,19 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
     )
     nextcloud_backend = cli._build_nextcloud_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     moodle_backend = cli._build_moodle_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     docuseal_backend = cli._build_docuseal_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )

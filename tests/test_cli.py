@@ -4299,6 +4299,95 @@ def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
     assert all(client is sentinel_session_client for client in seen_session_clients)
 
 
+def test_run_lifecycle_flow_passes_state_dir_to_nextcloud_moodle_and_docuseal_builders(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_env = parse_env_file(FIXTURES_DIR / "moodle-docuseal.env")
+    state_dir = tmp_path / "state"
+
+    class FakeLoadedState:
+        raw_input = None
+        desired_state = None
+        applied_state = None
+        ownership_ledger = None
+
+    required_profile = derive_required_profile(resolve_desired_state(raw_env))
+    seen: dict[str, Path] = {}
+
+    monkeypatch.setattr(cli, "load_state_dir", lambda state_dir: FakeLoadedState())
+    monkeypatch.setattr(cli, "parse_env_file", lambda env_file: raw_env)
+    monkeypatch.setattr(cli, "collect_host_facts", lambda raw: _host_facts())
+    monkeypatch.setattr(
+        cli,
+        "_run_preflight_report",
+        lambda **_: PreflightReport(
+            host_facts=_host_facts(),
+            required_profile=required_profile,
+            checks=(PreflightCheck(name="preflight", status="pass", detail="ok"),),
+            advisories=(),
+        ),
+    )
+    monkeypatch.setattr(cli, "persist_install_scaffold", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
+    monkeypatch.setattr(cli, "_qualify_dokploy_mutation_auth", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    monkeypatch.setattr(cli, "write_target_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "ShellTailscaleBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_dokploy_session_client", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_coder_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_openclaw_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})
+
+    monkeypatch.setattr(
+        cli,
+        "_build_nextcloud_backend",
+        lambda **kwargs: seen.setdefault("nextcloud", kwargs["state_dir"]) or cast(Any, object()),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_build_moodle_backend",
+        lambda **kwargs: seen.setdefault("moodle", kwargs["state_dir"]) or cast(Any, object()),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_build_docuseal_backend",
+        lambda **kwargs: seen.setdefault("docuseal", kwargs["state_dir"]) or cast(Any, object()),
+    )
+
+    cli._run_lifecycle_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=_FakeBootstrapBackend(),
+        tailscale_backend=None,
+        networking_backend=None,
+        shared_core_backend=None,
+        headscale_backend=None,
+        matrix_backend=None,
+        nextcloud_backend=None,
+        seaweedfs_backend=None,
+        coder_backend=None,
+        openclaw_backend=None,
+        allow_modify=False,
+        remediate_install_host_prereqs=False,
+        allow_memory_shortfall=True,
+        prompt_for_memory_shortfall=False,
+        enforce_live_run_contamination_check=False,
+    )
+
+    assert seen == {
+        "nextcloud": state_dir,
+        "moodle": state_dir,
+        "docuseal": state_dir,
+    }
+
+
 def test_install_prompts_before_continuing_on_memory_only_shortfall(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -4953,7 +5042,7 @@ def test_invalid_subcommand_fails_cleanly() -> None:
 def test_build_nextcloud_backend_passes_all_selected_advisor_workspace_mounts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, desired_state, backend_kwargs = _capture_nextcloud_backend_kwargs(
+    _, desired_state, backend_kwargs, _ = _capture_nextcloud_backend_kwargs(
         monkeypatch,
         packs="nextcloud,openclaw,my-farm-advisor",
         include_nexa_env=True,
@@ -4986,7 +5075,7 @@ def test_build_nextcloud_backend_passes_all_selected_advisor_workspace_mounts(
 def test_build_nextcloud_backend_passes_farm_mounts_without_openclaw_nexa_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, desired_state, backend_kwargs = _capture_nextcloud_backend_kwargs(
+    _, desired_state, backend_kwargs, _ = _capture_nextcloud_backend_kwargs(
         monkeypatch,
         packs="nextcloud,my-farm-advisor",
         include_nexa_env=False,
@@ -5014,7 +5103,7 @@ def test_build_nextcloud_backend_passes_farm_mounts_without_openclaw_nexa_env(
 def test_build_nextcloud_backend_preserves_openclaw_only_workspace_contract_behavior(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, desired_state, backend_kwargs = _capture_nextcloud_backend_kwargs(
+    _, desired_state, backend_kwargs, _ = _capture_nextcloud_backend_kwargs(
         monkeypatch,
         packs="nextcloud,openclaw",
         include_nexa_env=True,
@@ -5035,7 +5124,7 @@ def test_build_nextcloud_backend_preserves_openclaw_only_workspace_contract_beha
 def test_build_nextcloud_backend_passes_zero_advisor_mounts_when_no_advisor_selected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, _, backend_kwargs = _capture_nextcloud_backend_kwargs(
+    _, _, backend_kwargs, _ = _capture_nextcloud_backend_kwargs(
         monkeypatch,
         packs="nextcloud",
         include_nexa_env=False,
@@ -5043,6 +5132,92 @@ def test_build_nextcloud_backend_passes_zero_advisor_mounts_when_no_advisor_sele
 
     assert backend_kwargs["advisor_workspace_mounts"] == ()
     assert backend_kwargs["openclaw_volume_name"] is None
+
+
+def test_build_nextcloud_backend_passes_state_dir_to_dokploy_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, backend_kwargs, state_dir = _capture_nextcloud_backend_kwargs(
+        monkeypatch,
+        packs="nextcloud",
+        include_nexa_env=False,
+    )
+
+    assert backend_kwargs["state_dir"] == state_dir
+
+
+def test_build_moodle_backend_passes_state_dir_to_dokploy_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = parse_env_file(FIXTURES_DIR / "moodle-docuseal.env")
+    raw_env = RawEnvInput(
+        format_version=parsed.format_version,
+        values={
+            **parsed.values,
+            "DOKPLOY_MOCK_API_MODE": "false",
+            "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+            "DOKPLOY_API_KEY": "dokploy-key",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+    recorded: dict[str, Any] = {}
+    sentinel_backend = object()
+    sentinel_client = object()
+    state_dir = Path("/tmp/test-state")
+
+    def record_backend(**kwargs: Any) -> object:
+        recorded.update(kwargs)
+        return sentinel_backend
+
+    monkeypatch.setattr(cli, "DokployMoodleBackend", record_backend)
+    monkeypatch.setattr(cli, "_build_dokploy_api_client", lambda **_: sentinel_client)
+
+    backend = cli._build_moodle_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+    )
+
+    assert backend is sentinel_backend
+    assert recorded["client"] is sentinel_client
+    assert recorded["state_dir"] == state_dir
+
+
+def test_build_docuseal_backend_passes_state_dir_to_dokploy_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = parse_env_file(FIXTURES_DIR / "moodle-docuseal.env")
+    raw_env = RawEnvInput(
+        format_version=parsed.format_version,
+        values={
+            **parsed.values,
+            "DOKPLOY_MOCK_API_MODE": "false",
+            "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+            "DOKPLOY_API_KEY": "dokploy-key",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+    recorded: dict[str, Any] = {}
+    sentinel_backend = object()
+    sentinel_client = object()
+    state_dir = Path("/tmp/test-state")
+
+    def record_backend(**kwargs: Any) -> object:
+        recorded.update(kwargs)
+        return sentinel_backend
+
+    monkeypatch.setattr(cli, "DokployDocuSealBackend", record_backend)
+    monkeypatch.setattr(cli, "_build_dokploy_api_client", lambda **_: sentinel_client)
+
+    backend = cli._build_docuseal_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+    )
+
+    assert backend is sentinel_backend
+    assert recorded["client"] is sentinel_client
+    assert recorded["state_dir"] == state_dir
 
 
 class _LifecyclePhaseResult:
@@ -5350,12 +5525,13 @@ def _capture_nextcloud_backend_kwargs(
     *,
     packs: str,
     include_nexa_env: bool,
-) -> tuple[RawEnvInput, Any, dict[str, Any]]:
+) -> tuple[RawEnvInput, Any, dict[str, Any], Path]:
     raw_env = _nextcloud_backend_raw_env(packs=packs, include_nexa_env=include_nexa_env)
     desired_state = resolve_desired_state(raw_env)
     recorded: dict[str, Any] = {}
     sentinel_backend = object()
     sentinel_client = object()
+    state_dir = Path("/tmp/test-state")
 
     def record_backend(**kwargs: Any) -> object:
         recorded.update(kwargs)
@@ -5364,11 +5540,15 @@ def _capture_nextcloud_backend_kwargs(
     monkeypatch.setattr(cli, "DokployNextcloudBackend", record_backend)
     monkeypatch.setattr(cli, "_build_dokploy_api_client", lambda **_: sentinel_client)
 
-    backend = cli._build_nextcloud_backend(raw_env=raw_env, desired_state=desired_state)
+    backend = cli._build_nextcloud_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+    )
 
     assert backend is sentinel_backend
     assert recorded["client"] is sentinel_client
-    return raw_env, desired_state, recorded
+    return raw_env, desired_state, recorded, state_dir
 
 
 class _FakeBootstrapBackend:

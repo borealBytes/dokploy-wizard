@@ -1068,16 +1068,19 @@ def _run_lifecycle_flow(
     )
     nextcloud_phase_backend = nextcloud_backend or _build_nextcloud_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     moodle_phase_backend = _build_moodle_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     docuseal_phase_backend = _build_docuseal_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
@@ -1704,6 +1707,7 @@ def _build_headscale_backend(
 def _build_nextcloud_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> NextcloudBackend:
@@ -1743,6 +1747,7 @@ def _build_nextcloud_backend(
     return DokployNextcloudBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         nextcloud_hostname=nextcloud_hostname,
         onlyoffice_hostname=onlyoffice_hostname,
@@ -1830,6 +1835,7 @@ def _build_matrix_backend(
 def _build_moodle_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> MoodleBackend:
@@ -1852,6 +1858,7 @@ def _build_moodle_backend(
     return DokployMoodleBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
@@ -1873,6 +1880,7 @@ def _build_moodle_backend(
 def _build_docuseal_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> DocuSealBackend:
@@ -1895,6 +1903,7 @@ def _build_docuseal_backend(
     return DokployDocuSealBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
