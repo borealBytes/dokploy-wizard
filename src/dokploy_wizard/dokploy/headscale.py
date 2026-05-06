@@ -20,7 +20,7 @@ from dokploy_wizard.dokploy.client import (
 from dokploy_wizard.dokploy.compose_noop import apply_compose_noop_guard
 from dokploy_wizard.packs.headscale.models import HeadscaleResourceRecord
 from dokploy_wizard.packs.headscale.reconciler import HeadscaleError, _http_health_check
-from dokploy_wizard.verification import make_verification_result
+from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 
 class DokployHeadscaleApi(Protocol):
@@ -220,7 +220,7 @@ class DokployHeadscaleBackend:
         self._applied_locator = locator
         return locator
 
-    def _verify_current_service(self):
+    def _verify_current_service(self) -> ServiceVerificationResult:
         is_up = _docker_container_is_up(self._service_name)
         return make_verification_result(
             service_name=self._service_name,

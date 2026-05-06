@@ -9,12 +9,6 @@ from dokploy_wizard.dokploy.bootstrap_auth import (
     DokployBootstrapAuthError,
     DokployBootstrapAuthResult,
 )
-from dokploy_wizard.dokploy.compose_noop import (
-    ComposeApplyResult,
-    apply_compose_noop_guard,
-    load_compose_artifact_hash,
-    persist_compose_artifact_hash,
-)
 from dokploy_wizard.dokploy.client import (
     DokployApiClient,
     DokployApiError,
@@ -28,6 +22,12 @@ from dokploy_wizard.dokploy.client import (
 )
 from dokploy_wizard.dokploy.cloudflared import DokployCloudflaredBackend
 from dokploy_wizard.dokploy.coder import DokployCoderBackend
+from dokploy_wizard.dokploy.compose_noop import (
+    ComposeApplyResult,
+    apply_compose_noop_guard,
+    load_compose_artifact_hash,
+    persist_compose_artifact_hash,
+)
 from dokploy_wizard.dokploy.docuseal import DokployDocuSealBackend
 from dokploy_wizard.dokploy.headscale import DokployHeadscaleBackend
 from dokploy_wizard.dokploy.matrix import DokployMatrixBackend

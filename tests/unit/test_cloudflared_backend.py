@@ -1,8 +1,14 @@
 from pathlib import Path
 
+import pytest
+
 from dokploy_wizard.dokploy import DokployCloudflaredBackend
 from dokploy_wizard.dokploy.cloudflared import _render_compose_file
-from dokploy_wizard.state import AppliedStateCheckpoint, ComposeArtifactHashState, write_applied_checkpoint
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    ComposeArtifactHashState,
+    write_applied_checkpoint,
+)
 
 from .fake_dokploy import FakeDokployApiClient
 
@@ -20,7 +26,7 @@ def test_cloudflared_compose_uses_host_networking() -> None:
 
 
 def test_dokploy_cloudflared_backend_skips_redeploy_when_hash_matches_and_container_is_up(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     service_name = "wizard-stack-cloudflared"
     compose_file = _render_compose_file(service_name, tunnel_token="token-123")

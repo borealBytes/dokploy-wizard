@@ -1,9 +1,12 @@
 # ruff: noqa: E501
+
 from __future__ import annotations
 
-from collections.abc import Mapping
 import re
+from collections.abc import Mapping
 from pathlib import Path
+
+import pytest
 
 import dokploy_wizard.dokploy.shared_core as shared_core_module
 from dokploy_wizard.core.models import SharedPostgresAllocation
@@ -15,7 +18,11 @@ from dokploy_wizard.dokploy.shared_core import (
     build_litellm_consumer_model_allowlists,
 )
 from dokploy_wizard.litellm.admin import LiteLLMTeamRecord, LiteLLMVirtualKeyRecord
-from dokploy_wizard.state import AppliedStateCheckpoint, ComposeArtifactHashState, write_applied_checkpoint
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    ComposeArtifactHashState,
+    write_applied_checkpoint,
+)
 from dokploy_wizard.state.models import (
     STATE_FORMAT_VERSION,
     LiteLLMGeneratedKeys,
@@ -225,7 +232,7 @@ def test_litellm_ledger_resource_is_owned() -> None:
 
 
 def test_shared_core_matching_healthy_hash_skips_update_and_deploy(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
     litellm_env = {
@@ -302,7 +309,9 @@ def test_shared_core_matching_healthy_hash_skips_update_and_deploy(
     assert container_lookups.count(plan.redis.service_name) == 1
 
 
-def test_shared_core_unhealthy_litellm_blocks_noop_skip(tmp_path: Path, monkeypatch) -> None:
+def test_shared_core_unhealthy_litellm_blocks_noop_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
     litellm_env = {
         "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",

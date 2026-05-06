@@ -20,7 +20,7 @@ from dokploy_wizard.dokploy.client import (
     DokployProjectSummary,
 )
 from dokploy_wizard.dokploy.compose_noop import apply_compose_noop_guard
-from dokploy_wizard.verification import make_verification_result
+from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 
 class CloudflaredConnectorError(RuntimeError):
@@ -221,7 +221,7 @@ class DokployCloudflaredBackend:
         except DokployApiError as error_value:
             raise CloudflaredConnectorError(str(error_value)) from error_value
 
-    def _verify_current_service(self):
+    def _verify_current_service(self) -> ServiceVerificationResult:
         is_up = _docker_container_is_up(self._service_name)
         return make_verification_result(
             service_name=self._service_name,

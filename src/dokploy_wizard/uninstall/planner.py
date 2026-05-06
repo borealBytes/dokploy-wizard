@@ -142,7 +142,9 @@ _RULES: dict[str, DeletionRule] = {
     MATRIX_DATA_RESOURCE_TYPE: DeletionRule(phase="matrix", retain_safe=False, priority=31),
     HEADSCALE_SERVICE_RESOURCE_TYPE: DeletionRule(phase="headscale", retain_safe=True, priority=40),
     SHARED_LITELLM_RESOURCE_TYPE: DeletionRule(phase="shared_core", retain_safe=True, priority=49),
-    SHARED_MAIL_RELAY_RESOURCE_TYPE: DeletionRule(phase="shared_core", retain_safe=True, priority=50),
+    SHARED_MAIL_RELAY_RESOURCE_TYPE: DeletionRule(
+        phase="shared_core", retain_safe=True, priority=50
+    ),
     SHARED_NETWORK_RESOURCE_TYPE: DeletionRule(phase="shared_core", retain_safe=True, priority=50),
     SHARED_POSTGRES_RESOURCE_TYPE: DeletionRule(
         phase="shared_core", retain_safe=False, priority=52

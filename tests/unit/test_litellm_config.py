@@ -32,7 +32,10 @@ def test_build_litellm_config_keeps_only_local_route_when_non_local_routes_pause
 
     model_list = _model_list(config)
 
-    assert [entry["model_name"] for entry in model_list] == ["local/unsloth-active", "unsloth-active"]
+    assert [entry["model_name"] for entry in model_list] == [
+        "local/unsloth-active",
+        "unsloth-active",
+    ]
     assert model_list[0]["litellm_params"]["model"] == "openai/unsloth-active"
     assert model_list[0]["litellm_params"]["api_key"] == "sk-no-key-required"
     assert model_list[1]["litellm_params"]["model"] == "openai/unsloth-active"
@@ -57,7 +60,10 @@ def test_build_litellm_config_keeps_local_route_even_if_non_local_envs_are_prese
     )
 
     model_list = _model_list(config)
-    assert [entry["model_name"] for entry in model_list] == ["local/unsloth-active", "unsloth-active"]
+    assert [entry["model_name"] for entry in model_list] == [
+        "local/unsloth-active",
+        "unsloth-active",
+    ]
     assert model_list[0]["litellm_params"] == {
         "model": "openai/unsloth-active",
         "api_base": "http://vllm.internal:8000/v1",
