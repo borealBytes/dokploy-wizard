@@ -43,7 +43,12 @@ from dokploy_wizard.packs.openclaw import (
     OpenClawError,
     OpenClawResourceRecord,
 )
-from dokploy_wizard.state import RawEnvInput, load_state_dir, write_ownership_ledger
+from dokploy_wizard.state import (
+    RawEnvInput,
+    ensure_litellm_generated_keys,
+    load_state_dir,
+    write_ownership_ledger,
+)
 from tests.unit.test_openclaw_pack import FakeDokployOpenClawApi, _service_environment
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
@@ -1147,6 +1152,7 @@ def test_install_fresh_my_farm_only_renders_compose_and_persists_lifecycle_state
     compose = api.compose_files_by_name["farm-stack-my-farm-advisor"]
     service_environment = _service_environment(compose, "farm-stack-my-farm-advisor")
     loaded_state = load_state_dir(state_dir)
+    generated_keys = ensure_litellm_generated_keys(state_dir)
 
     assert set(api.compose_files_by_name) == {"farm-stack-my-farm-advisor"}
     assert summary["lifecycle"]["mode"] == "install"
@@ -1163,12 +1169,12 @@ def test_install_fresh_my_farm_only_renders_compose_and_persists_lifecycle_state
     assert "farm-stack-my-farm-advisor-data:/data" in compose
     assert service_environment["ADVISOR_VARIANT"] == "my-farm-advisor"
     assert service_environment["ADVISOR_CANONICAL_HOSTNAME"] == "farm.example.com"
-    assert service_environment["PRIMARY_MODEL"] == "anthropic/claude-sonnet-4"
     assert service_environment["OPENAI_BASE_URL"] == "http://farm-stack-shared-litellm:4000"
-    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
-    assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == (
-        "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
-    )
+    assert service_environment["OPENAI_API_KEY"] == generated_keys.virtual_keys["my-farm-advisor"]
+    assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == generated_keys.virtual_keys[
+        "my-farm-advisor"
+    ]
+    assert service_environment["PRIMARY_MODEL"] == "anthropic/claude-sonnet-4"
     assert "OPENROUTER_API_KEY" not in service_environment
     assert "NVIDIA_API_KEY" not in service_environment
     assert "ANTHROPIC_API_KEY" not in service_environment
@@ -1307,6 +1313,7 @@ def test_dual_advisors_use_distinct_litellm_virtual_keys(
         api.compose_files_by_name["wizard-stack-my-farm-advisor"],
         "wizard-stack-my-farm-advisor",
     )
+    generated_keys = ensure_litellm_generated_keys(state_dir)
 
     assert summary["lifecycle"]["phases_to_run"] == [
         "dokploy_bootstrap",
@@ -1318,13 +1325,13 @@ def test_dual_advisors_use_distinct_litellm_virtual_keys(
     ]
     assert openclaw_env["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
     assert farm_env["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
-    assert openclaw_env["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
-    assert farm_env["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert openclaw_env["OPENAI_API_KEY"] == generated_keys.virtual_keys["openclaw"]
+    assert farm_env["OPENAI_API_KEY"] == generated_keys.virtual_keys["my-farm-advisor"]
     assert openclaw_env["OPENAI_API_KEY"] != farm_env["OPENAI_API_KEY"]
-    assert openclaw_env["LITELLM_VIRTUAL_KEY_OPENCLAW"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
-    assert farm_env["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == (
-        "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
-    )
+    assert openclaw_env["LITELLM_VIRTUAL_KEY_OPENCLAW"] == generated_keys.virtual_keys["openclaw"]
+    assert farm_env["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == generated_keys.virtual_keys[
+        "my-farm-advisor"
+    ]
     assert "OPENROUTER_API_KEY" not in openclaw_env
     assert "MY_FARM_ADVISOR_OPENROUTER_API_KEY" not in farm_env
     assert "ANTHROPIC_API_KEY" not in openclaw_env
