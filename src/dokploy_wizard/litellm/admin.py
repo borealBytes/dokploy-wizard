@@ -256,14 +256,12 @@ class LiteLLMGatewayManager:
                 )
                 existing_keys[consumer] = existing_key
             elif existing_key.key != generated_key:
-                existing_key = self._api.update_key(
-                    key_alias=consumer,
-                    key=generated_key,
+                existing_key = LiteLLMVirtualKeyRecord(
+                    key=existing_key.key,
+                    key_alias=existing_key.key_alias,
                     team_id=team.team_id,
                     models=expected_models,
-                    metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
                 )
-                existing_keys[consumer] = existing_key
             elif existing_key.models != expected_models:
                 raise LiteLLMAdminError(
                     f"LiteLLM key alias '{consumer}' already exists with models {list(existing_key.models)}, "

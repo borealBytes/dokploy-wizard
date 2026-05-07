@@ -38,6 +38,7 @@ from dokploy_wizard.litellm import (
     build_litellm_config,
     render_litellm_config_yaml,
 )
+from dokploy_wizard.state import write_litellm_generated_keys
 from dokploy_wizard.state.models import LiteLLMGeneratedKeys
 
 
@@ -451,12 +452,26 @@ class DokploySharedCoreBackend:
         manager = LiteLLMGatewayManager(api=self._litellm_admin_api, sleep_fn=self._sleep_fn)
         try:
             manager.wait_until_ready()
-            manager.reconcile_virtual_keys(
+            reconciled = manager.reconcile_virtual_keys(
                 generated_keys=self._litellm_generated_keys.virtual_keys,
                 consumer_model_allowlists=self._litellm_consumer_model_allowlists,
             )
         except Exception as error:
             raise SharedCoreError(str(error)) from error
+        updated_virtual_keys = dict(self._litellm_generated_keys.virtual_keys)
+        changed = False
+        for consumer, record in reconciled.items():
+            if updated_virtual_keys.get(consumer) != record.key:
+                updated_virtual_keys[consumer] = record.key
+                changed = True
+        if changed:
+            self._litellm_generated_keys = LiteLLMGeneratedKeys(
+                format_version=self._litellm_generated_keys.format_version,
+                master_key=self._litellm_generated_keys.master_key,
+                salt_key=self._litellm_generated_keys.salt_key,
+                virtual_keys=updated_virtual_keys,
+            )
+            write_litellm_generated_keys(self._state_dir, self._litellm_generated_keys)
 
     def _shared_core_runtime_ready_for_noop(self) -> bool:
         postgres_allocations = tuple(

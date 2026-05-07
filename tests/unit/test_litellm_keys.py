@@ -285,7 +285,7 @@ def test_reconcile_virtual_keys_surfaces_key_creation_failures() -> None:
     assert "failed to create key coder-kdense" in str(error.value)
 
 
-def test_reconcile_virtual_keys_updates_existing_key_with_different_value() -> None:
+def test_reconcile_virtual_keys_reuses_existing_key_when_generated_value_differs() -> None:
     api = FakeLiteLLMAdminApi(
         teams=(
             LiteLLMTeamRecord(
@@ -310,7 +310,6 @@ def test_reconcile_virtual_keys_updates_existing_key_with_different_value() -> N
         consumer_model_allowlists={"my-farm-advisor": ("openai/*",)},
     )
 
-    assert reconciled["my-farm-advisor"].key == "new-my-farm-key"
+    assert reconciled["my-farm-advisor"].key == "old-my-farm-key"
     assert api.visible_models_for_key("my-farm-advisor") == ("openai/*",)
-    assert len(api.created_keys) == 1
-    assert api.created_keys[0].key == "new-my-farm-key"
+    assert len(api.created_keys) == 0
