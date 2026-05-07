@@ -204,6 +204,26 @@ def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
     assert "ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode" in template
     assert "if ! command -v zellij >/dev/null 2>&1; then" in template
     assert "zellij-$${ARCH}-unknown-linux-musl.tar.gz" in template
+    assert "if ! command -v node >/dev/null 2>&1; then" in template
+    assert "curl -fsSL https://deb.nodesource.com/setup_22.x | $_SUDO -E bash -" in template
+    assert "$_SUDO apt-get install -y nodejs" in template
+    assert "$_SUDO corepack enable" in template
+    assert "$_SUDO corepack prepare pnpm@10.27.0 --activate" in template
+    assert "export PNPM_HOME=/home/coder/.local/share/pnpm" in template
+    assert 'export PATH="$PNPM_HOME/bin:$PATH"' in template
+    assert '/home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc' in template
+    assert r'/home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc' in template
+    assert '/home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile' in template
+    assert r'/home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile' in template
+    assert "pnpm add -g @earendil-works/pi-coding-agent" in template
+    assert "command -v pi" in template
+    assert "pi --version" in template
+    assert "bash -lc 'command -v pi && pi --version'" in template
+    assert "pi.dev/install.sh" not in template
+    assert 'resource "coder_app"' not in template
+    assert "pi-web-ui" not in template
+    assert "vite preview" not in template
+    assert "subdomain =" not in template
 
 
 def test_default_opencode_web_template_includes_web_app() -> None:
@@ -324,6 +344,60 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
     assert 'url          = "http://localhost:8788"' in template
     assert "subdomain    = false" in template
     assert 'url       = "http://localhost:8788/health"' in template
+
+
+def test_default_pi_web_template_includes_clickable_pi_web_ui() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-pi-web/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    assert "$_SUDO apt-get install -y curl git ca-certificates wget btop" in template
+    assert "curl -fsSL https://deb.nodesource.com/setup_22.x | $_SUDO -E bash -" in template
+    assert "$_SUDO corepack enable" in template
+    assert "$_SUDO corepack prepare pnpm@10.27.0 --activate" in template
+    assert "export PNPM_HOME=/home/coder/.local/share/pnpm" in template
+    assert 'export PATH="$PNPM_HOME/bin:$PATH"' in template
+    assert (
+        'grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc'
+        in template
+    )
+    assert 'grep -qxF "export PATH=\\"$PNPM_HOME/bin:$PATH\\"" /home/coder/.profile' in template
+    assert "pnpm add -g @earendil-works/pi-coding-agent" in template
+    assert 'PI_WEB_SRC_DIR=/home/coder/.cache/pi-web-ui' in template
+    assert 'PI_WEB_BUILD_KEY=v1-coder-mounted-preview' in template
+    assert 'PI_WEB_UI_PORT=8650' in template
+    assert 'PI_WEB_PROXY_PORT=8651' in template
+    assert '"@earendil-works/pi-agent-core": "^0.74.0"' in template
+    assert '"@earendil-works/pi-ai": "^0.74.0"' in template
+    assert '"@earendil-works/pi-web-ui": "^0.74.0"' in template
+    assert "import { Agent } from '@earendil-works/pi-agent-core';" in template
+    assert "import { getModel } from '@earendil-works/pi-ai';" in template
+    assert "import '@earendil-works/pi-web-ui/app.css';" in template
+    assert 'document.title = "Pi Web UI";' in template
+    assert "CI=true pnpm install" in template
+    assert "pnpm exec vite build --base ./" in template
+    assert (
+        'pnpm exec vite preview --host 127.0.0.1 --port $PI_WEB_UI_PORT --strictPort' in template
+    )
+    assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
+    assert 'const parsed = new URL(req.url || "/", "http://localhost");' in template
+    assert 'const targetPath = needsSpaFallback(remainder) ? "/" : remainder + parsed.search;' in template
+    assert (
+        'nohup env SYNTHETIC_HEALTHCHECK=1 TARGET_PORT="$PI_WEB_UI_PORT" PROXY_PORT="$PI_WEB_PROXY_PORT" node /tmp/coder-mounted-proxy.mjs'
+        in template
+    )
+    assert 'resource "coder_app" "pi_web"' in template
+    assert 'slug         = "pi-web"' in template
+    assert 'display_name = "Pi Web UI"' in template
+    assert 'url          = "http://localhost:8651"' in template
+    assert 'share        = "owner"' in template
+    assert 'subdomain    = false' in template
+    assert 'url       = "http://localhost:8651/health"' in template
+    assert "pi.dev/install.sh" not in template
+    assert "curl | sh" not in template
+    assert "LITELLM_" not in template
+    assert "AI_DEFAULT_" not in template
+    assert "OPENCODE_GO_" not in template
 
 
 def test_default_kdense_byok_template_includes_upstream_parameterized_stack() -> None:
