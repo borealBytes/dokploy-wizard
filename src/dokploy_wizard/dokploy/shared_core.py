@@ -92,6 +92,7 @@ class DokploySharedCoreBackend:
         self._litellm_env = litellm_env or {}
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
+        self._created_in_process = False
         self._allocation_provisioner = allocation_provisioner
         self._litellm_generated_keys = litellm_generated_keys
         self._litellm_consumer_model_allowlists = litellm_consumer_model_allowlists or {}
@@ -335,7 +336,7 @@ class DokploySharedCoreBackend:
         return None
 
     def _ensure_compose_applied(self) -> _ComposeLocator:
-        if self._applied_locator is not None:
+        if self._applied_locator is not None and self._created_in_process:
             return self._applied_locator
         rendered_compose = _render_compose_file(
             self._plan,
@@ -375,6 +376,7 @@ class DokploySharedCoreBackend:
                             ),
                         )
                         self._applied_locator = result.locator
+                        self._created_in_process = result.status == "applied"
                         return result.locator
                 created = self._client.create_compose(
                     name=self._compose_name,
@@ -402,6 +404,7 @@ class DokploySharedCoreBackend:
                     compose_id=created.compose_id,
                 )
                 self._applied_locator = locator
+                self._created_in_process = True
                 return locator
 
             created_project = self._client.create_project(
@@ -437,6 +440,7 @@ class DokploySharedCoreBackend:
             compose_id=created_compose.compose_id,
         )
         self._applied_locator = locator
+        self._created_in_process = True
         return locator
 
     def _ensure_litellm_runtime_ready_and_reconciled(self) -> None:
