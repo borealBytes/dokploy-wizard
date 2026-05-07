@@ -86,6 +86,11 @@ def _seed_state_dir(state_dir: Path) -> None:
                     "stack:nextcloud-stack:shared-redis",
                 ),
                 OwnedResource(
+                    "shared_core_litellm",
+                    "nextcloud-stack-litellm",
+                    "stack:nextcloud-stack:shared-litellm",
+                ),
+                OwnedResource(
                     "headscale_service",
                     "nextcloud-stack-headscale",
                     "stack:nextcloud-stack:headscale",

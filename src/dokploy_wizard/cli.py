@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 """CLI scaffold for the Dokploy wizard."""
@@ -43,6 +44,7 @@ from dokploy_wizard.dokploy import (
     DokployOpenClawBackend,
     DokploySeaweedFsBackend,
     DokploySharedCoreBackend,
+    build_litellm_consumer_model_allowlists,
 )
 from dokploy_wizard.host_prereqs import (
     DOCKER_APT_PACKAGES,
@@ -60,6 +62,7 @@ from dokploy_wizard.lifecycle import (
     execute_lifecycle_plan,
     validate_preserved_phases,
 )
+from dokploy_wizard.litellm import LiteLLMAdminClient
 from dokploy_wizard.networking import (
     CloudflareApiBackend,
     CloudflareError,
@@ -67,7 +70,6 @@ from dokploy_wizard.networking import (
 from dokploy_wizard.packs.coder import CoderBackend, CoderError, ShellCoderBackend
 from dokploy_wizard.packs.docuseal import (
     DocuSealBackend,
-    DocuSealError,
     ShellDocuSealBackend,
 )
 from dokploy_wizard.packs.headscale import (
@@ -80,8 +82,9 @@ from dokploy_wizard.packs.matrix import (
     MatrixError,
     ShellMatrixBackend,
 )
-from dokploy_wizard.packs.moodle import MoodleBackend, MoodleError, ShellMoodleBackend
+from dokploy_wizard.packs.moodle import MoodleBackend, ShellMoodleBackend
 from dokploy_wizard.packs.nextcloud import (
+    NextcloudAdvisorWorkspaceMountContract,
     NextcloudBackend,
     NextcloudError,
     NextcloudOpenClawWorkspaceContract,
@@ -116,9 +119,12 @@ from dokploy_wizard.state import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
+    LiteLLMGeneratedKeys,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
+    ensure_litellm_generated_keys,
+    load_litellm_generated_keys,
     load_state_dir,
     parse_env_file,
     persist_install_scaffold,
@@ -607,18 +613,97 @@ def _handle_inspect_state(args: argparse.Namespace) -> int:
         loaded_state = load_state_dir(args.state_dir)
         raw_env = parse_env_file(args.env_file)
         desired_state = resolve_desired_state(raw_env)
-        snapshot = desired_state.to_dict()
+        snapshot = _build_public_inspection_snapshot(
+            raw_env=raw_env,
+            desired_state=desired_state,
+            litellm_generated_keys=load_litellm_generated_keys(args.state_dir),
+        )
         snapshot["live_drift"] = build_live_drift_report(
             desired_state=desired_state,
             ownership_ledger=loaded_state.ownership_ledger,
         )
         if not args.dry_run:
-            write_inspection_snapshot(args.state_dir, raw_env, snapshot)
+            write_inspection_snapshot(args.state_dir, _redacted_raw_env_input(raw_env), snapshot)
     except (OSError, StateValidationError) as error:
         raise SystemExit(str(error)) from error
 
     print(json.dumps(snapshot, indent=2, sort_keys=True))
     return 0
+
+
+_INSPECT_REDACTION_VALUE = "<redacted>"
+_INSPECT_SECRET_KEYS = (
+    "API_KEY",
+    "MASTER_KEY",
+    "PASSWORD",
+    "SALT_KEY",
+    "SECRET",
+    "TOKEN",
+    "AUTH_KEY",
+    "ACCESS_KEY",
+    "VIRTUAL_KEY",
+)
+
+
+def _build_public_inspection_snapshot(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
+) -> dict[str, Any]:
+    snapshot = desired_state.to_dict()
+    for key in ("seaweedfs_access_key", "seaweedfs_secret_key", "openclaw_gateway_token"):
+        if snapshot.get(key) is not None:
+            snapshot[key] = _INSPECT_REDACTION_VALUE
+    snapshot["advisor_status"] = {
+        "openclaw": {
+            "display_name": "Nexa Claw",
+            "enabled": "openclaw" in desired_state.enabled_packs,
+            "hostname": desired_state.hostnames.get("openclaw"),
+            "channels": list(desired_state.openclaw_channels),
+            "workspace_mount_name": (
+                "/OpenClaw" if _has_openclaw_nexa_env(raw_env) else "/Nexa Claw"
+            )
+            if "openclaw" in desired_state.enabled_packs
+            else None,
+        },
+        "my_farm_advisor": {
+            "display_name": "Nexa Farm",
+            "enabled": "my-farm-advisor" in desired_state.enabled_packs,
+            "hostname": desired_state.hostnames.get("my-farm-advisor"),
+            "channels": list(desired_state.my_farm_advisor_channels),
+            "workspace_mount_names": (
+                ["/Nexa Farm", "/Nexa Farm Data Pipeline"]
+                if "my-farm-advisor" in desired_state.enabled_packs
+                else []
+            ),
+        },
+    }
+    if litellm_generated_keys is not None:
+        snapshot["litellm"] = {
+            "master_key": _INSPECT_REDACTION_VALUE,
+            "salt_key": _INSPECT_REDACTION_VALUE,
+            "virtual_keys": {
+                consumer: _INSPECT_REDACTION_VALUE
+                for consumer in sorted(litellm_generated_keys.virtual_keys)
+            },
+        }
+    return snapshot
+
+
+def _redacted_raw_env_input(raw_env: RawEnvInput) -> RawEnvInput:
+    return RawEnvInput(
+        format_version=raw_env.format_version,
+        values={
+            key: (_INSPECT_REDACTION_VALUE if _raw_env_value_is_sensitive(key) else value)
+            for key, value in raw_env.values.items()
+        },
+    )
+
+
+def _raw_env_value_is_sensitive(key: str) -> bool:
+    normalized = key.upper()
+    return any(token in normalized for token in _INSPECT_SECRET_KEYS)
 
 
 def run_install_flow(
@@ -916,6 +1001,10 @@ def _run_lifecycle_flow(
         )
     if not dry_run and not existing_state:
         persist_install_scaffold(state_dir, raw_env, desired_state)
+    litellm_generated_keys = load_litellm_generated_keys(state_dir)
+    if not dry_run:
+        ensure_litellm_generated_keys(state_dir)
+        litellm_generated_keys = load_litellm_generated_keys(state_dir)
     require_real_dokploy_auth = _dokploy_api_auth_required(
         desired_state=desired_state,
         shared_core_backend=shared_core_backend,
@@ -954,53 +1043,65 @@ def _run_lifecycle_flow(
     if networking_backend is None:
         cloudflared_connector_backend = _build_cloudflared_connector_backend(
             raw_env=raw_env,
+            state_dir=state_dir,
             desired_state=desired_state,
             session_client=dokploy_session_client,
         )
     shared_core_phase_backend = shared_core_backend or _build_shared_core_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
+        litellm_generated_keys=litellm_generated_keys,
     )
     headscale_phase_backend = headscale_backend or _build_headscale_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     matrix_phase_backend = matrix_backend or _build_matrix_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     nextcloud_phase_backend = nextcloud_backend or _build_nextcloud_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     moodle_phase_backend = _build_moodle_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     docuseal_phase_backend = _build_docuseal_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     seaweedfs_phase_backend = seaweedfs_backend or _build_seaweedfs_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     coder_phase_backend = coder_backend or _build_coder_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
     openclaw_phase_backend = openclaw_backend or _build_openclaw_backend(
         raw_env=raw_env,
+        state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
+        litellm_generated_keys=litellm_generated_keys,
     )
     lifecycle_backends = LifecycleBackends(
         bootstrap=backend,
@@ -1056,6 +1157,11 @@ def _run_lifecycle_flow(
                         format_version=desired_state.format_version,
                         desired_state_fingerprint=desired_state.fingerprint(),
                         completed_steps=lifecycle_plan.initial_completed_steps,
+                        compose_artifact_hashes=(
+                            {}
+                            if loaded_state.applied_state is None
+                            else dict(loaded_state.applied_state.compose_artifact_hashes)
+                        ),
                         lifecycle_checkpoint_contract_version=(
                             LIFECYCLE_CHECKPOINT_CONTRACT_VERSION
                         ),
@@ -1496,8 +1602,10 @@ def _live_drift_entry_message(entry: dict[str, Any]) -> str:
 def _build_shared_core_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
+    litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> SharedCoreBackend:
     if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
         return ShellSharedCoreBackend()
@@ -1509,6 +1617,21 @@ def _build_shared_core_backend(
             api_key=api_key,
             stack_name=desired_state.stack_name,
             plan=desired_state.shared_core,
+            litellm_env=dict(raw_env.values),
+            litellm_generated_keys=litellm_generated_keys,
+            litellm_consumer_model_allowlists=build_litellm_consumer_model_allowlists(
+                flat_env=dict(raw_env.values),
+                plan=desired_state.shared_core,
+            ),
+            state_dir=state_dir,
+            litellm_admin_api=(
+                None
+                if litellm_generated_keys is None or desired_state.shared_core.litellm is None
+                else LiteLLMAdminClient(
+                    api_url="http://127.0.0.1:4000",
+                    master_key=litellm_generated_keys.master_key,
+                )
+            ),
             mail_relay_config={
                 key: value
                 for key, value in raw_env.values.items()
@@ -1527,6 +1650,7 @@ def _build_shared_core_backend(
 def _build_cloudflared_connector_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> Any | None:
@@ -1539,6 +1663,7 @@ def _build_cloudflared_connector_backend(
     return DokployCloudflaredBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         public_url=desired_state.dokploy_url,
         client=_build_dokploy_api_client(
@@ -1553,6 +1678,7 @@ def _build_cloudflared_connector_backend(
 def _build_headscale_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> HeadscaleBackend:
@@ -1565,6 +1691,7 @@ def _build_headscale_backend(
         return DokployHeadscaleBackend(
             api_url=api_url,
             api_key=api_key,
+            state_dir=state_dir,
             stack_name=desired_state.stack_name,
             hostname=hostname,
             client=_build_dokploy_api_client(
@@ -1580,6 +1707,7 @@ def _build_headscale_backend(
 def _build_nextcloud_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> NextcloudBackend:
@@ -1607,14 +1735,19 @@ def _build_nextcloud_backend(
     admin_user = raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
     admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon")
     nexa_enabled = _has_openclaw_nexa_env(raw_env)
+    advisor_workspace_mounts = _build_nextcloud_advisor_workspace_mounts(
+        raw_env=raw_env,
+        desired_state=desired_state,
+    )
     nexa_agent_password = None
     if nexa_enabled:
-        nexa_agent_password = raw_env.values.get("OPENCLAW_NEXA_AGENT_PASSWORD") or raw_env.values.get(
-            "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD"
-        )
+        nexa_agent_password = raw_env.values.get(
+            "OPENCLAW_NEXA_AGENT_PASSWORD"
+        ) or raw_env.values.get("OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD")
     return DokployNextcloudBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         nextcloud_hostname=nextcloud_hostname,
         onlyoffice_hostname=onlyoffice_hostname,
@@ -1625,22 +1758,22 @@ def _build_nextcloud_backend(
         integration_secret_ref=f"{desired_state.stack_name}-nextcloud-onlyoffice-jwt-secret",
         admin_user=admin_user,
         admin_password=admin_password,
+        advisor_workspace_mounts=advisor_workspace_mounts,
         openclaw_volume_name=(
             f"{desired_state.stack_name}-openclaw-data"
             if "openclaw" in desired_state.enabled_packs
             else None
         ),
-        openclaw_workspace_contract=(
-            _build_nextcloud_openclaw_workspace_contract(desired_state)
-            if nexa_enabled and "openclaw" in desired_state.enabled_packs
-            else None
+        nexa_agent_user_id=(
+            raw_env.values.get("OPENCLAW_NEXA_AGENT_USER_ID") if nexa_enabled else None
         ),
-        nexa_agent_user_id=(raw_env.values.get("OPENCLAW_NEXA_AGENT_USER_ID") if nexa_enabled else None),
         nexa_agent_display_name=(
             raw_env.values.get("OPENCLAW_NEXA_AGENT_DISPLAY_NAME") if nexa_enabled else None
         ),
         nexa_agent_password=nexa_agent_password,
-        nexa_agent_email=(raw_env.values.get("OPENCLAW_NEXA_AGENT_EMAIL") if nexa_enabled else None),
+        nexa_agent_email=(
+            raw_env.values.get("OPENCLAW_NEXA_AGENT_EMAIL") if nexa_enabled else None
+        ),
         openclaw_rescan_cron=raw_env.values.get("NEXTCLOUD_OPENCLAW_RESCAN_CRON", "*/15 * * * *"),
         openclaw_rescan_timezone=raw_env.values.get("NEXTCLOUD_OPENCLAW_RESCAN_TIMEZONE", "UTC"),
         client=_build_dokploy_api_client(
@@ -1655,6 +1788,7 @@ def _build_nextcloud_backend(
 def _build_matrix_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> MatrixBackend:
@@ -1679,6 +1813,7 @@ def _build_matrix_backend(
     return DokployMatrixBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         shared_allocation=allocation,
@@ -1700,6 +1835,7 @@ def _build_matrix_backend(
 def _build_moodle_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> MoodleBackend:
@@ -1722,6 +1858,7 @@ def _build_moodle_backend(
     return DokployMoodleBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
@@ -1743,6 +1880,7 @@ def _build_moodle_backend(
 def _build_docuseal_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> DocuSealBackend:
@@ -1765,6 +1903,7 @@ def _build_docuseal_backend(
     return DokployDocuSealBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
@@ -1787,6 +1926,7 @@ def _build_docuseal_backend(
 def _build_seaweedfs_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> SeaweedFsBackend:
@@ -1802,6 +1942,7 @@ def _build_seaweedfs_backend(
     return DokploySeaweedFsBackend(
         api_url=api_url,
         api_key=api_key,
+        state_dir=state_dir,
         stack_name=desired_state.stack_name,
         hostname=hostname,
         access_key=access_key,
@@ -1818,6 +1959,7 @@ def _build_seaweedfs_backend(
 def _build_coder_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
 ) -> CoderBackend:
@@ -1835,6 +1977,7 @@ def _build_coder_backend(
         return ShellCoderBackend()
     if allocation.postgres is None or desired_state.shared_core.postgres is None:
         return ShellCoderBackend()
+    litellm_generated_keys = ensure_litellm_generated_keys(state_dir)
     return DokployCoderBackend(
         api_url=api_url,
         api_key=api_key,
@@ -1845,12 +1988,11 @@ def _build_coder_backend(
         admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
-        hermes_inference_provider=raw_env.values.get(
-            "HERMES_INFERENCE_PROVIDER", "opencode-go"
-        ),
-        hermes_model=raw_env.values.get("HERMES_MODEL", "deepseek-v4-flash"),
+        hermes_inference_provider=raw_env.values.get("HERMES_INFERENCE_PROVIDER", "openai"),
+        hermes_model=raw_env.values.get("HERMES_MODEL", "unsloth-active"),
         ai_default_base_url=_shared_ai_default_base_url(raw_env),
-        ai_default_api_key=_shared_ai_default_api_key(raw_env),
+        ai_default_api_key=litellm_generated_keys.virtual_keys["coder-hermes"],
+        state_dir=state_dir,
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,
@@ -1863,8 +2005,10 @@ def _build_coder_backend(
 def _build_openclaw_backend(
     *,
     raw_env: RawEnvInput,
+    state_dir: Path,
     desired_state: DesiredState,
     session_client: DokployBootstrapAuthClient | None = None,
+    litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> OpenClawBackend:
     if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
         return ShellOpenClawBackend(raw_env)
@@ -1944,6 +2088,8 @@ def _build_openclaw_backend(
             api_key=api_key,
             session_client=session_client,
         ),
+        litellm_generated_keys=litellm_generated_keys,
+        state_dir=state_dir,
     )
 
 
@@ -1972,7 +2118,6 @@ def _has_openclaw_nexa_env(raw_env: RawEnvInput) -> bool:
 def _build_nextcloud_openclaw_workspace_contract(
     desired_state: DesiredState,
 ) -> NextcloudOpenClawWorkspaceContract:
-    stack_name = desired_state.stack_name
     return NextcloudOpenClawWorkspaceContract(
         enabled=True,
         external_mount_name="/OpenClaw",
@@ -1985,6 +2130,85 @@ def _build_nextcloud_openclaw_workspace_contract(
             "Credential values and identity-bearing fields remain server-owned and must not be overridden from workspace files.",
         ),
     )
+
+
+def _build_nextcloud_my_farm_advisor_workspace_mounts(
+    desired_state: DesiredState,
+) -> tuple[NextcloudAdvisorWorkspaceMountContract, NextcloudAdvisorWorkspaceMountContract]:
+    volume_name = f"{desired_state.stack_name}-my-farm-advisor-data"
+    return (
+        NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="my-farm-advisor",
+            volume_name=volume_name,
+            container_mount_root="/mnt/my-farm-advisor",
+            external_mount_name="/Nexa Farm",
+            external_mount_path="/mnt/my-farm-advisor/field-operations",
+            visible_root="/mnt/my-farm-advisor/field-operations/workspace",
+            contract_path=None,
+            runtime_state_source="wizard-managed service workspace",
+            rescan_schedule_identity="my-farm-advisor-field-operations",
+            notes=("Field operations workspace.",),
+        ),
+        NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="my-farm-advisor",
+            volume_name=volume_name,
+            container_mount_root="/mnt/my-farm-advisor",
+            external_mount_name="/Nexa Farm Data Pipeline",
+            external_mount_path="/mnt/my-farm-advisor/data-pipeline",
+            visible_root="/mnt/my-farm-advisor/data-pipeline/workspace",
+            contract_path=None,
+            runtime_state_source="wizard-managed data pipeline workspace",
+            rescan_schedule_identity="my-farm-advisor-data-pipeline",
+            notes=("Data pipeline workspace.",),
+        ),
+    )
+
+
+def _build_nextcloud_advisor_workspace_mounts(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+) -> tuple[NextcloudAdvisorWorkspaceMountContract, ...]:
+    if "nextcloud" not in desired_state.enabled_packs:
+        return ()
+    mounts: list[NextcloudAdvisorWorkspaceMountContract] = []
+    if "openclaw" in desired_state.enabled_packs:
+        if _has_openclaw_nexa_env(raw_env):
+            mounts.append(
+                NextcloudAdvisorWorkspaceMountContract(
+                    advisor_id="openclaw",
+                    volume_name=f"{desired_state.stack_name}-openclaw-data",
+                    container_mount_root="/mnt/openclaw",
+                    external_mount_name="/OpenClaw",
+                    external_mount_path="/mnt/openclaw/workspace",
+                    visible_root="/mnt/openclaw/workspace/nexa",
+                    contract_path="/mnt/openclaw/workspace/nexa/contract.json",
+                    runtime_state_source="server-owned env + durable state JSON",
+                    rescan_schedule_identity="openclaw",
+                    notes=(
+                        "Nextcloud exposes the Nexa workspace as an operator/user surface only.",
+                        "Credential values and identity-bearing fields remain server-owned and must not be overridden from workspace files.",
+                    ),
+                )
+            )
+        else:
+            mounts.append(
+                NextcloudAdvisorWorkspaceMountContract(
+                    advisor_id="openclaw",
+                    volume_name=f"{desired_state.stack_name}-openclaw-data",
+                    container_mount_root="/mnt/openclaw",
+                    external_mount_name="/Nexa Claw",
+                    external_mount_path="/mnt/openclaw/workspace",
+                    visible_root="/mnt/openclaw/workspace",
+                    contract_path=None,
+                    runtime_state_source="server-owned env + durable state JSON",
+                    rescan_schedule_identity="openclaw",
+                    notes=("Operator-facing OpenClaw workspace.",),
+                )
+            )
+    if "my-farm-advisor" in desired_state.enabled_packs:
+        mounts.extend(_build_nextcloud_my_farm_advisor_workspace_mounts(desired_state))
+    return tuple(mounts)
 
 
 def _dokploy_api_auth_required(

@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
@@ -8,13 +9,19 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 
-from dokploy_wizard.packs.openclaw.nexa_ingress import handle_onlyoffice_callback, handle_talk_webhook
+from dokploy_wizard.packs.openclaw.nexa_ingress import (
+    handle_onlyoffice_callback,
+    handle_talk_webhook,
+)
 from dokploy_wizard.packs.openclaw.nexa_runtime import (
     NexaOnlyofficeRuntimeResult,
     NexaTalkRuntimeResult,
     run_queued_nexa_job,
 )
-from dokploy_wizard.packs.openclaw.nexa_runtime_sidecar import _poll_talk_messages, _runtime_dependencies_from_env
+from dokploy_wizard.packs.openclaw.nexa_runtime_sidecar import (
+    _poll_talk_messages,
+    _runtime_dependencies_from_env,
+)
 from dokploy_wizard.state import DurableQueueStore
 from tests.integration.nexa_e2e_helpers import (
     ONLYOFFICE_CALLBACK_SECRET,

@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Python-first CLI scaffold for the Dokploy setup wizard"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "paramiko>=3.0",
+]
 
 [project.optional-dependencies]
 dev = [

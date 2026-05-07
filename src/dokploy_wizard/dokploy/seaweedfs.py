@@ -5,6 +5,7 @@ from __future__ import annotations
 import ssl
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 from urllib import error, parse, request
 
@@ -17,7 +18,9 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.compose_noop import apply_compose_noop_guard
 from dokploy_wizard.packs.seaweedfs import SeaweedFsError, SeaweedFsResourceRecord
+from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 
 class DokploySeaweedFsApi(Protocol):
@@ -51,12 +54,14 @@ class DokploySeaweedFsBackend:
         *,
         api_url: str,
         api_key: str,
+        state_dir: Path,
         stack_name: str,
         hostname: str,
         access_key: str,
         secret_key: str,
         client: DokploySeaweedFsApi | None = None,
     ) -> None:
+        self._state_dir = state_dir
         self._stack_name = stack_name
         self._compose_name = _service_name(stack_name)
         self._hostname = hostname
@@ -210,21 +215,25 @@ class DokploySeaweedFsBackend:
         )
         try:
             if self._applied_locator is not None:
-                updated = self._client.update_compose(
-                    compose_id=self._applied_locator.compose_id,
-                    compose_file=compose_file,
-                )
-                self._client.deploy_compose(
-                    compose_id=updated.compose_id,
+                current_locator = self._applied_locator
+                applied = apply_compose_noop_guard(
+                    rendered_compose=compose_file,
+                    service_key=self._compose_name,
+                    state_dir=self._state_dir,
+                    client=self._client,
+                    locator=current_locator,
+                    compose_id=current_locator.compose_id,
                     title="dokploy-wizard seaweedfs reconcile",
                     description="Update SeaweedFS compose app",
+                    verify_current=self._verify_current_service,
+                    locator_factory=lambda compose_id: _ComposeLocator(
+                        project_id=current_locator.project_id,
+                        environment_id=current_locator.environment_id,
+                        compose_id=compose_id,
+                    ),
                 )
                 self._created_in_process = True
-                self._applied_locator = _ComposeLocator(
-                    project_id=self._applied_locator.project_id,
-                    environment_id=self._applied_locator.environment_id,
-                    compose_id=updated.compose_id,
-                )
+                self._applied_locator = applied.locator
                 return self._applied_locator
             projects = self._client.list_projects()
             for project in projects:
@@ -240,8 +249,25 @@ class DokploySeaweedFsBackend:
                             environment_id=environment.environment_id,
                             compose_id=compose.compose_id,
                         )
-                        self._applied_locator = locator
-                        return locator
+                        applied = apply_compose_noop_guard(
+                            rendered_compose=compose_file,
+                            service_key=self._compose_name,
+                            state_dir=self._state_dir,
+                            client=self._client,
+                            locator=locator,
+                            compose_id=compose.compose_id,
+                            title="dokploy-wizard seaweedfs reconcile",
+                            description="Update SeaweedFS compose app",
+                            verify_current=self._verify_current_service,
+                            locator_factory=lambda compose_id: _ComposeLocator(
+                                project_id=project.project_id,
+                                environment_id=environment.environment_id,
+                                compose_id=compose_id,
+                            ),
+                        )
+                        self._created_in_process = True
+                        self._applied_locator = applied.locator
+                        return applied.locator
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
@@ -288,6 +314,19 @@ class DokploySeaweedFsBackend:
         self._created_in_process = True
         self._applied_locator = locator
         return locator
+
+    def _verify_current_service(self) -> ServiceVerificationResult:
+        is_up = _docker_container_is_up(self._compose_name)
+        return make_verification_result(
+            service_name=self._compose_name,
+            tier="app",
+            passed=is_up,
+            detail=(
+                f"SeaweedFS container for '{self._compose_name}' is "
+                f"{'up' if is_up else 'not up'}."
+            ),
+            evidence_command=["docker", "ps", "--format", "{{.Names}}\t{{.Status}}"],
+        )
 
 
 def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSummary | None:

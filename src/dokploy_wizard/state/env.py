@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Env-file parsing and desired-state resolution."""
 
 from __future__ import annotations
@@ -7,7 +8,6 @@ from pathlib import Path
 from urllib import parse
 
 from dokploy_wizard.core.planner import build_shared_core_plan
-from dokploy_wizard.packs.resolver import resolve_pack_selection
 from dokploy_wizard.state.models import DesiredState, RawEnvInput, StateValidationError
 
 _ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -36,6 +36,57 @@ _OPENCLAW_NEXA_ENV_KEYS = {
     "OPENCLAW_NEXA_MEM0_VECTOR_DIMENSIONS",
     "OPENCLAW_NEXA_PRESENCE_POLICY",
 }
+_MY_FARM_ADVISOR_DIRECT_PROVIDER_ENV_KEYS = {
+    "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
+    "MY_FARM_ADVISOR_NVIDIA_API_KEY",
+}
+_MY_FARM_ADVISOR_SHARED_PROVIDER_ENV_KEYS = {
+    "AI_DEFAULT_API_KEY",
+    "AI_DEFAULT_BASE_URL",
+    "ANTHROPIC_API_KEY",
+}
+_LITELLM_CANONICAL_ENV_KEYS = {
+    "LITELLM_IMAGE",
+    "LITELLM_IMAGE_TAG",
+    "LITELLM_VERSION",
+    "LITELLM_ADMIN_SUBDOMAIN",
+    "LITELLM_LOCAL_BASE_URL",
+    "LITELLM_LOCAL_MODEL",
+    "LITELLM_LOCAL_API_KEY",
+    "LITELLM_OPENROUTER_MODELS",
+    "LITELLM_NVIDIA_MODELS",
+    "OPENCODE_GO_API_KEY",
+    "OPENCODE_GO_BASE_URL",
+    "OPENROUTER_API_KEY",
+    "NVIDIA_BASE_URL",
+}
+_MY_FARM_ADVISOR_OPTIONAL_ENV_KEYS = {
+    "MY_FARM_ADVISOR_PRIMARY_MODEL",
+    "MY_FARM_ADVISOR_FALLBACK_MODELS",
+    "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
+    "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
+}
+_MY_FARM_ADVISOR_FEATURE_GATED_ENV_KEYS = {
+    "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
+    "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
+    "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
+    "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
+    "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
+    "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
+    "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
+    "TELEGRAM_ALLOWED_USERS",
+    "R2_BUCKET_NAME",
+    "R2_ENDPOINT",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+    "CF_ACCOUNT_ID",
+    "DATA_MODE",
+    "WORKSPACE_DATA_R2_RCLONE_MOUNT",
+    "WORKSPACE_DATA_R2_PREFIX",
+}
+_MY_FARM_ADVISOR_PACK_ONLY_ENV_KEYS = (
+    _MY_FARM_ADVISOR_OPTIONAL_ENV_KEYS | _MY_FARM_ADVISOR_FEATURE_GATED_ENV_KEYS
+)
 
 
 def parse_env_file(path: Path) -> RawEnvInput:
@@ -54,9 +105,6 @@ def parse_env_file(path: Path) -> RawEnvInput:
         if not _ENV_KEY_PATTERN.fullmatch(key):
             msg = f"Invalid env key '{key}' on line {line_number}."
             raise StateValidationError(msg)
-        if value == "":
-            msg = f"Invalid env value for '{key}' on line {line_number}: cannot be empty."
-            raise StateValidationError(msg)
         if key in values:
             msg = f"Duplicate env key '{key}' on line {line_number}."
             raise StateValidationError(msg)
@@ -73,8 +121,11 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
     hostnames: dict[str, str] = {
         "dokploy": _join_hostname(dokploy_subdomain, root_domain),
     }
+    from dokploy_wizard.packs.resolver import resolve_pack_selection
+
     pack_selection = resolve_pack_selection(values, root_domain=root_domain)
     _validate_openclaw_nexa_env(values, enabled_packs=pack_selection.enabled_packs)
+    _validate_my_farm_advisor_env(values, enabled_packs=pack_selection.enabled_packs)
     hostnames.update(pack_selection.hostnames)
 
     return DesiredState(
@@ -122,16 +173,30 @@ def _join_hostname(subdomain: str, root_domain: str) -> str:
 
 
 def _require_value(values: dict[str, str], key: str) -> str:
-    value = values.get(key)
+    value = _get_configured_value(values, key)
     if value is None:
         msg = f"Missing required env key '{key}'."
         raise StateValidationError(msg)
     return value
 
 
+def _get_configured_value(values: dict[str, str], key: str) -> str | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    normalized = value.strip()
+    if normalized == "":
+        return None
+    return normalized
+
+
+def _has_configured_value(values: dict[str, str], key: str) -> bool:
+    return _get_configured_value(values, key) is not None
+
+
 def _resolve_dokploy_api_url(values: dict[str, str]) -> str | None:
-    raw_url = values.get("DOKPLOY_API_URL")
-    raw_key = values.get("DOKPLOY_API_KEY")
+    raw_url = _get_configured_value(values, "DOKPLOY_API_URL")
+    raw_key = _get_configured_value(values, "DOKPLOY_API_KEY")
     if raw_url is None and raw_key is None:
         return None
     if raw_key is None:
@@ -150,7 +215,7 @@ def _resolve_dokploy_api_url(values: dict[str, str]) -> str | None:
 
 
 def _resolve_tailscale_enabled(values: dict[str, str]) -> bool:
-    raw_value = values.get("ENABLE_TAILSCALE")
+    raw_value = _get_configured_value(values, "ENABLE_TAILSCALE")
     enabled = False if raw_value is None else _parse_bool(raw_value, key="ENABLE_TAILSCALE")
     _validate_tailscale_env(enabled=enabled, values=values)
     return enabled
@@ -167,7 +232,7 @@ def _resolve_tailscale_hostname(values: dict[str, str]) -> str | None:
 def _resolve_tailscale_enable_ssh(values: dict[str, str]) -> bool:
     if not _resolve_tailscale_enabled(values):
         return False
-    raw_value = values.get("TAILSCALE_ENABLE_SSH")
+    raw_value = _get_configured_value(values, "TAILSCALE_ENABLE_SSH")
     if raw_value is None:
         return False
     return _parse_bool(raw_value, key="TAILSCALE_ENABLE_SSH")
@@ -176,7 +241,7 @@ def _resolve_tailscale_enable_ssh(values: dict[str, str]) -> bool:
 def _resolve_tailscale_csv(values: dict[str, str], *, key: str) -> tuple[str, ...]:
     if not _resolve_tailscale_enabled(values):
         return ()
-    raw_value = values.get(key, "")
+    raw_value = _get_configured_value(values, key) or ""
     if raw_value == "":
         return ()
     items = tuple(sorted({item.strip() for item in raw_value.split(",") if item.strip()}))
@@ -224,7 +289,7 @@ def _parse_bool(raw_value: str, *, key: str) -> bool:
 def _resolve_access_otp_emails(
     values: dict[str, str], enabled_packs: tuple[str, ...]
 ) -> tuple[str, ...]:
-    raw_value = values.get("CLOUDFLARE_ACCESS_OTP_EMAILS", "")
+    raw_value = _get_configured_value(values, "CLOUDFLARE_ACCESS_OTP_EMAILS") or ""
     if raw_value == "":
         if {"openclaw", "my-farm-advisor"} & set(enabled_packs):
             admin_email = values.get("DOKPLOY_ADMIN_EMAIL", "").strip().lower()
@@ -247,7 +312,7 @@ def _resolve_access_otp_emails(
 def _resolve_seaweedfs_secret(
     values: dict[str, str], *, enabled_packs: tuple[str, ...], key: str
 ) -> str | None:
-    raw_value = values.get(key)
+    raw_value = _get_configured_value(values, key)
     if "seaweedfs" not in enabled_packs:
         if raw_value is not None:
             raise StateValidationError(f"{key} requires the 'seaweedfs' pack.")
@@ -276,7 +341,7 @@ def _resolve_openclaw_replicas(
 def _resolve_pack_replicas(
     values: dict[str, str], enabled_packs: tuple[str, ...], *, key: str, pack_name: str
 ) -> int | None:
-    raw_value = values.get(key)
+    raw_value = _get_configured_value(values, key)
     if pack_name not in enabled_packs:
         if raw_value is not None:
             raise StateValidationError(f"{key} requires the '{pack_name}' pack.")
@@ -299,7 +364,7 @@ def _resolve_pack_replicas(
 def _resolve_openclaw_gateway_token(
     values: dict[str, str], *, enabled_packs: tuple[str, ...]
 ) -> str | None:
-    raw_value = values.get("OPENCLAW_GATEWAY_TOKEN")
+    raw_value = _get_configured_value(values, "OPENCLAW_GATEWAY_TOKEN")
     if "openclaw" not in enabled_packs:
         if raw_value is not None:
             raise StateValidationError("OPENCLAW_GATEWAY_TOKEN requires the 'openclaw' pack.")
@@ -312,6 +377,61 @@ def _validate_openclaw_nexa_env(
 ) -> None:
     if "openclaw" in enabled_packs:
         return
-    unexpected = sorted(key for key in _OPENCLAW_NEXA_ENV_KEYS if key in values)
+    unexpected = sorted(key for key in _OPENCLAW_NEXA_ENV_KEYS if _has_configured_value(values, key))
     if unexpected:
         raise StateValidationError(f"{unexpected} require the 'openclaw' pack.")
+
+
+def _validate_my_farm_advisor_env(
+    values: dict[str, str], *, enabled_packs: tuple[str, ...]
+) -> None:
+    if "my-farm-advisor" not in enabled_packs:
+        unexpected = sorted(
+            key for key in _MY_FARM_ADVISOR_PACK_ONLY_ENV_KEYS if _has_configured_value(values, key)
+        )
+        if unexpected:
+            raise StateValidationError(f"{unexpected} require the 'my-farm-advisor' pack.")
+        return
+
+    if any(_has_configured_value(values, key) for key in _MY_FARM_ADVISOR_DIRECT_PROVIDER_ENV_KEYS):
+        return
+    if _has_configured_value(values, "ANTHROPIC_API_KEY"):
+        return
+
+    has_shared_api_key = _has_configured_value(values, "AI_DEFAULT_API_KEY")
+    has_shared_base_url = _has_configured_value(values, "AI_DEFAULT_BASE_URL")
+    if has_shared_api_key and has_shared_base_url:
+        return
+    if has_shared_api_key or has_shared_base_url:
+        raise StateValidationError(
+            "My Farm Advisor shared provider fallback requires both AI_DEFAULT_API_KEY and "
+            "AI_DEFAULT_BASE_URL. Empty strings count as unset."
+        )
+
+    has_legacy_opencode_go_api_key = _has_configured_value(values, "OPENCODE_GO_API_KEY")
+    has_legacy_opencode_go_base_url = _has_configured_value(values, "OPENCODE_GO_BASE_URL")
+    if has_legacy_opencode_go_api_key and has_legacy_opencode_go_base_url:
+        return
+    if has_legacy_opencode_go_api_key or has_legacy_opencode_go_base_url:
+        raise StateValidationError(
+            "LiteLLM OpenCode Go compatibility requires both OPENCODE_GO_API_KEY and "
+            "OPENCODE_GO_BASE_URL. Empty strings count as unset."
+        )
+
+    if _has_configured_value(values, "LITELLM_LOCAL_BASE_URL"):
+        return
+    if _has_configured_value(values, "LITELLM_LOCAL_MODEL") or any(
+        _has_configured_value(values, key) for key in _LITELLM_CANONICAL_ENV_KEYS
+    ):
+        raise StateValidationError(
+            "LiteLLM canonical local mode for My Farm Advisor requires LITELLM_LOCAL_BASE_URL. "
+            "Point it at the reachable Tailnet/local vLLM endpoint. Empty strings count as unset."
+        )
+
+    raise StateValidationError(
+        "My Farm Advisor requires at least one provider configuration when enabled. Set "
+        "MY_FARM_ADVISOR_OPENROUTER_API_KEY, MY_FARM_ADVISOR_NVIDIA_API_KEY, "
+        "ANTHROPIC_API_KEY, both AI_DEFAULT_API_KEY and AI_DEFAULT_BASE_URL, both "
+        "OPENCODE_GO_API_KEY and OPENCODE_GO_BASE_URL, or LITELLM_LOCAL_BASE_URL for "
+        "LiteLLM canonical local mode. Empty strings count as unset."
+    )

@@ -13,8 +13,9 @@ from dokploy_wizard.lifecycle import (
     validate_completed_steps,
 )
 from dokploy_wizard.state import (
-    AppliedStateCheckpoint,
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+    AppliedStateCheckpoint,
+    RawEnvInput,
     StateValidationError,
     parse_env_file,
     resolve_desired_state,
@@ -25,8 +26,15 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _load_root_env():
-    return parse_env_file(_repo_root() / ".install.env")
+def _load_root_env() -> RawEnvInput:
+    raw_env = parse_env_file(_repo_root() / ".install.env")
+    values = {
+        key: value
+        for key, value in raw_env.values.items()
+        if key != "ENABLE_TAILSCALE" and not key.startswith("TAILSCALE_")
+    }
+    values["PACKS"] = "nextcloud,openclaw,seaweedfs,coder"
+    return RawEnvInput(format_version=raw_env.format_version, values=values)
 
 
 def _index(phase: str) -> int:
@@ -60,6 +68,7 @@ def test_root_mvp_env_applicable_phases_follow_required_order_and_keep_coder() -
         "nextcloud",
         "coder",
         "openclaw",
+        "my-farm-advisor",
         "cloudflare_access",
     )
 

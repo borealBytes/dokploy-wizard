@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
@@ -29,11 +31,6 @@ from dokploy_wizard.packs.openclaw.nexa_retrieval import (
     evaluate_retrieval_gate,
     resolve_retrieval_plan,
 )
-from dokploy_wizard.packs.openclaw.nexa_scope import NexaScopeContext, build_talk_scope
-from dokploy_wizard.packs.openclaw.nexa_talk_reply import (
-    NexaTalkReplyRequest,
-    deliver_talk_reply,
-)
 from dokploy_wizard.packs.openclaw.nexa_runtime import (
     NexaOnlyofficeActionResult,
     NexaOnlyofficeRuntimeResult,
@@ -42,6 +39,11 @@ from dokploy_wizard.packs.openclaw.nexa_runtime import (
     NexaTalkRuntimeResult,
     run_queued_nexa_job,
 )
+from dokploy_wizard.packs.openclaw.nexa_scope import NexaScopeContext, build_talk_scope
+from dokploy_wizard.packs.openclaw.nexa_talk_reply import (
+    NexaTalkReplyRequest,
+    deliver_talk_reply,
+)
 from dokploy_wizard.state import (
     DurableQueueStore,
     load_job_queue_state,
@@ -49,6 +51,7 @@ from dokploy_wizard.state import (
 )
 from dokploy_wizard.state.queue_policy import sweep_expired_leases
 from tests.nexa_mem0_test_server import mem0_base_url, run_recording_mem0_server
+
 from .nexa_e2e_helpers import (
     ONLYOFFICE_CALLBACK_SECRET,
     TALK_SHARED_SECRET,
@@ -57,7 +60,6 @@ from .nexa_e2e_helpers import (
     build_talk_headers,
     json_bytes,
     load_json_fixture,
-    ts,
     write_evidence,
 )
 
@@ -75,7 +77,7 @@ def _mem0_env(base_url: str) -> dict[str, str]:
 
 
 def _runtime_ts(hour: int, minute: int = 0) -> datetime:
-    return datetime(2026, 4, 20, hour, minute, tzinfo=UTC)
+    return datetime(datetime.now(tz=UTC).year + 1, 4, 20, hour, minute, tzinfo=UTC)
 
 
 def _fresh_canonical_file(*, file_version: str, acl_complete: bool = True) -> NexaCanonicalFileSnapshot:

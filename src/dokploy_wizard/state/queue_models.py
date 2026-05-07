@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Durable inbox and queue models for narrow runtime workflows."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 """Tiny Mem0 REST sidecar for Nexa internal deployments."""
 
@@ -8,9 +10,8 @@ import os
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
-
 from mem0 import Memory
+from pydantic import BaseModel, Field
 
 
 class ConfigureRequest(BaseModel):

@@ -18,7 +18,6 @@ from dokploy_wizard.networking import (
     CloudflareError,
     CloudflareTunnel,
 )
-from dokploy_wizard.preflight import HostFacts, PreflightCheck, PreflightReport, ResourceProfile
 from dokploy_wizard.packs.coder import CoderResourceRecord
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.nextcloud import (
@@ -28,6 +27,7 @@ from dokploy_wizard.packs.nextcloud import (
     TalkRuntime,
 )
 from dokploy_wizard.packs.openclaw import OpenClawResourceRecord
+from dokploy_wizard.preflight import HostFacts, PreflightCheck, PreflightReport, ResourceProfile
 from dokploy_wizard.state import load_state_dir
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
@@ -419,6 +419,9 @@ class FakeNextcloudBackend:
             ),
         )
 
+    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
+        del admin_user
+
 
 @dataclass
 class FakeOpenClawBackend:
@@ -516,6 +519,9 @@ def test_install_non_dry_run_reconciles_networking_and_persists_ledger(tmp_path:
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
+        ("shared_core_network", "stack:wizard-stack:shared-network"),
+        ("shared_core_postgres", "stack:wizard-stack:shared-postgres"),
+        ("shared_core_litellm", "stack:wizard-stack:shared-litellm"),
         ("headscale_service", "stack:wizard-stack:headscale"),
     }
 
@@ -603,6 +609,7 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
         encoding="utf-8",
     )
     backend = FakeCloudflareBackend()
+    nextcloud_backend = FakeNextcloudBackend()
 
     summary = run_install_flow(
         env_file=env_file,
@@ -611,14 +618,15 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=backend,
         headscale_backend=FakeHeadscaleBackend(),
-        nextcloud_backend=FakeNextcloudBackend(),
+        nextcloud_backend=nextcloud_backend,
         openclaw_backend=FakeOpenClawBackend(),
     )
 
     loaded_state = load_state_dir(state_dir)
     assert summary["cloudflare_access"]["outcome"] == "applied"
     assert [item["hostname"] for item in summary["cloudflare_access"]["applications"]] == [
-        "openclaw.example.com"
+        "openclaw.example.com",
+        "litellm.example.com",
     ]
     assert loaded_state.applied_state is not None
     assert loaded_state.applied_state.completed_steps[:5] == (
@@ -650,6 +658,7 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
                 "ENABLE_NEXTCLOUD=true",
                 "ENABLE_MY_FARM_ADVISOR=true",
                 "MY_FARM_ADVISOR_CHANNELS=telegram",
+                "MY_FARM_ADVISOR_OPENROUTER_API_KEY=farm-openrouter-key",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,ops@example.com",
                 "HOST_OS_ID=ubuntu",
                 "HOST_OS_VERSION_ID=24.04",
@@ -674,6 +683,7 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
         encoding="utf-8",
     )
     backend = FakeCloudflareBackend()
+    nextcloud_backend = FakeNextcloudBackend()
 
     summary = run_install_flow(
         env_file=env_file,
@@ -682,7 +692,7 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=backend,
         headscale_backend=FakeHeadscaleBackend(),
-        nextcloud_backend=FakeNextcloudBackend(),
+        nextcloud_backend=nextcloud_backend,
         openclaw_backend=FakeOpenClawBackend(),
     )
 
@@ -691,7 +701,7 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
 
     assert "farm.example.com" in dns_hostnames
     assert "office.example.com" in dns_hostnames
-    assert access_hostnames == ["farm.example.com"]
+    assert access_hostnames == ["farm.example.com", "litellm.example.com"]
     assert "office.example.com" not in access_hostnames
 
 

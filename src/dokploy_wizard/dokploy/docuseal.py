@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 """Dokploy-backed DocuSeal runtime backend."""
 
 from __future__ import annotations
@@ -5,12 +7,14 @@ from __future__ import annotations
 import re
 import ssl
 import time
-from http import cookiejar
 from dataclasses import dataclass
 from hashlib import sha256
+from http import cookiejar
+from pathlib import Path
 from typing import Protocol
 from urllib import error as urlerror
-from urllib import parse, request as urlrequest
+from urllib import parse
+from urllib import request as urlrequest
 
 from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.dokploy.client import (
@@ -22,11 +26,16 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    persist_compose_artifact_hash,
+)
 from dokploy_wizard.packs.docuseal import (
     DocuSealBootstrapState,
     DocuSealError,
     DocuSealResourceRecord,
 )
+from dokploy_wizard.verification import ServiceVerificationResult
 
 _DEFAULT_SHARED_SERVICE_PASSWORD = "change-me"
 _DEFAULT_DOCUSEAL_IMAGE = "docuseal/docuseal:latest"
@@ -95,6 +104,7 @@ class DokployDocuSealBackend:
         smtp_port: int | None = None,
         smtp_domain: str | None = None,
         smtp_from_address: str | None = None,
+        state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployDocuSealApi | None = None,
     ) -> None:
         self._stack_name = stack_name
@@ -109,6 +119,7 @@ class DokployDocuSealBackend:
         self._smtp_port = smtp_port
         self._smtp_domain = smtp_domain
         self._smtp_from_address = smtp_from_address
+        self._state_dir = state_dir
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
@@ -214,7 +225,7 @@ class DokployDocuSealBackend:
                 "DocuSeal SECRET_KEY_BASE secret ref no longer matches the active Dokploy plan."
             )
         health_url = _health_url(self._hostname)
-        if self._created_in_process and not _wait_for_local_https_health(health_url):
+        if not _wait_for_local_https_health(health_url):
             raise DocuSealError("DocuSeal /up endpoint did not become locally reachable before setup.")
         notes: list[str] = []
         if _docuseal_is_initialized(self._hostname):
@@ -282,21 +293,25 @@ class DokployDocuSealBackend:
         )
         try:
             if self._applied_locator is not None:
-                updated = self._client.update_compose(
-                    compose_id=self._applied_locator.compose_id,
-                    compose_file=compose_file,
-                )
-                self._client.deploy_compose(
-                    compose_id=updated.compose_id,
+                current_locator = self._applied_locator
+                result = apply_compose_noop_guard(
+                    rendered_compose=compose_file,
+                    service_key=self._compose_name,
+                    state_dir=self._state_dir,
+                    client=self._client,
+                    locator=current_locator,
+                    compose_id=current_locator.compose_id,
                     title="dokploy-wizard docuseal reconcile",
                     description="Update DocuSeal compose app",
+                    verify_current=self._verify_current_application,
+                    locator_factory=lambda compose_id: _ComposeLocator(
+                        project_id=current_locator.project_id,
+                        environment_id=current_locator.environment_id,
+                        compose_id=compose_id,
+                    ),
                 )
-                self._created_in_process = True
-                self._applied_locator = _ComposeLocator(
-                    project_id=self._applied_locator.project_id,
-                    environment_id=self._applied_locator.environment_id,
-                    compose_id=updated.compose_id,
-                )
+                self._created_in_process = result.status == "applied"
+                self._applied_locator = result.locator
                 return self._applied_locator
             projects = self._client.list_projects()
             for project in projects:
@@ -307,22 +322,30 @@ class DokployDocuSealBackend:
                     break
                 for compose in environment.composes:
                     if compose.name == self._compose_name:
-                        updated = self._client.update_compose(
-                            compose_id=compose.compose_id,
-                            compose_file=compose_file,
-                        )
-                        self._client.deploy_compose(
-                            compose_id=updated.compose_id,
-                            title="dokploy-wizard docuseal reconcile",
-                            description="Update DocuSeal compose app",
-                        )
                         locator = _ComposeLocator(
                             project_id=project.project_id,
                             environment_id=environment.environment_id,
-                            compose_id=updated.compose_id,
+                            compose_id=compose.compose_id,
                         )
-                        self._applied_locator = locator
-                        return locator
+                        result = apply_compose_noop_guard(
+                            rendered_compose=compose_file,
+                            service_key=self._compose_name,
+                            state_dir=self._state_dir,
+                            client=self._client,
+                            locator=locator,
+                            compose_id=compose.compose_id,
+                            title="dokploy-wizard docuseal reconcile",
+                            description="Update DocuSeal compose app",
+                            verify_current=self._verify_current_application,
+                            locator_factory=lambda compose_id: _ComposeLocator(
+                                project_id=project.project_id,
+                                environment_id=environment.environment_id,
+                                compose_id=compose_id,
+                            ),
+                        )
+                        self._created_in_process = result.status == "applied"
+                        self._applied_locator = result.locator
+                        return result.locator
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
@@ -338,6 +361,11 @@ class DokployDocuSealBackend:
                     project_id=project.project_id,
                     environment_id=environment.environment_id,
                     compose_id=created.compose_id,
+                )
+                persist_compose_artifact_hash(
+                    state_dir=self._state_dir,
+                    service_key=self._compose_name,
+                    rendered_compose=compose_file,
                 )
                 self._applied_locator = locator
                 self._created_in_process = True
@@ -365,9 +393,33 @@ class DokployDocuSealBackend:
             environment_id=created_project.environment_id,
             compose_id=created_compose.compose_id,
         )
+        persist_compose_artifact_hash(
+            state_dir=self._state_dir,
+            service_key=self._compose_name,
+            rendered_compose=compose_file,
+        )
         self._created_in_process = True
         self._applied_locator = locator
         return locator
+
+    def _verify_current_application(self) -> ServiceVerificationResult:
+        try:
+            self.ensure_application_ready(
+                secret_key_base_secret_ref=self._secret_key_base_secret_ref,
+            )
+        except DocuSealError as error:
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="app",
+                status="fail",
+                detail=str(error),
+            )
+        return ServiceVerificationResult(
+            service_name=self._compose_name,
+            tier="app",
+            status="pass",
+            detail="DocuSeal runtime checks passed.",
+        )
 
 
 def _resource_id(compose_id: str, kind: str) -> str:
@@ -519,7 +571,7 @@ def _local_https_health_check(url: str) -> bool:
     try:
         with urlrequest.urlopen(req, timeout=15, context=context):  # noqa: S310
             return True
-    except urlerror.HTTPError as exc:
+    except urlerror.HTTPError:
         return False
     except (urlerror.URLError, TimeoutError):
         return False

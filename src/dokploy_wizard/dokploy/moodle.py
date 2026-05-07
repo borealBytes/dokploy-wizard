@@ -1,16 +1,20 @@
+# ruff: noqa: E501
 """Dokploy-backed Moodle runtime backend."""
 
 from __future__ import annotations
 
+import re
 import shlex
 import ssl
 import subprocess
 import time
-import re
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 from urllib import error as urlerror
-from urllib import parse, request as urlrequest
+from urllib import parse
+from urllib import request as urlrequest
 
 from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.dokploy.client import (
@@ -23,18 +27,26 @@ from dokploy_wizard.dokploy.client import (
     DokployProjectSummary,
     DokployScheduleRecord,
 )
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    persist_compose_artifact_hash,
+)
 from dokploy_wizard.packs.moodle import MoodleError, MoodleResourceRecord
+from dokploy_wizard.verification import ServiceVerificationResult
 
 _DEFAULT_SHARED_SERVICE_PASSWORD = "change-me"
 _DEFAULT_MOODLE_FULLNAME = "Moodle"
 _DEFAULT_MOODLE_SHORTNAME = "Moodle"
 _DEFAULT_MOODLE_CRON = "* * * * *"
 _DEFAULT_MOODLE_CRON_TIMEZONE = "UTC"
+_DEFAULT_MOODLE_UPGRADE_RETRY_ATTEMPTS = 36
+_DEFAULT_MOODLE_UPGRADE_RETRY_DELAY_SECONDS = 5.0
 _DEFAULT_MOODLE_CONFIG_CACHE = "/var/moodledata/config.php"
 _DEFAULT_MOODLE_DATAROOT = "/var/moodledata/files"
 _DEFAULT_MOODLE_DOCROOT = "/var/www/html"
 _DEFAULT_MOODLE_SOURCE_REF = "MOODLE_500_STABLE"
 _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+_MOODLE_UPGRADE_IN_PROGRESS_TEXT = "Site is being upgraded, please retry later"
 _DEFAULT_MOODLE_PLUGIN_PARENT_PATHS = (
     "/var/www/html/admin/tool",
     "/var/www/html/assign/feedback",
@@ -139,6 +151,7 @@ class DokployMoodleBackend:
         smtp_from_address: str | None = None,
         moodle_cron: str = _DEFAULT_MOODLE_CRON,
         moodle_cron_timezone: str = _DEFAULT_MOODLE_CRON_TIMEZONE,
+        state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployMoodleApi | None = None,
     ) -> None:
         self._stack_name = stack_name
@@ -153,6 +166,7 @@ class DokployMoodleBackend:
         self._smtp_from_address = smtp_from_address
         self._moodle_cron = moodle_cron
         self._moodle_cron_timezone = moodle_cron_timezone
+        self._state_dir = state_dir
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
@@ -331,21 +345,25 @@ class DokployMoodleBackend:
         )
         try:
             if self._applied_locator is not None:
-                updated = self._client.update_compose(
-                    compose_id=self._applied_locator.compose_id,
-                    compose_file=compose_file,
-                )
-                self._client.deploy_compose(
-                    compose_id=updated.compose_id,
+                current_locator = self._applied_locator
+                result = apply_compose_noop_guard(
+                    rendered_compose=compose_file,
+                    service_key=self._compose_name,
+                    state_dir=self._state_dir,
+                    client=self._client,
+                    locator=current_locator,
+                    compose_id=current_locator.compose_id,
                     title="dokploy-wizard moodle reconcile",
                     description="Update Moodle compose app",
+                    verify_current=self._verify_current_application,
+                    locator_factory=lambda compose_id: _ComposeLocator(
+                        project_id=current_locator.project_id,
+                        environment_id=current_locator.environment_id,
+                        compose_id=compose_id,
+                    ),
                 )
-                self._created_in_process = True
-                self._applied_locator = _ComposeLocator(
-                    project_id=self._applied_locator.project_id,
-                    environment_id=self._applied_locator.environment_id,
-                    compose_id=updated.compose_id,
-                )
+                self._created_in_process = result.status == "applied"
+                self._applied_locator = result.locator
                 return self._applied_locator
             projects = self._client.list_projects()
             for project in projects:
@@ -356,22 +374,30 @@ class DokployMoodleBackend:
                     break
                 for compose in environment.composes:
                     if compose.name == self._compose_name:
-                        updated = self._client.update_compose(
-                            compose_id=compose.compose_id,
-                            compose_file=compose_file,
-                        )
-                        self._client.deploy_compose(
-                            compose_id=updated.compose_id,
-                            title="dokploy-wizard moodle reconcile",
-                            description="Update Moodle compose app",
-                        )
                         locator = _ComposeLocator(
                             project_id=project.project_id,
                             environment_id=environment.environment_id,
-                            compose_id=updated.compose_id,
+                            compose_id=compose.compose_id,
                         )
-                        self._applied_locator = locator
-                        return locator
+                        result = apply_compose_noop_guard(
+                            rendered_compose=compose_file,
+                            service_key=self._compose_name,
+                            state_dir=self._state_dir,
+                            client=self._client,
+                            locator=locator,
+                            compose_id=compose.compose_id,
+                            title="dokploy-wizard moodle reconcile",
+                            description="Update Moodle compose app",
+                            verify_current=self._verify_current_application,
+                            locator_factory=lambda compose_id: _ComposeLocator(
+                                project_id=project.project_id,
+                                environment_id=environment.environment_id,
+                                compose_id=compose_id,
+                            ),
+                        )
+                        self._created_in_process = result.status == "applied"
+                        self._applied_locator = result.locator
+                        return result.locator
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
@@ -387,6 +413,11 @@ class DokployMoodleBackend:
                     project_id=project.project_id,
                     environment_id=environment.environment_id,
                     compose_id=created.compose_id,
+                )
+                persist_compose_artifact_hash(
+                    state_dir=self._state_dir,
+                    service_key=self._compose_name,
+                    rendered_compose=compose_file,
                 )
                 self._applied_locator = locator
                 self._created_in_process = True
@@ -415,9 +446,31 @@ class DokployMoodleBackend:
             environment_id=created_project.environment_id,
             compose_id=created_compose.compose_id,
         )
+        persist_compose_artifact_hash(
+            state_dir=self._state_dir,
+            service_key=self._compose_name,
+            rendered_compose=compose_file,
+        )
         self._created_in_process = True
         self._applied_locator = locator
         return locator
+
+    def _verify_current_application(self) -> ServiceVerificationResult:
+        try:
+            self.ensure_application_ready()
+        except MoodleError as error:
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="app",
+                status="fail",
+                detail=str(error),
+            )
+        return ServiceVerificationResult(
+            service_name=self._compose_name,
+            tier="app",
+            status="pass",
+            detail="Moodle runtime checks passed.",
+        )
 
     def _ensure_moodle_cron_schedule(self) -> None:
         locator = self._find_compose_locator()
@@ -767,11 +820,31 @@ def _configure_moodle_smtp(
         f"php {cfg} --name=smtppass --set=''",
         f"php {cfg} --name=noreplyaddress --set={shlex.quote(from_address)}",
     ]
-    _run_container_shell(
-        container_name,
-        "set -eu && " + " && ".join(commands),
-        error_prefix="Unable to configure Moodle SMTP",
+    _run_moodle_upgrade_retry(
+        lambda: _run_container_shell(
+            container_name,
+            "set -eu && " + " && ".join(commands),
+            error_prefix="Unable to configure Moodle SMTP",
+        )
     )
+
+
+def _run_moodle_upgrade_retry(
+    action: Callable[[], None],
+    *,
+    attempts: int = _DEFAULT_MOODLE_UPGRADE_RETRY_ATTEMPTS,
+    delay_seconds: float = _DEFAULT_MOODLE_UPGRADE_RETRY_DELAY_SECONDS,
+) -> None:
+    for attempt in range(attempts):
+        try:
+            action()
+            return
+        except MoodleError as exc:
+            if _MOODLE_UPGRADE_IN_PROGRESS_TEXT not in str(exc):
+                raise
+            if attempt >= attempts - 1:
+                raise
+            time.sleep(delay_seconds)
 
 
 def _repair_moodle_config_file(container_name: str, config_path: str) -> None:

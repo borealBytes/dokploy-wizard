@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """OpenClaw/My Farm runtime reconciliation and ledger integration."""
 
 from __future__ import annotations
@@ -555,7 +556,7 @@ def _channels_for_pack(desired_state: DesiredState, pack_name: str) -> tuple[str
         return desired_state.openclaw_channels
     if pack_name == "my-farm-advisor":
         return desired_state.my_farm_advisor_channels
-        raise OpenClawError(f"Unsupported pack '{pack_name}'.")
+    raise OpenClawError(f"Unsupported pack '{pack_name}'.")
 
 
 def _replicas_for_pack(desired_state: DesiredState, pack_name: str) -> int | None:
@@ -563,7 +564,7 @@ def _replicas_for_pack(desired_state: DesiredState, pack_name: str) -> int | Non
         return desired_state.openclaw_replicas
     if pack_name == "my-farm-advisor":
         return desired_state.my_farm_advisor_replicas
-        raise OpenClawError(f"Unsupported pack '{pack_name}'.")
+    raise OpenClawError(f"Unsupported pack '{pack_name}'.")
 
 
 def _health_path_for_pack(pack_name: str) -> str:
@@ -571,7 +572,7 @@ def _health_path_for_pack(pack_name: str) -> str:
         return "/healthz"
     if pack_name == "openclaw":
         return "/health"
-        raise OpenClawError(f"Unsupported pack '{pack_name}'.")
+    raise OpenClawError(f"Unsupported pack '{pack_name}'.")
 
 
 def _optional_bool(values: dict[str, str], key: str) -> bool | None:

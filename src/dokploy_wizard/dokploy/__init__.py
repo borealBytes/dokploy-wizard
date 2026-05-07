@@ -22,6 +22,12 @@ from dokploy_wizard.dokploy.client import (
 )
 from dokploy_wizard.dokploy.cloudflared import DokployCloudflaredBackend
 from dokploy_wizard.dokploy.coder import DokployCoderBackend
+from dokploy_wizard.dokploy.compose_noop import (
+    ComposeApplyResult,
+    apply_compose_noop_guard,
+    load_compose_artifact_hash,
+    persist_compose_artifact_hash,
+)
 from dokploy_wizard.dokploy.docuseal import DokployDocuSealBackend
 from dokploy_wizard.dokploy.headscale import DokployHeadscaleBackend
 from dokploy_wizard.dokploy.matrix import DokployMatrixBackend
@@ -29,7 +35,10 @@ from dokploy_wizard.dokploy.moodle import DokployMoodleBackend
 from dokploy_wizard.dokploy.nextcloud import DokployNextcloudBackend
 from dokploy_wizard.dokploy.openclaw import DokployOpenClawBackend
 from dokploy_wizard.dokploy.seaweedfs import DokploySeaweedFsBackend
-from dokploy_wizard.dokploy.shared_core import DokploySharedCoreBackend
+from dokploy_wizard.dokploy.shared_core import (
+    DokploySharedCoreBackend,
+    build_litellm_consumer_model_allowlists,
+)
 
 __all__ = [
     "DokployApiClient",
@@ -37,6 +46,7 @@ __all__ = [
     "DokployBootstrapAuthClient",
     "DokployBootstrapAuthError",
     "DokployBootstrapAuthResult",
+    "ComposeApplyResult",
     "DokployComposeRecord",
     "DokployComposeSummary",
     "DokployCloudflaredBackend",
@@ -54,6 +64,10 @@ __all__ = [
     "DokployProjectSummary",
     "DokployScheduleRecord",
     "DokploySharedCoreBackend",
+    "build_litellm_consumer_model_allowlists",
+    "apply_compose_noop_guard",
+    "load_compose_artifact_hash",
+    "persist_compose_artifact_hash",
     "API_KEY_CREATE_PATH",
     "AUTH_SESSION_PATHS",
     "AUTH_SIGN_IN_PATHS",

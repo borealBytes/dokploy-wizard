@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
@@ -34,14 +35,27 @@ from dokploy_wizard.packs.nextcloud import (
     TalkRuntime,
 )
 from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
     OwnedResource,
     OwnershipLedger,
     RawEnvInput,
     load_state_dir,
     resolve_desired_state,
+    write_applied_checkpoint,
 )
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
+
+
+def _write_empty_applied_checkpoint(state_dir: Path) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("shared_core",),
+        ),
+    )
 
 
 @dataclass
@@ -227,11 +241,16 @@ class FakeSharedCoreBackend:
     postgres: SharedCoreResourceRecord | None = None
     redis: SharedCoreResourceRecord | None = None
     mail_relay: SharedCoreResourceRecord | None = None
+    litellm: SharedCoreResourceRecord | None = None
     create_network_calls: int = 0
     create_postgres_calls: int = 0
     create_redis_calls: int = 0
     create_mail_relay_calls: int = 0
+    create_litellm_calls: int = 0
     ensured_allocations: tuple[SharedPostgresAllocation, ...] = ()
+    refresh_compose_calls: int = 0
+    reconcile_litellm_runtime_calls: int = 0
+    call_order: list[str] = field(default_factory=list)
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self.network is not None and self.network.resource_id == resource_id:
@@ -245,6 +264,7 @@ class FakeSharedCoreBackend:
 
     def create_network(self, resource_name: str) -> SharedCoreResourceRecord:
         self.create_network_calls += 1
+        self.call_order.append("create_network")
         self.network = SharedCoreResourceRecord(
             resource_id="network-1",
             resource_name=resource_name,
@@ -263,6 +283,7 @@ class FakeSharedCoreBackend:
 
     def create_postgres_service(self, resource_name: str) -> SharedCoreResourceRecord:
         self.create_postgres_calls += 1
+        self.call_order.append("create_postgres_service")
         self.postgres = SharedCoreResourceRecord(
             resource_id="postgres-1",
             resource_name=resource_name,
@@ -281,6 +302,7 @@ class FakeSharedCoreBackend:
 
     def create_redis_service(self, resource_name: str) -> SharedCoreResourceRecord:
         self.create_redis_calls += 1
+        self.call_order.append("create_redis_service")
         self.redis = SharedCoreResourceRecord(
             resource_id="redis-1",
             resource_name=resource_name,
@@ -299,16 +321,45 @@ class FakeSharedCoreBackend:
 
     def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
         self.create_mail_relay_calls += 1
+        self.call_order.append("create_mail_relay_service")
         self.mail_relay = SharedCoreResourceRecord(
             resource_id="postfix-1",
             resource_name=resource_name,
         )
         return self.mail_relay
 
+    def get_litellm_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_id == resource_id:
+            return self.litellm
+        return None
+
+    def find_litellm_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_name == resource_name:
+            return self.litellm
+        return None
+
+    def create_litellm_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        self.create_litellm_calls += 1
+        self.call_order.append("create_litellm_service")
+        self.litellm = SharedCoreResourceRecord(
+            resource_id="litellm-1",
+            resource_name=resource_name,
+        )
+        return self.litellm
+
     def ensure_postgres_allocations(
         self, allocations: tuple[SharedPostgresAllocation, ...]
     ) -> None:
+        self.call_order.append("ensure_postgres_allocations")
         self.ensured_allocations = allocations
+
+    def refresh_compose(self) -> None:
+        self.refresh_compose_calls += 1
+        self.call_order.append("refresh_compose")
+
+    def reconcile_litellm_runtime(self) -> None:
+        self.reconcile_litellm_runtime_calls += 1
+        self.call_order.append("reconcile_litellm_runtime")
 
 
 @dataclass
@@ -559,6 +610,7 @@ def test_install_plans_and_persists_shared_core_once_for_nextcloud(tmp_path: Pat
         ("cloudflare_dns_record", "zone:zone-123:nextcloud.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:office.example.com"),
         ("headscale_service", "stack:nextcloud-stack:headscale"),
+        ("shared_core_litellm", "stack:nextcloud-stack:shared-litellm"),
         ("shared_core_network", "stack:nextcloud-stack:shared-network"),
         ("shared_core_postgres", "stack:nextcloud-stack:shared-postgres"),
         ("shared_core_redis", "stack:nextcloud-stack:shared-redis"),
@@ -632,9 +684,11 @@ def test_install_rerun_reuses_owned_shared_core_resources(tmp_path: Path) -> Non
     )
 
     assert summary["shared_core"]["outcome"] == "already_present"
+    assert summary["shared_core"]["litellm"]["action"] == "reuse_owned"
     assert summary["shared_core"]["network"]["action"] == "reuse_owned"
     assert summary["shared_core"]["postgres"]["action"] == "reuse_owned"
     assert summary["shared_core"]["redis"]["action"] == "reuse_owned"
+    assert shared_backend.create_litellm_calls == 1
     assert shared_backend.create_network_calls == 1
     assert shared_backend.create_postgres_calls == 1
     assert shared_backend.create_redis_calls == 1
@@ -709,7 +763,11 @@ def test_install_fails_closed_when_shared_core_owned_resource_drifted(tmp_path: 
         )
 
 
-def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_resources() -> None:
+def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_resources(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    _write_empty_applied_checkpoint(state_dir)
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -731,7 +789,9 @@ def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_re
         plan=desired_state.shared_core,
         client=client,
         allocation_provisioner=lambda allocations: provisioned.append(allocations),
+        state_dir=state_dir,
     )
+    setattr(backend, "_wait_for_shared_core_containers", lambda: None)
 
     phase = reconcile_shared_core(
         dry_run=False,
@@ -790,9 +850,84 @@ def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_re
     assert client.deploy_calls == 1
 
 
+def test_shared_core_reconciles_litellm_after_postgres_allocations() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "nextcloud-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+    backend = FakeSharedCoreBackend()
+
+    phase = reconcile_shared_core(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert phase.result.outcome == "applied"
+    assert backend.refresh_compose_calls == 1
+    assert backend.reconcile_litellm_runtime_calls == 1
+    assert backend.call_order.index("ensure_postgres_allocations") < backend.call_order.index(
+        "reconcile_litellm_runtime"
+    )
+
+
+def test_dokploy_shared_core_backend_defers_litellm_runtime_until_explicit_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    _write_empty_applied_checkpoint(state_dir)
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "nextcloud-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+                "DOKPLOY_API_URL": "https://dokploy.example.com",
+                "DOKPLOY_API_KEY": "dokp-key-123",
+            },
+        )
+    )
+    client = FakeDokployApiClient()
+    backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        stack_name=desired_state.stack_name,
+        plan=desired_state.shared_core,
+        client=client,
+        state_dir=state_dir,
+    )
+    setattr(backend, "_wait_for_shared_core_containers", lambda: None)
+    reconcile_calls: list[str] = []
+    monkeypatch.setattr(
+        backend,
+        "_ensure_litellm_runtime_ready_and_reconciled",
+        lambda: reconcile_calls.append("reconciled"),
+    )
+
+    backend.create_network(desired_state.shared_core.network_name)
+
+    assert reconcile_calls == []
+
+    backend.reconcile_litellm_runtime()
+
+    assert reconcile_calls == ["reconciled"]
+
+
 def test_dokploy_shared_core_backend_updates_existing_compose_when_mail_relay_container_is_missing(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    state_dir = tmp_path / "state"
+    _write_empty_applied_checkpoint(state_dir)
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -832,7 +967,9 @@ def test_dokploy_shared_core_backend_updates_existing_compose_when_mail_relay_co
         plan=desired_state.shared_core,
         client=client,
         allocation_provisioner=lambda allocations: provisioned.append(allocations),
+        state_dir=state_dir,
     )
+    setattr(backend, "_wait_for_shared_core_containers", lambda: None)
     assert desired_state.shared_core.mail_relay is not None
     mail_relay_service_name = desired_state.shared_core.mail_relay.service_name
     monkeypatch.setattr(
