@@ -199,6 +199,26 @@ class FakeLiteLLMAdminApi:
         self.created_keys.append(record)
         return record
 
+    def update_key(
+        self,
+        *,
+        key_alias: str,
+        key: str,
+        team_id: str | None,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMVirtualKeyRecord:
+        del metadata
+        record = LiteLLMVirtualKeyRecord(
+            key=key,
+            key_alias=key_alias,
+            team_id=team_id,
+            models=models,
+        )
+        self._keys[key_alias] = record
+        self.created_keys.append(record)
+        return record
+
     def visible_models_for_key(self, key_alias: str) -> tuple[str, ...]:
         return self._keys[key_alias].models
 
@@ -263,3 +283,34 @@ def test_reconcile_virtual_keys_surfaces_key_creation_failures() -> None:
         )
 
     assert "failed to create key coder-kdense" in str(error.value)
+
+
+def test_reconcile_virtual_keys_updates_existing_key_with_different_value() -> None:
+    api = FakeLiteLLMAdminApi(
+        teams=(
+            LiteLLMTeamRecord(
+                team_id="team-my-farm-advisor",
+                team_alias="my-farm-advisor",
+                models=("openai/*",),
+            ),
+        ),
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key="old-my-farm-key",
+                key_alias="my-farm-advisor",
+                team_id="team-my-farm-advisor",
+                models=("openai/*",),
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    reconciled = manager.reconcile_virtual_keys(
+        generated_keys={"my-farm-advisor": "new-my-farm-key"},
+        consumer_model_allowlists={"my-farm-advisor": ("openai/*",)},
+    )
+
+    assert reconciled["my-farm-advisor"].key == "new-my-farm-key"
+    assert api.visible_models_for_key("my-farm-advisor") == ("openai/*",)
+    assert len(api.created_keys) == 1
+    assert api.created_keys[0].key == "new-my-farm-key"
