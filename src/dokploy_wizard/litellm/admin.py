@@ -51,6 +51,16 @@ class LiteLLMAdminApi(Protocol):
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMVirtualKeyRecord: ...
 
+    def update_key(
+        self,
+        *,
+        key_alias: str,
+        key: str,
+        team_id: str | None,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMVirtualKeyRecord: ...
+
 
 class LiteLLMAdminClient:
     _KEY_LIST_PAGE_SIZE = 100
@@ -128,6 +138,30 @@ class LiteLLMAdminClient:
         )
         if not isinstance(payload, dict):
             raise LiteLLMAdminError("LiteLLM key.generate response must be an object.")
+        return _parse_key(payload, fallback_key=key, fallback_alias=key_alias, fallback_team_id=team_id)
+
+    def update_key(
+        self,
+        *,
+        key_alias: str,
+        key: str,
+        team_id: str | None,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMVirtualKeyRecord:
+        payload = self._request_json(
+            "POST",
+            "/key/update",
+            {
+                "key_alias": key_alias,
+                "key": key,
+                "team_id": team_id,
+                "models": list(models),
+                "metadata": dict(metadata or {}),
+            },
+        )
+        if not isinstance(payload, dict):
+            raise LiteLLMAdminError("LiteLLM key.update response must be an object.")
         return _parse_key(payload, fallback_key=key, fallback_alias=key_alias, fallback_team_id=team_id)
 
     def _request_json(
@@ -222,10 +256,14 @@ class LiteLLMGatewayManager:
                 )
                 existing_keys[consumer] = existing_key
             elif existing_key.key != generated_key:
-                raise LiteLLMAdminError(
-                    f"LiteLLM key alias '{consumer}' already exists with a different key value. "
-                    "Refusing to rotate or overwrite the existing virtual key silently."
+                existing_key = self._api.update_key(
+                    key_alias=consumer,
+                    key=generated_key,
+                    team_id=team.team_id,
+                    models=expected_models,
+                    metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
                 )
+                existing_keys[consumer] = existing_key
             elif existing_key.models != expected_models:
                 raise LiteLLMAdminError(
                     f"LiteLLM key alias '{consumer}' already exists with models {list(existing_key.models)}, "
