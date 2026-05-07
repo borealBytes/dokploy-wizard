@@ -475,8 +475,8 @@ class DokploySharedCoreBackend:
             return False
         try:
             LiteLLMGatewayManager(api=self._litellm_admin_api, sleep_fn=self._sleep_fn).wait_until_ready(
-                attempts=1,
-                delay_seconds=0,
+                attempts=3,
+                delay_seconds=2.0,
             )
         except Exception:
             return False

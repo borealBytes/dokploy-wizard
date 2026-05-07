@@ -504,20 +504,34 @@ class DokployCoderBackend:
                 email=self._admin_email,
                 password=self._admin_password,
             )
-            template_names = {
-                item.get("name")
-                for item in _list_templates(
+            workspace_name = _default_workspace_name(self._hostname)
+            missing_templates: list[str] = []
+            workspace_missing = False
+            for attempt in range(3):
+                template_names = {
+                    item.get("name")
+                    for item in _list_templates(
+                        container_name=container_name,
+                        hostname=self._hostname,
+                        session_token=session_token,
+                    )
+                    if isinstance(item.get("name"), str)
+                }
+                missing_templates = [
+                    template_name
+                    for template_name in _required_template_names()
+                    if template_name not in template_names
+                ]
+                workspace_missing = workspace_name not in _list_workspaces(
                     container_name=container_name,
                     hostname=self._hostname,
                     session_token=session_token,
                 )
-                if isinstance(item.get("name"), str)
-            }
-            missing_templates = [
-                template_name
-                for template_name in _required_template_names()
-                if template_name not in template_names
-            ]
+                if not missing_templates and not workspace_missing:
+                    break
+                if attempt < 2:
+                    time.sleep(2.0)
+
             if missing_templates:
                 return make_verification_result(
                     service_name=self._compose_name,
@@ -529,12 +543,7 @@ class DokployCoderBackend:
                         + "."
                     ),
                 )
-            workspace_name = _default_workspace_name(self._hostname)
-            if workspace_name not in _list_workspaces(
-                container_name=container_name,
-                hostname=self._hostname,
-                session_token=session_token,
-            ):
+            if workspace_missing:
                 return make_verification_result(
                     service_name=self._compose_name,
                     tier="bootstrap",
