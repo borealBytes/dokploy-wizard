@@ -560,6 +560,8 @@ def _render_compose_file(
             "    restart: unless-stopped\n"
             "    command: redis-server --appendonly yes "
             "--requirepass ${REDIS_PASSWORD:-change-me}\n"
+            "    environment:\n"
+            "      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me}\n"
             f"    volumes:\n      - {redis_volume}:/data\n"
             "    networks:\n      - shared\n"
         )
