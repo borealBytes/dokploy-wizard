@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -363,6 +364,92 @@ def test_shared_core_unhealthy_litellm_blocks_noop_skip(
     backend.create_network(plan.network_name)
 
     client.assert_single_update_deploy_pair(plan.network_name)
+
+
+def test_shared_core_find_container_name_prefers_exact_manual_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(
+        command: list[str], check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=(
+                "openmerge-shared-postgres\n"
+                "openmerge-shared-a1b2c3-openmerge-shared-postgres-1\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.shared_core.subprocess.run", fake_run)
+
+    assert shared_core_module._find_container_name("openmerge-shared-postgres") == (
+        "openmerge-shared-postgres"
+    )
+
+
+def test_shared_core_runtime_ready_uses_resolved_dokploy_container_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_shared_core_plan(stack_name="openmerge", enabled_packs=("nextcloud",))
+    readiness_api = _FakeLiteLLMAdminApi({"status": "connected", "db": "connected"})
+    postgres_container_names: list[str] = []
+    redis_container_names: list[str] = []
+
+    def fake_run(
+        command: list[str], check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        assert command[:2] == ["docker", "ps"]
+        service_filter = command[3]
+        if service_filter == "label=com.docker.compose.service=openmerge-shared-postgres":
+            stdout = "openmerge-shared-yqjzwd-openmerge-shared-postgres-1\n"
+        elif service_filter == "label=com.docker.compose.service=openmerge-shared-redis":
+            stdout = "openmerge-shared-yqjzwd-openmerge-shared-redis-1\n"
+        else:
+            stdout = ""
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    def fake_can_connect_as_allocation(
+        container_name: str, allocation: SharedPostgresAllocation
+    ) -> bool:
+        del allocation
+        postgres_container_names.append(container_name)
+        return True
+
+    def fake_redis_is_ready(container_name: str) -> bool:
+        redis_container_names.append(container_name)
+        return True
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.shared_core.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        shared_core_module,
+        "_can_connect_as_allocation",
+        fake_can_connect_as_allocation,
+    )
+    monkeypatch.setattr(shared_core_module, "_redis_is_ready", fake_redis_is_ready)
+
+    backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="openmerge",
+        plan=plan,
+        litellm_generated_keys=_generated_keys(),
+        litellm_admin_api=readiness_api,
+    )
+
+    assert backend._shared_core_runtime_ready_for_noop() is True
+    assert postgres_container_names == [
+        "openmerge-shared-yqjzwd-openmerge-shared-postgres-1"
+    ]
+    assert redis_container_names == ["openmerge-shared-yqjzwd-openmerge-shared-redis-1"]
 
 
 def test_litellm_allowlists_keep_local_and_bare_aliases_for_advisors() -> None:

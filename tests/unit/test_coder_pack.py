@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass
 from datetime import date
@@ -1476,6 +1477,76 @@ def test_dokploy_coder_verification_confirms_bootstrap_artifacts(
     assert "first user bootstrap" in result.detail
     assert "seeded templates" in result.detail
     assert "default workspace" in result.detail
+
+
+def test_dokploy_coder_verification_resolves_dokploy_prefixed_container_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="openmerge",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="openmerge-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="openmerge_coder",
+            user_name="openmerge_coder",
+            password_secret_ref="openmerge-coder-postgres-password",
+        ),
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    exec_container_names: list[str] = []
+
+    def fake_run(
+        command: list[str], check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        if command[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="openmerge-coder-ofbxpg-openmerge-coder-1\n",
+                stderr="",
+            )
+        if command[:4] == ["docker", "exec", "-e", f"CODER_URL={coder_module._coder_cli_url()}"]:
+            exec_container_names.append(command[6])
+            if command[7:10] == ["/opt/coder", "templates", "list"]:
+                stdout = json.dumps(
+                    [
+                        {"name": template_name}
+                        for template_name in coder_module._required_template_names()
+                    ]
+                )
+            elif command[7:9] == ["/opt/coder", "list"]:
+                stdout = json.dumps(
+                    [{"name": coder_module._default_workspace_name("coder.example.com")}]
+                )
+            else:
+                raise AssertionError(f"Unexpected docker exec command: {command}")
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(coder_module, "_local_https_health_check", lambda url: True)
+    monkeypatch.setattr(coder_module, "_wait_for_coder_bootstrap_api_ready", lambda hostname: None)
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: True)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
+    result = backend._verify_current_compose_application()
+
+    assert result.passed is True
+    assert exec_container_names == [
+        "openmerge-coder-ofbxpg-openmerge-coder-1",
+        "openmerge-coder-ofbxpg-openmerge-coder-1",
+    ]
 
 
 def test_dokploy_coder_backend_unhealthy_api_blocks_noop_skip(

@@ -31,6 +31,7 @@ from dokploy_wizard.dokploy.compose_noop import (
     apply_compose_noop_guard,
     persist_compose_artifact_hash,
 )
+from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
 from dokploy_wizard.litellm import (
     LiteLLMAdminApi,
     LiteLLMGatewayManager,
@@ -880,24 +881,25 @@ def _indent_block(text: str, spaces: int) -> str:
 
 
 def _find_container_name(service_name: str) -> str | None:
-    result = subprocess.run(
-        [
-            "docker",
-            "ps",
-            "--format",
-            '{{.Names}}\t{{.Label "com.docker.compose.service"}}',
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "ps",
+                "--filter",
+                f"label=com.docker.compose.service={service_name}",
+                "--format",
+                "{{.Names}}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
     if result.returncode != 0:
         return None
-    for line in result.stdout.splitlines():
-        name, _, compose_service = line.partition("\t")
-        if compose_service == service_name:
-            return name
-    return None
+    return resolve_compose_container_name(service_name, result.stdout.splitlines())
 
 
 def _wait_for_container_name(

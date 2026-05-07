@@ -37,6 +37,7 @@ from dokploy_wizard.dokploy.compose_noop import (
     apply_compose_noop_guard,
     persist_compose_artifact_hash,
 )
+from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
 from dokploy_wizard.state import load_state_dir
 from dokploy_wizard.verification import make_verification_result
@@ -837,8 +838,7 @@ def _coder_container_name(service_name: str) -> str | None:
         raise CoderError(
             f"Unable to locate Coder container: {(result.stderr or result.stdout).strip()}"
         )
-    names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return names[0] if names else None
+    return resolve_compose_container_name(service_name, result.stdout.splitlines())
 
 
 def _default_template_dir() -> Path:
