@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Host-level Tailscale reconciliation."""
 
 from __future__ import annotations

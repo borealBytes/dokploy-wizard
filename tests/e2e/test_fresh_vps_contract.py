@@ -79,6 +79,21 @@ def test_cli_install_same_host_completed_state_returns_explicit_noop_without_mut
                     "zone:zone-123:headscale.example.com",
                 ),
                 OwnedResource(
+                    "shared_core_network",
+                    "lifecycle-stack-shared",
+                    "stack:lifecycle-stack:shared-network",
+                ),
+                OwnedResource(
+                    "shared_core_postgres",
+                    "lifecycle-stack-shared-postgres",
+                    "stack:lifecycle-stack:shared-postgres",
+                ),
+                OwnedResource(
+                    "shared_core_litellm",
+                    "lifecycle-stack-shared-litellm",
+                    "stack:lifecycle-stack:shared-litellm",
+                ),
+                OwnedResource(
                     "headscale_service",
                     "lifecycle-stack-headscale",
                     "stack:lifecycle-stack:headscale",
@@ -119,10 +134,10 @@ def test_cli_install_same_host_completed_state_returns_explicit_noop_without_mut
         "networking",
         "shared_core",
     ]
-    assert "headscale" not in payload["lifecycle"]["applicable_phases"]
     assert payload["state_status"] == "existing"
     assert payload["bootstrap"]["outcome"] == "already_present"
     assert payload["networking"]["outcome"] == "already_present"
+    assert payload["shared_core"]["outcome"] == "already_present"
     assert payload["headscale"]["outcome"] == "not_run"
     assert rerun_env.read_text(encoding="utf-8") == env_before
     assert (state_dir / "raw-input.json").read_text(encoding="utf-8") == raw_before

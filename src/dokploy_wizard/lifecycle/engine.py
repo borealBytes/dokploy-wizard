@@ -13,7 +13,7 @@ from dokploy_wizard.core import (
     build_shared_core_ledger,
     reconcile_shared_core,
 )
-from dokploy_wizard.lifecycle.changes import LifecyclePlan, applicable_phases_for
+from dokploy_wizard.lifecycle.changes import LifecyclePlan
 from dokploy_wizard.networking import (
     CloudflareBackend,
     build_access_ledger,
@@ -53,11 +53,12 @@ from dokploy_wizard.packs.seaweedfs import (
 )
 from dokploy_wizard.preflight import PreflightReport
 from dokploy_wizard.state import (
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
-    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     OwnershipLedger,
     RawEnvInput,
+    load_state_dir,
     write_applied_checkpoint,
     write_ownership_ledger,
 )
@@ -94,8 +95,14 @@ def execute_lifecycle_plan(
 ) -> dict[str, Any]:
     applicable_phases = lifecycle_plan.applicable_phases
     valid_phases = set(lifecycle_plan.initial_completed_steps)
+    if not dry_run and load_state_dir(state_dir).applied_state is None:
+        _write_checkpoint(state_dir, desired_state, applicable_phases, valid_phases)
     phase_results: dict[str, dict[str, Any]] = {}
     current_ledger = ownership_ledger
+    nextcloud_refresh_phase = _nextcloud_refresh_phase(
+        phases_to_run=lifecycle_plan.phases_to_run,
+        enabled_packs=desired_state.enabled_packs,
+    )
 
     phase_results["preflight"] = preflight_report.to_dict()
     if not dry_run and "preflight" not in valid_phases:
@@ -195,6 +202,7 @@ def execute_lifecycle_plan(
                     postgres_resource_id=shared_core.postgres_resource_id,
                     redis_resource_id=shared_core.redis_resource_id,
                     mail_relay_resource_id=shared_core.mail_relay_resource_id,
+                    litellm_resource_id=shared_core.litellm_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "headscale":
@@ -325,10 +333,6 @@ def execute_lifecycle_plan(
                     service_resource_id=advisor.service_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
-                if "nextcloud" in desired_state.enabled_packs:
-                    backends.nextcloud.refresh_openclaw_external_storage(
-                        admin_user=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
-                    )
         elif phase == "my-farm-advisor":
             advisor = reconcile_my_farm_advisor(
                 dry_run=dry_run,
@@ -363,6 +367,10 @@ def execute_lifecycle_plan(
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         if not dry_run:
+            if phase == nextcloud_refresh_phase:
+                backends.nextcloud.refresh_openclaw_external_storage(
+                    admin_user=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
+                )
             valid_phases.add(phase)
             _promote_preserved_phases(
                 lifecycle_plan.preserved_phases, applicable_phases, valid_phases
@@ -379,6 +387,18 @@ def execute_lifecycle_plan(
     )
 
 
+def _nextcloud_refresh_phase(
+    *, phases_to_run: tuple[str, ...], enabled_packs: tuple[str, ...]
+) -> str | None:
+    if "nextcloud" not in enabled_packs:
+        return None
+    advisor_phases = {"openclaw", "my-farm-advisor"}
+    for phase in reversed(phases_to_run):
+        if phase in advisor_phases:
+            return phase
+    return None
+
+
 def _write_checkpoint(
     state_dir: Path,
     desired_state: DesiredState,
@@ -386,12 +406,16 @@ def _write_checkpoint(
     valid_phases: set[str],
 ) -> None:
     completed_steps = _longest_prefix(applicable_phases, valid_phases)
+    existing_applied = load_state_dir(state_dir).applied_state
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
             format_version=desired_state.format_version,
             desired_state_fingerprint=desired_state.fingerprint(),
             completed_steps=completed_steps,
+            compose_artifact_hashes=(
+                {} if existing_applied is None else dict(existing_applied.compose_artifact_hashes)
+            ),
             lifecycle_checkpoint_contract_version=LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
         ),
     )

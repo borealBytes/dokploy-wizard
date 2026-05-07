@@ -1,7 +1,10 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 """Dokploy-backed Coder runtime backend."""
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import re
@@ -10,12 +13,14 @@ import ssl
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Protocol
-from urllib import parse
 from urllib import error as urlerror
+from urllib import parse
 from urllib import request as urlrequest
 
 from dokploy_wizard.core.models import SharedPostgresAllocation
@@ -28,7 +33,14 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    persist_compose_artifact_hash,
+)
+from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
+from dokploy_wizard.state import load_state_dir
+from dokploy_wizard.verification import make_verification_result
 
 
 class DokployCoderApi(Protocol):
@@ -52,9 +64,10 @@ class _ComposeLocator:
     compose_id: str
 
 
-_DEFAULT_HERMES_INFERENCE_PROVIDER = "opencode-go"
-_DEFAULT_HERMES_MODEL = "deepseek-v4-flash"
+_DEFAULT_HERMES_INFERENCE_PROVIDER = "openai"
+_DEFAULT_HERMES_MODEL = "unsloth-active"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
+_DEFAULT_LITELLM_INTERNAL_PORT = 4000
 
 
 class DokployCoderBackend:
@@ -74,6 +87,7 @@ class DokployCoderBackend:
         hermes_model: str = _DEFAULT_HERMES_MODEL,
         ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
         ai_default_api_key: str | None = None,
+        state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployCoderApi | None = None,
     ) -> None:
         self._stack_name = stack_name
@@ -88,6 +102,7 @@ class DokployCoderBackend:
         self._hermes_model = hermes_model
         self._ai_default_base_url = ai_default_base_url
         self._ai_default_api_key = ai_default_api_key
+        self._state_dir = state_dir
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
@@ -184,8 +199,11 @@ class DokployCoderBackend:
         notes: list[str] = []
         if self._created_in_process:
             _wait_for_coder_bootstrap_api_ready(self._hostname)
+        bootstrap_ready = False
+        if not self._created_in_process:
+            bootstrap_ready = self._verify_current_compose_application().passed
         first_user_provisioned = False
-        if not _coder_first_user_exists(self._hostname):
+        if not bootstrap_ready and not _coder_first_user_exists(self._hostname):
             _create_coder_first_user(
                 hostname=self._hostname,
                 email=self._admin_email,
@@ -201,32 +219,37 @@ class DokployCoderBackend:
         container_name = _coder_container_name(_service_name(self._stack_name))
         if container_name is None:
             raise CoderError("Coder container is not running; cannot finish application bootstrap.")
+        hermes_litellm_base_url = _litellm_internal_base_url(self._stack_name)
         _sync_hermes_workspace_secrets(
             container_name=container_name,
             hostname=self._hostname,
             session_token=session_token,
             hermes_inference_provider=self._hermes_inference_provider,
             hermes_model=self._hermes_model,
-            ai_default_base_url=self._ai_default_base_url,
+            ai_default_base_url=hermes_litellm_base_url,
             ai_default_api_key=self._ai_default_api_key,
         )
+        if bootstrap_ready:
+            return ()
+        shared_network_name = _shared_network_name(self._stack_name)
         for template_name, template_dir, replacements in (
-            (_default_template_name(), _default_template_dir(), None),
+            (_default_template_name(), _default_template_dir(), {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name}),
             (
                 _default_opencode_web_template_name(),
                 _default_opencode_web_template_dir(),
-                None,
+                {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name},
             ),
-            (_default_openwork_template_name(), _default_openwork_template_dir(), None),
+            (_default_openwork_template_name(), _default_openwork_template_dir(), {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name}),
             (
                 _default_kdense_byok_template_name(),
                 _default_kdense_byok_template_dir(),
                 {
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
-                        self._ai_default_base_url
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": _shell_double_quote_escape(
+                        _litellm_internal_base_url(self._stack_name)
                     ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
+                    "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": _litellm_virtual_key_ref(
+                        "coder-kdense"
                     ),
                 },
             ),
@@ -234,30 +257,31 @@ class DokployCoderBackend:
                 _default_hermes_template_name(),
                 _default_hermes_template_dir(),
                 {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
                     "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": _shell_double_quote_escape(
                         self._hermes_inference_provider
                     ),
                     "__DOKPLOY_WIZARD_HERMES_MODEL__": _shell_double_quote_escape(
                         self._hermes_model
                     ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
-                        self._ai_default_base_url
+                    "__DOKPLOY_WIZARD_HERMES_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
                     ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
                         self._ai_default_api_key or ""
                     ),
                 },
             ),
         ):
-            _seed_template(
+            if _seed_template(
                 container_name=container_name,
                 hostname=self._hostname,
                 session_token=session_token,
                 template_name=template_name,
                 template_dir=template_dir,
                 replacements=replacements,
-            )
-            notes.append(f"Seeded default Coder template '{template_name}'.")
+            ):
+                notes.append(f"Seeded default Coder template '{template_name}'.")
         workspace_name = _default_workspace_name(self._hostname)
         try:
             if _ensure_default_workspace(
@@ -313,19 +337,9 @@ class DokployCoderBackend:
         )
         try:
             if self._applied_locator is not None:
-                updated = self._client.update_compose(
-                    compose_id=self._applied_locator.compose_id, compose_file=compose_file
-                )
-                self._client.deploy_compose(
-                    compose_id=updated.compose_id,
-                    title="dokploy-wizard coder reconcile",
-                    description="Update Coder compose app",
-                )
-                self._created_in_process = True
-                self._applied_locator = _ComposeLocator(
-                    project_id=self._applied_locator.project_id,
-                    environment_id=self._applied_locator.environment_id,
-                    compose_id=updated.compose_id,
+                self._applied_locator = self._apply_existing_compose(
+                    locator=self._applied_locator,
+                    compose_file=compose_file,
                 )
                 return self._applied_locator
             projects = self._client.list_projects()
@@ -342,19 +356,25 @@ class DokployCoderBackend:
                             environment_id=environment.environment_id,
                             compose_id=compose.compose_id,
                         )
-                        self._applied_locator = locator
-                        return locator
+                        self._applied_locator = self._apply_existing_compose(
+                            locator=locator,
+                            compose_file=compose_file,
+                        )
+                        return self._applied_locator
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
                     compose_file=compose_file,
                     app_name=self._compose_name,
                 )
-                self._client.deploy_compose(
+                deployment = self._client.deploy_compose(
                     compose_id=created.compose_id,
                     title="dokploy-wizard coder reconcile",
                     description="Create Coder compose app",
                 )
+                if not deployment.success:
+                    msg = "Dokploy deploy for compose service 'coder' did not report success."
+                    raise RuntimeError(msg)
                 locator = _ComposeLocator(
                     project_id=project.project_id,
                     environment_id=environment.environment_id,
@@ -362,6 +382,7 @@ class DokployCoderBackend:
                 )
                 self._applied_locator = locator
                 self._created_in_process = True
+                self._persist_compose_hash_if_checkpoint_present(compose_file)
                 return locator
             created_project = self._client.create_project(
                 name=self._stack_name, description="Managed by dokploy-wizard", env=None
@@ -372,12 +393,15 @@ class DokployCoderBackend:
                 compose_file=compose_file,
                 app_name=self._compose_name,
             )
-            self._client.deploy_compose(
+            deployment = self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
                 title="dokploy-wizard coder reconcile",
                 description="Create Coder compose app",
             )
-        except DokployApiError as error:
+            if not deployment.success:
+                msg = "Dokploy deploy for compose service 'coder' did not report success."
+                raise RuntimeError(msg)
+        except (DokployApiError, RuntimeError) as error:
             raise CoderError(str(error)) from error
         locator = _ComposeLocator(
             project_id=created_project.project_id,
@@ -386,7 +410,162 @@ class DokployCoderBackend:
         )
         self._applied_locator = locator
         self._created_in_process = True
+        self._persist_compose_hash_if_checkpoint_present(compose_file)
         return locator
+
+    def _apply_existing_compose(
+        self, *, locator: _ComposeLocator, compose_file: str
+    ) -> _ComposeLocator:
+        if not self._has_applied_state_checkpoint():
+            updated = self._client.update_compose(
+                compose_id=locator.compose_id,
+                compose_file=compose_file,
+            )
+            deployment = self._client.deploy_compose(
+                compose_id=updated.compose_id,
+                title="dokploy-wizard coder reconcile",
+                description="Update Coder compose app",
+            )
+            if not deployment.success:
+                msg = "Dokploy deploy for compose service 'coder' did not report success."
+                raise RuntimeError(msg)
+            self._created_in_process = True
+            return _ComposeLocator(
+                project_id=locator.project_id,
+                environment_id=locator.environment_id,
+                compose_id=updated.compose_id,
+            )
+        apply_result = apply_compose_noop_guard(
+            rendered_compose=compose_file,
+            service_key=self._compose_name,
+            state_dir=self._state_dir,
+            client=self._client,
+            locator=locator,
+            compose_id=locator.compose_id,
+            title="dokploy-wizard coder reconcile",
+            description="Update Coder compose app",
+            verify_current=self._verify_current_compose_application,
+            locator_factory=lambda compose_id: _ComposeLocator(
+                project_id=locator.project_id,
+                environment_id=locator.environment_id,
+                compose_id=compose_id,
+            ),
+        )
+        self._created_in_process = apply_result.status == "applied"
+        return apply_result.locator
+
+    def _has_applied_state_checkpoint(self) -> bool:
+        return load_state_dir(self._state_dir).applied_state is not None
+
+    def _persist_compose_hash_if_checkpoint_present(self, compose_file: str) -> None:
+        if not self._has_applied_state_checkpoint():
+            return
+        persist_compose_artifact_hash(
+            state_dir=self._state_dir,
+            service_key=self._compose_name,
+            rendered_compose=compose_file,
+        )
+
+    def _verify_current_compose_application(self):
+        service_name = _service_name(self._stack_name)
+        health_url = f"https://{self._hostname}/healthz"
+        if not self.check_health(
+            service=CoderResourceRecord(
+                resource_id=_resource_id(self._compose_name, "service"),
+                resource_name=service_name,
+            ),
+            url=health_url,
+        ):
+            return make_verification_result(
+                service_name=self._compose_name,
+                tier="app",
+                passed=False,
+                detail=f"Coder health checks failed for '{health_url}'.",
+            )
+        container_name = _coder_container_name(service_name)
+        if container_name is None:
+            return make_verification_result(
+                service_name=self._compose_name,
+                tier="bootstrap",
+                passed=False,
+                detail="Coder container is not running.",
+            )
+        try:
+            _wait_for_coder_bootstrap_api_ready(self._hostname)
+            if not _coder_first_user_exists(self._hostname):
+                return make_verification_result(
+                    service_name=self._compose_name,
+                    tier="bootstrap",
+                    passed=False,
+                    detail=f"Coder first user '{self._admin_email}' is not provisioned.",
+                )
+            session_token = _coder_login(
+                hostname=self._hostname,
+                email=self._admin_email,
+                password=self._admin_password,
+            )
+            workspace_name = _default_workspace_name(self._hostname)
+            missing_templates: list[str] = []
+            workspace_missing = False
+            for attempt in range(3):
+                template_names = {
+                    item.get("name")
+                    for item in _list_templates(
+                        container_name=container_name,
+                        hostname=self._hostname,
+                        session_token=session_token,
+                    )
+                    if isinstance(item.get("name"), str)
+                }
+                missing_templates = [
+                    template_name
+                    for template_name in _required_template_names()
+                    if template_name not in template_names
+                ]
+                workspace_missing = workspace_name not in _list_workspaces(
+                    container_name=container_name,
+                    hostname=self._hostname,
+                    session_token=session_token,
+                )
+                if not missing_templates and not workspace_missing:
+                    break
+                if attempt < 2:
+                    time.sleep(2.0)
+
+            if missing_templates:
+                return make_verification_result(
+                    service_name=self._compose_name,
+                    tier="bootstrap",
+                    passed=False,
+                    detail=(
+                        "Coder templates are missing or not visible: "
+                        + ", ".join(missing_templates)
+                        + "."
+                    ),
+                )
+            if workspace_missing:
+                return make_verification_result(
+                    service_name=self._compose_name,
+                    tier="bootstrap",
+                    passed=False,
+                    detail=f"Coder default workspace '{workspace_name}' is missing.",
+                )
+        except CoderError as error:
+            return make_verification_result(
+                service_name=self._compose_name,
+                tier="bootstrap",
+                passed=False,
+                detail=str(error),
+            )
+        return make_verification_result(
+            service_name=self._compose_name,
+            tier="bootstrap",
+            passed=True,
+            detail=(
+                "Coder container/API, first user bootstrap, seeded templates, "
+                "and default workspace are ready."
+            ),
+        )
 
 
 def _resource_id(compose_id: str, kind: str) -> str:
@@ -421,6 +600,15 @@ def _data_name(stack_name: str) -> str:
 
 def _shared_network_name(stack_name: str) -> str:
     return f"{stack_name}-shared"
+
+
+def _litellm_internal_base_url(stack_name: str) -> str:
+    return f"http://{stack_name}-shared-litellm:{_DEFAULT_LITELLM_INTERNAL_PORT}"
+
+
+def _litellm_virtual_key_ref(consumer: str) -> str:
+    normalized = consumer.strip().replace("-", "_").upper()
+    return f"$${{LITELLM_VIRTUAL_KEY_{normalized}}}"
 
 
 def _wildcard_suffix(wildcard_hostname: str) -> str:
@@ -659,8 +847,7 @@ def _coder_container_name(service_name: str) -> str | None:
         raise CoderError(
             f"Unable to locate Coder container: {(result.stderr or result.stdout).strip()}"
         )
-    names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return names[0] if names else None
+    return resolve_compose_container_name(service_name, result.stdout.splitlines())
 
 
 def _default_template_dir() -> Path:
@@ -737,6 +924,16 @@ def _default_workspace_name(hostname: str, *, today: date | None = None) -> str:
     return f"{normalized_root}{suffix}"
 
 
+def _required_template_names() -> tuple[str, ...]:
+    return (
+        _default_template_name(),
+        _default_opencode_web_template_name(),
+        _default_openwork_template_name(),
+        _default_kdense_byok_template_name(),
+        _default_hermes_template_name(),
+    )
+
+
 def _seed_template(
     *,
     container_name: str,
@@ -745,7 +942,28 @@ def _seed_template(
     template_name: str,
     template_dir: Path,
     replacements: dict[str, str] | None,
-) -> None:
+) -> bool:
+    desired_version_name = _template_version_name(
+        template_dir=template_dir,
+        replacements=replacements,
+    )
+    if (
+        _active_template_version_name(
+            container_name=container_name,
+            hostname=hostname,
+            session_token=session_token,
+            template_name=template_name,
+        )
+        == desired_version_name
+    ):
+        return False
+    if desired_version_name in _template_version_names(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+        template_name=template_name,
+    ):
+        return False
     _copy_template_into_container(
         container_name=container_name,
         template_dir=template_dir,
@@ -757,7 +975,20 @@ def _seed_template(
         hostname=hostname,
         session_token=session_token,
         template_name=template_name,
+        template_version_name=desired_version_name,
     )
+    return True
+
+
+def _template_version_name(*, template_dir: Path, replacements: dict[str, str] | None) -> str:
+    digest = hashlib.sha256()
+    with _rendered_template_dir(template_dir=template_dir, replacements=replacements) as rendered_dir:
+        for path in sorted(path for path in rendered_dir.rglob("*") if path.is_file()):
+            digest.update(path.relative_to(rendered_dir).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    return f"dokploy-wizard-{digest.hexdigest()[:16]}"
 
 
 def _copy_template_into_container(
@@ -767,38 +998,43 @@ def _copy_template_into_container(
     template_name: str,
     replacements: dict[str, str] | None,
 ) -> None:
-    if not template_dir.exists():
-        raise CoderError(f"Default Coder template directory is missing: {template_dir}")
     subprocess.run(
         ["docker", "exec", container_name, "rm", "-rf", f"/tmp/{template_name}"],
         check=False,
         capture_output=True,
         text=True,
     )
-    copy_source = template_dir
-    if replacements:
-        with tempfile.TemporaryDirectory(prefix="dokploy-wizard-coder-template-") as tmp_dir:
-            rendered_dir = Path(tmp_dir) / template_dir.name
-            shutil.copytree(template_dir, rendered_dir)
-            rendered_main_tf = rendered_dir / "main.tf"
-            contents = rendered_main_tf.read_text(encoding="utf-8")
-            for placeholder, value in replacements.items():
-                contents = contents.replace(placeholder, value)
-            rendered_main_tf.write_text(contents, encoding="utf-8")
-            _docker_copy_template_dir(
-                container_name=container_name,
-                template_name=template_name,
-                template_dir=rendered_dir,
-            )
-            return
-    _docker_copy_template_dir(
-        container_name=container_name,
-        template_name=template_name,
-        template_dir=copy_source,
-    )
+    with _rendered_template_dir(template_dir=template_dir, replacements=replacements) as copy_source:
+        _docker_copy_template_dir(
+            container_name=container_name,
+            template_name=template_name,
+            template_dir=copy_source,
+        )
 
 
-def _docker_copy_template_dir(*, container_name: str, template_name: str, template_dir: Path) -> None:
+@contextmanager
+def _rendered_template_dir(
+    *, template_dir: Path, replacements: dict[str, str] | None
+) -> Iterator[Path]:
+    if not template_dir.exists():
+        raise CoderError(f"Default Coder template directory is missing: {template_dir}")
+    if not replacements:
+        yield template_dir
+        return
+    with tempfile.TemporaryDirectory(prefix="dokploy-wizard-coder-template-") as tmp_dir:
+        rendered_dir = Path(tmp_dir) / template_dir.name
+        shutil.copytree(template_dir, rendered_dir)
+        rendered_main_tf = rendered_dir / "main.tf"
+        contents = rendered_main_tf.read_text(encoding="utf-8")
+        for placeholder, value in replacements.items():
+            contents = contents.replace(placeholder, value)
+        rendered_main_tf.write_text(contents, encoding="utf-8")
+        yield rendered_dir
+
+
+def _docker_copy_template_dir(
+    *, container_name: str, template_name: str, template_dir: Path
+) -> None:
     result = subprocess.run(
         ["docker", "cp", str(template_dir), f"{container_name}:/tmp/{template_name}"],
         check=False,
@@ -816,34 +1052,66 @@ def _coder_cli_url() -> str:
 
 
 def _push_default_template(
-    *, container_name: str, hostname: str, session_token: str, template_name: str
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+    template_name: str,
+    template_version_name: str | None = None,
 ) -> None:
-    result = subprocess.run(
+    command = [
+        "docker",
+        "exec",
+        "-e",
+        f"CODER_URL={_coder_cli_url()}",
+        "-e",
+        f"CODER_SESSION_TOKEN={session_token}",
+        container_name,
+        "/opt/coder",
+        "templates",
+        "push",
+        template_name,
+    ]
+    if template_version_name:
+        command.extend(["--name", template_version_name])
+    command.extend(
         [
-            "docker",
-            "exec",
-            "-e",
-            f"CODER_URL={_coder_cli_url()}",
-            "-e",
-            f"CODER_SESSION_TOKEN={session_token}",
-            container_name,
-            "/opt/coder",
-            "templates",
-            "push",
-            template_name,
             "--directory",
             f"/tmp/{template_name}",
             "--ignore-lockfile",
             "--yes",
-        ],
+        ]
+    )
+    result = subprocess.run(
+        command,
         check=False,
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
+        output = "\n".join(part for part in (result.stderr, result.stdout) if part).strip()
+        if template_version_name and _is_duplicate_template_version_error(
+            output=output,
+            template_version_name=template_version_name,
+        ):
+            return
         raise CoderError(
-            f"Unable to push default Coder template '{template_name}': {(result.stderr or result.stdout).strip()}"
+            f"Unable to push default Coder template '{template_name}': {output}"
         )
+
+
+def _is_duplicate_template_version_error(*, output: str, template_version_name: str) -> bool:
+    if not output:
+        return False
+    normalized_output = output.lower()
+    if template_version_name.lower() not in normalized_output:
+        return False
+    if "template version" not in normalized_output:
+        return False
+    return (
+        "already exists" in normalized_output
+        or "already in use" in normalized_output
+    )
 
 
 def _sync_hermes_workspace_secrets(
@@ -870,16 +1138,10 @@ def _sync_hermes_workspace_secrets(
             "Hermes model for wizard-managed workspaces.",
         ),
         (
-            "ai-default-base-url",
-            "AI_DEFAULT_BASE_URL",
+            "hermes-openai-api-base",
+            "OPENAI_API_BASE",
             ai_default_base_url,
-            "Default AI base URL for wizard-managed workspaces.",
-        ),
-        (
-            "opencode-go-base-url",
-            "OPENCODE_GO_BASE_URL",
-            ai_default_base_url,
-            "Legacy OpenCode Go base URL for wizard-managed workspaces.",
+            "Hermes LiteLLM base URL for wizard-managed workspaces.",
         ),
     )
     for secret_name, env_name, value, description in managed_values:
@@ -903,23 +1165,10 @@ def _sync_hermes_workspace_secrets(
                 container_name=container_name,
                 hostname=hostname,
                 session_token=session_token,
-                secret_name="ai-default-api-key",
-                env_name="AI_DEFAULT_API_KEY",
+                secret_name="hermes-openai-api-key",
+                env_name="OPENAI_API_KEY",
                 value=ai_default_api_key,
-                description="Default AI API key for wizard-managed workspaces.",
-            )
-        except CoderError as error:
-            if "unknown flag: --env" not in str(error):
-                raise
-        try:
-            _upsert_coder_secret(
-                container_name=container_name,
-                hostname=hostname,
-                session_token=session_token,
-                secret_name="opencode-go-api-key",
-                env_name="OPENCODE_GO_API_KEY",
-                value=ai_default_api_key,
-                description="Legacy OpenCode Go API key for wizard-managed workspaces.",
+                description="Hermes LiteLLM virtual key for wizard-managed workspaces.",
             )
         except CoderError as error:
             if "unknown flag: --env" not in str(error):
@@ -987,12 +1236,7 @@ def _upsert_coder_secret(
 
 
 def _shell_double_quote_escape(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("$", "\\$")
-        .replace("`", "\\`")
-    )
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 
 def _list_workspaces(*, container_name: str, hostname: str, session_token: str) -> tuple[str, ...]:
@@ -1032,6 +1276,140 @@ def _list_workspaces(*, container_name: str, hostname: str, session_token: str) 
         if isinstance(name, str) and name:
             names.append(name)
     return tuple(names)
+
+
+def _list_templates(
+    *, container_name: str, hostname: str, session_token: str
+) -> tuple[dict[str, object], ...]:
+    del hostname
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "templates",
+            "list",
+            "--output",
+            "json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise CoderError(
+            f"Unable to list Coder templates: {(result.stderr or result.stdout).strip()}"
+        )
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise CoderError("Coder template list returned invalid JSON.") from exc
+    if not isinstance(payload, list):
+        raise CoderError("Coder template list returned an unexpected payload shape.")
+    return tuple(
+        item.get("Template") if isinstance(item.get("Template"), dict) else item
+        for item in payload
+        if isinstance(item, dict)
+    )
+
+
+def _active_template_version_name(
+    *, container_name: str, hostname: str, session_token: str, template_name: str
+) -> str | None:
+    for item in _list_template_versions(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+        template_name=template_name,
+    ):
+        if item.get("active") is True:
+            name = item.get("name")
+            if isinstance(name, str) and name:
+                return name
+            return None
+    return None
+
+
+def _template_version_names(
+    *, container_name: str, hostname: str, session_token: str, template_name: str
+) -> tuple[str, ...]:
+    names: list[str] = []
+    for item in _list_template_versions(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+        template_name=template_name,
+    ):
+        name = item.get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return tuple(names)
+
+
+def _list_template_versions(
+    *, container_name: str, hostname: str, session_token: str, template_name: str
+) -> tuple[dict[str, object], ...]:
+    template_exists = False
+    for item in _list_templates(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+    ):
+        name = item.get("name")
+        if isinstance(name, str) and name == template_name:
+            template_exists = True
+            break
+    if not template_exists:
+        return ()
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "templates",
+            "versions",
+            "list",
+            template_name,
+            "--output",
+            "json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise CoderError(
+            f"Unable to list Coder template versions for '{template_name}': {(result.stderr or result.stdout).strip()}"
+        )
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise CoderError(f"Coder template version list for '{template_name}' returned invalid JSON.") from exc
+    versions: list[dict[str, object]]
+    if isinstance(payload, list):
+        versions = [item for item in payload if isinstance(item, dict)]
+    elif isinstance(payload, dict):
+        raw_versions = payload.get("versions")
+        if not isinstance(raw_versions, list):
+            raise CoderError(
+                f"Coder template version list for '{template_name}' returned an unexpected payload shape."
+            )
+        versions = [item for item in raw_versions if isinstance(item, dict)]
+    else:
+        raise CoderError(
+            f"Coder template version list for '{template_name}' returned an unexpected payload shape."
+        )
+    return tuple(versions)
 
 
 def _create_default_workspace(

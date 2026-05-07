@@ -343,7 +343,7 @@ def test_modify_disabling_nextcloud_is_supported_via_networking_only() -> None:
 
     assert plan.mode == "modify"
     assert plan.start_phase == "networking"
-    assert plan.phases_to_run == ("networking",)
+    assert plan.phases_to_run == ("networking", "shared_core")
     assert plan.initial_completed_steps == ("preflight", "dokploy_bootstrap")
 
 
@@ -425,6 +425,9 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "ADVISOR_GATEWAY_PASSWORD",
         "AI_DEFAULT_API_KEY",
         "AI_DEFAULT_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "CF_ACCOUNT_ID",
+        "DATA_MODE",
         "HERMES_INFERENCE_PROVIDER",
         "HERMES_MODEL",
         "MY_FARM_ADVISOR_CHANNELS",
@@ -437,10 +440,14 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
         "NEXTCLOUD_OPENCLAW_RESCAN_CRON",
         "NEXTCLOUD_OPENCLAW_RESCAN_TIMEZONE",
+        "NVIDIA_BASE_URL",
+        "OPENCLAW_BOOTSTRAP_REFRESH",
         "OPENCLAW_CHANNELS",
         "OPENCLAW_FALLBACK_MODELS",
+        "OPENCLAW_FORCE_SKILL_SYNC",
         "OPENCLAW_GATEWAY_PASSWORD",
         "OPENCLAW_GATEWAY_TOKEN",
+        "OPENCLAW_MEMORY_SEARCH_ENABLED",
         "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
         "OPENCLAW_NEXA_AGENT_EMAIL",
         "OPENCLAW_NEXA_AGENT_PASSWORD",
@@ -467,12 +474,30 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "OPENCLAW_NVIDIA_API_KEY",
         "OPENCLAW_OPENROUTER_API_KEY",
         "OPENCLAW_PRIMARY_MODEL",
+        "OPENCLAW_SYNC_SKILLS_ON_START",
+        "OPENCLAW_SYNC_SKILLS_OVERWRITE",
         "OPENCLAW_TELEGRAM_BOT_TOKEN",
+        "OPENCLAW_TELEGRAM_GROUP_POLICY",
         "OPENCLAW_TELEGRAM_OWNER_USER_ID",
         "OPENCODE_GO_API_KEY",
         "OPENCODE_GO_BASE_URL",
         "OUTBOUND_SMTP_FROM_ADDRESS",
         "OUTBOUND_SMTP_HOSTNAME",
+        "R2_ACCESS_KEY_ID",
+        "R2_BUCKET_NAME",
+        "R2_ENDPOINT",
+        "R2_SECRET_ACCESS_KEY",
+        "TELEGRAM_ALLOWED_USERS",
+        "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
+        "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
+        "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
+        "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
+        "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
+        "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
+        "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
+        "TZ",
+        "WORKSPACE_DATA_R2_PREFIX",
+        "WORKSPACE_DATA_R2_RCLONE_MOUNT",
     )
 
 
@@ -560,8 +585,8 @@ def test_modify_coder_hermes_env_change_reruns_coder() -> None:
         requested_desired=resolve_desired_state(requested_raw),
     )
 
-    assert plan.start_phase == "coder"
-    assert plan.phases_to_run == ("coder",)
+    assert plan.start_phase == "shared_core"
+    assert plan.phases_to_run == ("shared_core", "coder")
 
 
 def test_modify_uses_explicit_pack_mutable_resource_contract() -> None:

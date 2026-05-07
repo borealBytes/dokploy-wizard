@@ -1,20 +1,34 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
 
+import json
+import subprocess
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-import subprocess
 from typing import cast
 
-import dokploy_wizard.dokploy.coder as coder_module
 import pytest
+
+import dokploy_wizard.dokploy.coder as coder_module
 from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.dokploy.coder import DokployCoderApi, DokployCoderBackend, _render_compose_file
 from dokploy_wizard.packs.coder import build_coder_ledger, reconcile_coder
 from dokploy_wizard.packs.coder.models import CoderResourceRecord
-from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    ComposeArtifactHashState,
+    OwnedResource,
+    OwnershipLedger,
+    RawEnvInput,
+    resolve_desired_state,
+    write_applied_checkpoint,
+)
+
+from .fake_dokploy import FakeDokployApiClient
 
 
 @dataclass
@@ -177,16 +191,19 @@ def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
         encoding="utf-8"
     )
 
-    assert 'apt-get install -y curl git ca-certificates wget btop' in template
-    assert 'if ! command -v opencode >/dev/null 2>&1; then' in template
-    assert 'if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then' in template
-    assert 'if [ ! -x /home/coder/.opencode/bin/opencode ]; then' in template
+    assert "apt-get install -y curl git ca-certificates wget btop" in template
+    assert "if ! command -v opencode >/dev/null 2>&1; then" in template
+    assert (
+        "if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then"
+        in template
+    )
+    assert "if [ ! -x /home/coder/.opencode/bin/opencode ]; then" in template
     assert 'echo "OpenCode installer did not produce a usable binary" >&2' in template
-    assert 'exit 1' in template
-    assert 'if [ -x /home/coder/.opencode/bin/opencode ]; then' in template
-    assert 'ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode' in template
-    assert 'if ! command -v zellij >/dev/null 2>&1; then' in template
-    assert 'zellij-$${ARCH}-unknown-linux-musl.tar.gz' in template
+    assert "exit 1" in template
+    assert "if [ -x /home/coder/.opencode/bin/opencode ]; then" in template
+    assert "ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode" in template
+    assert "if ! command -v zellij >/dev/null 2>&1; then" in template
+    assert "zellij-$${ARCH}-unknown-linux-musl.tar.gz" in template
 
 
 def test_default_opencode_web_template_includes_web_app() -> None:
@@ -194,38 +211,53 @@ def test_default_opencode_web_template_includes_web_app() -> None:
         encoding="utf-8"
     )
 
-    assert 'apt-get install -y curl git ca-certificates wget btop' in template
-    assert 'if ! command -v opencode >/dev/null 2>&1; then' in template
-    assert 'if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then' in template
-    assert 'if [ ! -x /home/coder/.opencode/bin/opencode ]; then' in template
-    assert 'ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode' in template
-    assert 'NEED_NODE=true' in template
-    assert 'OPENCODE_WEB_PORT=4096' in template
-    assert 'OPENCODE_PROXY_PORT=4097' in template
-    assert 'nohup opencode web --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT" >/tmp/opencode-web.log 2>&1 &' in template
+    assert "apt-get install -y curl git ca-certificates wget btop" in template
+    assert "if ! command -v opencode >/dev/null 2>&1; then" in template
+    assert (
+        "if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then"
+        in template
+    )
+    assert "if [ ! -x /home/coder/.opencode/bin/opencode ]; then" in template
+    assert "ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode" in template
+    assert "NEED_NODE=true" in template
+    assert "OPENCODE_WEB_PORT=4096" in template
+    assert "OPENCODE_PROXY_PORT=4097" in template
+    assert (
+        'nohup opencode web --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT" >/tmp/opencode-web.log 2>&1 &'
+        in template
+    )
     assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
     assert '"accept-encoding"' in template
     assert "content-security-policy" in template
     assert "content-encoding" in template
-    assert 'pageHttpOrigin + mount + next.pathname + next.search' in template
-    assert 'const requestInitFrom = async (request, init) => {' in template
-    assert 'requestInit.body = await request.clone().arrayBuffer();' in template
-    assert 'if (input instanceof Request) return originalFetch(url, await requestInitFrom(input, init));' in template
-    assert 'window.EventSource = class extends OriginalEventSource' in template
-    assert 'window.WebSocket = class extends OriginalWebSocket' in template
-    assert 'originalPushState = window.history.pushState' in template
-    assert 'window.__OPENCODE_MOUNT = mount;' in template
-    assert 'const mountedBaseScript' in template
-    assert 'document.head.prepend(base);' in template
-    assert 'coder-mount=v2' in template
+    assert "pageHttpOrigin + mount + next.pathname + next.search" in template
+    assert "const requestInitFrom = async (request, init) => {" in template
+    assert "requestInit.body = await request.clone().arrayBuffer();" in template
+    assert (
+        "if (input instanceof Request) return originalFetch(url, await requestInitFrom(input, init));"
+        in template
+    )
+    assert "window.EventSource = class extends OriginalEventSource" in template
+    assert "window.WebSocket = class extends OriginalWebSocket" in template
+    assert "originalPushState = window.history.pushState" in template
+    assert "window.__OPENCODE_MOUNT = mount;" in template
+    assert "const mountedBaseScript" in template
+    assert "document.head.prepend(base);" in template
+    assert "coder-mount=v2" in template
     assert 'responseHeaders["Cache-Control"] = "no-store";' in template
     assert '.replace("<head>", "<head>" + mountedBaseScript)' in template
     assert 'KO=function(e){let t="";const n=location.pathname.indexOf("/apps/");' in template
     assert 'import("./$1?coder-mount=v2")' in template
     assert 'from"./$1?coder-mount=v2"' in template
-    assert 'window.history.replaceState(window.history.state, "", "/L2hvbWUvY29kZXI/session");' in template
+    assert (
+        'window.history.replaceState(window.history.state, "", "/L2hvbWUvY29kZXI/session");'
+        in template
+    )
     assert 'path:"/:coderUser/:coderWorkspace/apps/:coderApp/:dir"' in template
-    assert 'nohup env TARGET_PORT="$OPENCODE_WEB_PORT" PROXY_PORT="$OPENCODE_PROXY_PORT" node /tmp/coder-mounted-proxy.mjs' in template
+    assert (
+        'nohup env TARGET_PORT="$OPENCODE_WEB_PORT" PROXY_PORT="$OPENCODE_PROXY_PORT" node /tmp/coder-mounted-proxy.mjs'
+        in template
+    )
     assert 'resource "coder_app" "opencode"' in template
     assert 'display_name = "OpenCode"' in template
     assert (
@@ -234,40 +266,54 @@ def test_default_opencode_web_template_includes_web_app() -> None:
     )
     assert 'url          = "http://localhost:4097"' in template
     assert 'share        = "owner"' in template
-    assert 'subdomain    = false' in template
+    assert "subdomain    = false" in template
     assert 'url       = "http://localhost:4097"' in template
 
 
 def test_default_openwork_template_includes_full_webui_stack() -> None:
-    template = Path(
-        "templates/coder/default-ubuntu-code-server-openwork/main.tf"
-    ).read_text(encoding="utf-8")
+    template = Path("templates/coder/default-ubuntu-code-server-openwork/main.tf").read_text(
+        encoding="utf-8"
+    )
 
-    assert '$_SUDO apt-get install -y curl git ca-certificates wget btop' in template
-    assert '$_SUDO corepack enable' in template
-    assert '$_SUDO corepack prepare pnpm@10.27.0 --activate' in template
-    assert '$_SUDO npm install -g openwork-orchestrator' in template
-    assert 'OPENWORK_WEBUI_BUILD_KEY=v6-coder-mounted-basename' in template
-    assert 'OPENWORK_CLIENT_TOKEN=openwork-client-token' in template
-    assert 'OPENWORK_HOST_TOKEN=openwork-host-token' in template
-    assert 'git clone --depth 1 --branch dev https://github.com/different-ai/openwork "$OPENWORK_SRC_DIR"' in template
-    assert 'CI=true pnpm install' in template
-    assert 'VITE_OPENWORK_DEPLOYMENT=web OPENWORK_PUBLIC_HOST=localhost VITE_ALLOWED_HOSTS=localhost,127.0.0.1 pnpm --filter @openwork/app exec vite build --base ./' in template
-    assert 'perl -0pi -e ' in template
-    assert 'OPENWORK_APPROVAL_MODE=auto OPENWORK_PORT=$OPENWORK_SERVER_PORT OPENWORK_TOKEN="$OPENWORK_CLIENT_TOKEN" OPENWORK_HOST_TOKEN="$OPENWORK_HOST_TOKEN" nohup openwork serve --workspace /home/coder --json' in template
-    assert "pnpm exec vite preview --host 127.0.0.1 --port $OPENWORK_UI_PORT --strictPort" in template
+    assert "$_SUDO apt-get install -y curl git ca-certificates wget btop" in template
+    assert "$_SUDO corepack enable" in template
+    assert "$_SUDO corepack prepare pnpm@10.27.0 --activate" in template
+    assert "$_SUDO npm install -g openwork-orchestrator" in template
+    assert "OPENWORK_WEBUI_BUILD_KEY=v6-coder-mounted-basename" in template
+    assert "OPENWORK_CLIENT_TOKEN=openwork-client-token" in template
+    assert "OPENWORK_HOST_TOKEN=openwork-host-token" in template
+    assert (
+        'git clone --depth 1 --branch dev https://github.com/different-ai/openwork "$OPENWORK_SRC_DIR"'
+        in template
+    )
+    assert "CI=true pnpm install" in template
+    assert (
+        "VITE_OPENWORK_DEPLOYMENT=web OPENWORK_PUBLIC_HOST=localhost VITE_ALLOWED_HOSTS=localhost,127.0.0.1 pnpm --filter @openwork/app exec vite build --base ./"
+        in template
+    )
+    assert "perl -0pi -e " in template
+    assert (
+        'OPENWORK_APPROVAL_MODE=auto OPENWORK_PORT=$OPENWORK_SERVER_PORT OPENWORK_TOKEN="$OPENWORK_CLIENT_TOKEN" OPENWORK_HOST_TOKEN="$OPENWORK_HOST_TOKEN" nohup openwork serve --workspace /home/coder --json'
+        in template
+    )
+    assert (
+        "pnpm exec vite preview --host 127.0.0.1 --port $OPENWORK_UI_PORT --strictPort" in template
+    )
     assert 'localStorage.setItem("openwork.server.urlOverride", baseUrl);' in template
     assert 'localStorage.setItem("openwork.server.token"' in template
     assert 'localStorage.setItem("openwork.server.active", baseUrl' in template
-    assert 'const routerBasename =' in template
-    assert '<Router basename={routerBasename}>' in template
+    assert "const routerBasename =" in template
+    assert "<Router basename={routerBasename}>" in template
     assert '"/w/", "/api"' in template
-    assert 'function isStaticAsset(pathname)' in template
+    assert "function isStaticAsset(pathname)" in template
     assert 'raw === mount || raw.startsWith(mount + "/")' in template
-    assert 'await input.clone().arrayBuffer()' in template
-    assert 'originalFetch(new Request(url, next))' in template
+    assert "await input.clone().arrayBuffer()" in template
+    assert "originalFetch(new Request(url, next))" in template
     assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
-    assert 'nohup env UI_PORT="$OPENWORK_UI_PORT" API_PORT="$OPENWORK_SERVER_PORT" PROXY_PORT="$OPENWORK_PROXY_PORT" CLIENT_TOKEN="$OPENWORK_OWNER_TOKEN" node /tmp/coder-mounted-proxy.mjs' in template
+    assert (
+        'nohup env UI_PORT="$OPENWORK_UI_PORT" API_PORT="$OPENWORK_SERVER_PORT" PROXY_PORT="$OPENWORK_PROXY_PORT" CLIENT_TOKEN="$OPENWORK_OWNER_TOKEN" node /tmp/coder-mounted-proxy.mjs'
+        in template
+    )
     assert 'resource "coder_app" "openwork"' in template
     assert 'slug         = "openwork"' in template
     assert 'display_name = "OpenWork"' in template
@@ -276,115 +322,237 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
         in template
     )
     assert 'url          = "http://localhost:8788"' in template
-    assert 'subdomain    = false' in template
+    assert "subdomain    = false" in template
     assert 'url       = "http://localhost:8788/health"' in template
 
 
 def test_default_kdense_byok_template_includes_upstream_parameterized_stack() -> None:
-    template = Path(
-        "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
-    ).read_text(encoding="utf-8")
+    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
+        encoding="utf-8"
+    )
 
     assert 'resource "coder_script" "kdense_bootstrap"' in template
     assert 'display_name       = "K-Dense BYOK Bootstrap"' in template
-    assert 'run_on_start       = true' in template
-    assert 'start_blocks_login = false' in template
-    assert 'timeout            = 3600' in template
+    assert "run_on_start       = true" in template
+    assert "start_blocks_login = false" in template
+    assert "timeout            = 3600" in template
     assert "cat >/tmp/kdense-bootstrap.sh <<'BOOT'" in template
-    assert 'chmod +x /tmp/kdense-bootstrap.sh' in template
-    assert 'nohup bash /tmp/kdense-bootstrap.sh >/tmp/kdense-bootstrap.log 2>&1 &' in template
-    assert 'missing_packages=()' in template
-    assert 'for package in curl ca-certificates wget python3; do' in template
-    assert 'if ! command -v git >/dev/null 2>&1; then' in template
-    assert 'if ! command -v btop >/dev/null 2>&1; then' in template
+    assert "chmod +x /tmp/kdense-bootstrap.sh" in template
+    assert "nohup bash /tmp/kdense-bootstrap.sh >/tmp/kdense-bootstrap.log 2>&1 &" in template
+    assert "missing_packages=()" in template
+    assert "for package in curl ca-certificates wget python3; do" in template
+    assert "if ! command -v git >/dev/null 2>&1; then" in template
+    assert "if ! command -v btop >/dev/null 2>&1; then" in template
     assert '$_SUDO apt-get install -y "$${missing_packages[@]}"' in template
-    assert 'curl -LsSf https://astral.sh/uv/install.sh | sh' in template
-    assert 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt' in template
-    assert 'tar -xJf - -C /usr/local --strip-components=1 --no-same-owner' in template
-    assert 'NPM_CONFIG_PREFIX=/home/coder/.local npm install -g @google/gemini-cli' in template
-    assert 'data "coder_parameter" "kdense_provider" {' in template
+    assert "curl -LsSf https://astral.sh/uv/install.sh | sh" in template
+    assert "https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt" in template
+    assert "tar -xJf - -C /usr/local --strip-components=1 --no-same-owner" in template
+    assert "NPM_CONFIG_PREFIX=/home/coder/.local npm install -g @google/gemini-cli" in template
     assert 'data "coder_parameter" "kdense_default_model" {' in template
     assert 'data "coder_parameter" "kdense_expert_model" {' in template
     assert 'data "coder_parameter" "kdense_search_provider" {' in template
-    assert 'data "coder_parameter" "kdense_openrouter_api_key" {' in template
     assert 'data "coder_parameter" "kdense_opencode_go_api_key" {' in template
     assert 'data "coder_parameter" "kdense_exa_api_key" {' in template
     assert 'data "coder_parameter" "kdense_parallel_api_key" {' in template
     assert 'data "coder_parameter" "kdense_modal_token_id" {' in template
     assert 'data "coder_parameter" "kdense_modal_token_secret" {' in template
-    assert 'default      = "openrouter"' in template
     assert 'default      = "openrouter/anthropic/claude-opus-4.7"' in template
     assert 'default      = "openrouter/google/gemini-3.1-pro-preview"' in template
     assert 'default      = "disabled"' in template
-    assert 'export KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL="__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__"' in template
-    assert 'export KDENSE_TEMPLATE_OPENCODE_GO_API_KEY="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"' in template
-    assert 'KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL_PLACEHOLDER' not in template
-    assert 'KDENSE_TEMPLATE_OPENCODE_GO_API_KEY_PLACEHOLDER' not in template
-    assert 'sync_kdense_source() {' in template
+    assert (
+        'export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"'
+        in template
+    )
+    assert (
+        'export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"'
+        in template
+    )
+    assert "KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL_PLACEHOLDER" not in template
+    assert "KDENSE_TEMPLATE_OPENCODE_GO_API_KEY_PLACEHOLDER" not in template
+    assert "sync_kdense_source() {" in template
     assert 'EXPECTED_REPO_URL="https://github.com/K-Dense-AI/k-dense-byok.git"' in template
-    assert 'git clone --depth 1 --branch main https://github.com/K-Dense-AI/k-dense-byok.git "$KDENSE_SRC_DIR"' in template
-    assert 'curl -fsSL https://codeload.github.com/K-Dense-AI/k-dense-byok/tar.gz/refs/heads/main | tar -xz --strip-components=1 -C "$KDENSE_SRC_DIR"' in template
-    assert 'const streamdownComponents = { p: SafeParagraph } as unknown as ComponentProps<typeof Streamdown>["components"];' in template
+    assert (
+        'git clone --depth 1 --branch main https://github.com/K-Dense-AI/k-dense-byok.git "$KDENSE_SRC_DIR"'
+        in template
+    )
+    assert (
+        'curl -fsSL https://codeload.github.com/K-Dense-AI/k-dense-byok/tar.gz/refs/heads/main | tar -xz --strip-components=1 -C "$KDENSE_SRC_DIR"'
+        in template
+    )
+    assert (
+        'const streamdownComponents = { p: SafeParagraph } as unknown as ComponentProps<typeof Streamdown>["components"];'
+        in template
+    )
     assert 'status: "running" as const,' in template
-    assert 'text = re.sub(r\'status:\\s*"running",\', \'status: "running" as const,\', text, count=1)' in template
-    assert 'text = text.replace(\'// @ts-expect-error polyfill\\n\', \'\')' in template
-    assert 'KDENSE_REV=archive-main' in template
-    assert 'normalize_model_for_provider() {' in template
-    assert 'KDENSE_DEFAULT_MODEL_EFFECTIVE=$(normalize_model_for_provider "$KDENSE_PROVIDER" "$KDENSE_DEFAULT_MODEL")' in template
-    assert 'KDENSE_EXPERT_MODEL_EFFECTIVE=$(normalize_model_for_provider "$KDENSE_PROVIDER" "$KDENSE_EXPERT_MODEL")' in template
-    assert 'write_kdense_env_file() {' in template
-    assert 'DEFAULT_AGENT_MODEL=%s' in template
-    assert 'DEFAULT_EXPERT_MODEL=%s' in template
-    assert 'append_env OPENROUTER_API_KEY "$KDENSE_OPENROUTER_API_KEY" "$env_file"' in template
-    assert 'append_env OPENAI_API_KEY "$KDENSE_OPENCODE_GO_API_KEY" "$env_file"' in template
-    assert 'append_env OPENAI_API_BASE "$KDENSE_OPENCODE_GO_BASE_URL" "$env_file"' in template
+    assert (
+        "text = re.sub(r'status:\\s*\"running\",', 'status: \"running\" as const,', text, count=1)"
+        in template
+    )
+    assert "text = text.replace('// @ts-expect-error polyfill\\n', '')" in template
+    assert "KDENSE_REV=archive-main" in template
+    assert "normalize_model_for_gateway() {" in template
+    assert (
+        'KDENSE_DEFAULT_MODEL_EFFECTIVE=$(normalize_model_for_gateway "$KDENSE_DEFAULT_MODEL")'
+        in template
+    )
+    assert (
+        'KDENSE_EXPERT_MODEL_EFFECTIVE=$(normalize_model_for_gateway "$KDENSE_EXPERT_MODEL")'
+        in template
+    )
+    assert "write_kdense_env_file() {" in template
+    assert "DEFAULT_AGENT_MODEL=%s" in template
+    assert "DEFAULT_EXPERT_MODEL=%s" in template
+    assert 'append_env OPENAI_API_KEY "$KDENSE_CENTRAL_LITELLM_API_KEY" "$env_file"' in template
+    assert 'append_env OPENAI_API_BASE "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
+    assert 'append_env OPENAI_BASE_URL "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
     assert 'append_env EXA_API_KEY "$KDENSE_EXA_API_KEY" "$env_file"' in template
     assert 'append_env PARALLEL_API_KEY "$KDENSE_PARALLEL_API_KEY" "$env_file"' in template
     assert 'append_env MODAL_TOKEN_ID "$KDENSE_MODAL_TOKEN_ID" "$env_file"' in template
     assert 'append_env MODAL_TOKEN_SECRET "$KDENSE_MODAL_TOKEN_SECRET" "$env_file"' in template
-    assert 'if [ "$KDENSE_PROVIDER" = "openrouter" ] && [ -z "$KDENSE_OPENROUTER_API_KEY" ] && [ -n "$KDENSE_OPENCODE_GO_API_KEY" ]; then' in template
-    assert 'falling back to the wizard-managed OpenCode Go provider' in template
-    assert 'if [ "$KDENSE_PROVIDER" = "openrouter" ] && [ -z "$KDENSE_OPENROUTER_API_KEY" ]; then' in template
-    assert 'if [ "$KDENSE_PROVIDER" = "opencode_go" ] && [ -z "$KDENSE_OPENCODE_GO_API_KEY" ]; then' in template
+    assert "append_env OPENROUTER_API_KEY " not in template
+    assert "append_env NVIDIA_API_KEY " not in template
+    assert "append_env ANTHROPIC_API_KEY " not in template
+    assert (
+        'KDENSE_CENTRAL_LITELLM_API_KEY="$${KDENSE_OPENCODE_GO_API_KEY:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY}"'
+        in template
+    )
+    assert (
+        'KDENSE_CENTRAL_LITELLM_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL}"'
+        in template
+    )
+    assert 'KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"' in template
+    assert 'if [ -z "$KDENSE_CENTRAL_LITELLM_API_KEY" ]; then' in template
+    assert (
+        "KDENSE_CENTRAL_LITELLM_API_KEY is required for the central LiteLLM provider." in template
+    )
     assert 'KDENSE_UPSTREAM_LITELLM="$KDENSE_SRC_DIR/litellm_config.yaml"' in template
     assert 'model_name: "openai/*"' in template
-    assert 'api_base: os.environ/OPENAI_API_BASE' in template
+    assert "api_base: os.environ/OPENAI_API_BASE" in template
     assert 'clone["id"] = "openai/" + str(model["id"])[len("openrouter/"):]' in template
     assert 'clone["provider"] = "OpenCode Go"' in template
     assert '"id": "openai/deepseek-v4-flash"' in template
-    assert 'KDENSE_SETUP_STAMP=/home/coder/.cache/kdense-byok-setup-rev' in template
-    assert 'KDENSE_SETUP_KEY=v10-upstream-main-parameterized' in template
-    assert 'KDENSE_SETUP_ID="$KDENSE_REV:$KDENSE_SETUP_KEY:$KDENSE_PROVIDER:$KDENSE_DEFAULT_MODEL_EFFECTIVE:$KDENSE_EXPERT_MODEL_EFFECTIVE"' in template
+    assert "KDENSE_SETUP_STAMP=/home/coder/.cache/kdense-byok-setup-rev" in template
+    assert "KDENSE_SETUP_KEY=v11-central-litellm-only" in template
+    assert (
+        'KDENSE_SETUP_ID="$KDENSE_REV:$KDENSE_SETUP_KEY:$KDENSE_DEFAULT_MODEL_EFFECTIVE:$KDENSE_EXPERT_MODEL_EFFECTIVE"'
+        in template
+    )
     assert '[ ! -f "$KDENSE_SRC_DIR/web/.next/BUILD_ID" ]' in template
-    assert 'uv sync --python 3.13 --no-dev --quiet' in template
-    assert 'if [ -f web/package-lock.json ]; then' in template
-    assert '(cd web && NEXT_PUBLIC_ADK_API_URL= npm ci --silent && NEXT_PUBLIC_ADK_API_URL= npm run build)' in template
-    assert '(cd web && NEXT_PUBLIC_ADK_API_URL= npm install --silent && NEXT_PUBLIC_ADK_API_URL= npm run build)' in template
-    assert "printf '%s' \"$KDENSE_SETUP_ID\" > \"$KDENSE_SETUP_STAMP\"" in template
-    assert 'KDENSE_NEEDS_PREP=false' in template
+    assert "uv sync --python 3.13 --no-dev --quiet" in template
+    assert "if [ -f web/package-lock.json ]; then" in template
+    assert (
+        "(cd web && NEXT_PUBLIC_ADK_API_URL= npm ci --silent && NEXT_PUBLIC_ADK_API_URL= npm run build)"
+        in template
+    )
+    assert (
+        "(cd web && NEXT_PUBLIC_ADK_API_URL= npm install --silent && NEXT_PUBLIC_ADK_API_URL= npm run build)"
+        in template
+    )
+    assert 'printf \'%s\' "$KDENSE_SETUP_ID" > "$KDENSE_SETUP_STAMP"' in template
+    assert "KDENSE_NEEDS_PREP=false" in template
     assert 'if [ ! -d "$KDENSE_SRC_DIR/sandbox/.gemini/skills" ]; then' in template
-    assert 'KDENSE_NEEDS_PREP=true' in template
-    assert 'uv run python prep_sandbox.py' in template
-    assert '>/tmp/kdense-prep.log 2>&1 &' in template
+    assert "KDENSE_NEEDS_PREP=true" in template
+    assert "uv run python prep_sandbox.py" in template
+    assert ">/tmp/kdense-prep.log 2>&1 &" in template
     assert 'pkill -f "next dev --hostname 127.0.0.1 --port $KDENSE_UI_PORT"' in template
     assert 'pkill -f "next start --hostname 127.0.0.1 --port $KDENSE_UI_PORT"' in template
-    assert 'NEXT_PUBLIC_ADK_API_URL= npm run start -- --hostname 127.0.0.1 --port $KDENSE_UI_PORT' in template
-    assert 'const UI_PATHS = new Set(["/", "/favicon.ico", "/icon.png", "/site.webmanifest"]);' in template
-    assert 'function isUiPath(pathname) {' in template
-    assert 'return UI_PATHS.has(pathname) || pathname.startsWith("/_next/") || pathname.startsWith("/brand/");' in template
-    assert 'function filteredHeaders(headers) {' in template
+    assert (
+        "NEXT_PUBLIC_ADK_API_URL= npm run start -- --hostname 127.0.0.1 --port $KDENSE_UI_PORT"
+        in template
+    )
+    assert (
+        'const UI_PATHS = new Set(["/", "/favicon.ico", "/icon.png", "/site.webmanifest"]);'
+        in template
+    )
+    assert "function isUiPath(pathname) {" in template
+    assert (
+        'return UI_PATHS.has(pathname) || pathname.startsWith("/_next/") || pathname.startsWith("/brand/");'
+        in template
+    )
+    assert "function filteredHeaders(headers) {" in template
     assert 'if (["transfer-encoding", "connection"].includes(lowered)) continue;' in template
-    assert 'function targetForPath(pathname) {' in template
-    assert 'if (isUiPath(pathname)) return { host: UI_HOST, port: UI_PORT };' in template
-    assert 'return { host: API_HOST, port: API_PORT };' in template
+    assert "function targetForPath(pathname) {" in template
+    assert "if (isUiPath(pathname)) return { host: UI_HOST, port: UI_PORT };" in template
+    assert "return { host: API_HOST, port: API_PORT };" in template
     assert 'path: req.url || "/",' in template
-    assert 'res.writeHead(upstreamRes.statusCode || 502, filteredHeaders(upstreamRes.headers));' in template
+    assert (
+        "res.writeHead(upstreamRes.statusCode || 502, filteredHeaders(upstreamRes.headers));"
+        in template
+    )
     assert 'resource "coder_app" "kdense_byok"' in template
     assert 'display_name = "K-Dense BYOK"' in template
-    assert 'icon         = "https://raw.githubusercontent.com/K-Dense-AI/k-dense-byok/main/web/public/brand/kdense-logo-dark.png"' in template
+    assert (
+        'icon         = "https://raw.githubusercontent.com/K-Dense-AI/k-dense-byok/main/web/public/brand/kdense-logo-dark.png"'
+        in template
+    )
     assert 'url          = "http://localhost:3001"' in template
-    assert 'subdomain    = true' in template
+    assert "subdomain    = true" in template
     assert 'url       = "http://localhost:3001/health"' in template
+
+
+def test_kdense_calls_central_litellm() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        'export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"'
+        in template
+    )
+    assert (
+        'export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"'
+        in template
+    )
+    assert (
+        'KDENSE_CENTRAL_LITELLM_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL}"'
+        in template
+    )
+    assert (
+        'KDENSE_CENTRAL_LITELLM_API_KEY="$${KDENSE_OPENCODE_GO_API_KEY:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY}"'
+        in template
+    )
+    assert 'KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"' in template
+    assert (
+        'printf \'GOOGLE_GEMINI_BASE_URL=%s\\n\' "$KDENSE_LOCAL_LITELLM_BASE_URL" >> "$env_file"'
+        in template
+    )
+    assert 'append_env OPENAI_API_KEY "$KDENSE_CENTRAL_LITELLM_API_KEY" "$env_file"' in template
+    assert 'append_env OPENAI_API_BASE "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
+    assert 'append_env OPENAI_BASE_URL "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
+
+
+def test_no_openrouter_wildcard_in_kdense_config() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    assert "# Central LiteLLM gateway owns the OpenCode Go wildcard route." in template
+    assert (
+        "# Workspace-local LiteLLM stays on localhost for the Gemini/OpenAI shim only." in template
+    )
+    assert "KDENSE_OPENROUTER_API_KEY" not in template
+    assert "kdense_openrouter_api_key" not in template
+    assert 'model_name: "openrouter/*"' not in template
+    assert 'model_name: "openai/*"' in template
+
+
+def test_kdense_template_preserves_restored_byok_source_state() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'data "coder_parameter" "kdense_opencode_go_base_url" {' in template
+    assert 'display_name = "Central LiteLLM Base URL"' in template
+    assert 'default      = "https://opencode.ai/zen/go/v1"' in template
+    assert (
+        'KDENSE_CENTRAL_LITELLM_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL}"'
+        in template
+    )
+    assert "KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL_PLACEHOLDER" not in template
+    assert "KDENSE_TEMPLATE_OPENCODE_GO_API_KEY_PLACEHOLDER" not in template
+    assert 'append_env OPENROUTER_API_KEY ' not in template
+    assert 'append_env NVIDIA_API_KEY ' not in template
+    assert 'append_env ANTHROPIC_API_KEY ' not in template
 
 
 def test_default_hermes_template_includes_full_web_stack() -> None:
@@ -392,58 +560,89 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
         encoding="utf-8"
     )
 
-    assert '$_SUDO apt-get install -y curl git ca-certificates wget btop python3' in template
-    assert 'curl -fsSL https://deb.nodesource.com/setup_24.x | $_SUDO -E bash -' in template
+    assert "$_SUDO apt-get install -y curl git ca-certificates wget btop python3" in template
+    assert "curl -fsSL https://deb.nodesource.com/setup_24.x | $_SUDO -E bash -" in template
     assert (
         'HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup'
         in template
     )
-    assert 'export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1' in template
-    assert 'export HERMES_TEMPLATE_PROVIDER="__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__"' in template
+    assert "export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1" in template
+    assert (
+        'export HERMES_TEMPLATE_PROVIDER="__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__"' in template
+    )
     assert 'export HERMES_TEMPLATE_MODEL="__DOKPLOY_WIZARD_HERMES_MODEL__"' in template
-    assert 'export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__"' in template
-    assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"' in template
-    assert 'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"' in template
-    assert 'export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"' in template
+    assert 'export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_HERMES_BASE_URL__"' in template
+    assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_HERMES_API_KEY__"' in template
+    assert (
+        'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__"' in template
+    )
+    assert (
+        'export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"'
+        in template
+    )
     assert 'export HERMES_MODEL="$${HERMES_MODEL:-$HERMES_TEMPLATE_MODEL}"' in template
-    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-$HERMES_TEMPLATE_BASE_URL}"' in template
-    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-$HERMES_TEMPLATE_API_KEY}"' in template
-    assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
+    assert 'export OPENAI_API_BASE="$${OPENAI_API_BASE:-$HERMES_TEMPLATE_BASE_URL}"' in template
+    assert 'export OPENAI_API_KEY="$${OPENAI_API_KEY:-$HERMES_TEMPLATE_API_KEY}"' in template
+    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-$OPENAI_API_BASE}"' in template
+    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-$OPENAI_API_KEY}"' in template
+    assert (
+        'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
+    )
     assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
+    assert 'upsert_env OPENAI_API_KEY "$OPENAI_API_KEY"' in template
+    assert 'upsert_env OPENAI_API_BASE "$OPENAI_API_BASE"' in template
     assert 'upsert_env AI_DEFAULT_API_KEY "$AI_DEFAULT_API_KEY"' in template
-    assert 'upsert_env OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"' in template
-    assert 'API_SERVER_ENABLED=true' in template
-    assert 'AI_DEFAULT_API_KEY is required for the Hermes workspace template' in template
-    assert "Provider 'opencode-go' requires OPENCODE_GO_API_KEY in the Hermes workspace template" in template
+    assert "upsert_env OPENROUTER_API_KEY " not in template
+    assert "upsert_env NVIDIA_API_KEY " not in template
+    assert "upsert_env ANTHROPIC_API_KEY " not in template
+    assert "API_SERVER_ENABLED=true" in template
+    assert "OPENAI_API_KEY is required for the Hermes workspace template" in template
     assert 'hermes config set model.provider "$HERMES_INFERENCE_PROVIDER"' in template
     assert 'hermes config set model.default "$HERMES_MODEL"' in template
-    assert 'hermes config set model.base_url "$AI_DEFAULT_BASE_URL"' in template
-    assert 'hermes config set terminal.cwd /home/coder' in template
-    assert 'export HERMES_DASHBOARD_PORT=9119' in template
-    assert 'export HERMES_DASHBOARD_PROXY_PORT=9120' in template
-    assert 'export HERMES_WEB_UI_PORT=8648' in template
-    assert 'export HERMES_WEB_UI_PROXY_PORT=8649' in template
-    assert 'export HERMES_WEBUI_PORT=8787' in template
-    assert 'export HERMES_WEBUI_PROXY_PORT=8788' in template
-    assert 'HERMES_BOOTSTRAP_SCRIPT=/tmp/hermes-workspace-bootstrap.sh' in template
+    assert 'hermes config set model.base_url "$OPENAI_API_BASE"' in template
+    assert "hermes config set terminal.cwd /home/coder" in template
+    assert "export HERMES_DASHBOARD_PORT=9119" in template
+    assert "export HERMES_DASHBOARD_PROXY_PORT=9120" in template
+    assert "export HERMES_WEB_UI_PORT=8648" in template
+    assert "export HERMES_WEB_UI_PROXY_PORT=8649" in template
+    assert "export HERMES_WEBUI_PORT=8787" in template
+    assert "export HERMES_WEBUI_PROXY_PORT=8788" in template
+    assert "HERMES_BOOTSTRAP_SCRIPT=/tmp/hermes-workspace-bootstrap.sh" in template
     assert 'nohup sh "$HERMES_BOOTSTRAP_SCRIPT" >/tmp/hermes-bootstrap.log 2>&1 &' in template
-    assert 'nohup hermes gateway >/tmp/hermes-gateway.log 2>&1 &' in template
+    assert "nohup hermes gateway >/tmp/hermes-gateway.log 2>&1 &" in template
     assert 'hermes dashboard --host 127.0.0.1 --port "$HERMES_DASHBOARD_PORT" --no-open' in template
-    assert 'hermes-web-ui start --port "$HERMES_WEB_UI_PORT" >/tmp/hermes-web-ui-start.log 2>&1' in template
-    assert 'HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install' in template
+    assert (
+        'hermes-web-ui start --port "$HERMES_WEB_UI_PORT" >/tmp/hermes-web-ui-start.log 2>&1'
+        in template
+    )
+    assert (
+        "HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install"
+        in template
+    )
     assert 'const SYNTHETIC_HEALTHCHECK = process.env.SYNTHETIC_HEALTHCHECK === "1";' in template
-    assert 'const DASHBOARD_SESSION_HEADER = process.env.DASHBOARD_SESSION_HEADER === "1";' in template
+    assert (
+        'const DASHBOARD_SESSION_HEADER = process.env.DASHBOARD_SESSION_HEADER === "1";' in template
+    )
     assert 'const TOKEN_FILE = process.env.TOKEN_FILE || "";' in template
     assert 'headers["X-Hermes-Session-Token"] = await getDashboardSessionToken();' in template
-    assert 'window.history.pushState = (state, title, url) => originalPushState(state, title, url == null ? url : rewrite(url));' in template
-    assert "location.pathname.indexOf(\"/apps/\") !== -1" in template
+    assert (
+        "window.history.pushState = (state, title, url) => originalPushState(state, title, url == null ? url : rewrite(url));"
+        in template
+    )
+    assert 'location.pathname.indexOf("/apps/") !== -1' in template
     assert '.replace(/(["\'])\\/assets\\//g, "$1./assets/")' in template
     assert '.replace(/(["\'])\\/static\\//g, "$1./static/")' in template
     assert '.replace(/`\\/`\\+e/g, "`./`+e")' in template
-    assert 'DASHBOARD_SESSION_HEADER=1 SYNTHETIC_HEALTHCHECK=1 TARGET_PORT=$HERMES_DASHBOARD_PORT PROXY_PORT=$HERMES_DASHBOARD_PROXY_PORT node /tmp/coder-mounted-proxy.mjs' in template
-    assert 'TOKEN_FILE=/home/coder/.hermes-web-ui/.token TARGET_PORT=$HERMES_WEB_UI_PORT PROXY_PORT=$HERMES_WEB_UI_PROXY_PORT node /tmp/coder-mounted-proxy.mjs' in template
+    assert (
+        "DASHBOARD_SESSION_HEADER=1 SYNTHETIC_HEALTHCHECK=1 TARGET_PORT=$HERMES_DASHBOARD_PORT PROXY_PORT=$HERMES_DASHBOARD_PROXY_PORT node /tmp/coder-mounted-proxy.mjs"
+        in template
+    )
+    assert (
+        "TOKEN_FILE=/home/coder/.hermes-web-ui/.token TARGET_PORT=$HERMES_WEB_UI_PORT PROXY_PORT=$HERMES_WEB_UI_PROXY_PORT node /tmp/coder-mounted-proxy.mjs"
+        in template
+    )
     assert 'server.on("upgrade", (req, socket, head) => {' in template
-    assert 'window.WebSocket = class extends OriginalWebSocket' in template
+    assert "window.WebSocket = class extends OriginalWebSocket" in template
     assert 'resource "coder_app" "hermes_dashboard"' in template
     assert (
         'icon         = "https://raw.githubusercontent.com/NousResearch/hermes-agent/refs/heads/main/acp_registry/icon.svg"'
@@ -462,10 +661,150 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
         in template
     )
     assert 'url          = "http://localhost:8788"' in template
-    assert 'HERMIES_PROVIDER' not in template
-    assert 'HERMEIS_OPENCODE_GO_MODEL' not in template
-    assert 'HERMIES_BASE_USL' not in template
-    assert 'HERMIES_API_MODE' not in template
+    assert "HERMIES_PROVIDER" not in template
+    assert "HERMEIS_OPENCODE_GO_MODEL" not in template
+    assert "HERMIES_BASE_USL" not in template
+    assert "HERMIES_API_MODE" not in template
+
+
+def test_hermes_template_uses_litellm_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="clayton@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        hermes_inference_provider="openai",
+        hermes_model="unsloth-active",
+        ai_default_base_url="https://upstream.example.invalid/v1",
+        ai_default_api_key="litellm-coder-hermes-key",
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    template_replacements_by_name: dict[str, dict[str, str] | None] = {}
+    secret_sync_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
+    monkeypatch.setattr(
+        coder_module,
+        "_sync_hermes_workspace_secrets",
+        lambda **kwargs: secret_sync_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda *,
+        container_name,
+        template_dir,
+        template_name,
+        replacements: template_replacements_by_name.setdefault(template_name, replacements),
+    )
+    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+
+    backend.ensure_application_ready()
+
+    assert secret_sync_calls == [
+        {
+            "container_name": "wizard-stack-coder-container",
+            "hostname": "coder.example.com",
+            "session_token": "session-123",
+            "hermes_inference_provider": "openai",
+            "hermes_model": "unsloth-active",
+            "ai_default_base_url": "http://wizard-stack-shared-litellm:4000",
+            "ai_default_api_key": "litellm-coder-hermes-key",
+        }
+    ]
+    assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "openai",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "litellm-coder-hermes-key",
+    }
+
+
+def test_base_opencode_web_openwork_templates_do_not_receive_litellm_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="clayton@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        hermes_inference_provider="openai",
+        hermes_model="unsloth-active",
+        ai_default_api_key="litellm-coder-hermes-key",
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    template_replacements_by_name: dict[str, dict[str, str] | None] = {}
+
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda *,
+        container_name,
+        template_dir,
+        template_name,
+        replacements: template_replacements_by_name.setdefault(template_name, replacements),
+    )
+    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+
+    backend.ensure_application_ready()
+
+    assert template_replacements_by_name[coder_module._default_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+    }
+    assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+    }
+    assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+    }
+    assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
+    }
 
 
 def test_push_default_template_ignores_missing_terraform_lockfile(
@@ -505,6 +844,58 @@ def test_push_default_template_ignores_missing_terraform_lockfile(
             "--yes",
         ]
     ]
+
+
+def test_push_default_template_treats_duplicate_deterministic_version_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    template_version_name = "dokploy-wizard-0a966b668508e2d3"
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            stdout="",
+            stderr=(
+                f'error: A template version with name "{template_version_name}" '
+                "already exists for this template."
+            ),
+        )
+
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
+    coder_module._push_default_template(
+        container_name="coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        template_name="ubuntu-vscode-opencode-web",
+        template_version_name=template_version_name,
+    )
+
+
+def test_push_default_template_raises_for_unrelated_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            stdout="",
+            stderr="error: failed to reach provisioner registry",
+        )
+
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
+    with pytest.raises(coder_module.CoderError, match="failed to reach provisioner registry"):
+        coder_module._push_default_template(
+            container_name="coder-container",
+            hostname="coder.example.com",
+            session_token="session-123",
+            template_name="ubuntu-vscode-opencode-web",
+            template_version_name="dokploy-wizard-0a966b668508e2d3",
+        )
 
 
 def test_reconcile_coder_creates_service_and_data() -> None:
@@ -598,6 +989,8 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     monkeypatch.setattr(
         coder_module, "_coder_container_name", lambda service_name: "coder-container"
     )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
     secret_sync_calls: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         coder_module,
@@ -618,7 +1011,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
 
     assert waits == ["coder.example.com"]
     assert secret_sync_calls == [
-        ("opencode-go", "deepseek-v4-flash", "https://opencode.ai/zen/go/v1")
+        ("openai", "unsloth-active", "http://wizard-stack-shared-litellm:4000")
     ]
     assert notes == (
         "Provisioned initial Coder admin for 'admin@example.com'.",
@@ -628,6 +1021,250 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
     )
+
+
+def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="clayton@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    first_user_exists = False
+    first_user_calls: list[tuple[str, str, str]] = []
+    template_versions: dict[str, str] = {}
+    template_copy_calls: list[str] = []
+    template_push_calls: list[tuple[str, str | None]] = []
+    created_workspaces: list[tuple[str, str]] = []
+    workspaces: set[str] = set()
+
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: first_user_exists)
+
+    def fake_create_first_user(*, hostname: str, email: str, password: str) -> None:
+        nonlocal first_user_exists
+        first_user_calls.append((hostname, email, password))
+        first_user_exists = True
+
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", fake_create_first_user)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_active_template_version_name",
+        lambda **kwargs: template_versions.get(str(kwargs["template_name"])),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_template_version_names",
+        lambda **kwargs: tuple(template_versions.values()),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda *, template_name, **kwargs: template_copy_calls.append(template_name),
+    )
+
+    def fake_push_default_template(*, template_name: str, template_version_name: str | None = None, **kwargs: object) -> None:
+        template_push_calls.append((template_name, template_version_name))
+        if template_version_name is not None:
+            template_versions[template_name] = template_version_name
+
+    monkeypatch.setattr(coder_module, "_push_default_template", fake_push_default_template)
+    monkeypatch.setattr(
+        coder_module,
+        "_default_workspace_name",
+        lambda hostname: "openmergeme-workspace-2026-04-18",
+    )
+    monkeypatch.setattr(coder_module, "_list_workspaces", lambda **kwargs: tuple(sorted(workspaces)))
+
+    def fake_create_default_workspace(*, workspace_name: str, template_name: str, **kwargs: object) -> None:
+        created_workspaces.append((workspace_name, template_name))
+        workspaces.add(workspace_name)
+
+    monkeypatch.setattr(coder_module, "_create_default_workspace", fake_create_default_workspace)
+
+    first_notes = backend.ensure_application_ready()
+    second_notes = backend.ensure_application_ready()
+
+    expected_template_names = {
+        coder_module._default_template_name(),
+        coder_module._default_opencode_web_template_name(),
+        coder_module._default_openwork_template_name(),
+        coder_module._default_kdense_byok_template_name(),
+        coder_module._default_hermes_template_name(),
+    }
+    assert first_user_calls == [("coder.example.com", "clayton@openmerge.me", "ChangeMeSoon")]
+    assert set(template_copy_calls) == expected_template_names
+    assert len(template_copy_calls) == len(expected_template_names)
+    assert {name for name, _ in template_push_calls} == expected_template_names
+    assert len(template_push_calls) == len(expected_template_names)
+    assert all(version_name and version_name.startswith("dokploy-wizard-") for _, version_name in template_push_calls)
+    assert created_workspaces == [
+        ("openmergeme-workspace-2026-04-18", coder_module._default_template_name())
+    ]
+    assert first_notes == (
+        "Provisioned initial Coder admin for 'clayton@openmerge.me'.",
+        "Seeded default Coder template 'ubuntu-vscode'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
+        "Seeded default Coder template 'ubuntu-vscode-openwork'.",
+        "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes'.",
+        "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'clayton@openmerge.me'.",
+    )
+    assert second_notes == ()
+
+
+def test_seed_template_skips_push_when_desired_version_is_already_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "main.tf").write_text("resource \"x\" \"y\" {}\n", encoding="utf-8")
+    desired_version_name = coder_module._template_version_name(
+        template_dir=template_dir,
+        replacements=None,
+    )
+    copy_calls: list[str] = []
+    push_calls: list[str] = []
+
+    monkeypatch.setattr(
+        coder_module,
+        "_active_template_version_name",
+        lambda **kwargs: desired_version_name,
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_template_version_names",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not list versions")),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda **kwargs: copy_calls.append("copy"),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_push_default_template",
+        lambda **kwargs: push_calls.append("push"),
+    )
+
+    seeded = coder_module._seed_template(
+        container_name="coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        template_name="ubuntu-vscode",
+        template_dir=template_dir,
+        replacements=None,
+    )
+
+    assert seeded is False
+    assert copy_calls == []
+    assert push_calls == []
+
+
+def test_seed_template_skips_push_when_desired_version_already_exists_but_is_not_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "main.tf").write_text("resource \"x\" \"y\" {}\n", encoding="utf-8")
+    desired_version_name = coder_module._template_version_name(
+        template_dir=template_dir,
+        replacements=None,
+    )
+    copy_calls: list[str] = []
+    push_calls: list[str] = []
+
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: "older-version")
+    monkeypatch.setattr(
+        coder_module,
+        "_template_version_names",
+        lambda **kwargs: ("older-version", desired_version_name),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda **kwargs: copy_calls.append("copy"),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_push_default_template",
+        lambda **kwargs: push_calls.append("push"),
+    )
+
+    seeded = coder_module._seed_template(
+        container_name="coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        template_name="ubuntu-vscode",
+        template_dir=template_dir,
+        replacements=None,
+    )
+
+    assert seeded is False
+    assert copy_calls == []
+    assert push_calls == []
+
+
+def test_seed_template_pushes_when_desired_version_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "main.tf").write_text("resource \"x\" \"y\" {}\n", encoding="utf-8")
+    copy_calls: list[str] = []
+    push_calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: "older-version")
+    monkeypatch.setattr(
+        coder_module,
+        "_template_version_names",
+        lambda **kwargs: ("older-version",),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda **kwargs: copy_calls.append(str(kwargs["template_name"])),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_push_default_template",
+        lambda **kwargs: push_calls.append(
+            (str(kwargs["template_name"]), kwargs.get("template_version_name"))
+        ),
+    )
+
+    seeded = coder_module._seed_template(
+        container_name="coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        template_name="ubuntu-vscode",
+        template_dir=template_dir,
+        replacements=None,
+    )
+
+    assert seeded is True
+    assert copy_calls == ["ubuntu-vscode"]
+    assert push_calls == [("ubuntu-vscode", push_calls[0][1])]
+    assert push_calls[0][1] is not None
+    assert push_calls[0][1].startswith("dokploy-wizard-")
 
 
 def test_build_coder_ledger_replaces_existing_resources() -> None:
@@ -695,6 +1332,300 @@ def test_dokploy_coder_backend_renders_compose_on_create() -> None:
     assert compose is not None
     assert 'CODER_ACCESS_URL: "https://coder.example.com/"' in compose
     assert 'CODER_WILDCARD_ACCESS_URL: "*.coder.example.com"' in compose
+
+
+def test_dokploy_coder_backend_skips_healthy_unchanged_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose = _render_compose_file(
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+    )
+    _write_coder_hash_checkpoint(
+        tmp_path,
+        service_name="wizard-stack-coder",
+        compose_file=compose,
+    )
+    client = FakeDokployApiClient()
+    client.seed_existing_service(
+        service_name="wizard-stack-coder",
+        compose_id="cmp-coder",
+        project_name="wizard-stack",
+        compose_file=compose,
+    )
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        state_dir=tmp_path,
+        client=cast(DokployCoderApi, client),
+    )
+    wait_calls: list[str] = []
+    monkeypatch.setattr(coder_module, "_local_https_health_check", lambda url: True)
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_wait_for_coder_bootstrap_api_ready",
+        lambda hostname: wait_calls.append(hostname),
+    )
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: True)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_list_templates",
+        lambda **kwargs: tuple(
+            {"name": template_name}
+            for template_name in coder_module._required_template_names()
+        ),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_list_workspaces",
+        lambda **kwargs: (coder_module._default_workspace_name("coder.example.com"),),
+    )
+
+    record = backend.create_service(
+        resource_name="wizard-stack-coder",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        data_resource_name="wizard-stack-coder-data",
+    )
+
+    assert record == CoderResourceRecord(
+        resource_id="dokploy-compose:cmp-coder:service",
+        resource_name="wizard-stack-coder",
+    )
+    assert backend._created_in_process is False
+    assert wait_calls == ["coder.example.com"]
+    client.assert_unchanged_service("wizard-stack-coder")
+
+
+def test_dokploy_coder_verification_confirms_bootstrap_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    monkeypatch.setattr(coder_module, "_local_https_health_check", lambda url: True)
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(coder_module, "_wait_for_coder_bootstrap_api_ready", lambda hostname: None)
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: True)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_list_templates",
+        lambda **kwargs: tuple(
+            {"name": template_name}
+            for template_name in coder_module._required_template_names()
+        ),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_list_workspaces",
+        lambda **kwargs: (coder_module._default_workspace_name("coder.example.com"),),
+    )
+
+    result = backend._verify_current_compose_application()
+
+    assert result.passed is True
+    assert result.tier == "bootstrap"
+    assert "first user bootstrap" in result.detail
+    assert "seeded templates" in result.detail
+    assert "default workspace" in result.detail
+
+
+def test_dokploy_coder_verification_resolves_dokploy_prefixed_container_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="openmerge",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="openmerge-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="openmerge_coder",
+            user_name="openmerge_coder",
+            password_secret_ref="openmerge-coder-postgres-password",
+        ),
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    exec_container_names: list[str] = []
+
+    def fake_run(
+        command: list[str], check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        if command[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="openmerge-coder-ofbxpg-openmerge-coder-1\n",
+                stderr="",
+            )
+        if command[:4] == ["docker", "exec", "-e", f"CODER_URL={coder_module._coder_cli_url()}"]:
+            exec_container_names.append(command[6])
+            if command[7:10] == ["/opt/coder", "templates", "list"]:
+                stdout = json.dumps(
+                    [
+                        {"name": template_name}
+                        for template_name in coder_module._required_template_names()
+                    ]
+                )
+            elif command[7:9] == ["/opt/coder", "list"]:
+                stdout = json.dumps(
+                    [{"name": coder_module._default_workspace_name("coder.example.com")}]
+                )
+            else:
+                raise AssertionError(f"Unexpected docker exec command: {command}")
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(coder_module, "_local_https_health_check", lambda url: True)
+    monkeypatch.setattr(coder_module, "_wait_for_coder_bootstrap_api_ready", lambda hostname: None)
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: True)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
+    result = backend._verify_current_compose_application()
+
+    assert result.passed is True
+    assert exec_container_names == [
+        "openmerge-coder-ofbxpg-openmerge-coder-1",
+        "openmerge-coder-ofbxpg-openmerge-coder-1",
+    ]
+
+
+def test_dokploy_coder_backend_unhealthy_api_blocks_noop_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose = _render_compose_file(
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+    )
+    _write_coder_hash_checkpoint(
+        tmp_path,
+        service_name="wizard-stack-coder",
+        compose_file=compose,
+    )
+    client = FakeDokployApiClient()
+    client.seed_existing_service(
+        service_name="wizard-stack-coder",
+        compose_id="cmp-coder",
+        project_name="wizard-stack",
+        compose_file=compose,
+    )
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        state_dir=tmp_path,
+        client=cast(DokployCoderApi, client),
+    )
+    monkeypatch.setattr(coder_module, "_local_https_health_check", lambda url: True)
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+
+    def fail_api_ready(hostname: str) -> None:
+        raise coder_module.CoderError(
+            "Coder bootstrap API did not become ready before first-user setup."
+        )
+
+    monkeypatch.setattr(coder_module, "_wait_for_coder_bootstrap_api_ready", fail_api_ready)
+
+    record = backend.create_service(
+        resource_name="wizard-stack-coder",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        data_resource_name="wizard-stack-coder-data",
+    )
+
+    assert record == CoderResourceRecord(
+        resource_id="dokploy-compose:cmp-coder:service",
+        resource_name="wizard-stack-coder",
+    )
+    assert backend._created_in_process is True
+    client.assert_single_update_deploy_pair("wizard-stack-coder")
 
 
 def test_dokploy_coder_health_accepts_immediate_public_success(monkeypatch) -> None:
@@ -897,6 +1828,8 @@ def test_ensure_default_workspace_skips_existing_workspace(monkeypatch: pytest.M
 
     assert created_workspace is False
     assert create_calls == []
+
+
 def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -941,6 +1874,8 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "_coder_container_name",
         lambda service_name: "wizard-stack-coder-container",
     )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
     monkeypatch.setattr(
         coder_module,
         "_sync_hermes_workspace_secrets",
@@ -956,9 +1891,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     monkeypatch.setattr(
         coder_module,
         "_copy_template_into_container",
-        lambda *, container_name, template_dir, template_name, replacements: template_copy_calls.append(
-            (container_name, str(template_dir), template_name)
-        )
+        lambda *,
+        container_name,
+        template_dir,
+        template_name,
+        replacements: template_copy_calls.append((container_name, str(template_dir), template_name))
         or template_replacements_by_name.setdefault(template_name, replacements),
     )
     monkeypatch.setattr(
@@ -968,7 +1905,8 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         container_name,
         hostname,
         session_token,
-        template_name: template_push_calls.append(
+        template_name,
+        template_version_name=None: template_push_calls.append(
             (container_name, hostname, session_token, template_name)
         ),
     )
@@ -1052,17 +1990,19 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "coder.example.com",
             "session-123",
             coder_module._default_hermes_template_name(),
-        )
+        ),
     ]
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "https://opencode.ai/zen/go/v1",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
     }
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
-        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "deepseek-v4-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "https://opencode.ai/zen/go/v1",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "openai",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
     }
     assert ensure_workspace_calls == [
         (
@@ -1076,8 +2016,8 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert secret_sync_calls == [
         (
             "wizard-stack-coder-container",
-            "opencode-go",
-            "deepseek-v4-flash",
+            "openai",
+            "unsloth-active",
             None,
         )
     ]
@@ -1089,4 +2029,23 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
         "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'clayton@openmerge.me'.",
+    )
+
+
+def _write_coder_hash_checkpoint(
+    state_dir: Path, *, service_name: str, compose_file: str
+) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("coder",),
+            compose_artifact_hashes={
+                service_name: ComposeArtifactHashState.from_rendered_compose(
+                    service_id=service_name,
+                    rendered_compose=compose_file,
+                )
+            },
+        ),
     )

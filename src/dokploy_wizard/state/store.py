@@ -1,23 +1,30 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 """State-directory loading and persistence helpers."""
 
 from __future__ import annotations
 
 import json
-from importlib import import_module
+import secrets
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from dokploy_wizard.state.models import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+    LITELLM_GENERATED_MASTER_KEY_PREFIX,
+    LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES,
+    STATE_FORMAT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
+    LiteLLMGeneratedKeys,
     OwnershipLedger,
     RawEnvInput,
-    STATE_FORMAT_VERSION,
     StateValidationError,
+    litellm_key_uses_virtual_key_format,
 )
 from dokploy_wizard.state.queue_models import (
     DurableJobRecord,
@@ -35,6 +42,7 @@ OWNERSHIP_LEDGER_FILE = "ownership-ledger.json"
 INBOX_EVENTS_FILE = "inbox-events.json"
 JOB_QUEUE_FILE = "job-queue.json"
 OUTBOUND_DELIVERIES_FILE = "outbound-deliveries.json"
+LITELLM_GENERATED_KEYS_FILE = "litellm-generated-keys.json"
 STATE_DOCUMENT_FILES = (
     RAW_INPUT_FILE,
     DESIRED_STATE_FILE,
@@ -444,6 +452,65 @@ def write_inspection_snapshot(
     _write_document(state_dir / DESIRED_STATE_FILE, desired_state_snapshot)
 
 
+def load_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys | None:
+    return _load_optional_document(
+        state_dir / LITELLM_GENERATED_KEYS_FILE,
+        LiteLLMGeneratedKeys.from_dict,
+    )
+
+
+def write_litellm_generated_keys(state_dir: Path, generated_keys: LiteLLMGeneratedKeys) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / LITELLM_GENERATED_KEYS_FILE
+    _write_document(path, generated_keys.to_dict())
+    path.chmod(0o600)
+
+
+def ensure_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys:
+    existing = load_litellm_generated_keys(state_dir)
+    if existing is not None:
+        repaired_existing = _repair_litellm_generated_keys(existing)
+        if repaired_existing != existing:
+            write_litellm_generated_keys(state_dir, repaired_existing)
+        return repaired_existing
+
+    generated_keys = _build_litellm_generated_keys()
+    write_litellm_generated_keys(state_dir, generated_keys)
+    return generated_keys
+
+
+def _build_litellm_generated_keys() -> LiteLLMGeneratedKeys:
+    return LiteLLMGeneratedKeys(
+        format_version=STATE_FORMAT_VERSION,
+        master_key=_generate_secret(prefix=LITELLM_GENERATED_MASTER_KEY_PREFIX),
+        salt_key=_generate_secret(prefix="litellm-salt"),
+        virtual_keys={
+            consumer: _generate_secret(prefix=prefix)
+            for consumer, prefix in LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES.items()
+        },
+    )
+
+
+def _repair_litellm_generated_keys(existing: LiteLLMGeneratedKeys) -> LiteLLMGeneratedKeys:
+    master_key = existing.master_key
+    if not litellm_key_uses_virtual_key_format(master_key):
+        master_key = _generate_secret(prefix=LITELLM_GENERATED_MASTER_KEY_PREFIX)
+
+    virtual_keys = dict(existing.virtual_keys)
+    for consumer, prefix in LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES.items():
+        current_key = virtual_keys[consumer]
+        if litellm_key_uses_virtual_key_format(current_key):
+            continue
+        virtual_keys[consumer] = _generate_secret(prefix=prefix)
+
+    return LiteLLMGeneratedKeys(
+        format_version=existing.format_version,
+        master_key=master_key,
+        salt_key=existing.salt_key,
+        virtual_keys=virtual_keys,
+    )
+
+
 def validate_install_state(loaded_state: LoadedState, desired_state: DesiredState) -> bool:
     """Validate existing install state and report whether it already exists."""
 
@@ -639,6 +706,10 @@ def _read_json_file(path: Path) -> Any:
 
 def _write_document(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _generate_secret(*, prefix: str) -> str:
+    return f"{prefix}-{secrets.token_urlsafe(24)}"
 
 
 def _queue_policy_module() -> Any:

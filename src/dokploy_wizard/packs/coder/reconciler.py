@@ -1,10 +1,10 @@
+# ruff: noqa: E501
 """Coder runtime reconciliation and ledger integration."""
 
 from __future__ import annotations
 
 import http.client
 from collections.abc import Callable
-from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 

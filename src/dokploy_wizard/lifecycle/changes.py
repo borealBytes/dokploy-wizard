@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Lifecycle change classification for rerun, resume, and modify flows."""
 
 from __future__ import annotations
@@ -9,9 +10,9 @@ from dokploy_wizard.packs.catalog import (
     get_mutable_pack_resource_keys,
 )
 from dokploy_wizard.state.models import (
+    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
-    LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
@@ -34,6 +35,10 @@ PHASE_ORDER: tuple[str, ...] = (
     "my-farm-advisor",
     "cloudflare_access",
 )
+
+# LiteLLM is always installed as shared-core infrastructure, not as a standalone
+# lifecycle phase or optional pack.
+_LITELLM_PHASE = "shared_core"
 
 _SUPPORTED_AUTH_KEYS = {
     "CLOUDFLARE_API_TOKEN",
@@ -170,14 +175,41 @@ _NEXTCLOUD_NEXA_USER_ENV_KEYS = {
     "OPENCLAW_NEXA_AGENT_EMAIL",
 }
 _MY_FARM_RUNTIME_ENV_KEYS = {
+    "ADVISOR_GATEWAY_PASSWORD",
     "AI_DEFAULT_API_KEY",
     "AI_DEFAULT_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
     "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
     "MY_FARM_ADVISOR_NVIDIA_API_KEY",
+    "NVIDIA_BASE_URL",
     "MY_FARM_ADVISOR_PRIMARY_MODEL",
     "MY_FARM_ADVISOR_FALLBACK_MODELS",
     "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
     "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
+    "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
+    "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
+    "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
+    "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
+    "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
+    "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
+    "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
+    "TELEGRAM_ALLOWED_USERS",
+    "OPENCLAW_TELEGRAM_GROUP_POLICY",
+    "TZ",
+    "OPENCLAW_SYNC_SKILLS_ON_START",
+    "OPENCLAW_SYNC_SKILLS_OVERWRITE",
+    "OPENCLAW_FORCE_SKILL_SYNC",
+    "OPENCLAW_BOOTSTRAP_REFRESH",
+    "OPENCLAW_MEMORY_SEARCH_ENABLED",
+    "R2_BUCKET_NAME",
+    "R2_ENDPOINT",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+    "CF_ACCOUNT_ID",
+    "DATA_MODE",
+    "WORKSPACE_DATA_R2_RCLONE_MOUNT",
+    "WORKSPACE_DATA_R2_PREFIX",
 }
 _OUTBOUND_MAIL_ENV_KEYS = {
     "OUTBOUND_SMTP_HOSTNAME",
@@ -191,6 +223,32 @@ _CODER_RUNTIME_ENV_KEYS = {
     "OPENCODE_GO_API_KEY",
     "OPENCODE_GO_BASE_URL",
 }
+_LITELLM_SHARED_CONFIG_ENV_KEYS = {
+    "AI_DEFAULT_API_KEY",
+    "AI_DEFAULT_BASE_URL",
+    "OPENCODE_GO_API_KEY",
+    "OPENCODE_GO_BASE_URL",
+    "NVIDIA_BASE_URL",
+    "LITELLM_LOCAL_BASE_URL",
+    "LITELLM_LOCAL_MODEL",
+    "LITELLM_LOCAL_API_KEY",
+    "LITELLM_OPENROUTER_MODELS",
+    "LITELLM_NVIDIA_MODELS",
+    "OPENROUTER_API_KEY",
+}
+_OPENCLAW_LITELLM_UPSTREAM_ENV_KEYS = {
+    "OPENCLAW_OPENROUTER_API_KEY",
+    "OPENCLAW_NVIDIA_API_KEY",
+}
+_MY_FARM_LITELLM_UPSTREAM_ENV_KEYS = {
+    "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
+    "MY_FARM_ADVISOR_NVIDIA_API_KEY",
+}
+_LITELLM_MUTABLE_ENV_KEYS = (
+    _LITELLM_SHARED_CONFIG_ENV_KEYS
+    | _OPENCLAW_LITELLM_UPSTREAM_ENV_KEYS
+    | _MY_FARM_LITELLM_UPSTREAM_ENV_KEYS
+)
 
 _SUPPORTED_MODIFY_KEYS |= (
     _OPENCLAW_RUNTIME_ENV_KEYS
@@ -198,6 +256,7 @@ _SUPPORTED_MODIFY_KEYS |= (
     | _MY_FARM_RUNTIME_ENV_KEYS
     | _OUTBOUND_MAIL_ENV_KEYS
     | _CODER_RUNTIME_ENV_KEYS
+    | _LITELLM_MUTABLE_ENV_KEYS
 )
 
 @dataclass(frozen=True)
@@ -324,10 +383,17 @@ def classify_modify_request(
 
     reasons: list[str] = []
     changed_keys = _changed_env_keys(existing_raw, requested_raw)
-    removed_packs = sorted(
-        set(existing_desired.enabled_packs) - set(requested_desired.enabled_packs)
-    )
-    unsupported_keys = sorted(changed_keys - _SUPPORTED_MODIFY_KEYS - {"STACK_NAME"})
+    farm_enabled_before = "my-farm-advisor" in existing_desired.enabled_packs
+    farm_enabled_after = "my-farm-advisor" in requested_desired.enabled_packs
+    effective_changed_keys = set(changed_keys)
+    if not farm_enabled_before and not farm_enabled_after:
+        effective_changed_keys -= _MY_FARM_RUNTIME_ENV_KEYS - {
+            "AI_DEFAULT_API_KEY",
+            "AI_DEFAULT_BASE_URL",
+            "ADVISOR_GATEWAY_PASSWORD",
+        }
+    removed_packs = set(existing_desired.enabled_packs) - set(requested_desired.enabled_packs)
+    unsupported_keys = sorted(effective_changed_keys - _SUPPORTED_MODIFY_KEYS - {"STACK_NAME"})
     if existing_desired.stack_name != requested_desired.stack_name:
         reasons.append("STACK_NAME changes are unsupported in Task 11.")
     if unsupported_keys:
@@ -336,23 +402,39 @@ def classify_modify_request(
     if reasons:
         raise StateValidationError(" ".join(reasons))
 
+    if not effective_changed_keys and desired_equivalent:
+        return _classify_same_target(
+            existing_applied=existing_applied,
+            desired_state=requested_desired,
+            raw_equivalent=raw_equivalent,
+            desired_equivalent=True,
+        )
+
     phases_to_run: set[str] = set()
     tailscale_disable_only = (
         existing_desired.enable_tailscale and not requested_desired.enable_tailscale
     )
-    if changed_keys & _SUPPORTED_TAILSCALE_KEYS and requested_desired.enable_tailscale:
+    if effective_changed_keys & _SUPPORTED_TAILSCALE_KEYS and requested_desired.enable_tailscale:
         phases_to_run.add("tailscale")
-    if changed_keys & {"DOKPLOY_ADMIN_EMAIL", "DOKPLOY_ADMIN_PASSWORD"}:
+    if effective_changed_keys & {"DOKPLOY_ADMIN_EMAIL", "DOKPLOY_ADMIN_PASSWORD"}:
         if "nextcloud" in requested_desired.enabled_packs:
             phases_to_run.add("nextcloud")
-    if changed_keys & _SUPPORTED_AUTH_KEYS:
+    if effective_changed_keys & _SUPPORTED_AUTH_KEYS:
         phases_to_run.add("networking")
-    if changed_keys & (_SUPPORTED_AUTH_KEYS | _SUPPORTED_ACCESS_KEYS) and _access_enabled(
+    if effective_changed_keys & (_SUPPORTED_AUTH_KEYS | _SUPPORTED_ACCESS_KEYS) and _access_enabled(
         requested_desired
     ):
         phases_to_run.add("cloudflare_access")
-    if changed_keys & _CODER_RUNTIME_ENV_KEYS and "coder" in requested_desired.enabled_packs:
+    if (
+        effective_changed_keys & _CODER_RUNTIME_ENV_KEYS
+        and "coder" in requested_desired.enabled_packs
+    ):
         phases_to_run.add("coder")
+    if effective_changed_keys & _LITELLM_MUTABLE_ENV_KEYS:
+        phases_to_run.add(_LITELLM_PHASE)
+        phases_to_run.update(
+            _litellm_dependent_consumer_phases(effective_changed_keys, requested_desired)
+        )
     if (
         existing_desired.cloudflare_access_otp_emails
         != requested_desired.cloudflare_access_otp_emails
@@ -369,29 +451,35 @@ def classify_modify_request(
         phases_to_run.add("openclaw")
     if existing_desired.openclaw_replicas != requested_desired.openclaw_replicas:
         phases_to_run.add("openclaw")
-    if changed_keys & _OPENCLAW_RUNTIME_ENV_KEYS:
+    if effective_changed_keys & _OPENCLAW_RUNTIME_ENV_KEYS:
         phases_to_run.add("openclaw")
-    if changed_keys & _NEXTCLOUD_NEXA_USER_ENV_KEYS:
+    if effective_changed_keys & _NEXTCLOUD_NEXA_USER_ENV_KEYS:
         phases_to_run.add("nextcloud")
-    if existing_desired.my_farm_advisor_channels != requested_desired.my_farm_advisor_channels:
+    if (
+        farm_enabled_after
+        and existing_desired.my_farm_advisor_channels != requested_desired.my_farm_advisor_channels
+    ):
         phases_to_run.add("my-farm-advisor")
-    if existing_desired.my_farm_advisor_replicas != requested_desired.my_farm_advisor_replicas:
+    if (
+        farm_enabled_after
+        and existing_desired.my_farm_advisor_replicas != requested_desired.my_farm_advisor_replicas
+    ):
         phases_to_run.add("my-farm-advisor")
-    if changed_keys & _MY_FARM_RUNTIME_ENV_KEYS:
+    if farm_enabled_after and effective_changed_keys & _MY_FARM_RUNTIME_ENV_KEYS:
         phases_to_run.add("my-farm-advisor")
-    if changed_keys & _OUTBOUND_MAIL_ENV_KEYS:
+    if effective_changed_keys & _OUTBOUND_MAIL_ENV_KEYS:
         phases_to_run.add("shared_core")
         if "moodle" in requested_desired.enabled_packs:
             phases_to_run.add("moodle")
         if "docuseal" in requested_desired.enabled_packs:
             phases_to_run.add("docuseal")
-    if (
-        existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict()
-        and not removed_packs
-    ):
+    if existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict():
+        phases_to_run.add("shared_core")
+    if set(removed_packs) & {"openclaw", "my-farm-advisor"}:
         phases_to_run.add("shared_core")
     phases_to_run.update(_hostname_change_phases(existing_desired, requested_desired))
     phases_to_run.update(_new_pack_phases(existing_desired, requested_desired))
+    phases_to_run.update(_removed_pack_phases(existing_desired, requested_desired))
 
     if not phases_to_run and not tailscale_disable_only:
         raise StateValidationError(
@@ -482,9 +570,15 @@ def _hostname_change_phases(
     existing_desired: DesiredState, requested_desired: DesiredState
 ) -> set[str]:
     changed: set[str] = set()
+    farm_enablement_toggled = (
+        ("my-farm-advisor" in existing_desired.enabled_packs)
+        != ("my-farm-advisor" in requested_desired.enabled_packs)
+    )
     all_keys = set(existing_desired.hostnames) | set(requested_desired.hostnames)
     for key in sorted(all_keys):
         if existing_desired.hostnames.get(key) == requested_desired.hostnames.get(key):
+            continue
+        if key == "my-farm-advisor" and farm_enablement_toggled:
             continue
         changed.update(_HOSTNAME_PHASES.get(key, ()))
         if key in {"openclaw", "my-farm-advisor"} and _access_enabled(requested_desired):
@@ -519,12 +613,22 @@ def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredS
     if "my-farm-advisor" in new_packs:
         if _access_enabled(requested_desired):
             phases.add("cloudflare_access")
+        if "nextcloud" in requested_desired.enabled_packs:
+            phases.add("nextcloud")
         phases.add("my-farm-advisor")
     if (
         "headscale" in requested_desired.selected_packs
         and "headscale" not in existing_desired.selected_packs
     ):
         phases.add("headscale")
+    return phases
+
+
+def _removed_pack_phases(existing_desired: DesiredState, requested_desired: DesiredState) -> set[str]:
+    phases: set[str] = set()
+    removed_packs = set(existing_desired.enabled_packs) - set(requested_desired.enabled_packs)
+    if "my-farm-advisor" in removed_packs:
+        phases.add("my-farm-advisor")
     return phases
 
 
@@ -578,3 +682,17 @@ def _sorted_reasons(changed_keys: set[str], phases_to_run: set[str]) -> tuple[st
 
 def _access_enabled(desired_state: DesiredState) -> bool:
     return bool({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs))
+
+
+def _litellm_dependent_consumer_phases(
+    changed_keys: set[str], desired_state: DesiredState
+) -> set[str]:
+    phases: set[str] = set()
+    enabled_packs = set(desired_state.enabled_packs)
+    if changed_keys & _LITELLM_SHARED_CONFIG_ENV_KEYS:
+        phases.update(enabled_packs & {"coder", "openclaw", "my-farm-advisor"})
+    if changed_keys & _OPENCLAW_LITELLM_UPSTREAM_ENV_KEYS and "openclaw" in enabled_packs:
+        phases.add("openclaw")
+    if changed_keys & _MY_FARM_LITELLM_UPSTREAM_ENV_KEYS and "my-farm-advisor" in enabled_packs:
+        phases.add("my-farm-advisor")
+    return phases

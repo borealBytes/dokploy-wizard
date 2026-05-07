@@ -1,8 +1,10 @@
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -24,7 +26,17 @@ from dokploy_wizard.packs.headscale import (
     reconcile_headscale,
 )
 from dokploy_wizard.packs.headscale.reconciler import _http_health_check
-from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    ComposeArtifactHashState,
+    OwnedResource,
+    OwnershipLedger,
+    RawEnvInput,
+    resolve_desired_state,
+    write_applied_checkpoint,
+)
+
+from .fake_dokploy import FakeDokployApiClient as SharedFakeDokployApiClient
 
 
 @dataclass
@@ -325,6 +337,7 @@ def test_dokploy_headscale_backend_creates_and_reuses_compose_service() -> None:
     backend = DokployHeadscaleBackend(
         api_url="https://dokploy.example.com",
         api_key="dokp-key-123",
+        state_dir=Path("/tmp/state"),
         stack_name="wizard-stack",
         hostname="headscale.example.com",
         client=client,
@@ -349,7 +362,7 @@ def test_dokploy_headscale_backend_creates_and_reuses_compose_service() -> None:
     assert client.deploy_calls == 1
 
 
-def test_dokploy_headscale_backend_redeploys_existing_compose_service() -> None:
+def test_dokploy_headscale_backend_redeploys_existing_compose_service(tmp_path: Path) -> None:
     client = FakeDokployApiClient(
         projects=[
             DokployProjectSummary(
@@ -372,9 +385,11 @@ def test_dokploy_headscale_backend_redeploys_existing_compose_service() -> None:
             )
         ]
     )
+    _write_empty_checkpoint(tmp_path)
     backend = DokployHeadscaleBackend(
         api_url="https://dokploy.example.com",
         api_key="dokp-key-123",
+        state_dir=tmp_path,
         stack_name="wizard-stack",
         hostname="headscale.example.com",
         client=client,
@@ -393,6 +408,17 @@ def test_dokploy_headscale_backend_redeploys_existing_compose_service() -> None:
     assert client.create_project_calls == 0
     assert client.create_compose_calls == 0
     assert client.deploy_calls == 1
+
+
+def _write_empty_checkpoint(state_dir: Path) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("headscale",),
+        ),
+    )
 
 
 def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
@@ -468,6 +494,7 @@ def test_dokploy_headscale_health_prefers_local_container_state(
     backend = DokployHeadscaleBackend(
         api_url="https://dokploy.example.com",
         api_key="dokp-key-123",
+        state_dir=Path("/tmp/state"),
         stack_name="wizard-stack",
         hostname="headscale.example.com",
         client=FakeDokployApiClient(),
@@ -495,6 +522,7 @@ def test_dokploy_headscale_health_retries_until_container_is_up(
     backend = DokployHeadscaleBackend(
         api_url="https://dokploy.example.com",
         api_key="dokp-key-123",
+        state_dir=Path("/tmp/state"),
         stack_name="wizard-stack",
         hostname="headscale.example.com",
         client=FakeDokployApiClient(),
@@ -525,3 +553,66 @@ def test_dokploy_headscale_health_retries_until_container_is_up(
         is True
     )
     assert sleep_calls == [5.0, 5.0]
+
+
+def test_dokploy_headscale_backend_skips_redeploy_when_hash_matches_and_container_is_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service_name = "wizard-stack-headscale"
+    compose_file = _render_compose_file(
+        service_name,
+        "headscale.example.com",
+        (
+            "wizard-stack-headscale-admin-api-key",
+            "wizard-stack-headscale-noise-private-key",
+        ),
+    )
+    _write_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=compose_file)
+    client = SharedFakeDokployApiClient()
+    client.seed_existing_service(
+        service_name=service_name,
+        compose_id="cmp-headscale",
+        project_name="wizard-stack",
+        compose_file=compose_file,
+    )
+    backend = DokployHeadscaleBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        state_dir=tmp_path,
+        stack_name="wizard-stack",
+        hostname="headscale.example.com",
+        client=client,
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.headscale._docker_container_is_up",
+        lambda current_service_name: current_service_name == service_name,
+    )
+
+    record = backend.create_service(
+        resource_name=service_name,
+        hostname="headscale.example.com",
+        secret_refs=(
+            "wizard-stack-headscale-admin-api-key",
+            "wizard-stack-headscale-noise-private-key",
+        ),
+    )
+
+    assert record.resource_id == "dokploy-compose:cmp-headscale:headscale"
+    client.assert_unchanged_service(service_name)
+
+
+def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: str) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("headscale",),
+            compose_artifact_hashes={
+                service_name: ComposeArtifactHashState.from_rendered_compose(
+                    service_id=service_name,
+                    rendered_compose=rendered_compose,
+                )
+            },
+        ),
+    )

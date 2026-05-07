@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Dokploy-backed paired Nextcloud + OnlyOffice runtime backend."""
 
 from __future__ import annotations
@@ -8,7 +9,8 @@ import shlex
 import ssl
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Callable, Protocol
 from urllib import error, parse, request
 
@@ -23,7 +25,12 @@ from dokploy_wizard.dokploy.client import (
     DokployProjectSummary,
     DokployScheduleRecord,
 )
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    persist_compose_artifact_hash,
+)
 from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudAdvisorWorkspaceMountContract,
     NextcloudBundleVerification,
     NextcloudCommandCheck,
     NextcloudOpenClawWorkspaceContract,
@@ -31,13 +38,17 @@ from dokploy_wizard.packs.nextcloud.models import (
     TalkRuntime,
 )
 from dokploy_wizard.packs.nextcloud.reconciler import NextcloudError
+from dokploy_wizard.state import load_state_dir
+from dokploy_wizard.verification import ServiceVerificationResult
 
 _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 _DEFAULT_NEXTCLOUD_ADMIN_USER = "admin"
 _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD = "ChangeMeSoon"
 _DEFAULT_SHARED_SERVICE_PASSWORD = "change-me"
-_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME = "/OpenClaw"
-_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH = "/mnt/openclaw"
+_DEFAULT_ADVISOR_VOLUME_MOUNT_ROOT = "/mnt/advisors"
+_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME = "/Nexa Claw"
+_LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME = "/OpenClaw"
+_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH = f"{_DEFAULT_ADVISOR_VOLUME_MOUNT_ROOT}/openclaw"
 _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH = f"{_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH}/workspace"
 _DEFAULT_OPENCLAW_RESCAN_CRON = "*/15 * * * *"
 _DEFAULT_OPENCLAW_RESCAN_TIMEZONE = "UTC"
@@ -56,6 +67,10 @@ _DEFAULT_ONLYOFFICE_EDIT_FORMATS = {
 }
 _ONLYOFFICE_DOCUMENTSERVER_CHECK_ATTEMPTS = 180
 _ONLYOFFICE_DOCUMENTSERVER_CHECK_DELAY_SECONDS = 5.0
+_NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_ATTEMPTS = 240
+_NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_DELAY_SECONDS = 5.0
+_NEXTCLOUD_FIRST_BOOT_STATUS_WAIT_ATTEMPTS = 60
+_NEXTCLOUD_FIRST_BOOT_STATUS_WAIT_DELAY_SECONDS = 5.0
 _NEXTCLOUD_APPSTORE_APPS_JSON_URL = "https://apps.nextcloud.com/api/v1/apps.json"
 
 
@@ -131,6 +146,7 @@ class DokployNextcloudBackend:
         integration_secret_ref: str,
         admin_user: str = _DEFAULT_NEXTCLOUD_ADMIN_USER,
         admin_password: str = _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD,
+        advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...] = (),
         openclaw_volume_name: str | None = None,
         openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None = None,
         nexa_agent_user_id: str | None = None,
@@ -139,6 +155,7 @@ class DokployNextcloudBackend:
         nexa_agent_email: str | None = None,
         openclaw_rescan_cron: str = _DEFAULT_OPENCLAW_RESCAN_CRON,
         openclaw_rescan_timezone: str = _DEFAULT_OPENCLAW_RESCAN_TIMEZONE,
+        state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployNextcloudApi | None = None,
     ) -> None:
         self._stack_name = stack_name
@@ -152,14 +169,44 @@ class DokployNextcloudBackend:
         self._integration_secret_ref = integration_secret_ref
         self._admin_user = admin_user
         self._admin_password = admin_password
-        self._openclaw_volume_name = openclaw_volume_name
-        self._openclaw_workspace_contract = openclaw_workspace_contract
+        self._advisor_workspace_mounts = _resolve_advisor_workspace_mounts(
+            advisor_workspace_mounts=advisor_workspace_mounts,
+            openclaw_volume_name=openclaw_volume_name,
+            openclaw_workspace_contract=openclaw_workspace_contract,
+        )
+        self._openclaw_mount = next(
+            (
+                contract
+                for contract in self._advisor_workspace_mounts
+                if contract.advisor_id == "openclaw"
+            ),
+            None,
+        )
+        self._openclaw_volume_name = (
+            self._openclaw_mount.volume_name if self._openclaw_mount is not None else None
+        )
+        self._openclaw_external_mount_name = (
+            self._openclaw_mount.external_mount_name
+            if self._openclaw_mount is not None
+            else _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME
+        )
+        self._openclaw_external_mount_path = (
+            self._openclaw_mount.external_mount_path
+            if self._openclaw_mount is not None
+            else _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH
+        )
+        self._openclaw_container_mount_root = (
+            self._openclaw_mount.container_mount_root
+            if self._openclaw_mount is not None
+            else _DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH
+        )
         self._nexa_agent_user_id = nexa_agent_user_id
         self._nexa_agent_display_name = nexa_agent_display_name
         self._nexa_agent_password = nexa_agent_password
         self._nexa_agent_email = nexa_agent_email
         self._openclaw_rescan_cron = openclaw_rescan_cron
         self._openclaw_rescan_timezone = openclaw_rescan_timezone
+        self._state_dir = state_dir
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
@@ -322,17 +369,33 @@ class DokployNextcloudBackend:
                 storage_url=storage_url,
                 jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
                 wait_for_documentserver_check=self._created_in_process,
+                advisor_workspace_mounts=self._advisor_workspace_mounts,
                 openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
+                openclaw_external_storage_mount_point=self._openclaw_external_mount_name,
+                openclaw_external_storage_datadir=self._openclaw_external_mount_path,
+                openclaw_external_storage_volume_root=self._openclaw_container_mount_root,
                 admin_user=self._admin_user,
             )
             self._ensure_openclaw_rescan_schedule()
             return _verify_nextcloud_bundle(container)
-        container = _wait_for_container_name(_nextcloud_service_name(self._stack_name))
+        service_name = _nextcloud_service_name(self._stack_name)
+        container = _wait_for_nextcloud_first_boot_ready(
+            service_name,
+            f"{nextcloud_url}/status.php",
+            attempts=_NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_ATTEMPTS,
+            delay_seconds=_NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_DELAY_SECONDS,
+        )
         if container is None:
-            raise NextcloudError(
-                "Nextcloud container is not running; cannot finish application bootstrap."
-            )
-        if not _wait_for_nextcloud_status_ready(f"{nextcloud_url}/status.php"):
+            container = _find_container_name(service_name)
+            if container is None:
+                raise NextcloudError(
+                    "Nextcloud container is not running; cannot finish application bootstrap."
+                )
+            if not _container_health_ready(container):
+                raise NextcloudError(
+                    "Nextcloud container did not become healthy before application "
+                    "configuration was attempted."
+                )
             raise NextcloudError(
                 "Nextcloud did not finish its container bootstrap before application "
                 "configuration was attempted."
@@ -353,74 +416,99 @@ class DokployNextcloudBackend:
             storage_url=storage_url,
             jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
             wait_for_documentserver_check=self._created_in_process,
+            advisor_workspace_mounts=self._advisor_workspace_mounts,
             openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
+            openclaw_external_storage_mount_point=self._openclaw_external_mount_name,
+            openclaw_external_storage_datadir=self._openclaw_external_mount_path,
+            openclaw_external_storage_volume_root=self._openclaw_container_mount_root,
             admin_user=self._admin_user,
         )
         self._ensure_openclaw_rescan_schedule()
         return _verify_nextcloud_bundle(container)
 
     def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
-        if self._openclaw_volume_name is None:
+        if not self._advisor_workspace_mounts:
             return
         container = _find_container_name(_nextcloud_service_name(self._stack_name))
         if container is None:
             raise NextcloudError(
-                "Nextcloud container could not be located for OpenClaw external storage refresh."
+                "Nextcloud container could not be located for advisor external storage refresh."
             )
         _ensure_files_external_app(container)
-        _ensure_openclaw_external_storage(container, admin_user=admin_user)
+        for contract in self._advisor_workspace_mounts:
+            _ensure_advisor_external_storage(
+                container,
+                admin_user=admin_user,
+                contract=contract,
+            )
         self._ensure_openclaw_rescan_schedule()
 
     def _ensure_openclaw_rescan_schedule(self) -> None:
-        if self._openclaw_volume_name is None:
+        if not self._advisor_workspace_mounts:
             return
         locator = self._find_compose_locator()
         if locator is None:
             raise NextcloudError(
                 "Nextcloud compose locator is unavailable for schedule reconciliation."
             )
-        schedule_name = f"{self._stack_name}-openclaw-rescan"
         service_name = _nextcloud_service_name(self._stack_name)
-        command = f'php /var/www/html/occ files:scan --path="{self._admin_user}/files{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME}"'
-        existing = next(
-            (
-                item
-                for item in self._client.list_compose_schedules(compose_id=locator.compose_id)
-                if item.name == schedule_name
-            ),
-            None,
+        existing_by_name = {
+            item.name: item for item in self._client.list_compose_schedules(compose_id=locator.compose_id)
+        }
+        for contract in self._advisor_workspace_mounts:
+            schedule_name = _advisor_rescan_schedule_name(self._stack_name, contract)
+            rescan_mount_name = self._resolve_openclaw_rescan_mount_name(contract)
+            command = (
+                f'php /var/www/html/occ files:scan '
+                f'--path="{self._admin_user}/files{rescan_mount_name}"'
+            )
+            existing = existing_by_name.get(schedule_name)
+            if existing is None:
+                self._client.create_schedule(
+                    name=schedule_name,
+                    compose_id=locator.compose_id,
+                    service_name=service_name,
+                    cron_expression=self._openclaw_rescan_cron,
+                    timezone=self._openclaw_rescan_timezone,
+                    shell_type="bash",
+                    command=command,
+                    enabled=True,
+                )
+                continue
+            if (
+                existing.service_name != service_name
+                or existing.cron_expression != self._openclaw_rescan_cron
+                or existing.timezone != self._openclaw_rescan_timezone
+                or existing.shell_type != "bash"
+                or existing.command != command
+                or existing.enabled is not True
+            ):
+                self._client.update_schedule(
+                    schedule_id=existing.schedule_id,
+                    name=schedule_name,
+                    compose_id=locator.compose_id,
+                    service_name=service_name,
+                    cron_expression=self._openclaw_rescan_cron,
+                    timezone=self._openclaw_rescan_timezone,
+                    shell_type="bash",
+                    command=command,
+                    enabled=True,
+                )
+
+    def _resolve_openclaw_rescan_mount_name(
+        self, contract: NextcloudAdvisorWorkspaceMountContract | None = None
+    ) -> str:
+        active_contract = contract or self._openclaw_mount
+        if active_contract is None:
+            return _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME
+        container = _find_container_name(_nextcloud_service_name(self._stack_name))
+        if container is None:
+            return active_contract.external_mount_name
+        _, active_mount_point = _resolve_existing_advisor_external_storage_mount(
+            container,
+            contract=active_contract,
         )
-        if existing is None:
-            self._client.create_schedule(
-                name=schedule_name,
-                compose_id=locator.compose_id,
-                service_name=service_name,
-                cron_expression=self._openclaw_rescan_cron,
-                timezone=self._openclaw_rescan_timezone,
-                shell_type="bash",
-                command=command,
-                enabled=True,
-            )
-            return
-        if (
-            existing.service_name != service_name
-            or existing.cron_expression != self._openclaw_rescan_cron
-            or existing.timezone != self._openclaw_rescan_timezone
-            or existing.shell_type != "bash"
-            or existing.command != command
-            or existing.enabled is not True
-        ):
-            self._client.update_schedule(
-                schedule_id=existing.schedule_id,
-                name=schedule_name,
-                compose_id=locator.compose_id,
-                service_name=service_name,
-                cron_expression=self._openclaw_rescan_cron,
-                timezone=self._openclaw_rescan_timezone,
-                shell_type="bash",
-                command=command,
-                enabled=True,
-            )
+        return active_mount_point
 
     def _validate_service_inputs(
         self,
@@ -497,6 +585,7 @@ class DokployNextcloudBackend:
     def _ensure_compose_applied(self) -> _ComposeLocator:
         if self._applied_locator is not None and self._created_in_process:
             return self._applied_locator
+        can_use_stateful_noop_guard = self._can_use_stateful_noop_guard()
         compose_file = _render_compose_file(
             stack_name=self._stack_name,
             nextcloud_hostname=self._nextcloud_hostname,
@@ -508,26 +597,46 @@ class DokployNextcloudBackend:
             integration_secret_ref=self._integration_secret_ref,
             admin_user=self._admin_user,
             admin_password=self._admin_password,
-            openclaw_volume_name=self._openclaw_volume_name,
-            openclaw_workspace_contract=self._openclaw_workspace_contract,
+            advisor_workspace_mounts=self._advisor_workspace_mounts,
         )
         try:
             if self._applied_locator is not None:
-                updated = self._client.update_compose(
-                    compose_id=self._applied_locator.compose_id,
-                    compose_file=compose_file,
-                )
-                self._client.deploy_compose(
-                    compose_id=updated.compose_id,
-                    title="dokploy-wizard nextcloud reconcile",
-                    description="Update Nextcloud + OnlyOffice compose app",
-                )
-                self._created_in_process = True
-                self._applied_locator = _ComposeLocator(
-                    project_id=self._applied_locator.project_id,
-                    environment_id=self._applied_locator.environment_id,
-                    compose_id=updated.compose_id,
-                )
+                if can_use_stateful_noop_guard:
+                    applied_locator = self._applied_locator
+                    result = apply_compose_noop_guard(
+                        rendered_compose=compose_file,
+                        service_key=self._compose_name,
+                        state_dir=self._state_dir,
+                        client=self._client,
+                        locator=applied_locator,
+                        compose_id=applied_locator.compose_id,
+                        title="dokploy-wizard nextcloud reconcile",
+                        description="Update Nextcloud + OnlyOffice compose app",
+                        verify_current=self._verify_current_application,
+                        locator_factory=lambda compose_id: _ComposeLocator(
+                            project_id=applied_locator.project_id,
+                            environment_id=applied_locator.environment_id,
+                            compose_id=compose_id,
+                        ),
+                    )
+                    self._created_in_process = result.status == "applied"
+                    self._applied_locator = result.locator
+                else:
+                    updated = self._client.update_compose(
+                        compose_id=self._applied_locator.compose_id,
+                        compose_file=compose_file,
+                    )
+                    self._client.deploy_compose(
+                        compose_id=updated.compose_id,
+                        title="dokploy-wizard nextcloud reconcile",
+                        description="Update Nextcloud + OnlyOffice compose app",
+                    )
+                    self._created_in_process = True
+                    self._applied_locator = _ComposeLocator(
+                        project_id=self._applied_locator.project_id,
+                        environment_id=self._applied_locator.environment_id,
+                        compose_id=updated.compose_id,
+                    )
                 return self._applied_locator
             projects = self._client.list_projects()
             for project in projects:
@@ -538,6 +647,31 @@ class DokployNextcloudBackend:
                     break
                 for compose in environment.composes:
                     if compose.name == self._compose_name:
+                        if can_use_stateful_noop_guard:
+                            locator = _ComposeLocator(
+                                project_id=project.project_id,
+                                environment_id=environment.environment_id,
+                                compose_id=compose.compose_id,
+                            )
+                            result = apply_compose_noop_guard(
+                                rendered_compose=compose_file,
+                                service_key=self._compose_name,
+                                state_dir=self._state_dir,
+                                client=self._client,
+                                locator=locator,
+                                compose_id=compose.compose_id,
+                                title="dokploy-wizard nextcloud reconcile",
+                                description="Update Nextcloud + OnlyOffice compose app",
+                                verify_current=self._verify_current_application,
+                                locator_factory=lambda compose_id: _ComposeLocator(
+                                    project_id=project.project_id,
+                                    environment_id=environment.environment_id,
+                                    compose_id=compose_id,
+                                ),
+                            )
+                            self._created_in_process = result.status == "applied"
+                            self._applied_locator = result.locator
+                            return result.locator
                         updated = self._client.update_compose(
                             compose_id=compose.compose_id,
                             compose_file=compose_file,
@@ -552,6 +686,7 @@ class DokployNextcloudBackend:
                             environment_id=environment.environment_id,
                             compose_id=updated.compose_id,
                         )
+                        self._created_in_process = True
                         self._applied_locator = locator
                         return locator
                 created = self._client.create_compose(
@@ -570,6 +705,12 @@ class DokployNextcloudBackend:
                     environment_id=environment.environment_id,
                     compose_id=created.compose_id,
                 )
+                if can_use_stateful_noop_guard:
+                    persist_compose_artifact_hash(
+                        state_dir=self._state_dir,
+                        service_key=self._compose_name,
+                        rendered_compose=compose_file,
+                    )
                 self._created_in_process = True
                 self._applied_locator = locator
                 return locator
@@ -597,9 +738,84 @@ class DokployNextcloudBackend:
             environment_id=created_project.environment_id,
             compose_id=created_compose.compose_id,
         )
+        if can_use_stateful_noop_guard:
+            persist_compose_artifact_hash(
+                state_dir=self._state_dir,
+                service_key=self._compose_name,
+                rendered_compose=compose_file,
+            )
         self._created_in_process = True
         self._applied_locator = locator
         return locator
+
+    def _can_use_stateful_noop_guard(self) -> bool:
+        return load_state_dir(self._state_dir).applied_state is not None
+
+    def _verify_current_application(self) -> ServiceVerificationResult:
+        nextcloud_container = _find_container_name(_nextcloud_service_name(self._stack_name))
+        if nextcloud_container is None:
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="app",
+                status="fail",
+                detail="Nextcloud container is not running; compose app is not ready for a no-op skip.",
+            )
+        if not _container_health_ready(nextcloud_container):
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="app",
+                status="fail",
+                detail="Nextcloud container health check is not ready; compose app is not ready for a no-op skip.",
+            )
+        nextcloud_url = f"https://{self._nextcloud_hostname}"
+        onlyoffice_url = f"https://{self._onlyoffice_hostname}"
+        status_url = f"{nextcloud_url}/status.php"
+        if not _nextcloud_status_ready(status_url):
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="app",
+                status="fail",
+                detail="Nextcloud status.php is not app-ready; compose app is not ready for a no-op skip.",
+            )
+        if not self.check_health(
+            service=NextcloudResourceRecord(
+                resource_id="dokploy-compose:verification:onlyoffice-service",
+                resource_name=_onlyoffice_service_name(self._stack_name),
+            ),
+            url=f"{onlyoffice_url}/healthcheck",
+        ):
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="downstream",
+                status="fail",
+                detail="OnlyOffice health check is not ready; compose app is not ready for a no-op skip.",
+            )
+        try:
+            verification = self.ensure_application_ready(
+                nextcloud_url=nextcloud_url,
+                onlyoffice_url=onlyoffice_url,
+            )
+        except NextcloudError as error:
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="bootstrap",
+                status="fail",
+                detail=str(error),
+            )
+        verification_failure = _nextcloud_bundle_verification_failure(verification)
+        if verification_failure is not None:
+            return ServiceVerificationResult(
+                service_name=self._compose_name,
+                tier="downstream",
+                status="fail",
+                detail=verification_failure,
+            )
+        return ServiceVerificationResult(
+            service_name=self._compose_name,
+            tier="downstream",
+            status="pass",
+            detail="Nextcloud, OnlyOffice, and Talk readiness checks passed.",
+        )
 
 
 def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSummary | None:
@@ -633,6 +849,180 @@ def _onlyoffice_volume_name(stack_name: str) -> str:
 
 def _openclaw_volume_name(stack_name: str) -> str:
     return f"{stack_name}-openclaw-data"
+
+
+def _advisor_volume_mount_root(advisor_id: str) -> str:
+    return f"{_DEFAULT_ADVISOR_VOLUME_MOUNT_ROOT}/{advisor_id}"
+
+
+def _normalize_advisor_path(path: str | None, *, current_root: str, target_root: str) -> str | None:
+    if path is None:
+        return None
+    if path == current_root or path.startswith(f"{current_root}/"):
+        return f"{target_root}{path[len(current_root):]}"
+    return path
+
+
+def _normalize_advisor_workspace_mount(
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> NextcloudAdvisorWorkspaceMountContract:
+    target_root = _advisor_volume_mount_root(contract.advisor_id)
+    return replace(
+        contract,
+        container_mount_root=target_root,
+        external_mount_name=(
+            _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME
+            if contract.advisor_id == "openclaw"
+            else contract.external_mount_name
+        ),
+        external_mount_path=_normalize_advisor_path(
+            contract.external_mount_path,
+            current_root=contract.container_mount_root,
+            target_root=target_root,
+        )
+        or contract.external_mount_path,
+        visible_root=_normalize_advisor_path(
+            contract.visible_root,
+            current_root=contract.container_mount_root,
+            target_root=target_root,
+        )
+        or contract.visible_root,
+        contract_path=_normalize_advisor_path(
+            contract.contract_path,
+            current_root=contract.container_mount_root,
+            target_root=target_root,
+        ),
+    )
+
+
+def _resolve_advisor_workspace_mounts(
+    *,
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
+    openclaw_volume_name: str | None,
+    openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None,
+) -> tuple[NextcloudAdvisorWorkspaceMountContract, ...]:
+    if advisor_workspace_mounts:
+        return tuple(
+            _normalize_advisor_workspace_mount(contract)
+            for contract in advisor_workspace_mounts
+            if contract.enabled
+        )
+    if openclaw_volume_name is None:
+        return ()
+    if openclaw_workspace_contract is not None:
+        return (
+            _normalize_advisor_workspace_mount(
+                replace(
+                    openclaw_workspace_contract.advisor_mount,
+                    volume_name=openclaw_volume_name,
+                )
+            ),
+        )
+    return (
+        _normalize_advisor_workspace_mount(
+            NextcloudAdvisorWorkspaceMountContract(
+                advisor_id="openclaw",
+                volume_name=openclaw_volume_name,
+                container_mount_root="/mnt/openclaw",
+                external_mount_name=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+                external_mount_path="/mnt/openclaw/workspace",
+                visible_root="/mnt/openclaw/workspace",
+                contract_path=None,
+                runtime_state_source="server-owned env + durable state JSON",
+                notes=("Operator-facing OpenClaw workspace.",),
+            )
+        ),
+    )
+
+
+def _workspace_env_slug(contract: NextcloudAdvisorWorkspaceMountContract) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", contract.rescan_schedule_identity.upper()).strip("_")
+
+
+def _yaml_quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _render_nextcloud_workspace_env(
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
+) -> str:
+    if not advisor_workspace_mounts:
+        return ""
+    payload = json.dumps(
+        [contract.to_dict() for contract in advisor_workspace_mounts],
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    env_lines = [
+        f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MOUNTS_JSON: {_yaml_quote(payload)}",
+        f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_COUNT: {len(advisor_workspace_mounts)}",
+    ]
+    openclaw_contract = next(
+        (contract for contract in advisor_workspace_mounts if contract.advisor_id == "openclaw"),
+        None,
+    )
+    if openclaw_contract is not None:
+        env_lines.extend(
+            [
+                "      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface",
+                f"      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_NAME: {openclaw_contract.external_mount_name}",
+                f"      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_PATH: {openclaw_contract.external_mount_path}",
+                f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: {openclaw_contract.visible_root}",
+            ]
+        )
+        if openclaw_contract.contract_path is not None:
+            env_lines.append(
+                f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: {openclaw_contract.contract_path}"
+            )
+        env_lines.append(
+            "      DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: "
+            f"{openclaw_contract.runtime_state_source}"
+        )
+    for contract in advisor_workspace_mounts:
+        slug = _workspace_env_slug(contract)
+        env_lines.extend(
+            [
+                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_ADVISOR_ID: {contract.advisor_id}",
+                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_EXTERNAL_MOUNT_NAME: {contract.external_mount_name}",
+                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_EXTERNAL_MOUNT_PATH: {contract.external_mount_path}",
+                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_VISIBLE_ROOT: {contract.visible_root}",
+                "      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_"
+                f"{slug}_RUNTIME_STATE_SOURCE: {contract.runtime_state_source}",
+            ]
+        )
+        if contract.contract_path is not None:
+            env_lines.append(
+                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_CONTRACT_PATH: {contract.contract_path}"
+            )
+    return "\n".join(env_lines) + "\n"
+
+
+def _render_nextcloud_advisor_volume_mounts(
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
+) -> str:
+    seen: set[tuple[str, str]] = set()
+    lines: list[str] = []
+    for contract in advisor_workspace_mounts:
+        key = (contract.volume_name, contract.container_mount_root)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"      - {contract.volume_name}:{contract.container_mount_root}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _render_nextcloud_advisor_volume_block(
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
+) -> str:
+    seen: set[str] = set()
+    lines: list[str] = []
+    for contract in advisor_workspace_mounts:
+        if contract.volume_name in seen:
+            continue
+        seen.add(contract.volume_name)
+        lines.extend([f"  {contract.volume_name}:", f"    name: {contract.volume_name}"])
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def _service_name_for_kind(stack_name: str, kind: str) -> str:
@@ -713,36 +1103,18 @@ def _render_compose_file(
     integration_secret_ref: str,
     admin_user: str,
     admin_password: str,
-    openclaw_volume_name: str | None,
-    openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None,
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
 ) -> str:
     nextcloud_service = _nextcloud_service_name(stack_name)
     onlyoffice_service = _onlyoffice_service_name(stack_name)
     nextcloud_volume = _nextcloud_volume_name(stack_name)
     onlyoffice_volume = _onlyoffice_volume_name(stack_name)
-    openclaw_volume = openclaw_volume_name
     shared_network = _shared_network_name(stack_name)
     nextcloud_url = f"https://{nextcloud_hostname}"
     onlyoffice_url = f"https://{onlyoffice_hostname}"
-    nextcloud_workspace_env = ""
-    if openclaw_workspace_contract is not None:
-        nextcloud_workspace_env = (
-            f"      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface\n"
-            f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: {openclaw_workspace_contract.visible_root}\n"
-            f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: {openclaw_workspace_contract.contract_path}\n"
-            "      DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: "
-            f"{openclaw_workspace_contract.runtime_state_source}\n"
-        )
-    nextcloud_extra_mount = (
-        f"      - {openclaw_volume}:{_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH}\n"
-        if openclaw_volume is not None
-        else ""
-    )
-    openclaw_volume_block = (
-        f"  {openclaw_volume}:\n    name: {openclaw_volume}\n"
-        if openclaw_volume is not None
-        else ""
-    )
+    nextcloud_workspace_env = _render_nextcloud_workspace_env(advisor_workspace_mounts)
+    nextcloud_extra_mount = _render_nextcloud_advisor_volume_mounts(advisor_workspace_mounts)
+    advisor_volume_block = _render_nextcloud_advisor_volume_block(advisor_workspace_mounts)
     return (
         "services:\n"
         f"  {nextcloud_service}:\n"
@@ -824,7 +1196,7 @@ def _render_compose_file(
         "volumes:\n"
         f"  {nextcloud_volume}:\n"
         f"  {onlyoffice_volume}:\n"
-        f"{openclaw_volume_block}"
+        f"{advisor_volume_block}"
         "networks:\n"
         "  dokploy-network:\n"
         "    external: true\n"
@@ -955,6 +1327,48 @@ def _wait_for_container_name(
         container_name = _find_container_name(service_name)
         if container_name is not None:
             return container_name
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return None
+
+
+def _container_health_ready(container_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                "{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}",
+                container_name,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    return result.stdout.strip() == "healthy"
+
+
+def _wait_for_nextcloud_first_boot_ready(
+    service_name: str,
+    status_url: str,
+    *,
+    attempts: int = _NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_ATTEMPTS,
+    delay_seconds: float = _NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_DELAY_SECONDS,
+) -> str | None:
+    status_attempts_remaining = _NEXTCLOUD_FIRST_BOOT_STATUS_WAIT_ATTEMPTS
+    for attempt in range(attempts):
+        container_name = _find_container_name(service_name)
+        if container_name is not None and _container_health_ready(container_name):
+            if _nextcloud_status_ready(status_url):
+                return container_name
+            status_attempts_remaining -= 1
+            if status_attempts_remaining <= 0:
+                return None
         if attempt < attempts - 1:
             time.sleep(delay_seconds)
     return None
@@ -1120,7 +1534,11 @@ def _ensure_onlyoffice_app_config(
     storage_url: str,
     jwt_secret: str,
     wait_for_documentserver_check: bool = False,
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...] = (),
     openclaw_external_storage_enabled: bool = False,
+    openclaw_external_storage_mount_point: str = _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+    openclaw_external_storage_datadir: str = _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+    openclaw_external_storage_volume_root: str = _DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH,
     admin_user: str = _DEFAULT_NEXTCLOUD_ADMIN_USER,
 ) -> None:
     def_formats = json.dumps(_DEFAULT_ONLYOFFICE_DEF_FORMATS, separators=(",", ":"), sort_keys=True)
@@ -1177,9 +1595,28 @@ def _ensure_onlyoffice_app_config(
         _wait_for_onlyoffice_documentserver_check(container_name)
     else:
         _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
-    if openclaw_external_storage_enabled:
+    effective_mounts = advisor_workspace_mounts
+    if not effective_mounts and openclaw_external_storage_enabled:
+        effective_mounts = (
+            NextcloudAdvisorWorkspaceMountContract(
+                advisor_id="openclaw",
+                volume_name="openclaw-data",
+                container_mount_root=openclaw_external_storage_volume_root,
+                external_mount_name=openclaw_external_storage_mount_point,
+                external_mount_path=openclaw_external_storage_datadir,
+                visible_root=openclaw_external_storage_datadir,
+                runtime_state_source="legacy OpenClaw external storage bootstrap",
+                notes=(),
+            ),
+        )
+    if effective_mounts:
         _ensure_files_external_app(container_name)
-        _ensure_openclaw_external_storage(container_name, admin_user=admin_user)
+        for contract in effective_mounts:
+            _ensure_advisor_external_storage(
+                container_name,
+                admin_user=admin_user,
+                contract=contract,
+            )
 
 
 def _wait_for_onlyoffice_documentserver_check(
@@ -1229,6 +1666,25 @@ def _verify_nextcloud_bundle(container_name: str) -> NextcloudBundleVerification
     )
 
 
+def _nextcloud_bundle_verification_failure(
+    verification: NextcloudBundleVerification,
+) -> str | None:
+    talk_runtime = verification.talk
+    if talk_runtime.enabled is not True:
+        return "Nextcloud Talk app 'spreed' is not enabled after bootstrap."
+    if talk_runtime.enabled_check.passed is not True:
+        return "Nextcloud Talk verification failed while checking app:list output."
+    if talk_runtime.signaling_check.passed is not True:
+        return "Nextcloud Talk signaling verification failed."
+    if talk_runtime.stun_check.passed is not True:
+        return "Nextcloud Talk STUN verification failed."
+    if talk_runtime.turn_check.passed is not True:
+        return "Nextcloud Talk TURN verification failed."
+    if verification.onlyoffice_document_server_check.passed is not True:
+        return "OnlyOffice document-server verification failed."
+    return None
+
+
 def _ensure_files_external_app(container_name: str) -> None:
     _run_occ(container_name, ["app:enable", "files_external"])
 
@@ -1264,9 +1720,9 @@ def _find_external_storage_mount_id(
     return None
 
 
-def _ensure_openclaw_external_storage_path(container_name: str) -> None:
-    path = shlex.quote(_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH)
-    volume_root = shlex.quote(_DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH)
+def _ensure_external_storage_path(container_name: str, *, datadir: str, volume_root: str) -> None:
+    path = shlex.quote(datadir)
+    volume_root = shlex.quote(volume_root)
     result = subprocess.run(
         [
             "docker",
@@ -1283,62 +1739,188 @@ def _ensure_openclaw_external_storage_path(container_name: str) -> None:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise NextcloudError(
-            "Nextcloud OpenClaw external storage path could not be prepared"
+            "Nextcloud external storage path could not be prepared"
             f": {detail or 'unknown error'}"
         )
 
 
-def _delete_stale_external_storage_mounts(
-    container_name: str, *, mount_point: str, datadir: str
+def _ensure_openclaw_external_storage_path(
+    container_name: str, *, datadir: str, volume_root: str
 ) -> None:
-    for mount in _list_external_storage_mounts(container_name):
-        mount_name = mount.get("mount_point") or mount.get("mountPoint") or mount.get("mount")
-        config = mount.get("configuration") or mount.get("config")
-        mount_id = mount.get("mount_id") or mount.get("mountId") or mount.get("id")
-        config_datadir = config.get("datadir") if isinstance(config, dict) else None
-        if mount_name == mount_point and config_datadir != datadir and mount_id is not None:
-            _run_occ(container_name, ["files_external:delete", "--yes", str(mount_id)])
-
-
-def _ensure_openclaw_external_storage(container_name: str, *, admin_user: str) -> None:
-    _ensure_openclaw_external_storage_path(container_name)
-    _delete_stale_external_storage_mounts(
+    _ensure_external_storage_path(
         container_name,
-        mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
-        datadir=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+        datadir=datadir,
+        volume_root=volume_root,
     )
-    mount_id = _find_external_storage_mount_id(
+
+
+def _external_storage_mount_name(mount: dict[str, object]) -> str | None:
+    mount_name = mount.get("mount_point") or mount.get("mountPoint") or mount.get("mount")
+    return mount_name if isinstance(mount_name, str) else None
+
+
+def _external_storage_mount_configuration_datadir(mount: dict[str, object]) -> str | None:
+    config = mount.get("configuration") or mount.get("config")
+    config_datadir = config.get("datadir") if isinstance(config, dict) else None
+    return config_datadir if isinstance(config_datadir, str) else None
+
+
+def _external_storage_mount_id(mount: dict[str, object]) -> str | None:
+    mount_id = mount.get("mount_id") or mount.get("mountId") or mount.get("id")
+    if mount_id is None:
+        return None
+    return str(mount_id)
+
+
+def _advisor_legacy_mount_points(
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> tuple[str, ...]:
+    if contract.advisor_id == "openclaw":
+        return (_LEGACY_OPENCLAW_EXTERNAL_MOUNT_NAME,)
+    return ()
+
+
+def _advisor_legacy_volume_roots(
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> tuple[str, ...]:
+    legacy_root = f"/mnt/{contract.advisor_id}"
+    if legacy_root == contract.container_mount_root:
+        return (contract.container_mount_root,)
+    return (contract.container_mount_root, legacy_root)
+
+
+def _path_is_under_root(path: str, root: str) -> bool:
+    return path == root or path.startswith(f"{root}/")
+
+
+def _is_wizard_owned_advisor_datadir(
+    datadir: str | None,
+    *,
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> bool:
+    if datadir is None:
+        return False
+    return any(_path_is_under_root(datadir, root) for root in _advisor_legacy_volume_roots(contract))
+
+
+def _delete_stale_advisor_external_storage_mounts(
+    container_name: str,
+    *,
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> None:
+    mount_points = (contract.external_mount_name, *_advisor_legacy_mount_points(contract))
+    for mount in _list_external_storage_mounts(container_name):
+        mount_name = _external_storage_mount_name(mount)
+        config_datadir = _external_storage_mount_configuration_datadir(mount)
+        mount_id = _external_storage_mount_id(mount)
+        if (
+            mount_name in mount_points
+            and config_datadir != contract.external_mount_path
+            and mount_id is not None
+            and _is_wizard_owned_advisor_datadir(config_datadir, contract=contract)
+        ):
+            _run_occ(container_name, ["files_external:delete", "--yes", mount_id])
+
+
+def _resolve_existing_advisor_external_storage_mount(
+    container_name: str,
+    *,
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> tuple[str | None, str]:
+    for mount_point in (contract.external_mount_name, *_advisor_legacy_mount_points(contract)):
+        mount_id = _find_external_storage_mount_id(
+            container_name,
+            mount_point=mount_point,
+            datadir=contract.external_mount_path,
+        )
+        if mount_id is not None:
+            return mount_id, mount_point
+    return None, contract.external_mount_name
+
+
+def _ensure_advisor_external_storage(
+    container_name: str,
+    *,
+    admin_user: str,
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> None:
+    _ensure_external_storage_path(
         container_name,
-        mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
-        datadir=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+        datadir=contract.external_mount_path,
+        volume_root=contract.container_mount_root,
+    )
+    _delete_stale_advisor_external_storage_mounts(
+        container_name,
+        contract=contract,
+    )
+    mount_id, active_mount_point = _resolve_existing_advisor_external_storage_mount(
+        container_name,
+        contract=contract,
     )
     if mount_id is None:
         _run_occ(
             container_name,
             [
                 "files_external:create",
-                _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+                contract.external_mount_name,
                 "local",
                 "null::null",
                 "-c",
-                f"datadir={_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH}",
+                f"datadir={contract.external_mount_path}",
             ],
         )
         mount_id = _find_external_storage_mount_id(
             container_name,
-            mount_point=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
-            datadir=_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+            mount_point=contract.external_mount_name,
+            datadir=contract.external_mount_path,
         )
         if mount_id is None:
-            raise NextcloudError("Nextcloud external storage mount for OpenClaw was not created.")
+            raise NextcloudError(
+                "Nextcloud external storage mount for "
+                f"{contract.external_mount_name} was not created."
+            )
+    readonly_value = "false" if contract.read_write_mode else "true"
     _run_occ(container_name, ["files_external:applicable", mount_id, f"--add-user={admin_user}"])
-    _run_occ(container_name, ["files_external:option", mount_id, "readonly", "false"])
+    _run_occ(container_name, ["files_external:option", mount_id, "readonly", readonly_value])
     _run_occ(container_name, ["files_external:verify", mount_id])
     _run_occ(container_name, ["files_external:scan", mount_id])
     _run_occ(
         container_name,
-        ["files:scan", f"--path={admin_user}/files{_DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME}"],
+        ["files:scan", f"--path={admin_user}/files{active_mount_point}"],
     )
+
+
+def _ensure_openclaw_external_storage(
+    container_name: str,
+    *,
+    admin_user: str,
+    mount_point: str = _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_NAME,
+    datadir: str = _DEFAULT_OPENCLAW_EXTERNAL_MOUNT_PATH,
+    volume_root: str = _DEFAULT_OPENCLAW_VOLUME_MOUNT_PATH,
+) -> None:
+    _ensure_advisor_external_storage(
+        container_name,
+        admin_user=admin_user,
+        contract=NextcloudAdvisorWorkspaceMountContract(
+            advisor_id="openclaw",
+            volume_name="openclaw-data",
+            container_mount_root=volume_root,
+            external_mount_name=mount_point,
+            external_mount_path=datadir,
+            visible_root=datadir,
+            runtime_state_source="legacy OpenClaw external storage helper",
+            notes=(),
+        ),
+    )
+
+
+def _advisor_rescan_schedule_name(
+    stack_name: str,
+    contract: NextcloudAdvisorWorkspaceMountContract,
+) -> str:
+    if contract.rescan_schedule_identity == "openclaw":
+        return f"{stack_name}-openclaw-rescan"
+    return f"{stack_name}-{contract.rescan_schedule_identity}-rescan"
 
 
 def _ensure_spreed_app_enabled(container_name: str) -> None:

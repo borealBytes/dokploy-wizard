@@ -21,6 +21,10 @@ provider "docker" {
   host = var.docker_socket != "" ? var.docker_socket : null
 }
 
+data "docker_network" "shared" {
+  name = "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__"
+}
+
 locals {
   username = data.coder_workspace_owner.me.name
 
@@ -127,32 +131,10 @@ data "coder_provisioner" "me" {}
 data "coder_workspace" "me" {}
 data "coder_workspace_owner" "me" {}
 
-data "coder_parameter" "kdense_provider" {
-  name         = "kdense_provider"
-  display_name = "K-Dense Provider"
-  description  = "Use the normal upstream OpenRouter path or the extra OpenCode Go-compatible endpoint."
-  icon         = "/emojis/1f310.png"
-  type         = "string"
-  mutable      = true
-  default      = "openrouter"
-
-  option {
-    name  = "OpenRouter"
-    value = "openrouter"
-    icon  = "/emojis/1f310.png"
-  }
-
-  option {
-    name  = "OpenCode Go"
-    value = "opencode_go"
-    icon  = "/icon/code.svg"
-  }
-}
-
 data "coder_parameter" "kdense_default_model" {
   name         = "kdense_default_model"
   display_name = "Default Chat Model"
-  description  = "Choose the default Kady model. When the provider is OpenCode Go, the selected model is mapped onto the OpenCode Go-compatible endpoint automatically."
+  description  = "Choose the default Kady model. The selected model is mapped onto the central LiteLLM OpenCode Go-compatible gateway automatically."
   icon         = "/emojis/1f9e0.png"
   type         = "string"
   mutable      = true
@@ -171,7 +153,7 @@ data "coder_parameter" "kdense_default_model" {
 data "coder_parameter" "kdense_expert_model" {
   name         = "kdense_expert_model"
   display_name = "Default Expert Model"
-  description  = "Choose the default delegated expert model. When the provider is OpenCode Go, the selected model is mapped onto the OpenCode Go-compatible endpoint automatically."
+  description  = "Choose the default delegated expert model. The selected model is mapped onto the central LiteLLM OpenCode Go-compatible gateway automatically."
   icon         = "/emojis/1f52c.png"
   type         = "string"
   mutable      = true
@@ -215,30 +197,10 @@ data "coder_parameter" "kdense_search_provider" {
   }
 }
 
-data "coder_parameter" "kdense_openrouter_api_key" {
-  name         = "kdense_openrouter_api_key"
-  display_name = "OpenRouter API Key"
-  description  = "Optional workspace-level OpenRouter key. Leave blank to rely on other configured provider paths."
-  icon         = "/emojis/1f511.png"
-  type         = "string"
-  mutable      = true
-  default      = ""
-}
-
-data "coder_parameter" "kdense_openrouter_base_url" {
-  name         = "kdense_openrouter_base_url"
-  display_name = "OpenRouter Base URL"
-  description  = "Override the OpenRouter-compatible base URL if needed."
-  icon         = "/emojis/1f517.png"
-  type         = "string"
-  mutable      = true
-  default      = "https://openrouter.ai/api/v1"
-}
-
 data "coder_parameter" "kdense_opencode_go_api_key" {
   name         = "kdense_opencode_go_api_key"
-  display_name = "OpenCode Go API Key"
-  description  = "Optional workspace-level OpenCode Go key. Leave blank to fall back to the wizard-managed default when available."
+  display_name = "Central LiteLLM API Key"
+  description  = "Optional override for the central LiteLLM OpenCode Go-compatible wildcard key. Leave blank to use the wizard-managed K-Dense gateway key."
   icon         = "/emojis/1f511.png"
   type         = "string"
   mutable      = true
@@ -247,8 +209,8 @@ data "coder_parameter" "kdense_opencode_go_api_key" {
 
 data "coder_parameter" "kdense_opencode_go_base_url" {
   name         = "kdense_opencode_go_base_url"
-  display_name = "OpenCode Go Base URL"
-  description  = "Override the OpenCode Go-compatible base URL if needed."
+  display_name = "Central LiteLLM Base URL"
+  description  = "Optional override for the central LiteLLM OpenCode Go-compatible wildcard base URL. Leave blank to use the wizard-managed internal gateway URL."
   icon         = "/emojis/1f517.png"
   type         = "string"
   mutable      = true
@@ -402,30 +364,20 @@ PY
       NPM_CONFIG_PREFIX=/home/coder/.local npm install -g @google/gemini-cli
     fi
 
-    export KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL="__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__"
-    export KDENSE_TEMPLATE_OPENCODE_GO_API_KEY="__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__"
+    export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"
+    export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"
 
-    KDENSE_PROVIDER="$${KDENSE_PROVIDER:-openrouter}"
     KDENSE_DEFAULT_MODEL="$${KDENSE_DEFAULT_MODEL:-openrouter/anthropic/claude-opus-4.7}"
     KDENSE_EXPERT_MODEL="$${KDENSE_EXPERT_MODEL:-openrouter/google/gemini-3.1-pro-preview}"
     KDENSE_SEARCH_PROVIDER="$${KDENSE_SEARCH_PROVIDER:-disabled}"
 
-    KDENSE_OPENROUTER_API_KEY="$${KDENSE_OPENROUTER_API_KEY:-}"
-    KDENSE_OPENROUTER_BASE_URL="$${KDENSE_OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
-    KDENSE_OPENCODE_GO_API_KEY="$${KDENSE_OPENCODE_GO_API_KEY:-$KDENSE_TEMPLATE_OPENCODE_GO_API_KEY}"
-    KDENSE_OPENCODE_GO_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL}"
+    # Central LiteLLM gateway owns the OpenCode Go wildcard route.
+    KDENSE_CENTRAL_LITELLM_API_KEY="$${KDENSE_OPENCODE_GO_API_KEY:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY}"
+    KDENSE_CENTRAL_LITELLM_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL}"
     KDENSE_EXA_API_KEY="$${KDENSE_EXA_API_KEY:-}"
     KDENSE_PARALLEL_API_KEY="$${KDENSE_PARALLEL_API_KEY:-}"
     KDENSE_MODAL_TOKEN_ID="$${KDENSE_MODAL_TOKEN_ID:-}"
     KDENSE_MODAL_TOKEN_SECRET="$${KDENSE_MODAL_TOKEN_SECRET:-}"
-
-    case "$KDENSE_PROVIDER" in
-      openrouter|opencode_go) ;;
-      *)
-        echo "Unsupported KDENSE_PROVIDER: $KDENSE_PROVIDER" >&2
-        exit 1
-        ;;
-    esac
 
     case "$KDENSE_SEARCH_PROVIDER" in
       disabled|exa|parallel) ;;
@@ -452,51 +404,30 @@ PY
       exit 1
     fi
 
-    if [ "$KDENSE_PROVIDER" = "openrouter" ] && [ -z "$KDENSE_OPENROUTER_API_KEY" ] && [ -n "$KDENSE_OPENCODE_GO_API_KEY" ]; then
-      echo "K-Dense: no OpenRouter key provided; falling back to the wizard-managed OpenCode Go provider." >&2
-      KDENSE_PROVIDER="opencode_go"
-    fi
-
-    if [ "$KDENSE_PROVIDER" = "openrouter" ] && [ -z "$KDENSE_OPENROUTER_API_KEY" ]; then
-      echo "KDENSE_OPENROUTER_API_KEY is required when using the OpenRouter provider." >&2
+    if [ -z "$KDENSE_CENTRAL_LITELLM_API_KEY" ]; then
+      echo "KDENSE_CENTRAL_LITELLM_API_KEY is required for the central LiteLLM provider." >&2
       exit 1
     fi
 
-    if [ "$KDENSE_PROVIDER" = "opencode_go" ] && [ -z "$KDENSE_OPENCODE_GO_API_KEY" ]; then
-      echo "KDENSE_OPENCODE_GO_API_KEY is required when using the OpenCode Go provider." >&2
-      exit 1
-    fi
-
-    normalize_model_for_provider() {
-      provider="$1"
-      model="$2"
-      case "$provider" in
-        openrouter)
-          case "$model" in
-            openrouter/*) printf '%s' "$model" ;;
-            openai/*) printf 'openrouter/%s' "$${model#openai/}" ;;
-            *) printf '%s' "$model" ;;
-          esac
-          ;;
-        opencode_go)
-          case "$model" in
-            openrouter/*) printf 'openai/%s' "$${model#openrouter/}" ;;
-            openai/*) printf '%s' "$model" ;;
-            *) printf '%s' "$model" ;;
-          esac
-          ;;
+    normalize_model_for_gateway() {
+      model="$1"
+      case "$model" in
+        openai/*) printf '%s' "$model" ;;
+        *) printf '%s' "$model" ;;
       esac
     }
 
-    KDENSE_DEFAULT_MODEL_EFFECTIVE=$(normalize_model_for_provider "$KDENSE_PROVIDER" "$KDENSE_DEFAULT_MODEL")
-    KDENSE_EXPERT_MODEL_EFFECTIVE=$(normalize_model_for_provider "$KDENSE_PROVIDER" "$KDENSE_EXPERT_MODEL")
+    KDENSE_DEFAULT_MODEL_EFFECTIVE=$(normalize_model_for_gateway "$KDENSE_DEFAULT_MODEL")
+    KDENSE_EXPERT_MODEL_EFFECTIVE=$(normalize_model_for_gateway "$KDENSE_EXPERT_MODEL")
 
     KDENSE_SRC_DIR=/home/coder/.cache/kdense-byok-src
     KDENSE_SETUP_STAMP=/home/coder/.cache/kdense-byok-setup-rev
-    KDENSE_SETUP_KEY=v10-upstream-main-parameterized
+    KDENSE_SETUP_KEY=v11-central-litellm-only
     KDENSE_UI_PORT=3000
     KDENSE_API_PORT=8000
     KDENSE_LITELLM_PORT=4000
+    # Workspace-local LiteLLM stays on localhost for the Gemini/OpenAI shim only.
+    KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"
     KDENSE_PROXY_PORT=3001
     KDENSE_NEEDS_PREP=false
 
@@ -588,14 +519,13 @@ PY
     write_kdense_env_file() {
       env_file="$1"
       : > "$env_file"
-      printf 'GOOGLE_GEMINI_BASE_URL=http://localhost:%s\n' "$KDENSE_LITELLM_PORT" >> "$env_file"
+      printf 'GOOGLE_GEMINI_BASE_URL=%s\n' "$KDENSE_LOCAL_LITELLM_BASE_URL" >> "$env_file"
       printf 'GEMINI_API_KEY=sk-litellm-local\n' >> "$env_file"
       printf 'DEFAULT_AGENT_MODEL=%s\n' "$KDENSE_DEFAULT_MODEL_EFFECTIVE" >> "$env_file"
       printf 'DEFAULT_EXPERT_MODEL=%s\n' "$KDENSE_EXPERT_MODEL_EFFECTIVE" >> "$env_file"
-      append_env OPENROUTER_API_KEY "$KDENSE_OPENROUTER_API_KEY" "$env_file"
-      append_env OPENAI_API_KEY "$KDENSE_OPENCODE_GO_API_KEY" "$env_file"
-      append_env OPENAI_API_BASE "$KDENSE_OPENCODE_GO_BASE_URL" "$env_file"
-      append_env OPENAI_BASE_URL "$KDENSE_OPENCODE_GO_BASE_URL" "$env_file"
+      append_env OPENAI_API_KEY "$KDENSE_CENTRAL_LITELLM_API_KEY" "$env_file"
+      append_env OPENAI_API_BASE "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"
+      append_env OPENAI_BASE_URL "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"
       append_env EXA_API_KEY "$KDENSE_EXA_API_KEY" "$env_file"
       append_env PARALLEL_API_KEY "$KDENSE_PARALLEL_API_KEY" "$env_file"
       append_env MODAL_TOKEN_ID "$KDENSE_MODAL_TOKEN_ID" "$env_file"
@@ -629,6 +559,7 @@ import sys
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 block = '''
+  # OpenRouter stays explicit-model only; the central LiteLLM gateway owns the OpenCode Go wildcard route.
   # ── OpenCode Go via OpenAI-compatible endpoint ──
   - model_name: "openai/*"
     litellm_params:
@@ -649,7 +580,7 @@ if 'model_name: "openai/*"' not in text and needle in text:
 PY
 
     KDENSE_MODELS_JSON="$KDENSE_SRC_DIR/web/src/data/models.json"
-    python3 - <<'PY' "$KDENSE_MODELS_JSON" "$KDENSE_DEFAULT_MODEL_EFFECTIVE" "$KDENSE_EXPERT_MODEL_EFFECTIVE" "$KDENSE_OPENROUTER_API_KEY" "$KDENSE_OPENCODE_GO_API_KEY"
+    python3 - <<'PY' "$KDENSE_MODELS_JSON" "$KDENSE_DEFAULT_MODEL_EFFECTIVE" "$KDENSE_EXPERT_MODEL_EFFECTIVE" "$KDENSE_CENTRAL_LITELLM_API_KEY"
 from pathlib import Path
 import json
 import sys
@@ -657,8 +588,7 @@ import sys
 path = Path(sys.argv[1])
 default_model = sys.argv[2]
 expert_model = sys.argv[3]
-openrouter_api_key = sys.argv[4]
-opencode_go_api_key = sys.argv[5]
+central_litellm_api_key = sys.argv[4]
 
 models = json.loads(path.read_text(encoding="utf-8"))
 
@@ -670,16 +600,14 @@ def clear_flags(model: dict) -> dict:
 
 openrouter_models = [clear_flags(model) for model in models if str(model.get("id", "")).startswith("openrouter/")]
 merged = []
-if openrouter_api_key:
-    merged.extend(openrouter_models)
-if opencode_go_api_key:
+if central_litellm_api_key:
     for model in openrouter_models:
       clone = dict(model)
       clone["id"] = "openai/" + str(model["id"])[len("openrouter/"):]
       clone["provider"] = "OpenCode Go"
       description = str(model.get("description", "")).strip()
       clone["description"] = (description + "\n\n") if description else ""
-      clone["description"] += "Available through the workspace OpenCode Go-compatible endpoint."
+      clone["description"] += "Available through the central LiteLLM OpenCode Go-compatible gateway."
       merged.append(clone)
     merged.append(
         {
@@ -690,7 +618,7 @@ if opencode_go_api_key:
             "context_length": 262144,
             "pricing": {"prompt": 0.0, "completion": 0.0},
             "modality": "text->text",
-            "description": "Available through the workspace OpenCode Go-compatible endpoint.",
+            "description": "Available through the central LiteLLM OpenCode Go-compatible gateway.",
         }
     )
 
@@ -721,7 +649,7 @@ PY
     else
       KDENSE_REV=archive-main
     fi
-    KDENSE_SETUP_ID="$KDENSE_REV:$KDENSE_SETUP_KEY:$KDENSE_PROVIDER:$KDENSE_DEFAULT_MODEL_EFFECTIVE:$KDENSE_EXPERT_MODEL_EFFECTIVE"
+    KDENSE_SETUP_ID="$KDENSE_REV:$KDENSE_SETUP_KEY:$KDENSE_DEFAULT_MODEL_EFFECTIVE:$KDENSE_EXPERT_MODEL_EFFECTIVE"
 
     if [ ! -d "$KDENSE_SRC_DIR/.venv" ] || [ ! -d "$KDENSE_SRC_DIR/web/node_modules" ] || [ ! -f "$KDENSE_SRC_DIR/web/.next/BUILD_ID" ] || [ ! -f "$KDENSE_SETUP_STAMP" ] || [ "$(cat "$KDENSE_SETUP_STAMP" 2>/dev/null || true)" != "$KDENSE_SETUP_ID" ]; then
       cd "$KDENSE_SRC_DIR"
@@ -908,12 +836,9 @@ resource "docker_container" "workspace" {
     "DOKPLOY_WIZARD_CODER_CONTROL_PLANE_DATABASE_BACKEND=shared_core_postgres",
     "DOKPLOY_WIZARD_CODER_WORKSPACE_HOME_BACKEND=local_docker_volume",
     "DOKPLOY_WIZARD_CODER_WORKSPACE_HOME_STATUS=seaweedfs_deferred",
-    "KDENSE_PROVIDER=${data.coder_parameter.kdense_provider.value}",
     "KDENSE_DEFAULT_MODEL=${data.coder_parameter.kdense_default_model.value}",
     "KDENSE_EXPERT_MODEL=${data.coder_parameter.kdense_expert_model.value}",
     "KDENSE_SEARCH_PROVIDER=${data.coder_parameter.kdense_search_provider.value}",
-    "KDENSE_OPENROUTER_API_KEY=${data.coder_parameter.kdense_openrouter_api_key.value}",
-    "KDENSE_OPENROUTER_BASE_URL=${data.coder_parameter.kdense_openrouter_base_url.value}",
     "KDENSE_OPENCODE_GO_API_KEY=${data.coder_parameter.kdense_opencode_go_api_key.value}",
     "KDENSE_OPENCODE_GO_BASE_URL=${data.coder_parameter.kdense_opencode_go_base_url.value}",
     "KDENSE_EXA_API_KEY=${data.coder_parameter.kdense_exa_api_key.value}",
@@ -925,6 +850,10 @@ resource "docker_container" "workspace" {
   host {
     host = "host.docker.internal"
     ip   = "host-gateway"
+  }
+
+  networks_advanced {
+    name = data.docker_network.shared.name
   }
 
   volumes {

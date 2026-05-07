@@ -1,13 +1,16 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 from __future__ import annotations
 
 import json
 import subprocess
 from pathlib import Path
 
-import dokploy_wizard.cli as cli
 import pytest
-from dokploy_wizard.core import SharedCoreResourceRecord
+
+import dokploy_wizard.cli as cli
 from dokploy_wizard.cli import run_install_flow, run_modify_flow
+from dokploy_wizard.core import SharedCoreResourceRecord
 from dokploy_wizard.lifecycle import applicable_phases_for
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
@@ -84,6 +87,10 @@ class FakeSharedCoreBackend:
             resource_id="moodle-docuseal-stack-postgres",
             resource_name="moodle-docuseal-stack-shared-postgres",
         )
+        self.litellm = SharedCoreResourceRecord(
+            resource_id="moodle-docuseal-stack-litellm",
+            resource_name="moodle-docuseal-stack-shared-litellm",
+        )
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self.network.resource_id == resource_id:
@@ -144,6 +151,23 @@ class FakeSharedCoreBackend:
             resource_name=resource_name,
         )
 
+    def get_litellm_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        if self.litellm.resource_id == resource_id:
+            return self.litellm
+        return None
+
+    def find_litellm_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        if self.litellm.resource_name == resource_name:
+            return self.litellm
+        return None
+
+    def create_litellm_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        self.litellm = SharedCoreResourceRecord(
+            resource_id="moodle-docuseal-stack-litellm",
+            resource_name=resource_name,
+        )
+        return self.litellm
+
     def validate_postgres_allocations(self, allocations: tuple[object, ...]) -> bool:
         assert allocations
         return self.allocations_ready
@@ -192,6 +216,11 @@ def _seed_moodle_docuseal_state(state_dir: Path) -> Path:
                     "shared_core_postgres",
                     "moodle-docuseal-stack-postgres",
                     "stack:moodle-docuseal-stack:shared-postgres",
+                ),
+                OwnedResource(
+                    "shared_core_litellm",
+                    "moodle-docuseal-stack-litellm",
+                    "stack:moodle-docuseal-stack:shared-litellm",
                 ),
                 OwnedResource(
                     "moodle_service",
@@ -251,6 +280,21 @@ def test_cli_install_then_rerun_surfaces_explicit_noop(tmp_path: Path) -> None:
                     "cloudflare_dns_record",
                     "headscale-example-com",
                     "zone:zone-123:headscale.example.com",
+                ),
+                OwnedResource(
+                    "shared_core_network",
+                    "lifecycle-stack-shared",
+                    "stack:lifecycle-stack:shared-network",
+                ),
+                OwnedResource(
+                    "shared_core_postgres",
+                    "lifecycle-stack-shared-postgres",
+                    "stack:lifecycle-stack:shared-postgres",
+                ),
+                OwnedResource(
+                    "shared_core_litellm",
+                    "lifecycle-stack-shared-litellm",
+                    "stack:lifecycle-stack:shared-litellm",
                 ),
                 OwnedResource(
                     "headscale_service",

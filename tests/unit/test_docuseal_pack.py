@@ -1,12 +1,15 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from email.message import Message
-from urllib import parse
+from pathlib import Path
 from typing import Any, cast
 from urllib import error as urlerror
+from urllib import parse
 
 import pytest
 
@@ -37,7 +40,17 @@ from dokploy_wizard.packs.docuseal import (
     build_docuseal_ledger,
     reconcile_docuseal,
 )
-from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    ComposeArtifactHashState,
+    OwnedResource,
+    OwnershipLedger,
+    RawEnvInput,
+    resolve_desired_state,
+    write_applied_checkpoint,
+)
+
+from .fake_dokploy import FakeDokployApiClient
 
 
 @dataclass
@@ -273,7 +286,10 @@ def test_render_docuseal_compose_includes_local_postfix_smtp_when_configured() -
     assert "SMTP_ENABLE_STARTTLS: 'false'" in compose
 
 
-def test_dokploy_docuseal_backend_create_and_update_paths_keep_single_compose_stable() -> None:
+def test_dokploy_docuseal_backend_create_and_update_paths_keep_single_compose_stable(
+    tmp_path: Path,
+) -> None:
+    _write_empty_checkpoint(tmp_path)
     create_client = FakeDokployDocuSealApiClient()
     create_backend = DokployDocuSealBackend(
         api_url="https://dokploy.example.com/api",
@@ -288,6 +304,7 @@ def test_dokploy_docuseal_backend_create_and_update_paths_keep_single_compose_st
             user_name="wizard_stack_docuseal",
             password_secret_ref="wizard-stack-docuseal-postgres-password",
         ),
+        state_dir=tmp_path,
         client=cast(DokployDocuSealApi, create_client),
     )
 
@@ -342,6 +359,7 @@ def test_dokploy_docuseal_backend_create_and_update_paths_keep_single_compose_st
             user_name="wizard_stack_docuseal",
             password_secret_ref="wizard-stack-docuseal-postgres-password",
         ),
+        state_dir=tmp_path,
         client=cast(DokployDocuSealApi, update_client),
     )
 
@@ -362,6 +380,138 @@ def test_dokploy_docuseal_backend_create_and_update_paths_keep_single_compose_st
     assert update_client.update_compose_calls == 1
     assert update_client.deploy_calls == 1
     assert update_client.last_update_compose_file is not None
+
+
+def test_docuseal_noop_skip_skips_update_and_deploy_when_up_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = _render_compose_file(
+        stack_name="wizard-stack",
+        hostname="docuseal.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_docuseal",
+            user_name="wizard_stack_docuseal",
+            password_secret_ref="wizard-stack-docuseal-postgres-password",
+        ),
+        secret_key_base_secret_ref="wizard-stack-docuseal-secret-key-base",
+    )
+    _write_hash_checkpoint(
+        tmp_path,
+        service_key="wizard-stack-docuseal",
+        rendered_compose=compose_file,
+    )
+    client = FakeDokployApiClient()
+    client.seed_existing_service(
+        service_name="wizard-stack-docuseal",
+        compose_id="cmp-docuseal",
+        project_name="wizard-stack",
+        compose_file=compose_file,
+    )
+    backend = DokployDocuSealBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="docuseal.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_docuseal",
+            user_name="wizard_stack_docuseal",
+            password_secret_ref="wizard-stack-docuseal-postgres-password",
+        ),
+        state_dir=tmp_path,
+        client=cast(DokployDocuSealApi, client),
+    )
+
+    monkeypatch.setattr(docuseal_module, "_wait_for_local_https_health", lambda url: True)
+    monkeypatch.setattr(docuseal_module, "_docuseal_is_initialized", lambda hostname: True)
+
+    created = backend.create_service(
+        resource_name="wizard-stack-docuseal",
+        hostname="docuseal.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_docuseal",
+            user_name="wizard_stack_docuseal",
+            password_secret_ref="wizard-stack-docuseal-postgres-password",
+        ),
+        data_resource_name="wizard-stack-docuseal-data",
+    )
+
+    assert created.resource_id == "dokploy-compose:cmp-docuseal:service"
+    client.assert_unchanged_service("wizard-stack-docuseal")
+
+
+def test_docuseal_up_failure_blocks_noop_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = _render_compose_file(
+        stack_name="wizard-stack",
+        hostname="docuseal.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_docuseal",
+            user_name="wizard_stack_docuseal",
+            password_secret_ref="wizard-stack-docuseal-postgres-password",
+        ),
+        secret_key_base_secret_ref="wizard-stack-docuseal-secret-key-base",
+    )
+    _write_hash_checkpoint(
+        tmp_path,
+        service_key="wizard-stack-docuseal",
+        rendered_compose=compose_file,
+    )
+    client = FakeDokployApiClient()
+    client.seed_existing_service(
+        service_name="wizard-stack-docuseal",
+        compose_id="cmp-docuseal",
+        project_name="wizard-stack",
+        compose_file=compose_file,
+    )
+    backend = DokployDocuSealBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="docuseal.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_docuseal",
+            user_name="wizard_stack_docuseal",
+            password_secret_ref="wizard-stack-docuseal-postgres-password",
+        ),
+        state_dir=tmp_path,
+        client=cast(DokployDocuSealApi, client),
+    )
+    init_checks: list[str] = []
+
+    monkeypatch.setattr(docuseal_module, "_wait_for_local_https_health", lambda url: False)
+    monkeypatch.setattr(
+        docuseal_module,
+        "_docuseal_is_initialized",
+        lambda hostname: init_checks.append(hostname) or True,
+    )
+
+    created = backend.create_service(
+        resource_name="wizard-stack-docuseal",
+        hostname="docuseal.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_docuseal",
+            user_name="wizard_stack_docuseal",
+            password_secret_ref="wizard-stack-docuseal-postgres-password",
+        ),
+        data_resource_name="wizard-stack-docuseal-data",
+    )
+
+    assert created.resource_id == "dokploy-compose:cmp-docuseal:service"
+    assert init_checks == []
+    client.assert_single_update_deploy_pair("wizard-stack-docuseal")
 
 
 def test_ensure_application_ready_initializes_docuseal_via_internal_setup_flow(
@@ -439,6 +589,7 @@ def test_ensure_application_ready_is_rerun_safe_when_docuseal_is_already_initial
         ),
         client=cast(DokployDocuSealApi, FakeDokployDocuSealApiClient()),
     )
+    monkeypatch.setattr(docuseal_module, "_wait_for_local_https_health", lambda url: True)
     monkeypatch.setattr(docuseal_module, "_docuseal_is_initialized", lambda hostname: True)
     submit_calls: list[str] = []
     monkeypatch.setattr(
@@ -893,3 +1044,31 @@ def test_build_docuseal_ledger_replaces_prior_owned_resources_cleanly() -> None:
         (DOCUSEAL_DATA_RESOURCE_TYPE, "new-data", "stack:wizard-stack:docuseal:data"),
         ("cloudflare_tunnel", "tunnel-1", "account:account-123"),
     }
+
+
+def _write_empty_checkpoint(state_dir: Path) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("shared_core",),
+        ),
+    )
+
+
+def _write_hash_checkpoint(state_dir: Path, *, service_key: str, rendered_compose: str) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("shared_core",),
+            compose_artifact_hashes={
+                service_key: ComposeArtifactHashState.from_rendered_compose(
+                    service_id=service_key,
+                    rendered_compose=rendered_compose,
+                )
+            },
+        ),
+    )

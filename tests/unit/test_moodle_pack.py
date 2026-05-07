@@ -1,8 +1,11 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -20,7 +23,11 @@ from dokploy_wizard.dokploy import (
     DokployProjectSummary,
 )
 from dokploy_wizard.dokploy.client import DokployScheduleRecord
-from dokploy_wizard.dokploy.moodle import DokployMoodleApi, _local_https_health_check, _render_compose_file
+from dokploy_wizard.dokploy.moodle import (
+    DokployMoodleApi,
+    _local_https_health_check,
+    _render_compose_file,
+)
 from dokploy_wizard.packs.moodle import (
     MOODLE_DATA_RESOURCE_TYPE,
     MOODLE_SERVICE_RESOURCE_TYPE,
@@ -29,7 +36,17 @@ from dokploy_wizard.packs.moodle import (
     build_moodle_ledger,
     reconcile_moodle,
 )
-from dokploy_wizard.state import OwnedResource, OwnershipLedger, RawEnvInput, resolve_desired_state
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    ComposeArtifactHashState,
+    OwnedResource,
+    OwnershipLedger,
+    RawEnvInput,
+    resolve_desired_state,
+    write_applied_checkpoint,
+)
+
+from .fake_dokploy import FakeDokployApiClient
 
 
 @dataclass
@@ -300,7 +317,69 @@ def test_configure_moodle_smtp_uses_local_postfix_sender() -> None:
     ]
 
 
-def test_dokploy_moodle_backend_create_and_update_paths_keep_single_compose_stable() -> None:
+def test_configure_moodle_smtp_retries_transient_upgrade_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_run_container_shell(
+        container_name: str,
+        shell_command: str,
+        *,
+        error_prefix: str,
+    ) -> None:
+        del container_name, error_prefix
+        calls.append(shell_command)
+        if len(calls) < 3:
+            raise MoodleError("Unable to configure Moodle SMTP: !!! Site is being upgraded, please retry later. !!!")
+
+    monkeypatch.setattr(moodle_module, "_run_container_shell", fake_run_container_shell)
+    monkeypatch.setattr(moodle_module.time, "sleep", sleeps.append)
+
+    moodle_module._configure_moodle_smtp(
+        "moodle-container",
+        smtp_host="wizard-stack-shared-postfix",
+        smtp_port=587,
+        from_address="DoNotReply@example.com",
+    )
+
+    assert len(calls) == 3
+    assert sleeps == [moodle_module._DEFAULT_MOODLE_UPGRADE_RETRY_DELAY_SECONDS] * 2
+
+
+def test_configure_moodle_smtp_fails_fast_for_non_transient_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    def fake_run_container_shell(
+        container_name: str,
+        shell_command: str,
+        *,
+        error_prefix: str,
+    ) -> None:
+        del container_name, shell_command, error_prefix
+        raise MoodleError("Unable to configure Moodle SMTP: permission denied")
+
+    monkeypatch.setattr(moodle_module, "_run_container_shell", fake_run_container_shell)
+    monkeypatch.setattr(moodle_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(MoodleError, match="permission denied"):
+        moodle_module._configure_moodle_smtp(
+            "moodle-container",
+            smtp_host="wizard-stack-shared-postfix",
+            smtp_port=587,
+            from_address="DoNotReply@example.com",
+        )
+
+    assert sleeps == []
+
+
+def test_dokploy_moodle_backend_create_and_update_paths_keep_single_compose_stable(
+    tmp_path: Path,
+) -> None:
+    _write_empty_checkpoint(tmp_path)
     create_client = FakeDokployMoodleApiClient()
     create_backend = DokployMoodleBackend(
         api_url="https://dokploy.example.com/api",
@@ -315,6 +394,7 @@ def test_dokploy_moodle_backend_create_and_update_paths_keep_single_compose_stab
             user_name="wizard_stack_moodle",
             password_secret_ref="wizard-stack-moodle-postgres-password",
         ),
+        state_dir=tmp_path,
         client=cast(DokployMoodleApi, create_client),
     )
 
@@ -369,6 +449,7 @@ def test_dokploy_moodle_backend_create_and_update_paths_keep_single_compose_stab
             user_name="wizard_stack_moodle",
             password_secret_ref="wizard-stack-moodle-postgres-password",
         ),
+        state_dir=tmp_path,
         client=cast(DokployMoodleApi, update_client),
     )
 
@@ -389,6 +470,83 @@ def test_dokploy_moodle_backend_create_and_update_paths_keep_single_compose_stab
     assert update_client.update_compose_calls == 1
     assert update_client.deploy_calls == 1
     assert update_client.last_update_compose_file is not None
+
+
+def test_moodle_noop_skip_retries_upgrade_window_before_skipping_update_and_deploy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = _render_compose_file(
+        stack_name="wizard-stack",
+        hostname="moodle.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_moodle",
+            user_name="wizard_stack_moodle",
+            password_secret_ref="wizard-stack-moodle-postgres-password",
+        ),
+    )
+    _write_hash_checkpoint(
+        tmp_path,
+        service_key="wizard-stack-moodle",
+        rendered_compose=compose_file,
+    )
+    client = FakeDokployApiClient()
+    client.seed_existing_service(
+        service_name="wizard-stack-moodle",
+        compose_id="cmp-moodle",
+        project_name="wizard-stack",
+        compose_file=compose_file,
+    )
+    backend = DokployMoodleBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="moodle.example.com",
+        admin_email="admin@example.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_moodle",
+            user_name="wizard_stack_moodle",
+            password_secret_ref="wizard-stack-moodle-postgres-password",
+        ),
+        state_dir=tmp_path,
+        client=cast(DokployMoodleApi, client),
+    )
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def ready_with_upgrade_retry() -> tuple[str, ...]:
+        def action() -> None:
+            calls.append("attempt")
+            if len(calls) < 3:
+                raise MoodleError(
+                    "Unable to configure Moodle SMTP: !!! Site is being upgraded, please retry later. !!!"
+                )
+
+        moodle_module._run_moodle_upgrade_retry(action)
+        return ("Moodle already initialized; skipped CLI install.",)
+
+    monkeypatch.setattr(backend, "ensure_application_ready", ready_with_upgrade_retry)
+    monkeypatch.setattr(moodle_module.time, "sleep", sleeps.append)
+
+    created = backend.create_service(
+        resource_name="wizard-stack-moodle",
+        hostname="moodle.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_moodle",
+            user_name="wizard_stack_moodle",
+            password_secret_ref="wizard-stack-moodle-postgres-password",
+        ),
+        data_resource_name="wizard-stack-moodle-data",
+    )
+
+    assert created.resource_id == "dokploy-compose:cmp-moodle:service"
+    assert calls == ["attempt", "attempt", "attempt"]
+    assert sleeps == [moodle_module._DEFAULT_MOODLE_UPGRADE_RETRY_DELAY_SECONDS] * 2
+    client.assert_unchanged_service("wizard-stack-moodle")
 
 
 def test_reconcile_moodle_runs_application_bootstrap_before_final_health_gate_on_first_apply() -> None:
@@ -1005,3 +1163,31 @@ def test_build_moodle_ledger_replaces_prior_owned_resources_cleanly() -> None:
         (MOODLE_DATA_RESOURCE_TYPE, "new-data", "stack:wizard-stack:moodle:data"),
         ("cloudflare_tunnel", "tunnel-1", "account:account-123"),
     }
+
+
+def _write_empty_checkpoint(state_dir: Path) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("shared_core",),
+        ),
+    )
+
+
+def _write_hash_checkpoint(state_dir: Path, *, service_key: str, rendered_compose: str) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("shared_core",),
+            compose_artifact_hashes={
+                service_key: ComposeArtifactHashState.from_rendered_compose(
+                    service_id=service_key,
+                    rendered_compose=rendered_compose,
+                )
+            },
+        ),
+    )

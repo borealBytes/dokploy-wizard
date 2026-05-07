@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import time
 from collections.abc import Callable
 from typing import Protocol
 
@@ -245,7 +246,14 @@ def reconcile_seaweedfs(
     service_record = SeaweedFsResourceRecord(
         resource_id=service_id, resource_name=service.resource_name
     )
-    if not backend.check_health(service=service_record, url=health_url):
+    health_passed = False
+    for attempt in range(10):
+        if backend.check_health(service=service_record, url=health_url):
+            health_passed = True
+            break
+        if attempt < 9:
+            time.sleep(3.0)
+    if not health_passed:
         raise SeaweedFsError(f"SeaweedFS health check failed for '{health_url}'.")
 
     return SeaweedFsPhase(

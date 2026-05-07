@@ -1,7 +1,9 @@
+# ruff: noqa: E501
 """Cloudflare networking planner and reconciler."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,6 +44,11 @@ ACCESS_APPLICATION_RESOURCE_TYPE = "cloudflare_access_application"
 ACCESS_POLICY_RESOURCE_TYPE = "cloudflare_access_policy"
 
 _NON_PUBLIC_HOSTNAME_KEYS = {"openclaw-internal"}
+_LITELLM_ADMIN_ACCESS_KEY = "litellm-admin"
+_LITELLM_ADMIN_SUBDOMAIN_ENV_KEY = "LITELLM_ADMIN_SUBDOMAIN"
+_LITELLM_ADMIN_DEFAULT_SUBDOMAIN = "litellm"
+_LITELLM_INTERNAL_PORT = 4000
+_DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 @dataclass(frozen=True)
@@ -198,12 +205,8 @@ def reconcile_cloudflare_access(
     backend: CloudflareBackend,
 ) -> AccessPhase:
     credentials = _resolve_credentials(raw_env, desired_state, backend)
-    emails = desired_state.cloudflare_access_otp_emails
-    target_hostnames = tuple(
-        desired_state.hostnames[key]
-        for key in ("openclaw", "my-farm-advisor")
-        if key in desired_state.enabled_packs and key in desired_state.hostnames
-    )
+    emails = _access_target_emails(raw_env=raw_env, desired_state=desired_state)
+    target_hostnames = _access_target_hostnames(raw_env=raw_env, desired_state=desired_state)
     if not emails or not target_hostnames:
         return AccessPhase(
             result=AccessResult(
@@ -229,10 +232,11 @@ def reconcile_cloudflare_access(
     app_ids: dict[str, str] = {}
     policies: list[PlannedAccessPolicy] = []
     policy_ids: dict[str, str] = {}
-    for hostname in target_hostnames:
+    for pack_name, hostname in target_hostnames:
         app, app_action = _resolve_access_application(
             dry_run=dry_run,
             account_id=credentials.account_id,
+            pack_name=pack_name,
             hostname=hostname,
             provider_id=provider.provider_id,
             ownership_ledger=ownership_ledger,
@@ -246,6 +250,7 @@ def reconcile_cloudflare_access(
         policy, policy_action = _resolve_access_policy(
             dry_run=dry_run,
             account_id=credentials.account_id,
+            pack_name=pack_name,
             hostname=hostname,
             app_id=app.app_id,
             emails=emails,
@@ -269,6 +274,12 @@ def reconcile_cloudflare_access(
         *(item.action for item in policies),
     }
     outcome = "plan_only" if dry_run else ("applied" if "create" in actions else "already_present")
+    notes = [
+        "Cloudflare Access self-hosted applications are applied to advisor hostnames and the LiteLLM admin hostname."
+    ]
+    litellm_hostname = dict(target_hostnames).get(_LITELLM_ADMIN_ACCESS_KEY)
+    if litellm_hostname is not None:
+        notes.extend(_litellm_access_notes(desired_state=desired_state, hostname=litellm_hostname))
     return AccessPhase(
         result=AccessResult(
             outcome=outcome,
@@ -280,9 +291,7 @@ def reconcile_cloudflare_access(
             ),
             applications=tuple(apps),
             policies=tuple(policies),
-            notes=(
-                "Cloudflare Access self-hosted applications are applied only to advisor hostnames.",
-            ),
+            notes=tuple(notes),
         ),
         provider_resource_id=None if dry_run else provider.provider_id,
         application_resource_ids=app_ids,
@@ -433,12 +442,13 @@ def _resolve_access_application(
     *,
     dry_run: bool,
     account_id: str,
+    pack_name: str,
     hostname: str,
     provider_id: str,
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
 ) -> tuple[CloudflareAccessApplication, str]:
-    app_name = f"{hostname} protected"
+    app_name = f"{_access_display_name(pack_name)} protected"
     owned_app = _find_owned_access_resource(
         ownership_ledger,
         resource_type=ACCESS_APPLICATION_RESOURCE_TYPE,
@@ -492,13 +502,14 @@ def _resolve_access_policy(
     *,
     dry_run: bool,
     account_id: str,
+    pack_name: str,
     hostname: str,
     app_id: str,
     emails: tuple[str, ...],
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
 ) -> tuple[CloudflareAccessPolicy, str]:
-    policy_name = f"Allow {hostname}"
+    policy_name = f"Allow {_access_display_name(pack_name)}"
     owned_policy = _find_owned_access_resource(
         ownership_ledger,
         resource_type=ACCESS_POLICY_RESOURCE_TYPE,
@@ -541,6 +552,87 @@ def _resolve_access_policy(
             emails=emails,
         ),
         "create",
+    )
+
+
+def _access_display_name(pack_name: str) -> str:
+    if pack_name == "openclaw":
+        return "Nexa Claw"
+    if pack_name == "my-farm-advisor":
+        return "Nexa Farm"
+    if pack_name == _LITELLM_ADMIN_ACCESS_KEY:
+        return "LiteLLM Admin"
+    return pack_name
+
+
+def _access_target_hostnames(
+    *, raw_env: RawEnvInput, desired_state: DesiredState
+) -> tuple[tuple[str, str], ...]:
+    target_hostnames: list[tuple[str, str]] = [
+        (key, desired_state.hostnames[key])
+        for key in ("openclaw", "my-farm-advisor")
+        if key in desired_state.enabled_packs and key in desired_state.hostnames
+    ]
+    litellm_hostname = resolve_litellm_admin_hostname(raw_env=raw_env, desired_state=desired_state)
+    if litellm_hostname is not None:
+        target_hostnames.append(
+            (
+                _LITELLM_ADMIN_ACCESS_KEY,
+                litellm_hostname,
+            )
+        )
+    return tuple(target_hostnames)
+
+
+def resolve_litellm_admin_hostname(*, raw_env: RawEnvInput, desired_state: DesiredState) -> str | None:
+    if desired_state.shared_core.litellm is None:
+        return None
+    return _shared_service_admin_hostname(raw_env=raw_env, desired_state=desired_state)
+
+
+def _shared_service_admin_hostname(*, raw_env: RawEnvInput, desired_state: DesiredState) -> str:
+    subdomain = (
+        raw_env.values.get(_LITELLM_ADMIN_SUBDOMAIN_ENV_KEY, _LITELLM_ADMIN_DEFAULT_SUBDOMAIN)
+        .strip()
+        .lower()
+    )
+    if not subdomain:
+        subdomain = _LITELLM_ADMIN_DEFAULT_SUBDOMAIN
+    if _DNS_LABEL_PATTERN.fullmatch(subdomain) is None:
+        raise CloudflareError(
+            f"{_LITELLM_ADMIN_SUBDOMAIN_ENV_KEY} must be a single DNS label containing only lowercase letters, digits, or hyphens."
+        )
+    hostname = f"{subdomain}.{desired_state.root_domain}"
+    if hostname in set(desired_state.hostnames.values()):
+        raise CloudflareError(
+            f"LiteLLM admin hostname '{hostname}' collides with an existing desired hostname. Choose a different {_LITELLM_ADMIN_SUBDOMAIN_ENV_KEY}."
+        )
+    return hostname
+
+
+def _access_target_emails(*, raw_env: RawEnvInput, desired_state: DesiredState) -> tuple[str, ...]:
+    if desired_state.cloudflare_access_otp_emails:
+        return desired_state.cloudflare_access_otp_emails
+    if desired_state.shared_core.litellm is None:
+        return ()
+    admin_email = raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "").strip().lower()
+    if admin_email and "@" in admin_email:
+        return (admin_email,)
+    return ()
+
+
+def _litellm_access_notes(*, desired_state: DesiredState, hostname: str) -> tuple[str, ...]:
+    if desired_state.shared_core.litellm is None:
+        return ()
+    internal_url = (
+        f"http://{desired_state.shared_core.litellm.service_name}:{_LITELLM_INTERNAL_PORT}"
+    )
+    admin_url = f"https://{hostname}"
+    return (
+        f"LiteLLM internal containers should keep using '{internal_url}'.",
+        f"LiteLLM admin access is planned separately at '{admin_url}' behind Cloudflare Access.",
+        "LiteLLM admin QA must treat 302/401/403 as protected success and must never accept an unauthenticated 200.",
+        "LiteLLM admin DNS and tunnel ingress must remain separate from the internal service URL until Access protection is in place.",
     )
 
 
@@ -725,14 +817,16 @@ def _resolve_nested_coder_wildcard_certificate(
     except CloudflareError as exc:
         raise CloudflareError(
             "Nested Coder wildcard routing requires Cloudflare edge certificate access for "
-            f"'{wildcard_hostname}'. Ensure the token includes 'Zone -> SSL and Certificates -> Edit' "
+            f"'{wildcard_hostname}'. Ensure the token includes "
+            "'Zone -> SSL and Certificates -> Edit' "
             "and that Advanced Certificate Manager is enabled. "
             f"Underlying error: {exc}"
         ) from exc
     if existing_pack is not None:
         return (
             "Cloudflare edge certificate "
-            f"'{existing_pack.pack_id}' ({existing_pack.pack_type}, {existing_pack.status}) already covers "
+            f"'{existing_pack.pack_id}' "
+            f"({existing_pack.pack_type}, {existing_pack.status}) already covers "
             f"'{wildcard_hostname}'.",
         )
     if dry_run:
@@ -746,13 +840,15 @@ def _resolve_nested_coder_wildcard_certificate(
         )
     except CloudflareError as exc:
         raise CloudflareError(
-            "Unable to order the Cloudflare advanced edge certificate required for nested Coder app "
-            f"hosts under '{wildcard_hostname}'. Ensure Advanced Certificate Manager is enabled and the "
+            "Unable to order the Cloudflare advanced edge certificate required for nested "
+            f"Coder app hosts under '{wildcard_hostname}'. Ensure Advanced Certificate "
+            "Manager is enabled and the "
             "token includes 'Zone -> SSL and Certificates -> Edit'. "
             f"Underlying error: {exc}"
         ) from exc
     note = (
-        f"Ordered Cloudflare advanced edge certificate '{created_pack.pack_id}' for '{wildcard_hostname}' "
+        f"Ordered Cloudflare advanced edge certificate '{created_pack.pack_id}' for "
+        f"'{wildcard_hostname}' "
         f"with status '{created_pack.status}'."
     )
     if created_pack.status != "active":

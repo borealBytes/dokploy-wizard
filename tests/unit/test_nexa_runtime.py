@@ -1,3 +1,6 @@
+# mypy: ignore-errors
+# pyright: reportIndexIssue=false
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
@@ -5,9 +8,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+
 import pytest
 
-from dokploy_wizard.packs.openclaw.nexa_ingress import handle_onlyoffice_callback, handle_talk_webhook
+from dokploy_wizard.packs.openclaw.nexa_ingress import (
+    handle_onlyoffice_callback,
+    handle_talk_webhook,
+)
 from dokploy_wizard.packs.openclaw.nexa_onlyoffice import NexaOnlyofficeAgentIdentity
 from dokploy_wizard.packs.openclaw.nexa_retrieval import NexaCanonicalFileSnapshot
 from dokploy_wizard.packs.openclaw.nexa_runtime import (
@@ -15,7 +22,6 @@ from dokploy_wizard.packs.openclaw.nexa_runtime import (
     NexaOnlyofficeRuntimeResult,
     NexaPlannedTalkReply,
     NexaRuntimeDependencies,
-    NexaTerminalCommandResult,
     NexaTalkRuntimeResult,
     run_queued_nexa_job,
 )

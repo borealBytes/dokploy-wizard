@@ -89,7 +89,7 @@ class FakeHeadscaleBackend:
         return True
 
 
-def test_install_runs_tailscale_phase_before_networking(tmp_path: Path) -> None:
+def test_install_runs_tailscale_phase_after_shared_core(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     raw_env_path = tmp_path / "tailscale.env"
     raw_env_path.write_text(
@@ -113,6 +113,7 @@ def test_install_runs_tailscale_phase_before_networking(tmp_path: Path) -> None:
                 "HOST_PORT_3000_IN_USE=false",
                 "HOST_ENVIRONMENT=local",
                 "DOKPLOY_BOOTSTRAP_HEALTHY=true",
+                "DOKPLOY_BOOTSTRAP_MOCK_API_KEY=dokp-mock-key",
                 "CLOUDFLARE_API_TOKEN=token-123",
                 "CLOUDFLARE_ACCOUNT_ID=account-123",
                 "CLOUDFLARE_ZONE_ID=zone-123",
@@ -140,6 +141,6 @@ def test_install_runs_tailscale_phase_before_networking(tmp_path: Path) -> None:
     loaded = load_state_dir(state_dir)
     assert summary["tailscale"]["outcome"] == "applied"
     phases = summary["lifecycle"]["applicable_phases"]
-    assert phases.index("networking") < phases.index("tailscale")
+    assert phases.index("shared_core") < phases.index("tailscale")
     assert loaded.applied_state is not None
     assert "tailscale" in loaded.applied_state.completed_steps

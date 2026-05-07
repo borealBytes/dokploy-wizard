@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any
 
@@ -51,7 +51,9 @@ def _require_string_list(payload: dict[str, Any], key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _require_string_map(payload: dict[str, Any], key: str) -> dict[str, str]:
+def _require_string_map(
+    payload: dict[str, Any], key: str, *, allow_empty_values: bool = False
+) -> dict[str, str]:
     value = payload.get(key)
     if not isinstance(value, dict):
         msg = f"Expected object for '{key}'."
@@ -62,8 +64,9 @@ def _require_string_map(payload: dict[str, Any], key: str) -> dict[str, str]:
         if not isinstance(map_key, str) or map_key == "":
             msg = f"Expected non-empty string keys in '{key}'."
             raise StateValidationError(msg)
-        if not isinstance(map_value, str) or map_value == "":
-            msg = f"Expected non-empty string values in '{key}'."
+        if not isinstance(map_value, str) or (not allow_empty_values and map_value == ""):
+            qualifier = "string" if allow_empty_values else "non-empty string"
+            msg = f"Expected {qualifier} values in '{key}'."
             raise StateValidationError(msg)
         normalized[map_key] = map_value
     return normalized
@@ -75,6 +78,22 @@ def _require_format_version(payload: dict[str, Any]) -> int:
         msg = f"Unsupported format_version {version}; expected {STATE_FORMAT_VERSION}."
         raise StateValidationError(msg)
     return version
+
+
+def _normalize_rendered_compose(value: str) -> str:
+    """Normalize rendered compose content before hashing."""
+
+    return "\n".join(
+        line.rstrip() for line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    ).strip()
+
+
+def _require_sha256_hex(payload: dict[str, Any], key: str) -> str:
+    value = _require_string(payload, key)
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        msg = f"Expected 64-character lowercase SHA-256 hex string for '{key}'."
+        raise StateValidationError(msg)
+    return value
 
 
 def _require_lifecycle_checkpoint_contract_version(payload: dict[str, Any]) -> int:
@@ -100,6 +119,69 @@ def _require_lifecycle_checkpoint_contract_version(payload: dict[str, Any]) -> i
 
 
 @dataclass(frozen=True)
+class ComposeArtifactHashState:
+    """Persisted rendered compose metadata without storing raw YAML."""
+
+    service_id: str
+    rendered_compose_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.service_id == "":
+            msg = "Compose artifact service_id cannot be empty."
+            raise StateValidationError(msg)
+        if len(self.rendered_compose_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in self.rendered_compose_sha256
+        ):
+            msg = "Compose artifact hash must be a 64-character lowercase SHA-256 hex string."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "service_id": self.service_id,
+            "rendered_compose_sha256": self.rendered_compose_sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> ComposeArtifactHashState:
+        return cls(
+            service_id=_require_string(payload, "service_id"),
+            rendered_compose_sha256=_require_sha256_hex(payload, "rendered_compose_sha256"),
+        )
+
+    @classmethod
+    def from_rendered_compose(
+        cls, *, service_id: str, rendered_compose: str
+    ) -> ComposeArtifactHashState:
+        normalized = _normalize_rendered_compose(rendered_compose)
+        return cls(
+            service_id=service_id,
+            rendered_compose_sha256=sha256(normalized.encode("utf-8")).hexdigest(),
+        )
+
+
+def _require_compose_artifact_hashes(
+    payload: dict[str, Any], key: str
+) -> dict[str, ComposeArtifactHashState]:
+    value = payload.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        msg = f"Expected object for '{key}'."
+        raise StateValidationError(msg)
+
+    normalized: dict[str, ComposeArtifactHashState] = {}
+    for service_key, service_payload in value.items():
+        if not isinstance(service_key, str) or service_key == "":
+            msg = f"Expected non-empty string keys in '{key}'."
+            raise StateValidationError(msg)
+        if not isinstance(service_payload, dict):
+            msg = f"Expected object values in '{key}'."
+            raise StateValidationError(msg)
+        normalized[service_key] = ComposeArtifactHashState.from_dict(service_payload)
+    return normalized
+
+
+@dataclass(frozen=True)
 class RawEnvInput:
     """Normalized raw env-file input."""
 
@@ -117,8 +199,8 @@ class RawEnvInput:
             msg = "Raw env input cannot be empty."
             raise StateValidationError(msg)
         for key, value in self.values.items():
-            if key == "" or value == "":
-                msg = "Raw env input keys and values must be non-empty strings."
+            if key == "" or not isinstance(value, str):
+                msg = "Raw env input keys must be non-empty strings and values must be strings."
                 raise StateValidationError(msg)
 
     def to_dict(self) -> dict[str, Any]:
@@ -131,7 +213,7 @@ class RawEnvInput:
     def from_dict(cls, payload: dict[str, Any]) -> RawEnvInput:
         return cls(
             format_version=_require_format_version(payload),
-            values=_require_string_map(payload, "values"),
+            values=_require_string_map(payload, "values", allow_empty_values=True),
         )
 
 
@@ -328,6 +410,79 @@ def _require_optional_string(payload: dict[str, Any], key: str) -> str | None:
     return value
 
 
+LITELLM_CONSUMER_VIRTUAL_KEY_NAMES = (
+    "coder-hermes",
+    "coder-kdense",
+    "my-farm-advisor",
+    "openclaw",
+)
+
+LITELLM_GENERATED_MASTER_KEY_PREFIX = "sk-litellm-master"
+LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES = {
+    "coder-hermes": "sk-litellm-coder-hermes",
+    "coder-kdense": "sk-litellm-coder-kdense",
+    "my-farm-advisor": "sk-litellm-my-farm-advisor",
+    "openclaw": "sk-litellm-openclaw",
+}
+
+
+def litellm_key_uses_virtual_key_format(value: str) -> bool:
+    return value.startswith("sk-")
+
+
+@dataclass(frozen=True)
+class LiteLLMGeneratedKeys:
+    """Wizard-managed LiteLLM secrets persisted outside install.env."""
+
+    format_version: int
+    master_key: str
+    salt_key: str
+    virtual_keys: dict[str, str]
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        if self.master_key == "" or self.salt_key == "":
+            msg = "LiteLLM master_key and salt_key must be non-empty strings."
+            raise StateValidationError(msg)
+
+        missing_consumers = sorted(
+            consumer
+            for consumer in LITELLM_CONSUMER_VIRTUAL_KEY_NAMES
+            if self.virtual_keys.get(consumer, "") == ""
+        )
+        if missing_consumers:
+            msg = (
+                "LiteLLM virtual_keys must contain non-empty values for "
+                f"{missing_consumers}."
+            )
+            raise StateValidationError(msg)
+        if any(key == "" or value == "" for key, value in self.virtual_keys.items()):
+            msg = "LiteLLM virtual_keys must use non-empty names and values."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format_version": self.format_version,
+            "master_key": self.master_key,
+            "salt_key": self.salt_key,
+            "virtual_keys": dict(sorted(self.virtual_keys.items())),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> LiteLLMGeneratedKeys:
+        return cls(
+            format_version=_require_format_version(payload),
+            master_key=_require_string(payload, "master_key"),
+            salt_key=_require_string(payload, "salt_key"),
+            virtual_keys=_require_string_map(payload, "virtual_keys"),
+        )
+
+
 @dataclass(frozen=True)
 class AppliedStateCheckpoint:
     """Last known successfully applied state."""
@@ -335,6 +490,7 @@ class AppliedStateCheckpoint:
     format_version: int
     desired_state_fingerprint: str
     completed_steps: tuple[str, ...]
+    compose_artifact_hashes: dict[str, ComposeArtifactHashState] = field(default_factory=dict)
     lifecycle_checkpoint_contract_version: int = LIFECYCLE_CHECKPOINT_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
@@ -350,6 +506,11 @@ class AppliedStateCheckpoint:
         if any(step == "" for step in self.completed_steps):
             msg = "Applied state steps must be non-empty strings."
             raise StateValidationError(msg)
+        for service_key, artifact_hash in self.compose_artifact_hashes.items():
+            if not isinstance(service_key, str) or service_key == "":
+                msg = "Applied state compose artifact hash keys must be non-empty strings."
+                raise StateValidationError(msg)
+            artifact_hash.service_id
         if self.lifecycle_checkpoint_contract_version not in {
             LEGACY_LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
             LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
@@ -367,6 +528,10 @@ class AppliedStateCheckpoint:
             "format_version": self.format_version,
             "desired_state_fingerprint": self.desired_state_fingerprint,
             "completed_steps": list(self.completed_steps),
+            "compose_artifact_hashes": {
+                service_key: artifact_hash.to_dict()
+                for service_key, artifact_hash in sorted(self.compose_artifact_hashes.items())
+            },
             "lifecycle_checkpoint_contract_version": self.lifecycle_checkpoint_contract_version,
         }
 
@@ -376,6 +541,9 @@ class AppliedStateCheckpoint:
             format_version=_require_format_version(payload),
             desired_state_fingerprint=_require_string(payload, "desired_state_fingerprint"),
             completed_steps=_require_string_list(payload, "completed_steps"),
+            compose_artifact_hashes=_require_compose_artifact_hashes(
+                payload, "compose_artifact_hashes"
+            ),
             lifecycle_checkpoint_contract_version=_require_lifecycle_checkpoint_contract_version(
                 payload
             ),

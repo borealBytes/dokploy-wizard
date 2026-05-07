@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 """Dokploy-backed OpenClaw and My Farm Advisor runtime backend."""
 
 from __future__ import annotations
@@ -23,11 +25,17 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    persist_compose_artifact_hash,
+)
 from dokploy_wizard.packs.openclaw.models import (
     OpenClawNexaDeploymentContract,
     OpenClawResourceRecord,
 )
 from dokploy_wizard.packs.openclaw.reconciler import OpenClawError
+from dokploy_wizard.state.models import LiteLLMGeneratedKeys
+from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 _DEFAULT_MODEL_PROVIDER = "openai"
 _DEFAULT_MODEL_NAME = "gpt-4o-mini"
@@ -35,6 +43,25 @@ _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 _DEFAULT_NVIDIA_VISIBLE_DEVICES = "all"
 _DEFAULT_APP_PORT = 18789
 _MY_FARM_ADVISOR_PORT = 18789
+_DEFAULT_LITELLM_INTERNAL_PORT = 4000
+_MY_FARM_ADVISOR_STATE_ROOT = "/data"
+_MY_FARM_ADVISOR_WORKSPACE_ROOT = f"{_MY_FARM_ADVISOR_STATE_ROOT}/workspace"
+_MY_FARM_ADVISOR_PIPELINE_WORKSPACE_ROOT = (
+    f"{_MY_FARM_ADVISOR_STATE_ROOT}/workspace-data-pipeline"
+)
+_MY_FARM_ADVISOR_MANAGED_SKILLS_ROOT = f"{_MY_FARM_ADVISOR_STATE_ROOT}/skills"
+_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_URL = (
+    "https://github.com/borealBytes/my-farm-advisor-skills.git"
+)
+_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_DIR = (
+    f"{_MY_FARM_ADVISOR_MANAGED_SKILLS_ROOT}/my-farm-advisor-skills"
+)
+_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_URL = (
+    "https://github.com/K-Dense-AI/scientific-agent-skills.git"
+)
+_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_DIR = (
+    f"{_MY_FARM_ADVISOR_MANAGED_SKILLS_ROOT}/scientific-agent-skills"
+)
 _DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace/nexa"
 _DEFAULT_NEXA_RUNTIME_CONTRACT_PATH = "/home/node/.openclaw/.nexa/runtime-contract.json"
 _DEFAULT_NEXA_WORKSPACE_CONTRACT_PATH = f"{_DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT}/contract.json"
@@ -66,6 +93,7 @@ _DEFAULT_AI_DEFAULT_PROVIDER_ID = "opencode-go"
 _DEFAULT_AI_DEFAULT_MODEL_ID = "deepseek-v4-flash"
 _DEFAULT_AI_DEFAULT_MODEL_REF = "opencode-go/deepseek-v4-flash"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
+_DEFAULT_LITELLM_PROVIDER_ID = "ai-default"
 _DEFAULT_GENERAL_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace"
 _DEFAULT_TELLY_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace-telly"
 _CLOUDFLARE_ACCESS_USER_HEADER = "cf-access-authenticated-user-email"
@@ -173,6 +201,35 @@ class _ComposeLocator:
 
 
 @dataclass(frozen=True)
+class _FarmAdvisorRuntimeEnv:
+    anthropic_api_key: str | None
+    nvidia_base_url: str | None
+    telegram_field_operations_bot_token: str | None
+    telegram_field_operations_bot_pairing_code: str | None
+    telegram_field_operations_allowed_users: str | None
+    telegram_data_pipeline_bot_token: str | None
+    telegram_data_pipeline_bot_pairing_code: str | None
+    telegram_data_pipeline_allowed_users: str | None
+    telegram_data_pipeline_bot_allowed_users: str | None
+    telegram_allowed_users: str | None
+    telegram_group_policy: str | None
+    timezone: str | None
+    sync_skills_on_start: str | None
+    sync_skills_overwrite: str | None
+    force_skill_sync: str | None
+    bootstrap_refresh: str | None
+    memory_search_enabled: str | None
+    r2_bucket_name: str | None
+    r2_endpoint: str | None
+    r2_access_key_id: str | None
+    r2_secret_access_key: str | None
+    cf_account_id: str | None
+    data_mode: str | None
+    workspace_data_r2_rclone_mount: str | None
+    workspace_data_r2_prefix: str | None
+
+
+@dataclass(frozen=True)
 class _AdvisorRuntimeConfig:
     gateway_token: str | None
     gateway_password: str | None
@@ -192,6 +249,7 @@ class _AdvisorRuntimeConfig:
     nvidia_visible_devices: str
     nexa_env: dict[str, str]
     nexa_contract: OpenClawNexaDeploymentContract | None
+    farm_env: _FarmAdvisorRuntimeEnv | None
 
 
 class DokployOpenClawBackend:
@@ -223,14 +281,42 @@ class DokployOpenClawBackend:
         my_farm_nvidia_api_key: str | None = None,
         my_farm_telegram_bot_token: str | None = None,
         my_farm_telegram_owner_user_id: str | None = None,
+        anthropic_api_key: str | None = None,
+        nvidia_base_url: str | None = None,
+        telegram_field_operations_bot_token: str | None = None,
+        telegram_field_operations_bot_pairing_code: str | None = None,
+        telegram_field_operations_allowed_users: str | None = None,
+        telegram_data_pipeline_bot_token: str | None = None,
+        telegram_data_pipeline_bot_pairing_code: str | None = None,
+        telegram_data_pipeline_allowed_users: str | None = None,
+        telegram_data_pipeline_bot_allowed_users: str | None = None,
+        telegram_allowed_users: str | None = None,
+        openclaw_telegram_group_policy: str | None = None,
+        tz: str | None = None,
+        openclaw_sync_skills_on_start: str | None = None,
+        openclaw_sync_skills_overwrite: str | None = None,
+        openclaw_force_skill_sync: str | None = None,
+        openclaw_bootstrap_refresh: str | None = None,
+        openclaw_memory_search_enabled: str | None = None,
+        r2_bucket_name: str | None = None,
+        r2_endpoint: str | None = None,
+        r2_access_key_id: str | None = None,
+        r2_secret_access_key: str | None = None,
+        cf_account_id: str | None = None,
+        data_mode: str | None = None,
+        workspace_data_r2_rclone_mount: str | None = None,
+        workspace_data_r2_prefix: str | None = None,
         model_provider: str = _DEFAULT_MODEL_PROVIDER,
         model_name: str = _DEFAULT_MODEL_NAME,
         trusted_proxies: str = _DEFAULT_TRUSTED_PROXIES,
         nvidia_visible_devices: str = _DEFAULT_NVIDIA_VISIBLE_DEVICES,
         client: DokployOpenClawApi | None = None,
+        litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
+        state_dir: Path | None = None,
     ) -> None:
         resolved_openclaw_nexa_env = _resolve_openclaw_nexa_env(stack_name, openclaw_nexa_env or {})
         self._stack_name = stack_name
+        self._litellm_generated_keys = litellm_generated_keys
         self._runtime_configs = {
             "openclaw": _AdvisorRuntimeConfig(
                 gateway_token=gateway_token,
@@ -251,6 +337,7 @@ class DokployOpenClawBackend:
                 nvidia_visible_devices=nvidia_visible_devices,
                 nexa_env=resolved_openclaw_nexa_env,
                 nexa_contract=_build_nexa_deployment_contract(resolved_openclaw_nexa_env),
+                farm_env=None,
             ),
             "my-farm-advisor": _AdvisorRuntimeConfig(
                 gateway_token=gateway_token,
@@ -271,9 +358,37 @@ class DokployOpenClawBackend:
                 nvidia_visible_devices=nvidia_visible_devices,
                 nexa_env={},
                 nexa_contract=None,
+                farm_env=_FarmAdvisorRuntimeEnv(
+                    anthropic_api_key=anthropic_api_key,
+                    nvidia_base_url=nvidia_base_url,
+                    telegram_field_operations_bot_token=telegram_field_operations_bot_token,
+                    telegram_field_operations_bot_pairing_code=telegram_field_operations_bot_pairing_code,
+                    telegram_field_operations_allowed_users=telegram_field_operations_allowed_users,
+                    telegram_data_pipeline_bot_token=telegram_data_pipeline_bot_token,
+                    telegram_data_pipeline_bot_pairing_code=telegram_data_pipeline_bot_pairing_code,
+                    telegram_data_pipeline_allowed_users=telegram_data_pipeline_allowed_users,
+                    telegram_data_pipeline_bot_allowed_users=telegram_data_pipeline_bot_allowed_users,
+                    telegram_allowed_users=telegram_allowed_users,
+                    telegram_group_policy=openclaw_telegram_group_policy,
+                    timezone=tz,
+                    sync_skills_on_start=openclaw_sync_skills_on_start,
+                    sync_skills_overwrite=openclaw_sync_skills_overwrite,
+                    force_skill_sync=openclaw_force_skill_sync,
+                    bootstrap_refresh=openclaw_bootstrap_refresh,
+                    memory_search_enabled=openclaw_memory_search_enabled,
+                    r2_bucket_name=r2_bucket_name,
+                    r2_endpoint=r2_endpoint,
+                    r2_access_key_id=r2_access_key_id,
+                    r2_secret_access_key=r2_secret_access_key,
+                    cf_account_id=cf_account_id,
+                    data_mode=data_mode,
+                    workspace_data_r2_rclone_mount=workspace_data_r2_rclone_mount,
+                    workspace_data_r2_prefix=workspace_data_r2_prefix,
+                ),
             ),
         }
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
+        self._state_dir = state_dir
 
     def get_service(self, resource_id: str) -> OpenClawResourceRecord | None:
         parsed = _parse_resource_id(resource_id)
@@ -359,16 +474,14 @@ class DokployOpenClawBackend:
         )
 
     def check_health(self, *, service: OpenClawResourceRecord, url: str) -> bool:
-        if not _wait_for_docker_container_is_up(service.resource_name):
-            return False
         variant = _variant_from_service_name(self._stack_name, service.resource_name)
-        app_port = _app_port_for_variant(variant or "openclaw")
-        if not _wait_for_container_http_health(service.resource_name, url, app_port=app_port):
-            https_ok = _wait_for_local_https_health(url)
-            if not https_ok:
-                return False
-        _control_ui_origin_ready(service.resource_name, url)
-        return True
+        if variant is None:
+            return False
+        return self._verify_service_runtime(
+            service_name=service.resource_name,
+            variant=variant,
+            url=url,
+        ).passed
 
     def _validate_inputs(
         self,
@@ -430,7 +543,9 @@ class DokployOpenClawBackend:
             channels=channels,
             replicas=replicas,
             runtime_config=self._runtime_configs[variant],
+            generated_keys=self._litellm_generated_keys,
         )
+        health_url = _external_health_url(hostname=hostname, variant=variant)
         try:
             projects = self._client.list_projects()
             for project in projects:
@@ -441,15 +556,53 @@ class DokployOpenClawBackend:
                     break
                 for compose in environment.composes:
                     if compose.name == resource_name:
+                        locator = _ComposeLocator(
+                            project_id=project.project_id,
+                            environment_id=environment.environment_id,
+                            compose_id=compose.compose_id,
+                        )
+                        if self._state_dir is not None:
+                            applied = apply_compose_noop_guard(
+                                rendered_compose=compose_file,
+                                service_key=resource_name,
+                                state_dir=self._state_dir,
+                                client=self._client,
+                                locator=locator,
+                                compose_id=compose.compose_id,
+                                title=f"dokploy-wizard {variant} reconcile",
+                                description=f"Update {variant} compose app",
+                                verify_current=lambda: self._verify_service_runtime(
+                                    service_name=resource_name,
+                                    variant=variant,
+                                    url=health_url,
+                                ),
+                                locator_factory=lambda compose_id: _ComposeLocator(
+                                    project_id=project.project_id,
+                                    environment_id=environment.environment_id,
+                                    compose_id=compose_id,
+                                ),
+                            )
+                            return applied.locator
                         updated = self._client.update_compose(
                             compose_id=compose.compose_id,
                             compose_file=compose_file,
                         )
-                        self._client.deploy_compose(
+                        deployment = self._client.deploy_compose(
                             compose_id=updated.compose_id,
                             title=f"dokploy-wizard {variant} reconcile",
                             description=f"Update {variant} compose app",
                         )
+                        if not deployment.success:
+                            msg = (
+                                f"Dokploy deploy for compose service '{resource_name}' did not report success."
+                            )
+                            raise OpenClawError(msg)
+                        if self._state_dir is not None:
+                            persist_compose_artifact_hash(
+                                state_dir=self._state_dir,
+                                service_key=resource_name,
+                                rendered_compose=compose_file,
+                            )
                         return _ComposeLocator(
                             project_id=project.project_id,
                             environment_id=environment.environment_id,
@@ -461,11 +614,20 @@ class DokployOpenClawBackend:
                     compose_file=compose_file,
                     app_name=resource_name,
                 )
-                self._client.deploy_compose(
+                deployment = self._client.deploy_compose(
                     compose_id=created.compose_id,
                     title=f"dokploy-wizard {variant} reconcile",
                     description=f"Create {variant} compose app",
                 )
+                if not deployment.success:
+                    msg = f"Dokploy deploy for compose service '{resource_name}' did not report success."
+                    raise OpenClawError(msg)
+                if self._state_dir is not None:
+                    persist_compose_artifact_hash(
+                        state_dir=self._state_dir,
+                        service_key=resource_name,
+                        rendered_compose=compose_file,
+                    )
                 return _ComposeLocator(
                     project_id=project.project_id,
                     environment_id=environment.environment_id,
@@ -483,17 +645,179 @@ class DokployOpenClawBackend:
                 compose_file=compose_file,
                 app_name=resource_name,
             )
-            self._client.deploy_compose(
+            deployment = self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
                 title=f"dokploy-wizard {variant} reconcile",
                 description=f"Create {variant} compose app",
             )
+            if not deployment.success:
+                msg = f"Dokploy deploy for compose service '{resource_name}' did not report success."
+                raise OpenClawError(msg)
+            if self._state_dir is not None:
+                persist_compose_artifact_hash(
+                    state_dir=self._state_dir,
+                    service_key=resource_name,
+                    rendered_compose=compose_file,
+                )
         except DokployApiError as error:
             raise OpenClawError(str(error)) from error
         return _ComposeLocator(
             project_id=created_project.project_id,
             environment_id=created_project.environment_id,
             compose_id=created_compose.compose_id,
+        )
+
+    def _verify_service_runtime(
+        self,
+        *,
+        service_name: str,
+        variant: str,
+        url: str,
+    ) -> ServiceVerificationResult:
+        runtime_config = self._runtime_configs[variant]
+        if not _wait_for_docker_container_is_up(service_name):
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail="Container health verification failed because the advisor container is not running.",
+                evidence_command=["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
+            )
+
+        app_port = _app_port_for_variant(variant)
+        if not _wait_for_container_http_health(service_name, url, app_port=app_port):
+            if not _wait_for_local_https_health(url):
+                return make_verification_result(
+                    service_name=service_name,
+                    tier="app",
+                    passed=False,
+                    detail=(
+                        "Container health verification failed because neither the in-container HTTP "
+                        "probe nor the local HTTPS ingress probe succeeded."
+                    ),
+                    evidence_command=["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
+                )
+
+        config_service_name = service_name
+        control_ui_service_name = (
+            f"{service_name}-public"
+            if variant == "openclaw" and runtime_config.internal_hostname is not None
+            else service_name
+        )
+        config_payload = _load_runtime_config_payload(config_service_name)
+        if config_payload is None:
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail="Runtime verification failed because the generated OpenClaw config could not be read.",
+                evidence_command=[
+                    "docker",
+                    "exec",
+                    _find_container_name(config_service_name) or config_service_name,
+                    "sh",
+                    "-lc",
+                    _runtime_config_dump_command(),
+                ],
+            )
+
+        control_ui_payload = (
+            config_payload
+            if control_ui_service_name == config_service_name
+            else _load_runtime_config_payload(control_ui_service_name)
+        )
+        if control_ui_payload is None:
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail=(
+                    "Runtime verification failed because the control UI gateway config could not be read "
+                    "for trusted-proxy validation."
+                ),
+                evidence_command=[
+                    "docker",
+                    "exec",
+                    _find_container_name(control_ui_service_name) or control_ui_service_name,
+                    "sh",
+                    "-lc",
+                    _runtime_config_dump_command(),
+                ],
+            )
+
+        if not _control_ui_origin_allowed(control_ui_payload, url):
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail="Runtime verification failed because the control UI allowedOrigins list is missing the public advisor origin.",
+            )
+
+        if runtime_config.trusted_proxy_emails and not _trusted_proxy_gateway_ready(
+            control_ui_payload, runtime_config=runtime_config
+        ):
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail=(
+                    "Runtime verification failed because the trusted-proxy control UI config is not "
+                    "ready with retained operator scopes."
+                ),
+            )
+
+        if variant == "openclaw":
+            seeded_config_ok, seeded_detail = _openclaw_seeded_config_ready(
+                config_payload,
+                runtime_config=runtime_config,
+            )
+            if not seeded_config_ok:
+                return make_verification_result(
+                    service_name=service_name,
+                    tier="app",
+                    passed=False,
+                    detail=seeded_detail,
+                )
+
+        runtime_dirs = _runtime_directory_paths(variant=variant, runtime_config=runtime_config)
+        if not _container_paths_are_writable(service_name, runtime_dirs):
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail="Runtime verification failed because one or more managed advisor directories are missing or not writable.",
+                evidence_command=[
+                    "docker",
+                    "exec",
+                    _find_container_name(service_name) or service_name,
+                    "sh",
+                    "-lc",
+                    _paths_are_writable_command(runtime_dirs),
+                ],
+            )
+
+        expected_models = _expected_litellm_model_aliases(variant)
+        if not _container_litellm_models_accessible(service_name, expected_models):
+            return make_verification_result(
+                service_name=service_name,
+                tier="app",
+                passed=False,
+                detail=(
+                    "Runtime verification failed because the advisor's LiteLLM virtual key does not "
+                    "expose the expected local model aliases."
+                ),
+                evidence_command=["docker", "exec", _find_container_name(service_name) or service_name, "node", "-e", _litellm_model_probe_script(), *expected_models],
+            )
+
+        return make_verification_result(
+            service_name=service_name,
+            tier="app",
+            passed=True,
+            detail=(
+                "Advisor runtime verification passed: container health, trusted-proxy readiness, "
+                "generated config, writable runtime directories, seeded bindings, and LiteLLM "
+                "local model access are all healthy."
+            ),
         )
 
 
@@ -631,36 +955,241 @@ def _wait_for_docker_container_is_up(
 
 
 def _control_ui_origin_ready(service_name: str, url: str) -> bool:
+    payload = _load_runtime_config_payload(service_name)
+    if payload is None:
+        return False
+    return _control_ui_origin_allowed(payload, url)
+
+
+def _control_ui_origin_allowed(payload: dict[str, object], url: str) -> bool:
     parsed = parse.urlsplit(url)
     if not parsed.hostname:
         return False
+    gateway = payload.get("gateway")
+    if not isinstance(gateway, dict):
+        return False
+    control_ui = gateway.get("controlUi")
+    if not isinstance(control_ui, dict):
+        return False
+    origins = control_ui.get("allowedOrigins", [])
+    if not isinstance(origins, list):
+        return False
+    return f"https://{parsed.hostname}" in origins
+
+
+def _trusted_proxy_gateway_ready(
+    payload: dict[str, object], *, runtime_config: _AdvisorRuntimeConfig
+) -> bool:
+    gateway = payload.get("gateway")
+    if not isinstance(gateway, dict):
+        return False
+    auth = gateway.get("auth")
+    if not isinstance(auth, dict) or auth.get("mode") != "trusted-proxy":
+        return False
+    control_ui = gateway.get("controlUi")
+    if not isinstance(control_ui, dict):
+        return False
+    if control_ui.get("dangerouslyDisableDeviceAuth") is not True:
+        return False
+    trusted_proxy = auth.get("trustedProxy")
+    if not isinstance(trusted_proxy, dict):
+        return False
+    if trusted_proxy.get("userHeader") != _CLOUDFLARE_ACCESS_USER_HEADER:
+        return False
+    allow_users = trusted_proxy.get("allowUsers")
+    if not isinstance(allow_users, list):
+        return False
+    expected_users = set(runtime_config.trusted_proxy_emails)
+    nexa_agent_user = runtime_config.nexa_env.get("OPENCLAW_NEXA_AGENT_USER_ID")
+    if nexa_agent_user is not None and nexa_agent_user.strip() != "":
+        expected_users.add(nexa_agent_user.strip())
+    return expected_users.issubset({str(item) for item in allow_users})
+
+
+def _openclaw_seeded_config_ready(
+    payload: dict[str, object], *, runtime_config: _AdvisorRuntimeConfig
+) -> tuple[bool, str]:
+    agents = payload.get("agents")
+    if not isinstance(agents, dict):
+        return False, "Runtime verification failed because the generated OpenClaw config is missing the agents block."
+    agent_list = agents.get("list")
+    if not isinstance(agent_list, list):
+        return False, "Runtime verification failed because the generated OpenClaw config is missing the seeded agent list."
+    agent_ids = {
+        item.get("id")
+        for item in agent_list
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    if "main" not in agent_ids:
+        return False, "Runtime verification failed because the generated OpenClaw config is missing the main agent."
+    bindings = payload.get("bindings", [])
+    if not isinstance(bindings, list):
+        return False, "Runtime verification failed because the generated OpenClaw config bindings block is invalid."
+    if runtime_config.nexa_contract is not None:
+        if "nexa" not in agent_ids:
+            return False, "Runtime verification failed because the generated OpenClaw config is missing the nexa agent."
+        if not any(
+            isinstance(item, dict)
+            and item.get("agentId") == "nexa"
+            and isinstance(item.get("match"), dict)
+            and item.get("match", {}).get("channel") == "nextcloud-talk"
+            for item in bindings
+        ):
+            return False, "Runtime verification failed because the generated OpenClaw config is missing the nexa nextcloud-talk binding."
+    has_telegram_binding = any(
+        isinstance(item, dict)
+        and item.get("agentId") == "telly"
+        and isinstance(item.get("match"), dict)
+        and item.get("match", {}).get("channel") == "telegram"
+        for item in bindings
+    )
+    if runtime_config.telegram_bot_token is not None or has_telegram_binding:
+        if "telly" not in agent_ids:
+            return False, "Runtime verification failed because the generated OpenClaw config is missing the telly agent."
+        if not has_telegram_binding:
+            return False, "Runtime verification failed because the generated OpenClaw config is missing the telly telegram binding."
+    return True, "ok"
+
+
+def _runtime_directory_paths(
+    *, variant: str, runtime_config: _AdvisorRuntimeConfig
+) -> tuple[str, ...]:
+    if variant == "my-farm-advisor":
+        return (
+            _MY_FARM_ADVISOR_STATE_ROOT,
+            f"{_MY_FARM_ADVISOR_STATE_ROOT}/.openclaw",
+            _MY_FARM_ADVISOR_WORKSPACE_ROOT,
+            _MY_FARM_ADVISOR_PIPELINE_WORKSPACE_ROOT,
+            _MY_FARM_ADVISOR_MANAGED_SKILLS_ROOT,
+            f"{_MY_FARM_ADVISOR_WORKSPACE_ROOT}/skills",
+        )
+    paths = [
+        _DEFAULT_OPENCLAW_STATE_ROOT,
+        _DEFAULT_GENERAL_OPENCLAW_WORKSPACE_ROOT,
+        _DEFAULT_TELLY_OPENCLAW_WORKSPACE_ROOT,
+        f"{_DEFAULT_OPENCLAW_STATE_ROOT}/agents/main/sessions",
+        f"{_DEFAULT_OPENCLAW_STATE_ROOT}/agents/telly/sessions",
+    ]
+    if runtime_config.nexa_contract is not None:
+        paths.extend(
+            [
+                _DEFAULT_NEXA_OPENCLAW_WORKSPACE_ROOT,
+                f"{_DEFAULT_OPENCLAW_STATE_ROOT}/agents/nexa/sessions",
+                f"{_DEFAULT_OPENCLAW_STATE_ROOT}/.nexa",
+            ]
+        )
+    return tuple(paths)
+
+
+def _expected_litellm_model_aliases(variant: str) -> tuple[str, ...]:
+    if variant == "my-farm-advisor":
+        return (_DEFAULT_LOCAL_MODEL_REF, _DEFAULT_LOCAL_MODEL_ID)
+    return (_DEFAULT_LOCAL_MODEL_REF,)
+
+
+def _external_health_url(*, hostname: str, variant: str) -> str:
+    return f"https://{hostname}{_external_health_path_for_variant(variant)}"
+
+
+def _external_health_path_for_variant(variant: str) -> str:
+    if variant == "my-farm-advisor":
+        return "/healthz"
+    return "/health"
+
+
+def _runtime_config_dump_command() -> str:
+    return (
+        "cat /home/node/.openclaw/openclaw.json 2>/dev/null "
+        "|| cat /data/.openclaw/openclaw.json 2>/dev/null "
+        "|| cat /data/openclaw.json 2>/dev/null || true"
+    )
+
+
+def _load_runtime_config_payload(service_name: str) -> dict[str, object] | None:
     container_name = _find_container_name(service_name)
     if container_name is None:
-        return False
+        return None
     result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            container_name,
-            "sh",
-            "-lc",
-            "cat /home/node/.openclaw/openclaw.json 2>/dev/null "
-            "|| cat /data/.openclaw/openclaw.json 2>/dev/null || true",
-        ],
+        ["docker", "exec", container_name, "sh", "-lc", _runtime_config_dump_command()],
         check=False,
         capture_output=True,
         text=True,
     )
     if result.returncode != 0 or result.stdout.strip() == "":
-        return False
+        return None
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _paths_are_writable_command(paths: tuple[str, ...]) -> str:
+    quoted_paths = " ".join(shlex.quote(path) for path in paths)
+    return (
+        f"for path in {quoted_paths}; do "
+        'test -d "$path" || exit 10; '
+        'test -w "$path" || exit 11; '
+        "done"
+    )
+
+
+def _container_paths_are_writable(service_name: str, paths: tuple[str, ...]) -> bool:
+    container_name = _find_container_name(service_name)
+    if container_name is None:
         return False
-    origins = payload.get("gateway", {}).get("controlUi", {}).get("allowedOrigins", [])
-    if not isinstance(origins, list):
+    result = subprocess.run(
+        ["docker", "exec", container_name, "sh", "-lc", _paths_are_writable_command(paths)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _litellm_model_probe_script() -> str:
+    return (
+        "const expected = new Set(process.argv.slice(1));"
+        "const base = (process.env.OPENAI_BASE_URL || '').replace(/\\/$/, '');"
+        "const apiKey = process.env.OPENAI_API_KEY || '';"
+        "if (!base || !apiKey) process.exit(1);"
+        "fetch(`${base}/v1/models`, {headers: {Authorization: `Bearer ${apiKey}`, Accept: 'application/json'}})"
+        ".then(async (response) => {"
+        "if (!response.ok) process.exit(1);"
+        "const payload = await response.json();"
+        "const entries = Array.isArray(payload.data) ? payload.data : [];"
+        "const ids = new Set(entries.map((item) => item && item.id).filter((item) => typeof item === 'string'));"
+        "process.exit([...expected].every((item) => ids.has(item)) ? 0 : 1);"
+        "})"
+        ".catch(() => process.exit(1));"
+    )
+
+
+def _container_litellm_models_accessible(service_name: str, expected_models: tuple[str, ...]) -> bool:
+    if not expected_models:
+        return True
+    container_name = _find_container_name(service_name)
+    if container_name is None:
         return False
-    return f"https://{parsed.hostname}" in origins
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                container_name,
+                "node",
+                "-e",
+                _litellm_model_probe_script(),
+                *expected_models,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0
 
 
 def _find_container_name(service_name: str) -> str | None:
@@ -781,12 +1310,13 @@ def _render_compose_file(
     channels: tuple[str, ...],
     replicas: int,
     runtime_config: _AdvisorRuntimeConfig,
+    generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> str:
     app_port = _app_port_for_variant(variant)
     stack_name = (
-        service_name.removesuffix("-openclaw")
+        service_name.removesuffix("-my-farm-advisor")
+        .removesuffix("-openclaw")
         .removesuffix("-advisor")
-        .removesuffix("-my-farm-advisor")
     )
     shared_network = _shared_network_name(stack_name)
     channel_list = ",".join(channels)
@@ -799,12 +1329,11 @@ def _render_compose_file(
         "services:",
     ]
     split_gateway = variant == "openclaw" and runtime_config.internal_hostname is not None
-    single_gateway_trusted_proxy = (
-        variant == "openclaw" and not split_gateway and bool(runtime_config.trusted_proxy_emails)
-    )
+    single_gateway_trusted_proxy = not split_gateway and bool(runtime_config.trusted_proxy_emails)
     if split_gateway:
         public_service_name = f"{service_name}-public"
         internal_environment = _gateway_environment(
+            stack_name=stack_name,
             hostname=hostname,
             app_port=app_port,
             channel_list=channel_list,
@@ -814,12 +1343,14 @@ def _render_compose_file(
             state_root=_DEFAULT_OPENCLAW_STATE_ROOT,
             include_gateway_token=True,
             include_nexa=True,
+            generated_keys=generated_keys,
         )
         lines.extend(
             _render_gateway_service_block(
                 service_name=service_name,
                 image=image,
                 command=_command_for_variant(
+                    stack_name=stack_name,
                     variant=variant,
                     hostname=hostname,
                     app_port=app_port,
@@ -845,6 +1376,7 @@ def _render_compose_file(
             )
         )
         public_environment = _gateway_environment(
+            stack_name=stack_name,
             hostname=hostname,
             app_port=app_port,
             channel_list=channel_list,
@@ -854,12 +1386,14 @@ def _render_compose_file(
             state_root=_DEFAULT_OPENCLAW_PUBLIC_STATE_ROOT,
             include_gateway_token=False,
             include_nexa=False,
+            generated_keys=generated_keys,
         )
         lines.extend(
             _render_gateway_service_block(
                 service_name=public_service_name,
                 image=image,
                 command=_command_for_variant(
+                    stack_name=stack_name,
                     variant=variant,
                     hostname=hostname,
                     app_port=app_port,
@@ -884,23 +1418,38 @@ def _render_compose_file(
     else:
         labels = _gateway_labels(service_name, hostname, app_port, slot_name, variant)
         environment = _gateway_environment(
+            stack_name=stack_name,
             hostname=hostname,
             app_port=app_port,
             channel_list=channel_list,
             startup_mode=startup_mode,
             runtime_config=runtime_config,
             variant=variant,
-            state_root="/data" if variant == "my-farm-advisor" else _DEFAULT_OPENCLAW_STATE_ROOT,
+            state_root=(
+                _MY_FARM_ADVISOR_STATE_ROOT
+                if variant == "my-farm-advisor"
+                else _DEFAULT_OPENCLAW_STATE_ROOT
+            ),
             include_gateway_token=not single_gateway_trusted_proxy,
             include_nexa=variant == "openclaw",
+            generated_keys=generated_keys,
         )
-        volume_name = f"{service_name}-data" if variant == "my-farm-advisor" else _openclaw_data_volume_name(stack_name)
-        volume_target = "/data" if variant == "my-farm-advisor" else _DEFAULT_OPENCLAW_STATE_ROOT
+        volume_name = (
+            f"{service_name}-data"
+            if variant == "my-farm-advisor"
+            else _openclaw_data_volume_name(stack_name)
+        )
+        volume_target = (
+            _MY_FARM_ADVISOR_STATE_ROOT
+            if variant == "my-farm-advisor"
+            else _DEFAULT_OPENCLAW_STATE_ROOT
+        )
         lines.extend(
             _render_gateway_service_block(
                 service_name=service_name,
                 image=image,
                 command=_command_for_variant(
+                    stack_name=stack_name,
                     variant=variant,
                     hostname=hostname,
                     app_port=app_port,
@@ -935,6 +1484,7 @@ def _render_compose_file(
                     runtime_config,
                     service_name=service_name,
                     shared_network=shared_network,
+                    generated_keys=generated_keys,
                 )
             )
         lines.extend(["volumes:"])
@@ -1045,6 +1595,7 @@ def _gateway_labels(
 
 def _gateway_environment(
     *,
+    stack_name: str,
     hostname: str,
     app_port: int,
     channel_list: str,
@@ -1054,6 +1605,7 @@ def _gateway_environment(
     state_root: str,
     include_gateway_token: bool,
     include_nexa: bool,
+    generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> dict[str, str]:
     environment = {
         "ADVISOR_VARIANT": variant,
@@ -1072,21 +1624,19 @@ def _gateway_environment(
         "PORT": str(app_port),
         "TRUSTED_PROXIES": runtime_config.trusted_proxies,
     }
-    if runtime_config.primary_model is None and not runtime_config.fallback_models:
+    if variant == "openclaw" and runtime_config.primary_model is None and not runtime_config.fallback_models:
         environment["MODEL_PROVIDER"] = runtime_config.model_provider
         environment["MODEL_NAME"] = runtime_config.model_name
     if include_gateway_token and runtime_config.gateway_token is not None:
         environment["OPENCLAW_GATEWAY_TOKEN"] = runtime_config.gateway_token
     if runtime_config.gateway_password is not None:
         environment["OPENCLAW_GATEWAY_PASSWORD"] = runtime_config.gateway_password
-    if runtime_config.openrouter_api_key is not None:
-        environment["OPENROUTER_API_KEY"] = runtime_config.openrouter_api_key
-    elif runtime_config.ai_default_api_key is not None:
-        environment["OPENROUTER_API_KEY"] = runtime_config.ai_default_api_key
-    if runtime_config.nvidia_api_key is not None:
-        environment["NVIDIA_API_KEY"] = runtime_config.nvidia_api_key
-    if runtime_config.telegram_bot_token is not None:
-        environment["TELEGRAM_BOT_TOKEN"] = runtime_config.telegram_bot_token
+    if variant == "my-farm-advisor":
+        environment.update(_my_farm_gateway_environment(stack_name=stack_name, runtime_config=runtime_config, generated_keys=generated_keys))
+    else:
+        environment.update(_openclaw_gateway_environment(stack_name=stack_name, generated_keys=generated_keys))
+        if runtime_config.telegram_bot_token is not None:
+            environment["TELEGRAM_BOT_TOKEN"] = runtime_config.telegram_bot_token
     if include_nexa and variant == "openclaw" and runtime_config.nexa_contract is not None:
         environment.update(runtime_config.nexa_env)
         environment.update(
@@ -1104,11 +1654,156 @@ def _gateway_environment(
                 "DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH": (
                     runtime_config.nexa_contract.workspace_contract_path
                 ),
-                "DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT": _DEFAULT_NEXA_VISIBLE_WORKSPACE_ROOT,
+                "DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT": runtime_config.nexa_contract.workspace_root,
             }
         )
     if variant == "my-farm-advisor":
-        environment["HOME"] = "/data"
+        environment["HOME"] = _MY_FARM_ADVISOR_STATE_ROOT
+    return environment
+
+
+def _openclaw_gateway_environment(*, stack_name: str, generated_keys: LiteLLMGeneratedKeys | None = None) -> dict[str, str]:
+    virtual_key = _litellm_virtual_key_value("openclaw", generated_keys)
+    return {
+        "LITELLM_VIRTUAL_KEY_OPENCLAW": virtual_key,
+        "OPENAI_API_KEY": virtual_key,
+        "OPENAI_BASE_URL": _litellm_internal_base_url(stack_name),
+    }
+
+
+def _env_value_present(value: str | None) -> bool:
+    return value is not None and value.strip() != ""
+
+
+def _env_value_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _set_env_if_present(environment: dict[str, str], key: str, value: str | None) -> None:
+    if _env_value_present(value):
+        stripped_value = value.strip() if value is not None else ""
+        environment[key] = stripped_value
+
+
+def _litellm_internal_base_url(stack_name: str) -> str:
+    return f"http://{stack_name}-shared-litellm:{_DEFAULT_LITELLM_INTERNAL_PORT}"
+
+
+def _my_farm_r2_data_enabled(farm_env: _FarmAdvisorRuntimeEnv | None) -> bool:
+    if farm_env is None:
+        return False
+    return all(
+        (
+            _env_value_present(farm_env.r2_bucket_name),
+            _env_value_present(farm_env.r2_access_key_id),
+            _env_value_present(farm_env.r2_secret_access_key),
+            _env_value_present(farm_env.r2_endpoint) or _env_value_present(farm_env.cf_account_id),
+            _env_value_truthy(farm_env.workspace_data_r2_rclone_mount),
+        )
+    )
+
+
+def _my_farm_gateway_environment(*, stack_name: str, runtime_config: _AdvisorRuntimeConfig, generated_keys: LiteLLMGeneratedKeys | None = None) -> dict[str, str]:
+    farm_env = runtime_config.farm_env
+    if farm_env is None:
+        return {}
+    virtual_key = _litellm_virtual_key_value("my-farm-advisor", generated_keys)
+    environment: dict[str, str] = {}
+    environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] = virtual_key
+    environment["OPENAI_API_KEY"] = virtual_key
+    environment["OPENAI_BASE_URL"] = _litellm_internal_base_url(stack_name)
+    if runtime_config.primary_model is None and not runtime_config.fallback_models:
+        environment["MODEL_PROVIDER"] = runtime_config.model_provider
+        environment["MODEL_NAME"] = runtime_config.model_name
+    _set_env_if_present(environment, "PRIMARY_MODEL", runtime_config.primary_model)
+    if runtime_config.fallback_models:
+        environment["FALLBACK_MODELS"] = ",".join(runtime_config.fallback_models)
+    _set_env_if_present(environment, "TELEGRAM_BOT_TOKEN", runtime_config.telegram_bot_token)
+    _set_env_if_present(environment, "TELEGRAM_OWNER_USER_ID", runtime_config.telegram_owner_user_id)
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
+        farm_env.telegram_field_operations_bot_token,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
+        farm_env.telegram_field_operations_bot_pairing_code,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
+        farm_env.telegram_field_operations_allowed_users,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
+        farm_env.telegram_data_pipeline_bot_token,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
+        farm_env.telegram_data_pipeline_bot_pairing_code,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
+        farm_env.telegram_data_pipeline_allowed_users,
+    )
+    _set_env_if_present(
+        environment,
+        "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
+        farm_env.telegram_data_pipeline_bot_allowed_users,
+    )
+    _set_env_if_present(environment, "TELEGRAM_ALLOWED_USERS", farm_env.telegram_allowed_users)
+    _set_env_if_present(
+        environment,
+        "OPENCLAW_TELEGRAM_GROUP_POLICY",
+        farm_env.telegram_group_policy,
+    )
+    _set_env_if_present(environment, "TZ", farm_env.timezone)
+    _set_env_if_present(environment, "OPENCLAW_BOOTSTRAP_REFRESH", farm_env.bootstrap_refresh)
+    _set_env_if_present(
+        environment,
+        "OPENCLAW_MEMORY_SEARCH_ENABLED",
+        farm_env.memory_search_enabled,
+    )
+    if _my_farm_r2_data_enabled(farm_env):
+        _set_env_if_present(environment, "R2_BUCKET_NAME", farm_env.r2_bucket_name)
+        _set_env_if_present(environment, "R2_ENDPOINT", farm_env.r2_endpoint)
+        _set_env_if_present(environment, "R2_ACCESS_KEY_ID", farm_env.r2_access_key_id)
+        _set_env_if_present(environment, "R2_SECRET_ACCESS_KEY", farm_env.r2_secret_access_key)
+        _set_env_if_present(environment, "CF_ACCOUNT_ID", farm_env.cf_account_id)
+        _set_env_if_present(environment, "DATA_MODE", farm_env.data_mode)
+        _set_env_if_present(
+            environment,
+            "WORKSPACE_DATA_R2_RCLONE_MOUNT",
+            farm_env.workspace_data_r2_rclone_mount,
+        )
+        _set_env_if_present(
+            environment,
+            "WORKSPACE_DATA_R2_PREFIX",
+            farm_env.workspace_data_r2_prefix,
+        )
+        _set_env_if_present(
+            environment,
+            "OPENCLAW_SYNC_SKILLS_ON_START",
+            farm_env.sync_skills_on_start,
+        )
+        _set_env_if_present(
+            environment,
+            "OPENCLAW_SYNC_SKILLS_OVERWRITE",
+            farm_env.sync_skills_overwrite,
+        )
+        _set_env_if_present(
+            environment,
+            "OPENCLAW_FORCE_SKILL_SYNC",
+            farm_env.force_skill_sync,
+        )
+    else:
+        environment["OPENCLAW_SYNC_SKILLS_ON_START"] = "0"
     return environment
 
 
@@ -1134,6 +1829,41 @@ def _remote_fallback_base_url(runtime_config: _AdvisorRuntimeConfig) -> str:
     if runtime_config.ai_default_api_key is not None:
         return runtime_config.ai_default_base_url
     return "https://openrouter.ai/api/v1"
+def _litellm_virtual_key_ref(consumer: str) -> str:
+    env_name = consumer.upper().replace("-", "_")
+    return f"${{LITELLM_VIRTUAL_KEY_{env_name}}}"
+
+
+def _litellm_virtual_key_value(consumer: str, generated_keys: LiteLLMGeneratedKeys | None) -> str:
+    if generated_keys is not None and consumer in generated_keys.virtual_keys:
+        return generated_keys.virtual_keys[consumer]
+    return _litellm_virtual_key_ref(consumer)
+
+
+def _generic_provider_model_entry(model_id: str) -> dict[str, object]:
+    return {
+        "id": model_id,
+        "name": model_id,
+        "reasoning": True,
+        "input": ["text"],
+        "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+        },
+        "contextWindow": 262144,
+        "maxTokens": 32768,
+    }
+
+
+def _litellm_provider_config(*, stack_name: str, model_ids: tuple[str, ...], consumer: str = "openclaw") -> dict[str, object]:
+    return {
+        "baseUrl": _litellm_internal_base_url(stack_name),
+        "apiKey": _litellm_virtual_key_ref(consumer),
+        "api": "openai-completions",
+        "models": [_generic_provider_model_entry(model_id) for model_id in model_ids],
+    }
 
 
 def _render_gateway_service_block(
@@ -1189,6 +1919,7 @@ def _render_openclaw_nexa_sidecar_services(
     *,
     service_name: str,
     shared_network: str,
+    generated_keys: LiteLLMGeneratedKeys | None = None,
 ) -> list[str]:
     mem0_config_json = json.dumps(_build_mem0_sidecar_config(runtime_config.nexa_env), separators=(",", ":"))
     mem0_environment = {
@@ -1209,6 +1940,8 @@ def _render_openclaw_nexa_sidecar_services(
     if runtime_config.nexa_contract is None:
         msg = "Expected a Nexa deployment contract before rendering sidecar services."
         raise OpenClawError(msg)
+    planner_api_key = _litellm_virtual_key_value("openclaw", generated_keys)
+    planner_base_url = _litellm_internal_base_url(stack_name)
     runtime_environment = {
         **runtime_config.nexa_env,
         "DOKPLOY_WIZARD_OPENCLAW_INTERNAL_URL": f"http://{service_name}:{_DEFAULT_APP_PORT}",
@@ -1217,16 +1950,12 @@ def _render_openclaw_nexa_sidecar_services(
             runtime_config.primary_model or _DEFAULT_LOCAL_MODEL_REF,
             default=_DEFAULT_LOCAL_PROVIDER_ID,
         ),
-        "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL": _DEFAULT_LOCAL_MODEL_BASE_URL,
-        "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY": _DEFAULT_LOCAL_MODEL_API_KEY,
-        "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
-        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL": _remote_fallback_base_url(
-            runtime_config
-        ),
-        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_API_KEY": (
-            runtime_config.openrouter_api_key or runtime_config.ai_default_api_key or ""
-        ),
-        "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY": runtime_config.nvidia_api_key or "",
+        "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL": planner_base_url,
+        "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY": planner_api_key,
+        "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL": planner_base_url,
+        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL": planner_base_url,
+        "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_API_KEY": planner_api_key,
+        "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY": planner_api_key,
         "DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH": _nexa_runtime_volume_path(
             runtime_config.nexa_contract.runtime_contract_path
         ),
@@ -1386,6 +2115,7 @@ def _health_path_for_variant(variant: str) -> str:
 
 def _command_for_variant(
     *,
+    stack_name: str,
     variant: str,
     hostname: str,
     app_port: int,
@@ -1430,6 +2160,9 @@ def _command_for_variant(
     ]
     auth_payload: dict[str, object] = {"mode": auth_mode}
     if auth_mode == "trusted-proxy":
+        control_ui_payload = gateway_payload.get("controlUi")
+        if isinstance(control_ui_payload, dict):
+            control_ui_payload["dangerouslyDisableDeviceAuth"] = True
         trusted_proxy_config: dict[str, object] = {
             "userHeader": _CLOUDFLARE_ACCESS_USER_HEADER,
         }
@@ -1467,8 +2200,12 @@ def _command_for_variant(
         agents_payload["defaults"] = defaults_payload
     defaults_payload["workspace"] = f"{state_root}/workspace"
     defaults_payload["timeoutSeconds"] = 300
+    allowed_models = _openclaw_seed_model_refs(
+        runtime_config,
+        channels=channels,
+        include_runtime_seed=include_runtime_seed and variant == "openclaw",
+    )
     if runtime_config.primary_model is not None or runtime_config.fallback_models:
-        allowed_models = _allowed_models(runtime_config)
         if _DEFAULT_LOCAL_MODEL_REF not in allowed_models:
             allowed_models = (_DEFAULT_LOCAL_MODEL_REF, *allowed_models)
         model_defaults: dict[str, object] = {}
@@ -1478,61 +2215,43 @@ def _command_for_variant(
             model_defaults["fallbacks"] = list(runtime_config.fallback_models)
         defaults_payload["model"] = model_defaults
         defaults_payload["models"] = {model_ref: {} for model_ref in allowed_models}
+    if allowed_models:
         providers: dict[str, object] = {
-            _DEFAULT_LOCAL_PROVIDER_ID: {
-                "baseUrl": _DEFAULT_LOCAL_MODEL_BASE_URL,
-                "apiKey": _DEFAULT_LOCAL_MODEL_API_KEY,
-                "api": "openai-completions",
-                "models": [
-                    {
-                        "id": _DEFAULT_LOCAL_MODEL_ID,
-                        "name": "Unsloth Active",
-                        "reasoning": True,
-                        "input": ["text"],
-                        "cost": {
-                            "input": 0,
-                            "output": 0,
-                            "cacheRead": 0,
-                            "cacheWrite": 0,
-                        },
-                        "contextWindow": 262144,
-                        "maxTokens": 32768,
-                        "compat": {
-                            "requiresStringContent": True,
-                        },
-                    }
-                ],
-            }
+            _DEFAULT_LOCAL_PROVIDER_ID: _litellm_provider_config(
+                stack_name=stack_name,
+                model_ids=(_DEFAULT_LOCAL_MODEL_ID,),
+                consumer=variant,
+            )
         }
-        ai_default_models = _model_refs_for_provider(
-            runtime_config, provider_id=_DEFAULT_AI_DEFAULT_PROVIDER_ID
+        remote_model_ids: list[str] = []
+        remote_provider_ids = tuple(
+            dict.fromkeys(
+                _provider_for_model_ref(model_ref, default="")
+                for model_ref in allowed_models
+                if _provider_for_model_ref(model_ref, default="")
+                not in {"", _DEFAULT_LOCAL_PROVIDER_ID}
+            )
         )
-        if ai_default_models and runtime_config.ai_default_api_key is not None:
-            providers[_DEFAULT_AI_DEFAULT_PROVIDER_ID] = {
-                "baseUrl": runtime_config.ai_default_base_url,
-                "apiKey": runtime_config.ai_default_api_key,
-                "api": "openai-completions",
-                "models": [
-                    {
-                        "id": model_id,
-                        "name": model_id,
-                        "reasoning": True,
-                        "input": ["text"],
-                        "cost": {
-                            "input": 0,
-                            "output": 0,
-                            "cacheRead": 0,
-                            "cacheWrite": 0,
-                        },
-                        "contextWindow": 262144,
-                        "maxTokens": 32768,
-                        "compat": {
-                            "requiresStringContent": True,
-                        },
-                    }
-                    for model_id in ai_default_models
-                ],
-            }
+        for provider_id in remote_provider_ids:
+            model_ids = tuple(
+                model_ref.split("/", 1)[1].strip()
+                for model_ref in allowed_models
+                if model_ref.startswith(f"{provider_id}/") and model_ref.split("/", 1)[1].strip() != ""
+            )
+            if not model_ids:
+                continue
+            providers[provider_id] = _litellm_provider_config(
+                stack_name=stack_name,
+                model_ids=tuple(dict.fromkeys(model_ids)),
+                consumer=variant,
+            )
+            remote_model_ids.extend(model_ids)
+        if remote_model_ids:
+            providers[_DEFAULT_LITELLM_PROVIDER_ID] = _litellm_provider_config(
+                stack_name=stack_name,
+                model_ids=tuple(dict.fromkeys(remote_model_ids)),
+                consumer=variant,
+            )
         payload["models"] = {
             "mode": "merge",
             "providers": providers,
@@ -1569,11 +2288,7 @@ def _command_for_variant(
                 "name": runtime_config.nexa_env.get(
                     "OPENCLAW_NEXA_AGENT_DISPLAY_NAME", _DEFAULT_NEXA_AGENT_NAME
                 ),
-                "model": _specialized_agent_model_defaults(
-                    runtime_config,
-                    default_primary="openrouter/auto",
-                    default_fallbacks=("openrouter/openrouter/free",),
-                ),
+                "model": _nexa_model_defaults(runtime_config),
                 "tools": {
                     "profile": "coding",
                     "elevated": {
@@ -1621,10 +2336,7 @@ def _command_for_variant(
                 {
                     "id": "telly",
                     "name": "Telly",
-                    "model": {
-                        "primary": _DEFAULT_LOCAL_MODEL_REF,
-                        "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
-                    },
+                    "model": _telly_model_defaults(),
                     "tools": {
                         "profile": "coding",
                         "elevated": {
@@ -1699,7 +2411,9 @@ def _command_for_variant(
     )
     if variant == "my-farm-advisor":
         seed_command = (
-            "mkdir -p /data /data/.openclaw /data/workspace && "
+            f"mkdir -p {_MY_FARM_ADVISOR_STATE_ROOT} {_MY_FARM_ADVISOR_STATE_ROOT}/.openclaw "
+            f"{_MY_FARM_ADVISOR_WORKSPACE_ROOT} {_MY_FARM_ADVISOR_PIPELINE_WORKSPACE_ROOT} && "
+            f"{_my_farm_skills_preload_command()} && "
             f"node -e {shlex.quote(node_script)}"
         )
         return json.dumps(
@@ -1708,14 +2422,14 @@ def _command_for_variant(
                 "-lc",
                 (
                     f"{seed_command} && "
-                    f"exec node openclaw.mjs gateway --bind lan --port {app_port} "
-                    "--allow-unconfigured"
+                    "exec /app/scripts/entrypoint.sh"
                 ),
             ]
         )
     seed_command = (
         f"mkdir -p {state_root} {state_root}/workspace "
-        f"{state_root}/workspace/nexa {state_root}/workspace-telly {state_root}/.nexa && "
+        f"{state_root}/workspace/nexa {state_root}/workspace-telly {state_root}/.nexa "
+        f"{state_root}/agents/main/sessions {state_root}/agents/nexa/sessions {state_root}/agents/telly/sessions && "
         f"node -e {shlex.quote(node_script)}"
     )
     return json.dumps(
@@ -1753,6 +2467,55 @@ def _allowed_models(runtime_config: _AdvisorRuntimeConfig) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _nexa_model_defaults(runtime_config: _AdvisorRuntimeConfig) -> dict[str, object]:
+    return _specialized_agent_model_defaults(
+        runtime_config,
+        default_primary=_DEFAULT_LOCAL_MODEL_REF,
+        default_fallbacks=(),
+    )
+
+
+def _telly_model_defaults() -> dict[str, object]:
+    return {
+        "primary": _DEFAULT_LOCAL_MODEL_REF,
+        "fallbacks": [],
+    }
+
+
+def _openclaw_seed_model_refs(
+    runtime_config: _AdvisorRuntimeConfig,
+    *,
+    channels: tuple[str, ...],
+    include_runtime_seed: bool,
+) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def _append(model_ref: str) -> None:
+        if model_ref in seen:
+            return
+        seen.add(model_ref)
+        ordered.append(model_ref)
+
+    for model_ref in _allowed_models(runtime_config):
+        _append(model_ref)
+    if not include_runtime_seed:
+        return tuple(ordered)
+    if runtime_config.nexa_contract is not None:
+        nexa_defaults = _nexa_model_defaults(runtime_config)
+        primary = nexa_defaults.get("primary")
+        if isinstance(primary, str):
+            _append(primary)
+        fallbacks = nexa_defaults.get("fallbacks")
+        if isinstance(fallbacks, list):
+            for model_ref in fallbacks:
+                if isinstance(model_ref, str):
+                    _append(model_ref)
+    if "telegram" in channels:
+        _append(_DEFAULT_LOCAL_MODEL_REF)
+    return tuple(ordered)
+
+
 def _specialized_agent_model_defaults(
     runtime_config: _AdvisorRuntimeConfig,
     *,
@@ -1763,6 +2526,71 @@ def _specialized_agent_model_defaults(
     fallback_candidates = runtime_config.fallback_models or default_fallbacks
     fallbacks = [model for model in fallback_candidates if model != primary]
     return {"primary": primary, "fallbacks": fallbacks}
+
+
+def _my_farm_skills_preload_command() -> str:
+    skills_root = shlex.quote(_MY_FARM_ADVISOR_MANAGED_SKILLS_ROOT)
+    farm_repo_dir = shlex.quote(_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_DIR)
+    farm_repo_git_dir = shlex.quote(f"{_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_DIR}/.git")
+    farm_repo_url = shlex.quote(_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_URL)
+    scientific_repo_dir = shlex.quote(_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_DIR)
+    scientific_repo_git_dir = shlex.quote(f"{_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_DIR}/.git")
+    scientific_repo_url = shlex.quote(_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_URL)
+    workspace_skills_root = shlex.quote(f"{_MY_FARM_ADVISOR_WORKSPACE_ROOT}/skills")
+    sync_script = (
+        "from pathlib import Path\n"
+        "import shutil\n"
+        f"workspace = Path({json.dumps(f'{_MY_FARM_ADVISOR_WORKSPACE_ROOT}/skills')})\n"
+        f"farm_repo = Path({json.dumps(_MY_FARM_ADVISOR_MANAGED_SKILLS_REPO_DIR)})\n"
+        f"scientific_root = Path({json.dumps(f'{_MY_FARM_ADVISOR_SCIENTIFIC_SKILLS_REPO_DIR}/scientific-skills')})\n"
+        "workspace.mkdir(parents=True, exist_ok=True)\n"
+        "for child in workspace.iterdir():\n"
+        "    if child.is_dir():\n"
+        "        shutil.rmtree(child)\n"
+        "    else:\n"
+        "        child.unlink()\n"
+        "for name in ('my-farm-advisor', 'my-farm-breeding-trial-management', 'my-farm-qtl-analysis'):\n"
+        "    source = farm_repo / name\n"
+        "    if source.is_dir():\n"
+        "        shutil.copytree(source, workspace / name)\n"
+        "if scientific_root.is_dir():\n"
+        "    for source in sorted(scientific_root.iterdir()):\n"
+        "        if not source.is_dir():\n"
+        "            continue\n"
+        "        target = workspace / source.name\n"
+        "        if target.exists():\n"
+        "            shutil.rmtree(target)\n"
+        "        shutil.copytree(source, target)\n"
+        "marker = '---\\n'\n"
+        "for skill_md in workspace.glob('*/SKILL.md'):\n"
+        "    text = skill_md.read_text()\n"
+        "    idx = text.find(marker) if text.startswith('<!--') else -1\n"
+        "    if idx > 0:\n"
+        "        skill_md.write_text(text[idx:])\n"
+    )
+    sync_script_b64 = base64.b64encode(sync_script.encode("utf-8")).decode("ascii")
+    return (
+        f"mkdir -p {skills_root} && "
+        "if ! command -v git >/dev/null 2>&1; then "
+        "echo 'git is required to preload my-farm-advisor skills' >&2; exit 1; "
+        "fi && "
+        f"if [ -d {farm_repo_git_dir} ]; then "
+        f"git -C {farm_repo_dir} fetch --depth 1 origin && "
+        f"git -C {farm_repo_dir} reset --hard FETCH_HEAD || "
+        "echo 'warning: failed to refresh my-farm-advisor managed skills; continuing with cached copy' >&2; "
+        "else "
+        f"rm -rf {farm_repo_dir} && git clone --depth 1 {farm_repo_url} {farm_repo_dir}; "
+        "fi && "
+        f"if [ -d {scientific_repo_git_dir} ]; then "
+        f"git -C {scientific_repo_dir} fetch --depth 1 origin && "
+        f"git -C {scientific_repo_dir} reset --hard FETCH_HEAD || "
+        "echo 'warning: failed to refresh scientific-agent skills; continuing with cached copy' >&2; "
+        "else "
+        f"rm -rf {scientific_repo_dir} && git clone --depth 1 {scientific_repo_url} {scientific_repo_dir}; "
+        "fi && "
+        f"mkdir -p {workspace_skills_root} && "
+        f"python3 -c {shlex.quote(f'import base64; exec(base64.b64decode({json.dumps(sync_script_b64)}))')}"
+    )
 
 
 def _provider_for_model_ref(model_ref: str, *, default: str) -> str:

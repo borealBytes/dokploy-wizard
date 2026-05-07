@@ -55,9 +55,12 @@ def test_shared_core_plan_is_empty_when_no_selected_pack_needs_it() -> None:
     desired_state = resolve_desired_state(raw_env)
 
     assert desired_state.shared_core.network_name == "core-only-shared"
-    assert desired_state.shared_core.postgres is None
+    assert desired_state.shared_core.postgres is not None
+    assert desired_state.shared_core.postgres.service_name == "core-only-shared-postgres"
     assert desired_state.shared_core.redis is None
     assert desired_state.shared_core.allocations == ()
+    assert desired_state.shared_core.litellm is not None
+    assert desired_state.shared_core.litellm.service_name == "core-only-shared-litellm"
     assert desired_state.enabled_packs == ()
 
 

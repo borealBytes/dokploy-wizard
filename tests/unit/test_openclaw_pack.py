@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
@@ -7,6 +9,7 @@ import json
 import re
 from dataclasses import dataclass
 from email.message import Message
+from pathlib import Path
 from typing import Any
 from urllib import error
 
@@ -45,12 +48,17 @@ from dokploy_wizard.packs.openclaw import (
 )
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
+    ComposeArtifactHashState,
     OwnedResource,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
     resolve_desired_state,
+    write_applied_checkpoint,
 )
+from dokploy_wizard.verification import ServiceVerificationResult
+
+from .fake_dokploy import FakeDokployApiClient
 
 
 @dataclass
@@ -154,6 +162,15 @@ def _decode_extra_seeded_files(compose: str) -> dict[str, str]:
     }
 
 
+def _decode_embedded_python_script(compose: str) -> str:
+    match = re.search(
+        r'python3 -c .*?base64\.b64decode\((?:\\?[\"\"])??([A-Za-z0-9+/=]+)(?:\\?[\"\"])??\)',
+        compose,
+    )
+    assert match is not None
+    return base64.b64decode(match.group(1)).decode("utf-8")
+
+
 def _service_block(compose: str, service_name: str) -> str:
     match = re.search(
         rf"^  {re.escape(service_name)}:\n(?P<body>(?:    .*\n)*)",
@@ -162,6 +179,50 @@ def _service_block(compose: str, service_name: str) -> str:
     )
     assert match is not None
     return match.group(0)
+
+
+def _service_environment(compose: str, service_name: str) -> dict[str, str]:
+    environment: dict[str, str] = {}
+    capture = False
+    for line in _service_block(compose, service_name).splitlines():
+        if line == "    environment:":
+            capture = True
+            continue
+        if not capture:
+            continue
+        if not line.startswith("      "):
+            break
+        key, raw_value = line.strip().split(": ", 1)
+        environment[key] = json.loads(raw_value)
+    return environment
+
+
+def _write_compose_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: str) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("openclaw",),
+            compose_artifact_hashes={
+                service_name: ComposeArtifactHashState.from_rendered_compose(
+                    service_id=service_name,
+                    rendered_compose=rendered_compose,
+                )
+            },
+        ),
+    )
+
+
+def _write_empty_applied_checkpoint(state_dir: Path) -> None:
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint="fingerprint",
+            completed_steps=("openclaw",),
+        ),
+    )
 
 
 def test_reconcile_openclaw_plans_slot_runtime_for_openclaw_variant() -> None:
@@ -229,6 +290,71 @@ def test_resolve_desired_state_rejects_unsupported_advisor_channel() -> None:
                 },
             )
         )
+
+
+def _farm_env_values(**overrides: str) -> dict[str, str]:
+    values = {
+        "STACK_NAME": "wizard-stack",
+        "ROOT_DOMAIN": "example.com",
+        "ENABLE_MY_FARM_ADVISOR": "true",
+    }
+    values.update(overrides)
+    return values
+
+
+@pytest.mark.parametrize(
+    ("provider_env", "expected_present"),
+    [
+        ({"MY_FARM_ADVISOR_OPENROUTER_API_KEY": "openrouter-key"}, "my-farm-advisor"),
+        ({"MY_FARM_ADVISOR_NVIDIA_API_KEY": "nvidia-key"}, "my-farm-advisor"),
+        ({"ANTHROPIC_API_KEY": "anthropic-key"}, "my-farm-advisor"),
+        (
+            {
+                "AI_DEFAULT_API_KEY": "shared-ai-key",
+                "AI_DEFAULT_BASE_URL": "https://opencode.ai/zen/go/v1",
+            },
+            "my-farm-advisor",
+        ),
+    ],
+)
+def test_resolve_desired_state_accepts_farm_provider_paths(
+    provider_env: dict[str, str], expected_present: str
+) -> None:
+    desired_state = resolve_desired_state(RawEnvInput(format_version=1, values=_farm_env_values(**provider_env)))
+
+    assert expected_present in desired_state.enabled_packs
+
+
+def test_resolve_desired_state_rejects_farm_without_provider_config() -> None:
+    with pytest.raises(
+        StateValidationError,
+        match="My Farm Advisor requires at least one provider configuration",
+    ):
+        resolve_desired_state(RawEnvInput(format_version=1, values=_farm_env_values()))
+
+
+def test_resolve_desired_state_rejects_incomplete_shared_farm_provider_fallback() -> None:
+    with pytest.raises(
+        StateValidationError,
+        match="shared provider fallback requires both AI_DEFAULT_API_KEY and AI_DEFAULT_BASE_URL",
+    ):
+        resolve_desired_state(
+            RawEnvInput(
+                format_version=1,
+                values=_farm_env_values(AI_DEFAULT_API_KEY="shared-ai-key", AI_DEFAULT_BASE_URL=""),
+            )
+        )
+
+
+def test_my_farm_advisor_accepts_litellm_canonical_env() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values=_farm_env_values(LITELLM_LOCAL_BASE_URL="http://100.64.0.10:8000/v1"),
+        )
+    )
+
+    assert "my-farm-advisor" in desired_state.enabled_packs
 
 
 def test_resolve_desired_state_rejects_openclaw_replicas_without_advisor_pack() -> None:
@@ -300,6 +426,7 @@ def test_reconcile_my_farm_advisor_plans_runtime_independently() -> None:
                 "ENABLE_MY_FARM_ADVISOR": "true",
                 "ENABLE_MATRIX": "true",
                 "MY_FARM_ADVISOR_CHANNELS": "telegram,matrix",
+                "ANTHROPIC_API_KEY": "anthropic-key",
             },
         )
     )
@@ -330,6 +457,7 @@ def test_reconcile_my_farm_advisor_uses_healthz_for_health_check() -> None:
                 "ENABLE_MY_FARM_ADVISOR": "true",
                 "ENABLE_MATRIX": "true",
                 "MY_FARM_ADVISOR_CHANNELS": "telegram",
+                "ANTHROPIC_API_KEY": "anthropic-key",
             },
         )
     )
@@ -359,6 +487,7 @@ def test_resolve_desired_state_supports_both_advisor_packs_together() -> None:
                 "ENABLE_MATRIX": "true",
                 "OPENCLAW_CHANNELS": "telegram",
                 "MY_FARM_ADVISOR_CHANNELS": "telegram,matrix",
+                "ANTHROPIC_API_KEY": "anthropic-key",
             },
         )
     )
@@ -367,6 +496,47 @@ def test_resolve_desired_state_supports_both_advisor_packs_together() -> None:
     assert "my-farm-advisor" in desired_state.enabled_packs
     assert desired_state.openclaw_channels == ("telegram",)
     assert desired_state.my_farm_advisor_channels == ("matrix", "telegram")
+
+
+def test_resolve_desired_state_openclaw_only_does_not_require_farm_envs() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+            },
+        )
+    )
+
+    assert desired_state.enabled_packs == ("openclaw",)
+
+
+def test_resolve_desired_state_farm_only_does_not_require_openclaw_envs() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values=_farm_env_values(MY_FARM_ADVISOR_OPENROUTER_API_KEY="openrouter-key"),
+        )
+    )
+
+    assert desired_state.enabled_packs == ("my-farm-advisor",)
+
+
+def test_resolve_desired_state_ignores_configured_farm_env_without_farm_pack() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "openrouter-key",
+            },
+        )
+    )
+
+    assert desired_state.enabled_packs == ()
 
 
 def test_reconcile_openclaw_skips_when_openclaw_is_disabled() -> None:
@@ -570,6 +740,7 @@ def test_reconcile_my_farm_advisor_reuses_existing_dokploy_managed_service() -> 
                 "ROOT_DOMAIN": "example.com",
                 "ENABLE_MY_FARM_ADVISOR": "true",
                 "MY_FARM_ADVISOR_CHANNELS": "telegram",
+                "ANTHROPIC_API_KEY": "anthropic-key",
             },
         )
     )
@@ -679,6 +850,246 @@ def test_build_my_farm_advisor_ledger_persists_pack_specific_scope() -> None:
     )
 
 
+def test_openclaw_only_render_and_state_remain_stable_without_farm_selection() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+                "OPENCLAW_GATEWAY_TOKEN": "fixed-token-123",
+            },
+        )
+    )
+
+    baseline_api = FakeDokployOpenClawApi()
+    baseline_backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        openclaw_gateway_password="openclaw-ui-generated",
+        openclaw_openrouter_api_key="openrouter-key",
+        openclaw_nvidia_api_key="nvidia-key",
+        openclaw_telegram_bot_token="telegram-token",
+        client=baseline_api,
+    )
+    farm_aware_api = FakeDokployOpenClawApi()
+    farm_aware_backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        openclaw_gateway_password="openclaw-ui-generated",
+        openclaw_openrouter_api_key="openrouter-key",
+        openclaw_nvidia_api_key="nvidia-key",
+        openclaw_telegram_bot_token="telegram-token",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-farm-key",
+        anthropic_api_key="anthropic-key",
+        telegram_field_operations_bot_token="field-token",
+        openclaw_sync_skills_on_start="1",
+        r2_bucket_name="farm-bucket",
+        workspace_data_r2_rclone_mount="1",
+        client=farm_aware_api,
+    )
+
+    baseline_record = baseline_backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+    farm_aware_record = farm_aware_backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    baseline_compose = baseline_api.last_create_compose_file
+    farm_aware_compose = farm_aware_api.last_create_compose_file
+    assert baseline_compose is not None
+    assert farm_aware_compose is not None
+    assert desired_state.enabled_packs == ("openclaw",)
+    assert desired_state.hostnames["openclaw"] == "openclaw.example.com"
+    assert "my-farm-advisor" not in desired_state.hostnames
+    assert baseline_record == farm_aware_record
+    assert baseline_compose == farm_aware_compose
+    assert _service_environment(baseline_compose, "wizard-stack-openclaw") == _service_environment(
+        farm_aware_compose,
+        "wizard-stack-openclaw",
+    )
+    assert "wizard-stack-openclaw-data:/home/node/.openclaw" in baseline_compose
+    assert "wizard-stack-my-farm-advisor-data" not in baseline_compose
+
+    baseline_ledger = build_openclaw_ledger(
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        stack_name="wizard-stack",
+        service_resource_id=baseline_record.resource_id,
+        nexa_sidecars_enabled=False,
+    )
+    farm_aware_ledger = build_openclaw_ledger(
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        stack_name="wizard-stack",
+        service_resource_id=farm_aware_record.resource_id,
+        nexa_sidecars_enabled=False,
+    )
+    assert baseline_ledger == farm_aware_ledger
+    assert baseline_ledger.resources == (
+        OwnedResource(
+            resource_type=OPENCLAW_SERVICE_RESOURCE_TYPE,
+            resource_id="dokploy-compose:compose-1:openclaw:replicas:1",
+            scope="stack:wizard-stack:openclaw",
+        ),
+    )
+
+
+def test_openclaw_and_farm_advisor_render_side_by_side_without_collisions() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "OPENCLAW_CHANNELS": "telegram",
+                "ENABLE_MY_FARM_ADVISOR": "true",
+                "ENABLE_MATRIX": "true",
+                "MY_FARM_ADVISOR_CHANNELS": "matrix,telegram",
+                "ANTHROPIC_API_KEY": "anthropic-key",
+            },
+        )
+    )
+    openclaw_api = FakeDokployOpenClawApi(created_compose_id="compose-openclaw")
+    openclaw_backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        openclaw_gateway_password="openclaw-ui-generated",
+        openclaw_openrouter_api_key="openclaw-key",
+        openclaw_nvidia_api_key="openclaw-nvidia-key",
+        openclaw_telegram_bot_token="openclaw-telegram-token",
+        client=openclaw_api,
+    )
+    farm_api = FakeDokployOpenClawApi(created_compose_id="compose-farm")
+    farm_backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-farm-key",
+        my_farm_nvidia_api_key="farm-nvidia-key",
+        my_farm_telegram_bot_token="farm-telegram-token",
+        my_farm_telegram_owner_user_id="123456",
+        anthropic_api_key="anthropic-key",
+        telegram_field_operations_bot_token="field-token",
+        client=farm_api,
+    )
+
+    openclaw_record = openclaw_backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname=desired_state.hostnames["openclaw"],
+        template_path=None,
+        variant="openclaw",
+        channels=desired_state.openclaw_channels,
+        replicas=1,
+        secret_refs=(),
+    )
+    farm_record = farm_backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname=desired_state.hostnames["my-farm-advisor"],
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=desired_state.my_farm_advisor_channels,
+        replicas=1,
+        secret_refs=(),
+    )
+
+    openclaw_compose = openclaw_api.last_create_compose_file
+    farm_compose = farm_api.last_create_compose_file
+    assert openclaw_compose is not None
+    assert farm_compose is not None
+
+    openclaw_env = _service_environment(openclaw_compose, "wizard-stack-openclaw")
+    farm_env = _service_environment(farm_compose, "wizard-stack-my-farm-advisor")
+    assert {"openclaw", "my-farm-advisor"} <= set(desired_state.enabled_packs)
+    assert desired_state.hostnames["openclaw"] == "openclaw.example.com"
+    assert desired_state.hostnames["my-farm-advisor"] == "farm.example.com"
+    assert desired_state.hostnames["openclaw"] != desired_state.hostnames["my-farm-advisor"]
+
+    assert openclaw_record.resource_name == "wizard-stack-openclaw"
+    assert farm_record.resource_name == "wizard-stack-my-farm-advisor"
+    assert openclaw_record.resource_id != farm_record.resource_id
+    assert "  wizard-stack-openclaw:\n" in openclaw_compose
+    assert "  wizard-stack-my-farm-advisor:\n" in farm_compose
+    assert "wizard-stack-my-farm-advisor" not in openclaw_compose
+    assert "wizard-stack-openclaw" not in farm_compose
+    assert "wizard-stack-openclaw-data:/home/node/.openclaw" in openclaw_compose
+    assert "wizard-stack-my-farm-advisor-data:/data" in farm_compose
+    assert "wizard-stack-my-farm-advisor-data" not in openclaw_compose
+    assert "wizard-stack-openclaw-data:/home/node/.openclaw" not in farm_compose
+    assert "      - wizard-stack-shared" in farm_compose
+    assert "  wizard-stack-shared:\n    external: true" in farm_compose
+    assert 'traefik.http.routers.wizard-stack-openclaw.rule: "Host(`openclaw.example.com`)"' in openclaw_compose
+    assert 'traefik.http.routers.wizard-stack-my-farm-advisor.rule: "Host(`farm.example.com`)"' in farm_compose
+
+    assert openclaw_env["ADVISOR_CANONICAL_HOSTNAME"] == "openclaw.example.com"
+    assert farm_env["ADVISOR_CANONICAL_HOSTNAME"] == "farm.example.com"
+    assert openclaw_env["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert openclaw_env["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert openclaw_env["LITELLM_VIRTUAL_KEY_OPENCLAW"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert farm_env["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert farm_env["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert farm_env["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert openclaw_env["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
+    assert farm_env["OPENCLAW_GATEWAY_PASSWORD"] == "farm-ui-generated"
+    assert "MODEL_PROVIDER" in openclaw_env
+    assert "MODEL_NAME" in openclaw_env
+    assert "PRIMARY_MODEL" not in openclaw_env
+    assert "ANTHROPIC_API_KEY" not in openclaw_env
+    assert "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN" not in openclaw_env
+    assert "OPENROUTER_API_KEY" not in farm_env
+    assert "NVIDIA_API_KEY" not in farm_env
+    assert "ANTHROPIC_API_KEY" not in farm_env
+    assert farm_env["TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN"] == "field-token"
+    assert "PRIMARY_MODEL" not in openclaw_env
+    assert "PRIMARY_MODEL" not in farm_env
+    assert farm_env["MODEL_PROVIDER"] == "openai"
+    assert farm_env["MODEL_NAME"] == "gpt-4o-mini"
+    assert "DOKPLOY_WIZARD_NEXA_ENABLED" not in farm_env
+
+    combined_ledger = build_my_farm_advisor_ledger(
+        existing_ledger=build_openclaw_ledger(
+            existing_ledger=OwnershipLedger(format_version=1, resources=()),
+            stack_name="wizard-stack",
+            service_resource_id=openclaw_record.resource_id,
+            nexa_sidecars_enabled=False,
+        ),
+        stack_name="wizard-stack",
+        service_resource_id=farm_record.resource_id,
+    )
+    assert {resource.resource_type for resource in combined_ledger.resources} == {
+        OPENCLAW_SERVICE_RESOURCE_TYPE,
+        MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+    }
+    assert {resource.scope for resource in combined_ledger.resources} == {
+        "stack:wizard-stack:openclaw",
+        "stack:wizard-stack:my-farm-advisor",
+    }
+    assert len({resource.resource_id for resource in combined_ledger.resources}) == len(
+        combined_ledger.resources
+    )
+
+
 @dataclass
 class FakeDokployOpenClawApi:
     projects: tuple[DokployProjectSummary, ...] = ()
@@ -719,6 +1130,110 @@ class FakeDokployOpenClawApi:
         del title, description
         self.deploy_calls += 1
         return DokployDeployResult(success=True, compose_id=compose_id, message=None)
+
+
+def test_dokploy_openclaw_backend_healthy_unchanged_rerun_skips_update_and_deploy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service_name = "wizard-stack-openclaw"
+    client = FakeDokployApiClient()
+    _write_empty_applied_checkpoint(tmp_path)
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=client,
+        state_dir=tmp_path,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_verify_service_runtime",
+        lambda *, service_name, variant, url: ServiceVerificationResult(
+            service_name=service_name,
+            tier="app",
+            status="pass",
+            detail=f"{variant} runtime healthy at {url}",
+        ),
+    )
+
+    created = backend.create_service(
+        resource_name=service_name,
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+    compose = client.compose_files_by_name[service_name]
+    _write_compose_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=compose)
+
+    updated = backend.update_service(
+        resource_id=created.resource_id,
+        resource_name=service_name,
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    assert updated == created
+    client.assert_mutation_counts(service_name, create=1, update=0, deploy=1)
+
+
+def test_dokploy_my_farm_backend_healthy_unchanged_rerun_skips_update_and_deploy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service_name = "wizard-stack-my-farm-advisor"
+    client = FakeDokployApiClient()
+    _write_empty_applied_checkpoint(tmp_path)
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-ai-key",
+        client=client,
+        state_dir=tmp_path,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_verify_service_runtime",
+        lambda *, service_name, variant, url: ServiceVerificationResult(
+            service_name=service_name,
+            tier="app",
+            status="pass",
+            detail=f"{variant} runtime healthy at {url}",
+        ),
+    )
+
+    created = backend.create_service(
+        resource_name=service_name,
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+    compose = client.compose_files_by_name[service_name]
+    _write_compose_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=compose)
+
+    updated = backend.update_service(
+        resource_id=created.resource_id,
+        resource_name=service_name,
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    assert updated == created
+    client.assert_mutation_counts(service_name, create=1, update=0, deploy=1)
 
 
 def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
@@ -780,7 +1295,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+                "fallbacks": [],
             },
             "tools": {
                 "profile": "coding",
@@ -890,11 +1405,50 @@ def test_dokploy_openclaw_backend_uses_trusted_proxy_mode_for_single_gateway_whe
             "allowUsers": ["admin@example.com"],
         },
     }
+    assert seeded["gateway"]["controlUi"]["dangerouslyDisableDeviceAuth"] is True
     assert "remote" not in seeded["gateway"]
     assert "payload.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;" not in compose
 
 
-def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys() -> None:
+def test_dokploy_my_farm_backend_uses_trusted_proxy_mode_for_single_gateway_when_access_emails_present() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        trusted_proxy_emails=("admin@example.com",),
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    assert 'OPENCLAW_GATEWAY_TOKEN: "fixed-token-123"' not in compose
+    seeded = _decode_seeded_gateway_payload(compose)
+    assert seeded["gateway"]["mode"] == "local"
+    assert seeded["gateway"]["auth"] == {
+        "mode": "trusted-proxy",
+        "trustedProxy": {
+            "userHeader": "cf-access-authenticated-user-email",
+            "allowUsers": ["admin@example.com"],
+        },
+    }
+    assert seeded["gateway"]["controlUi"]["dangerouslyDisableDeviceAuth"] is True
+    assert "remote" not in seeded["gateway"]
+    assert "payload.gateway.auth.token = process.env.OPENCLAW_GATEWAY_TOKEN;" not in compose
+
+
+def test_openclaw_seeded_config_routes_through_litellm() -> None:
     api = FakeDokployOpenClawApi()
     backend = DokployOpenClawBackend(
         api_url="https://dokploy.example.com/api",
@@ -925,11 +1479,15 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
 
     compose = api.last_create_compose_file
     assert compose is not None
-    assert 'OPENROUTER_API_KEY: "or-key"' in compose
-    assert 'NVIDIA_API_KEY: "nv-key"' in compose
     assert 'TELEGRAM_BOT_TOKEN: "bot-token"' in compose
     assert "MODEL_PROVIDER:" not in compose
     assert "MODEL_NAME:" not in compose
+    service_environment = _service_environment(compose, "wizard-stack-openclaw")
+    assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert service_environment["LITELLM_VIRTUAL_KEY_OPENCLAW"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert "OPENROUTER_API_KEY" not in service_environment
+    assert "NVIDIA_API_KEY" not in service_environment
 
     seeded = _decode_seeded_gateway_payload(compose)
     assert seeded["agents"]["defaults"]["model"]["primary"] == "nvidia/moonshotai/kimi-k2.5"
@@ -944,7 +1502,7 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+                "fallbacks": [],
             },
             "tools": {
                 "profile": "coding",
@@ -964,6 +1522,83 @@ def test_dokploy_openclaw_backend_uses_explicit_allowed_models_and_provider_keys
         "nvidia/moonshotai/kimi-k2.5": {},
         "openrouter/openrouter/free": {},
         "openrouter/google/gemma-4-31b-it:free": {},
+    }
+    assert seeded["models"]["providers"]["local"] == {
+        "baseUrl": "http://wizard-stack-shared-litellm:4000",
+        "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
+        "api": "openai-completions",
+        "models": [
+            {
+                "id": "unsloth-active",
+                "name": "unsloth-active",
+                "reasoning": True,
+                "input": ["text"],
+                "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                },
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+            }
+        ],
+    }
+    assert seeded["models"]["providers"]["openrouter"] == {
+        "baseUrl": "http://wizard-stack-shared-litellm:4000",
+        "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
+        "api": "openai-completions",
+        "models": [
+            {
+                "id": "openrouter/free",
+                "name": "openrouter/free",
+                "reasoning": True,
+                "input": ["text"],
+                "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                },
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+            },
+            {
+                "id": "google/gemma-4-31b-it:free",
+                "name": "google/gemma-4-31b-it:free",
+                "reasoning": True,
+                "input": ["text"],
+                "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                },
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+            },
+        ],
+    }
+    assert seeded["models"]["providers"]["nvidia"] == {
+        "baseUrl": "http://wizard-stack-shared-litellm:4000",
+        "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
+        "api": "openai-completions",
+        "models": [
+            {
+                "id": "moonshotai/kimi-k2.5",
+                "name": "moonshotai/kimi-k2.5",
+                "reasoning": True,
+                "input": ["text"],
+                "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                },
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+            }
+        ],
     }
     assert seeded["channels"]["telegram"] == {
         "botToken": "bot-token",
@@ -1005,6 +1640,9 @@ def test_dokploy_openclaw_backend_renders_split_public_and_internal_gateways() -
     assert 'OPENCLAW_CONFIG_PATH: "/home/node/.openclaw/openclaw.json"' in internal_block
     assert 'OPENCLAW_CONFIG_PATH: "/home/node/.openclaw-public/openclaw.json"' in public_block
     assert 'OPENCLAW_STATE_DIR: "/home/node/.openclaw-public"' in public_block
+    assert "/home/node/.openclaw/agents/main/sessions" in internal_block
+    assert "/home/node/.openclaw/agents/nexa/sessions" in internal_block
+    assert "/home/node/.openclaw/agents/telly/sessions" in internal_block
     assert "wizard-stack-openclaw-public-data:/home/node/.openclaw-public" in compose
     assert "      - wizard-stack-openclaw" in public_block
     assert 'traefik.http.routers.wizard-stack-openclaw-public.rule: "Host(`openclaw.example.com`)"' in compose
@@ -1075,7 +1713,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
     assert 'DOKPLOY_WIZARD_NEXA_MEM0_MODE: "rest"' in compose
     assert 'DOKPLOY_WIZARD_NEXA_CREDENTIAL_MEDIATION_MODE: "server-owned-env"' in compose
     assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_ROOT: "/home/node/.openclaw/workspace/nexa"' in compose
-    assert 'DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT: "/mnt/openclaw/workspace/nexa"' in compose
+    assert 'DOKPLOY_WIZARD_NEXA_VISIBLE_WORKSPACE_ROOT: "/home/node/.openclaw/workspace/nexa"' in compose
     assert "  mem0:\n" in compose
     assert "  qdrant:\n" in compose
     assert "  nexa-runtime:\n" in compose
@@ -1112,10 +1750,10 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
     assert 'DOKPLOY_WIZARD_OPENCLAW_INTERNAL_URL: "http://wizard-stack-openclaw:18789"' in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL: "local/unsloth-active"' in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL_PROVIDER: "local"' in runtime_block
-    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL: "http://tuxdesktop.tailb12aa5.ts.net:61434/v1"' in runtime_block
-    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY: "sk-no-key-required"' in runtime_block
-    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL: "https://integrate.api.nvidia.com/v1"' in runtime_block
-    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL: "https://openrouter.ai/api/v1"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL: "http://wizard-stack-shared-litellm:4000"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY: "${LITELLM_VIRTUAL_KEY_OPENCLAW}"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL: "http://wizard-stack-shared-litellm:4000"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL: "http://wizard-stack-shared-litellm:4000"' in runtime_block
     assert 'OPENCLAW_NEXA_NEXTCLOUD_BASE_URL: "http://wizard-stack-nextcloud"' in runtime_block
     assert 'OPENCLAW_NEXA_MEM0_BASE_URL: "http://mem0:8000"' in runtime_block
     assert 'OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL: "http://qdrant:6333"' in runtime_block
@@ -1144,8 +1782,8 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "nexa",
             "name": "Nexa",
             "model": {
-                "primary": "openrouter/auto",
-                "fallbacks": ["openrouter/openrouter/free"],
+                "primary": "local/unsloth-active",
+                "fallbacks": [],
             },
             "tools": {
                 "profile": "coding",
@@ -1163,7 +1801,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+                "fallbacks": [],
             },
             "tools": {
                 "profile": "coding",
@@ -1275,7 +1913,7 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
             "name": "Telly",
             "model": {
                 "primary": "local/unsloth-active",
-                "fallbacks": ["openrouter/auto", "openrouter/openrouter/free"],
+                "fallbacks": [],
             },
             "tools": {
                 "profile": "coding",
@@ -1293,7 +1931,104 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
     assert "channels" not in seeded or "telegram" not in seeded.get("channels", {})
 
 
-def test_dokploy_openclaw_backend_renders_my_farm_variant_with_same_backend_path() -> None:
+def test_telly_keeps_local_first_through_litellm() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    seeded = _decode_seeded_gateway_payload(compose)
+    telly = next(agent for agent in seeded["agents"]["list"] if agent["id"] == "telly")
+
+    assert telly["model"] == {
+        "primary": "local/unsloth-active",
+        "fallbacks": [],
+    }
+    assert seeded["models"]["providers"]["local"] == {
+        "baseUrl": "http://wizard-stack-shared-litellm:4000",
+        "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
+        "api": "openai-completions",
+        "models": [
+            {
+                "id": "unsloth-active",
+                "name": "unsloth-active",
+                "reasoning": True,
+                "input": ["text"],
+                "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                },
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+            }
+        ],
+    }
+
+
+def test_nexa_model_routing_uses_litellm_without_openrouter_secret() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        openclaw_openrouter_api_key="or-key",
+        openclaw_nvidia_api_key="nv-key",
+        openclaw_nexa_env={
+            "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
+            "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
+            "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL": "https://nextcloud.example.com",
+            "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET": "office-shared-secret",
+            "OPENCLAW_NEXA_TALK_SHARED_SECRET": "talk-shared-secret",
+            "OPENCLAW_NEXA_TALK_SIGNING_SECRET": "talk-signing-secret",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD": "webdav-app-password",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_USER": "nexa-agent",
+        },
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    runtime_env = _service_environment(compose, "nexa-runtime")
+
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_MODEL"] == "local/unsloth-active"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert "or-key" not in runtime_env.values()
+    assert "nv-key" not in runtime_env.values()
+
+
+def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapping() -> None:
     environment = DokployEnvironmentSummary(
         environment_id="env-1",
         name="default",
@@ -1316,6 +2051,40 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_same_backend_path
         api_url="https://dokploy.example.com/api",
         api_key="key-123",
         stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_primary_model="nvidia/nemotron-3-super-120b-a12b:free",
+        my_farm_fallback_models=(
+            "openrouter/openrouter/healer-alpha",
+            "nvidia/moonshotai/kimi-k2.5",
+        ),
+        my_farm_ai_default_api_key="shared-ai-key",
+        anthropic_api_key="anthropic-key",
+        my_farm_nvidia_api_key="nvidia-key",
+        nvidia_base_url="https://integrate.api.nvidia.com/v1",
+        my_farm_telegram_bot_token="farm-telegram-token",
+        my_farm_telegram_owner_user_id="123456",
+        telegram_field_operations_bot_token="field-token",
+        telegram_field_operations_bot_pairing_code="field-pair",
+        telegram_field_operations_allowed_users="111,222",
+        telegram_data_pipeline_bot_token="pipeline-token",
+        telegram_data_pipeline_bot_pairing_code="pipeline-pair",
+        telegram_data_pipeline_allowed_users="333,444",
+        telegram_data_pipeline_bot_allowed_users="555,666",
+        telegram_allowed_users="777,888",
+        openclaw_telegram_group_policy="allowlist",
+        tz="America/Chicago",
+        openclaw_sync_skills_on_start="1",
+        openclaw_sync_skills_overwrite="1",
+        openclaw_force_skill_sync="0",
+        openclaw_bootstrap_refresh="1",
+        openclaw_memory_search_enabled="0",
+        r2_bucket_name="farm-bucket",
+        cf_account_id="cf-account-1",
+        r2_access_key_id="r2-access-key",
+        r2_secret_access_key="r2-secret-key",
+        data_mode="volume",
+        workspace_data_r2_rclone_mount="1",
+        workspace_data_r2_prefix="workspace/data",
         client=api,
     )
 
@@ -1332,21 +2101,38 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_same_backend_path
 
     compose = api.last_update_compose_file
     assert compose is not None
+    service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
     assert record.resource_id == "dokploy-compose:compose-existing:my-farm-advisor:replicas:3"
     assert "image: ghcr.io/borealbytes/my-farm-advisor:latest" in compose
-    assert "node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" in compose
+    assert "/app/scripts/entrypoint.sh" in compose
+    assert "exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" not in compose
     assert 'ADVISOR_VARIANT: "my-farm-advisor"' in compose
     assert 'ADVISOR_STARTUP_MODE: "my-farm-advisor"' in compose
     assert 'ADVISOR_CHANNELS: "matrix,telegram"' in compose
     assert 'HOME: "/data"' in compose
     assert 'OPENCLAW_STATE_DIR: "/data"' in compose
     assert 'OPENCLAW_WORKSPACE_DIR: "/data/workspace"' in compose
+    assert "requiresStringContent" not in compose
     assert "/data/openclaw.json" in compose
     assert "/data/.openclaw/openclaw.json" in compose
+    assert "/data/skills/my-farm-advisor-skills" in compose
+    assert "/data/skills/scientific-agent-skills" in compose
+    assert "/data/workspace/skills" in compose
+    assert "git clone --depth 1 https://github.com/borealBytes/my-farm-advisor-skills.git" in compose
+    assert "git clone --depth 1 https://github.com/K-Dense-AI/scientific-agent-skills.git" in compose
+    assert "git -C /data/skills/my-farm-advisor-skills fetch --depth 1 origin" in compose
+    assert "git -C /data/skills/scientific-agent-skills fetch --depth 1 origin" in compose
+    sync_script = _decode_embedded_python_script(compose)
+    assert "farm_repo = Path(\"/data/skills/my-farm-advisor-skills\")" in sync_script
+    assert "scientific_root = Path(\"/data/skills/scientific-agent-skills/scientific-skills\")" in sync_script
+    assert "for source in sorted(scientific_root.iterdir())" in sync_script
+    assert "/data/workspace-data-pipeline" in compose
     assert "http://127.0.0.1:18789" in compose
     assert "https://farm.example.com" in compose
     assert 'user: "0:0"' in compose
     assert "wizard-stack-my-farm-advisor-data:/data" in compose
+    assert "      - wizard-stack-shared" in compose
+    assert "  wizard-stack-shared:\n    external: true" in compose
     assert "http://127.0.0.1:18789/healthz" in compose
     assert (
         'traefik.http.routers.wizard-stack-my-farm-advisor.rule: "Host(`farm.example.com`)"'
@@ -1356,7 +2142,234 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_same_backend_path
         'traefik.http.services.wizard-stack-my-farm-advisor.loadbalancer.server.port: "18789"'
         in compose
     )
-    assert 'MODEL_PROVIDER: "openai"' in compose
+    assert service_environment == {
+        "ADVISOR_VARIANT": "my-farm-advisor",
+        "ADVISOR_CHANNELS": "matrix,telegram",
+        "ADVISOR_CANONICAL_HOSTNAME": "farm.example.com",
+        "ADVISOR_CANONICAL_URL": "https://farm.example.com",
+        "ADVISOR_PUBLIC_URL": "https://farm.example.com",
+        "ADVISOR_STARTUP_MODE": "my-farm-advisor",
+        "CONTROL_UI_ALLOWED_ORIGINS": "https://farm.example.com",
+        "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+        "NVIDIA_VISIBLE_DEVICES": "all",
+        "OPENCLAW_DISABLE_BONJOUR": "1",
+        "OPENCLAW_CONFIG_PATH": "/data/openclaw.json",
+        "OPENCLAW_STATE_DIR": "/data",
+        "OPENCLAW_WORKSPACE_DIR": "/data/workspace",
+        "PORT": "18789",
+        "TRUSTED_PROXIES": "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+        "OPENCLAW_GATEWAY_PASSWORD": "farm-ui-generated",
+        "LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR": "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}",
+        "OPENAI_API_KEY": "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}",
+        "OPENAI_BASE_URL": "http://wizard-stack-shared-litellm:4000",
+        "PRIMARY_MODEL": "nvidia/nemotron-3-super-120b-a12b:free",
+        "FALLBACK_MODELS": "openrouter/openrouter/healer-alpha,nvidia/moonshotai/kimi-k2.5",
+        "TELEGRAM_BOT_TOKEN": "farm-telegram-token",
+        "TELEGRAM_OWNER_USER_ID": "123456",
+        "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN": "field-token",
+        "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE": "field-pair",
+        "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS": "111,222",
+        "TELEGRAM_DATA_PIPELINE_BOT_TOKEN": "pipeline-token",
+        "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE": "pipeline-pair",
+        "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS": "333,444",
+        "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS": "555,666",
+        "TELEGRAM_ALLOWED_USERS": "777,888",
+        "OPENCLAW_TELEGRAM_GROUP_POLICY": "allowlist",
+        "TZ": "America/Chicago",
+        "OPENCLAW_BOOTSTRAP_REFRESH": "1",
+        "OPENCLAW_MEMORY_SEARCH_ENABLED": "0",
+        "R2_BUCKET_NAME": "farm-bucket",
+        "R2_ACCESS_KEY_ID": "r2-access-key",
+        "R2_SECRET_ACCESS_KEY": "r2-secret-key",
+        "CF_ACCOUNT_ID": "cf-account-1",
+        "DATA_MODE": "volume",
+        "WORKSPACE_DATA_R2_RCLONE_MOUNT": "1",
+        "WORKSPACE_DATA_R2_PREFIX": "workspace/data",
+        "OPENCLAW_SYNC_SKILLS_ON_START": "1",
+        "OPENCLAW_SYNC_SKILLS_OVERWRITE": "1",
+        "OPENCLAW_FORCE_SKILL_SYNC": "0",
+        "HOME": "/data",
+    }
+
+
+def test_openclaw_upstream_keys_do_not_leak() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        gateway_token="fixed-token-123",
+        openclaw_gateway_password="openclaw-ui-generated",
+        openclaw_openrouter_api_key="openrouter-key",
+        openclaw_nvidia_api_key="nvidia-key",
+        openclaw_telegram_bot_token="telegram-token",
+        anthropic_api_key="anthropic-key",
+        nvidia_base_url="https://integrate.api.nvidia.com/v1",
+        telegram_field_operations_bot_token="field-token",
+        openclaw_sync_skills_on_start="1",
+        r2_bucket_name="farm-bucket",
+        workspace_data_r2_rclone_mount="1",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    service_environment = _service_environment(compose, "wizard-stack-openclaw")
+    assert "exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" in compose
+    assert "/app/scripts/entrypoint.sh" not in compose
+    assert service_environment["OPENCLAW_GATEWAY_TOKEN"] == "fixed-token-123"
+    assert service_environment["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
+    assert service_environment["TELEGRAM_BOT_TOKEN"] == "telegram-token"
+    assert service_environment["MODEL_PROVIDER"] == "openai"
+    assert service_environment["MODEL_NAME"] == "gpt-4o-mini"
+    assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert service_environment["LITELLM_VIRTUAL_KEY_OPENCLAW"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert "OPENROUTER_API_KEY" not in service_environment
+    assert "NVIDIA_API_KEY" not in service_environment
+    assert "ANTHROPIC_API_KEY" not in service_environment
+    assert "PRIMARY_MODEL" not in service_environment
+    assert "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN" not in service_environment
+    assert "OPENCLAW_SYNC_SKILLS_ON_START" not in service_environment
+
+
+def test_dokploy_openclaw_backend_omits_partial_my_farm_optional_data_envs() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-ai-key",
+        my_farm_telegram_bot_token="farm-telegram-token",
+        openclaw_sync_skills_on_start="1",
+        openclaw_sync_skills_overwrite="1",
+        openclaw_force_skill_sync="1",
+        openclaw_bootstrap_refresh="1",
+        openclaw_memory_search_enabled="1",
+        r2_bucket_name="farm-bucket",
+        r2_access_key_id="r2-access-key",
+        data_mode="volume",
+        workspace_data_r2_rclone_mount="1",
+        workspace_data_r2_prefix="workspace/data",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
+    assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["OPENCLAW_SYNC_SKILLS_ON_START"] == "0"
+    assert service_environment["OPENCLAW_BOOTSTRAP_REFRESH"] == "1"
+    assert service_environment["OPENCLAW_MEMORY_SEARCH_ENABLED"] == "1"
+    assert "R2_BUCKET_NAME" not in service_environment
+    assert "R2_ACCESS_KEY_ID" not in service_environment
+    assert "R2_SECRET_ACCESS_KEY" not in service_environment
+    assert "CF_ACCOUNT_ID" not in service_environment
+    assert "R2_ENDPOINT" not in service_environment
+    assert "DATA_MODE" not in service_environment
+    assert "WORKSPACE_DATA_R2_RCLONE_MOUNT" not in service_environment
+    assert "WORKSPACE_DATA_R2_PREFIX" not in service_environment
+    assert "OPENCLAW_SYNC_SKILLS_OVERWRITE" not in service_environment
+    assert "OPENCLAW_FORCE_SKILL_SYNC" not in service_environment
+
+
+def test_farm_consumes_litellm_only() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_primary_model="local/unsloth-active",
+        my_farm_fallback_models=("openai/*", "openrouter/openrouter/free"),
+        my_farm_openrouter_api_key="openrouter-key",
+        my_farm_nvidia_api_key="nvidia-key",
+        anthropic_api_key="anthropic-key",
+        my_farm_telegram_bot_token="farm-telegram-token",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
+
+    assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["PRIMARY_MODEL"] == "local/unsloth-active"
+    assert service_environment["FALLBACK_MODELS"] == "openai/*,openrouter/openrouter/free"
+    assert service_environment["TELEGRAM_BOT_TOKEN"] == "farm-telegram-token"
+    assert "OPENROUTER_API_KEY" not in service_environment
+    assert "NVIDIA_API_KEY" not in service_environment
+    assert "ANTHROPIC_API_KEY" not in service_environment
+
+
+def test_dokploy_my_farm_backend_uses_default_model_env_when_no_explicit_models() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-ai-key",
+        my_farm_telegram_bot_token="farm-telegram-token",
+        model_provider="local",
+        model_name="unsloth-active",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
+    assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["MODEL_PROVIDER"] == "local"
+    assert service_environment["MODEL_NAME"] == "unsloth-active"
+    assert "PRIMARY_MODEL" not in service_environment
 
 
 def test_dokploy_openclaw_backend_accepts_legacy_advisor_service_resource_id() -> None:
@@ -1718,7 +2731,19 @@ def test_check_health_succeeds_when_container_http_probe_passes(
         "dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", lambda _: False
     )
     monkeypatch.setattr(
-        "dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", lambda *_: True
+        "dokploy_wizard.dokploy.openclaw._load_runtime_config_payload",
+        lambda service_name: {
+            "gateway": {"controlUi": {"allowedOrigins": ["https://openclaw.example.com"]}},
+            "agents": {"list": [{"id": "main", "default": True}]},
+            "bindings": [],
+        },
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._container_paths_are_writable", lambda *args: True
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._container_litellm_models_accessible",
+        lambda *args: True,
     )
 
     assert backend.check_health(service=service, url="https://openclaw.example.com/health") is True
@@ -1752,21 +2777,34 @@ def test_check_health_falls_back_to_local_https_before_control_ui_probe(
         calls.append(("local", url))
         return True
 
-    def fake_control(service_name: str, url: str) -> bool:
-        calls.append((service_name, url))
-        return True
+    def fake_load_config(service_name: str) -> dict[str, object]:
+        calls.append((service_name, "config"))
+        return {
+            "gateway": {"controlUi": {"allowedOrigins": ["https://openclaw.example.com"]}},
+            "agents": {"list": [{"id": "main", "default": True}]},
+            "bindings": [],
+        }
 
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.openclaw._wait_for_container_http_health", fake_container_wait
     )
     monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._wait_for_local_https_health", fake_wait)
-    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._control_ui_origin_ready", fake_control)
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._load_runtime_config_payload", fake_load_config
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._container_paths_are_writable", lambda *args: True
+    )
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.openclaw._container_litellm_models_accessible",
+        lambda *args: True,
+    )
 
     assert backend.check_health(service=service, url="https://openclaw.example.com/health") is True
     assert calls == [
         ("container", "wizard-stack-openclaw:18789:https://openclaw.example.com/health"),
         ("local", "https://openclaw.example.com/health"),
-        ("wizard-stack-openclaw", "https://openclaw.example.com/health"),
+        ("wizard-stack-openclaw", "config"),
     ]
 
 

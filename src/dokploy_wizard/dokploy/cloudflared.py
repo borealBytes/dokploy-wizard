@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, cast
 from urllib import error, request
 
@@ -17,6 +19,8 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.compose_noop import apply_compose_noop_guard
+from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 
 class CloudflaredConnectorError(RuntimeError):
@@ -60,10 +64,12 @@ class DokployCloudflaredBackend:
         *,
         api_url: str,
         api_key: str,
+        state_dir: Path,
         stack_name: str,
         public_url: str,
         client: DokployCloudflaredApi | None = None,
     ) -> None:
+        self._state_dir = state_dir
         self._stack_name = stack_name
         self._public_url = public_url
         self._service_name = f"{stack_name}-cloudflared"
@@ -135,6 +141,7 @@ class DokployCloudflaredBackend:
         return None
 
     def _ensure_compose_applied(self, *, tunnel_token: str) -> _ComposeLocator:
+        compose_file = _render_compose_file(self._service_name, tunnel_token=tunnel_token)
         try:
             projects = self._client.list_projects()
             for project in projects:
@@ -145,31 +152,34 @@ class DokployCloudflaredBackend:
                     break
                 for compose in environment.composes:
                     if compose.name == self._service_name:
-                        updated = self._client.update_compose(
-                            compose_id=compose.compose_id,
-                            compose_file=_render_compose_file(
-                                self._service_name, tunnel_token=tunnel_token
-                            ),
-                        )
-                        self._client.deploy_compose(
-                            compose_id=updated.compose_id,
-                            title="dokploy-wizard cloudflared reconcile",
-                            description="Update Cloudflare Tunnel connector compose app",
-                        )
                         locator = _ComposeLocator(
                             project_id=project.project_id,
                             environment_id=environment.environment_id,
-                            compose_id=updated.compose_id,
+                            compose_id=compose.compose_id,
                         )
-                        self._applied_locator = locator
-                        return locator
+                        applied = apply_compose_noop_guard(
+                            rendered_compose=compose_file,
+                            service_key=self._service_name,
+                            state_dir=self._state_dir,
+                            client=self._client,
+                            locator=locator,
+                            compose_id=compose.compose_id,
+                            title="dokploy-wizard cloudflared reconcile",
+                            description="Update Cloudflare Tunnel connector compose app",
+                            verify_current=self._verify_current_service,
+                            locator_factory=lambda compose_id: _ComposeLocator(
+                                project_id=project.project_id,
+                                environment_id=environment.environment_id,
+                                compose_id=compose_id,
+                            ),
+                        )
+                        self._applied_locator = applied.locator
+                        return applied.locator
 
                 created = self._client.create_compose(
                     name=self._service_name,
                     environment_id=environment.environment_id,
-                    compose_file=_render_compose_file(
-                        self._service_name, tunnel_token=tunnel_token
-                    ),
+                    compose_file=compose_file,
                     app_name=self._service_name,
                 )
                 self._client.deploy_compose(
@@ -193,7 +203,7 @@ class DokployCloudflaredBackend:
             created = self._client.create_compose(
                 name=self._service_name,
                 environment_id=created_project.environment_id,
-                compose_file=_render_compose_file(self._service_name, tunnel_token=tunnel_token),
+                compose_file=compose_file,
                 app_name=self._service_name,
             )
             self._client.deploy_compose(
@@ -210,6 +220,19 @@ class DokployCloudflaredBackend:
             return locator
         except DokployApiError as error_value:
             raise CloudflaredConnectorError(str(error_value)) from error_value
+
+    def _verify_current_service(self) -> ServiceVerificationResult:
+        is_up = _docker_container_is_up(self._service_name)
+        return make_verification_result(
+            service_name=self._service_name,
+            tier="app",
+            passed=is_up,
+            detail=(
+                f"Cloudflared container for '{self._service_name}' is "
+                f"{'up' if is_up else 'not up'}."
+            ),
+            evidence_command=["docker", "ps", "--format", "{{.Names}}\t{{.Status}}"],
+        )
 
 
 def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSummary | None:
@@ -248,6 +271,26 @@ def _render_compose_file(service_name: str, *, tunnel_token: str) -> str:
         "    environment:\n"
         f"      TUNNEL_TOKEN: {encoded_token}\n"
     )
+
+
+def _docker_container_is_up(service_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}\t{{.Status}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.splitlines():
+        name, _, status = line.partition("\t")
+        if service_name not in name:
+            continue
+        return status.startswith("Up ")
+    return False
 
 
 def _wait_for_public_url(url: str, *, attempts: int = 24, delay_seconds: float = 5.0) -> bool:

@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
@@ -216,6 +217,8 @@ class FakeCloudflareBackend:
 @dataclass
 class FakeSharedCoreBackend:
     network: SharedCoreResourceRecord | None = None
+    postgres: SharedCoreResourceRecord | None = None
+    litellm: SharedCoreResourceRecord | None = None
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self.network is not None and self.network.resource_id == resource_id:
@@ -235,15 +238,21 @@ class FakeSharedCoreBackend:
         return self.network
 
     def get_postgres_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
-        del resource_id
+        if self.postgres is not None and self.postgres.resource_id == resource_id:
+            return self.postgres
         return None
 
     def find_postgres_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
-        del resource_name
+        if self.postgres is not None and self.postgres.resource_name == resource_name:
+            return self.postgres
         return None
 
     def create_postgres_service(self, resource_name: str) -> SharedCoreResourceRecord:
-        raise AssertionError(f"Headscale should not provision postgres: {resource_name}")
+        self.postgres = SharedCoreResourceRecord(
+            resource_id="shared-postgres-1",
+            resource_name=resource_name,
+        )
+        return self.postgres
 
     def get_redis_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
         del resource_id
@@ -266,6 +275,23 @@ class FakeSharedCoreBackend:
 
     def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
         raise AssertionError(f"Headscale should not provision mail relay: {resource_name}")
+
+    def get_litellm_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_id == resource_id:
+            return self.litellm
+        return None
+
+    def find_litellm_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        if self.litellm is not None and self.litellm.resource_name == resource_name:
+            return self.litellm
+        return None
+
+    def create_litellm_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        self.litellm = SharedCoreResourceRecord(
+            resource_id="shared-litellm-1",
+            resource_name=resource_name,
+        )
+        return self.litellm
 
 
 @dataclass
@@ -390,7 +416,7 @@ def test_install_reconciles_headscale_and_persists_runtime_ledger(tmp_path: Path
 
     loaded_state = load_state_dir(state_dir)
 
-    assert summary["shared_core"]["outcome"] == "not_required"
+    assert summary["shared_core"]["outcome"] == "applied"
     assert summary["headscale"]["outcome"] == "applied"
     assert summary["headscale"]["hostname"] == "headscale.example.com"
     assert summary["headscale"]["service"]["resource_name"] == "headscale-stack-headscale"
@@ -411,6 +437,9 @@ def test_install_reconciles_headscale_and_persists_runtime_ledger(tmp_path: Path
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
+        ("shared_core_network", "stack:headscale-stack:shared-network"),
+        ("shared_core_postgres", "stack:headscale-stack:shared-postgres"),
+        ("shared_core_litellm", "stack:headscale-stack:shared-litellm"),
         ("headscale_service", "stack:headscale-stack:headscale"),
     }
 
@@ -439,6 +468,7 @@ def test_install_reconciles_headscale_via_dokploy_backend(
         headscale_backend=DokployHeadscaleBackend(
             api_url="https://dokploy.example.com",
             api_key="dokp-key-123",
+            state_dir=state_dir,
             stack_name="headscale-stack",
             hostname="headscale.example.com",
             client=client,
@@ -464,13 +494,14 @@ def test_install_reconciles_headscale_via_dokploy_backend(
 def test_install_rerun_reuses_owned_headscale_service(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     headscale_backend = FakeHeadscaleBackend()
+    shared_core_backend = FakeSharedCoreBackend()
     run_install_flow(
         env_file=FIXTURES_DIR / "headscale.env",
         state_dir=state_dir,
         dry_run=False,
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=FakeCloudflareBackend(),
-        shared_core_backend=FakeSharedCoreBackend(),
+        shared_core_backend=shared_core_backend,
         headscale_backend=headscale_backend,
     )
 
@@ -501,7 +532,7 @@ def test_install_rerun_reuses_owned_headscale_service(tmp_path: Path) -> None:
                 ),
             },
         ),
-        shared_core_backend=FakeSharedCoreBackend(),
+        shared_core_backend=shared_core_backend,
         headscale_backend=headscale_backend,
     )
 

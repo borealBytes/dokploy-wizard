@@ -21,6 +21,10 @@ provider "docker" {
   host = var.docker_socket != "" ? var.docker_socket : null
 }
 
+data "docker_network" "shared" {
+  name = "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__"
+}
+
 locals {
   username = data.coder_workspace_owner.me.name
 }
@@ -432,6 +436,10 @@ resource "docker_container" "workspace" {
   host {
     host = "host.docker.internal"
     ip   = "host-gateway"
+  }
+
+  networks_advanced {
+    name = data.docker_network.shared.name
   }
 
   volumes {
