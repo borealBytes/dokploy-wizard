@@ -1051,50 +1051,6 @@ def _coder_cli_url() -> str:
     return "http://127.0.0.1:3000"
 
 
-def _ensure_coder_cli_session(container_name: str, session_token: str) -> None:
-    """Write Coder CLI session files inside the container so /opt/coder commands authenticate."""
-    session_result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "-i",
-            container_name,
-            "sh",
-            "-lc",
-            "mkdir -p /root/.config/coderv2 && cat > /root/.config/coderv2/session",
-        ],
-        input=session_token,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if session_result.returncode != 0:
-        raise CoderError(
-            "Unable to write Coder CLI session file: "
-            f"{(session_result.stderr or session_result.stdout).strip()}"
-        )
-    url_result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "-i",
-            container_name,
-            "sh",
-            "-lc",
-            "cat > /root/.config/coderv2/url",
-        ],
-        input=_coder_cli_url(),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if url_result.returncode != 0:
-        raise CoderError(
-            "Unable to write Coder CLI URL file: "
-            f"{(url_result.stderr or url_result.stdout).strip()}"
-        )
-
-
 def _push_default_template(
     *,
     container_name: str,
@@ -1103,10 +1059,13 @@ def _push_default_template(
     template_name: str,
     template_version_name: str | None = None,
 ) -> None:
-    _ensure_coder_cli_session(container_name, session_token)
     command = [
         "docker",
         "exec",
+        "-e",
+        f"CODER_URL={_coder_cli_url()}",
+        "-e",
+        f"CODER_SESSION_TOKEN={session_token}",
         container_name,
         "/opt/coder",
         "templates",
@@ -1226,11 +1185,14 @@ def _upsert_coder_secret(
     value: str,
     description: str,
 ) -> None:
-    _ensure_coder_cli_session(container_name, session_token)
     command_prefix = [
         "docker",
         "exec",
         "-i",
+        "-e",
+        f"CODER_URL={_coder_cli_url()}",
+        "-e",
+        f"CODER_SESSION_TOKEN={session_token}",
         container_name,
         "/opt/coder",
         "secret",
@@ -1278,11 +1240,14 @@ def _shell_double_quote_escape(value: str) -> str:
 
 
 def _list_workspaces(*, container_name: str, hostname: str, session_token: str) -> tuple[str, ...]:
-    _ensure_coder_cli_session(container_name, session_token)
     result = subprocess.run(
         [
             "docker",
             "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
             container_name,
             "/opt/coder",
             "list",
@@ -1317,11 +1282,14 @@ def _list_templates(
     *, container_name: str, hostname: str, session_token: str
 ) -> tuple[dict[str, object], ...]:
     del hostname
-    _ensure_coder_cli_session(container_name, session_token)
     result = subprocess.run(
         [
             "docker",
             "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
             container_name,
             "/opt/coder",
             "templates",
@@ -1394,11 +1362,14 @@ def _list_template_versions(
             break
     if not template_exists:
         return ()
-    _ensure_coder_cli_session(container_name, session_token)
     result = subprocess.run(
         [
             "docker",
             "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
             container_name,
             "/opt/coder",
             "templates",
@@ -1445,11 +1416,14 @@ def _create_default_workspace(
     workspace_name: str,
     template_name: str,
 ) -> None:
-    _ensure_coder_cli_session(container_name, session_token)
     result = subprocess.run(
         [
             "docker",
             "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
             container_name,
             "/opt/coder",
             "create",

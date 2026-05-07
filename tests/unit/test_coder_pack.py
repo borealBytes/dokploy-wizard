@@ -829,24 +829,10 @@ def test_push_default_template_ignores_missing_terraform_lockfile(
         [
             "docker",
             "exec",
-            "-i",
-            "coder-container",
-            "sh",
-            "-lc",
-            "mkdir -p /root/.config/coderv2 && cat > /root/.config/coderv2/session",
-        ],
-        [
-            "docker",
-            "exec",
-            "-i",
-            "coder-container",
-            "sh",
-            "-lc",
-            "cat > /root/.config/coderv2/url",
-        ],
-        [
-            "docker",
-            "exec",
+            "-e",
+            "CODER_URL=http://127.0.0.1:3000",
+            "-e",
+            "CODER_SESSION_TOKEN=session-123",
             "coder-container",
             "/opt/coder",
             "templates",
@@ -856,7 +842,7 @@ def test_push_default_template_ignores_missing_terraform_lockfile(
             "/tmp/ubuntu-vscode-opencode-web",
             "--ignore-lockfile",
             "--yes",
-        ],
+        ]
     ]
 
 
@@ -878,7 +864,6 @@ def test_push_default_template_treats_duplicate_deterministic_version_as_success
         )
 
     monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(coder_module, "_ensure_coder_cli_session", lambda *args, **kwargs: None)
 
     coder_module._push_default_template(
         container_name="coder-container",
@@ -1526,16 +1511,16 @@ def test_dokploy_coder_verification_resolves_dokploy_prefixed_container_name(
                 stdout="openmerge-coder-ofbxpg-openmerge-coder-1\n",
                 stderr="",
             )
-        if command[:2] == ["docker", "exec"]:
-            exec_container_names.append(command[2])
-            if command[3:6] == ["/opt/coder", "templates", "list"]:
+        if command[:4] == ["docker", "exec", "-e", f"CODER_URL={coder_module._coder_cli_url()}"]:
+            exec_container_names.append(command[6])
+            if command[7:10] == ["/opt/coder", "templates", "list"]:
                 stdout = json.dumps(
                     [
                         {"name": template_name}
                         for template_name in coder_module._required_template_names()
                     ]
                 )
-            elif command[3:5] == ["/opt/coder", "list"]:
+            elif command[7:9] == ["/opt/coder", "list"]:
                 stdout = json.dumps(
                     [{"name": coder_module._default_workspace_name("coder.example.com")}]
                 )
@@ -1553,7 +1538,6 @@ def test_dokploy_coder_verification_resolves_dokploy_prefixed_container_name(
     monkeypatch.setattr(coder_module, "_wait_for_coder_bootstrap_api_ready", lambda hostname: None)
     monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: True)
     monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
-    monkeypatch.setattr(coder_module, "_ensure_coder_cli_session", lambda *args, **kwargs: None)
     monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
 
     result = backend._verify_current_compose_application()
