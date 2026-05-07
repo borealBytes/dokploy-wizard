@@ -1311,7 +1311,11 @@ def _list_templates(
         raise CoderError("Coder template list returned invalid JSON.") from exc
     if not isinstance(payload, list):
         raise CoderError("Coder template list returned an unexpected payload shape.")
-    return tuple(item for item in payload if isinstance(item, dict))
+    return tuple(
+        item.get("Template") if isinstance(item.get("Template"), dict) else item
+        for item in payload
+        if isinstance(item, dict)
+    )
 
 
 def _active_template_version_name(
