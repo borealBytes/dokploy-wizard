@@ -1992,6 +1992,7 @@ def _build_coder_backend(
         hermes_model=raw_env.values.get("HERMES_MODEL", "unsloth-active"),
         ai_default_base_url=_shared_ai_default_base_url(raw_env),
         ai_default_api_key=litellm_generated_keys.virtual_keys["coder-hermes"],
+        state_dir=state_dir,
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,
