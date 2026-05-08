@@ -24,6 +24,8 @@ from dokploy_wizard.state import (
     write_litellm_generated_keys,
 )
 
+_MANAGED_METADATA = {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"}
+
 
 def _raw_env() -> RawEnvInput:
     return RawEnvInput(
@@ -161,6 +163,8 @@ class FakeLiteLLMAdminApi:
         self.fail_create_key_for = fail_create_key_for
         self.created_teams: list[LiteLLMTeamRecord] = []
         self.created_keys: list[LiteLLMVirtualKeyRecord] = []
+        self.updated_teams: list[LiteLLMTeamRecord] = []
+        self.updated_keys: list[LiteLLMVirtualKeyRecord] = []
 
     def readiness(self) -> dict[str, object]:
         return {"status": "connected", "db": "connected"}
@@ -168,10 +172,39 @@ class FakeLiteLLMAdminApi:
     def list_teams(self) -> tuple[LiteLLMTeamRecord, ...]:
         return tuple(self._teams.values())
 
-    def create_team(self, *, team_alias: str, models: tuple[str, ...]) -> LiteLLMTeamRecord:
-        team = LiteLLMTeamRecord(team_id=f"team-{team_alias}", team_alias=team_alias, models=models)
+    def create_team(
+        self,
+        *,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        team = LiteLLMTeamRecord(
+            team_id=f"team-{team_alias}",
+            team_alias=team_alias,
+            models=models,
+            metadata=dict(metadata or {}),
+        )
         self._teams[team_alias] = team
         self.created_teams.append(team)
+        return team
+
+    def update_team(
+        self,
+        *,
+        team_id: str,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        team = LiteLLMTeamRecord(
+            team_id=team_id,
+            team_alias=team_alias,
+            models=models,
+            metadata=dict(metadata or {}),
+        )
+        self._teams[team_alias] = team
+        self.updated_teams.append(team)
         return team
 
     def list_keys(self) -> tuple[LiteLLMVirtualKeyRecord, ...]:
@@ -186,7 +219,6 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
-        del metadata
         if self.fail_create_key_for == key_alias:
             raise LiteLLMAdminError(f"failed to create key {key_alias}")
         record = LiteLLMVirtualKeyRecord(
@@ -194,6 +226,7 @@ class FakeLiteLLMAdminApi:
             key_alias=key_alias,
             team_id=team_id,
             models=models,
+            metadata=dict(metadata or {}),
         )
         self._keys[key_alias] = record
         self.created_keys.append(record)
@@ -208,15 +241,15 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
-        del metadata
         record = LiteLLMVirtualKeyRecord(
             key=key,
             key_alias=key_alias,
             team_id=team_id,
             models=models,
+            metadata=dict(metadata or {}),
         )
         self._keys[key_alias] = record
-        self.created_keys.append(record)
+        self.updated_keys.append(record)
         return record
 
     def visible_models_for_key(self, key_alias: str) -> tuple[str, ...]:
@@ -229,7 +262,10 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
             LiteLLMTeamRecord(
                 team_id="team-my-farm-advisor",
                 team_alias="my-farm-advisor",
-                models=("local/unsloth-active", "openai/*", "openrouter/healer-alpha"),
+                models=(
+                    "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                    "openrouter/anthropic/claude-3.5-sonnet",
+                ),
             ),
         ),
         keys=(
@@ -237,7 +273,10 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
                 key="existing-my-farm-key",
                 key_alias="my-farm-advisor",
                 team_id="team-my-farm-advisor",
-                models=("local/unsloth-active", "openai/*", "openrouter/healer-alpha"),
+                models=(
+                    "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                    "openrouter/anthropic/claude-3.5-sonnet",
+                ),
             ),
         ),
     )
@@ -249,8 +288,14 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
             "coder-kdense": "new-coder-kdense-key",
         },
         consumer_model_allowlists={
-            "my-farm-advisor": ("local/unsloth-active", "openai/*", "openrouter/healer-alpha"),
-            "coder-kdense": ("openai/*",),
+            "my-farm-advisor": (
+                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "openrouter/anthropic/claude-3.5-sonnet",
+            ),
+            "coder-kdense": (
+                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "openrouter/anthropic/claude-3.5-sonnet",
+            ),
         },
     )
 
@@ -259,17 +304,23 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
             key="new-coder-kdense-key",
             key_alias="coder-kdense",
             team_id="team-coder-kdense",
-            models=("openai/*",),
+            models=(
+                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "openrouter/anthropic/claude-3.5-sonnet",
+            ),
+            metadata={"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
         )
     ]
     assert reconciled["my-farm-advisor"].key == "existing-my-farm-key"
     assert reconciled["coder-kdense"].key == "new-coder-kdense-key"
     assert api.visible_models_for_key("my-farm-advisor") == (
-        "local/unsloth-active",
-        "openai/*",
-        "openrouter/healer-alpha",
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "openrouter/anthropic/claude-3.5-sonnet",
     )
-    assert api.visible_models_for_key("coder-kdense") == ("openai/*",)
+    assert api.visible_models_for_key("coder-kdense") == (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "openrouter/anthropic/claude-3.5-sonnet",
+    )
 
 
 def test_reconcile_virtual_keys_surfaces_key_creation_failures() -> None:
@@ -279,7 +330,12 @@ def test_reconcile_virtual_keys_surfaces_key_creation_failures() -> None:
     with pytest.raises(LiteLLMAdminError) as error:
         manager.reconcile_virtual_keys(
             generated_keys={"coder-kdense": "new-coder-kdense-key"},
-            consumer_model_allowlists={"coder-kdense": ("openai/*",)},
+            consumer_model_allowlists={
+                "coder-kdense": (
+                    "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                    "openrouter/anthropic/claude-3.5-sonnet",
+                )
+            },
         )
 
     assert "failed to create key coder-kdense" in str(error.value)
@@ -291,7 +347,7 @@ def test_reconcile_virtual_keys_reuses_existing_key_when_generated_value_differs
             LiteLLMTeamRecord(
                 team_id="team-my-farm-advisor",
                 team_alias="my-farm-advisor",
-                models=("openai/*",),
+                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
             ),
         ),
         keys=(
@@ -299,7 +355,7 @@ def test_reconcile_virtual_keys_reuses_existing_key_when_generated_value_differs
                 key="old-my-farm-key",
                 key_alias="my-farm-advisor",
                 team_id="team-my-farm-advisor",
-                models=("openai/*",),
+                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
             ),
         ),
     )
@@ -307,9 +363,139 @@ def test_reconcile_virtual_keys_reuses_existing_key_when_generated_value_differs
 
     reconciled = manager.reconcile_virtual_keys(
         generated_keys={"my-farm-advisor": "new-my-farm-key"},
-        consumer_model_allowlists={"my-farm-advisor": ("openai/*",)},
+        consumer_model_allowlists={
+            "my-farm-advisor": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",)
+        },
     )
 
     assert reconciled["my-farm-advisor"].key == "old-my-farm-key"
-    assert api.visible_models_for_key("my-farm-advisor") == ("openai/*",)
+    assert api.visible_models_for_key("my-farm-advisor") == (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+    )
     assert len(api.created_keys) == 0
+
+
+def test_reconcile_virtual_keys_updates_managed_team_and_key_model_drift_without_rotating_key(
+) -> None:
+    api = FakeLiteLLMAdminApi(
+        teams=(
+            LiteLLMTeamRecord(
+                team_id="team-my-farm-advisor",
+                team_alias="my-farm-advisor",
+                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                metadata=_MANAGED_METADATA,
+            ),
+        ),
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key="existing-my-farm-key",
+                key_alias="my-farm-advisor",
+                team_id="team-my-farm-advisor",
+                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                metadata=_MANAGED_METADATA,
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    reconciled = manager.reconcile_virtual_keys(
+        generated_keys={"my-farm-advisor": "new-my-farm-key"},
+        consumer_model_allowlists={
+            "my-farm-advisor": (
+                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "openrouter/anthropic/claude-3.5-sonnet",
+            )
+        },
+    )
+
+    assert api.updated_teams == [
+        LiteLLMTeamRecord(
+            team_id="team-my-farm-advisor",
+            team_alias="my-farm-advisor",
+            models=(
+                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "openrouter/anthropic/claude-3.5-sonnet",
+            ),
+            metadata=_MANAGED_METADATA,
+        )
+    ]
+    assert api.updated_keys == [
+        LiteLLMVirtualKeyRecord(
+            key="existing-my-farm-key",
+            key_alias="my-farm-advisor",
+            team_id="team-my-farm-advisor",
+            models=(
+                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "openrouter/anthropic/claude-3.5-sonnet",
+            ),
+            metadata=_MANAGED_METADATA,
+        )
+    ]
+    assert reconciled["my-farm-advisor"].key == "existing-my-farm-key"
+
+
+def test_reconcile_virtual_keys_fails_closed_for_unmanaged_team_model_drift() -> None:
+    api = FakeLiteLLMAdminApi(
+        teams=(
+            LiteLLMTeamRecord(
+                team_id="team-my-farm-advisor",
+                team_alias="my-farm-advisor",
+                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+            ),
+        ),
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key="existing-my-farm-key",
+                key_alias="my-farm-advisor",
+                team_id="team-my-farm-advisor",
+                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                metadata=_MANAGED_METADATA,
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    with pytest.raises(LiteLLMAdminError, match="not wizard-managed"):
+        manager.reconcile_virtual_keys(
+            generated_keys={"my-farm-advisor": "existing-my-farm-key"},
+            consumer_model_allowlists={
+                "my-farm-advisor": (
+                    "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                    "openrouter/anthropic/claude-3.5-sonnet",
+                )
+            },
+        )
+
+
+def test_reconcile_virtual_keys_fails_closed_for_mismatched_managed_key_metadata() -> None:
+    api = FakeLiteLLMAdminApi(
+        teams=(
+            LiteLLMTeamRecord(
+                team_id="team-my-farm-advisor",
+                team_alias="my-farm-advisor",
+                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                metadata=_MANAGED_METADATA,
+            ),
+        ),
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key="existing-my-farm-key",
+                key_alias="my-farm-advisor",
+                team_id="team-my-farm-advisor",
+                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                metadata={"consumer": "openclaw", "managed_by": "dokploy-wizard"},
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    with pytest.raises(LiteLLMAdminError, match="belongs to consumer 'openclaw'"):
+        manager.reconcile_virtual_keys(
+            generated_keys={"my-farm-advisor": "existing-my-farm-key"},
+            consumer_model_allowlists={
+                "my-farm-advisor": (
+                    "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                    "openrouter/anthropic/claude-3.5-sonnet",
+                )
+            },
+        )

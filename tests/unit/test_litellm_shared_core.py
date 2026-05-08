@@ -66,7 +66,7 @@ def test_litellm_db_allocation_is_dedicated_and_not_a_pack_allocation() -> None:
     )
 
 
-def test_rendered_compose_includes_pinned_litellm_service() -> None:
+def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs() -> None:
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
 
     rendered = _render_compose_file(
@@ -99,17 +99,23 @@ def test_rendered_compose_includes_pinned_litellm_service() -> None:
     assert re.search(r"source: wizard-stack-shared-litellm-config-[0-9a-f]{12}", rendered)
     assert "target: /app/config.yaml" in rendered
     assert 'api_key: "sk-no-key-required"' in rendered
-    assert 'model_name: "openai/*"' not in rendered
+    assert 'model_name: "opencode-go/deepseek-v4-flash"' in rendered
+    assert 'model_name: "openrouter/hunter-alpha"' in rendered
+    assert '      LITELLM_OPENCODE_GO_API_KEY: "${OPENCODE_GO_API_KEY}"' in rendered
+    assert (
+        '      LITELLM_OPENROUTER_API_KEY: "${MY_FARM_ADVISOR_OPENROUTER_API_KEY}"'
+        in rendered
+    )
     assert 'OPENCODE_GO_API_KEY: "opencode-go-upstream-key"' not in rendered
     assert 'MY_FARM_ADVISOR_OPENROUTER_API_KEY: "farm-openrouter-upstream-key"' not in rendered
-    assert 'api_key: "opencode-go-upstream-key"' not in rendered
-    assert 'api_key: "farm-openrouter-upstream-key"' not in rendered
+    assert 'os.environ/LITELLM_OPENCODE_GO_API_KEY' not in rendered
+    assert 'os.environ/LITELLM_OPENROUTER_API_KEY' not in rendered
     assert "    aliases:\n          - wizard-stack-shared-litellm\n" in rendered
     assert '      - "127.0.0.1:4000:4000"' in rendered
     assert "    expose:\n" not in rendered
 
 
-def test_rendered_compose_keeps_only_local_route_when_non_local_routes_paused() -> None:
+def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
 
     rendered = _render_compose_file(
@@ -119,25 +125,24 @@ def test_rendered_compose_keeps_only_local_route_when_non_local_routes_paused() 
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
             "LITELLM_LOCAL_MODEL": "unsloth-active",
             "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
-            "OPENCODE_GO_API_KEY": "opencode-go-upstream-key",
-            "LITELLM_OPENROUTER_MODELS": (
-                "openrouter/nvidia/nemotron-3-super-120b-a12b:free="
-                "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
-            ),
-            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-upstream-key",
-            "LITELLM_NVIDIA_MODELS": "nvidia/kimi-k2.5=nvidia/moonshotai/kimi-k2.5",
-            "OPENCLAW_NVIDIA_API_KEY": "openclaw-nvidia-upstream-key",
-            "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
+            "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
+            "LITELLM_OPENCODE_GO_API_KEY": "litellm-opencode-key",
+            "OPENCODE_GO_API_KEY": "legacy-opencode-go-key",
+            "LITELLM_OPENROUTER_MODELS": "google/gemma-4-31b-it:free",
+            "LITELLM_OPENROUTER_API_KEY": "litellm-openrouter-key",
+            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "legacy-openrouter-key",
         },
     )
 
-    assert 'model_name: "local/unsloth-active"' in rendered
-    assert 'model: "openai/unsloth-active"' in rendered
-    assert 'api_key: "sk-no-key-required"' in rendered
-    assert 'model_name: "openai/*"' not in rendered
-    assert 'openrouter/nvidia/nemotron-3-super-120b-a12b:free' not in rendered
-    assert 'OPENCODE_GO_API_KEY: "opencode-go-upstream-key"' not in rendered
-    assert 'MY_FARM_ADVISOR_OPENROUTER_API_KEY: "farm-openrouter-upstream-key"' not in rendered
+    assert '      LITELLM_OPENCODE_GO_API_KEY: "${LITELLM_OPENCODE_GO_API_KEY}"' in rendered
+    assert '      LITELLM_OPENROUTER_API_KEY: "${LITELLM_OPENROUTER_API_KEY}"' in rendered
+    assert '      LITELLM_OPENCODE_GO_API_KEY: "${OPENCODE_GO_API_KEY}"' not in rendered
+    assert (
+        '      LITELLM_OPENROUTER_API_KEY: "${MY_FARM_ADVISOR_OPENROUTER_API_KEY}"'
+        not in rendered
+    )
+    assert 'model_name: "opencode-go/gpt-4.1-mini"' in rendered
+    assert 'model_name: "openrouter/google/gemma-4-31b-it:free"' in rendered
 
 
 def test_litellm_inline_config_name_changes_when_model_content_changes() -> None:
@@ -159,6 +164,44 @@ def test_litellm_inline_config_name_changes_when_model_content_changes() -> None
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
             "LITELLM_LOCAL_MODEL": "unsloth-active",
             "LITELLM_LOCAL_API_KEY": "sk-local-override",
+        },
+    )
+
+    first_name = re.search(
+        r"source: (wizard-stack-shared-litellm-config-[0-9a-f]{12})", rendered_first
+    )
+    second_name = re.search(
+        r"source: (wizard-stack-shared-litellm-config-[0-9a-f]{12})", rendered_second
+    )
+
+    assert first_name is not None
+    assert second_name is not None
+    assert first_name.group(1) != second_name.group(1)
+
+
+def test_litellm_inline_config_name_changes_when_openrouter_model_inventory_changes() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered_first = _render_compose_file(
+        plan,
+        {},
+        {
+            "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_OPENROUTER_API_KEY": "litellm-openrouter-key",
+            "LITELLM_OPENROUTER_MODELS": "minimax/minimax-m2.5:free",
+        },
+    )
+    rendered_second = _render_compose_file(
+        plan,
+        {},
+        {
+            "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_OPENROUTER_API_KEY": "litellm-openrouter-key",
+            "LITELLM_OPENROUTER_MODELS": (
+                "minimax/minimax-m2.5:free,google/gemma-4-31b-it:free"
+            ),
         },
     )
 
@@ -467,8 +510,12 @@ def test_litellm_allowlists_keep_local_and_bare_aliases_for_advisors() -> None:
         plan=plan,
     )
 
-    assert allowlists["my-farm-advisor"] == ("local/unsloth-active", "unsloth-active")
-    assert allowlists["openclaw"] == ("local/unsloth-active", "unsloth-active")
+    assert allowlists["my-farm-advisor"] == (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+    )
+    assert allowlists["openclaw"] == (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+    )
 
 
 class _FakeLiteLLMAdminApi:
@@ -483,7 +530,25 @@ class _FakeLiteLLMAdminApi:
     def list_teams(self) -> tuple[LiteLLMTeamRecord, ...]:
         return ()
 
-    def create_team(self, *, team_alias: str, models: tuple[str, ...]) -> LiteLLMTeamRecord:
+    def create_team(
+        self,
+        *,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        del metadata
+        return LiteLLMTeamRecord(team_id=f"team-{team_alias}", team_alias=team_alias, models=models)
+
+    def update_team(
+        self,
+        *,
+        team_id: str,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        del team_id, metadata
         return LiteLLMTeamRecord(team_id=f"team-{team_alias}", team_alias=team_alias, models=models)
 
     def list_keys(self) -> tuple[LiteLLMVirtualKeyRecord, ...]:

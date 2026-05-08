@@ -39,10 +39,22 @@ from dokploy_wizard.litellm.admin import (
 from dokploy_wizard.litellm.config_renderer import build_litellm_config
 
 EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
-    "my-farm-advisor": ("local/unsloth-active", "unsloth-active"),
-    "openclaw": ("local/unsloth-active", "unsloth-active"),
-    "coder-hermes": ("local/unsloth-active", "unsloth-active"),
-    "coder-kdense": (),
+    "my-farm-advisor": (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "openrouter/anthropic/claude-3.5-sonnet",
+    ),
+    "openclaw": (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "openrouter/anthropic/claude-3.5-sonnet",
+    ),
+    "coder-hermes": (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "openrouter/anthropic/claude-3.5-sonnet",
+    ),
+    "coder-kdense": (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "openrouter/anthropic/claude-3.5-sonnet",
+    ),
 }
 
 LIVE_KEY_ENV_BY_CONSUMER = {
@@ -70,8 +82,36 @@ class FakeLiteLLMAdminApi:
     def list_teams(self) -> tuple[LiteLLMTeamRecord, ...]:
         return tuple(self._teams.values())
 
-    def create_team(self, *, team_alias: str, models: tuple[str, ...]) -> LiteLLMTeamRecord:
-        team = LiteLLMTeamRecord(team_id=f"team-{team_alias}", team_alias=team_alias, models=models)
+    def create_team(
+        self,
+        *,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        team = LiteLLMTeamRecord(
+            team_id=f"team-{team_alias}",
+            team_alias=team_alias,
+            models=models,
+            metadata=dict(metadata or {}),
+        )
+        self._teams[team_alias] = team
+        return team
+
+    def update_team(
+        self,
+        *,
+        team_id: str,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        team = LiteLLMTeamRecord(
+            team_id=team_id,
+            team_alias=team_alias,
+            models=models,
+            metadata=dict(metadata or {}),
+        )
         self._teams[team_alias] = team
         return team
 
@@ -87,12 +127,12 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
-        del metadata
         record = LiteLLMVirtualKeyRecord(
             key=key,
             key_alias=key_alias,
             team_id=team_id,
             models=models,
+            metadata=dict(metadata or {}),
         )
         self._keys[key_alias] = record
         return record
@@ -106,12 +146,12 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
-        del metadata
         record = LiteLLMVirtualKeyRecord(
             key=key,
             key_alias=key_alias,
             team_id=team_id,
             models=models,
+            metadata=dict(metadata or {}),
         )
         self._keys[key_alias] = record
         return record
@@ -252,6 +292,8 @@ def _qa_flat_env() -> dict[str, str]:
         "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
         "LITELLM_LOCAL_MODEL": "unsloth-active",
         "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
+        "LITELLM_OPENROUTER_API_KEY": "sk-openrouter-test",
+        "LITELLM_OPENROUTER_MODELS": "anthropic/claude-3.5-sonnet",
     }
 
 
@@ -351,7 +393,7 @@ def test_fake_v1_models_farm_key_shows_local_and_opencode_go_wildcard(
     response = fake_harness.v1_models(_consumer_api_key("my-farm-advisor"))
 
     assert response.status_code == 200
-    assert _model_names_from_v1_models(response) == ("local/unsloth-active", "unsloth-active")
+    assert _model_names_from_v1_models(response) == EXPECTED_VISIBLE_MODELS["my-farm-advisor"]
     assert "openrouter/*" not in _model_names_from_v1_models(response)
 
 
@@ -433,6 +475,20 @@ def test_fake_coder_kdense_rejects_advisor_only_openrouter_alias(
     )
 
     assert response.status_code in {400, 403}
+
+
+@pytest.mark.parametrize("consumer", tuple(EXPECTED_VISIBLE_MODELS))
+def test_fake_denied_bare_local_alias_returns_403(
+    fake_harness: FakeLiteLLMRestrictionHarness,
+    consumer: str,
+) -> None:
+    response = fake_harness.chat_completion(
+        _consumer_api_key(consumer),
+        model="unsloth-active",
+    )
+
+    assert response.status_code in {400, 403}
+    assert "unsloth-active" in json.dumps(response.json_body)
 
 
 @pytest.mark.skipif(not _live_enabled(), reason="set LITELLM_QA_ENABLE_LIVE=1 to run post-deploy checks")
