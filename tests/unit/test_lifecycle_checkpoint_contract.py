@@ -17,9 +17,9 @@ from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     RawEnvInput,
     StateValidationError,
-    parse_env_file,
     resolve_desired_state,
 )
+from tests.helpers.root_install_env import root_install_env
 
 
 def _repo_root() -> Path:
@@ -27,7 +27,7 @@ def _repo_root() -> Path:
 
 
 def _load_root_env() -> RawEnvInput:
-    raw_env = parse_env_file(_repo_root() / ".install.env")
+    raw_env = root_install_env()
     values = {
         key: value
         for key, value in raw_env.values.items()

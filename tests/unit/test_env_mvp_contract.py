@@ -3,21 +3,22 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from dokploy_wizard.packs.resolver import resolve_pack_selection
-from dokploy_wizard.state import parse_env_file, resolve_desired_state
+from dokploy_wizard.state import resolve_desired_state
 from dokploy_wizard.state.models import RawEnvInput, StateValidationError
+from tests.helpers.root_install_env import root_install_env
 
 
-def _repo_root() -> Path:
+def _repo_root():
+    from pathlib import Path
+
     return Path(__file__).resolve().parents[2]
 
 
 def _load_root_env():
-    return parse_env_file(_repo_root() / ".install.env")
+    return root_install_env()
 
 
 def _farm_litellm_env(**overrides: str) -> RawEnvInput:
