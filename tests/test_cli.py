@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -497,6 +498,76 @@ def test_inspect_state_redacts_litellm_generated_secrets(
     assert "litellm-master-secret" not in json.dumps(payload)
     assert "litellm-salt-secret" not in json.dumps(payload)
     assert "litellm-virtual-secret" not in json.dumps(payload)
+
+
+def test_inspect_state_redacts_litellm_provider_api_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / "inspect-litellm-provider-keys.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "DOKPLOY_SUBDOMAIN=dokploy",
+                "DOKPLOY_ADMIN_EMAIL=operator@example.com",
+                "ENABLE_MY_FARM_ADVISOR=true",
+                "AI_DEFAULT_PROVIDER=openrouter",
+                "AI_DEFAULT_MODEL=anthropic/claude-sonnet-4",
+                "LITELLM_LOCAL_BASE_URL=http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
+                "LITELLM_OPENROUTER_API_KEY=sk-test-openrouter-secret-12345678",
+                "LITELLM_OPENROUTER_MODELS=anthropic/claude-sonnet-4",
+                "LITELLM_OPENCODE_GO_API_KEY=sk-test-opencode-secret-12345678",
+                "LITELLM_OPENCODE_GO_BASE_URL=https://opencode-go.example.com/v1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "build_live_drift_report", lambda **_: {"status": "clean"})
+
+    assert (
+        cli._handle_inspect_state(
+            argparse.Namespace(env_file=env_file, state_dir=tmp_path / "state", dry_run=False)
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    raw_snapshot = json.loads((tmp_path / "state" / "raw-input.json").read_text(encoding="utf-8"))
+
+    assert raw_snapshot["values"]["LITELLM_OPENROUTER_API_KEY"] == "<redacted>"
+    assert raw_snapshot["values"]["LITELLM_OPENCODE_GO_API_KEY"] == "<redacted>"
+    assert "sk-test-openrouter-secret-12345678" not in json.dumps(payload)
+    assert "sk-test-opencode-secret-12345678" not in json.dumps(payload)
+
+
+def test_resolve_desired_state_accepts_litellm_routing_env_without_legacy_advisor_model_keys() -> None:
+    raw_env = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_MY_FARM_ADVISOR": "true",
+            "AI_DEFAULT_PROVIDER": "openrouter",
+            "AI_DEFAULT_MODEL": "anthropic/claude-sonnet-4",
+            "LITELLM_OPENROUTER_API_KEY": "<REDACTED>",
+            "LITELLM_OPENROUTER_MODELS": "anthropic/claude-sonnet-4",
+            "LITELLM_OPENCODE_GO_API_KEY": "<REDACTED>",
+        }
+    )
+
+    desired_state = resolve_desired_state(raw_env)
+
+    assert "my-farm-advisor" in desired_state.enabled_packs
+
+
+def test_install_env_example_uses_redacted_provider_key_placeholders_only() -> None:
+    example_env = (REPO_ROOT / ".install.env").read_text(encoding="utf-8")
+    parsed = parse_env_file(REPO_ROOT / ".install.env")
+
+    assert parsed.values["LITELLM_OPENROUTER_API_KEY"] == "<REDACTED>"
+    assert parsed.values["LITELLM_OPENCODE_GO_API_KEY"] == "<REDACTED>"
+    assert re.search(r"sk-[A-Za-z0-9_-]{8,}", example_env) is None
 
 
 def test_inspect_state_reports_both_advisors_with_user_visible_names(

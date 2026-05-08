@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import pytest
 
+import dokploy_wizard.lifecycle.changes as change_module
+import dokploy_wizard.state.env as env_module
+from dokploy_wizard import cli
+from dokploy_wizard.packs.catalog import get_mutable_pack_env_keys, get_pack_definition
 from dokploy_wizard.packs.resolver import resolve_pack_selection
 from dokploy_wizard.state import resolve_desired_state
 from dokploy_wizard.state.models import RawEnvInput, StateValidationError
@@ -112,6 +116,142 @@ def test_litellm_canonical_env_rejects_missing_local_endpoint_with_actionable_er
                 OPENCODE_GO_BASE_URL="",
             )
         )
+
+
+def test_ai_default_provider_and_model_resolve_local_alias_without_shared_api_pair() -> None:
+    raw_env = _farm_litellm_env(
+        MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
+        MY_FARM_ADVISOR_NVIDIA_API_KEY="",
+        ANTHROPIC_API_KEY="",
+        AI_DEFAULT_API_KEY="",
+        AI_DEFAULT_BASE_URL="",
+        LITELLM_LOCAL_BASE_URL="",
+        AI_DEFAULT_PROVIDER="tuxdesktop.tailb12aa5.ts.net",
+        AI_DEFAULT_MODEL="unsloth-active",
+    )
+
+    assert env_module.resolve_ai_default_model_ref(raw_env.values) == (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    )
+    assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
+
+
+def test_ai_default_provider_and_model_resolve_opencode_alias() -> None:
+    raw_env = _farm_litellm_env(
+        MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
+        MY_FARM_ADVISOR_NVIDIA_API_KEY="",
+        ANTHROPIC_API_KEY="",
+        AI_DEFAULT_API_KEY="",
+        AI_DEFAULT_BASE_URL="",
+        LITELLM_LOCAL_BASE_URL="",
+        AI_DEFAULT_PROVIDER="opencode",
+        AI_DEFAULT_MODEL="minimax/minimax-m2.5:free",
+    )
+
+    assert env_module.resolve_ai_default_model_ref(raw_env.values) == (
+        "opencode-go/minimax/minimax-m2.5:free"
+    )
+    assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
+
+
+def test_litellm_openrouter_models_accept_raw_openrouter_model_ids() -> None:
+    raw_env = _farm_litellm_env(
+        MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
+        MY_FARM_ADVISOR_NVIDIA_API_KEY="",
+        ANTHROPIC_API_KEY="",
+        AI_DEFAULT_API_KEY="",
+        AI_DEFAULT_BASE_URL="",
+        LITELLM_LOCAL_BASE_URL="",
+        AI_DEFAULT_PROVIDER="tuxdesktop.tailb12aa5.ts.net",
+        AI_DEFAULT_MODEL="unsloth-active",
+        LITELLM_OPENROUTER_MODELS=(
+            "openrouter/openai/gpt-4.1-mini,"
+            "openrouter/anthropic/claude-3.5-sonnet"
+        ),
+    )
+
+    assert env_module.parse_litellm_openrouter_models(raw_env.values) == (
+        (
+            "openrouter/openai/gpt-4.1-mini",
+            "openrouter/openai/gpt-4.1-mini",
+        ),
+        (
+            "openrouter/anthropic/claude-3.5-sonnet",
+            "openrouter/anthropic/claude-3.5-sonnet",
+        ),
+    )
+    assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
+
+
+def test_ai_default_provider_requires_model_name() -> None:
+    with pytest.raises(StateValidationError, match="AI_DEFAULT_MODEL"):
+        resolve_desired_state(
+            _farm_litellm_env(
+                MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
+                MY_FARM_ADVISOR_NVIDIA_API_KEY="",
+                ANTHROPIC_API_KEY="",
+                AI_DEFAULT_API_KEY="",
+                AI_DEFAULT_BASE_URL="",
+                LITELLM_LOCAL_BASE_URL="",
+                AI_DEFAULT_PROVIDER="opencode",
+                AI_DEFAULT_MODEL="",
+            )
+        )
+
+
+def test_ai_default_model_requires_provider_name() -> None:
+    with pytest.raises(StateValidationError, match="AI_DEFAULT_PROVIDER"):
+        resolve_desired_state(
+            _farm_litellm_env(
+                MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
+                MY_FARM_ADVISOR_NVIDIA_API_KEY="",
+                ANTHROPIC_API_KEY="",
+                AI_DEFAULT_API_KEY="",
+                AI_DEFAULT_BASE_URL="",
+                LITELLM_LOCAL_BASE_URL="",
+                AI_DEFAULT_PROVIDER="",
+                AI_DEFAULT_MODEL="unsloth-active",
+            )
+        )
+
+
+def test_new_ai_contract_keys_are_mutable_and_sensitive() -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "AI_DEFAULT_PROVIDER": "opencode",
+            "AI_DEFAULT_MODEL": "minimax/minimax-m2.5:free",
+            "LITELLM_OPENROUTER_API_KEY": "should-not-leak-openrouter",
+            "LITELLM_OPENCODE_GO_API_KEY": "should-not-leak-opencode",
+        },
+    )
+
+    redacted = cli._redacted_raw_env_input(raw_env)
+
+    assert redacted.values["LITELLM_OPENROUTER_API_KEY"] == "<redacted>"
+    assert redacted.values["LITELLM_OPENCODE_GO_API_KEY"] == "<redacted>"
+    assert "AI_DEFAULT_PROVIDER" in get_pack_definition("coder").mutable_env_keys
+    assert "AI_DEFAULT_MODEL" in get_pack_definition("openclaw").mutable_env_keys
+    assert {
+        "AI_DEFAULT_PROVIDER",
+        "AI_DEFAULT_MODEL",
+        "LITELLM_OPENROUTER_API_KEY",
+        "LITELLM_OPENCODE_GO_API_KEY",
+    } <= set(get_mutable_pack_env_keys())
+    assert {
+        "AI_DEFAULT_PROVIDER",
+        "AI_DEFAULT_MODEL",
+        "LITELLM_OPENROUTER_API_KEY",
+        "LITELLM_OPENCODE_GO_API_KEY",
+    } <= change_module._SUPPORTED_MODIFY_KEYS
+    assert {
+        "AI_DEFAULT_PROVIDER",
+        "AI_DEFAULT_MODEL",
+        "LITELLM_OPENROUTER_API_KEY",
+        "LITELLM_OPENCODE_GO_API_KEY",
+    } <= change_module._LITELLM_MUTABLE_ENV_KEYS
 
 
 def test_readme_documents_litellm_core_gateway_contract() -> None:

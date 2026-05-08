@@ -13,7 +13,12 @@ _MY_FARM_ADVISOR_EXPECTED_MUTABLE_ENV_KEYS = {
     "MY_FARM_ADVISOR_CHANNELS",
     "AI_DEFAULT_API_KEY",
     "AI_DEFAULT_BASE_URL",
+    "AI_DEFAULT_PROVIDER",
+    "AI_DEFAULT_MODEL",
     "ANTHROPIC_API_KEY",
+    "LITELLM_OPENCODE_GO_API_KEY",
+    "LITELLM_OPENROUTER_API_KEY",
+    "LITELLM_OPENROUTER_MODELS",
     "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
     "MY_FARM_ADVISOR_NVIDIA_API_KEY",
     "NVIDIA_BASE_URL",
@@ -67,8 +72,13 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     assert get_pack_definition("coder").hostnames[1].key == "coder-wildcard"
     assert "AI_DEFAULT_API_KEY" in get_pack_definition("coder").mutable_env_keys
     assert "AI_DEFAULT_BASE_URL" in get_pack_definition("coder").mutable_env_keys
+    assert "AI_DEFAULT_PROVIDER" in get_pack_definition("coder").mutable_env_keys
+    assert "AI_DEFAULT_MODEL" in get_pack_definition("coder").mutable_env_keys
     assert "HERMES_INFERENCE_PROVIDER" in get_pack_definition("coder").mutable_env_keys
     assert "HERMES_MODEL" in get_pack_definition("coder").mutable_env_keys
+    assert "LITELLM_OPENCODE_GO_API_KEY" in get_pack_definition("coder").mutable_env_keys
+    assert "LITELLM_OPENROUTER_API_KEY" in get_pack_definition("coder").mutable_env_keys
+    assert "LITELLM_OPENROUTER_MODELS" in get_pack_definition("coder").mutable_env_keys
     assert "OPENCODE_GO_API_KEY" in get_pack_definition("coder").mutable_env_keys
     assert "OPENCODE_GO_BASE_URL" in get_pack_definition("coder").mutable_env_keys
     assert get_pack_definition("openclaw").slot is None
@@ -78,6 +88,11 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     assert "OPENCLAW_NEXA_MEM0_BASE_URL" in get_pack_definition("openclaw").mutable_env_keys
     assert "OPENCLAW_NEXA_PRESENCE_POLICY" in get_pack_definition("openclaw").mutable_env_keys
     assert "OPENCLAW_NEXA_TALK_SHARED_SECRET" in get_pack_definition("openclaw").mutable_env_keys
+    assert "AI_DEFAULT_PROVIDER" in get_pack_definition("openclaw").mutable_env_keys
+    assert "AI_DEFAULT_MODEL" in get_pack_definition("openclaw").mutable_env_keys
+    assert "LITELLM_OPENCODE_GO_API_KEY" in get_pack_definition("openclaw").mutable_env_keys
+    assert "LITELLM_OPENROUTER_API_KEY" in get_pack_definition("openclaw").mutable_env_keys
+    assert "LITELLM_OPENROUTER_MODELS" in get_pack_definition("openclaw").mutable_env_keys
     assert get_pack_definition("my-farm-advisor").depends_on == ()
     assert _MY_FARM_ADVISOR_EXPECTED_MUTABLE_ENV_KEYS <= set(
         get_pack_definition("my-farm-advisor").mutable_env_keys
