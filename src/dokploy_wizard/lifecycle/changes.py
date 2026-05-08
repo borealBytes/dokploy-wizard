@@ -259,6 +259,7 @@ _LITELLM_MUTABLE_ENV_KEYS = (
     | _OPENCLAW_LITELLM_UPSTREAM_ENV_KEYS
     | _MY_FARM_LITELLM_UPSTREAM_ENV_KEYS
 )
+_LITELLM_CONSUMER_PHASES = {"coder", "openclaw", "my-farm-advisor"}
 
 _SUPPORTED_MODIFY_KEYS |= (
     _OPENCLAW_RUNTIME_ENV_KEYS
@@ -485,7 +486,7 @@ def classify_modify_request(
             phases_to_run.add("docuseal")
     if existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict():
         phases_to_run.add("shared_core")
-    if set(removed_packs) & {"openclaw", "my-farm-advisor"}:
+    if set(removed_packs) & _LITELLM_CONSUMER_PHASES:
         phases_to_run.add("shared_core")
     phases_to_run.update(_hostname_change_phases(existing_desired, requested_desired))
     phases_to_run.update(_new_pack_phases(existing_desired, requested_desired))
@@ -700,7 +701,7 @@ def _litellm_dependent_consumer_phases(
     phases: set[str] = set()
     enabled_packs = set(desired_state.enabled_packs)
     if changed_keys & _LITELLM_SHARED_CONFIG_ENV_KEYS:
-        phases.update(enabled_packs & {"coder", "openclaw", "my-farm-advisor"})
+        phases.update(enabled_packs & _LITELLM_CONSUMER_PHASES)
     if changed_keys & _OPENCLAW_LITELLM_UPSTREAM_ENV_KEYS and "openclaw" in enabled_packs:
         phases.add("openclaw")
     if changed_keys & _MY_FARM_LITELLM_UPSTREAM_ENV_KEYS and "my-farm-advisor" in enabled_packs:

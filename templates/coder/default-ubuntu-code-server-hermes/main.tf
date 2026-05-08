@@ -158,6 +158,7 @@ resource "coder_agent" "main" {
     upsert_env HERMES_MODEL "$HERMES_MODEL"
     upsert_env AI_DEFAULT_BASE_URL "$AI_DEFAULT_BASE_URL"
     upsert_env OPENCODE_GO_BASE_URL "$OPENCODE_GO_BASE_URL"
+    upsert_env OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"
     upsert_env API_SERVER_ENABLED "$API_SERVER_ENABLED"
     upsert_env API_SERVER_HOST "$API_SERVER_HOST"
     upsert_env API_SERVER_PORT "$API_SERVER_PORT"

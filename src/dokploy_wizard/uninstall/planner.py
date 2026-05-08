@@ -154,6 +154,8 @@ _RULES: dict[str, DeletionRule] = {
     TUNNEL_RESOURCE_TYPE: DeletionRule(phase="networking", retain_safe=True, priority=61),
 }
 
+_LITELLM_CONSUMER_PACKS = {"coder", "openclaw", "my-farm-advisor"}
+
 _PHASE_ORDER = {
     "tailscale": 0,
     "cloudflare_access": 1,
@@ -599,4 +601,4 @@ def _shared_core_dirty_after_pack_disable(
 ) -> bool:
     if existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict():
         return True
-    return bool({"openclaw", "my-farm-advisor"} & set(removed_packs))
+    return bool(_LITELLM_CONSUMER_PACKS & set(removed_packs))

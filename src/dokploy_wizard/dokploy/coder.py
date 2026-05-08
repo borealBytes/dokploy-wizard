@@ -38,6 +38,7 @@ from dokploy_wizard.dokploy.compose_noop import (
     persist_compose_artifact_hash,
 )
 from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
+from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
 from dokploy_wizard.state import load_state_dir
 from dokploy_wizard.verification import make_verification_result
@@ -64,8 +65,10 @@ class _ComposeLocator:
     compose_id: str
 
 
+_DEFAULT_AI_DEFAULT_PROVIDER = "opencode-go"
+_DEFAULT_AI_DEFAULT_MODEL = "deepseek-v4-flash"
 _DEFAULT_HERMES_INFERENCE_PROVIDER = "openai"
-_DEFAULT_HERMES_MODEL = "unsloth-active"
+_DEFAULT_HERMES_MODEL = DEFAULT_LOCAL_CANONICAL_ALIAS
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_INTERNAL_PORT = 4000
 
@@ -83,6 +86,8 @@ class DokployCoderBackend:
         admin_password: str,
         postgres_service_name: str,
         postgres: SharedPostgresAllocation,
+        ai_default_provider: str = _DEFAULT_AI_DEFAULT_PROVIDER,
+        ai_default_model: str = _DEFAULT_AI_DEFAULT_MODEL,
         hermes_inference_provider: str = _DEFAULT_HERMES_INFERENCE_PROVIDER,
         hermes_model: str = _DEFAULT_HERMES_MODEL,
         ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
@@ -98,8 +103,12 @@ class DokployCoderBackend:
         self._admin_password = admin_password
         self._postgres_service_name = postgres_service_name
         self._postgres = postgres
-        self._hermes_inference_provider = hermes_inference_provider
-        self._hermes_model = hermes_model
+        self._ai_default_provider = ai_default_provider.strip() or _DEFAULT_AI_DEFAULT_PROVIDER
+        self._ai_default_model = _normalize_ai_default_model(ai_default_model)
+        self._hermes_inference_provider = (
+            hermes_inference_provider.strip() or _DEFAULT_HERMES_INFERENCE_PROVIDER
+        )
+        self._hermes_model = _normalize_hermes_model_ref(hermes_model)
         self._ai_default_base_url = ai_default_base_url
         self._ai_default_api_key = ai_default_api_key
         self._state_dir = state_dir
@@ -233,13 +242,49 @@ class DokployCoderBackend:
             return ()
         shared_network_name = _shared_network_name(self._stack_name)
         for template_name, template_dir, replacements in (
-            (_default_template_name(), _default_template_dir(), {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name}),
+            (
+                _default_template_name(),
+                _default_template_dir(),
+                {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name},
+            ),
             (
                 _default_opencode_web_template_name(),
                 _default_opencode_web_template_dir(),
-                {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name},
+                {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
+                        self._ai_default_provider
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
+                        self._ai_default_model
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                },
             ),
-            (_default_openwork_template_name(), _default_openwork_template_dir(), {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name}),
+            (
+                _default_openwork_template_name(),
+                _default_openwork_template_dir(),
+                {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
+                        self._ai_default_provider
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
+                        self._ai_default_model
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                },
+            ),
             (
                 _default_kdense_byok_template_name(),
                 _default_kdense_byok_template_dir(),
@@ -616,6 +661,23 @@ def _litellm_virtual_key_ref(consumer: str) -> str:
     return f"$${{LITELLM_VIRTUAL_KEY_{normalized}}}"
 
 
+def _normalize_hermes_model_ref(model_ref: str) -> str:
+    normalized = model_ref.strip()
+    if normalized in {"", "unsloth-active", "local/unsloth-active"}:
+        return DEFAULT_LOCAL_CANONICAL_ALIAS
+    return normalized
+
+
+def _normalize_ai_default_model(model_ref: str) -> str:
+    normalized = model_ref.strip()
+    if normalized == "":
+        return _DEFAULT_AI_DEFAULT_MODEL
+    provider_prefix = f"{_DEFAULT_AI_DEFAULT_PROVIDER}/"
+    if normalized.startswith(provider_prefix):
+        return normalized.removeprefix(provider_prefix)
+    return normalized
+
+
 def _wildcard_suffix(wildcard_hostname: str) -> str:
     if not wildcard_hostname.startswith("*."):
         raise CoderError("Coder wildcard hostname must start with '*.'")
@@ -662,6 +724,10 @@ def _render_compose_file(
         f'      traefik.http.routers.{service_name}.tls: "true"\n'
         f'      traefik.http.routers.{service_name}-wildcard.entrypoints: "websecure"\n'
         f'      traefik.http.routers.{service_name}-wildcard.rule: "HostRegexp(`(?i)^[a-z0-9-]+(?:--[a-z0-9-]+){{2,}}\\\\.{wildcard_host_pattern}$`)"\n'
+        f'      traefik.http.routers.{service_name}-wildcard.middlewares: "{service_name}-forwarded-https"\n'
+        f'      traefik.http.routers.{service_name}-wildcard.tls: "true"\n'
+        f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Proto: "https"\n'
+        f'      traefik.hz0-9-]+){{2,}}\\\\.{wildcard_host_pattern}$`)"\n'
         f'      traefik.http.routers.{service_name}-wildcard.middlewares: "{service_name}-forwarded-https"\n'
         f'      traefik.http.routers.{service_name}-wildcard.tls: "true"\n'
         f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Proto: "https"\n'

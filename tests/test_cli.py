@@ -2234,17 +2234,30 @@ def test_modify_disabled_farm_ignores_empty_pack_only_env_drift() -> None:
 
 def test_modify_shared_ai_defaults_rerun_only_selected_advisor_phases() -> None:
     farm_only_plan = _classify_modify_plan(
-        existing_values=_farm_modify_values(),
-        requested_values=_farm_modify_values(AI_DEFAULT_API_KEY="shared-key-2"),
+        existing_values=_farm_modify_values(
+            AI_DEFAULT_PROVIDER="openrouter",
+            AI_DEFAULT_MODEL="anthropic/claude-sonnet-4",
+        ),
+        requested_values=_farm_modify_values(
+            AI_DEFAULT_PROVIDER="opencode-go",
+            AI_DEFAULT_MODEL="deepseek-v4-flash",
+        ),
     )
     both_advisors_plan = _classify_modify_plan(
-        existing_values=_farm_modify_values(ENABLE_OPENCLAW="true"),
+        existing_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            AI_DEFAULT_PROVIDER="openrouter",
+            AI_DEFAULT_MODEL="anthropic/claude-sonnet-4",
+        ),
         requested_values=_farm_modify_values(
             ENABLE_OPENCLAW="true",
-            AI_DEFAULT_BASE_URL="https://models.example.com/v2",
+            AI_DEFAULT_PROVIDER="openrouter",
+            AI_DEFAULT_MODEL="anthropic/claude-opus-4.1",
         ),
     )
 
+    assert "AI_DEFAULT_PROVIDER" in farm_only_plan.reasons[0]
+    assert "AI_DEFAULT_MODEL" in both_advisors_plan.reasons[0]
     assert farm_only_plan.phases_to_run == ("shared_core", "my-farm-advisor")
     assert both_advisors_plan.phases_to_run == (
         "shared_core",
@@ -2254,16 +2267,22 @@ def test_modify_shared_ai_defaults_rerun_only_selected_advisor_phases() -> None:
 
 
 def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() -> None:
-    plan = _classify_modify_plan(
+    alias_plan = _classify_modify_plan(
         existing_values=_farm_modify_values(
             ENABLE_OPENCLAW="true",
             ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
             OPENCODE_GO_API_KEY="opencode-go-key",
             LITELLM_OPENROUTER_MODELS=("openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"),
         ),
         requested_values=_farm_modify_values(
             ENABLE_OPENCLAW="true",
             ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
             OPENCODE_GO_API_KEY="opencode-go-key",
             LITELLM_OPENROUTER_MODELS=(
                 "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini,"
@@ -2272,10 +2291,45 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
         ),
     )
 
-    assert plan.mode == "modify"
-    assert "LITELLM_OPENROUTER_MODELS" in plan.reasons[0]
-    assert plan.start_phase == "shared_core"
-    assert plan.phases_to_run == ("shared_core", "coder", "openclaw", "my-farm-advisor")
+    key_reconcile_plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+            LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
+            AI_DEFAULT_PROVIDER="opencode-go",
+            AI_DEFAULT_MODEL="deepseek-v4-flash",
+        ),
+        requested_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+            LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-2",
+            AI_DEFAULT_PROVIDER="opencode-go",
+            AI_DEFAULT_MODEL="deepseek-v4-flash",
+        ),
+    )
+
+    assert alias_plan.mode == "modify"
+    assert "LITELLM_OPENROUTER_MODELS" in alias_plan.reasons[0]
+    assert alias_plan.start_phase == "shared_core"
+    assert alias_plan.phases_to_run == ("shared_core", "coder", "openclaw", "my-farm-advisor")
+    assert key_reconcile_plan.mode == "modify"
+    assert "LITELLM_OPENCODE_GO_API_KEY" in key_reconcile_plan.reasons[0]
+    assert key_reconcile_plan.phases_to_run == (
+        "shared_core",
+        "coder",
+        "openclaw",
+        "my-farm-advisor",
+    )
+    assert "nextcloud" not in alias_plan.phases_to_run
+    assert "seaweedfs" not in alias_plan.phases_to_run
+    assert "nextcloud" not in key_reconcile_plan.phases_to_run
+    assert "seaweedfs" not in key_reconcile_plan.phases_to_run
 
 
 def test_modify_litellm_consumer_removal_reruns_shared_core() -> None:
@@ -2287,6 +2341,31 @@ def test_modify_litellm_consumer_removal_reruns_shared_core() -> None:
     assert plan.mode == "modify"
     assert "ENABLE_OPENCLAW" in plan.reasons[0]
     assert plan.phases_to_run == ("networking", "shared_core", "cloudflare_access")
+
+
+def test_modify_litellm_coder_removal_reruns_shared_core_without_unrelated_packs() -> None:
+    plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+        ),
+        requested_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="false",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+        ),
+    )
+
+    assert plan.mode == "modify"
+    assert "ENABLE_CODER" in plan.reasons[0]
+    assert plan.phases_to_run == ("networking", "shared_core")
+    assert "nextcloud" not in plan.phases_to_run
+    assert "seaweedfs" not in plan.phases_to_run
 
 
 def test_modify_add_my_farm_later_refreshes_nextcloud_without_openclaw() -> None:

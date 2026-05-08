@@ -88,6 +88,14 @@ resource "coder_agent" "main" {
       $_SUDO npm install -g openwork-orchestrator
     fi
 
+    # Shared LiteLLM defaults keep OpenWork's embedded OpenCode routes aligned with the wizard-managed gateway.
+    export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"
+    export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"
+    export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"
+    export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"
+    export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"
+    export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"
+
     OPENWORK_SRC_DIR=/home/coder/.cache/openwork-src
     OPENWORK_BUILD_STAMP=/home/coder/.cache/openwork-webui-build-rev
     OPENWORK_WEBUI_BUILD_KEY=v6-coder-mounted-basename

@@ -251,36 +251,48 @@ def test_build_pack_disable_plan_deletes_tailscale_node_even_without_pack_remova
     assert [item.resource.resource_type for item in plan.deletions] == ["tailscale_node"]
 
 
-def test_build_pack_disable_plan_caps_checkpoint_before_shared_core_for_litellm_consumer_removal() -> None:
-    existing = resolve_desired_state(
-        RawEnvInput(
-            format_version=1,
-            values={
-                "STACK_NAME": "wizard-stack",
-                "ROOT_DOMAIN": "example.com",
-                "ENABLE_OPENCLAW": "true",
-                "ENABLE_MY_FARM_ADVISOR": "true",
-                "AI_DEFAULT_API_KEY": "shared-key",
-                "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
-                "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
-                "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
-            },
-        )
-    )
-    requested = resolve_desired_state(
-        RawEnvInput(
-            format_version=1,
-            values={
-                "STACK_NAME": "wizard-stack",
-                "ROOT_DOMAIN": "example.com",
-                "ENABLE_MY_FARM_ADVISOR": "true",
-                "AI_DEFAULT_API_KEY": "shared-key",
-                "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
-                "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
-                "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
-            },
-        )
-    )
+@pytest.mark.parametrize(
+    ("existing_overrides", "requested_overrides"),
+    [
+        (
+            {"ENABLE_OPENCLAW": "true"},
+            {},
+        ),
+        (
+            {"ENABLE_CODER": "true"},
+            {},
+        ),
+        (
+            {"ENABLE_OPENCLAW": "true", "ENABLE_CODER": "true"},
+            {"ENABLE_OPENCLAW": "true"},
+        ),
+    ],
+)
+def test_build_pack_disable_plan_caps_checkpoint_before_shared_core_for_litellm_consumer_removal(
+    existing_overrides: dict[str, str], requested_overrides: dict[str, str]
+) -> None:
+    existing_values = {
+        "STACK_NAME": "wizard-stack",
+        "ROOT_DOMAIN": "example.com",
+        "ENABLE_MY_FARM_ADVISOR": "true",
+        "AI_DEFAULT_API_KEY": "shared-key",
+        "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+        "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+        "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
+        **existing_overrides,
+    }
+    requested_values = {
+        "STACK_NAME": "wizard-stack",
+        "ROOT_DOMAIN": "example.com",
+        "ENABLE_MY_FARM_ADVISOR": "true",
+        "AI_DEFAULT_API_KEY": "shared-key",
+        "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+        "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+        "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
+        **requested_overrides,
+    }
+    existing = resolve_desired_state(RawEnvInput(format_version=1, values=existing_values))
+    requested = resolve_desired_state(RawEnvInput(format_version=1, values=requested_values))
 
     plan = build_pack_disable_plan(
         existing_desired=existing,
