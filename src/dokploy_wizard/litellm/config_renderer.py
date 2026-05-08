@@ -166,7 +166,7 @@ def build_litellm_config(
     for alias, target_model, model_info in explicit_openrouter_routes:
         if openrouter_api_key_env is None:
             raise ValueError("Missing upstream OpenRouter env name for explicit alias routes")
-        entry: dict[str, object] = {
+        route_entry: dict[str, object] = {
             "model_name": alias,
             "litellm_params": {
                 "model": target_model,
@@ -174,8 +174,8 @@ def build_litellm_config(
             },
         }
         if model_info:
-            entry["model_info"] = model_info
-        model_list.append(entry)
+            route_entry["model_info"] = model_info
+        model_list.append(route_entry)
 
     return {"model_list": model_list, "litellm_settings": {"drop_params": True}}
 
