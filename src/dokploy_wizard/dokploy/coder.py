@@ -65,8 +65,8 @@ class _ComposeLocator:
     compose_id: str
 
 
-_DEFAULT_AI_DEFAULT_PROVIDER = "opencode-go"
-_DEFAULT_AI_DEFAULT_MODEL = "deepseek-v4-flash"
+_DEFAULT_AI_DEFAULT_PROVIDER = "tuxdesktop.tailb12aa5.ts.net"
+_DEFAULT_AI_DEFAULT_MODEL = "unsloth-active"
 _DEFAULT_HERMES_INFERENCE_PROVIDER = "openai"
 _DEFAULT_HERMES_MODEL = DEFAULT_LOCAL_CANONICAL_ALIAS
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"

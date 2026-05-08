@@ -30,6 +30,11 @@ locals {
 
   kdense_model_options = [
     {
+      name  = "Unsloth Active (local alias)"
+      value = "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+      icon  = "/emojis/1f3e0.png"
+    },
+    {
       name  = "Claude Opus 4.7"
       value = "openrouter/anthropic/claude-opus-4.7"
       icon  = "/emojis/1f9e0.png"
@@ -138,7 +143,7 @@ data "coder_parameter" "kdense_default_model" {
   icon         = "/emojis/1f9e0.png"
   type         = "string"
   mutable      = true
-  default      = "openrouter/anthropic/claude-opus-4.7"
+  default      = "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
 
   dynamic "option" {
     for_each = local.kdense_model_options
