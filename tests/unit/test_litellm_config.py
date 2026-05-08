@@ -88,6 +88,26 @@ def test_build_litellm_config_rejects_openrouter_wildcards() -> None:
         )
 
 
+def test_build_litellm_config_skips_empty_openrouter_entries_to_match_env_contract() -> None:
+    config = build_litellm_config(
+        {
+            "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_OPENROUTER_MODELS": (
+                "openrouter/openai/gpt-4.1-mini, , openrouter/anthropic/claude-3.5-sonnet,"
+            ),
+        },
+        {
+            "openrouter_api_key_env": "OPENROUTER_API_KEY",
+        },
+    )
+
+    assert [entry["model_name"] for entry in _model_list(config)] == [
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "openrouter/openai/gpt-4.1-mini",
+        "openrouter/anthropic/claude-3.5-sonnet",
+    ]
+
+
 def test_build_litellm_config_exposes_verified_opencode_go_chat_models_only_when_key_present(
 ) -> None:
     config = build_litellm_config(

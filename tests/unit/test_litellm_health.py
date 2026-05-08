@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import inspect
 
 import pytest
@@ -26,16 +27,48 @@ class FakeReadinessApi:
     def list_teams(self) -> tuple[LiteLLMTeamRecord, ...]:
         return ()
 
-    def create_team(self, *, team_alias: str, models: tuple[str, ...]) -> LiteLLMTeamRecord:
+    def create_team(
+        self,
+        *,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
         raise AssertionError(f"unexpected create_team call for {team_alias}: {models}")
+
+    def update_team(
+        self,
+        *,
+        team_id: str,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        raise AssertionError(f"unexpected update_team call for {team_id}/{team_alias}: {models}")
 
     def list_keys(self) -> tuple[LiteLLMVirtualKeyRecord, ...]:
         return ()
 
-    def create_key(self, **_: object) -> LiteLLMVirtualKeyRecord:
+    def create_key(
+        self,
+        *,
+        key: str,
+        key_alias: str,
+        team_id: str | None,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMVirtualKeyRecord:
         raise AssertionError("unexpected create_key call")
 
-    def update_key(self, **_: object) -> LiteLLMVirtualKeyRecord:
+    def update_key(
+        self,
+        *,
+        key_alias: str,
+        key: str,
+        team_id: str | None,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMVirtualKeyRecord:
         raise AssertionError("unexpected update_key call")
 
 

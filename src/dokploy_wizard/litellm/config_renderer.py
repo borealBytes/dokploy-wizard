@@ -291,7 +291,7 @@ def _parse_openrouter_models(flat_env: Mapping[str, str], key: str) -> tuple[tup
     for item in raw.split(","):
         normalized_item = item.strip()
         if not normalized_item:
-            raise ValueError(f"Expected non-empty OpenRouter model entry for {key}: {item}")
+            continue
         alias, separator, target = normalized_item.partition("=")
         if separator == "=":
             normalized_alias = alias.strip()
