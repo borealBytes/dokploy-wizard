@@ -43,9 +43,13 @@ _MY_FARM_ADVISOR_DIRECT_PROVIDER_ENV_KEYS = {
 _MY_FARM_ADVISOR_SHARED_PROVIDER_ENV_KEYS = {
     "AI_DEFAULT_API_KEY",
     "AI_DEFAULT_BASE_URL",
+    "AI_DEFAULT_PROVIDER",
+    "AI_DEFAULT_MODEL",
     "ANTHROPIC_API_KEY",
 }
 _LITELLM_CANONICAL_ENV_KEYS = {
+    "AI_DEFAULT_PROVIDER",
+    "AI_DEFAULT_MODEL",
     "LITELLM_IMAGE",
     "LITELLM_IMAGE_TAG",
     "LITELLM_VERSION",
@@ -53,12 +57,19 @@ _LITELLM_CANONICAL_ENV_KEYS = {
     "LITELLM_LOCAL_BASE_URL",
     "LITELLM_LOCAL_MODEL",
     "LITELLM_LOCAL_API_KEY",
+    "LITELLM_OPENROUTER_API_KEY",
     "LITELLM_OPENROUTER_MODELS",
+    "LITELLM_OPENCODE_GO_API_KEY",
     "LITELLM_NVIDIA_MODELS",
     "OPENCODE_GO_API_KEY",
     "OPENCODE_GO_BASE_URL",
     "OPENROUTER_API_KEY",
     "NVIDIA_BASE_URL",
+}
+_LITELLM_LOCAL_ENV_KEYS = {
+    "LITELLM_LOCAL_BASE_URL",
+    "LITELLM_LOCAL_MODEL",
+    "LITELLM_LOCAL_API_KEY",
 }
 _MY_FARM_ADVISOR_OPTIONAL_ENV_KEYS = {
     "MY_FARM_ADVISOR_PRIMARY_MODEL",
@@ -117,6 +128,8 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
     values = raw_env.values
     stack_name = _require_value(values, "STACK_NAME")
     root_domain = _require_value(values, "ROOT_DOMAIN")
+    resolve_ai_default_model_ref(values)
+    parse_litellm_openrouter_models(values)
     dokploy_subdomain = values.get("DOKPLOY_SUBDOMAIN", "dokploy")
     hostnames: dict[str, str] = {
         "dokploy": _join_hostname(dokploy_subdomain, root_domain),
@@ -192,6 +205,72 @@ def _get_configured_value(values: dict[str, str], key: str) -> str | None:
 
 def _has_configured_value(values: dict[str, str], key: str) -> bool:
     return _get_configured_value(values, key) is not None
+
+
+def resolve_ai_default_model_ref(values: dict[str, str]) -> str | None:
+    key_provider = "AI_DEFAULT_PROVIDER"
+    key_model = "AI_DEFAULT_MODEL"
+    if key_provider in values or key_model in values:
+        provider = _get_configured_value(values, key_provider)
+        model = _get_configured_value(values, key_model)
+        if provider is None and model is None:
+            return None
+        if provider is None:
+            raise StateValidationError(
+                "AI_DEFAULT_PROVIDER is required when AI_DEFAULT_MODEL is set. Empty strings count as unset."
+            )
+        if model is None:
+            raise StateValidationError(
+                "AI_DEFAULT_MODEL is required when AI_DEFAULT_PROVIDER is set. Empty strings count as unset."
+            )
+        canonical_provider = _canonical_ai_default_provider(provider)
+        if model.startswith(f"{canonical_provider}/"):
+            return model
+        return f"{canonical_provider}/{model}"
+
+    legacy_provider = _get_configured_value(values, "ADVISOR_MODEL_PROVIDER")
+    legacy_model = _get_configured_value(values, "ADVISOR_MODEL_NAME")
+    if legacy_provider is None and legacy_model is None:
+        return None
+    if legacy_provider is None or legacy_model is None:
+        return None
+    if legacy_model.startswith(f"{legacy_provider}/"):
+        return legacy_model
+    return f"{legacy_provider}/{legacy_model}"
+
+
+def parse_litellm_openrouter_models(values: dict[str, str]) -> tuple[tuple[str, str], ...]:
+    raw_value = _get_configured_value(values, "LITELLM_OPENROUTER_MODELS")
+    if raw_value is None:
+        return ()
+    pairs: list[tuple[str, str]] = []
+    for item in raw_value.split(","):
+        normalized_item = item.strip()
+        if normalized_item == "":
+            continue
+        alias, separator, target_model = normalized_item.partition("=")
+        if separator == "":
+            alias = normalized_item
+            target = normalized_item
+        else:
+            alias = alias.strip()
+            target = target_model.strip()
+        if alias == "" or target == "":
+            raise StateValidationError(
+                "LITELLM_OPENROUTER_MODELS entries must be raw model IDs or alias=model pairs."
+            )
+        if alias in {"openrouter/*", "*"} or target in {"openrouter/*", "*"}:
+            raise StateValidationError(
+                "LITELLM_OPENROUTER_MODELS does not allow wildcard OpenRouter routes."
+            )
+        pairs.append((alias, target))
+    return tuple(pairs)
+
+
+def _canonical_ai_default_provider(provider: str) -> str:
+    normalized = provider.strip().lower()
+    aliases = {"opencode": "opencode-go"}
+    return aliases.get(normalized, normalized)
 
 
 def _resolve_dokploy_api_url(values: dict[str, str]) -> str | None:
@@ -408,6 +487,9 @@ def _validate_my_farm_advisor_env(
             "AI_DEFAULT_BASE_URL. Empty strings count as unset."
         )
 
+    if resolve_ai_default_model_ref(values) is not None:
+        return
+
     has_legacy_opencode_go_api_key = _has_configured_value(values, "OPENCODE_GO_API_KEY")
     has_legacy_opencode_go_base_url = _has_configured_value(values, "OPENCODE_GO_BASE_URL")
     if has_legacy_opencode_go_api_key and has_legacy_opencode_go_base_url:
@@ -418,10 +500,24 @@ def _validate_my_farm_advisor_env(
             "OPENCODE_GO_BASE_URL. Empty strings count as unset."
         )
 
+    openrouter_models = parse_litellm_openrouter_models(values)
+    has_litellm_openrouter_api_key = _has_configured_value(values, "LITELLM_OPENROUTER_API_KEY")
+    if has_litellm_openrouter_api_key and openrouter_models:
+        return
+    if has_litellm_openrouter_api_key and not openrouter_models:
+        raise StateValidationError(
+            "LiteLLM OpenRouter routing for My Farm Advisor requires both "
+            "LITELLM_OPENROUTER_API_KEY and LITELLM_OPENROUTER_MODELS. Empty strings count "
+            "as unset."
+        )
+
+    if _has_configured_value(values, "LITELLM_OPENCODE_GO_API_KEY"):
+        return
+
     if _has_configured_value(values, "LITELLM_LOCAL_BASE_URL"):
         return
     if _has_configured_value(values, "LITELLM_LOCAL_MODEL") or any(
-        _has_configured_value(values, key) for key in _LITELLM_CANONICAL_ENV_KEYS
+        _has_configured_value(values, key) for key in _LITELLM_LOCAL_ENV_KEYS
     ):
         raise StateValidationError(
             "LiteLLM canonical local mode for My Farm Advisor requires LITELLM_LOCAL_BASE_URL. "
@@ -432,6 +528,8 @@ def _validate_my_farm_advisor_env(
         "My Farm Advisor requires at least one provider configuration when enabled. Set "
         "MY_FARM_ADVISOR_OPENROUTER_API_KEY, MY_FARM_ADVISOR_NVIDIA_API_KEY, "
         "ANTHROPIC_API_KEY, both AI_DEFAULT_API_KEY and AI_DEFAULT_BASE_URL, both "
-        "OPENCODE_GO_API_KEY and OPENCODE_GO_BASE_URL, or LITELLM_LOCAL_BASE_URL for "
-        "LiteLLM canonical local mode. Empty strings count as unset."
+        "AI_DEFAULT_PROVIDER and AI_DEFAULT_MODEL, both OPENCODE_GO_API_KEY and "
+        "OPENCODE_GO_BASE_URL, LITELLM_OPENROUTER_API_KEY with LITELLM_OPENROUTER_MODELS, "
+        "LITELLM_OPENCODE_GO_API_KEY, or LITELLM_LOCAL_BASE_URL for LiteLLM canonical local "
+        "mode. Empty strings count as unset."
     )
