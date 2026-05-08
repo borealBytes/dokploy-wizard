@@ -208,7 +208,7 @@ def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
     assert "curl -fsSL https://deb.nodesource.com/setup_22.x | $_SUDO -E bash -" in template
     assert "$_SUDO apt-get install -y nodejs" in template
     assert "$_SUDO corepack enable" in template
-    assert "$_SUDO corepack prepare pnpm --activate" in template
+    assert "$_SUDO corepack prepare pnpm@10.27.0 --activate" in template
     assert "export PNPM_HOME=/home/coder/.local/share/pnpm" in template
     assert 'export PATH="$PNPM_HOME/bin:$PATH"' in template
     assert '/home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc' in template
@@ -373,7 +373,7 @@ def test_default_pi_web_template_includes_clickable_pi_web_ui() -> None:
     assert "$_SUDO apt-get install -y curl git ca-certificates wget btop" in template
     assert "curl -fsSL https://deb.nodesource.com/setup_22.x | $_SUDO -E bash -" in template
     assert "$_SUDO corepack enable" in template
-    assert "$_SUDO corepack prepare pnpm --activate" in template
+    assert "$_SUDO corepack prepare pnpm@10.27.0 --activate" in template
     assert "export PNPM_HOME=/home/coder/.local/share/pnpm" in template
     assert 'export PATH="$PNPM_HOME/bin:$PATH"' in template
     assert (
@@ -383,51 +383,21 @@ def test_default_pi_web_template_includes_clickable_pi_web_ui() -> None:
     assert 'grep -qxF "export PATH=\\"$PNPM_HOME/bin:$PATH\\"" /home/coder/.profile' in template
     assert "pnpm add -g @earendil-works/pi-coding-agent" in template
     assert 'PI_WEB_SRC_DIR=/home/coder/.cache/pi-web-ui' in template
-    assert 'PI_WEB_BUILD_KEY=v2-coder-mounted-preview-allowbuilds' in template
+    assert 'PI_WEB_BUILD_KEY=v1-coder-mounted-preview' in template
     assert 'PI_WEB_UI_PORT=8650' in template
     assert 'PI_WEB_PROXY_PORT=8651' in template
     assert '"@earendil-works/pi-agent-core": "^0.74.0"' in template
     assert '"@earendil-works/pi-ai": "^0.74.0"' in template
     assert '"@earendil-works/pi-web-ui": "^0.74.0"' in template
-    assert '"pnpm": {' in template
-    assert '"onlyBuiltDependencies": [' in template
-    assert '"@google/genai"' in template
-    assert '"esbuild"' in template
-    assert '"koffi"' in template
-    assert '"protobufjs"' in template
     assert "import { Agent } from '@earendil-works/pi-agent-core';" in template
     assert "import { getModel } from '@earendil-works/pi-ai';" in template
     assert "import '@earendil-works/pi-web-ui/app.css';" in template
     assert 'document.title = "Pi Web UI";' in template
-    assert 'cat >"$PI_WEB_SRC_DIR/pnpm-workspace.yaml" <<\'YAML\'' in template
-    assert "allowBuilds:" in template
-    assert "  '@google/genai': true" in template
-    assert '  esbuild: true' in template
-    assert '  koffi: true' in template
-    assert '  protobufjs: true' in template
-    assert template.index('cat >"$PI_WEB_SRC_DIR/pnpm-workspace.yaml" <<\'YAML\'') < template.index(
-        'if [ ! -d "$PI_WEB_SRC_DIR/node_modules" ] || [ ! -f "$PI_WEB_SRC_DIR/dist/index.html" ] || [ ! -f "$PI_WEB_BUILD_STAMP" ] || [ "$(cat "$PI_WEB_BUILD_STAMP" 2>/dev/null || true)" != "$PI_WEB_BUILD_KEY" ]; then'
-    )
-    assert template.index(
-        'if [ ! -d "$PI_WEB_SRC_DIR/node_modules" ] || [ ! -f "$PI_WEB_SRC_DIR/dist/index.html" ] || [ ! -f "$PI_WEB_BUILD_STAMP" ] || [ "$(cat "$PI_WEB_BUILD_STAMP" 2>/dev/null || true)" != "$PI_WEB_BUILD_KEY" ]; then'
-    ) < template.index(
-        "pnpm config set blockExoticSubdeps false"
-    )
-    assert "pnpm config set blockExoticSubdeps false" in template
-    assert template.index("pnpm config set blockExoticSubdeps false") < template.index(
-        "CI=true pnpm install"
-    )
     assert "CI=true pnpm install" in template
     assert "pnpm exec vite build --base ./" in template
     assert (
-        'if [ ! -f "$PI_WEB_SRC_DIR/dist/index.html" ]; then echo "Vite build failed: dist/index.html missing" >&2; exit 1; fi'
-        in template
+        'pnpm exec vite preview --host 127.0.0.1 --port $PI_WEB_UI_PORT --strictPort' in template
     )
-    assert (
-        'pnpm exec vite preview --host 127.0.0.1 --port $PI_WEB_UI_PORT --strictPort'
-        in template
-    )
-    assert '$PNPM_HOME/bin/pnpm exec vite preview' not in template
     assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
     assert 'const parsed = new URL(req.url || "/", "http://localhost");' in template
     assert 'const targetPath = needsSpaFallback(remainder) ? "/" : remainder + parsed.search;' in template

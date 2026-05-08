@@ -81,7 +81,7 @@ resource "coder_agent" "main" {
       $_SUDO apt-get install -y nodejs
     fi
     $_SUDO corepack enable
-    $_SUDO corepack prepare pnpm --activate
+    $_SUDO corepack prepare pnpm@10.27.0 --activate
 
     export PNPM_HOME=/home/coder/.local/share/pnpm
     export PATH="$PNPM_HOME/bin:$PATH"
@@ -102,7 +102,7 @@ resource "coder_agent" "main" {
 
     PI_WEB_SRC_DIR=/home/coder/.cache/pi-web-ui
     PI_WEB_BUILD_STAMP=/home/coder/.cache/pi-web-ui-build-rev
-    PI_WEB_BUILD_KEY=v2-coder-mounted-preview-allowbuilds
+    PI_WEB_BUILD_KEY=v1-coder-mounted-preview
     PI_WEB_UI_PORT=8650
     PI_WEB_PROXY_PORT=8651
 
@@ -125,14 +125,6 @@ resource "coder_agent" "main" {
   "devDependencies": {
     "typescript": "^5.7.3",
     "vite": "^7.1.6"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@google/genai",
-      "esbuild",
-      "koffi",
-      "protobufjs"
-    ]
   }
 }
 JSON
@@ -294,19 +286,10 @@ async function init() {
 void init();
 TS
 
-    cat >"$PI_WEB_SRC_DIR/pnpm-workspace.yaml" <<'YAML'
-allowBuilds:
-  '@google/genai': true
-  esbuild: true
-  koffi: true
-  protobufjs: true
-YAML
     if [ ! -d "$PI_WEB_SRC_DIR/node_modules" ] || [ ! -f "$PI_WEB_SRC_DIR/dist/index.html" ] || [ ! -f "$PI_WEB_BUILD_STAMP" ] || [ "$(cat "$PI_WEB_BUILD_STAMP" 2>/dev/null || true)" != "$PI_WEB_BUILD_KEY" ]; then
       cd "$PI_WEB_SRC_DIR"
-      pnpm config set blockExoticSubdeps false
       CI=true pnpm install
       pnpm exec vite build --base ./
-      if [ ! -f "$PI_WEB_SRC_DIR/dist/index.html" ]; then echo "Vite build failed: dist/index.html missing" >&2; exit 1; fi
       printf '%s' "$PI_WEB_BUILD_KEY" > "$PI_WEB_BUILD_STAMP"
     fi
 

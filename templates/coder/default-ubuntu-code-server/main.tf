@@ -81,7 +81,7 @@ resource "coder_agent" "main" {
       $_SUDO apt-get install -y nodejs
     fi
     $_SUDO corepack enable
-    $_SUDO corepack prepare pnpm --activate
+    $_SUDO corepack prepare pnpm@10.27.0 --activate
 
     export PNPM_HOME=/home/coder/.local/share/pnpm
     export PATH="$PNPM_HOME/bin:$PATH"
