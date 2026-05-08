@@ -346,6 +346,25 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
     assert 'url       = "http://localhost:8788/health"' in template
 
 
+def test_pi_web_template_helpers_and_required_template_names() -> None:
+    assert coder_module._default_pi_web_template_dir() == (
+        Path(coder_module.__file__).resolve().parents[3]
+        / "templates"
+        / "coder"
+        / "default-ubuntu-code-server-pi-web"
+    )
+    assert coder_module._default_pi_web_template_name() == "ubuntu-vscode-pi-web"
+    assert coder_module._required_template_names() == (
+        coder_module._default_template_name(),
+        coder_module._default_opencode_web_template_name(),
+        coder_module._default_openwork_template_name(),
+        coder_module._default_kdense_byok_template_name(),
+        coder_module._default_hermes_template_name(),
+        coder_module._default_pi_web_template_name(),
+    )
+    assert len(coder_module._required_template_names()) == 6
+
+
 def test_default_pi_web_template_includes_clickable_pi_web_ui() -> None:
     template = Path("templates/coder/default-ubuntu-code-server-pi-web/main.tf").read_text(
         encoding="utf-8"
@@ -1094,6 +1113,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
         "Seeded default Coder template 'ubuntu-vscode-openwork'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
+        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
     )
 
 
@@ -1183,6 +1203,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
         coder_module._default_openwork_template_name(),
         coder_module._default_kdense_byok_template_name(),
         coder_module._default_hermes_template_name(),
+        coder_module._default_pi_web_template_name(),
     }
     assert first_user_calls == [("coder.example.com", "admin@openmerge.me", "ChangeMeSoon")]
     assert set(template_copy_calls) == expected_template_names
@@ -1200,6 +1221,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
         "Seeded default Coder template 'ubuntu-vscode-openwork'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
+        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
         "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'admin@openmerge.me'.",
     )
     assert second_notes == ()
@@ -2033,6 +2055,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             str(coder_module._default_hermes_template_dir()),
             coder_module._default_hermes_template_name(),
         ),
+        (
+            "wizard-stack-coder-container",
+            str(coder_module._default_pi_web_template_dir()),
+            coder_module._default_pi_web_template_name(),
+        ),
     ]
     assert template_push_calls == [
         (
@@ -2064,6 +2091,12 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "coder.example.com",
             "session-123",
             coder_module._default_hermes_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
+            "coder.example.com",
+            "session-123",
+            coder_module._default_pi_web_template_name(),
         ),
     ]
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
@@ -2102,6 +2135,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "Seeded default Coder template 'ubuntu-vscode-openwork'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
+        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
         "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'admin@openmerge.me'.",
     )
 

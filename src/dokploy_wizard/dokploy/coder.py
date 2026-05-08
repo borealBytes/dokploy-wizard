@@ -272,6 +272,11 @@ class DokployCoderBackend:
                     ),
                 },
             ),
+            (
+                _default_pi_web_template_name(),
+                _default_pi_web_template_dir(),
+                {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name},
+            ),
         ):
             if _seed_template(
                 container_name=container_name,
@@ -912,6 +917,19 @@ def _default_hermes_template_name() -> str:
     return "ubuntu-vscode-hermes"
 
 
+def _default_pi_web_template_dir() -> Path:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "templates"
+        / "coder"
+        / "default-ubuntu-code-server-pi-web"
+    )
+
+
+def _default_pi_web_template_name() -> str:
+    return "ubuntu-vscode-pi-web"
+
+
 def _default_workspace_name(hostname: str, *, today: date | None = None) -> str:
     root_domain = (
         hostname.split(".", 1)[1] if hostname.startswith("coder.") and "." in hostname else hostname
@@ -931,6 +949,7 @@ def _required_template_names() -> tuple[str, ...]:
         _default_openwork_template_name(),
         _default_kdense_byok_template_name(),
         _default_hermes_template_name(),
+        _default_pi_web_template_name(),
     )
 
 
@@ -1311,11 +1330,13 @@ def _list_templates(
         raise CoderError("Coder template list returned invalid JSON.") from exc
     if not isinstance(payload, list):
         raise CoderError("Coder template list returned an unexpected payload shape.")
-    return tuple(
-        item.get("Template") if isinstance(item.get("Template"), dict) else item
-        for item in payload
-        if isinstance(item, dict)
-    )
+    templates: list[dict[str, object]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        template = item.get("Template")
+        templates.append(template if isinstance(template, dict) else item)
+    return tuple(templates)
 
 
 def _active_template_version_name(
