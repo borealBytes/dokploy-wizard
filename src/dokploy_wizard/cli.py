@@ -27,6 +27,7 @@ from dokploy_wizard.bootstrap import (
 from dokploy_wizard.core import (
     SharedCoreBackend,
     SharedCoreError,
+    SharedCorePlan,
     ShellSharedCoreBackend,
 )
 from dokploy_wizard.dokploy import (
@@ -63,6 +64,7 @@ from dokploy_wizard.lifecycle import (
     validate_preserved_phases,
 )
 from dokploy_wizard.litellm import LiteLLMAdminClient
+from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.networking import (
     CloudflareApiBackend,
     CloudflareError,
@@ -2019,10 +2021,14 @@ def _build_openclaw_backend(
     if not ({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs)):
         return ShellOpenClawBackend(raw_env)
     openclaw_primary_model, openclaw_fallback_models = _advisor_model_selection(
-        raw_env, env_prefix="OPENCLAW"
+        raw_env,
+        env_prefix="OPENCLAW",
+        shared_core_plan=desired_state.shared_core,
     )
     my_farm_primary_model, my_farm_fallback_models = _advisor_model_selection(
-        raw_env, env_prefix="MY_FARM_ADVISOR"
+        raw_env,
+        env_prefix="MY_FARM_ADVISOR",
+        shared_core_plan=desired_state.shared_core,
     )
     return DokployOpenClawBackend(
         api_url=api_url,
@@ -2279,8 +2285,33 @@ def _shared_ai_default_base_url(raw_env: RawEnvInput) -> str:
     return "https://opencode.ai/zen/go/v1"
 
 
+def _shared_ai_default_provider(raw_env: RawEnvInput) -> str:
+    value = raw_env.values.get("AI_DEFAULT_PROVIDER")
+    if value is None or value.strip() == "":
+        return "opencode-go"
+    normalized = value.strip().lower()
+    if normalized == "opencode":
+        return "opencode-go"
+    return normalized
+
+
+def _shared_ai_default_model(raw_env: RawEnvInput) -> str:
+    provider = _shared_ai_default_provider(raw_env)
+    value = raw_env.values.get("AI_DEFAULT_MODEL")
+    if value is None or value.strip() == "":
+        return "deepseek-v4-flash"
+    normalized = value.strip()
+    prefix = f"{provider}/"
+    if normalized.startswith(prefix):
+        return normalized.removeprefix(prefix)
+    return normalized
+
+
 def _advisor_model_selection(
-    raw_env: RawEnvInput, *, env_prefix: str
+    raw_env: RawEnvInput,
+    *,
+    env_prefix: str,
+    shared_core_plan: SharedCorePlan,
 ) -> tuple[str | None, tuple[str, ...]]:
     """Return repo-facing model envs mapped onto current OpenClaw config semantics.
 
@@ -2293,18 +2324,38 @@ def _advisor_model_selection(
     env wins over seeded config fallback values at runtime.
     """
 
-    return (
-        _advisor_primary_model(raw_env, env_prefix=env_prefix),
-        _advisor_model_list(raw_env, env_prefix=env_prefix),
-    )
+    explicit_primary = _advisor_explicit_primary_model(raw_env, env_prefix=env_prefix)
+    explicit_fallbacks = _advisor_model_list(raw_env, env_prefix=env_prefix)
+    if explicit_primary is not None or explicit_fallbacks:
+        return (explicit_primary, explicit_fallbacks)
+
+    consumer = env_prefix.lower().replace("_", "-")
+    catalog_models = build_litellm_consumer_model_allowlists(
+        flat_env=raw_env.values,
+        plan=shared_core_plan,
+    ).get(consumer, ())
+    if catalog_models:
+        return (catalog_models[0], catalog_models[1:])
+
+    return (_advisor_primary_model(raw_env, env_prefix=env_prefix), ())
+
+
+def _advisor_explicit_primary_model(raw_env: RawEnvInput, *, env_prefix: str) -> str | None:
+    explicit = _advisor_env_optional(raw_env, f"{env_prefix}_PRIMARY_MODEL")
+    if explicit is None:
+        return None
+    return _normalize_advisor_model_ref(explicit)
 
 
 def _advisor_primary_model(raw_env: RawEnvInput, *, env_prefix: str) -> str | None:
-    explicit = _advisor_env_optional(raw_env, f"{env_prefix}_PRIMARY_MODEL")
+    explicit = _advisor_explicit_primary_model(raw_env, env_prefix=env_prefix)
     if explicit is not None:
-        return _normalize_advisor_model_ref(explicit)
-    provider = _advisor_env_optional(raw_env, "ADVISOR_MODEL_PROVIDER")
-    model_name = _advisor_env_optional(raw_env, "ADVISOR_MODEL_NAME")
+        return explicit
+    provider = _advisor_env_optional(raw_env, "AI_DEFAULT_PROVIDER")
+    model_name = _advisor_env_optional(raw_env, "AI_DEFAULT_MODEL")
+    if provider is None or model_name is None:
+        provider = _advisor_env_optional(raw_env, "ADVISOR_MODEL_PROVIDER")
+        model_name = _advisor_env_optional(raw_env, "ADVISOR_MODEL_NAME")
     if provider is None or model_name is None:
         return None
     return _normalize_advisor_model_ref(
@@ -2323,7 +2374,12 @@ def _advisor_model_list(raw_env: RawEnvInput, *, env_prefix: str) -> tuple[str, 
 
 def _normalize_advisor_model_ref(model_ref: str) -> str:
     normalized = model_ref.strip()
+    if normalized == "unsloth-active":
+        return DEFAULT_LOCAL_CANONICAL_ALIAS
+    if normalized.startswith("opencode/"):
+        normalized = f"opencode-go/{normalized.removeprefix('opencode/')}"
     legacy_aliases = {
+        "local/unsloth-active": DEFAULT_LOCAL_CANONICAL_ALIAS,
         "nvidia/moonshot/kimi-k2.5": "nvidia/moonshotai/kimi-k2.5",
     }
     return legacy_aliases.get(normalized, normalized)

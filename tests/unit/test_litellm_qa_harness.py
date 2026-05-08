@@ -9,6 +9,7 @@ from urllib import error
 import pytest
 
 from dokploy_wizard.core.planner import build_shared_core_plan
+from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.litellm.qa_harness import (
     LiteLLMAdminAccessCheckError,
     build_litellm_admin_qa_harness,
@@ -51,7 +52,9 @@ def test_build_litellm_admin_qa_harness_requires_access_challenge_and_internal_p
     assert "docker run --rm --network wizard-stack-shared" in harness.checks[1].shell_command
     assert "curlimages/curl:8.7.1" in harness.checks[1].shell_command
     assert "http://wizard-stack-shared-litellm:4000/health/readiness" in harness.checks[1].shell_command
-    assert "local/unsloth-active" in harness.checks[2].shell_command
+    assert DEFAULT_LOCAL_CANONICAL_ALIAS in harness.checks[2].shell_command
+    assert DEFAULT_LOCAL_CANONICAL_ALIAS in harness.checks[2].success_criteria
+    assert DEFAULT_LOCAL_CANONICAL_ALIAS in harness.checks[2].failure_criteria
     assert "/v1/chat/completions" in harness.checks[2].shell_command
     assert "litellm-generated-keys.json" in harness.checks[2].shell_command
     assert harness.checks[2].command == (

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib import error, request
 
+from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.networking import resolve_litellm_admin_hostname
 from dokploy_wizard.state import DesiredState, RawEnvInput, parse_env_file, resolve_desired_state
 
@@ -18,7 +19,7 @@ _ACCESS_ALLOWED_STATUSES = (302, 401, 403)
 _CURL_IMAGE = "curlimages/curl:8.7.1"
 _READINESS_PATH = "/health/readiness"
 _CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
-_SMOKE_MODEL = "local/unsloth-active"
+_SMOKE_MODEL = DEFAULT_LOCAL_CANONICAL_ALIAS
 
 
 class LiteLLMAdminAccessCheckError(RuntimeError):
@@ -91,8 +92,14 @@ def build_litellm_admin_qa_harness(
                     service_name=desired_state.shared_core.litellm.service_name,
                 ),
             ),
-            success_criteria="Shared Docker network can perform an authenticated chat completion against LiteLLM using model local/unsloth-active.",
-            failure_criteria="Internal LiteLLM chat completion cannot authenticate or cannot access the local/unsloth-active alias.",
+            success_criteria=(
+                "Shared Docker network can perform an authenticated chat completion "
+                f"against LiteLLM using model {_SMOKE_MODEL}."
+            ),
+            failure_criteria=(
+                "Internal LiteLLM chat completion cannot authenticate or cannot "
+                f"access the {_SMOKE_MODEL} alias."
+            ),
         ),
     ]
 

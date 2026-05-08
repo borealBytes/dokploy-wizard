@@ -15,6 +15,7 @@ from urllib import error
 
 import pytest
 
+from dokploy_wizard import cli
 from dokploy_wizard.dokploy.client import (
     DokployComposeRecord,
     DokployComposeSummary,
@@ -344,6 +345,39 @@ def test_resolve_desired_state_rejects_incomplete_shared_farm_provider_fallback(
                 values=_farm_env_values(AI_DEFAULT_API_KEY="shared-ai-key", AI_DEFAULT_BASE_URL=""),
             )
         )
+
+
+def test_advisor_model_selection_defaults_to_catalog_visible_aliases() -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "ENABLE_MY_FARM_ADVISOR": "true",
+            "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_OPENROUTER_API_KEY": "shared-openrouter-key",
+            "LITELLM_OPENROUTER_MODELS": "anthropic/claude-sonnet-4",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    assert cli._advisor_model_selection(
+        raw_env,
+        env_prefix="OPENCLAW",
+        shared_core_plan=desired_state.shared_core,
+    ) == (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        ("openrouter/anthropic/claude-sonnet-4",),
+    )
+    assert cli._advisor_model_selection(
+        raw_env,
+        env_prefix="MY_FARM_ADVISOR",
+        shared_core_plan=desired_state.shared_core,
+    ) == (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        ("openrouter/anthropic/claude-sonnet-4",),
+    )
 
 
 def test_my_farm_advisor_accepts_litellm_canonical_env() -> None:
@@ -1052,19 +1086,18 @@ def test_openclaw_and_farm_advisor_render_side_by_side_without_collisions() -> N
     assert farm_env["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
     assert openclaw_env["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
     assert farm_env["OPENCLAW_GATEWAY_PASSWORD"] == "farm-ui-generated"
-    assert "MODEL_PROVIDER" in openclaw_env
-    assert "MODEL_NAME" in openclaw_env
-    assert "PRIMARY_MODEL" not in openclaw_env
+    assert openclaw_env["LITELLM_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert openclaw_env["LITELLM_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert openclaw_env["PRIMARY_MODEL"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
     assert "ANTHROPIC_API_KEY" not in openclaw_env
     assert "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN" not in openclaw_env
     assert "OPENROUTER_API_KEY" not in farm_env
     assert "NVIDIA_API_KEY" not in farm_env
     assert "ANTHROPIC_API_KEY" not in farm_env
     assert farm_env["TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN"] == "field-token"
-    assert "PRIMARY_MODEL" not in openclaw_env
-    assert "PRIMARY_MODEL" not in farm_env
-    assert farm_env["MODEL_PROVIDER"] == "openai"
-    assert farm_env["MODEL_NAME"] == "gpt-4o-mini"
+    assert farm_env["LITELLM_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert farm_env["LITELLM_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert farm_env["PRIMARY_MODEL"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
     assert "DOKPLOY_WIZARD_NEXA_ENABLED" not in farm_env
 
     combined_ledger = build_my_farm_advisor_ledger(
@@ -1294,7 +1327,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "local/unsloth-active",
+                "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -1501,7 +1534,7 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "local/unsloth-active",
+                "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -1518,12 +1551,12 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
     ]
     assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert seeded["agents"]["defaults"]["models"] == {
-        "local/unsloth-active": {},
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active": {},
         "nvidia/moonshotai/kimi-k2.5": {},
         "openrouter/openrouter/free": {},
         "openrouter/google/gemma-4-31b-it:free": {},
     }
-    assert seeded["models"]["providers"]["local"] == {
+    assert seeded["models"]["providers"]["tuxdesktop.tailb12aa5.ts.net"] == {
         "baseUrl": "http://wizard-stack-shared-litellm:4000",
         "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
         "api": "openai-completions",
@@ -1748,8 +1781,8 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
     assert 'DOKPLOY_WIZARD_NEXA_STATE_DIR: "/mnt/openclaw/.nexa/state"' in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_WORKER_MODE: "queue"' in runtime_block
     assert 'DOKPLOY_WIZARD_OPENCLAW_INTERNAL_URL: "http://wizard-stack-openclaw:18789"' in runtime_block
-    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL: "local/unsloth-active"' in runtime_block
-    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL_PROVIDER: "local"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL: "tuxdesktop.tailb12aa5.ts.net/unsloth-active"' in runtime_block
+    assert 'DOKPLOY_WIZARD_NEXA_PLANNER_MODEL_PROVIDER: "tuxdesktop.tailb12aa5.ts.net"' in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL: "http://wizard-stack-shared-litellm:4000"' in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY: "${LITELLM_VIRTUAL_KEY_OPENCLAW}"' in runtime_block
     assert 'DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL: "http://wizard-stack-shared-litellm:4000"' in runtime_block
@@ -1782,7 +1815,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "nexa",
             "name": "Nexa",
             "model": {
-                "primary": "local/unsloth-active",
+                "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -1800,7 +1833,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "local/unsloth-active",
+                "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -1912,7 +1945,7 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "local/unsloth-active",
+                "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -1956,10 +1989,10 @@ def test_telly_keeps_local_first_through_litellm() -> None:
     telly = next(agent for agent in seeded["agents"]["list"] if agent["id"] == "telly")
 
     assert telly["model"] == {
-        "primary": "local/unsloth-active",
+        "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
         "fallbacks": [],
     }
-    assert seeded["models"]["providers"]["local"] == {
+    assert seeded["models"]["providers"]["tuxdesktop.tailb12aa5.ts.net"] == {
         "baseUrl": "http://wizard-stack-shared-litellm:4000",
         "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
         "api": "openai-completions",
@@ -2017,7 +2050,7 @@ def test_nexa_model_routing_uses_litellm_without_openrouter_secret() -> None:
     assert compose is not None
     runtime_env = _service_environment(compose, "nexa-runtime")
 
-    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_MODEL"] == "local/unsloth-active"
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_MODEL"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
     assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
     assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
     assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
@@ -2160,6 +2193,8 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapp
         "TRUSTED_PROXIES": "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
         "OPENCLAW_GATEWAY_PASSWORD": "farm-ui-generated",
         "LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR": "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}",
+        "LITELLM_API_KEY": "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}",
+        "LITELLM_BASE_URL": "http://wizard-stack-shared-litellm:4000",
         "OPENAI_API_KEY": "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}",
         "OPENAI_BASE_URL": "http://wizard-stack-shared-litellm:4000",
         "PRIMARY_MODEL": "nvidia/nemotron-3-super-120b-a12b:free",
@@ -2230,15 +2265,15 @@ def test_openclaw_upstream_keys_do_not_leak() -> None:
     assert service_environment["OPENCLAW_GATEWAY_TOKEN"] == "fixed-token-123"
     assert service_environment["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
     assert service_environment["TELEGRAM_BOT_TOKEN"] == "telegram-token"
-    assert service_environment["MODEL_PROVIDER"] == "openai"
-    assert service_environment["MODEL_NAME"] == "gpt-4o-mini"
+    assert service_environment["LITELLM_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["LITELLM_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert service_environment["PRIMARY_MODEL"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
     assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
     assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
     assert service_environment["LITELLM_VIRTUAL_KEY_OPENCLAW"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
     assert "OPENROUTER_API_KEY" not in service_environment
     assert "NVIDIA_API_KEY" not in service_environment
     assert "ANTHROPIC_API_KEY" not in service_environment
-    assert "PRIMARY_MODEL" not in service_environment
     assert "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN" not in service_environment
     assert "OPENCLAW_SYNC_SKILLS_ON_START" not in service_environment
 
@@ -2303,7 +2338,7 @@ def test_farm_consumes_litellm_only() -> None:
         api_key="key-123",
         stack_name="wizard-stack",
         my_farm_gateway_password="farm-ui-generated",
-        my_farm_primary_model="local/unsloth-active",
+        my_farm_primary_model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
         my_farm_fallback_models=("openai/*", "openrouter/openrouter/free"),
         my_farm_openrouter_api_key="openrouter-key",
         my_farm_nvidia_api_key="nvidia-key",
@@ -2329,7 +2364,7 @@ def test_farm_consumes_litellm_only() -> None:
     assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
     assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
     assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
-    assert service_environment["PRIMARY_MODEL"] == "local/unsloth-active"
+    assert service_environment["PRIMARY_MODEL"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
     assert service_environment["FALLBACK_MODELS"] == "openai/*,openrouter/openrouter/free"
     assert service_environment["TELEGRAM_BOT_TOKEN"] == "farm-telegram-token"
     assert "OPENROUTER_API_KEY" not in service_environment
@@ -2367,9 +2402,9 @@ def test_dokploy_my_farm_backend_uses_default_model_env_when_no_explicit_models(
     assert service_environment["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
     assert service_environment["OPENAI_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
     assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
-    assert service_environment["MODEL_PROVIDER"] == "local"
-    assert service_environment["MODEL_NAME"] == "unsloth-active"
-    assert "PRIMARY_MODEL" not in service_environment
+    assert service_environment["LITELLM_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
+    assert service_environment["LITELLM_API_KEY"] == "${LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR}"
+    assert service_environment["PRIMARY_MODEL"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
 
 
 def test_dokploy_openclaw_backend_accepts_legacy_advisor_service_resource_id() -> None:

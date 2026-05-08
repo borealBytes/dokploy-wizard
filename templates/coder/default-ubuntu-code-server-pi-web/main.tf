@@ -106,6 +106,10 @@ resource "coder_agent" "main" {
     PI_WEB_UI_PORT=8650
     PI_WEB_PROXY_PORT=8651
 
+    # Pi Web UI stays browser-local today: provider keys live in IndexedDB and this
+    # repo does not control a Pi scoped-models surface, so the template is not
+    # centrally LiteLLM-scoped.
+
     mkdir -p "$PI_WEB_SRC_DIR/src" /home/coder/.cache
 
     cat >"$PI_WEB_SRC_DIR/package.json" <<'JSON'

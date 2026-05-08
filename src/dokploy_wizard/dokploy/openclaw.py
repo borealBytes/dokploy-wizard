@@ -37,8 +37,8 @@ from dokploy_wizard.packs.openclaw.reconciler import OpenClawError
 from dokploy_wizard.state.models import LiteLLMGeneratedKeys
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
-_DEFAULT_MODEL_PROVIDER = "openai"
-_DEFAULT_MODEL_NAME = "gpt-4o-mini"
+_DEFAULT_MODEL_PROVIDER = "tuxdesktop.tailb12aa5.ts.net"
+_DEFAULT_MODEL_NAME = "unsloth-active"
 _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 _DEFAULT_NVIDIA_VISIBLE_DEVICES = "all"
 _DEFAULT_APP_PORT = 18789
@@ -84,9 +84,9 @@ _DEFAULT_OPENCLAW_PUBLIC_STATE_ROOT = "/home/node/.openclaw-public"
 _DEFAULT_NEXA_RUNTIME_BUILD_CONTEXT = "."
 _DEFAULT_NEXA_RUNTIME_DOCKERFILE = "docker/nexa-runtime/Dockerfile"
 _DEFAULT_NEXA_MEM0_DOCKERFILE = "docker/nexa-mem0/Dockerfile"
-_DEFAULT_LOCAL_PROVIDER_ID = "local"
+_DEFAULT_LOCAL_PROVIDER_ID = "tuxdesktop.tailb12aa5.ts.net"
 _DEFAULT_LOCAL_MODEL_ID = "unsloth-active"
-_DEFAULT_LOCAL_MODEL_REF = "local/unsloth-active"
+_DEFAULT_LOCAL_MODEL_REF = "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
 _DEFAULT_LOCAL_MODEL_BASE_URL = "http://tuxdesktop.tailb12aa5.ts.net:61434/v1"
 _DEFAULT_LOCAL_MODEL_API_KEY = "sk-no-key-required"
 _DEFAULT_AI_DEFAULT_PROVIDER_ID = "opencode-go"
@@ -315,6 +315,10 @@ class DokployOpenClawBackend:
         state_dir: Path | None = None,
     ) -> None:
         resolved_openclaw_nexa_env = _resolve_openclaw_nexa_env(stack_name, openclaw_nexa_env or {})
+        normalized_openclaw_primary_model = _normalize_runtime_model_ref(openclaw_primary_model)
+        normalized_openclaw_fallback_models = _normalize_runtime_model_refs(openclaw_fallback_models)
+        normalized_my_farm_primary_model = _normalize_runtime_model_ref(my_farm_primary_model)
+        normalized_my_farm_fallback_models = _normalize_runtime_model_refs(my_farm_fallback_models)
         self._stack_name = stack_name
         self._litellm_generated_keys = litellm_generated_keys
         self._runtime_configs = {
@@ -323,8 +327,8 @@ class DokployOpenClawBackend:
                 gateway_password=openclaw_gateway_password,
                 internal_hostname=openclaw_internal_hostname,
                 trusted_proxy_emails=trusted_proxy_emails,
-                primary_model=openclaw_primary_model,
-                fallback_models=openclaw_fallback_models,
+                primary_model=normalized_openclaw_primary_model,
+                fallback_models=normalized_openclaw_fallback_models,
                 openrouter_api_key=openclaw_openrouter_api_key,
                 ai_default_api_key=openclaw_ai_default_api_key,
                 ai_default_base_url=openclaw_ai_default_base_url,
@@ -344,8 +348,8 @@ class DokployOpenClawBackend:
                 gateway_password=my_farm_gateway_password,
                 internal_hostname=None,
                 trusted_proxy_emails=trusted_proxy_emails,
-                primary_model=my_farm_primary_model,
-                fallback_models=my_farm_fallback_models,
+                primary_model=normalized_my_farm_primary_model,
+                fallback_models=normalized_my_farm_fallback_models,
                 openrouter_api_key=my_farm_openrouter_api_key,
                 ai_default_api_key=my_farm_ai_default_api_key,
                 ai_default_base_url=my_farm_ai_default_base_url,
@@ -1082,8 +1086,6 @@ def _runtime_directory_paths(
 
 
 def _expected_litellm_model_aliases(variant: str) -> tuple[str, ...]:
-    if variant == "my-farm-advisor":
-        return (_DEFAULT_LOCAL_MODEL_REF, _DEFAULT_LOCAL_MODEL_ID)
     return (_DEFAULT_LOCAL_MODEL_REF,)
 
 
@@ -1624,9 +1626,6 @@ def _gateway_environment(
         "PORT": str(app_port),
         "TRUSTED_PROXIES": runtime_config.trusted_proxies,
     }
-    if variant == "openclaw" and runtime_config.primary_model is None and not runtime_config.fallback_models:
-        environment["MODEL_PROVIDER"] = runtime_config.model_provider
-        environment["MODEL_NAME"] = runtime_config.model_name
     if include_gateway_token and runtime_config.gateway_token is not None:
         environment["OPENCLAW_GATEWAY_TOKEN"] = runtime_config.gateway_token
     if runtime_config.gateway_password is not None:
@@ -1634,7 +1633,13 @@ def _gateway_environment(
     if variant == "my-farm-advisor":
         environment.update(_my_farm_gateway_environment(stack_name=stack_name, runtime_config=runtime_config, generated_keys=generated_keys))
     else:
-        environment.update(_openclaw_gateway_environment(stack_name=stack_name, generated_keys=generated_keys))
+        environment.update(
+            _openclaw_gateway_environment(
+                stack_name=stack_name,
+                runtime_config=runtime_config,
+                generated_keys=generated_keys,
+            )
+        )
         if runtime_config.telegram_bot_token is not None:
             environment["TELEGRAM_BOT_TOKEN"] = runtime_config.telegram_bot_token
     if include_nexa and variant == "openclaw" and runtime_config.nexa_contract is not None:
@@ -1662,13 +1667,26 @@ def _gateway_environment(
     return environment
 
 
-def _openclaw_gateway_environment(*, stack_name: str, generated_keys: LiteLLMGeneratedKeys | None = None) -> dict[str, str]:
+def _openclaw_gateway_environment(
+    *,
+    stack_name: str,
+    runtime_config: _AdvisorRuntimeConfig,
+    generated_keys: LiteLLMGeneratedKeys | None = None,
+) -> dict[str, str]:
     virtual_key = _litellm_virtual_key_value("openclaw", generated_keys)
-    return {
+    base_url = _litellm_internal_base_url(stack_name)
+    environment = {
         "LITELLM_VIRTUAL_KEY_OPENCLAW": virtual_key,
+        "LITELLM_API_KEY": virtual_key,
+        "LITELLM_BASE_URL": base_url,
         "OPENAI_API_KEY": virtual_key,
-        "OPENAI_BASE_URL": _litellm_internal_base_url(stack_name),
+        "OPENAI_BASE_URL": base_url,
+        "PRIMARY_MODEL": _resolved_primary_model(runtime_config),
     }
+    fallback_models = _resolved_fallback_models(runtime_config)
+    if fallback_models:
+        environment["FALLBACK_MODELS"] = ",".join(fallback_models)
+    return environment
 
 
 def _env_value_present(value: str | None) -> bool:
@@ -1710,16 +1728,17 @@ def _my_farm_gateway_environment(*, stack_name: str, runtime_config: _AdvisorRun
     if farm_env is None:
         return {}
     virtual_key = _litellm_virtual_key_value("my-farm-advisor", generated_keys)
+    base_url = _litellm_internal_base_url(stack_name)
     environment: dict[str, str] = {}
     environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] = virtual_key
+    environment["LITELLM_API_KEY"] = virtual_key
+    environment["LITELLM_BASE_URL"] = base_url
     environment["OPENAI_API_KEY"] = virtual_key
-    environment["OPENAI_BASE_URL"] = _litellm_internal_base_url(stack_name)
-    if runtime_config.primary_model is None and not runtime_config.fallback_models:
-        environment["MODEL_PROVIDER"] = runtime_config.model_provider
-        environment["MODEL_NAME"] = runtime_config.model_name
-    _set_env_if_present(environment, "PRIMARY_MODEL", runtime_config.primary_model)
-    if runtime_config.fallback_models:
-        environment["FALLBACK_MODELS"] = ",".join(runtime_config.fallback_models)
+    environment["OPENAI_BASE_URL"] = base_url
+    environment["PRIMARY_MODEL"] = _resolved_primary_model(runtime_config)
+    fallback_models = _resolved_fallback_models(runtime_config)
+    if fallback_models:
+        environment["FALLBACK_MODELS"] = ",".join(fallback_models)
     _set_env_if_present(environment, "TELEGRAM_BOT_TOKEN", runtime_config.telegram_bot_token)
     _set_env_if_present(environment, "TELEGRAM_OWNER_USER_ID", runtime_config.telegram_owner_user_id)
     _set_env_if_present(
@@ -2457,9 +2476,8 @@ def _yaml_quote(value: str) -> str:
 def _allowed_models(runtime_config: _AdvisorRuntimeConfig) -> tuple[str, ...]:
     seen: set[str] = set()
     ordered: list[str] = []
-    for model_ref in (
-        (runtime_config.primary_model,) if runtime_config.primary_model is not None else ()
-    ) + runtime_config.fallback_models:
+
+    for model_ref in (_resolved_primary_model(runtime_config),) + runtime_config.fallback_models:
         if model_ref in seen:
             continue
         seen.add(model_ref)
@@ -2526,6 +2544,15 @@ def _specialized_agent_model_defaults(
     fallback_candidates = runtime_config.fallback_models or default_fallbacks
     fallbacks = [model for model in fallback_candidates if model != primary]
     return {"primary": primary, "fallbacks": fallbacks}
+
+
+def _resolved_primary_model(runtime_config: _AdvisorRuntimeConfig) -> str:
+    return runtime_config.primary_model or _DEFAULT_LOCAL_MODEL_REF
+
+
+def _resolved_fallback_models(runtime_config: _AdvisorRuntimeConfig) -> tuple[str, ...]:
+    primary = _resolved_primary_model(runtime_config)
+    return tuple(model for model in runtime_config.fallback_models if model != primary)
 
 
 def _my_farm_skills_preload_command() -> str:
@@ -2598,6 +2625,29 @@ def _provider_for_model_ref(model_ref: str, *, default: str) -> str:
         return default
     prefix = model_ref.split("/", 1)[0].strip()
     return prefix or default
+
+
+def _normalize_runtime_model_ref(model_ref: str | None) -> str | None:
+    if model_ref is None:
+        return None
+    normalized = model_ref.strip()
+    if normalized == "":
+        return None
+    legacy_aliases = {
+        "local/unsloth-active": _DEFAULT_LOCAL_MODEL_REF,
+        "nvidia/moonshot/kimi-k2.5": "nvidia/moonshotai/kimi-k2.5",
+    }
+    return legacy_aliases.get(normalized, normalized)
+
+
+def _normalize_runtime_model_refs(model_refs: tuple[str, ...]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for model_ref in model_refs:
+        resolved = _normalize_runtime_model_ref(model_ref)
+        if resolved is None or resolved in normalized:
+            continue
+        normalized.append(resolved)
+    return tuple(normalized)
 
 
 def _resolve_openclaw_nexa_env(stack_name: str, nexa_env: dict[str, str]) -> dict[str, str]:

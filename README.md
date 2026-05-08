@@ -542,7 +542,7 @@ pytest tests/test_cli.py -q
 
 ## LiteLLM core gateway
 
-LiteLLM is always installed as core infrastructure. It is not a pack you opt into, and it runs as a shared-core service alongside Postgres and Redis. Every AI consumer in the stack, including My Farm Advisor, OpenClaw, and Coder templates, routes model calls through LiteLLM using a per-consumer virtual key.
+LiteLLM is always installed as core infrastructure. It is not a pack you opt into, and it runs as a shared-core service alongside Postgres and Redis. My Farm Advisor, OpenClaw, Coder Hermes, and Coder K-Dense route through LiteLLM with wizard-managed virtual keys. OpenCode Web and OpenWork inherit wizard-managed LiteLLM defaults at template bootstrap so they do not silently drift back to direct provider defaults. Pi Web UI is still a browser-local surface and is not centrally model-restricted because this repo does not control a Pi scoped-models endpoint.
 
 ### Flat env inputs
 
@@ -566,6 +566,8 @@ The wizard auto-generates stable virtual keys for each consumer:
 - OpenClaw
 - Coder Hermes
 - Coder K-Dense
+
+OpenCode Web and OpenWork currently reuse the shared Coder AI default gateway env during template bootstrap rather than receiving their own dedicated LiteLLM virtual-key consumer records. Pi Web UI does not receive a wizard-managed virtual key.
 
 These keys are generated once and reused across reruns and modify operations. They are stored in the wizard state directory, not written back into `.install.env`. If you need to rotate a key, that is a future operator action, not something that happens silently on reinstall.
 
@@ -606,7 +608,7 @@ This keeps admin verification aligned with the intended trust boundary: public a
 
 ### Migration from direct provider envs
 
-If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, consumers no longer receive those raw upstream keys. Instead, each consumer gets its own LiteLLM virtual key and the internal base URL. Upstream secrets terminate at the LiteLLM proxy.
+If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, wizard-managed server-side consumers receive LiteLLM virtual keys or inherited LiteLLM gateway defaults instead of raw upstream provider keys. Upstream secrets terminate at the LiteLLM proxy. Pi Web UI remains the exception because its browser-local provider-key flow is intentionally unchanged.
 
 ### Validation
 

@@ -413,6 +413,8 @@ PY
       model="$1"
       case "$model" in
         openai/*) printf '%s' "$model" ;;
+        opencode-go/*) printf 'openai/%s' "$${model#opencode-go/}" ;;
+        openrouter/*) printf 'openai/%s' "$${model#openrouter/}" ;;
         *) printf '%s' "$model" ;;
       esac
     }
@@ -580,7 +582,7 @@ if 'model_name: "openai/*"' not in text and needle in text:
 PY
 
     KDENSE_MODELS_JSON="$KDENSE_SRC_DIR/web/src/data/models.json"
-    python3 - <<'PY' "$KDENSE_MODELS_JSON" "$KDENSE_DEFAULT_MODEL_EFFECTIVE" "$KDENSE_EXPERT_MODEL_EFFECTIVE" "$KDENSE_CENTRAL_LITELLM_API_KEY"
+    python3 - <<'PY' "$KDENSE_MODELS_JSON" "$KDENSE_DEFAULT_MODEL_EFFECTIVE" "$KDENSE_EXPERT_MODEL_EFFECTIVE" "$KDENSE_CENTRAL_LITELLM_API_KEY" '${jsonencode(local.kdense_model_options)}'
 from pathlib import Path
 import json
 import sys
@@ -589,6 +591,7 @@ path = Path(sys.argv[1])
 default_model = sys.argv[2]
 expert_model = sys.argv[3]
 central_litellm_api_key = sys.argv[4]
+catalog_options = json.loads(sys.argv[5])
 
 models = json.loads(path.read_text(encoding="utf-8"))
 
@@ -598,29 +601,34 @@ def clear_flags(model: dict) -> dict:
     next_model.pop("expertDefault", None)
     return next_model
 
-openrouter_models = [clear_flags(model) for model in models if str(model.get("id", "")).startswith("openrouter/")]
+openrouter_models = {
+    str(model.get("id", "")): clear_flags(model)
+    for model in models
+    if str(model.get("id", "")).startswith("openrouter/")
+}
 merged = []
 if central_litellm_api_key:
-    for model in openrouter_models:
-      clone = dict(model)
-      clone["id"] = "openai/" + str(model["id"])[len("openrouter/"):]
+    for option in catalog_options:
+      option_value = str(option.get("value", "")).strip()
+      if not option_value.startswith("openrouter/"):
+        continue
+      source = dict(openrouter_models.get(option_value, {}))
+      label = str(option.get("name", "")).strip()
+      if not source:
+        source = {
+            "id": option_value,
+            "label": label or option_value.removeprefix("openrouter/"),
+            "provider": "OpenRouter",
+        }
+      clone = clear_flags(source)
+      clone["id"] = "openai/" + option_value[len("openrouter/"):]
+      if label:
+        clone["label"] = label
       clone["provider"] = "OpenCode Go"
-      description = str(model.get("description", "")).strip()
+      description = str(clone.get("description", "")).strip()
       clone["description"] = (description + "\n\n") if description else ""
       clone["description"] += "Available through the central LiteLLM OpenCode Go-compatible gateway."
       merged.append(clone)
-    merged.append(
-        {
-            "id": "openai/deepseek-v4-flash",
-            "label": "DeepSeek V4 Flash",
-            "provider": "OpenCode Go",
-            "tier": "mid",
-            "context_length": 262144,
-            "pricing": {"prompt": 0.0, "completion": 0.0},
-            "modality": "text->text",
-            "description": "Available through the central LiteLLM OpenCode Go-compatible gateway.",
-        }
-    )
 
 seen = set()
 deduped = []
