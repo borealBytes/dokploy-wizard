@@ -35,6 +35,9 @@ class FakeReadinessApi:
     def create_key(self, **_: object) -> LiteLLMVirtualKeyRecord:
         raise AssertionError("unexpected create_key call")
 
+    def update_key(self, **_: object) -> LiteLLMVirtualKeyRecord:
+        raise AssertionError("unexpected update_key call")
+
 
 class FakeTransientReadinessApi(FakeReadinessApi):
     def __init__(self) -> None:

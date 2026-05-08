@@ -506,6 +506,23 @@ class _FakeLiteLLMAdminApi:
             models=models,
         )
 
+    def update_key(
+        self,
+        *,
+        key_alias: str,
+        key: str,
+        team_id: str | None,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMVirtualKeyRecord:
+        del metadata
+        return LiteLLMVirtualKeyRecord(
+            key=key,
+            key_alias=key_alias,
+            team_id=team_id,
+            models=models,
+        )
+
 
 def _generated_keys() -> LiteLLMGeneratedKeys:
     return LiteLLMGeneratedKeys(

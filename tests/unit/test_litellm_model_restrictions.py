@@ -97,6 +97,25 @@ class FakeLiteLLMAdminApi:
         self._keys[key_alias] = record
         return record
 
+    def update_key(
+        self,
+        *,
+        key_alias: str,
+        key: str,
+        team_id: str | None,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMVirtualKeyRecord:
+        del metadata
+        record = LiteLLMVirtualKeyRecord(
+            key=key,
+            key_alias=key_alias,
+            team_id=team_id,
+            models=models,
+        )
+        self._keys[key_alias] = record
+        return record
+
 
 class FakeLiteLLMRestrictionHarness:
     def __init__(
