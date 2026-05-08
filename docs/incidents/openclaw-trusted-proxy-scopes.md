@@ -49,7 +49,7 @@ On a fresh VPS, the wizard should now bootstrap OpenClaw with:
 - bindings:
   - `nexa -> nextcloud-talk`
   - `telly -> telegram`
-- local model routing through LiteLLM to `local/unsloth-active`
+- local model routing through LiteLLM to `tuxdesktop.tailb12aa5.ts.net/unsloth-active`
 - trusted-proxy control UI sessions that retain operator scopes
 
 ## Existing VPS Recovery

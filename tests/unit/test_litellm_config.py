@@ -132,6 +132,35 @@ def test_build_litellm_config_skips_opencode_go_models_without_upstream_key() ->
     ]
 
 
+def test_build_litellm_config_prefers_canonical_litellm_env_refs_for_non_local_routes() -> None:
+    config = build_litellm_config(
+        {
+            "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
+            "LITELLM_OPENCODE_GO_API_KEY": "sk-opencode-go-key",
+            "LITELLM_OPENROUTER_API_KEY": "sk-openrouter-key",
+            "LITELLM_OPENROUTER_MODELS": (
+                "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"
+            ),
+        },
+        {},
+    )
+
+    model_names = [entry["model_name"] for entry in _model_list(config)]
+
+    assert "openrouter/hunter-alpha" in model_names
+    assert "openrouter/openai/gpt-4.1-mini" not in model_names
+
+    deepseek_entry = _model_entry(config, "opencode-go/deepseek-v4-flash")
+    assert deepseek_entry["litellm_params"]["api_key"] == "os.environ/LITELLM_OPENCODE_GO_API_KEY"
+
+    openrouter_entry = _model_entry(config, "openrouter/hunter-alpha")
+    assert openrouter_entry["litellm_params"] == {
+        "model": "openrouter/openai/gpt-4.1-mini",
+        "api_key": "os.environ/LITELLM_OPENROUTER_API_KEY",
+    }
+
+
 def test_render_litellm_config_yaml_includes_new_model_aliases_only() -> None:
     config = build_litellm_config(
         {

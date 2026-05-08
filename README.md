@@ -552,11 +552,24 @@ The operator env file stays flat. `.install.env` contains only key=value pairs. 
 
 The generated LiteLLM config enforces a strict precedence:
 
-1. `local/unsloth-active` — the local vLLM or Tailnet endpoint, when `LITELLM_LOCAL_BASE_URL` is configured
-2. OpenCode Go wildcard — a single `openai/*` route that covers the OpenCode Go provider fleet
-3. Explicit OpenRouter aliases — each alias is declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS`
+1. `tuxdesktop.tailb12aa5.ts.net/unsloth-active` — the local vLLM or Tailnet endpoint, when `LITELLM_LOCAL_BASE_URL` is configured
+2. `opencode-go/*` — explicit OpenCode Go aliases covering the OpenCode Go provider fleet
+3. `openrouter/*` — explicit OpenRouter aliases, each declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS`
 
 OpenRouter wildcard routes are not allowed. The config renderer rejects `openrouter/*` or broad `*` aliases.
+
+### AI env contract
+
+The preferred way to select the default model is with `AI_DEFAULT_PROVIDER` and `AI_DEFAULT_MODEL`:
+
+```bash
+AI_DEFAULT_PROVIDER=tuxdesktop.tailb12aa5.ts.net
+AI_DEFAULT_MODEL=unsloth-active
+```
+
+Together these resolve to the canonical alias `tuxdesktop.tailb12aa5.ts.net/unsloth-active`. If you omit them, the wizard falls back to legacy `ADVISOR_MODEL_PROVIDER` and `ADVISOR_MODEL_NAME`.
+
+For LiteLLM upstream API keys, the canonical names are `LITELLM_OPENROUTER_API_KEY` and `LITELLM_OPENCODE_GO_API_KEY`. The older bare keys `OPENROUTER_API_KEY` and `OPENCODE_GO_API_KEY` are still accepted as compatibility fallbacks. The old alias `local/unsloth-active` is also resolved to the canonical alias when it appears in legacy env values.
 
 ### Virtual keys
 
