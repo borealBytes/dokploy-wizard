@@ -6,7 +6,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -37,6 +37,13 @@ from dokploy_wizard.litellm import (
     LiteLLMGatewayManager,
     build_litellm_config,
     render_litellm_config_yaml,
+)
+from dokploy_wizard.litellm.model_catalog import (
+    DEFAULT_LOCAL_CANONICAL_ALIAS,
+    DEFAULT_LOCAL_UPSTREAM_TARGET,
+    ModelCatalog,
+    ModelCostMetadata,
+    build_model_catalog,
 )
 from dokploy_wizard.state import write_litellm_generated_keys
 from dokploy_wizard.state.models import LiteLLMGeneratedKeys
@@ -689,18 +696,14 @@ def _render_compose_file(
 
 def _build_litellm_upstream_creds(litellm_env: dict[str, str]) -> dict[str, str]:
     upstream_creds: dict[str, str] = {}
-    # PAUSED: OpenCode Go route — will re-enable later.
-    # upstream_creds["opencode_go_api_key_env"] = "OPENCODE_GO_API_KEY"
-    # PAUSED: OpenRouter route — will re-enable later.
-    # openrouter_env_name = _first_configured_env_name(
-    #     litellm_env,
-    #     "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
-    #     "OPENCLAW_OPENROUTER_API_KEY",
-    #     "AI_DEFAULT_API_KEY",
-    #     "OPENROUTER_API_KEY",
-    # )
-    # if openrouter_env_name is not None:
-    #     upstream_creds["openrouter_api_key_env"] = openrouter_env_name
+    if _first_configured_env_name(
+        litellm_env, *_litellm_secret_ref_candidates("LITELLM_OPENCODE_GO_API_KEY")
+    ) is not None:
+        upstream_creds["opencode_go_api_key_env"] = "LITELLM_OPENCODE_GO_API_KEY"
+    if _first_configured_env_name(
+        litellm_env, *_litellm_secret_ref_candidates("LITELLM_OPENROUTER_API_KEY")
+    ) is not None:
+        upstream_creds["openrouter_api_key_env"] = "LITELLM_OPENROUTER_API_KEY"
     nvidia_env_name = _first_configured_env_name(
         litellm_env,
         "MY_FARM_ADVISOR_NVIDIA_API_KEY",
@@ -732,12 +735,42 @@ def _render_litellm_upstream_env_lines(
     for env_name in upstream_creds.values():
         if env_name in rendered_names:
             continue
-        value = litellm_env.get(env_name)
-        if value is None or value.strip() == "":
+        source_env_name = _first_configured_env_name(
+            litellm_env, *_litellm_secret_ref_candidates(env_name)
+        )
+        if source_env_name is None:
             continue
-        lines.append(f'      {env_name}: "{value.replace(chr(34), r"\\\"")}"\n')
+        lines.append(f'      {env_name}: "${{{source_env_name}}}"\n')
         rendered_names.add(env_name)
     return "".join(lines)
+
+
+def _litellm_secret_ref_candidates(env_name: str) -> tuple[str, ...]:
+    if env_name == "LITELLM_OPENCODE_GO_API_KEY":
+        return ("LITELLM_OPENCODE_GO_API_KEY", "OPENCODE_GO_API_KEY")
+    if env_name == "LITELLM_OPENROUTER_API_KEY":
+        return (
+            "LITELLM_OPENROUTER_API_KEY",
+            "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
+            "OPENCLAW_OPENROUTER_API_KEY",
+            "AI_DEFAULT_API_KEY",
+            "OPENROUTER_API_KEY",
+        )
+    return (env_name,)
+
+
+def _resolve_litellm_secret_ref_value(
+    litellm_env: dict[str, str], env_name: str
+) -> str | None:
+    source_env_name = _first_configured_env_name(
+        litellm_env, *_litellm_secret_ref_candidates(env_name)
+    )
+    if source_env_name is None:
+        return None
+    value = litellm_env.get(source_env_name)
+    if value is None or value.strip() == "":
+        return None
+    return value
 
 
 def _inline_litellm_secret_refs(config: dict[str, object], litellm_env: dict[str, str]) -> None:
@@ -754,8 +787,8 @@ def _inline_litellm_secret_refs(config: dict[str, object], litellm_env: dict[str
         if not isinstance(api_key_ref, str) or not api_key_ref.startswith("os.environ/"):
             continue
         env_name = api_key_ref.removeprefix("os.environ/")
-        value = litellm_env.get(env_name)
-        if value is None or value.strip() == "":
+        value = _resolve_litellm_secret_ref_value(litellm_env, env_name)
+        if value is None:
             continue
         litellm_params["api_key"] = value
 
@@ -768,41 +801,61 @@ def build_litellm_consumer_model_allowlists(
     if plan.litellm is None:
         return {}
     config = build_litellm_config(flat_env, _build_litellm_upstream_creds(flat_env))
-    model_list = config.get("model_list")
-    if not isinstance(model_list, list):
-        return {}
-    configured_aliases = tuple(
-        entry["model_name"]
-        for entry in model_list
-        if isinstance(entry, dict) and isinstance(entry.get("model_name"), str)
+    projection_catalog = _build_litellm_consumer_projection_catalog(
+        flat_env=flat_env,
+        config=config,
+        plan=plan,
     )
-    available_aliases = set(configured_aliases)
-    default_aliases = tuple(
+    return {
+        consumer: projection_catalog.fallback_alias_order_for(consumer)
+        for consumer in _litellm_consumers()
+    }
+
+
+def _build_litellm_consumer_projection_catalog(
+    *,
+    flat_env: dict[str, str],
+    config: Mapping[str, object],
+    plan: SharedCorePlan,
+) -> ModelCatalog:
+    litellm_plan = plan.litellm
+    if litellm_plan is None:
+        raise ValueError("LiteLLM consumer projection catalog requires an active LiteLLM plan.")
+    base_catalog = _build_catalog_from_litellm_config(config)
+    default_aliases = _resolve_litellm_default_aliases(
+        aliases=litellm_plan.default_model_alias_order,
+        catalog=base_catalog,
+    )
+    shared_aliases = tuple(
         dict.fromkeys(
-            resolved_alias
-            for alias in plan.litellm.default_model_alias_order
-            if (resolved_alias := _resolve_litellm_default_alias(alias, available_aliases)) is not None
+            [
+                *default_aliases,
+                *(
+                    entry.alias
+                    for entry in base_catalog.entries
+                    if entry.provider_slug == "openrouter" and not entry.alias.endswith(":free")
+                ),
+            ]
         )
     )
-    expanded_defaults = _expand_aliases_with_bare_names(default_aliases)
-    return {
-        "coder-hermes": expanded_defaults,
-        "coder-kdense": tuple(alias for alias in ("openai/*",) if alias in available_aliases),
-        "my-farm-advisor": _advisor_alias_allowlist(
-            flat_env,
-            primary_key="MY_FARM_ADVISOR_PRIMARY_MODEL",
-            fallback_key="MY_FARM_ADVISOR_FALLBACK_MODELS",
-            available_aliases=available_aliases,
-            default_aliases=expanded_defaults,
-        ),
-        "openclaw": _advisor_alias_allowlist(
-            flat_env,
-            primary_key="OPENCLAW_PRIMARY_MODEL",
-            fallback_key="OPENCLAW_FALLBACK_MODELS",
-            available_aliases=available_aliases,
-            default_aliases=expanded_defaults,
-        ),
+    visible_aliases_by_consumer = {
+        consumer: shared_aliases for consumer in _litellm_consumers()
     }
+    visible_aliases_by_consumer["my-farm-advisor"] = _advisor_alias_allowlist(
+        flat_env,
+        primary_key="MY_FARM_ADVISOR_PRIMARY_MODEL",
+        fallback_key="MY_FARM_ADVISOR_FALLBACK_MODELS",
+        catalog=base_catalog,
+        default_aliases=shared_aliases,
+    )
+    visible_aliases_by_consumer["openclaw"] = _advisor_alias_allowlist(
+        flat_env,
+        primary_key="OPENCLAW_PRIMARY_MODEL",
+        fallback_key="OPENCLAW_FALLBACK_MODELS",
+        catalog=base_catalog,
+        default_aliases=shared_aliases,
+    )
+    return _project_catalog(base_catalog, visible_aliases_by_consumer)
 
 
 def _advisor_alias_allowlist(
@@ -810,53 +863,174 @@ def _advisor_alias_allowlist(
     *,
     primary_key: str,
     fallback_key: str,
-    available_aliases: set[str],
+    catalog: ModelCatalog,
     default_aliases: tuple[str, ...],
 ) -> tuple[str, ...]:
     aliases = list(default_aliases)
     primary_model = _optional_value(flat_env, primary_key)
-    if primary_model is not None and primary_model in available_aliases:
-        aliases.append(primary_model)
-        # My Farm Advisor splits provider/model strings such as local/unsloth-active
-        # and sends the bare model name to LiteLLM. Allow both forms.
-        if "/" in primary_model:
-            bare_name = primary_model.split("/", 1)[1]
-            if bare_name not in aliases:
-                aliases.append(bare_name)
+    resolved_primary = _resolve_requested_catalog_alias(primary_model, catalog)
+    if resolved_primary is not None:
+        aliases.append(resolved_primary)
     fallback_models = _optional_value(flat_env, fallback_key)
     if fallback_models is not None:
         for model in fallback_models.split(","):
-            normalized = model.strip()
-            if normalized in available_aliases:
-                aliases.append(normalized)
-                if "/" in normalized:
-                    bare_name = normalized.split("/", 1)[1]
-                    if bare_name not in aliases:
-                        aliases.append(bare_name)
+            resolved_alias = _resolve_requested_catalog_alias(model.strip(), catalog)
+            if resolved_alias is not None:
+                aliases.append(resolved_alias)
     return tuple(dict.fromkeys(aliases))
 
 
-def _expand_aliases_with_bare_names(aliases: tuple[str, ...]) -> tuple[str, ...]:
-    expanded: list[str] = []
-    seen: set[str] = set()
+def _build_catalog_from_litellm_config(config: Mapping[str, object]) -> ModelCatalog:
+    model_entries = config.get("model_list")
+    if not isinstance(model_entries, list):
+        raise ValueError("LiteLLM config model_list must be a list.")
+    local_alias = DEFAULT_LOCAL_CANONICAL_ALIAS
+    local_upstream_target = DEFAULT_LOCAL_UPSTREAM_TARGET
+    openrouter_model_ids: list[str] = []
+    opencode_go_model_ids: list[str] = []
+    passthrough_alias_targets: dict[str, str] = {}
+    cost_metadata_by_alias: dict[str, ModelCostMetadata] = {}
+    default_alias_order: list[str] = []
+
+    for entry in model_entries:
+        if not isinstance(entry, dict):
+            continue
+        alias = entry.get("model_name")
+        litellm_params = entry.get("litellm_params")
+        if not isinstance(alias, str) or not isinstance(litellm_params, dict):
+            continue
+        upstream_target = litellm_params.get("model")
+        if not isinstance(upstream_target, str):
+            continue
+        default_alias_order.append(alias)
+        if _is_local_alias(alias):
+            local_alias = alias
+            local_upstream_target = upstream_target
+        elif alias.startswith("openrouter/"):
+            openrouter_model_ids.append(alias.removeprefix("openrouter/"))
+        elif alias.startswith("opencode-go/"):
+            opencode_go_model_ids.append(alias.removeprefix("opencode-go/"))
+        else:
+            passthrough_alias_targets[alias] = upstream_target
+
+        model_info = entry.get("model_info")
+        if isinstance(model_info, dict):
+            input_cost = model_info.get("input_cost_per_token")
+            output_cost = model_info.get("output_cost_per_token")
+            if isinstance(input_cost, (int, float)) or isinstance(output_cost, (int, float)):
+                cost_metadata_by_alias[alias] = ModelCostMetadata(
+                    input_cost_per_token=float(input_cost)
+                    if isinstance(input_cost, (int, float))
+                    else None,
+                    output_cost_per_token=float(output_cost)
+                    if isinstance(output_cost, (int, float))
+                    else None,
+                )
+
+    return build_model_catalog(
+        local_alias=local_alias,
+        local_upstream_target=local_upstream_target,
+        openrouter_model_ids=tuple(openrouter_model_ids),
+        opencode_go_model_ids=tuple(opencode_go_model_ids),
+        nvidia_alias_targets=passthrough_alias_targets,
+        default_alias_order=tuple(default_alias_order),
+        cost_metadata_by_alias=cost_metadata_by_alias,
+    )
+
+
+def _is_local_alias(alias: str) -> bool:
+    provider_slug, _, _ = alias.partition("/")
+    default_local_provider, _, _ = DEFAULT_LOCAL_CANONICAL_ALIAS.partition("/")
+    return provider_slug == default_local_provider or "." in provider_slug
+
+
+def _project_catalog(
+    base_catalog: ModelCatalog,
+    visible_aliases_by_consumer: Mapping[str, tuple[str, ...]],
+) -> ModelCatalog:
+    passthrough_alias_targets: dict[str, str] = {}
+    openrouter_model_ids: list[str] = []
+    opencode_go_model_ids: list[str] = []
+    cost_metadata_by_alias: dict[str, ModelCostMetadata] = {}
+    local_entry = next((entry for entry in base_catalog.entries if _is_local_alias(entry.alias)), None)
+    if local_entry is None:
+        local_entry = base_catalog.entry_for(DEFAULT_LOCAL_CANONICAL_ALIAS)
+
+    for entry in base_catalog.entries:
+        if entry.alias == local_entry.alias:
+            continue
+        if entry.provider_slug == "openrouter":
+            openrouter_model_ids.append(entry.model_id)
+        elif entry.provider_slug == "opencode-go":
+            opencode_go_model_ids.append(entry.model_id)
+        else:
+            passthrough_alias_targets[entry.alias] = entry.upstream_target
+        if entry.input_cost_per_token is not None or entry.output_cost_per_token is not None:
+            cost_metadata_by_alias[entry.alias] = ModelCostMetadata(
+                input_cost_per_token=entry.input_cost_per_token,
+                output_cost_per_token=entry.output_cost_per_token,
+            )
+
+    return build_model_catalog(
+        local_alias=local_entry.alias,
+        local_upstream_target=local_entry.upstream_target,
+        openrouter_model_ids=tuple(openrouter_model_ids),
+        opencode_go_model_ids=tuple(opencode_go_model_ids),
+        nvidia_alias_targets=passthrough_alias_targets,
+        visible_aliases_by_consumer=visible_aliases_by_consumer,
+        default_alias_order=tuple(entry.alias for entry in base_catalog.entries),
+        cost_metadata_by_alias=cost_metadata_by_alias,
+    )
+
+
+def _resolve_litellm_default_aliases(
+    *,
+    aliases: tuple[str, ...],
+    catalog: ModelCatalog,
+) -> tuple[str, ...]:
+    resolved: list[str] = []
     for alias in aliases:
-        if alias not in seen:
-            expanded.append(alias)
-            seen.add(alias)
-        if "/" in alias:
-            bare_name = alias.split("/", 1)[1]
-            if bare_name not in seen:
-                expanded.append(bare_name)
-                seen.add(bare_name)
-    return tuple(expanded)
+        for projected_alias in _project_catalog_alias(alias, catalog):
+            if projected_alias not in resolved:
+                resolved.append(projected_alias)
+    return tuple(resolved)
 
 
-def _resolve_litellm_default_alias(alias: str, available_aliases: set[str]) -> str | None:
-    if alias in available_aliases:
-        return alias
-    if alias == "opencode-go/*" and "openai/*" in available_aliases:
-        return "openai/*"
+def _project_catalog_alias(alias: str, catalog: ModelCatalog) -> tuple[str, ...]:
+    if alias.endswith("/*"):
+        provider_slug = alias.removesuffix("/*")
+        return tuple(
+            entry.alias for entry in catalog.entries if entry.provider_slug == provider_slug
+        )
+    resolved_alias = _resolve_requested_catalog_alias(alias, catalog)
+    return (resolved_alias,) if resolved_alias is not None else ()
+
+
+def _resolve_requested_catalog_alias(model_ref: str | None, catalog: ModelCatalog) -> str | None:
+    if model_ref is None:
+        return None
+    alias_lookup = _catalog_alias_lookup(catalog)
+    if model_ref in alias_lookup:
+        return alias_lookup[model_ref]
+    legacy_local_ref = model_ref.removeprefix("local/") if model_ref.startswith("local/") else None
+    if legacy_local_ref is not None:
+        return alias_lookup.get(legacy_local_ref)
     return None
+
+
+def _catalog_alias_lookup(catalog: ModelCatalog) -> dict[str, str]:
+    alias_lookup = {entry.alias: entry.alias for entry in catalog.entries}
+    aliases_by_model_id: dict[str, list[str]] = {}
+    for entry in catalog.entries:
+        aliases_by_model_id.setdefault(entry.model_id, []).append(entry.alias)
+    for model_id, matching_aliases in aliases_by_model_id.items():
+        if len(matching_aliases) == 1:
+            alias_lookup[model_id] = matching_aliases[0]
+    return alias_lookup
+
+
+def _litellm_consumers() -> tuple[str, ...]:
+    return ("coder-hermes", "coder-kdense", "my-farm-advisor", "openclaw")
 
 
 def _optional_value(flat_env: dict[str, str], key: str) -> str | None:

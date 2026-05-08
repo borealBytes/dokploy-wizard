@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib import error, parse, request
 
@@ -22,6 +22,7 @@ class LiteLLMTeamRecord:
     team_id: str
     team_alias: str
     models: tuple[str, ...]
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class LiteLLMVirtualKeyRecord:
     key_alias: str
     team_id: str | None
     models: tuple[str, ...]
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
 
 class LiteLLMAdminApi(Protocol):
@@ -37,7 +39,22 @@ class LiteLLMAdminApi(Protocol):
 
     def list_teams(self) -> tuple[LiteLLMTeamRecord, ...]: ...
 
-    def create_team(self, *, team_alias: str, models: tuple[str, ...]) -> LiteLLMTeamRecord: ...
+    def create_team(
+        self,
+        *,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord: ...
+
+    def update_team(
+        self,
+        *,
+        team_id: str,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord: ...
 
     def list_keys(self) -> tuple[LiteLLMVirtualKeyRecord, ...]: ...
 
@@ -88,14 +105,42 @@ class LiteLLMAdminClient:
             raise LiteLLMAdminError("LiteLLM team.list response must be a list.")
         return tuple(_parse_team(item) for item in payload)
 
-    def create_team(self, *, team_alias: str, models: tuple[str, ...]) -> LiteLLMTeamRecord:
+    def create_team(
+        self,
+        *,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
         payload = self._request_json(
             "POST",
             "/team/new",
-            {"team_alias": team_alias, "models": list(models)},
+            {"team_alias": team_alias, "models": list(models), "metadata": dict(metadata or {})},
         )
         if not isinstance(payload, dict):
             raise LiteLLMAdminError("LiteLLM team.new response must be an object.")
+        return _parse_team(payload)
+
+    def update_team(
+        self,
+        *,
+        team_id: str,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        payload = self._request_json(
+            "POST",
+            "/team/update",
+            {
+                "team_id": team_id,
+                "team_alias": team_alias,
+                "models": list(models),
+                "metadata": dict(metadata or {}),
+            },
+        )
+        if not isinstance(payload, dict):
+            raise LiteLLMAdminError("LiteLLM team.update response must be an object.")
         return _parse_team(payload)
 
     def list_keys(self) -> tuple[LiteLLMVirtualKeyRecord, ...]:
@@ -235,15 +280,28 @@ class LiteLLMGatewayManager:
         reconciled: dict[str, LiteLLMVirtualKeyRecord] = {}
         for consumer, generated_key in generated_keys.items():
             expected_models = tuple(dict.fromkeys(consumer_model_allowlists.get(consumer, ())))
+            managed_metadata = _managed_metadata_for_consumer(consumer)
             team = existing_teams.get(consumer)
             if team is None:
-                team = self._api.create_team(team_alias=consumer, models=expected_models)
+                team = self._api.create_team(
+                    team_alias=consumer,
+                    models=expected_models,
+                    metadata=managed_metadata,
+                )
                 existing_teams[consumer] = team
             elif team.models != expected_models:
-                raise LiteLLMAdminError(
-                    f"LiteLLM team '{consumer}' already exists with models {list(team.models)}, "
-                    f"expected {list(expected_models)}. Refusing to mutate team restrictions silently."
+                _ensure_record_is_wizard_managed(
+                    record_kind="team",
+                    consumer=consumer,
+                    metadata=team.metadata,
                 )
+                team = self._api.update_team(
+                    team_id=team.team_id,
+                    team_alias=consumer,
+                    models=expected_models,
+                    metadata=managed_metadata,
+                )
+                existing_teams[consumer] = team
 
             existing_key = existing_keys.get(consumer)
             if existing_key is None:
@@ -252,26 +310,47 @@ class LiteLLMGatewayManager:
                     key_alias=consumer,
                     team_id=team.team_id,
                     models=expected_models,
-                    metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
+                    metadata=managed_metadata,
                 )
                 existing_keys[consumer] = existing_key
             elif existing_key.key != generated_key:
+                if existing_key.models != expected_models or existing_key.team_id != team.team_id:
+                    _ensure_record_is_wizard_managed(
+                        record_kind="key",
+                        consumer=consumer,
+                        metadata=existing_key.metadata,
+                    )
+                    existing_key = self._api.update_key(
+                        key_alias=consumer,
+                        key=existing_key.key,
+                        team_id=team.team_id,
+                        models=expected_models,
+                        metadata=managed_metadata,
+                    )
+                    existing_keys[consumer] = existing_key
+                    reconciled[consumer] = existing_key
+                    continue
                 existing_key = LiteLLMVirtualKeyRecord(
                     key=existing_key.key,
                     key_alias=existing_key.key_alias,
                     team_id=team.team_id,
                     models=expected_models,
+                    metadata=existing_key.metadata,
                 )
-            elif existing_key.models != expected_models:
-                raise LiteLLMAdminError(
-                    f"LiteLLM key alias '{consumer}' already exists with models {list(existing_key.models)}, "
-                    f"expected {list(expected_models)}. Refusing to mutate key restrictions silently."
+            elif existing_key.models != expected_models or existing_key.team_id != team.team_id:
+                _ensure_record_is_wizard_managed(
+                    record_kind="key",
+                    consumer=consumer,
+                    metadata=existing_key.metadata,
                 )
-            elif existing_key.team_id != team.team_id:
-                raise LiteLLMAdminError(
-                    f"LiteLLM key alias '{consumer}' already exists on team '{existing_key.team_id}', "
-                    f"expected '{team.team_id}'. Refusing to reassign it silently."
+                existing_key = self._api.update_key(
+                    key_alias=consumer,
+                    key=existing_key.key,
+                    team_id=team.team_id,
+                    models=expected_models,
+                    metadata=managed_metadata,
                 )
+                existing_keys[consumer] = existing_key
             reconciled[consumer] = existing_key
         return reconciled
 
@@ -303,6 +382,7 @@ def _parse_team(payload: Any) -> LiteLLMTeamRecord:
         team_id=team_id,
         team_alias=team_alias,
         models=_tuple_of_strings(payload.get("models")),
+        metadata=_metadata_mapping(payload.get("metadata")),
     )
 
 
@@ -323,6 +403,7 @@ def _parse_key(
         key_alias=key_alias,
         team_id=team_id,
         models=_tuple_of_strings(payload.get("models")),
+        metadata=_metadata_mapping(payload.get("metadata")),
     )
 
 
@@ -368,6 +449,35 @@ def _tuple_of_strings(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(item for item in value if isinstance(item, str) and item.strip() != "")
+
+
+def _metadata_mapping(value: Any) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): nested for key, nested in value.items()}
+
+
+def _managed_metadata_for_consumer(consumer: str) -> dict[str, object]:
+    return {"consumer": consumer, "managed_by": "dokploy-wizard"}
+
+
+def _ensure_record_is_wizard_managed(
+    *,
+    record_kind: str,
+    consumer: str,
+    metadata: Mapping[str, object],
+) -> None:
+    if metadata.get("managed_by") != "dokploy-wizard":
+        raise LiteLLMAdminError(
+            f"LiteLLM {record_kind} '{consumer}' drifted but is not wizard-managed. "
+            "Refusing to mutate it silently."
+        )
+    metadata_consumer = metadata.get("consumer")
+    if metadata_consumer != consumer:
+        raise LiteLLMAdminError(
+            f"LiteLLM {record_kind} '{consumer}' drifted but metadata belongs to consumer {metadata_consumer!r}. "
+            "Refusing to mutate it silently."
+        )
 
 
 def _default_request(req: request.Request) -> Any:
