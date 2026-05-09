@@ -8,6 +8,23 @@ import pytest
 
 from dokploy_wizard.litellm.config_renderer import build_litellm_config, render_litellm_config_yaml
 
+_EXPECTED_OPENCODE_GO_CHAT_ALIASES = [
+    "opencode-go/minimax-m2.7",
+    "opencode-go/minimax-m2.5",
+    "opencode-go/kimi-k2.6",
+    "opencode-go/kimi-k2.5",
+    "opencode-go/glm-5.1",
+    "opencode-go/glm-5",
+    "opencode-go/deepseek-v4-pro",
+    "opencode-go/deepseek-v4-flash",
+    "opencode-go/qwen3.6-plus",
+    "opencode-go/qwen3.5-plus",
+    "opencode-go/mimo-v2-pro",
+    "opencode-go/mimo-v2-omni",
+    "opencode-go/mimo-v2.5-pro",
+    "opencode-go/mimo-v2.5",
+]
+
 
 def _model_list(config: dict[str, object]) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], config["model_list"])
@@ -124,15 +141,16 @@ def test_build_litellm_config_exposes_verified_opencode_go_chat_models_only_when
 
     assert model_names == [
         "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
-        "opencode-go/deepseek-v4-flash",
-        "opencode-go/gpt-4.1-mini",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
     ]
     assert "deepseek-v4-flash" not in model_names
     assert "opencode-go/text-embedding-3-large" not in model_names
+    assert "opencode-go/gpt-4.1-mini" not in model_names
+    assert "opencode-go/minimax-m2.7" in model_names
 
-    deepseek_entry = _model_entry(config, "opencode-go/deepseek-v4-flash")
-    assert deepseek_entry["litellm_params"] == {
-        "model": "openai/deepseek-v4-flash",
+    minimax_entry = _model_entry(config, "opencode-go/minimax-m2.7")
+    assert minimax_entry["litellm_params"] == {
+        "model": "openai/minimax-m2.7",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "os.environ/OPENCODE_GO_API_KEY",
     }
@@ -150,6 +168,62 @@ def test_build_litellm_config_skips_opencode_go_models_without_upstream_key() ->
     assert [entry["model_name"] for entry in _model_list(config)] == [
         "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
     ]
+
+
+def test_build_litellm_config_exposes_verified_opencode_go_models_with_default_base_url() -> None:
+    config = build_litellm_config(
+        {
+            "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_OPENCODE_GO_API_KEY": "sk-opencode-go-key",
+        },
+        {},
+    )
+
+    model_names = [entry["model_name"] for entry in _model_list(config)]
+
+    assert model_names == [
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
+    ]
+    assert _model_entry(config, "opencode-go/minimax-m2.7")["litellm_params"] == {
+        "model": "openai/minimax-m2.7",
+        "api_base": "https://opencode.ai/zen/go/v1",
+        "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
+    }
+
+
+@pytest.mark.parametrize("raw_value", ["1", "true", "TRUE", "yes", "on"])
+def test_build_litellm_config_ignores_opencode_go_wildcard_flag_and_keeps_concrete_chat_aliases(
+    raw_value: str,
+) -> None:
+    config = build_litellm_config(
+        {
+            "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_OPENCODE_GO_API_KEY": "sk-opencode-go-key",
+            "LITELLM_OPENCODE_GO_WILDCARD": raw_value,
+        },
+        {},
+    )
+
+    model_names = [entry["model_name"] for entry in _model_list(config)]
+
+    assert model_names == [
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
+    ]
+    assert _model_entry(config, "opencode-go/minimax-m2.7")["litellm_params"] == {
+        "model": "openai/minimax-m2.7",
+        "api_base": "https://opencode.ai/zen/go/v1",
+        "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
+    }
+    assert "opencode-go/*" not in model_names
+    assert "opencode-go/deepseek-v4-flash" in model_names
+    assert "opencode-go/minimax-m2.7" in model_names
+    assert "opencode-go/text-embedding-3-large" not in model_names
+    assert "opencode-go/dall-e-3" not in model_names
+    assert "opencode-go/whisper-1" not in model_names
+    assert "opencode-go/sora-2" not in model_names
+    assert "opencode-go/gpt-image-1.5" not in model_names
 
 
 def test_build_litellm_config_prefers_canonical_litellm_env_refs_for_non_local_routes() -> None:
@@ -171,8 +245,8 @@ def test_build_litellm_config_prefers_canonical_litellm_env_refs_for_non_local_r
     assert "openrouter/hunter-alpha" in model_names
     assert "openrouter/openai/gpt-4.1-mini" not in model_names
 
-    deepseek_entry = _model_entry(config, "opencode-go/deepseek-v4-flash")
-    assert deepseek_entry["litellm_params"]["api_key"] == "os.environ/LITELLM_OPENCODE_GO_API_KEY"
+    minimax_entry = _model_entry(config, "opencode-go/minimax-m2.7")
+    assert minimax_entry["litellm_params"]["api_key"] == "os.environ/LITELLM_OPENCODE_GO_API_KEY"
 
     openrouter_entry = _model_entry(config, "openrouter/hunter-alpha")
     assert openrouter_entry["litellm_params"] == {
@@ -197,9 +271,12 @@ def test_render_litellm_config_yaml_includes_new_model_aliases_only() -> None:
     rendered_yaml = render_litellm_config_yaml(config)
 
     assert 'model_name: "tuxdesktop.tailb12aa5.ts.net/unsloth-active"' in rendered_yaml
-    assert 'model_name: "opencode-go/deepseek-v4-flash"' in rendered_yaml
+    assert 'model_name: "opencode-go/minimax-m2.7"' in rendered_yaml
+    assert 'model_name: "opencode-go/mimo-v2.5"' in rendered_yaml
     assert 'model_name: "openrouter/minimax/minimax-m2.5:free"' in rendered_yaml
+    assert 'model: "openai/*"' not in rendered_yaml
     assert 'model_name: "openai/*"' not in rendered_yaml
+    assert 'model_name: "opencode-go/*"' not in rendered_yaml
     assert 'model_name: "minimax/minimax-m2.5:free"' not in rendered_yaml
 
 
@@ -351,6 +428,7 @@ def test_build_litellm_config_preserves_hostname_provider_alias_for_local_route(
 
     assert [entry["model_name"] for entry in model_list] == [
         "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
     ]
     assert model_list[0]["litellm_params"] == {
         "model": "openai/unsloth-active",

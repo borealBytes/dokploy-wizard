@@ -99,7 +99,9 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
     assert re.search(r"source: wizard-stack-shared-litellm-config-[0-9a-f]{12}", rendered)
     assert "target: /app/config.yaml" in rendered
     assert 'api_key: "sk-no-key-required"' in rendered
+    assert 'model_name: "opencode-go/minimax-m2.7"' in rendered
     assert 'model_name: "opencode-go/deepseek-v4-flash"' in rendered
+    assert 'model_name: "opencode-go/mimo-v2.5"' in rendered
     assert 'model_name: "openrouter/hunter-alpha"' in rendered
     assert '      LITELLM_OPENCODE_GO_API_KEY: "${OPENCODE_GO_API_KEY}"' in rendered
     assert (
@@ -141,7 +143,7 @@ def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
         '      LITELLM_OPENROUTER_API_KEY: "${MY_FARM_ADVISOR_OPENROUTER_API_KEY}"'
         not in rendered
     )
-    assert 'model_name: "opencode-go/gpt-4.1-mini"' in rendered
+    assert 'model_name: "opencode-go/minimax-m2.7"' in rendered
     assert 'model_name: "openrouter/google/gemma-4-31b-it:free"' in rendered
 
 

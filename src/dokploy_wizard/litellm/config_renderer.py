@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
 
 from dokploy_wizard.litellm.model_catalog import (
     DEFAULT_LOCAL_CANONICAL_ALIAS,
@@ -15,23 +14,26 @@ DEFAULT_LOCAL_MODEL = "openai/unsloth-active"
 DEFAULT_LOCAL_API_KEY = "sk-no-key-required"
 DEFAULT_OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 
-_VERIFIED_OPENCODE_GO_MODELS: tuple[dict[str, Any], ...] = (
-    {
-        "id": "deepseek-v4-flash",
-        "litellm_model": "openai/deepseek-v4-flash",
-        "chat_compatible": True,
-    },
-    {
-        "id": "gpt-4.1-mini",
-        "litellm_model": "openai/gpt-4.1-mini",
-        "chat_compatible": True,
-    },
-    {
-        "id": "text-embedding-3-large",
-        "litellm_model": "openai/text-embedding-3-large",
-        "chat_compatible": False,
-    },
+_VERIFIED_OPENCODE_GO_CHAT_MODEL_IDS: tuple[str, ...] = (
+    "minimax-m2.7",
+    "minimax-m2.5",
+    "kimi-k2.6",
+    "kimi-k2.5",
+    "glm-5.1",
+    "glm-5",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "qwen3.6-plus",
+    "qwen3.5-plus",
+    "mimo-v2-pro",
+    "mimo-v2-omni",
+    "mimo-v2.5-pro",
+    "mimo-v2.5",
 )
+
+
+def verified_opencode_go_chat_model_ids() -> tuple[str, ...]:
+    return _VERIFIED_OPENCODE_GO_CHAT_MODEL_IDS
 
 
 def build_litellm_config(
@@ -51,16 +53,8 @@ def build_litellm_config(
         upstream_cred_key="opencode_go_api_key_env",
         legacy_env_names=("OPENCODE_GO_API_KEY",),
     )
-    has_explicit_opencode_go_base_url = any(
-        _optional(flat_env, key) is not None
-        for key in ("AI_DEFAULT_BASE_URL", "OPENCODE_GO_BASE_URL")
-    )
     opencode_go_base_url = _opencode_go_base_url(flat_env)
-    opencode_go_model_ids = tuple(
-        str(model["id"])
-        for model in _VERIFIED_OPENCODE_GO_MODELS
-        if model.get("chat_compatible") is True
-    )
+    opencode_go_model_ids = verified_opencode_go_chat_model_ids()
 
     openrouter_api_key_env = _provider_api_key_env(
         flat_env,
@@ -96,11 +90,7 @@ def build_litellm_config(
         local_alias=local_alias,
         local_upstream_target=local_model,
         openrouter_model_ids=tuple(openrouter_model_ids),
-        opencode_go_model_ids=(
-            opencode_go_model_ids
-            if opencode_go_api_key_env is not None and has_explicit_opencode_go_base_url
-            else ()
-        ),
+        opencode_go_model_ids=opencode_go_model_ids if opencode_go_api_key_env is not None else (),
         nvidia_alias_targets=nvidia_alias_targets,
         cost_metadata_by_alias=cost_metadata_by_alias,
     )
@@ -121,7 +111,7 @@ def build_litellm_config(
             )
             continue
         if entry.provider_slug == "opencode-go":
-            if opencode_go_api_key_env is None or not has_explicit_opencode_go_base_url:
+            if opencode_go_api_key_env is None:
                 continue
             model_list.append(
                 {
