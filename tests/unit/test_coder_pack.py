@@ -184,6 +184,23 @@ def test_render_coder_compose_includes_root_and_wildcard_routes() -> None:
         in compose
     )
     assert 'traefik.http.services.wizard-stack-coder.loadbalancer.server.port: "3000"' in compose
+    assert "traefik.hz" not in compose
+    assert compose.count("traefik.http.routers.wizard-stack-coder.rule:") == 1
+    assert compose.count("traefik.http.routers.wizard-stack-coder-wildcard.rule:") == 1
+    assert compose.count("traefik.http.routers.wizard-stack-coder-wildcard.middlewares:") == 1
+    assert compose.count("traefik.http.routers.wizard-stack-coder-wildcard.tls:") == 1
+    assert (
+        compose.count(
+            "traefik.http.middlewares.wizard-stack-coder-forwarded-https.headers.customrequestheaders.X-Forwarded-Proto: \"https\""
+        )
+        == 1
+    )
+    assert (
+        compose.count(
+            "traefik.http.middlewares.wizard-stack-coder-forwarded-host.headers.customrequestheaders.X-Forwarded-Host: \"coder.example.com\""
+        )
+        == 1
+    )
 
 
 def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
