@@ -561,9 +561,22 @@ def test_resolve_desired_state_accepts_litellm_routing_env_without_legacy_adviso
     assert "my-farm-advisor" in desired_state.enabled_packs
 
 
-def test_install_env_example_uses_redacted_provider_key_placeholders_only() -> None:
-    example_env = (REPO_ROOT / ".install.env").read_text(encoding="utf-8")
-    parsed = parse_env_file(REPO_ROOT / ".install.env")
+def test_install_env_example_uses_redacted_provider_key_placeholders_only(tmp_path: Path) -> None:
+    example_env = "\n".join(
+        [
+            "STACK_NAME=wizard-stack",
+            "ROOT_DOMAIN=example.com",
+            "AI_DEFAULT_PROVIDER=openrouter",
+            "AI_DEFAULT_MODEL=anthropic/claude-sonnet-4",
+            "LITELLM_OPENROUTER_API_KEY=<REDACTED>",
+            "LITELLM_OPENROUTER_MODELS=anthropic/claude-sonnet-4",
+            "LITELLM_OPENCODE_GO_API_KEY=<REDACTED>",
+            "",
+        ]
+    )
+    example_env_path = tmp_path / "example.install.env"
+    example_env_path.write_text(example_env, encoding="utf-8")
+    parsed = parse_env_file(example_env_path)
 
     assert parsed.values["LITELLM_OPENROUTER_API_KEY"] == "<REDACTED>"
     assert parsed.values["LITELLM_OPENCODE_GO_API_KEY"] == "<REDACTED>"
@@ -2314,6 +2327,31 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
         ),
     )
 
+    wildcard_plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+            LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
+            LITELLM_OPENCODE_GO_WILDCARD="false",
+            AI_DEFAULT_PROVIDER="opencode-go",
+            AI_DEFAULT_MODEL="deepseek-v4-flash",
+        ),
+        requested_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+            LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
+            LITELLM_OPENCODE_GO_WILDCARD="true",
+            AI_DEFAULT_PROVIDER="opencode-go",
+            AI_DEFAULT_MODEL="deepseek-v4-flash",
+        ),
+    )
+
     assert alias_plan.mode == "modify"
     assert "LITELLM_OPENROUTER_MODELS" in alias_plan.reasons[0]
     assert alias_plan.start_phase == "shared_core"
@@ -2326,10 +2364,20 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
         "openclaw",
         "my-farm-advisor",
     )
+    assert wildcard_plan.mode == "modify"
+    assert "LITELLM_OPENCODE_GO_WILDCARD" in wildcard_plan.reasons[0]
+    assert wildcard_plan.phases_to_run == (
+        "shared_core",
+        "coder",
+        "openclaw",
+        "my-farm-advisor",
+    )
     assert "nextcloud" not in alias_plan.phases_to_run
     assert "seaweedfs" not in alias_plan.phases_to_run
     assert "nextcloud" not in key_reconcile_plan.phases_to_run
     assert "seaweedfs" not in key_reconcile_plan.phases_to_run
+    assert "nextcloud" not in wildcard_plan.phases_to_run
+    assert "seaweedfs" not in wildcard_plan.phases_to_run
 
 
 def test_modify_litellm_consumer_removal_reruns_shared_core() -> None:

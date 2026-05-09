@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 import inspect
+from collections.abc import Mapping
 
 import pytest
 
