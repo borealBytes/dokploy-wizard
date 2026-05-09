@@ -117,9 +117,16 @@ class LiteLLMAdminClient:
             "/team/new",
             {"team_alias": team_alias, "models": list(models), "metadata": dict(metadata or {})},
         )
-        if not isinstance(payload, dict):
-            raise LiteLLMAdminError("LiteLLM team.new response must be an object.")
-        return _parse_team(payload)
+        return _parse_team(
+            _unwrap_record_response(
+                payload,
+                response_kind="team.new",
+                required_string_fields=("team_alias", "team_alias_name", "alias"),
+                container_keys=("team", "team_info", "data", "result", "record", "item"),
+                allowed_record_fields=("team_id", "teamId", "models", "metadata"),
+            ),
+            fallback_alias=team_alias,
+        )
 
     def update_team(
         self,
@@ -139,9 +146,17 @@ class LiteLLMAdminClient:
                 "metadata": dict(metadata or {}),
             },
         )
-        if not isinstance(payload, dict):
-            raise LiteLLMAdminError("LiteLLM team.update response must be an object.")
-        return _parse_team(payload)
+        return _parse_team(
+            _unwrap_record_response(
+                payload,
+                response_kind="team.update",
+                required_string_fields=("team_alias", "team_alias_name", "alias"),
+                container_keys=("team", "team_info", "data", "result", "record", "item"),
+                allowed_record_fields=("team_id", "teamId", "models", "metadata"),
+            ),
+            fallback_alias=team_alias,
+            fallback_team_id=team_id,
+        )
 
     def list_keys(self) -> tuple[LiteLLMVirtualKeyRecord, ...]:
         records: list[LiteLLMVirtualKeyRecord] = []
@@ -181,9 +196,18 @@ class LiteLLMAdminClient:
                 "metadata": dict(metadata or {}),
             },
         )
-        if not isinstance(payload, dict):
-            raise LiteLLMAdminError("LiteLLM key.generate response must be an object.")
-        return _parse_key(payload, fallback_key=key, fallback_alias=key_alias, fallback_team_id=team_id)
+        return _parse_key(
+            _unwrap_record_response(
+                payload,
+                response_kind="key.generate",
+                required_string_fields=("key", "token", "api_key", "key_alias", "key_name", "alias"),
+                container_keys=("key", "token", "virtual_key", "data", "result", "record", "item"),
+                allowed_record_fields=("team_id", "teamId", "models", "metadata"),
+            ),
+            fallback_key=key,
+            fallback_alias=key_alias,
+            fallback_team_id=team_id,
+        )
 
     def update_key(
         self,
@@ -205,9 +229,18 @@ class LiteLLMAdminClient:
                 "metadata": dict(metadata or {}),
             },
         )
-        if not isinstance(payload, dict):
-            raise LiteLLMAdminError("LiteLLM key.update response must be an object.")
-        return _parse_key(payload, fallback_key=key, fallback_alias=key_alias, fallback_team_id=team_id)
+        return _parse_key(
+            _unwrap_record_response(
+                payload,
+                response_kind="key.update",
+                required_string_fields=("key", "token", "api_key", "key_alias", "key_name", "alias"),
+                container_keys=("key", "token", "virtual_key", "data", "result", "record", "item"),
+                allowed_record_fields=("team_id", "teamId", "models", "metadata"),
+            ),
+            fallback_key=key,
+            fallback_alias=key_alias,
+            fallback_team_id=team_id,
+        )
 
     def _request_json(
         self,
@@ -373,11 +406,16 @@ def _readiness_failure_detail(
     return "No readiness response was received."
 
 
-def _parse_team(payload: Any) -> LiteLLMTeamRecord:
+def _parse_team(
+    payload: Any,
+    *,
+    fallback_alias: str | None = None,
+    fallback_team_id: str | None = None,
+) -> LiteLLMTeamRecord:
     if not isinstance(payload, dict):
         raise LiteLLMAdminError("LiteLLM team record must be an object.")
-    team_alias = _first_string(payload, "team_alias", "team_alias_name", "alias")
-    team_id = _first_string(payload, "team_id", "teamId", default=team_alias)
+    team_alias = _first_string(payload, "team_alias", "team_alias_name", "alias", default=fallback_alias)
+    team_id = _first_string(payload, "team_id", "teamId", default=fallback_team_id or team_alias)
     return LiteLLMTeamRecord(
         team_id=team_id,
         team_alias=team_alias,
@@ -426,6 +464,33 @@ def _ensure_key_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise LiteLLMAdminError("LiteLLM key record must be an object.")
     return payload
+
+
+def _unwrap_record_response(
+    payload: Any,
+    *,
+    response_kind: str,
+    required_string_fields: tuple[str, ...],
+    container_keys: tuple[str, ...],
+    allowed_record_fields: tuple[str, ...],
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise LiteLLMAdminError(f"LiteLLM {response_kind} response must be an object.")
+    if _optional_string(payload, *required_string_fields) is not None or any(
+        field in payload for field in allowed_record_fields
+    ):
+        return payload
+    for container_key in container_keys:
+        candidate = payload.get(container_key)
+        if isinstance(candidate, dict) and (
+            _optional_string(candidate, *required_string_fields) is not None
+            or any(field in candidate for field in allowed_record_fields)
+        ):
+            return candidate
+    raise LiteLLMAdminError(
+        f"LiteLLM {response_kind} response missing required string field from {required_string_fields!r}. "
+        f"Checked the top-level payload and nested objects under {container_keys!r}."
+    )
 
 
 def _first_string(payload: Mapping[str, Any], *keys: str, default: str | None = None) -> str:
