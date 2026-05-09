@@ -61,6 +61,23 @@ from dokploy_wizard.verification import ServiceVerificationResult
 
 from .fake_dokploy import FakeDokployApiClient
 
+_EXPECTED_OPENCODE_GO_CHAT_FALLBACKS = (
+    "opencode-go/minimax-m2.7",
+    "opencode-go/minimax-m2.5",
+    "opencode-go/kimi-k2.6",
+    "opencode-go/kimi-k2.5",
+    "opencode-go/glm-5.1",
+    "opencode-go/glm-5",
+    "opencode-go/deepseek-v4-pro",
+    "opencode-go/deepseek-v4-flash",
+    "opencode-go/qwen3.6-plus",
+    "opencode-go/qwen3.5-plus",
+    "opencode-go/mimo-v2-pro",
+    "opencode-go/mimo-v2-omni",
+    "opencode-go/mimo-v2.5-pro",
+    "opencode-go/mimo-v2.5",
+)
+
 
 @dataclass
 class FakeOpenClawBackend:
@@ -356,6 +373,7 @@ def test_advisor_model_selection_defaults_to_catalog_visible_aliases() -> None:
             "ENABLE_OPENCLAW": "true",
             "ENABLE_MY_FARM_ADVISOR": "true",
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_OPENCODE_GO_API_KEY": "shared-opencode-go-key",
             "LITELLM_OPENROUTER_API_KEY": "shared-openrouter-key",
             "LITELLM_OPENROUTER_MODELS": "anthropic/claude-sonnet-4",
         },
@@ -368,7 +386,7 @@ def test_advisor_model_selection_defaults_to_catalog_visible_aliases() -> None:
         shared_core_plan=desired_state.shared_core,
     ) == (
         "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
-        ("openrouter/anthropic/claude-sonnet-4",),
+        (*_EXPECTED_OPENCODE_GO_CHAT_FALLBACKS, "openrouter/anthropic/claude-sonnet-4"),
     )
     assert cli._advisor_model_selection(
         raw_env,
@@ -376,7 +394,7 @@ def test_advisor_model_selection_defaults_to_catalog_visible_aliases() -> None:
         shared_core_plan=desired_state.shared_core,
     ) == (
         "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
-        ("openrouter/anthropic/claude-sonnet-4",),
+        (*_EXPECTED_OPENCODE_GO_CHAT_FALLBACKS, "openrouter/anthropic/claude-sonnet-4"),
     )
 
 
