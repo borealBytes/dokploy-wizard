@@ -830,11 +830,8 @@ def _build_litellm_consumer_projection_catalog(
         dict.fromkeys(
             [
                 *default_aliases,
-                *(
-                    entry.alias
-                    for entry in base_catalog.entries
-                    if entry.provider_slug == "openrouter" and not entry.alias.endswith(":free")
-                ),
+                *(entry.alias for entry in base_catalog.entries if entry.provider_slug == "opencode-go"),
+                *(entry.alias for entry in base_catalog.entries if entry.provider_slug == "openrouter"),
             ]
         )
     )
@@ -902,7 +899,6 @@ def _build_catalog_from_litellm_config(config: Mapping[str, object]) -> ModelCat
         upstream_target = litellm_params.get("model")
         if not isinstance(upstream_target, str):
             continue
-        default_alias_order.append(alias)
         if _is_local_alias(alias):
             local_alias = alias
             local_upstream_target = upstream_target
@@ -912,6 +908,8 @@ def _build_catalog_from_litellm_config(config: Mapping[str, object]) -> ModelCat
             opencode_go_model_ids.append(alias.removeprefix("opencode-go/"))
         else:
             passthrough_alias_targets[alias] = upstream_target
+
+        default_alias_order.append(alias)
 
         model_info = entry.get("model_info")
         if isinstance(model_info, dict):

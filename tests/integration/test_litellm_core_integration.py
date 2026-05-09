@@ -52,6 +52,23 @@ from tests.integration.test_openclaw_pack import (
     _patch_real_dokploy_openclaw_backend,
 )
 
+_EXPECTED_OPENCODE_GO_CHAT_ALIASES = (
+    "opencode-go/minimax-m2.7",
+    "opencode-go/minimax-m2.5",
+    "opencode-go/kimi-k2.6",
+    "opencode-go/kimi-k2.5",
+    "opencode-go/glm-5.1",
+    "opencode-go/glm-5",
+    "opencode-go/deepseek-v4-pro",
+    "opencode-go/deepseek-v4-flash",
+    "opencode-go/qwen3.6-plus",
+    "opencode-go/qwen3.5-plus",
+    "opencode-go/mimo-v2-pro",
+    "opencode-go/mimo-v2-omni",
+    "opencode-go/mimo-v2.5-pro",
+    "opencode-go/mimo-v2.5",
+)
+
 
 @dataclass
 class RecordingDokploySharedCoreApi:
@@ -305,8 +322,7 @@ def test_build_litellm_config_integrates_all_supported_provider_types() -> None:
 
     assert _model_names(config) == [
         "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
-        "opencode-go/deepseek-v4-flash",
-        "opencode-go/gpt-4.1-mini",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
         "openrouter/anthropic/claude-3.7-sonnet",
         "nvidia/kimi-k2.5",
         "openrouter/hunter-alpha",
@@ -321,8 +337,8 @@ def test_build_litellm_config_integrates_all_supported_provider_types() -> None:
         "api_base": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
         "api_key": "sk-no-key-required",
     }
-    assert entries["opencode-go/deepseek-v4-flash"]["litellm_params"] == {
-        "model": "openai/deepseek-v4-flash",
+    assert entries["opencode-go/minimax-m2.7"]["litellm_params"] == {
+        "model": "openai/minimax-m2.7",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
     }
@@ -354,38 +370,96 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
     allowlists = build_litellm_consumer_model_allowlists(
         flat_env=_litellm_route_env(
             MY_FARM_ADVISOR_PRIMARY_MODEL="nvidia/kimi-k2.5",
-            MY_FARM_ADVISOR_FALLBACK_MODELS="opencode-go/deepseek-v4-flash",
+            MY_FARM_ADVISOR_FALLBACK_MODELS="opencode-go/minimax-m2.7",
             OPENCLAW_PRIMARY_MODEL="openrouter/hunter-alpha",
-            OPENCLAW_FALLBACK_MODELS="opencode-go/gpt-4.1-mini",
+            OPENCLAW_FALLBACK_MODELS="opencode-go/mimo-v2.5",
         ),
         plan=plan,
     )
 
+    shared_models = (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
+        "openrouter/anthropic/claude-3.7-sonnet",
+        "openrouter/hunter-alpha",
+    )
+
     assert allowlists == {
-        "coder-hermes": (
-            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
-            "openrouter/anthropic/claude-3.7-sonnet",
-            "openrouter/hunter-alpha",
-        ),
-        "coder-kdense": (
-            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
-            "openrouter/anthropic/claude-3.7-sonnet",
-            "openrouter/hunter-alpha",
-        ),
-        "my-farm-advisor": (
-            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
-            "opencode-go/deepseek-v4-flash",
-            "openrouter/anthropic/claude-3.7-sonnet",
-            "openrouter/hunter-alpha",
-            "nvidia/kimi-k2.5",
-        ),
-        "openclaw": (
-            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
-            "opencode-go/gpt-4.1-mini",
-            "openrouter/anthropic/claude-3.7-sonnet",
-            "openrouter/hunter-alpha",
-        ),
+        "coder-hermes": shared_models,
+        "coder-kdense": shared_models,
+        "my-farm-advisor": (*shared_models, "nvidia/kimi-k2.5"),
+        "openclaw": shared_models,
     }
+    assert "opencode-go/minimax-m2.7" in allowlists["my-farm-advisor"]
+
+
+def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases() -> None:
+    plan = build_shared_core_plan(
+        stack_name="wizard-stack",
+        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+    )
+
+    allowlists = build_litellm_consumer_model_allowlists(
+        flat_env=_litellm_route_env(
+            LITELLM_OPENROUTER_MODELS=(
+                "anthropic/claude-3.7-sonnet,"
+                "google/gemma-4-31b-it:free,"
+                "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"
+            ),
+            OPENCODE_GO_BASE_URL="",
+        ),
+        plan=plan,
+    )
+
+    shared_models = (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
+        "openrouter/anthropic/claude-3.7-sonnet",
+        "openrouter/google/gemma-4-31b-it:free",
+        "openrouter/hunter-alpha",
+    )
+
+    assert allowlists == {
+        "coder-hermes": shared_models,
+        "coder-kdense": shared_models,
+        "my-farm-advisor": shared_models,
+        "openclaw": shared_models,
+    }
+
+
+def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_flag() -> None:
+    plan = build_shared_core_plan(
+        stack_name="wizard-stack",
+        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+    )
+
+    allowlists = build_litellm_consumer_model_allowlists(
+        flat_env=_litellm_route_env(
+            LITELLM_OPENCODE_GO_WILDCARD="yes",
+        ),
+        plan=plan,
+    )
+
+    shared_models = (
+        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
+        "openrouter/anthropic/claude-3.7-sonnet",
+        "openrouter/hunter-alpha",
+    )
+
+    assert allowlists == {
+        "coder-hermes": shared_models,
+        "coder-kdense": shared_models,
+        "my-farm-advisor": shared_models,
+        "openclaw": shared_models,
+    }
+    assert "opencode-go/*" not in allowlists["openclaw"]
+    assert "opencode-go/deepseek-v4-flash" in allowlists["openclaw"]
+    assert "opencode-go/text-embedding-3-large" not in allowlists["openclaw"]
+    assert "opencode-go/dall-e-3" not in allowlists["openclaw"]
+    assert "opencode-go/whisper-1" not in allowlists["openclaw"]
+    assert "opencode-go/sora-2" not in allowlists["openclaw"]
+    assert "opencode-go/gpt-image-1.5" not in allowlists["openclaw"]
 
 
 def test_litellm_admin_reconciliation_preserves_live_managed_keys_during_drift(
@@ -398,9 +472,9 @@ def test_litellm_admin_reconciliation_preserves_live_managed_keys_during_drift(
     allowlists = build_litellm_consumer_model_allowlists(
         flat_env=_litellm_route_env(
             MY_FARM_ADVISOR_PRIMARY_MODEL="nvidia/kimi-k2.5",
-            MY_FARM_ADVISOR_FALLBACK_MODELS="opencode-go/deepseek-v4-flash",
+            MY_FARM_ADVISOR_FALLBACK_MODELS="opencode-go/minimax-m2.7",
             OPENCLAW_PRIMARY_MODEL="openrouter/hunter-alpha",
-            OPENCLAW_FALLBACK_MODELS="opencode-go/gpt-4.1-mini",
+            OPENCLAW_FALLBACK_MODELS="opencode-go/mimo-v2.5",
         ),
         plan=plan,
     )
