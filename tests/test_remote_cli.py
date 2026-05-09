@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import subprocess
+import tarfile
 from pathlib import Path
 from types import ModuleType
 
@@ -164,3 +165,26 @@ def test_fresh_validation_errors_redact_password() -> None:
     assert result.returncode != 0
     assert "confirm-file" in result.stderr.lower()
     assert password not in result.stderr
+
+
+def test_create_repo_archive_excludes_local_env_backups(tmp_path: Path) -> None:
+    remote_cli = import_remote_cli_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "keep.txt").write_text("safe\n", encoding="utf-8")
+    (repo_root / ".install.env.example").write_text("safe-example\n", encoding="utf-8")
+    (repo_root / ".install.env.bak").write_text("secret\n", encoding="utf-8")
+    (repo_root / ".install.env.swp").write_text("secret\n", encoding="utf-8")
+    (repo_root / ".fresh-vps-validation.env.backup").write_text("secret\n", encoding="utf-8")
+
+    archive_path = tmp_path / "repo.tar.gz"
+    remote_cli._create_repo_archive(repo_root=repo_root, destination=archive_path)
+
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members = set(archive.getnames())
+
+    assert "keep.txt" in members
+    assert ".install.env.example" in members
+    assert ".install.env.bak" not in members
+    assert ".install.env.swp" not in members
+    assert ".fresh-vps-validation.env.backup" not in members

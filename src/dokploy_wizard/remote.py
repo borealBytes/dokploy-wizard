@@ -469,11 +469,23 @@ def _should_skip(relative: Path) -> bool:
         return True
     if parts[0] == ".sisyphus" and len(parts) > 1 and parts[1] == "evidence":
         return True
-    if relative.name in {".install.env", ".fresh-vps-validation.env"}:
+    if _is_secret_env_artifact(relative.name):
         return True
     if relative.suffix == ".swp":
         return True
     return any(part == "__pycache__" for part in parts)
+
+
+def _is_secret_env_artifact(name: str) -> bool:
+    sensitive_env_files = {".install.env", ".fresh-vps-validation.env"}
+    if name in sensitive_env_files:
+        return True
+    backup_suffixes = {"bak", "backup", "old", "orig", "save", "tmp"}
+    return any(
+        name == f"{env_name}.{suffix}"
+        for env_name in sensitive_env_files
+        for suffix in backup_suffixes
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
