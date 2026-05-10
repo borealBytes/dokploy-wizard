@@ -1827,18 +1827,18 @@ def _my_farm_gateway_environment(*, stack_name: str, runtime_config: _AdvisorRun
 
 
 def _model_refs_for_provider(
-    runtime_config: _AdvisorRuntimeConfig, *, provider_id: str
+    model_refs: tuple[str, ...], *, provider_id: str
 ) -> tuple[str, ...]:
     seen: set[str] = set()
     ordered: list[str] = []
-    for model_ref in _allowed_models(runtime_config):
+    for model_ref in model_refs:
         if not model_ref.startswith(f"{provider_id}/"):
             continue
-        model_id = model_ref.split("/", 1)[1].strip()
-        if model_id == "" or model_id in seen:
+        full_model_ref = model_ref.strip()
+        if full_model_ref == "" or full_model_ref in seen:
             continue
-        seen.add(model_id)
-        ordered.append(model_id)
+        seen.add(full_model_ref)
+        ordered.append(full_model_ref)
     return tuple(ordered)
 
 
@@ -1883,6 +1883,40 @@ def _litellm_provider_config(*, stack_name: str, model_ids: tuple[str, ...], con
         "api": "openai-completions",
         "models": [_generic_provider_model_entry(model_id) for model_id in model_ids],
     }
+
+
+def _litellm_selection_model_ref(model_ref: str) -> str:
+    normalized = model_ref.strip()
+    if normalized.startswith(f"{_DEFAULT_LITELLM_PROVIDER_ID}/"):
+        return normalized
+    return f"{_DEFAULT_LITELLM_PROVIDER_ID}/{normalized}"
+
+
+def _litellm_selection_model_refs(model_refs: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(_litellm_selection_model_ref(model_ref) for model_ref in model_refs)
+
+
+def _litellm_selection_model_defaults(
+    *, primary: str | None, fallbacks: tuple[str, ...]
+) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    if primary is not None:
+        payload["primary"] = _litellm_selection_model_ref(primary)
+        payload["fallbacks"] = list(_litellm_selection_model_refs(fallbacks))
+    elif fallbacks:
+        payload["fallbacks"] = list(_litellm_selection_model_refs(fallbacks))
+    return payload
+
+
+def _litellm_selection_model_defaults_from_payload(model_defaults: dict[str, object]) -> dict[str, object]:
+    primary = model_defaults.get("primary")
+    fallbacks = model_defaults.get("fallbacks")
+    return _litellm_selection_model_defaults(
+        primary=primary if isinstance(primary, str) else None,
+        fallbacks=tuple(item for item in fallbacks if isinstance(item, str))
+        if isinstance(fallbacks, list)
+        else (),
+    )
 
 
 def _render_gateway_service_block(
@@ -2227,50 +2261,30 @@ def _command_for_variant(
     if runtime_config.primary_model is not None or runtime_config.fallback_models:
         if _DEFAULT_LOCAL_MODEL_REF not in allowed_models:
             allowed_models = (_DEFAULT_LOCAL_MODEL_REF, *allowed_models)
-        model_defaults: dict[str, object] = {}
-        if runtime_config.primary_model is not None:
-            model_defaults["primary"] = runtime_config.primary_model
-        if runtime_config.fallback_models:
-            model_defaults["fallbacks"] = list(runtime_config.fallback_models)
+        model_defaults = _litellm_selection_model_defaults(
+            primary=_resolved_primary_model(runtime_config),
+            fallbacks=_resolved_fallback_models(runtime_config),
+        )
         defaults_payload["model"] = model_defaults
-        defaults_payload["models"] = {model_ref: {} for model_ref in allowed_models}
+        defaults_payload["models"] = {
+            _litellm_selection_model_ref(model_ref): {} for model_ref in allowed_models
+        }
     if allowed_models:
+        provider_model_ids = tuple(
+            dict.fromkeys(
+                (
+                    ((_DEFAULT_LOCAL_MODEL_REF,) if _DEFAULT_LOCAL_MODEL_REF in allowed_models else ())
+                    + allowed_models
+                )
+            )
+        )
         providers: dict[str, object] = {
-            _DEFAULT_LOCAL_PROVIDER_ID: _litellm_provider_config(
+            _DEFAULT_LITELLM_PROVIDER_ID: _litellm_provider_config(
                 stack_name=stack_name,
-                model_ids=(_DEFAULT_LOCAL_MODEL_ID,),
+                model_ids=provider_model_ids,
                 consumer=variant,
             )
         }
-        remote_model_ids: list[str] = []
-        remote_provider_ids = tuple(
-            dict.fromkeys(
-                _provider_for_model_ref(model_ref, default="")
-                for model_ref in allowed_models
-                if _provider_for_model_ref(model_ref, default="")
-                not in {"", _DEFAULT_LOCAL_PROVIDER_ID}
-            )
-        )
-        for provider_id in remote_provider_ids:
-            model_ids = tuple(
-                model_ref.split("/", 1)[1].strip()
-                for model_ref in allowed_models
-                if model_ref.startswith(f"{provider_id}/") and model_ref.split("/", 1)[1].strip() != ""
-            )
-            if not model_ids:
-                continue
-            providers[provider_id] = _litellm_provider_config(
-                stack_name=stack_name,
-                model_ids=tuple(dict.fromkeys(model_ids)),
-                consumer=variant,
-            )
-            remote_model_ids.extend(model_ids)
-        if remote_model_ids:
-            providers[_DEFAULT_LITELLM_PROVIDER_ID] = _litellm_provider_config(
-                stack_name=stack_name,
-                model_ids=tuple(dict.fromkeys(remote_model_ids)),
-                consumer=variant,
-            )
         payload["models"] = {
             "mode": "merge",
             "providers": providers,
@@ -2289,6 +2303,7 @@ def _command_for_variant(
         }
         defaults_payload["elevatedDefault"] = "off"
     if include_runtime_seed and runtime_config.nexa_contract is not None:
+        nexa_model_defaults = _nexa_model_defaults(runtime_config)
         agents_list = agents_payload.setdefault("list", [{"id": "main", "default": True}])
         if not isinstance(agents_list, list):
             agents_list = []
@@ -2307,7 +2322,7 @@ def _command_for_variant(
                 "name": runtime_config.nexa_env.get(
                     "OPENCLAW_NEXA_AGENT_DISPLAY_NAME", _DEFAULT_NEXA_AGENT_NAME
                 ),
-                "model": _nexa_model_defaults(runtime_config),
+                "model": _litellm_selection_model_defaults_from_payload(nexa_model_defaults),
                 "tools": {
                     "profile": "coding",
                     "elevated": {
@@ -2333,6 +2348,7 @@ def _command_for_variant(
         ):
             bindings.append({"agentId": _DEFAULT_NEXA_AGENT_ID, "match": {"channel": "nextcloud-talk"}})
     if include_runtime_seed and "telegram" in channels:
+        telly_model_defaults = _telly_model_defaults()
         agents_list = agents_payload.setdefault(
             "list",
             [
@@ -2355,7 +2371,7 @@ def _command_for_variant(
                 {
                     "id": "telly",
                     "name": "Telly",
-                    "model": _telly_model_defaults(),
+                    "model": _litellm_selection_model_defaults_from_payload(telly_model_defaults),
                     "tools": {
                         "profile": "coding",
                         "elevated": {
