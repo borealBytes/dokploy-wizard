@@ -100,15 +100,76 @@ resource "coder_agent" "main" {
     pi --version
     bash -lc 'command -v pi && pi --version'
 
+    export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"
+    export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"
+    export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"
+    export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"
+    export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"
+    export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"
+
+    mkdir -p /home/coder/.pi/agent
+    python3 - <<'PY'
+import json
+import os
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+base_url = os.environ["AI_DEFAULT_BASE_URL"].rstrip("/")
+api_key = os.environ.get("AI_DEFAULT_API_KEY", "")
+default_alias = os.environ["LITELLM_DEFAULT_ALIAS"]
+fallback_models = json.loads(os.environ["DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON"])
+
+headers = {"Accept": "application/json"}
+if api_key:
+    headers["Authorization"] = f"Bearer {api_key}"
+request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+try:
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.load(response)
+except (OSError, ValueError, urllib.error.URLError):
+    payload = {"data": []}
+
+model_ids: list[str] = []
+for item in payload.get("data", []):
+    if not isinstance(item, dict):
+        continue
+    model_id = item.get("id")
+    if not isinstance(model_id, str):
+        continue
+    normalized = model_id.strip()
+    if normalized and "/" in normalized and not normalized.endswith("/*") and not normalized.startswith("openai/"):
+        model_ids.append(normalized)
+
+model_ids = list(dict.fromkeys(model_ids + fallback_models))
+if default_alias not in model_ids:
+    model_ids.insert(0, default_alias)
+
+config = {
+    "providers": {
+        "litellm": {
+            "name": "LiteLLM",
+            "baseUrl": base_url,
+            "api": "openai-completions",
+            "apiKey": api_key,
+            "models": [{"id": model_id, "name": model_id} for model_id in model_ids],
+        }
+    }
+}
+Path("/home/coder/.pi/agent/models.json").write_text(
+    json.dumps(config, indent=2) + "\n",
+    encoding="utf-8",
+)
+PY
+
     PI_WEB_SRC_DIR=/home/coder/.cache/pi-web-ui
     PI_WEB_BUILD_STAMP=/home/coder/.cache/pi-web-ui-build-rev
     PI_WEB_BUILD_KEY=v1-coder-mounted-preview
     PI_WEB_UI_PORT=8650
     PI_WEB_PROXY_PORT=8651
 
-    # Pi Web UI stays browser-local today: provider keys live in IndexedDB and this
-    # repo does not control a Pi scoped-models surface, so the template is not
-    # centrally LiteLLM-scoped.
+    # Pi Web UI stays browser-local, but the workspace now pre-seeds custom LiteLLM
+    # models with full alias IDs so Pi sends the exact /v1/models values back to the proxy.
 
     mkdir -p "$PI_WEB_SRC_DIR/src" /home/coder/.cache
 

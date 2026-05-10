@@ -95,6 +95,62 @@ resource "coder_agent" "main" {
     export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"
     export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"
     export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"
+    export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"
+    export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"
+
+    mkdir -p /home/coder/.config/opencode
+    python3 - <<'PY'
+import json
+import os
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+base_url = os.environ["AI_DEFAULT_BASE_URL"].rstrip("/")
+api_key = os.environ.get("AI_DEFAULT_API_KEY", "")
+default_alias = os.environ["LITELLM_DEFAULT_ALIAS"]
+fallback_models = json.loads(os.environ["DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON"])
+
+headers = {"Accept": "application/json"}
+if api_key:
+    headers["Authorization"] = f"Bearer {api_key}"
+request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+try:
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.load(response)
+except (OSError, ValueError, urllib.error.URLError):
+    payload = {"data": []}
+
+model_ids: list[str] = []
+for item in payload.get("data", []):
+    if not isinstance(item, dict):
+        continue
+    model_id = item.get("id")
+    if not isinstance(model_id, str):
+        continue
+    normalized = model_id.strip()
+    if normalized and "/" in normalized and not normalized.endswith("/*") and not normalized.startswith("openai/"):
+        model_ids.append(normalized)
+
+model_ids = list(dict.fromkeys(model_ids + fallback_models))
+if default_alias not in model_ids:
+    model_ids.insert(0, default_alias)
+
+config = {
+    "provider": {
+        "litellm": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": base_url, "apiKey": api_key},
+            "models": {model_id: {} for model_id in model_ids},
+        }
+    },
+    "model": default_alias,
+}
+Path("/home/coder/.config/opencode/opencode.json").write_text(
+    json.dumps(config, indent=2) + "\n",
+    encoding="utf-8",
+)
+PY
 
     OPENWORK_SRC_DIR=/home/coder/.cache/openwork-src
     OPENWORK_BUILD_STAMP=/home/coder/.cache/openwork-webui-build-rev

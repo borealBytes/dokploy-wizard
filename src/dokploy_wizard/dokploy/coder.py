@@ -38,6 +38,7 @@ from dokploy_wizard.dokploy.compose_noop import (
     persist_compose_artifact_hash,
 )
 from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
+from dokploy_wizard.litellm.config_renderer import verified_opencode_go_chat_model_ids
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
 from dokploy_wizard.state import load_state_dir
@@ -71,6 +72,7 @@ _DEFAULT_HERMES_INFERENCE_PROVIDER = "openai"
 _DEFAULT_HERMES_MODEL = DEFAULT_LOCAL_CANONICAL_ALIAS
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_INTERNAL_PORT = 4000
+_DEFAULT_CODER_OPENROUTER_ALIAS_SAMPLE = "openrouter/minimax/minimax-m2.5:free"
 
 
 class DokployCoderBackend:
@@ -229,6 +231,11 @@ class DokployCoderBackend:
         if container_name is None:
             raise CoderError("Coder container is not running; cannot finish application bootstrap.")
         hermes_litellm_base_url = _litellm_internal_base_url(self._stack_name)
+        litellm_fallback_models_json = _shell_double_quote_escape(
+            _litellm_workspace_fallback_models_json(
+                default_alias=f"{self._ai_default_provider}/{self._ai_default_model}"
+            )
+        )
         _sync_hermes_workspace_secrets(
             container_name=container_name,
             hostname=self._hostname,
@@ -238,14 +245,27 @@ class DokployCoderBackend:
             ai_default_base_url=hermes_litellm_base_url,
             ai_default_api_key=self._ai_default_api_key,
         )
-        if bootstrap_ready:
-            return ()
         shared_network_name = _shared_network_name(self._stack_name)
         for template_name, template_dir, replacements in (
             (
                 _default_template_name(),
                 _default_template_dir(),
-                {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name},
+                {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
+                        self._ai_default_provider
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
+                        self._ai_default_model
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                },
             ),
             (
                 _default_opencode_web_template_name(),
@@ -264,6 +284,7 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
                         self._ai_default_api_key or ""
                     ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
                 },
             ),
             (
@@ -283,6 +304,7 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
                         self._ai_default_api_key or ""
                     ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
                 },
             ),
             (
@@ -320,7 +342,22 @@ class DokployCoderBackend:
             (
                 _default_pi_web_template_name(),
                 _default_pi_web_template_dir(),
-                {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name},
+                {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
+                        self._ai_default_provider
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
+                        self._ai_default_model
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                },
             ),
         ):
             if _seed_template(
@@ -332,6 +369,8 @@ class DokployCoderBackend:
                 replacements=replacements,
             ):
                 notes.append(f"Seeded default Coder template '{template_name}'.")
+        if bootstrap_ready:
+            return tuple(notes)
         workspace_name = _default_workspace_name(self._hostname)
         try:
             if _ensure_default_workspace(
@@ -1318,6 +1357,13 @@ def _upsert_coder_secret(
 
 def _shell_double_quote_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
+
+def _litellm_workspace_fallback_models_json(*, default_alias: str) -> str:
+    model_ids = [default_alias]
+    model_ids.extend(f"opencode-go/{model_id}" for model_id in verified_opencode_go_chat_model_ids())
+    model_ids.append(_DEFAULT_CODER_OPENROUTER_ALIAS_SAMPLE)
+    return json.dumps(list(dict.fromkeys(model_ids)))
 
 
 def _list_workspaces(*, container_name: str, hostname: str, session_token: str) -> tuple[str, ...]:

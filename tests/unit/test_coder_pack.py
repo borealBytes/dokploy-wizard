@@ -31,6 +31,28 @@ from dokploy_wizard.state import (
 from .fake_dokploy import FakeDokployApiClient
 
 
+def _expected_coder_fallback_models_json() -> str:
+    return coder_module._litellm_workspace_fallback_models_json(
+        default_alias="tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    )
+
+
+def _expected_coder_fallback_models_json_escaped() -> str:
+    return coder_module._shell_double_quote_escape(_expected_coder_fallback_models_json())
+
+
+def test_coder_litellm_fallback_models_json_uses_full_concrete_aliases() -> None:
+    aliases = json.loads(_expected_coder_fallback_models_json())
+
+    assert aliases[0] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert "opencode-go/deepseek-v4-flash" in aliases
+    assert "opencode-go/minimax-m2.7" in aliases
+    assert "openrouter/minimax/minimax-m2.5:free" in aliases
+    assert "deepseek-v4-flash" not in aliases
+    assert "minimax/minimax-m2.5:free" not in aliases
+    assert "opencode-go/*" not in aliases
+
+
 @dataclass
 class FakeCoderBackend:
     existing_service: CoderResourceRecord | None = None
@@ -236,6 +258,28 @@ def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
     assert "command -v pi" in template
     assert "pi --version" in template
     assert "bash -lc 'command -v pi && pi --version'" in template
+    assert 'export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"' in template
+    assert 'export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"' in template
+    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"' in template
+    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
+    assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
+    assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
+    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
+    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
+    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
+    assert 'payload = json.load(response)' in template
+    assert 'except (OSError, ValueError, urllib.error.URLError):' in template
+    assert 'return []' in template
+    assert 'model_id = item.get("id")' in template
+    assert 'and not normalized.endswith("/*")' in template
+    assert 'and not normalized.startswith("openai/")' in template
+    assert 'model_ids = list(dict.fromkeys(fetch_model_ids() + fallback_models))' in template
+    assert '"npm": "@ai-sdk/openai-compatible"' in template
+    assert '"options": {"baseURL": base_url, "apiKey": api_key}' in template
+    assert '"models": {model_id: {} for model_id in model_ids}' in template
+    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
+    assert '"models": [{"id": model_id, "name": model_id} for model_id in model_ids]' in template
+    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
     assert "pi.dev/install.sh" not in template
     assert 'resource "coder_app"' not in template
     assert "pi-web-ui" not in template
@@ -264,6 +308,16 @@ def test_default_opencode_web_template_includes_web_app() -> None:
     assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
     assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
     assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
+    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
+    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
+    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
+    assert 'payload = json.load(response)' in template
+    assert 'payload = {"data": []}' in template
+    assert 'model_ids = list(dict.fromkeys(model_ids + fallback_models))' in template
+    assert '"npm": "@ai-sdk/openai-compatible"' in template
+    assert '"options": {"baseURL": base_url, "apiKey": api_key}' in template
+    assert '"models": {model_id: {} for model_id in model_ids}' in template
+    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
     assert "OPENCODE_WEB_PORT=4096" in template
     assert "OPENCODE_PROXY_PORT=4097" in template
     assert (
@@ -333,6 +387,16 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
     assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
     assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
     assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
+    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
+    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
+    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
+    assert 'payload = json.load(response)' in template
+    assert 'payload = {"data": []}' in template
+    assert 'model_ids = list(dict.fromkeys(model_ids + fallback_models))' in template
+    assert '"npm": "@ai-sdk/openai-compatible"' in template
+    assert '"options": {"baseURL": base_url, "apiKey": api_key}' in template
+    assert '"models": {model_id: {} for model_id in model_ids}' in template
+    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
     assert "OPENWORK_WEBUI_BUILD_KEY=v6-coder-mounted-basename" in template
     assert "OPENWORK_CLIENT_TOKEN=openwork-client-token" in template
     assert "OPENWORK_HOST_TOKEN=openwork-host-token" in template
@@ -416,12 +480,25 @@ def test_default_pi_web_template_includes_clickable_pi_web_ui() -> None:
     )
     assert 'grep -qxF "export PATH=\\"$PNPM_HOME/bin:$PATH\\"" /home/coder/.profile' in template
     assert "pnpm add -g @earendil-works/pi-coding-agent" in template
+    assert 'export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"' in template
+    assert 'export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"' in template
+    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"' in template
+    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
+    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
+    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
+    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
+    assert 'payload = json.load(response)' in template
+    assert 'payload = {"data": []}' in template
+    assert '"baseUrl": base_url' in template
+    assert '"api": "openai-completions"' in template
+    assert '"apiKey": api_key' in template
+    assert '"models": [{"id": model_id, "name": model_id} for model_id in model_ids]' in template
+    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
     assert 'PI_WEB_SRC_DIR=/home/coder/.cache/pi-web-ui' in template
     assert 'PI_WEB_BUILD_KEY=v1-coder-mounted-preview' in template
     assert 'PI_WEB_UI_PORT=8650' in template
     assert 'PI_WEB_PROXY_PORT=8651' in template
-    assert "Pi Web UI stays browser-local today: provider keys live in IndexedDB and this" in template
-    assert "repo does not control a Pi scoped-models surface" in template
+    assert "Pi Web UI stays browser-local, but the workspace now pre-seeds custom LiteLLM" in template
     assert '"@earendil-works/pi-agent-core": "^0.74.0"' in template
     assert '"@earendil-works/pi-ai": "^0.74.0"' in template
     assert '"@earendil-works/pi-web-ui": "^0.74.0"' in template
@@ -450,9 +527,6 @@ def test_default_pi_web_template_includes_clickable_pi_web_ui() -> None:
     assert 'url       = "http://localhost:8651/health"' in template
     assert "pi.dev/install.sh" not in template
     assert "curl | sh" not in template
-    assert "LITELLM_" not in template
-    assert "AI_DEFAULT_" not in template
-    assert "OPENCODE_GO_" not in template
 
 
 def test_readme_documents_coder_litellm_scope_boundaries() -> None:
@@ -939,6 +1013,11 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
 
     assert template_replacements_by_name[coder_module._default_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -946,6 +1025,7 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -953,11 +1033,131 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
+    }
+    assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+
+
+def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        ai_default_api_key="litellm-coder-hermes-key",
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    template_replacements_by_name: dict[str, dict[str, str] | None] = {}
+    template_push_calls: list[str] = []
+    ensure_workspace_calls: list[object] = []
+
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(
+        backend,
+        "_verify_current_compose_application",
+        lambda: type("HealthyResult", (), {"passed": True})(),
+    )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda *,
+        container_name,
+        template_dir,
+        template_name,
+        replacements: template_replacements_by_name.setdefault(template_name, replacements),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_push_default_template",
+        lambda *, template_name, **kwargs: template_push_calls.append(template_name),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: ensure_workspace_calls.append(kwargs),
+    )
+
+    notes = backend.ensure_application_ready()
+
+    assert template_push_calls == [
+        coder_module._default_template_name(),
+        coder_module._default_opencode_web_template_name(),
+        coder_module._default_openwork_template_name(),
+        coder_module._default_kdense_byok_template_name(),
+        coder_module._default_hermes_template_name(),
+        coder_module._default_pi_web_template_name(),
+    ]
+    assert ensure_workspace_calls == []
+    assert notes == (
+        "Seeded default Coder template 'ubuntu-vscode'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
+        "Seeded default Coder template 'ubuntu-vscode-openwork'.",
+        "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes'.",
+        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
+    )
+    assert template_replacements_by_name[coder_module._default_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+    assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+    assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+    assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
 
 
@@ -2175,6 +2375,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -2182,6 +2383,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -2189,6 +2391,14 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "__DOKPLOY_WIZARD_HERMES_MODEL__": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
+    }
+    assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert ensure_workspace_calls == [
         (
