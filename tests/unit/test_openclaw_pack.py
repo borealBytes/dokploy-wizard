@@ -1345,7 +1345,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -1541,10 +1541,10 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
     assert "NVIDIA_API_KEY" not in service_environment
 
     seeded = _decode_seeded_gateway_payload(compose)
-    assert seeded["agents"]["defaults"]["model"]["primary"] == "nvidia/moonshotai/kimi-k2.5"
+    assert seeded["agents"]["defaults"]["model"]["primary"] == "ai-default/nvidia/moonshotai/kimi-k2.5"
     assert seeded["agents"]["defaults"]["model"]["fallbacks"] == [
-        "openrouter/openrouter/free",
-        "openrouter/google/gemma-4-31b-it:free",
+        "ai-default/openrouter/openrouter/free",
+        "ai-default/openrouter/google/gemma-4-31b-it:free",
     ]
     assert seeded["agents"]["list"] == [
         {"id": "main", "default": True},
@@ -1552,7 +1552,7 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -1569,40 +1569,20 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
     ]
     assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert seeded["agents"]["defaults"]["models"] == {
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active": {},
-        "nvidia/moonshotai/kimi-k2.5": {},
-        "openrouter/openrouter/free": {},
-        "openrouter/google/gemma-4-31b-it:free": {},
+        "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active": {},
+        "ai-default/nvidia/moonshotai/kimi-k2.5": {},
+        "ai-default/openrouter/openrouter/free": {},
+        "ai-default/openrouter/google/gemma-4-31b-it:free": {},
     }
-    assert seeded["models"]["providers"]["tuxdesktop.tailb12aa5.ts.net"] == {
+    assert set(seeded["models"]["providers"]) == {"ai-default"}
+    assert seeded["models"]["providers"]["ai-default"] == {
         "baseUrl": "http://wizard-stack-shared-litellm:4000",
         "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
         "api": "openai-completions",
         "models": [
             {
-                "id": "unsloth-active",
-                "name": "unsloth-active",
-                "reasoning": True,
-                "input": ["text"],
-                "cost": {
-                    "input": 0,
-                    "output": 0,
-                    "cacheRead": 0,
-                    "cacheWrite": 0,
-                },
-                "contextWindow": 262144,
-                "maxTokens": 32768,
-            }
-        ],
-    }
-    assert seeded["models"]["providers"]["openrouter"] == {
-        "baseUrl": "http://wizard-stack-shared-litellm:4000",
-        "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
-        "api": "openai-completions",
-        "models": [
-            {
-                "id": "openrouter/free",
-                "name": "openrouter/free",
+                "id": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "name": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "reasoning": True,
                 "input": ["text"],
                 "cost": {
@@ -1615,8 +1595,8 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
                 "maxTokens": 32768,
             },
             {
-                "id": "google/gemma-4-31b-it:free",
-                "name": "google/gemma-4-31b-it:free",
+                "id": "nvidia/moonshotai/kimi-k2.5",
+                "name": "nvidia/moonshotai/kimi-k2.5",
                 "reasoning": True,
                 "input": ["text"],
                 "cost": {
@@ -1628,16 +1608,9 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
                 "contextWindow": 262144,
                 "maxTokens": 32768,
             },
-        ],
-    }
-    assert seeded["models"]["providers"]["nvidia"] == {
-        "baseUrl": "http://wizard-stack-shared-litellm:4000",
-        "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
-        "api": "openai-completions",
-        "models": [
             {
-                "id": "moonshotai/kimi-k2.5",
-                "name": "moonshotai/kimi-k2.5",
+                "id": "openrouter/openrouter/free",
+                "name": "openrouter/openrouter/free",
                 "reasoning": True,
                 "input": ["text"],
                 "cost": {
@@ -1648,7 +1621,21 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
                 },
                 "contextWindow": 262144,
                 "maxTokens": 32768,
-            }
+            },
+            {
+                "id": "openrouter/google/gemma-4-31b-it:free",
+                "name": "openrouter/google/gemma-4-31b-it:free",
+                "reasoning": True,
+                "input": ["text"],
+                "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                },
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+            },
         ],
     }
     assert seeded["channels"]["telegram"] == {
@@ -1718,6 +1705,54 @@ def test_dokploy_openclaw_backend_renders_split_public_and_internal_gateways() -
     assert public_payload["discovery"] == {"mdns": {"mode": "off"}}
     assert public_payload["agents"]["defaults"]["workspace"] == "/home/node/.openclaw-public/workspace"
     assert "tools" not in public_payload
+
+
+def test_openclaw_seeded_provider_models_keep_full_litellm_alias_ids() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        openclaw_fallback_models=(
+            "opencode-go/deepseek-v4-flash",
+            "openrouter/minimax/minimax-m2.5:free",
+        ),
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    seeded = _decode_seeded_gateway_payload(api.last_create_compose_file or "")
+    assert set(seeded["models"]["providers"]) == {"ai-default"}
+    provider_model_ids = [
+        model["id"]
+        for provider in seeded["models"]["providers"].values()
+        for model in provider["models"]
+    ]
+
+    assert seeded["agents"]["defaults"]["model"]["primary"] == "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert seeded["agents"]["defaults"]["model"]["fallbacks"] == [
+        "ai-default/opencode-go/deepseek-v4-flash",
+        "ai-default/openrouter/minimax/minimax-m2.5:free",
+    ]
+    assert "tuxdesktop.tailb12aa5.ts.net/unsloth-active" in provider_model_ids
+    assert "opencode-go/deepseek-v4-flash" in provider_model_ids
+    assert "openrouter/minimax/minimax-m2.5:free" in provider_model_ids
+    assert "unsloth-active" not in provider_model_ids
+    assert "deepseek-v4-flash" not in provider_model_ids
+    assert "minimax/minimax-m2.5:free" not in provider_model_ids
+    assert "opencode-go" not in seeded["models"]["providers"]
+    assert "openrouter" not in seeded["models"]["providers"]
+    assert "tuxdesktop.tailb12aa5.ts.net" not in seeded["models"]["providers"]
+    assert "nvidia" not in seeded["models"]["providers"]
 
 
 def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surface() -> None:
@@ -1833,7 +1868,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "nexa",
             "name": "Nexa",
             "model": {
-                "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -1851,7 +1886,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -1963,7 +1998,7 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -2007,17 +2042,18 @@ def test_telly_keeps_local_first_through_litellm() -> None:
     telly = next(agent for agent in seeded["agents"]["list"] if agent["id"] == "telly")
 
     assert telly["model"] == {
-        "primary": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
         "fallbacks": [],
     }
-    assert seeded["models"]["providers"]["tuxdesktop.tailb12aa5.ts.net"] == {
+    assert set(seeded["models"]["providers"]) == {"ai-default"}
+    assert seeded["models"]["providers"]["ai-default"] == {
         "baseUrl": "http://wizard-stack-shared-litellm:4000",
         "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
         "api": "openai-completions",
         "models": [
             {
-                "id": "unsloth-active",
-                "name": "unsloth-active",
+                "id": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "name": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
                 "reasoning": True,
                 "input": ["text"],
                 "cost": {
