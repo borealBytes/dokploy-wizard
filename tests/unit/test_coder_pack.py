@@ -796,6 +796,10 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
         'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__"' in template
     )
     assert (
+        'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"'
+        in template
+    )
+    assert (
         'export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"'
         in template
     )
@@ -821,6 +825,11 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert 'hermes config set model.default "$HERMES_MODEL"' in template
     assert 'hermes config set model.base_url "$OPENAI_API_BASE"' in template
     assert "hermes config set terminal.cwd /home/coder" in template
+    assert 'providers[provider] = {' in template
+    assert '"name": "Dokploy LiteLLM"' in template
+    assert '"base_url": base_url' in template
+    assert '"models": {model_id: {} for model_id in model_ids}' in template
+    assert '"discover_models": False' in template
     assert "export HERMES_DASHBOARD_PORT=9119" in template
     assert "export HERMES_DASHBOARD_PROXY_PORT=9120" in template
     assert "export HERMES_WEB_UI_PORT=8648" in template
@@ -828,6 +837,8 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert "export HERMES_WEBUI_PORT=8787" in template
     assert "export HERMES_WEBUI_PROXY_PORT=8788" in template
     assert "HERMES_BOOTSTRAP_SCRIPT=/tmp/hermes-workspace-bootstrap.sh" in template
+    assert 'export HERMES_HOME="$${HERMES_HOME:-/home/coder/.hermes}"' in template
+    assert 'export HERMES_INSTALL_DIR="$${HERMES_INSTALL_DIR:-/home/coder/.hermes/hermes-agent}"' in template
     assert 'nohup sh "$HERMES_BOOTSTRAP_SCRIPT" >/tmp/hermes-bootstrap.log 2>&1 &' in template
     assert "nohup hermes gateway >/tmp/hermes-gateway.log 2>&1 &" in template
     assert 'hermes dashboard --host 127.0.0.1 --port "$HERMES_DASHBOARD_PORT" --no-open' in template
@@ -836,9 +847,10 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
         in template
     )
     assert (
-        "HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install"
+        "HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR"
         in template
     )
+    assert "python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install" in template
     assert 'const SYNTHETIC_HEALTHCHECK = process.env.SYNTHETIC_HEALTHCHECK === "1";' in template
     assert (
         'const DASHBOARD_SESSION_HEADER = process.env.DASHBOARD_SESSION_HEADER === "1";' in template
@@ -959,6 +971,7 @@ def test_hermes_template_uses_litellm_credentials(
         "__DOKPLOY_WIZARD_HERMES_MODEL__": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
 
 
@@ -1366,7 +1379,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     assert waits == ["coder.example.com"]
     assert secret_sync_calls == [
         (
-            "openai",
+            "dokploy-litellm",
             "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
             "http://wizard-stack-shared-litellm:4000",
         )
@@ -2387,10 +2400,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     }
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "openai",
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
         "__DOKPLOY_WIZARD_HERMES_MODEL__": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -2412,7 +2426,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert secret_sync_calls == [
         (
             "wizard-stack-coder-container",
-            "openai",
+            "dokploy-litellm",
             "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
             None,
         )

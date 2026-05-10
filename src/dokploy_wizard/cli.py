@@ -1990,7 +1990,7 @@ def _build_coder_backend(
         admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
-        hermes_inference_provider=raw_env.values.get("HERMES_INFERENCE_PROVIDER", "openai"),
+        hermes_inference_provider=raw_env.values.get("HERMES_INFERENCE_PROVIDER", "dokploy-litellm"),
         hermes_model=raw_env.values.get("HERMES_MODEL", "unsloth-active"),
         ai_default_base_url=_shared_ai_default_base_url(raw_env),
         ai_default_api_key=litellm_generated_keys.virtual_keys["coder-hermes"],

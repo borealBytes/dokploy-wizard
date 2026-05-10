@@ -68,7 +68,7 @@ class _ComposeLocator:
 
 _DEFAULT_AI_DEFAULT_PROVIDER = "tuxdesktop.tailb12aa5.ts.net"
 _DEFAULT_AI_DEFAULT_MODEL = "unsloth-active"
-_DEFAULT_HERMES_INFERENCE_PROVIDER = "openai"
+_DEFAULT_HERMES_INFERENCE_PROVIDER = "dokploy-litellm"
 _DEFAULT_HERMES_MODEL = DEFAULT_LOCAL_CANONICAL_ALIAS
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_INTERNAL_PORT = 4000
@@ -337,6 +337,7 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
                         self._ai_default_api_key or ""
                     ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
                 },
             ),
             (
