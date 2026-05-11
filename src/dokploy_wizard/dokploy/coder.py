@@ -73,6 +73,14 @@ _DEFAULT_HERMES_MODEL = DEFAULT_LOCAL_CANONICAL_ALIAS
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_INTERNAL_PORT = 4000
 _DEFAULT_CODER_OPENROUTER_ALIAS_SAMPLE = "openrouter/minimax/minimax-m2.5:free"
+_COPILOT_BYOK_SETTING_KEY = "github.copilot.chat.customOAIModels"
+_COPILOT_BYOK_PROVIDER_LABEL = "Dokploy LiteLLM"
+_COPILOT_BYOK_CHAT_ONLY_LIMITATION = (
+    "Official Copilot BYOK models apply to VS Code chat and agents only; "
+    "inline completions still use Copilot-managed models."
+)
+_CODER_STATE_REQUIRED_FOR_MODIFY = frozenset({"applied-state.json", "ownership-ledger.json"})
+
 
 
 class DokployCoderBackend:
@@ -312,12 +320,19 @@ class DokployCoderBackend:
                 _default_kdense_byok_template_dir(),
                 {
                     "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
+                        self._ai_default_provider
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
+                        self._ai_default_model
+                    ),
                     "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": _shell_double_quote_escape(
                         _litellm_internal_base_url(self._stack_name)
                     ),
                     "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": _litellm_virtual_key_ref(
                         "coder-kdense"
                     ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
                 },
             ),
             (
@@ -1365,6 +1380,107 @@ def _litellm_workspace_fallback_models_json(*, default_alias: str) -> str:
     model_ids.extend(f"opencode-go/{model_id}" for model_id in verified_opencode_go_chat_model_ids())
     model_ids.append(_DEFAULT_CODER_OPENROUTER_ALIAS_SAMPLE)
     return json.dumps(list(dict.fromkeys(model_ids)))
+
+
+def _copilot_byok_contract() -> dict[str, str]:
+    return {
+        "setting": _COPILOT_BYOK_SETTING_KEY,
+        "provider_label": _COPILOT_BYOK_PROVIDER_LABEL,
+        "scope": "chat-and-agents-only",
+        "limitation": _COPILOT_BYOK_CHAT_ONLY_LIMITATION,
+        "reference": "https://code.visualstudio.com/docs/copilot/customization/language-models",
+    }
+
+
+def _copilot_byok_openai_base_url(base_url: str) -> str:
+    normalized = base_url.strip().rstrip("/")
+    if normalized.endswith("/v1") or normalized.endswith("/v1/chat/completions"):
+        return normalized
+    return f"{normalized}/v1"
+
+
+def _copilot_byok_model_ids(*, default_alias: str, fallback_models_json: str) -> tuple[str, ...]:
+    model_ids: list[str] = []
+    try:
+        parsed = json.loads(fallback_models_json)
+    except json.JSONDecodeError:
+        parsed = []
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, str) and item.strip():
+                model_ids.append(item.strip())
+    if default_alias and default_alias not in model_ids:
+        model_ids.insert(0, default_alias)
+    return tuple(dict.fromkeys(model_ids))
+
+
+def _copilot_byok_settings_json(
+    *,
+    base_url: str,
+    api_key: str,
+    default_alias: str,
+    fallback_models_json: str,
+) -> str:
+    openai_base_url = _copilot_byok_openai_base_url(base_url)
+    model_ids = _copilot_byok_model_ids(
+        default_alias=default_alias, fallback_models_json=fallback_models_json
+    )
+    custom_models = {
+        model_id: {
+            "name": f"{_COPILOT_BYOK_PROVIDER_LABEL}: {model_id}",
+            "model": model_id,
+            "url": openai_base_url,
+            "apiKey": api_key,
+            "keyStorage": "dokploy-litellm",
+            "requiresAPIKey": bool(api_key),
+            "toolCalling": True,
+            "vision": False,
+            "thinking": False,
+            "maxInputTokens": 131072,
+            "maxOutputTokens": 8192,
+        }
+        for model_id in model_ids
+    }
+    settings = {
+        _COPILOT_BYOK_SETTING_KEY: custom_models,
+    }
+    return json.dumps(settings, indent=2, sort_keys=True)
+
+
+def _copilot_byok_compatibility_probe() -> str:
+    return (
+        f"official-byok-supported: target-setting={_COPILOT_BYOK_SETTING_KEY}; "
+        "scope=chat-and-agents-only; "
+        "requires VS Code/code-server build with Copilot Chat BYOK/OpenAI-compatible model support; "
+        "no secrets required for this dry-run probe"
+    )
+
+
+def _coder_state_gap_diagnosis(state_files: tuple[str, ...]) -> str:
+    present = set(state_files)
+    missing = sorted(_CODER_STATE_REQUIRED_FOR_MODIFY - present)
+    if not missing:
+        return "state-complete: modify can perform normal non-destructive Coder template reseed"
+    return (
+        "state-incomplete: focused-coder-template-reseed-required; "
+        f"missing={','.join(missing)}; do-not-reinstall"
+    )
+
+
+def _coder_live_template_update_command_bundle() -> tuple[str, ...]:
+    return (
+        "./bin/dokploy-wizard inspect-state --env-file ./.install.env --state-dir .dokploy-wizard-state",
+        (
+            "python3 - <<'PY'\n"
+            "# Focused Coder template reseed only. Do not print DOKPLOY_API_KEY, Coder session tokens, or LiteLLM keys.\n"
+            "# 1. Load .install.env and .dokploy-wizard-state.\n"
+            "# 2. If applied-state.json and ownership-ledger.json exist, run non-interactive modify to invoke DokployCoderBackend.ensure_application_ready().\n"
+            "# 3. If state is incomplete, authenticate to live Coder with redacted operator credentials, copy templates/coder/* into the running Coder container, and run /opt/coder templates push for the six wizard-managed templates only.\n"
+            "# 4. Query template versions and assert github.copilot.chat.customOAIModels exists in all six payloads.\n"
+            "print('focused-coder-template-reseed <redacted credentials>')\n"
+            "PY"
+        ),
+    )
 
 
 def _list_workspaces(*, container_name: str, hostname: str, session_token: str) -> tuple[str, ...]:

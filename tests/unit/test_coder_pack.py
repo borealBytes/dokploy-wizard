@@ -53,6 +53,157 @@ def test_coder_litellm_fallback_models_json_uses_full_concrete_aliases() -> None
     assert "opencode-go/*" not in aliases
 
 
+def test_copilot_byok_contract_documents_official_chat_only_scope() -> None:
+    contract = coder_module._copilot_byok_contract()
+
+    assert contract["setting"] == "github.copilot.chat.customOAIModels"
+    assert contract["provider_label"] == "Dokploy LiteLLM"
+    assert contract["scope"] == "chat-and-agents-only"
+    assert "inline completions" in contract["limitation"]
+    assert "code.visualstudio.com/docs/copilot/customization/language-models" in contract["reference"]
+
+
+def test_copilot_byok_settings_json_contains_litellm_models() -> None:
+    settings = json.loads(
+        coder_module._copilot_byok_settings_json(
+            base_url="http://wizard-stack-shared-litellm:4000",
+            api_key="fake-litellm-key",
+            default_alias="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            fallback_models_json=_expected_coder_fallback_models_json(),
+        )
+    )
+
+    custom_models = settings["github.copilot.chat.customOAIModels"]
+    assert "tuxdesktop.tailb12aa5.ts.net/unsloth-active" in custom_models
+    assert "opencode-go/deepseek-v4-flash" in custom_models
+    default_model = custom_models["tuxdesktop.tailb12aa5.ts.net/unsloth-active"]
+    assert default_model["name"] == "Dokploy LiteLLM: tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert default_model["url"] == "http://wizard-stack-shared-litellm:4000/v1"
+    assert default_model["apiKey"] == "fake-litellm-key"
+    assert default_model["requiresAPIKey"] is True
+    assert default_model["toolCalling"] is True
+    assert default_model["vision"] is False
+    assert default_model["thinking"] is False
+    assert "sk-" not in json.dumps(settings)
+    assert "ghp_" not in json.dumps(settings)
+
+
+def test_copilot_byok_compatibility_probe_is_secret_safe() -> None:
+    probe = coder_module._copilot_byok_compatibility_probe()
+
+    assert "official-byok-supported" in probe
+    assert "github.copilot.chat.customOAIModels" in probe
+    assert "chat-and-agents-only" in probe
+    assert "secret" in probe.lower()
+    assert "sk-" not in probe
+    assert "ghp_" not in probe
+
+
+def test_coder_live_template_update_command_bundle_is_non_destructive_and_redacted() -> None:
+    bundle = "\n".join(coder_module._coder_live_template_update_command_bundle())
+
+    assert "inspect-state" in bundle
+    assert "focused-coder-template-reseed" in bundle
+    assert "ensure_application_ready" in bundle
+    assert "github.copilot.chat.customOAIModels" in bundle
+    assert "<redacted" in bundle
+    assert "uninstall" not in bundle
+    assert "destroy-data" not in bundle
+    assert "reinstall" not in bundle.lower()
+    assert "sk-" not in bundle
+    assert "ghp_" not in bundle
+
+
+def test_coder_state_gap_diagnosis_requires_focused_reseed_when_checkpoint_incomplete() -> None:
+    diagnosis = coder_module._coder_state_gap_diagnosis(("desired-state.json", "raw-input.json"))
+
+    assert "state-incomplete" in diagnosis
+    assert "focused-coder-template-reseed-required" in diagnosis
+    assert "applied-state.json" in diagnosis
+    assert "ownership-ledger.json" in diagnosis
+    assert "do-not-reinstall" in diagnosis
+
+
+def _assert_template_preseeds_copilot_byok(template: str) -> None:
+    assert "github.copilot.chat.customOAIModels" in template
+    assert "Official Copilot BYOK is intentionally chat/agent-only" in template
+    assert "/home/coder/.local/share/code-server/User/settings.json" in template
+    assert "/home/coder/.config/code-server/User/settings.json" in template
+    assert "Dokploy LiteLLM: {model_id}" in template
+    assert '"toolCalling": True' in template
+    assert '"vision": False' in template
+    assert '"thinking": False' in template
+    assert "vivswan.litellm-vscode-chat" not in template
+    assert "calgan.oai-provider" not in template
+    assert "openai-compat-provider.providers" not in template
+
+
+def test_base_copilot_byok_template_settings() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
+    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
+
+
+def test_pi_web_copilot_byok_template_settings() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-pi-web/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
+
+
+def test_opencode_web_copilot_byok_template_settings() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-opencode-web/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert "OPENCODE_WEB_PORT=4096" in template
+    assert "OPENCODE_PROXY_PORT=4097" in template
+
+
+def test_openwork_copilot_byok_template_settings() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-openwork/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert "OPENWORK_UI_PORT=8790" in template
+    assert "OPENWORK_PROXY_PORT=8788" in template
+
+
+def test_hermes_copilot_byok_template_settings() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-hermes/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_HERMES_API_KEY__"' in template
+    assert 'upsert_env OPENAI_API_KEY "$OPENAI_API_KEY"' in template
+
+
+def test_kdense_copilot_byok_uses_central_gateway() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"' in template
+    assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"' in template
+    assert 'export KDENSE_COPILOT_DEFAULT_ALIAS="__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__/__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__"' in template
+    assert 'base_url = os.environ["KDENSE_CENTRAL_LITELLM_BASE_URL"].rstrip("/")' in template
+    assert 'api_key = os.environ.get("KDENSE_CENTRAL_LITELLM_API_KEY", "")' in template
+    assert 'KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"' in template
+    assert 'append_env OPENROUTER_API_KEY ' not in template
+    assert 'append_env NVIDIA_API_KEY ' not in template
+    assert 'append_env ANTHROPIC_API_KEY ' not in template
+
+
 @dataclass
 class FakeCoderBackend:
     existing_service: CoderResourceRecord | None = None
@@ -1050,8 +1201,11 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
     }
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -2379,8 +2533,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     ]
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",

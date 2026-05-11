@@ -371,6 +371,8 @@ PY
 
     export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"
     export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"
+    export KDENSE_COPILOT_DEFAULT_ALIAS="__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__/__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__"
+    export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"
 
     KDENSE_DEFAULT_MODEL="$${KDENSE_DEFAULT_MODEL:-openrouter/anthropic/claude-opus-4.7}"
     KDENSE_EXPERT_MODEL="$${KDENSE_EXPERT_MODEL:-openrouter/google/gemini-3.1-pro-preview}"
@@ -413,6 +415,89 @@ PY
       echo "KDENSE_CENTRAL_LITELLM_API_KEY is required for the central LiteLLM provider." >&2
       exit 1
     fi
+
+    python3 - <<'PY'
+import json
+import os
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+base_url = os.environ["KDENSE_CENTRAL_LITELLM_BASE_URL"].rstrip("/")
+api_key = os.environ.get("KDENSE_CENTRAL_LITELLM_API_KEY", "")
+default_alias = os.environ["KDENSE_COPILOT_DEFAULT_ALIAS"]
+fallback_models = json.loads(os.environ.get("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]"))
+kdense_models = [
+    os.environ.get("KDENSE_DEFAULT_MODEL", ""),
+    os.environ.get("KDENSE_EXPERT_MODEL", ""),
+]
+
+
+def fetch_model_ids() -> list[str]:
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError):
+        return []
+    ids: list[str] = []
+    for item in payload.get("data", []):
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id")
+        if isinstance(model_id, str) and model_id.strip() and not model_id.strip().endswith("/*"):
+            ids.append(model_id.strip())
+    return ids
+
+
+model_ids = []
+for candidate in [default_alias, *kdense_models, *fetch_model_ids(), *fallback_models]:
+    if isinstance(candidate, str) and candidate.strip():
+        model_ids.append(candidate.strip())
+model_ids = list(dict.fromkeys(model_ids))
+
+# Official Copilot BYOK is intentionally chat/agent-only; inline completions stay on Copilot-managed models.
+def _copilot_byok_openai_base_url(raw_base_url: str) -> str:
+    normalized = raw_base_url.rstrip("/")
+    if normalized.endswith("/v1") or normalized.endswith("/v1/chat/completions"):
+        return normalized
+    return f"{normalized}/v1"
+
+
+custom_models = {
+    model_id: {
+        "name": f"Dokploy LiteLLM: {model_id}",
+        "model": model_id,
+        "url": _copilot_byok_openai_base_url(base_url),
+        "apiKey": api_key,
+        "keyStorage": "dokploy-litellm",
+        "requiresAPIKey": bool(api_key),
+        "toolCalling": True,
+        "vision": False,
+        "thinking": False,
+        "maxInputTokens": 131072,
+        "maxOutputTokens": 8192,
+    }
+    for model_id in model_ids
+}
+
+for settings_path in [
+    Path("/home/coder/.local/share/code-server/User/settings.json"),
+    Path("/home/coder/.config/code-server/User/settings.json"),
+]:
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+    except (OSError, ValueError):
+        settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
+    settings["github.copilot.chat.customOAIModels"] = custom_models
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+PY
 
     normalize_model_for_gateway() {
       model="$1"
