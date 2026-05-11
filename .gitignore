@@ -32,3 +32,4 @@ dist/
 .install*.env
 .fresh-vps-validation.env
 .gstack/
+*.bak

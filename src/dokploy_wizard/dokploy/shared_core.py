@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from dokploy_wizard.core import (
     SharedCoreError,
@@ -19,6 +19,7 @@ from dokploy_wizard.core import (
     SharedPostgresAllocation,
 )
 from dokploy_wizard.dokploy.client import (
+    DokployAiProvider,
     DokployApiClient,
     DokployApiError,
     DokployComposeRecord,
@@ -65,6 +66,32 @@ class DokploySharedCoreApi(Protocol):
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
     ) -> DokployDeployResult: ...
+
+
+@runtime_checkable
+class DokployAiProviderApi(Protocol):
+    def ai_providers_all(self) -> tuple[DokployAiProvider, ...]: ...
+
+    def ai_provider_create(
+        self,
+        *,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+    ) -> DokployAiProvider: ...
+
+    def ai_provider_update(
+        self,
+        *,
+        ai_id: str,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+    ) -> DokployAiProvider: ...
 
 
 @dataclass(frozen=True)
@@ -479,6 +506,16 @@ class DokploySharedCoreBackend:
                 virtual_keys=updated_virtual_keys,
             )
             write_litellm_generated_keys(self._state_dir, self._litellm_generated_keys)
+            if isinstance(self._client, DokployAiProviderApi):
+                try:
+                    _ensure_dokploy_ai_provider(
+                        self._client,
+                        litellm_service_name=self._plan.litellm.service_name,
+                        generated_keys=self._litellm_generated_keys,
+                        litellm_env=self._litellm_env,
+                    )
+                except DokployApiError:
+                    pass
 
     def _shared_core_runtime_ready_for_noop(self) -> bool:
         postgres_allocations = tuple(
@@ -529,6 +566,59 @@ def _parse_resource_id(resource_id: str, kind: str) -> str | None:
         return None
     compose_id = resource_id.removeprefix(prefix).removesuffix(suffix)
     return compose_id or None
+
+
+def _dokploy_ai_model_alias(litellm_env: dict[str, str]) -> str:
+    provider = litellm_env.get("AI_DEFAULT_PROVIDER")
+    model = litellm_env.get("AI_DEFAULT_MODEL")
+    if provider and model:
+        provider = provider.strip()
+        model = model.strip()
+        if provider:
+            if provider == "local":
+                provider_alias, _, _ = DEFAULT_LOCAL_CANONICAL_ALIAS.partition("/")
+                return f"{provider_alias}/{model}"
+            if "." in provider:
+                return f"{provider}/{model}"
+    return DEFAULT_LOCAL_CANONICAL_ALIAS
+
+
+def _ensure_dokploy_ai_provider(
+    client: DokployAiProviderApi,
+    *,
+    litellm_service_name: str,
+    generated_keys: LiteLLMGeneratedKeys | None,
+    litellm_env: dict[str, str] | None = None,
+) -> None:
+    if generated_keys is None:
+        return
+    internal_url = f"http://{litellm_service_name}:4000/v1"
+    name = "Dokploy Wizard LiteLLM"
+    model = _dokploy_ai_model_alias(litellm_env or {})
+    api_key = generated_keys.master_key
+    existing = client.ai_providers_all()
+    wizard_provider = None
+    for provider in existing:
+        if provider.name == name:
+            wizard_provider = provider
+            break
+    if wizard_provider is None:
+        client.ai_provider_create(
+            name=name,
+            api_url=internal_url,
+            api_key=api_key,
+            model=model,
+            is_enabled=True,
+        )
+    else:
+        client.ai_provider_update(
+            ai_id=wizard_provider.ai_id,
+            name=name,
+            api_url=internal_url,
+            api_key=api_key,
+            model=model,
+            is_enabled=True,
+        )
 
 
 def _render_compose_file(

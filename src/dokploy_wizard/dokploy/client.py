@@ -79,6 +79,16 @@ class DokployScheduleRecord:
     enabled: bool
 
 
+@dataclass(frozen=True)
+class DokployAiProvider:
+    ai_id: str
+    name: str
+    api_url: str
+    api_key: str
+    model: str
+    is_enabled: bool
+
+
 class DokployApiClient:
     def __init__(
         self,
@@ -381,6 +391,62 @@ class DokployApiClient:
         if payload is not True and not isinstance(payload, bool):
             raise DokployApiError("Dokploy schedule.delete response must be true.")
 
+    def ai_providers_all(self) -> tuple[DokployAiProvider, ...]:
+        payload = self._request_json("GET", "/api/ai.getAll")
+        if not isinstance(payload, list):
+            raise DokployApiError("Dokploy ai.getAll response must be a list.")
+        return tuple(_parse_ai_provider(item) for item in payload)
+
+    def ai_provider_create(
+        self,
+        *,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+    ) -> DokployAiProvider:
+        payload = self._request_json(
+            "POST",
+            "/api/ai.create",
+            {
+                "name": name,
+                "apiUrl": api_url,
+                "apiKey": api_key,
+                "model": model,
+                "isEnabled": is_enabled,
+            },
+        )
+        if not isinstance(payload, dict):
+            raise DokployApiError("Dokploy ai.create response must be an object.")
+        return _parse_ai_provider(payload)
+
+    def ai_provider_update(
+        self,
+        *,
+        ai_id: str,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+    ) -> DokployAiProvider:
+        payload = self._request_json(
+            "POST",
+            "/api/ai.update",
+            {
+                "aiId": ai_id,
+                "name": name,
+                "apiUrl": api_url,
+                "apiKey": api_key,
+                "model": model,
+                "isEnabled": is_enabled,
+            },
+        )
+        if not isinstance(payload, dict):
+            raise DokployApiError("Dokploy ai.update response must be an object.")
+        return _parse_ai_provider(payload)
+
     def _request_json(self, method: str, path: str, payload: Any | None = None) -> Any:
         data = None
         headers = {
@@ -502,3 +568,19 @@ def _require_string(payload: dict[str, Any], key: str) -> str:
 
 def _is_unauthorized_error(error: DokployApiError) -> bool:
     return "status 401" in str(error).lower()
+
+
+def _parse_ai_provider(payload: Any) -> DokployAiProvider:
+    if not isinstance(payload, dict):
+        raise DokployApiError("Dokploy AI provider response must be an object.")
+    is_enabled = payload.get("isEnabled")
+    if not isinstance(is_enabled, bool):
+        raise DokployApiError("Dokploy AI provider isEnabled must be a boolean.")
+    return DokployAiProvider(
+        ai_id=_require_string(payload, "aiId"),
+        name=_require_string(payload, "name"),
+        api_url=_require_string(payload, "apiUrl"),
+        api_key=_require_string(payload, "apiKey"),
+        model=_require_string(payload, "model"),
+        is_enabled=is_enabled,
+    )

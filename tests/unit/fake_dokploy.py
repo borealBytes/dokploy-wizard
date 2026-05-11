@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from dokploy_wizard.dokploy.client import (
+    DokployAiProvider,
     DokployComposeRecord,
     DokployComposeSummary,
     DokployCreatedProject,
@@ -35,6 +36,9 @@ class FakeDokployApiClient:
     deploy_calls_by_name: dict[str, int] = field(default_factory=dict)
     create_project_calls: int = 0
     next_compose_number: int = 1
+    _ai_providers: list[DokployAiProvider] = field(default_factory=list)
+    _ai_provider_creates: list[dict[str, object]] = field(default_factory=list)
+    _ai_provider_updates: list[dict[str, object]] = field(default_factory=list)
 
     def seed_existing_service(
         self,
@@ -139,3 +143,74 @@ class FakeDokployApiClient:
 
     def assert_single_update_deploy_pair(self, service_name: str) -> None:
         self.assert_mutation_counts(service_name, create=0, update=1, deploy=1)
+
+    def ai_providers_all(self) -> tuple[DokployAiProvider, ...]:
+        return tuple(self._ai_providers)
+
+    def ai_provider_create(
+        self,
+        *,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+    ) -> DokployAiProvider:
+        self._ai_provider_creates.append({
+            "name": name,
+            "apiUrl": api_url,
+            "apiKey": api_key,
+            "model": model,
+            "isEnabled": is_enabled,
+        })
+        ai_id = f"ai-{len(self._ai_providers) + 1}"
+        provider = DokployAiProvider(
+            ai_id=ai_id,
+            name=name,
+            api_url=api_url,
+            api_key=api_key,
+            model=model,
+            is_enabled=is_enabled,
+        )
+        self._ai_providers.append(provider)
+        return provider
+
+    def ai_provider_update(
+        self,
+        *,
+        ai_id: str,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+    ) -> DokployAiProvider:
+        self._ai_provider_updates.append({
+            "aiId": ai_id,
+            "name": name,
+            "apiUrl": api_url,
+            "apiKey": api_key,
+            "model": model,
+            "isEnabled": is_enabled,
+        })
+        for i, provider in enumerate(self._ai_providers):
+            if provider.ai_id == ai_id:
+                self._ai_providers[i] = DokployAiProvider(
+                    ai_id=ai_id,
+                    name=name,
+                    api_url=api_url,
+                    api_key=api_key,
+                    model=model,
+                    is_enabled=is_enabled,
+                )
+                return self._ai_providers[i]
+        ai_provider = DokployAiProvider(
+            ai_id=ai_id,
+            name=name,
+            api_url=api_url,
+            api_key=api_key,
+            model=model,
+            is_enabled=is_enabled,
+        )
+        self._ai_providers.append(ai_provider)
+        return ai_provider
