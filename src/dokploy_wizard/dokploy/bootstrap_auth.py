@@ -225,6 +225,7 @@ class DokployBootstrapAuthClient:
         environment_id: str,
         compose_file: str,
         app_name: str,
+        env: str | None = None,
     ) -> dict[str, Any]:
         self._authenticate(admin_email=admin_email, admin_password=admin_password)
         self._resolve_session()
@@ -247,6 +248,13 @@ class DokployBootstrapAuthClient:
             raise DokployBootstrapAuthError(
                 "Dokploy session compose.create response must include a valid composeId."
             )
+        if env is not None:
+            self.update_compose(
+                admin_email=admin_email,
+                admin_password=admin_password,
+                compose_id=compose_id,
+                env=env,
+            )
         return self.update_compose(
             admin_email=admin_email,
             admin_password=admin_password,
@@ -260,24 +268,35 @@ class DokployBootstrapAuthClient:
         admin_email: str,
         admin_password: str,
         compose_id: str,
-        compose_file: str,
+        compose_file: str | None = None,
+        env: str | None = None,
     ) -> dict[str, Any]:
+        if compose_file is None and env is None:
+            raise DokployBootstrapAuthError(
+                "Dokploy session compose.update requires compose_file or env."
+            )
         self._authenticate(admin_email=admin_email, admin_password=admin_password)
         self._resolve_session()
+        update_payload: dict[str, Any] = {"composeId": compose_id}
+        if compose_file is not None:
+            update_payload.update(
+                {
+                    "composeType": "docker-compose",
+                    "sourceType": "raw",
+                    "composePath": "./docker-compose.yml",
+                    "githubId": None,
+                    "repository": None,
+                    "owner": None,
+                    "branch": None,
+                    "composeFile": compose_file,
+                }
+            )
+        if env is not None:
+            update_payload["env"] = env
         payload = self._request_json(
             "POST",
             "/api/compose.update",
-            {
-                "composeId": compose_id,
-                "composeType": "docker-compose",
-                "sourceType": "raw",
-                "composePath": "./docker-compose.yml",
-                "githubId": None,
-                "repository": None,
-                "owner": None,
-                "branch": None,
-                "composeFile": compose_file,
-            },
+            update_payload,
         )
         if not isinstance(payload, dict):
             raise DokployBootstrapAuthError(
