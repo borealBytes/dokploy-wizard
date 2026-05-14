@@ -1239,9 +1239,6 @@ def test_dokploy_openclaw_backend_healthy_unchanged_rerun_skips_update_and_deplo
         replicas=1,
         secret_refs=(),
     )
-    compose = client.compose_files_by_name[service_name]
-    _write_compose_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=compose)
-
     updated = backend.update_service(
         resource_id=created.resource_id,
         resource_name=service_name,
@@ -1292,9 +1289,6 @@ def test_dokploy_my_farm_backend_healthy_unchanged_rerun_skips_update_and_deploy
         replicas=1,
         secret_refs=(),
     )
-    compose = client.compose_files_by_name[service_name]
-    _write_compose_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=compose)
-
     updated = backend.update_service(
         resource_id=created.resource_id,
         resource_name=service_name,

@@ -352,8 +352,11 @@ def _passing_bundle_verification() -> NextcloudBundleVerification:
 
 
 def _write_compose_hash_checkpoint(
-    state_dir: Path, *, service_key: str, rendered_compose: str
+    state_dir: Path, *, service_key: str, rendered_compose: object
 ) -> None:
+    compose_file = getattr(rendered_compose, "compose_file", rendered_compose)
+    env_specs = getattr(rendered_compose, "env_specs", ())
+    assert isinstance(compose_file, str)
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
@@ -363,7 +366,8 @@ def _write_compose_hash_checkpoint(
             compose_artifact_hashes={
                 service_key: ComposeArtifactHashState.from_rendered_compose(
                     service_id=service_key,
-                    rendered_compose=rendered_compose,
+                    rendered_compose=compose_file,
+                    env_specs=env_specs,
                 )
             },
         ),
@@ -1937,7 +1941,7 @@ def test_dokploy_nextcloud_backend_skips_redeploy_when_hash_and_readiness_match(
     _write_compose_hash_checkpoint(
         tmp_path,
         service_key="wizard-stack-nextcloud",
-        rendered_compose=rendered_compose.compose_file,
+        rendered_compose=rendered_compose,
     )
     client = FakeDokployApiClient(projects=[existing_project])
     backend = DokployNextcloudBackend(

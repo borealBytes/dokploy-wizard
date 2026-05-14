@@ -1869,7 +1869,7 @@ def test_dokploy_coder_backend_skips_healthy_unchanged_rerun(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    compose = _render_compose_file(
+    rendered_compose = _render_compose_file(
         stack_name="wizard-stack",
         hostname="coder.example.com",
         wildcard_hostname="*.coder.example.com",
@@ -1877,13 +1877,14 @@ def test_dokploy_coder_backend_skips_healthy_unchanged_rerun(
         postgres=SharedPostgresAllocation(
             database_name="wizard_stack_coder",
             user_name="wizard_stack_coder",
-            password_secret_ref="wizard-stack-coder-postgres-password",
-        ),
-    ).compose_file
+                password_secret_ref="wizard-stack-coder-postgres-password",
+            ),
+        )
+    compose = rendered_compose.compose_file
     _write_coder_hash_checkpoint(
         tmp_path,
         service_name="wizard-stack-coder",
-        compose_file=compose,
+        compose_file=rendered_compose,
     )
     client = FakeDokployApiClient()
     client.seed_existing_service(
@@ -2604,8 +2605,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
 
 
 def _write_coder_hash_checkpoint(
-    state_dir: Path, *, service_name: str, compose_file: str
+    state_dir: Path, *, service_name: str, compose_file: object
 ) -> None:
+    rendered_compose = getattr(compose_file, "compose_file", compose_file)
+    env_specs = getattr(compose_file, "env_specs", ())
+    assert isinstance(rendered_compose, str)
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
@@ -2615,7 +2619,8 @@ def _write_coder_hash_checkpoint(
             compose_artifact_hashes={
                 service_name: ComposeArtifactHashState.from_rendered_compose(
                     service_id=service_name,
-                    rendered_compose=compose_file,
+                    rendered_compose=rendered_compose,
+                    env_specs=env_specs,
                 )
             },
         ),

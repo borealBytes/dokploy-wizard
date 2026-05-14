@@ -482,20 +482,21 @@ def test_moodle_noop_skip_retries_upgrade_window_before_skipping_update_and_depl
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    compose_file = _render_compose_file(
+    rendered_compose = _render_compose_file(
         stack_name="wizard-stack",
         hostname="moodle.example.com",
         postgres_service_name="wizard-stack-shared-postgres",
         postgres=SharedPostgresAllocation(
             database_name="wizard_stack_moodle",
             user_name="wizard_stack_moodle",
-            password_secret_ref="wizard-stack-moodle-postgres-password",
-        ),
-    ).compose_file
+                password_secret_ref="wizard-stack-moodle-postgres-password",
+            ),
+        )
+    compose_file = rendered_compose.compose_file
     _write_hash_checkpoint(
         tmp_path,
         service_key="wizard-stack-moodle",
-        rendered_compose=compose_file,
+        rendered_compose=rendered_compose,
     )
     client = FakeDokployApiClient()
     client.seed_existing_service(
@@ -1182,7 +1183,10 @@ def _write_empty_checkpoint(state_dir: Path) -> None:
     )
 
 
-def _write_hash_checkpoint(state_dir: Path, *, service_key: str, rendered_compose: str) -> None:
+def _write_hash_checkpoint(state_dir: Path, *, service_key: str, rendered_compose: object) -> None:
+    compose_file = getattr(rendered_compose, "compose_file", rendered_compose)
+    env_specs = getattr(rendered_compose, "env_specs", ())
+    assert isinstance(compose_file, str)
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
@@ -1192,7 +1196,8 @@ def _write_hash_checkpoint(state_dir: Path, *, service_key: str, rendered_compos
             compose_artifact_hashes={
                 service_key: ComposeArtifactHashState.from_rendered_compose(
                     service_id=service_key,
-                    rendered_compose=rendered_compose,
+                    rendered_compose=compose_file,
+                    env_specs=env_specs,
                 )
             },
         ),

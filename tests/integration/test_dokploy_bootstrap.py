@@ -750,13 +750,13 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
     assert first_summary["coder"]["outcome"] == "applied"
     assert first_summary["openclaw"]["outcome"] == "applied"
     assert _mutation_counts(clients, service_names) == {
-        "shared_core": (1, 0, 1),
-        "nextcloud": (1, 0, 1),
-        "moodle": (1, 0, 1),
-        "docuseal": (1, 0, 1),
-        "seaweedfs": (1, 0, 1),
-        "coder": (1, 0, 1),
-        "openclaw": (1, 0, 1),
+        "shared_core": (1, 1, 1),
+        "nextcloud": (1, 2, 1),
+        "moodle": (1, 1, 1),
+        "docuseal": (1, 1, 1),
+        "seaweedfs": (1, 1, 1),
+        "coder": (1, 1, 1),
+        "openclaw": (1, 1, 1),
     }
 
     _persist_missing_compose_hashes(

@@ -738,7 +738,7 @@ class DokployNextcloudBackend:
                     persist_compose_artifact_hash(
                         state_dir=self._state_dir,
                         service_key=self._compose_name,
-                        rendered_compose=rendered_compose.compose_file,
+                        rendered_compose=rendered_compose,
                     )
                 self._created_in_process = True
                 self._applied_locator = locator
@@ -780,7 +780,7 @@ class DokployNextcloudBackend:
             persist_compose_artifact_hash(
                 state_dir=self._state_dir,
                 service_key=self._compose_name,
-                rendered_compose=rendered_compose.compose_file,
+                rendered_compose=rendered_compose,
             )
         self._created_in_process = True
         self._applied_locator = locator
@@ -1466,6 +1466,7 @@ def _apply_rendered_compose_noop_guard(
     rendered_hash = ComposeArtifactHashState.from_rendered_compose(
         service_id=service_key,
         rendered_compose=rendered_compose.compose_file,
+        env_specs=rendered_compose.env_specs,
     )
     stored_hash = load_compose_artifact_hash(state_dir=state_dir, service_key=service_key)
     if stored_hash == rendered_hash and verify_current().passed:
@@ -1488,7 +1489,7 @@ def _apply_rendered_compose_noop_guard(
     persist_compose_artifact_hash(
         state_dir=state_dir,
         service_key=service_key,
-        rendered_compose=rendered_compose.compose_file,
+        rendered_compose=rendered_compose,
     )
     return _RenderedComposeApplyResult(
         locator=locator_factory(updated.compose_id),

@@ -21,6 +21,7 @@ from dokploy_wizard.dokploy.client import (
 from dokploy_wizard.dokploy.compose_noop import (
     apply_compose_noop_guard,
     apply_rendered_compose_to_existing,
+    persist_compose_artifact_hash_if_checkpoint_present,
 )
 from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
 from dokploy_wizard.packs.seaweedfs import SeaweedFsError, SeaweedFsResourceRecord
@@ -290,6 +291,11 @@ class DokploySeaweedFsBackend:
                     title="dokploy-wizard seaweedfs reconcile",
                     description="Create SeaweedFS compose app",
                 )
+                persist_compose_artifact_hash_if_checkpoint_present(
+                    state_dir=self._state_dir,
+                    service_key=self._compose_name,
+                    rendered_compose=compose_file,
+                )
                 locator = _ComposeLocator(
                     project_id=project.project_id,
                     environment_id=environment.environment_id,
@@ -319,6 +325,11 @@ class DokploySeaweedFsBackend:
                 compose_id=created_compose.compose_id,
                 title="dokploy-wizard seaweedfs reconcile",
                 description="Create SeaweedFS compose app",
+            )
+            persist_compose_artifact_hash_if_checkpoint_present(
+                state_dir=self._state_dir,
+                service_key=self._compose_name,
+                rendered_compose=compose_file,
             )
         except DokployApiError as error:
             raise SeaweedFsError(str(error)) from error

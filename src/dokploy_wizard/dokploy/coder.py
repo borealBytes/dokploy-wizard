@@ -583,7 +583,7 @@ class DokployCoderBackend:
         persist_compose_artifact_hash(
             state_dir=self._state_dir,
             service_key=self._compose_name,
-            rendered_compose=compose_file.compose_file,
+            rendered_compose=compose_file,
         )
 
     def _verify_current_compose_application(self):

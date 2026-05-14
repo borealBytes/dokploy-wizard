@@ -429,7 +429,7 @@ Wave 4: Final verification agents F1-F4.
 
   **Commit**: YES | Message: `fix(security): redact dokploy env specs everywhere` | Files: listed redaction/state/remote modules and tests
 
-- [ ] 9. Preserve No-op, Rerun, and Modify Safety with Env Metadata
+- [x] 9. Preserve No-op, Rerun, and Modify Safety with Env Metadata
 
   **What to do**: Update `src/dokploy_wizard/dokploy/compose_noop.py` and lifecycle integration so unchanged safe compose plus unchanged env spec metadata skips deploy, changed env names/scopes trigger update, and secret value changes reconcile env without writing raw values into hash state/logs. For existing installs, fail safe and preserve services; do not build full in-place migration as a primary deliverable. Fresh installs must always create env before deploy.
   **Must NOT do**: Do not hash raw secret values. Do not mark a service no-op if required env specs are missing in Dokploy payload planning.

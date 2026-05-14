@@ -56,6 +56,7 @@ def apply_compose_noop_guard(
     rendered_hash = ComposeArtifactHashState.from_rendered_compose(
         service_id=service_key,
         rendered_compose=compose_file,
+        env_specs=_env_specs(rendered_compose),
     )
     stored_hash = load_compose_artifact_hash(state_dir=state_dir, service_key=service_key)
 
@@ -79,7 +80,7 @@ def apply_compose_noop_guard(
     persist_compose_artifact_hash(
         state_dir=state_dir,
         service_key=service_key,
-        rendered_compose=compose_file,
+        rendered_compose=rendered_compose,
     )
     return ComposeApplyResult(
         locator=locator_factory(updated.compose_id),
@@ -112,6 +113,12 @@ def _compose_file_text(rendered_compose: str | RenderedCompose) -> str:
     return rendered_compose
 
 
+def _env_specs(rendered_compose: str | RenderedCompose) -> tuple[Any, ...]:
+    if isinstance(rendered_compose, RenderedCompose):
+        return rendered_compose.env_specs
+    return ()
+
+
 def _update_compose_env_if_supported(
     client: ComposeMutationApi, *, compose_id: str, env_payload: str
 ) -> None:
@@ -134,11 +141,13 @@ def load_compose_artifact_hash(
 
 
 def persist_compose_artifact_hash(
-    *, state_dir: Path, service_key: str, rendered_compose: str
+    *, state_dir: Path, service_key: str, rendered_compose: str | RenderedCompose
 ) -> ComposeArtifactHashState:
+    compose_file = _compose_file_text(rendered_compose)
     rendered_hash = ComposeArtifactHashState.from_rendered_compose(
         service_id=service_key,
-        rendered_compose=rendered_compose,
+        rendered_compose=compose_file,
+        env_specs=_env_specs(rendered_compose),
     )
     applied_state = _require_applied_state(state_dir)
     updated_hashes = dict(applied_state.compose_artifact_hashes)
@@ -156,6 +165,18 @@ def persist_compose_artifact_hash(
         ),
     )
     return rendered_hash
+
+
+def persist_compose_artifact_hash_if_checkpoint_present(
+    *, state_dir: Path, service_key: str, rendered_compose: str | RenderedCompose
+) -> ComposeArtifactHashState | None:
+    if load_state_dir(state_dir).applied_state is None:
+        return None
+    return persist_compose_artifact_hash(
+        state_dir=state_dir,
+        service_key=service_key,
+        rendered_compose=rendered_compose,
+    )
 
 
 def _verification_passed(result: VerificationOutcome) -> bool:

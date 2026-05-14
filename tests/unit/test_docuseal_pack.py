@@ -396,7 +396,7 @@ def test_docuseal_noop_skip_skips_update_and_deploy_when_up_ready(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    compose_file = _render_compose_file(
+    rendered_compose = _render_compose_file(
         stack_name="wizard-stack",
         hostname="docuseal.example.com",
         postgres_service_name="wizard-stack-shared-postgres",
@@ -404,13 +404,14 @@ def test_docuseal_noop_skip_skips_update_and_deploy_when_up_ready(
             database_name="wizard_stack_docuseal",
             user_name="wizard_stack_docuseal",
             password_secret_ref="wizard-stack-docuseal-postgres-password",
-        ),
-        secret_key_base_secret_ref="wizard-stack-docuseal-secret-key-base",
-    ).compose_file
+            ),
+            secret_key_base_secret_ref="wizard-stack-docuseal-secret-key-base",
+        )
+    compose_file = rendered_compose.compose_file
     _write_hash_checkpoint(
         tmp_path,
         service_key="wizard-stack-docuseal",
-        rendered_compose=compose_file,
+        rendered_compose=rendered_compose,
     )
     client = FakeDokployApiClient()
     client.seed_existing_service(
@@ -1067,7 +1068,10 @@ def _write_empty_checkpoint(state_dir: Path) -> None:
     )
 
 
-def _write_hash_checkpoint(state_dir: Path, *, service_key: str, rendered_compose: str) -> None:
+def _write_hash_checkpoint(state_dir: Path, *, service_key: str, rendered_compose: object) -> None:
+    compose_file = getattr(rendered_compose, "compose_file", rendered_compose)
+    env_specs = getattr(rendered_compose, "env_specs", ())
+    assert isinstance(compose_file, str)
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
@@ -1077,7 +1081,8 @@ def _write_hash_checkpoint(state_dir: Path, *, service_key: str, rendered_compos
             compose_artifact_hashes={
                 service_key: ComposeArtifactHashState.from_rendered_compose(
                     service_id=service_key,
-                    rendered_compose=rendered_compose,
+                    rendered_compose=compose_file,
+                    env_specs=env_specs,
                 )
             },
         ),

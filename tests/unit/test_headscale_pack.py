@@ -564,15 +564,18 @@ def test_dokploy_headscale_backend_skips_redeploy_when_hash_matches_and_containe
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     service_name = "wizard-stack-headscale"
-    compose_file = _render_compose_file(
+    rendered_compose = _render_compose_file(
         service_name,
         "headscale.example.com",
         (
             "wizard-stack-headscale-admin-api-key",
             "wizard-stack-headscale-noise-private-key",
         ),
-    ).compose_file
-    _write_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=compose_file)
+    )
+    compose_file = rendered_compose.compose_file
+    _write_hash_checkpoint(
+        tmp_path, service_name=service_name, rendered_compose=rendered_compose
+    )
     client = SharedFakeDokployApiClient()
     client.seed_existing_service(
         service_name=service_name,
@@ -606,7 +609,10 @@ def test_dokploy_headscale_backend_skips_redeploy_when_hash_matches_and_containe
     client.assert_unchanged_service(service_name)
 
 
-def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: str) -> None:
+def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: object) -> None:
+    compose_file = getattr(rendered_compose, "compose_file", rendered_compose)
+    env_specs = getattr(rendered_compose, "env_specs", ())
+    assert isinstance(compose_file, str)
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
@@ -616,7 +622,8 @@ def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compo
             compose_artifact_hashes={
                 service_name: ComposeArtifactHashState.from_rendered_compose(
                     service_id=service_name,
-                    rendered_compose=rendered_compose,
+                    rendered_compose=compose_file,
+                    env_specs=env_specs,
                 )
             },
         ),

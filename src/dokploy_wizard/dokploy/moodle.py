@@ -426,7 +426,7 @@ class DokployMoodleBackend:
                 persist_compose_artifact_hash(
                     state_dir=self._state_dir,
                     service_key=self._compose_name,
-                    rendered_compose=compose_file.compose_file,
+                    rendered_compose=compose_file,
                 )
                 self._applied_locator = locator
                 self._created_in_process = True
@@ -463,7 +463,7 @@ class DokployMoodleBackend:
         persist_compose_artifact_hash(
             state_dir=self._state_dir,
             service_key=self._compose_name,
-            rendered_compose=compose_file.compose_file,
+            rendered_compose=compose_file,
         )
         self._created_in_process = True
         self._applied_locator = locator
