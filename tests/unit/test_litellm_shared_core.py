@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 
 import dokploy_wizard.dokploy.shared_core as shared_core_module
-from dokploy_wizard.core.models import SharedPostgresAllocation
+from dokploy_wizard.core.models import SharedCoreResourceRecord, SharedPostgresAllocation
 from dokploy_wizard.core.planner import build_shared_core_plan
-from dokploy_wizard.core.reconciler import build_shared_core_ledger
+from dokploy_wizard.core.reconciler import build_shared_core_ledger, reconcile_shared_core
 from dokploy_wizard.dokploy.env_spec import RenderedCompose
 from dokploy_wizard.dokploy.shared_core import (
     DokploySharedCoreBackend,
@@ -23,6 +23,7 @@ from dokploy_wizard.litellm.admin import LiteLLMTeamRecord, LiteLLMVirtualKeyRec
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     ComposeArtifactHashState,
+    resolve_desired_state,
     write_applied_checkpoint,
 )
 from dokploy_wizard.state.models import (
@@ -30,9 +31,89 @@ from dokploy_wizard.state.models import (
     LiteLLMGeneratedKeys,
     OwnedResource,
     OwnershipLedger,
+    RawEnvInput,
 )
 
 from .fake_dokploy import FakeDokployApiClient
+
+
+class _RecordingSharedCoreBackend:
+    def __init__(self) -> None:
+        self.ensured_allocations: tuple[SharedPostgresAllocation, ...] = ()
+        self._records: dict[str, SharedCoreResourceRecord] = {}
+
+    def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        return self._get_existing(resource_id)
+
+    def find_network_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        return self._find_existing(resource_name)
+
+    def create_network(self, resource_name: str) -> SharedCoreResourceRecord:
+        return self._record(resource_name)
+
+    def get_postgres_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        return self._get_existing(resource_id)
+
+    def find_postgres_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        return self._find_existing(resource_name)
+
+    def create_postgres_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        return self._record(resource_name)
+
+    def get_redis_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        return self._get_existing(resource_id)
+
+    def find_redis_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        return self._find_existing(resource_name)
+
+    def create_redis_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        return self._record(resource_name)
+
+    def get_mail_relay_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        return self._get_existing(resource_id)
+
+    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        return self._find_existing(resource_name)
+
+    def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        return self._record(resource_name)
+
+    def get_litellm_service(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        return self._get_existing(resource_id)
+
+    def find_litellm_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        return self._find_existing(resource_name)
+
+    def create_litellm_service(self, resource_name: str) -> SharedCoreResourceRecord:
+        return self._record(resource_name)
+
+    def ensure_postgres_allocations(
+        self, allocations: tuple[SharedPostgresAllocation, ...]
+    ) -> None:
+        self.ensured_allocations = allocations
+
+    def refresh_compose(self) -> None:
+        return None
+
+    def reconcile_litellm_runtime(self) -> None:
+        return None
+
+    def _record(self, resource_name: str) -> SharedCoreResourceRecord:
+        record = SharedCoreResourceRecord(
+            resource_id=f"resource-{resource_name}",
+            resource_name=resource_name,
+        )
+        self._records[record.resource_id] = record
+        return record
+
+    def _get_existing(self, resource_id: str) -> SharedCoreResourceRecord | None:
+        return self._records.get(resource_id)
+
+    def _find_existing(self, resource_name: str) -> SharedCoreResourceRecord | None:
+        for record in self._records.values():
+            if record.resource_name == resource_name:
+                return record
+        return None
 
 
 def test_litellm_plan_exists_without_ai_packs() -> None:
@@ -64,6 +145,54 @@ def test_litellm_db_allocation_is_dedicated_and_not_a_pack_allocation() -> None:
         database_name="openmerge_litellm",
         user_name="openmerge_litellm",
         password_secret_ref="openmerge-litellm-postgres-password",
+    )
+
+
+def test_reconcile_repairs_litellm_postgres_allocation_without_pack_allocations() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={"STACK_NAME": "openmerge", "ROOT_DOMAIN": "example.com"},
+        )
+    )
+    backend = _RecordingSharedCoreBackend()
+
+    reconcile_shared_core(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert desired_state.shared_core.allocations == ()
+    assert desired_state.shared_core.litellm is not None
+    assert backend.ensured_allocations == (desired_state.shared_core.litellm.postgres,)
+
+
+def test_reconcile_repairs_pack_and_litellm_postgres_allocations() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openmerge",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_NEXTCLOUD": "true",
+            },
+        )
+    )
+    backend = _RecordingSharedCoreBackend()
+
+    reconcile_shared_core(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert desired_state.shared_core.litellm is not None
+    assert backend.ensured_allocations == (
+        *(allocation.postgres for allocation in desired_state.shared_core.allocations if allocation.postgres is not None),
+        desired_state.shared_core.litellm.postgres,
     )
 
 
