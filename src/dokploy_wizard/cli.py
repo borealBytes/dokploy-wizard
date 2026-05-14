@@ -30,6 +30,7 @@ from dokploy_wizard.core import (
     SharedCorePlan,
     ShellSharedCoreBackend,
 )
+from dokploy_wizard.core.planner import build_pack_env_specs
 from dokploy_wizard.dokploy import (
     DokployApiClient,
     DokployApiError,
@@ -148,6 +149,12 @@ from dokploy_wizard.uninstall import (
     build_uninstall_plan,
     collect_confirmation_lines,
     execute_uninstall_plan,
+)
+from dokploy_wizard.verification import (
+    key_is_sensitive,
+    redact_data,
+    redact_text,
+    redacted_env_spec_metadata,
 )
 
 if TYPE_CHECKING:
@@ -354,7 +361,7 @@ def _handle_install(args: argparse.Namespace) -> int:
         OpenClawError,
         SeaweedFsError,
     ) as error:
-        raise SystemExit(str(error)) from error
+        raise SystemExit(_redacted_cli_error(error)) from error
 
     print(json.dumps(summary, indent=2, sort_keys=True))
     if not getattr(args, "no_print_secrets", False):
@@ -582,7 +589,7 @@ def _handle_modify(args: argparse.Namespace) -> int:
         OpenClawError,
         SeaweedFsError,
     ) as error:
-        raise SystemExit(str(error)) from error
+        raise SystemExit(_redacted_cli_error(error)) from error
 
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
@@ -604,7 +611,7 @@ def _handle_uninstall(args: argparse.Namespace) -> int:
         UninstallExecutionError,
         UninstallPlanningError,
     ) as error:
-        raise SystemExit(str(error)) from error
+        raise SystemExit(_redacted_cli_error(error)) from error
 
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
@@ -624,10 +631,11 @@ def _handle_inspect_state(args: argparse.Namespace) -> int:
             desired_state=desired_state,
             ownership_ledger=loaded_state.ownership_ledger,
         )
+        snapshot = cast(dict[str, Any], redact_data(snapshot))
         if not args.dry_run:
             write_inspection_snapshot(args.state_dir, _redacted_raw_env_input(raw_env), snapshot)
     except (OSError, StateValidationError) as error:
-        raise SystemExit(str(error)) from error
+        raise SystemExit(_redacted_cli_error(error)) from error
 
     print(json.dumps(snapshot, indent=2, sort_keys=True))
     return 0
@@ -690,6 +698,15 @@ def _build_public_inspection_snapshot(
                 for consumer in sorted(litellm_generated_keys.virtual_keys)
             },
         }
+    pack_env_specs = build_pack_env_specs(
+        desired_state.stack_name,
+        desired_state.enabled_packs,
+        raw_env.values,
+    )
+    if pack_env_specs:
+        snapshot["dokploy_env_specs"] = [
+            dict(entry) for entry in redacted_env_spec_metadata(pack_env_specs)
+        ]
     return snapshot
 
 
@@ -705,7 +722,11 @@ def _redacted_raw_env_input(raw_env: RawEnvInput) -> RawEnvInput:
 
 def _raw_env_value_is_sensitive(key: str) -> bool:
     normalized = key.upper()
-    return any(token in normalized for token in _INSPECT_SECRET_KEYS)
+    return any(token in normalized for token in _INSPECT_SECRET_KEYS) or key_is_sensitive(key)
+
+
+def _redacted_cli_error(error: BaseException) -> str:
+    return redact_text(str(error))
 
 
 def run_install_flow(

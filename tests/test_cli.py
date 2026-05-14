@@ -390,6 +390,7 @@ def test_inspect_state_reports_farm_status_with_redacted_secrets(
                 "AI_DEFAULT_BASE_URL=https://models.example.com/v1",
                 "MY_FARM_ADVISOR_PRIMARY_MODEL=anthropic/claude-sonnet-4",
                 "MY_FARM_ADVISOR_GATEWAY_PASSWORD=farm-secret-password",
+                "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN=SECRET_TEST_FARM_BOT_TOKEN_VALUE",
                 "",
             ]
         ),
@@ -404,7 +405,8 @@ def test_inspect_state_reports_farm_status_with_redacted_secrets(
         == 0
     )
 
-    payload = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr().out
+    payload = json.loads(output)
     assert payload["advisor_status"]["my_farm_advisor"] == {
         "display_name": "Nexa Farm",
         "enabled": True,
@@ -416,8 +418,15 @@ def test_inspect_state_reports_farm_status_with_redacted_secrets(
     assert raw_snapshot["values"]["CLOUDFLARE_API_TOKEN"] == "<redacted>"
     assert raw_snapshot["values"]["DOKPLOY_ADMIN_PASSWORD"] == "<redacted>"
     assert raw_snapshot["values"]["AI_DEFAULT_API_KEY"] == "<redacted>"
+    assert raw_snapshot["values"]["MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN"] == "<redacted>"
+    env_specs = {entry["name"]: entry for entry in payload["dokploy_env_specs"]}
+    bot_token_spec = env_specs["MY_FARM_ADVISOR_MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN"]
+    assert bot_token_spec["owner"] == "my-farm-advisor"
+    assert bot_token_spec["sensitive"] is True
+    assert bot_token_spec["redacted_fingerprint"].startswith("sha256:")
     assert "cf-secret-token" not in json.dumps(payload)
     assert "shared-secret-key" not in json.dumps(payload)
+    assert "SECRET_TEST_FARM_BOT_TOKEN_VALUE" not in output
 
 
 def test_inspect_state_reports_disabled_farm_status(
