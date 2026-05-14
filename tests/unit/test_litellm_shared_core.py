@@ -224,6 +224,8 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
     assert "image: ghcr.io/berriai/litellm:main-v1.40.14-stable" in compose
     assert "image: ghcr.io/berriai/litellm:latest" not in compose
     assert 'DATABASE_URL: "postgresql://wizard_stack_litellm:${WIZARD_STACK_LITELLM_POSTGRES_PASSWORD:?WIZARD_STACK_LITELLM_POSTGRES_PASSWORD is required}@wizard-stack-shared-postgres:5432/wizard_stack_litellm"' in compose
+    assert 'ENFORCE_PRISMA_MIGRATION_CHECK: "true"' in compose
+    assert "ENFORCE_PRISMA_MIGRATION_CHECK" not in env_specs
     assert 'LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY is required}"' in compose
     assert 'MASTER_KEY: "${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY is required}"' in compose
     assert 'LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}"' in compose
@@ -493,7 +495,8 @@ def test_shared_core_matching_healthy_hash_skips_update_and_deploy(
     assert readiness_api.readiness_calls == 1
     assert plan.postgres is not None
     assert plan.redis is not None
-    assert allocation_checks == [plan.allocations[0].postgres]
+    assert plan.litellm is not None
+    assert allocation_checks == [plan.allocations[0].postgres, plan.litellm.postgres]
     assert redis_checks == ["redis-ctr"]
     assert container_lookups.count(plan.postgres.service_name) == 1
     assert container_lookups.count(plan.redis.service_name) == 1
@@ -636,7 +639,8 @@ def test_shared_core_runtime_ready_uses_resolved_dokploy_container_names(
 
     assert backend._shared_core_runtime_ready_for_noop() is True
     assert postgres_container_names == [
-        "openmerge-shared-yqjzwd-openmerge-shared-postgres-1"
+        "openmerge-shared-yqjzwd-openmerge-shared-postgres-1",
+        "openmerge-shared-yqjzwd-openmerge-shared-postgres-1",
     ]
     assert redis_container_names == ["openmerge-shared-yqjzwd-openmerge-shared-redis-1"]
 

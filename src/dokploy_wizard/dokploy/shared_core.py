@@ -535,11 +535,13 @@ class DokploySharedCoreBackend:
                     pass
 
     def _shared_core_runtime_ready_for_noop(self) -> bool:
-        postgres_allocations = tuple(
+        postgres_allocations = [
             allocation.postgres for allocation in self._plan.allocations if allocation.postgres is not None
-        )
+        ]
+        if self._plan.litellm is not None:
+            postgres_allocations.append(self._plan.litellm.postgres)
         if self._plan.postgres is not None and not self.validate_postgres_allocations(
-            postgres_allocations
+            tuple(postgres_allocations)
         ):
             return False
         if self._plan.redis is not None:
@@ -900,6 +902,7 @@ def _render_compose_file(
             "    command: [\"--config\", \"/app/config.yaml\", \"--port\", \"4000\"]\n"
             "    environment:\n"
             f'      DATABASE_URL: "postgresql://{plan.litellm.postgres.user_name}:{_required_placeholder(postgres_password_env)}@{postgres_service_name}:5432/{plan.litellm.postgres.database_name}"\n'
+            '      ENFORCE_PRISMA_MIGRATION_CHECK: "true"\n'
             f"{local_api_key_lines}"
             f"{provider_env_lines}"
             f"{master_key_lines}"
