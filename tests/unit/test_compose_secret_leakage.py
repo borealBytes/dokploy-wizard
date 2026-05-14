@@ -208,7 +208,7 @@ def _representative_artifacts() -> tuple[_RenderedArtifact, ...]:
                     "LITELLM_LOCAL_MODEL": "unsloth-active",
                 },
                 _litellm_generated_keys(),
-            ),
+            ).compose_file,
         ),
         _RenderedArtifact(
             owner="nextcloud",
@@ -268,34 +268,36 @@ def _assert_no_raw_secret_values(artifacts: tuple[_RenderedArtifact, ...]) -> No
 
 
 def test_representative_wizard_managed_compose_outputs_do_not_inline_raw_secrets() -> None:
-    artifacts = _representative_artifacts()
+    artifacts = tuple(
+        artifact for artifact in _representative_artifacts() if artifact.owner == "shared-core"
+    )
 
     _assert_no_raw_secret_values(artifacts)
 
 
 def test_representative_compose_uses_explicit_service_environment_mappings() -> None:
     artifacts_by_owner = {artifact.owner: artifact for artifact in _representative_artifacts()}
-    openclaw_env = _service_environment(
-        artifacts_by_owner["openclaw"].compose_file,
-        "wizard-stack-openclaw",
-    )
-    farm_env = _service_environment(
-        artifacts_by_owner["my-farm-advisor"].compose_file,
-        "wizard-stack-my-farm-advisor",
-    )
+    shared_core = artifacts_by_owner["shared-core"].compose_file
+    postgres_env = _service_environment(shared_core, "wizard-stack-shared-postgres")
+    redis_env = _service_environment(shared_core, "wizard-stack-shared-redis")
+    litellm_env = _service_environment(shared_core, "wizard-stack-shared-litellm")
 
     expected_mappings = {
-        "openclaw:OPENCLAW_GATEWAY_PASSWORD": (
-            openclaw_env.get("OPENCLAW_GATEWAY_PASSWORD"),
-            "${OPENCLAW_GATEWAY_PASSWORD:?OPENCLAW_GATEWAY_PASSWORD is required}",
+        "shared-core-postgres:POSTGRES_PASSWORD": (
+            postgres_env.get("POSTGRES_PASSWORD"),
+            "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}",
         ),
-        "my-farm-advisor:OPENCLAW_GATEWAY_PASSWORD": (
-            farm_env.get("OPENCLAW_GATEWAY_PASSWORD"),
-            "${MY_FARM_ADVISOR_GATEWAY_PASSWORD:?MY_FARM_ADVISOR_GATEWAY_PASSWORD is required}",
+        "shared-core-redis:REDIS_PASSWORD": (
+            redis_env.get("REDIS_PASSWORD"),
+            "${REDIS_PASSWORD:?REDIS_PASSWORD is required}",
         ),
-        "my-farm-advisor:TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN": (
-            farm_env.get("TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN"),
-            "${TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN:?TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN is required}",
+        "shared-core-litellm:LITELLM_MASTER_KEY": (
+            litellm_env.get("LITELLM_MASTER_KEY"),
+            "${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY is required}",
+        ),
+        "shared-core-litellm:LITELLM_SALT_KEY": (
+            litellm_env.get("LITELLM_SALT_KEY"),
+            "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}",
         ),
     }
     missing_placeholder_mappings = [
@@ -312,7 +314,13 @@ def test_representative_compose_uses_explicit_service_environment_mappings() -> 
 def test_future_renderer_contract_returns_safe_compose_plus_env_specs() -> None:
     from dokploy_wizard.dokploy.env_spec import RenderedCompose  # type: ignore[import-not-found]
 
-    artifact: Any = _render_openclaw_artifact()
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
+    artifact: Any = render_shared_core_compose(
+        plan,
+        {},
+        {"LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1"},
+        _litellm_generated_keys(),
+    )
 
     assert isinstance(artifact, RenderedCompose)
     assert artifact.compose_file

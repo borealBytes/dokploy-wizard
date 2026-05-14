@@ -13,6 +13,7 @@ import dokploy_wizard.dokploy.shared_core as shared_core_module
 from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.core.reconciler import build_shared_core_ledger
+from dokploy_wizard.dokploy.env_spec import RenderedCompose
 from dokploy_wizard.dokploy.shared_core import (
     DokploySharedCoreBackend,
     _render_compose_file,
@@ -86,35 +87,45 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
             "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-upstream-key",
         },
     )
+    compose = rendered.compose_file
+    env_specs = {spec.name: spec for spec in rendered.env_specs}
 
-    assert "  wizard-stack-shared-litellm:\n" in rendered
-    assert "image: ghcr.io/berriai/litellm:main-v1.40.14-stable" in rendered
-    assert "image: ghcr.io/berriai/litellm:latest" not in rendered
-    assert 'DATABASE_URL: "postgresql://wizard_stack_litellm:${WIZARD_STACK_LITELLM_POSTGRES_PASSWORD:-change-me}@wizard-stack-shared-postgres:5432/wizard_stack_litellm"' in rendered
-    assert 'LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"' in rendered
-    assert 'MASTER_KEY: "${LITELLM_MASTER_KEY}"' in rendered
-    assert 'LITELLM_SALT_KEY: "${LITELLM_SALT_KEY}"' in rendered
-    assert 'SALT_KEY: "${LITELLM_SALT_KEY}"' in rendered
-    assert "healthcheck:\n" in rendered
-    assert re.search(r"source: wizard-stack-shared-litellm-config-[0-9a-f]{12}", rendered)
-    assert "target: /app/config.yaml" in rendered
-    assert 'api_key: "sk-no-key-required"' in rendered
-    assert 'model_name: "opencode-go/minimax-m2.7"' in rendered
-    assert 'model_name: "opencode-go/deepseek-v4-flash"' in rendered
-    assert 'model_name: "opencode-go/mimo-v2.5"' in rendered
-    assert 'model_name: "openrouter/hunter-alpha"' in rendered
-    assert '      LITELLM_OPENCODE_GO_API_KEY: "${OPENCODE_GO_API_KEY}"' in rendered
+    assert isinstance(rendered, RenderedCompose)
+    assert "  wizard-stack-shared-litellm:\n" in compose
+    assert "image: ghcr.io/berriai/litellm:main-v1.40.14-stable" in compose
+    assert "image: ghcr.io/berriai/litellm:latest" not in compose
+    assert 'DATABASE_URL: "postgresql://wizard_stack_litellm:${WIZARD_STACK_LITELLM_POSTGRES_PASSWORD:?WIZARD_STACK_LITELLM_POSTGRES_PASSWORD is required}@wizard-stack-shared-postgres:5432/wizard_stack_litellm"' in compose
+    assert 'LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY is required}"' in compose
+    assert 'MASTER_KEY: "${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY is required}"' in compose
+    assert 'LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}"' in compose
+    assert 'SALT_KEY: "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}"' in compose
+    assert "healthcheck:\n" in compose
+    assert re.search(r"source: wizard-stack-shared-litellm-config-[0-9a-f]{12}", compose)
+    assert "target: /app/config.yaml" in compose
+    assert 'api_key: "os.environ/LITELLM_LOCAL_API_KEY"' in compose
+    assert 'model_name: "opencode-go/minimax-m2.7"' in compose
+    assert 'model_name: "opencode-go/deepseek-v4-flash"' in compose
+    assert 'model_name: "opencode-go/mimo-v2.5"' in compose
+    assert 'model_name: "openrouter/hunter-alpha"' in compose
+    assert '      LITELLM_OPENCODE_GO_API_KEY: "${LITELLM_OPENCODE_GO_API_KEY:?LITELLM_OPENCODE_GO_API_KEY is required}"' in compose
     assert (
-        '      LITELLM_OPENROUTER_API_KEY: "${MY_FARM_ADVISOR_OPENROUTER_API_KEY}"'
-        in rendered
+        '      LITELLM_OPENROUTER_API_KEY: "${LITELLM_OPENROUTER_API_KEY:?LITELLM_OPENROUTER_API_KEY is required}"'
+        in compose
     )
-    assert 'OPENCODE_GO_API_KEY: "opencode-go-upstream-key"' not in rendered
-    assert 'MY_FARM_ADVISOR_OPENROUTER_API_KEY: "farm-openrouter-upstream-key"' not in rendered
-    assert 'os.environ/LITELLM_OPENCODE_GO_API_KEY' not in rendered
-    assert 'os.environ/LITELLM_OPENROUTER_API_KEY' not in rendered
-    assert "    aliases:\n          - wizard-stack-shared-litellm\n" in rendered
-    assert '      - "127.0.0.1:4000:4000"' in rendered
-    assert "    expose:\n" not in rendered
+    assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "opencode-go-upstream-key"
+    assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "farm-openrouter-upstream-key"
+    assert env_specs["LITELLM_LOCAL_API_KEY"].target_services == ("wizard-stack-shared-litellm",)
+    assert env_specs["LITELLM_MASTER_KEY"].target_services == ("wizard-stack-shared-litellm",)
+    assert env_specs["LITELLM_SALT_KEY"].target_services == ("wizard-stack-shared-litellm",)
+    assert env_specs["WIZARD_STACK_LITELLM_POSTGRES_PASSWORD"].target_services == (
+        "wizard-stack-shared-postgres",
+        "wizard-stack-shared-litellm",
+    )
+    assert "opencode-go-upstream-key" not in compose
+    assert "farm-openrouter-upstream-key" not in compose
+    assert "    aliases:\n          - wizard-stack-shared-litellm\n" in compose
+    assert '      - "127.0.0.1:4000:4000"' in compose
+    assert "    expose:\n" not in compose
 
 
 def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
@@ -135,16 +146,20 @@ def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
             "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "legacy-openrouter-key",
         },
     )
+    compose = rendered.compose_file
+    env_specs = {spec.name: spec for spec in rendered.env_specs}
 
-    assert '      LITELLM_OPENCODE_GO_API_KEY: "${LITELLM_OPENCODE_GO_API_KEY}"' in rendered
-    assert '      LITELLM_OPENROUTER_API_KEY: "${LITELLM_OPENROUTER_API_KEY}"' in rendered
-    assert '      LITELLM_OPENCODE_GO_API_KEY: "${OPENCODE_GO_API_KEY}"' not in rendered
+    assert '      LITELLM_OPENCODE_GO_API_KEY: "${LITELLM_OPENCODE_GO_API_KEY:?LITELLM_OPENCODE_GO_API_KEY is required}"' in compose
+    assert '      LITELLM_OPENROUTER_API_KEY: "${LITELLM_OPENROUTER_API_KEY:?LITELLM_OPENROUTER_API_KEY is required}"' in compose
+    assert '      LITELLM_OPENCODE_GO_API_KEY: "${OPENCODE_GO_API_KEY}' not in compose
     assert (
-        '      LITELLM_OPENROUTER_API_KEY: "${MY_FARM_ADVISOR_OPENROUTER_API_KEY}"'
-        not in rendered
+        '      LITELLM_OPENROUTER_API_KEY: "${MY_FARM_ADVISOR_OPENROUTER_API_KEY'
+        not in compose
     )
-    assert 'model_name: "opencode-go/minimax-m2.7"' in rendered
-    assert 'model_name: "openrouter/google/gemma-4-31b-it:free"' in rendered
+    assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "litellm-opencode-key"
+    assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "litellm-openrouter-key"
+    assert 'model_name: "opencode-go/minimax-m2.7"' in compose
+    assert 'model_name: "openrouter/google/gemma-4-31b-it:free"' in compose
 
 
 def test_litellm_inline_config_name_changes_when_model_content_changes() -> None:
@@ -164,16 +179,18 @@ def test_litellm_inline_config_name_changes_when_model_content_changes() -> None
         {},
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
-            "LITELLM_LOCAL_MODEL": "unsloth-active",
-            "LITELLM_LOCAL_API_KEY": "sk-local-override",
+            "LITELLM_LOCAL_MODEL": "other-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
         },
     )
 
     first_name = re.search(
-        r"source: (wizard-stack-shared-litellm-config-[0-9a-f]{12})", rendered_first
+        r"source: (wizard-stack-shared-litellm-config-[0-9a-f]{12})",
+        rendered_first.compose_file,
     )
     second_name = re.search(
-        r"source: (wizard-stack-shared-litellm-config-[0-9a-f]{12})", rendered_second
+        r"source: (wizard-stack-shared-litellm-config-[0-9a-f]{12})",
+        rendered_second.compose_file,
     )
 
     assert first_name is not None
@@ -208,10 +225,12 @@ def test_litellm_inline_config_name_changes_when_openrouter_model_inventory_chan
     )
 
     first_name = re.search(
-        r"source: (wizard-stack-shared-litellm-config-[0-9a-f]{12})", rendered_first
+        r"source: (wizard-stack-shared-litellm-config-[0-9a-f]{12})",
+        rendered_first.compose_file,
     )
     second_name = re.search(
-        r"source: (wizard-stack-shared-litellm-config-[0-9a-f]{12})", rendered_second
+        r"source: (wizard-stack-shared-litellm-config-[0-9a-f]{12})",
+        rendered_second.compose_file,
     )
 
     assert first_name is not None
@@ -219,7 +238,7 @@ def test_litellm_inline_config_name_changes_when_openrouter_model_inventory_chan
     assert first_name.group(1) != second_name.group(1)
 
 
-def test_rendered_compose_inlines_documented_and_legacy_litellm_keys_when_generated() -> None:
+def test_rendered_compose_uses_env_specs_for_generated_litellm_keys() -> None:
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
 
     rendered = _render_compose_file(
@@ -228,13 +247,19 @@ def test_rendered_compose_inlines_documented_and_legacy_litellm_keys_when_genera
         {},
         litellm_generated_keys=_generated_keys(),
     )
+    compose = rendered.compose_file
+    env_specs = {spec.name: spec for spec in rendered.env_specs}
 
-    assert 'LITELLM_MASTER_KEY: "sk-master-fake-test-key"' in rendered
-    assert 'MASTER_KEY: "sk-master-fake-test-key"' in rendered
-    assert 'LITELLM_SALT_KEY: "sk-salt-fake-test-key"' in rendered
-    assert 'SALT_KEY: "sk-salt-fake-test-key"' in rendered
-    assert '${LITELLM_MASTER_KEY}' not in rendered
-    assert '${LITELLM_SALT_KEY}' not in rendered
+    assert "sk-master-fake-test-key" not in compose
+    assert "sk-salt-fake-test-key" not in compose
+    assert 'LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY is required}"' in compose
+    assert 'MASTER_KEY: "${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY is required}"' in compose
+    assert 'LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}"' in compose
+    assert 'SALT_KEY: "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}"' in compose
+    assert env_specs["LITELLM_MASTER_KEY"].value == "sk-master-fake-test-key"
+    assert env_specs["LITELLM_SALT_KEY"].value == "sk-salt-fake-test-key"
+    assert env_specs["LITELLM_VIRTUAL_KEY_CODER_HERMES"].value == "sk-hermes-fake-test-key"
+    assert env_specs["LITELLM_VIRTUAL_KEY_CODER_HERMES"].required is False
 
 
 def test_litellm_ledger_resource_is_owned() -> None:
@@ -280,14 +305,14 @@ def test_shared_core_matching_healthy_hash_skips_update_and_deploy(
     _write_hash_checkpoint(
         tmp_path,
         service_key=plan.network_name,
-        rendered_compose=rendered_compose,
+        rendered_compose=rendered_compose.compose_file,
     )
     client = FakeDokployApiClient()
     client.seed_existing_service(
         service_name=plan.network_name,
         compose_id="cmp-shared",
         project_name="wizard-stack",
-        compose_file=rendered_compose,
+        compose_file=rendered_compose.compose_file,
     )
     readiness_api = _FakeLiteLLMAdminApi({"status": "connected", "db": "connected"})
     container_lookups: list[str] = []
@@ -358,14 +383,14 @@ def test_shared_core_unhealthy_litellm_blocks_noop_skip(
     _write_hash_checkpoint(
         tmp_path,
         service_key=plan.network_name,
-        rendered_compose=rendered_compose,
+        rendered_compose=rendered_compose.compose_file,
     )
     client = FakeDokployApiClient()
     client.seed_existing_service(
         service_name=plan.network_name,
         compose_id="cmp-shared",
         project_name="wizard-stack",
-        compose_file=rendered_compose,
+        compose_file=rendered_compose.compose_file,
     )
 
     monkeypatch.setattr(
