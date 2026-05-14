@@ -34,6 +34,7 @@ from dokploy_wizard.state.queue_models import (
     OutboundDeliveryLog,
     OutboundDeliveryRecord,
 )
+from dokploy_wizard.verification import redact_data
 
 RAW_INPUT_FILE = "raw-input.json"
 DESIRED_STATE_FILE = "desired-state.json"
@@ -449,7 +450,7 @@ def write_inspection_snapshot(
 ) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     _write_document(state_dir / RAW_INPUT_FILE, raw_input.to_dict())
-    _write_document(state_dir / DESIRED_STATE_FILE, desired_state_snapshot)
+    _write_document(state_dir / DESIRED_STATE_FILE, redact_data(desired_state_snapshot))
 
 
 def load_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys | None:

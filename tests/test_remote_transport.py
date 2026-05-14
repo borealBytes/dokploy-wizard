@@ -266,3 +266,30 @@ def test_verify_service_failures_bubble_through_proof(
     message = str(excinfo.value)
     assert "verify-services" in message
     assert "<REDACTED>" in message
+
+
+def test_remote_failures_redact_dokploy_env_payload_values(
+    remote_transport_subject: ModuleType,
+    make_fake_transport: Any,
+) -> None:
+    sentinel = "SECRET_TEST_OPENCLAW_PROVIDER_VALUE"
+    transport = make_fake_transport(
+        failures={
+            "inspect-state": (
+                "Dokploy API failed with env payload:\n"
+                "# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
+                "key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:abc123\n"
+                f"OPENCLAW_PROVIDER_API_KEY={sentinel}"
+            )
+        }
+    )
+    session = _build_session(remote_transport_subject, transport=transport)
+
+    with pytest.raises(remote_transport_subject.RemoteCommandFailure) as excinfo:
+        session.run_proof(password="SuperSecretPassword123!")
+
+    message = str(excinfo.value)
+    assert "inspect-state" in message
+    assert sentinel not in message
+    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in message
+    assert "fingerprint=sha256:abc123" in message

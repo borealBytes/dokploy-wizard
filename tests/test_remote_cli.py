@@ -188,3 +188,24 @@ def test_create_repo_archive_excludes_local_env_backups(tmp_path: Path) -> None:
     assert ".install.env.bak" not in members
     assert ".install.env.swp" not in members
     assert ".fresh-vps-validation.env.backup" not in members
+
+
+def test_runtime_error_redaction_masks_env_payload_values() -> None:
+    remote_cli = import_remote_cli_module()
+    password = "super-secret-password"
+    sentinel = "SECRET_TEST_OPENCLAW_PROVIDER_VALUE"
+
+    message = remote_cli._redact_runtime_message(
+        (
+            f"ssh failed with {password}\n"
+            "# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
+            "key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:def456\n"
+            f"OPENCLAW_PROVIDER_API_KEY={sentinel}"
+        ),
+        password=password,
+    )
+
+    assert password not in message
+    assert sentinel not in message
+    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in message
+    assert "fingerprint=sha256:def456" in message

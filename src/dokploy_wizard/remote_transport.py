@@ -5,14 +5,16 @@ import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from dokploy_wizard.verification import redact_text
+
 if TYPE_CHECKING:
     import paramiko  # type: ignore[import-untyped]
 
 
 def _redact_secret(value: str, password: str | None) -> str:
-    if password is None or password == "":
-        return value
-    return value.replace(password, "<redacted>")
+    if password is not None and password != "":
+        value = value.replace(password, "<redacted>")
+    return redact_text(value)
 
 
 class RemoteCommandFailure(RuntimeError):

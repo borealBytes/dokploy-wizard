@@ -18,6 +18,7 @@ from dokploy_wizard.remote_transport import (
     RemoteCommandFailure,
     RemoteTransportSession,
 )
+from dokploy_wizard.verification import redact_text
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -436,9 +437,9 @@ def _shell_join(arguments: Sequence[str]) -> str:
 
 
 def _redact_runtime_message(message: str, *, password: str | None) -> str:
-    if not password:
-        return message
-    return message.replace(password, "<redacted>")
+    if password:
+        message = message.replace(password, "<redacted>")
+    return redact_text(message)
 
 
 def _create_repo_archive(*, repo_root: Path, destination: Path) -> None:
