@@ -419,9 +419,12 @@ class FakeDokployApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        del compose_file
-        self.update_compose_calls += 1
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        del env
+        if compose_file is not None:
+            self.update_compose_calls += 1
         return DokployComposeRecord(compose_id=compose_id, name="nextcloud-stack-shared")
 
     def deploy_compose(
@@ -846,7 +849,7 @@ def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_re
     assert reused.result.outcome == "already_present"
     assert client.create_project_calls == 1
     assert client.create_compose_calls == 1
-    assert client.update_compose_calls == 0
+    assert client.update_compose_calls == 1
     assert client.deploy_calls == 1
 
 

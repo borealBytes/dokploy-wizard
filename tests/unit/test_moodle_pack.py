@@ -180,9 +180,13 @@ class FakeDokployMoodleApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        self.update_compose_calls += 1
-        self.last_update_compose_file = compose_file
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        del env
+        if compose_file is not None:
+            self.update_compose_calls += 1
+            self.last_update_compose_file = compose_file
         return DokployComposeRecord(compose_id=compose_id, name="wizard-stack-moodle")
 
     def deploy_compose(
@@ -253,7 +257,7 @@ class FakeDokployMoodleApiClient:
 
 
 def test_render_moodle_compose_includes_shared_postgres_data_and_forwarded_https() -> None:
-    compose = _render_compose_file(
+    rendered = _render_compose_file(
         stack_name="wizard-stack",
         hostname="moodle.example.com",
         postgres_service_name="wizard-stack-shared-postgres",
@@ -263,6 +267,7 @@ def test_render_moodle_compose_includes_shared_postgres_data_and_forwarded_https
             password_secret_ref="wizard-stack-moodle-postgres-password",
         ),
     )
+    compose = rendered.compose_file
 
     assert "image: moodlehq/moodle-php-apache:8.4-bullseye" in compose
     assert 'DOKPLOY_WIZARD_MOODLE_WWWROOT: "https://moodle.example.com"' in compose
@@ -270,7 +275,8 @@ def test_render_moodle_compose_includes_shared_postgres_data_and_forwarded_https
     assert 'DOKPLOY_WIZARD_MOODLE_DBHOST: "wizard-stack-shared-postgres"' in compose
     assert 'DOKPLOY_WIZARD_MOODLE_DBNAME: "wizard_stack_moodle"' in compose
     assert 'DOKPLOY_WIZARD_MOODLE_DBUSER: "wizard_stack_moodle"' in compose
-    assert 'DOKPLOY_WIZARD_MOODLE_DBPASS: "change-me"' in compose
+    assert 'DOKPLOY_WIZARD_MOODLE_DBPASS: "${MOODLE_DB_PASSWORD:?MOODLE_DB_PASSWORD is required}"' in compose
+    assert rendered.env_specs[0].value == "change-me"
     assert 'DOKPLOY_WIZARD_MOODLE_CONFIG_CACHE: "/var/moodledata/config.php"' in compose
     assert 'DOKPLOY_WIZARD_MOODLE_SOURCE_REF: "MOODLE_500_STABLE"' in compose
     assert (
@@ -413,7 +419,7 @@ def test_dokploy_moodle_backend_create_and_update_paths_keep_single_compose_stab
     assert created.resource_id == "dokploy-compose:cmp-1:service"
     assert create_client.create_project_calls == 1
     assert create_client.create_compose_calls == 1
-    assert create_client.update_compose_calls == 0
+    assert create_client.update_compose_calls == 1
     assert create_client.deploy_calls == 1
     assert create_client.last_create_compose_file is not None
 
@@ -485,7 +491,7 @@ def test_moodle_noop_skip_retries_upgrade_window_before_skipping_update_and_depl
             user_name="wizard_stack_moodle",
             password_secret_ref="wizard-stack-moodle-postgres-password",
         ),
-    )
+    ).compose_file
     _write_hash_checkpoint(
         tmp_path,
         service_key="wizard-stack-moodle",

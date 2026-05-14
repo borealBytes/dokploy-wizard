@@ -35,9 +35,11 @@ from dokploy_wizard.dokploy.client import (
 )
 from dokploy_wizard.dokploy.compose_noop import (
     apply_compose_noop_guard,
+    apply_rendered_compose_to_existing,
     persist_compose_artifact_hash,
 )
 from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
+from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
 from dokploy_wizard.litellm.config_renderer import verified_opencode_go_chat_model_ids
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
@@ -53,7 +55,9 @@ class DokployCoderApi(Protocol):
     def create_compose(
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord: ...
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord: ...
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord: ...
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
     ) -> DokployDeployResult: ...
@@ -469,8 +473,13 @@ class DokployCoderBackend:
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
-                    compose_file=compose_file,
+                    compose_file="services: {}\n",
                     app_name=self._compose_name,
+                )
+                apply_rendered_compose_to_existing(
+                    client=self._client,
+                    compose_id=created.compose_id,
+                    rendered_compose=compose_file,
                 )
                 deployment = self._client.deploy_compose(
                     compose_id=created.compose_id,
@@ -495,8 +504,13 @@ class DokployCoderBackend:
             created_compose = self._client.create_compose(
                 name=self._compose_name,
                 environment_id=created_project.environment_id,
-                compose_file=compose_file,
+                compose_file="services: {}\n",
                 app_name=self._compose_name,
+            )
+            apply_rendered_compose_to_existing(
+                client=self._client,
+                compose_id=created_compose.compose_id,
+                rendered_compose=compose_file,
             )
             deployment = self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
@@ -519,12 +533,13 @@ class DokployCoderBackend:
         return locator
 
     def _apply_existing_compose(
-        self, *, locator: _ComposeLocator, compose_file: str
+        self, *, locator: _ComposeLocator, compose_file: RenderedCompose
     ) -> _ComposeLocator:
         if not self._has_applied_state_checkpoint():
-            updated = self._client.update_compose(
+            updated = apply_rendered_compose_to_existing(
+                client=self._client,
                 compose_id=locator.compose_id,
-                compose_file=compose_file,
+                rendered_compose=compose_file,
             )
             deployment = self._client.deploy_compose(
                 compose_id=updated.compose_id,
@@ -562,13 +577,13 @@ class DokployCoderBackend:
     def _has_applied_state_checkpoint(self) -> bool:
         return load_state_dir(self._state_dir).applied_state is not None
 
-    def _persist_compose_hash_if_checkpoint_present(self, compose_file: str) -> None:
+    def _persist_compose_hash_if_checkpoint_present(self, compose_file: RenderedCompose) -> None:
         if not self._has_applied_state_checkpoint():
             return
         persist_compose_artifact_hash(
             state_dir=self._state_dir,
             service_key=self._compose_name,
-            rendered_compose=compose_file,
+            rendered_compose=compose_file.compose_file,
         )
 
     def _verify_current_compose_application(self):
@@ -746,17 +761,18 @@ def _render_compose_file(
     wildcard_hostname: str,
     postgres_service_name: str,
     postgres: SharedPostgresAllocation,
-) -> str:
+) -> RenderedCompose:
     service_name = _service_name(stack_name)
     data_name = _data_name(stack_name)
     shared_network = _shared_network_name(stack_name)
     wildcard_suffix = _wildcard_suffix(wildcard_hostname)
     wildcard_host_pattern = re.escape(wildcard_suffix).replace("\\", "\\\\")
+    pg_url_env = "CODER_PG_CONNECTION_URL"
     pg_url = (
         f"postgres://{postgres.user_name}:change-me@{postgres_service_name}:5432/"
         f"{postgres.database_name}?sslmode=disable"
     )
-    return (
+    compose_file = (
         "services:\n"
         f"  {service_name}:\n"
         "    image: ghcr.io/coder/coder:latest\n"
@@ -766,7 +782,7 @@ def _render_compose_file(
         "      CODER_HTTP_ADDRESS: 0.0.0.0:3000\n"
         f"      CODER_ACCESS_URL: {_yaml_quote(f'https://{hostname}/')}\n"
         f"      CODER_WILDCARD_ACCESS_URL: {_yaml_quote(wildcard_hostname)}\n"
-        f"      CODER_PG_CONNECTION_URL: {_yaml_quote(pg_url)}\n"
+        f"      CODER_PG_CONNECTION_URL: \"{_required_placeholder(pg_url_env)}\"\n"
         '      CODER_DERP_FORCE_WEBSOCKETS: "true"\n'
         f"      CODER_PROXY_TRUSTED_HEADERS: {_yaml_quote('X-Forwarded-For')}\n"
         f"      CODER_PROXY_TRUSTED_ORIGINS: {_yaml_quote('10.0.0.0/8,172.16.0.0/12,192.168.0.0/16')}\n"
@@ -807,6 +823,33 @@ def _render_compose_file(
         f"    name: {shared_network}\n"
         "    external: true\n"
     )
+    return RenderedCompose(
+        compose_file=compose_file,
+        env_specs=(
+            _coder_env_spec(
+                name=pg_url_env,
+                value=pg_url,
+                target_services=(service_name,),
+                source="coder-postgres-url",
+            ),
+        ),
+    )
+
+
+def _coder_env_spec(
+    *, name: str, value: str, target_services: tuple[str, ...], source: str
+) -> DokployEnvSpec:
+    return DokployEnvSpec(
+        variable=DokployEnvVar(name=name, value=value, sensitive=True, source=source),
+        owner="coder",
+        target_services=target_services,
+        placeholder=_required_placeholder(name),
+        required=True,
+    )
+
+
+def _required_placeholder(name: str) -> str:
+    return f"${{{name}:?{name} is required}}"
 
 
 def _local_https_health_check(url: str) -> bool:

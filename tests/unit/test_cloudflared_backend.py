@@ -14,22 +14,27 @@ from .fake_dokploy import FakeDokployApiClient
 
 
 def test_cloudflared_compose_uses_host_networking() -> None:
-    compose = _render_compose_file(
+    rendered = _render_compose_file(
         "wizard-stack-cloudflared",
         tunnel_token="token-123",
     )
+    compose = rendered.compose_file
 
     assert "image: cloudflare/cloudflared:latest" in compose
     assert "network_mode: host" in compose
     assert "command: ['tunnel', '--no-autoupdate', 'run']" in compose
-    assert 'TUNNEL_TOKEN: "token-123"' in compose
+    assert (
+        'TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}"'
+        in compose
+    )
+    assert rendered.env_specs[0].value == "token-123"
 
 
 def test_dokploy_cloudflared_backend_skips_redeploy_when_hash_matches_and_container_is_up(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     service_name = "wizard-stack-cloudflared"
-    compose_file = _render_compose_file(service_name, tunnel_token="token-123")
+    compose_file = _render_compose_file(service_name, tunnel_token="token-123").compose_file
     _write_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=compose_file)
     client = FakeDokployApiClient()
     client.seed_existing_service(

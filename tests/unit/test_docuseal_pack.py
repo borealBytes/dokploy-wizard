@@ -188,9 +188,13 @@ class FakeDokployDocuSealApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        self.update_compose_calls += 1
-        self.last_update_compose_file = compose_file
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        del env
+        if compose_file is not None:
+            self.update_compose_calls += 1
+            self.last_update_compose_file = compose_file
         return DokployComposeRecord(compose_id=compose_id, name="wizard-stack-docuseal")
 
     def deploy_compose(
@@ -218,7 +222,7 @@ def test_render_docuseal_compose_includes_database_secret_persistent_storage_and
     None
 ):
     secret_key_base_secret_ref = "wizard-stack-docuseal-secret-key-base"
-    compose = _render_compose_file(
+    rendered = _render_compose_file(
         stack_name="wizard-stack",
         hostname="docuseal.example.com",
         postgres_service_name="wizard-stack-shared-postgres",
@@ -229,15 +233,21 @@ def test_render_docuseal_compose_includes_database_secret_persistent_storage_and
         ),
         secret_key_base_secret_ref=secret_key_base_secret_ref,
     )
+    compose = rendered.compose_file
 
     assert "image: docuseal/docuseal:latest" in compose
     assert (
-        'DATABASE_URL: "postgres://wizard_stack_docuseal:change-me@wizard-stack-shared-postgres:5432/wizard_stack_docuseal?sslmode=disable"'
+        'DATABASE_URL: "${DOCUSEAL_DATABASE_URL:?DOCUSEAL_DATABASE_URL is required}"'
         in compose
     )
     assert (
-        f"SECRET_KEY_BASE: {_secret_key_base_value('wizard-stack', secret_key_base_secret_ref)}"
+        'SECRET_KEY_BASE: "${DOCUSEAL_SECRET_KEY_BASE:?DOCUSEAL_SECRET_KEY_BASE is required}"'
         in compose
+    )
+    assert any(
+        spec.name == "DOCUSEAL_SECRET_KEY_BASE"
+        and spec.value == _secret_key_base_value("wizard-stack", secret_key_base_secret_ref)
+        for spec in rendered.env_specs
     )
     assert 'DOKPLOY_WIZARD_DOCUSEAL_BASE_URL: "https://docuseal.example.com"' in compose
     assert "working_dir: /data/docuseal" in compose
@@ -277,7 +287,7 @@ def test_render_docuseal_compose_includes_local_postfix_smtp_when_configured() -
         smtp_port=587,
         smtp_domain="example.com",
         smtp_from_address="DoNotReply@example.com",
-    )
+    ).compose_file
 
     assert "SMTP_ADDRESS: wizard-stack-shared-postfix" in compose
     assert "SMTP_PORT: '587'" in compose
@@ -323,7 +333,7 @@ def test_dokploy_docuseal_backend_create_and_update_paths_keep_single_compose_st
     assert created.resource_id == "dokploy-compose:cmp-1:service"
     assert create_client.create_project_calls == 1
     assert create_client.create_compose_calls == 1
-    assert create_client.update_compose_calls == 0
+    assert create_client.update_compose_calls == 1
     assert create_client.deploy_calls == 1
     assert create_client.last_create_compose_file is not None
 
@@ -396,7 +406,7 @@ def test_docuseal_noop_skip_skips_update_and_deploy_when_up_ready(
             password_secret_ref="wizard-stack-docuseal-postgres-password",
         ),
         secret_key_base_secret_ref="wizard-stack-docuseal-secret-key-base",
-    )
+    ).compose_file
     _write_hash_checkpoint(
         tmp_path,
         service_key="wizard-stack-docuseal",
@@ -459,7 +469,7 @@ def test_docuseal_up_failure_blocks_noop_skip(
             password_secret_ref="wizard-stack-docuseal-postgres-password",
         ),
         secret_key_base_secret_ref="wizard-stack-docuseal-secret-key-base",
-    )
+    ).compose_file
     _write_hash_checkpoint(
         tmp_path,
         service_key="wizard-stack-docuseal",

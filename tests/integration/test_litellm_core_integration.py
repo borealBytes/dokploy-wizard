@@ -119,10 +119,14 @@ class RecordingDokploySharedCoreApi:
         self.compose_files_by_name[name] = compose_file
         return DokployComposeRecord(compose_id=compose_id, name=name)
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        self.update_compose_calls += 1
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        del env
         name = self.compose_names_by_id[compose_id]
-        self.compose_files_by_name[name] = compose_file
+        if compose_file is not None:
+            self.update_compose_calls += 1
+            self.compose_files_by_name[name] = compose_file
         return DokployComposeRecord(compose_id=compose_id, name=name)
 
     def deploy_compose(
@@ -643,7 +647,7 @@ def test_core_only_rerun_is_noop_and_preserves_litellm_keys(
     assert generated_after == generated_before
     assert api.create_project_calls == 1
     assert api.create_compose_calls == 1
-    assert api.update_compose_calls == 0
+    assert api.update_compose_calls == 1
     assert api.deploy_calls == 1
 
 
@@ -740,7 +744,7 @@ def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_f
     assert summary["shared_core"]["outcome"] == "already_present"
     assert summary["coder"]["outcome"] in {"applied", "already_present"}
     assert summary["my_farm_advisor"]["outcome"] in {"applied", "already_present"}
-    assert shared_core_api.update_compose_calls == 1
+    assert shared_core_api.update_compose_calls == 2
     assert openclaw_backend.update_calls == 1
     assert "openrouter/healer-alpha" in shared_core_api.compose_files_by_name["wizard-stack-shared"]
     assert generated_before is not None

@@ -109,7 +109,9 @@ class FakeDokployApiClient:
             self.compose_env_by_name[service_name] = env
         if compose_file is not None:
             self.compose_files_by_name[service_name] = compose_file
-            self.update_calls_by_name[service_name] = self.update_calls_by_name.get(service_name, 0) + 1
+            self.update_calls_by_name[service_name] = (
+                self.update_calls_by_name.get(service_name, 0) + 1
+            )
         return DokployComposeRecord(compose_id=compose_id, name=service_name)
 
     def deploy_compose(

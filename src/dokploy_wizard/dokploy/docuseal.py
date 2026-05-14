@@ -28,8 +28,10 @@ from dokploy_wizard.dokploy.client import (
 )
 from dokploy_wizard.dokploy.compose_noop import (
     apply_compose_noop_guard,
+    apply_rendered_compose_to_existing,
     persist_compose_artifact_hash,
 )
+from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
 from dokploy_wizard.packs.docuseal import (
     DocuSealBootstrapState,
     DocuSealError,
@@ -60,7 +62,9 @@ class DokployDocuSealApi(Protocol):
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord: ...
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord: ...
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord: ...
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -349,8 +353,13 @@ class DokployDocuSealBackend:
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
-                    compose_file=compose_file,
+                    compose_file="services: {}\n",
                     app_name=self._compose_name,
+                )
+                apply_rendered_compose_to_existing(
+                    client=self._client,
+                    compose_id=created.compose_id,
+                    rendered_compose=compose_file,
                 )
                 self._client.deploy_compose(
                     compose_id=created.compose_id,
@@ -365,7 +374,7 @@ class DokployDocuSealBackend:
                 persist_compose_artifact_hash(
                     state_dir=self._state_dir,
                     service_key=self._compose_name,
-                    rendered_compose=compose_file,
+                    rendered_compose=compose_file.compose_file,
                 )
                 self._applied_locator = locator
                 self._created_in_process = True
@@ -378,8 +387,13 @@ class DokployDocuSealBackend:
             created_compose = self._client.create_compose(
                 name=self._compose_name,
                 environment_id=created_project.environment_id,
-                compose_file=compose_file,
+                compose_file="services: {}\n",
                 app_name=self._compose_name,
+            )
+            apply_rendered_compose_to_existing(
+                client=self._client,
+                compose_id=created_compose.compose_id,
+                rendered_compose=compose_file,
             )
             self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
@@ -396,7 +410,7 @@ class DokployDocuSealBackend:
         persist_compose_artifact_hash(
             state_dir=self._state_dir,
             service_key=self._compose_name,
-            rendered_compose=compose_file,
+            rendered_compose=compose_file.compose_file,
         )
         self._created_in_process = True
         self._applied_locator = locator
@@ -492,11 +506,14 @@ def _render_compose_file(
     smtp_port: int | None = None,
     smtp_domain: str | None = None,
     smtp_from_address: str | None = None,
-) -> str:
+) -> RenderedCompose:
     service_name = _service_name(stack_name)
     data_name = _data_name(stack_name)
     shared_network = _shared_network_name(stack_name)
     health_url = _health_url(hostname)
+    database_url_env = "DOCUSEAL_DATABASE_URL"
+    secret_key_base_env = "DOCUSEAL_SECRET_KEY_BASE"
+    database_url = _database_url(postgres_service_name, postgres)
     secret_key_base = _secret_key_base_value(stack_name, secret_key_base_secret_ref)
     smtp_block = ""
     if smtp_host is not None and smtp_port is not None and smtp_from_address is not None:
@@ -507,15 +524,15 @@ def _render_compose_file(
             f"      SMTP_FROM: {_yaml_quote(smtp_from_address)}\n"
             "      SMTP_ENABLE_STARTTLS: 'false'\n"
         )
-    return (
+    compose_file = (
         "services:\n"
         f"  {service_name}:\n"
         f"    image: {_DEFAULT_DOCUSEAL_IMAGE}\n"
         "    restart: unless-stopped\n"
         f"    working_dir: {_DEFAULT_DOCUSEAL_DATA_ROOT}\n"
         "    environment:\n"
-        f"      DATABASE_URL: {_yaml_quote(_database_url(postgres_service_name, postgres))}\n"
-        f"      SECRET_KEY_BASE: {secret_key_base}\n"
+        f"      DATABASE_URL: \"{_required_placeholder(database_url_env)}\"\n"
+        f"      SECRET_KEY_BASE: \"{_required_placeholder(secret_key_base_env)}\"\n"
         f"      DOKPLOY_WIZARD_DOCUSEAL_BASE_URL: {_yaml_quote(f'https://{hostname}')}\n"
         f"      DOKPLOY_WIZARD_DOCUSEAL_DATA_ROOT: {_yaml_quote(_DEFAULT_DOCUSEAL_DATA_ROOT)}\n"
         f"{smtp_block}"
@@ -551,6 +568,39 @@ def _render_compose_file(
         "    external: true\n"
         f"# Managed health endpoint: {health_url}\n"
     )
+    return RenderedCompose(
+        compose_file=compose_file,
+        env_specs=(
+            _docuseal_env_spec(
+                name=database_url_env,
+                value=database_url,
+                target_services=(service_name,),
+                source="docuseal-database-url",
+            ),
+            _docuseal_env_spec(
+                name=secret_key_base_env,
+                value=secret_key_base,
+                target_services=(service_name,),
+                source="docuseal-secret-key-base",
+            ),
+        ),
+    )
+
+
+def _docuseal_env_spec(
+    *, name: str, value: str, target_services: tuple[str, ...], source: str
+) -> DokployEnvSpec:
+    return DokployEnvSpec(
+        variable=DokployEnvVar(name=name, value=value, sensitive=True, source=source),
+        owner="docuseal",
+        target_services=target_services,
+        placeholder=_required_placeholder(name),
+        required=True,
+    )
+
+
+def _required_placeholder(name: str) -> str:
+    return f"${{{name}:?{name} is required}}"
 
 
 def _local_https_health_check(url: str) -> bool:
