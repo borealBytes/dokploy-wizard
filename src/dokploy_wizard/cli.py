@@ -2725,12 +2725,18 @@ def _build_dokploy_session_project_create_fallback(
 
 def _build_dokploy_session_compose_create_fallback(
     *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
-) -> Callable[[str, str, str, str], Any] | None:
+) -> Callable[..., Any] | None:
     admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
     if not admin_email or not admin_password or session_client is None:
         return None
 
-    def _fallback(name: str, environment_id: str, compose_file: str, app_name: str) -> Any:
+    def _fallback(
+        name: str,
+        environment_id: str,
+        compose_file: str,
+        app_name: str,
+        env: str | None = None,
+    ) -> Any:
         return session_client.create_compose(
             admin_email=admin_email,
             admin_password=admin_password,
@@ -2738,6 +2744,7 @@ def _build_dokploy_session_compose_create_fallback(
             environment_id=environment_id,
             compose_file=compose_file,
             app_name=app_name,
+            env=env,
         )
 
     return _fallback
@@ -2745,17 +2752,22 @@ def _build_dokploy_session_compose_create_fallback(
 
 def _build_dokploy_session_compose_update_fallback(
     *, raw_env: RawEnvInput, session_client: DokployBootstrapAuthClient | None
-) -> Callable[[str, str], Any] | None:
+) -> Callable[..., Any] | None:
     admin_email, admin_password = _resolve_dokploy_admin_auth(raw_env.values)
     if not admin_email or not admin_password or session_client is None:
         return None
 
-    def _fallback(compose_id: str, compose_file: str) -> Any:
+    def _fallback(
+        compose_id: str,
+        compose_file: str | None = None,
+        env: str | None = None,
+    ) -> Any:
         return session_client.update_compose(
             admin_email=admin_email,
             admin_password=admin_password,
             compose_id=compose_id,
             compose_file=compose_file,
+            env=env,
         )
 
     return _fallback

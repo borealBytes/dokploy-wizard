@@ -13,8 +13,8 @@ from urllib import error, request
 RequestFn = Callable[[request.Request], Any]
 ListProjectsSessionFallbackFn = Callable[[], Any]
 ProjectCreateSessionFallbackFn = Callable[[str, str | None, str | None], Any]
-ComposeCreateSessionFallbackFn = Callable[[str, str, str, str], Any]
-ComposeUpdateSessionFallbackFn = Callable[[str, str], Any]
+ComposeCreateSessionFallbackFn = Callable[..., Any]
+ComposeUpdateSessionFallbackFn = Callable[..., Any]
 DeploySessionFallbackFn = Callable[[str, str | None, str | None], Any]
 ListComposeSchedulesSessionFallbackFn = Callable[[str], Any]
 CreateScheduleSessionFallbackFn = Callable[[str, str, str, str, str, str, bool], Any]
@@ -180,6 +180,7 @@ class DokployApiClient:
         environment_id: str,
         compose_file: str,
         app_name: str,
+        env: str | None = None,
     ) -> DokployComposeRecord:
         try:
             payload = self._request_json(
@@ -195,21 +196,34 @@ class DokployApiClient:
         except DokployApiError as error:
             if self._compose_create_session_fallback is None or not _is_unauthorized_error(error):
                 raise
-            payload = self._compose_create_session_fallback(
-                name, environment_id, compose_file, app_name
-            )
+            if env is None:
+                payload = self._compose_create_session_fallback(
+                    name, environment_id, compose_file, app_name
+                )
+            else:
+                payload = self._compose_create_session_fallback(
+                    name, environment_id, compose_file, app_name, env
+                )
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
         created = _parse_compose_record(payload, "compose.create")
+        if env is not None:
+            self.update_compose(compose_id=created.compose_id, env=env)
         return self.update_compose(compose_id=created.compose_id, compose_file=compose_file)
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        try:
-            payload = self._request_json(
-                "POST",
-                "/api/compose.update",
+    def update_compose(
+        self,
+        *,
+        compose_id: str,
+        compose_file: str | None = None,
+        env: str | None = None,
+    ) -> DokployComposeRecord:
+        if compose_file is None and env is None:
+            raise DokployApiError("Dokploy compose.update requires compose_file or env.")
+        update_payload: dict[str, Any] = {"composeId": compose_id}
+        if compose_file is not None:
+            update_payload.update(
                 {
-                    "composeId": compose_id,
                     "composeType": "docker-compose",
                     "sourceType": "raw",
                     "composePath": "./docker-compose.yml",
@@ -218,12 +232,23 @@ class DokployApiClient:
                     "owner": None,
                     "branch": None,
                     "composeFile": compose_file,
-                },
+                }
+            )
+        if env is not None:
+            update_payload["env"] = env
+        try:
+            payload = self._request_json(
+                "POST",
+                "/api/compose.update",
+                update_payload,
             )
         except DokployApiError as error:
             if self._compose_update_session_fallback is None or not _is_unauthorized_error(error):
                 raise
-            payload = self._compose_update_session_fallback(compose_id, compose_file)
+            if env is None:
+                payload = self._compose_update_session_fallback(compose_id, compose_file)
+            else:
+                payload = self._compose_update_session_fallback(compose_id, compose_file, env)
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
         return _parse_compose_record(payload, "compose.update")
