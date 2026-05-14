@@ -209,13 +209,14 @@ def reconcile_shared_core(
     if not dry_run and postgres is not None:
         ensure_postgres_allocations = getattr(backend, "ensure_postgres_allocations", None)
         if callable(ensure_postgres_allocations):
-            ensure_postgres_allocations(
-                tuple(
-                    allocation.postgres
-                    for allocation in plan.allocations
-                    if allocation.postgres is not None
-                )
-            )
+            postgres_allocations = [
+                allocation.postgres
+                for allocation in plan.allocations
+                if allocation.postgres is not None
+            ]
+            if plan.litellm is not None:
+                postgres_allocations.append(plan.litellm.postgres)
+            ensure_postgres_allocations(tuple(postgres_allocations))
     if not dry_run:
         reconcile_litellm = getattr(backend, "reconcile_litellm_runtime", None)
         if callable(reconcile_litellm):
