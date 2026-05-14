@@ -180,9 +180,13 @@ class FakeDokployApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        del compose_id, compose_file
-        raise AssertionError("SeaweedFS backend should not update compose apps in this task")
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        del env
+        if compose_file is not None:
+            self.last_create_compose_file = compose_file
+        return DokployComposeRecord(compose_id=compose_id, name="wizard-stack-seaweedfs")
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -444,7 +448,7 @@ def test_dokploy_seaweedfs_backend_skips_redeploy_when_hash_matches_and_containe
         hostname="s3.example.com",
         access_key="seaweed-access",
         secret_key="seaweed-secret",
-    )
+    ).compose_file
     _write_hash_checkpoint(
         tmp_path,
         service_name="wizard-stack-seaweedfs",

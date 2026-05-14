@@ -135,8 +135,10 @@ class FakeDokployApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        del compose_file
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        del compose_file, env
         return DokployComposeRecord(compose_id=compose_id, name="wizard-stack-headscale")
 
     def deploy_compose(
@@ -422,7 +424,7 @@ def _write_empty_checkpoint(state_dir: Path) -> None:
 
 
 def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
-    rendered = _render_compose_file(
+    rendered_compose = _render_compose_file(
         "wizard-stack-headscale",
         "headscale.example.com",
         (
@@ -430,6 +432,7 @@ def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
             "wizard-stack-headscale-noise-private-key",
         ),
     )
+    rendered = rendered_compose.compose_file
 
     assert "cat <<'EOF'" not in rendered
     assert "HEADSCALE_SERVER_URL: https://headscale.example.com" in rendered
@@ -439,6 +442,8 @@ def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
     assert "command: ['serve']" in rendered
     assert "HEADSCALE_DERP_SERVER_ENABLED" not in rendered
     assert "healthcheck:" not in rendered
+    assert 'HEADSCALE_ADMIN_API_KEY: "${WIZARD_STACK_HEADSCALE_ADMIN_API_KEY:?WIZARD_STACK_HEADSCALE_ADMIN_API_KEY is required}"' in rendered
+    assert rendered_compose.env_specs[0].name == "WIZARD_STACK_HEADSCALE_ADMIN_API_KEY"
     assert (
         'traefik.http.routers.wizard-stack-headscale.rule: "Host(`headscale.example.com`)"'
         in rendered
@@ -566,7 +571,7 @@ def test_dokploy_headscale_backend_skips_redeploy_when_hash_matches_and_containe
             "wizard-stack-headscale-admin-api-key",
             "wizard-stack-headscale-noise-private-key",
         ),
-    )
+    ).compose_file
     _write_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=compose_file)
     client = SharedFakeDokployApiClient()
     client.seed_existing_service(

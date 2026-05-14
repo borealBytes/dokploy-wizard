@@ -473,9 +473,11 @@ class FakeDokployApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        del compose_id, compose_file
-        raise AssertionError("Matrix backend should not update compose apps in this task")
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        del compose_file, env
+        return DokployComposeRecord(compose_id=compose_id, name="wizard-stack-matrix")
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None

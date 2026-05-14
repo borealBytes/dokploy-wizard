@@ -314,9 +314,11 @@ class FakeDokployApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str):
-        del compose_id, compose_file
-        raise AssertionError("SeaweedFS backend should not update compose apps in this task")
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ):
+        del compose_file, env
+        return DokployComposeRecord(compose_id=compose_id, name="nextcloud-stack-seaweedfs")
 
     def deploy_compose(self, *, compose_id: str, title: str | None, description: str | None):
         del title, description

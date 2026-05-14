@@ -13,6 +13,7 @@ from dokploy_wizard.core.models import SharedPostgresAllocation, SharedRedisAllo
 from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.dokploy.cloudflared import _render_compose_file as render_cloudflared_compose
 from dokploy_wizard.dokploy.coder import _render_compose_file as render_coder_compose
+from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, RenderedCompose
 from dokploy_wizard.dokploy.openclaw import DokployOpenClawBackend
 from dokploy_wizard.dokploy.seaweedfs import _render_compose_file as render_seaweedfs_compose
 from dokploy_wizard.dokploy.shared_core import _render_compose_file as render_shared_core_compose
@@ -26,6 +27,7 @@ class _RenderedArtifact:
     owner: str
     service_names: tuple[str, ...]
     compose_file: str = field(repr=False)
+    env_specs: tuple[DokployEnvSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,17 @@ def _litellm_generated_keys() -> LiteLLMGeneratedKeys:
     )
 
 
+def _artifact_from_rendered(
+    *, owner: str, service_names: tuple[str, ...], rendered: RenderedCompose
+) -> _RenderedArtifact:
+    return _RenderedArtifact(
+        owner=owner,
+        service_names=service_names,
+        compose_file=rendered.compose_file,
+        env_specs=rendered.env_specs,
+    )
+
+
 def _render_openclaw_artifact() -> _RenderedArtifact:
     api = FakeDokployOpenClawApi(created_compose_id="compose-openclaw")
     backend = DokployOpenClawBackend(
@@ -185,22 +198,22 @@ def _representative_artifacts() -> tuple[_RenderedArtifact, ...]:
     nextcloud_redis = _redis_allocation("nextcloud")
 
     return (
-        _RenderedArtifact(
+        _artifact_from_rendered(
             owner="cloudflared",
             service_names=("wizard-stack-cloudflared",),
-            compose_file=render_cloudflared_compose(
+            rendered=render_cloudflared_compose(
                 "wizard-stack-cloudflared",
                 tunnel_token="SECRET_TEST_CLOUDFLARED_TUNNEL_VALUE",
             ),
         ),
-        _RenderedArtifact(
+        _artifact_from_rendered(
             owner="shared-core",
             service_names=(
                 "wizard-stack-shared-postgres",
                 "wizard-stack-shared-redis",
                 "wizard-stack-shared-litellm",
             ),
-            compose_file=render_shared_core_compose(
+            rendered=render_shared_core_compose(
                 shared_plan,
                 {},
                 {
@@ -208,12 +221,12 @@ def _representative_artifacts() -> tuple[_RenderedArtifact, ...]:
                     "LITELLM_LOCAL_MODEL": "unsloth-active",
                 },
                 _litellm_generated_keys(),
-            ).compose_file,
+            ),
         ),
-        _RenderedArtifact(
+        _artifact_from_rendered(
             owner="nextcloud",
             service_names=("wizard-stack-nextcloud", "wizard-stack-onlyoffice"),
-            compose_file=nextcloud_module._render_compose_file(
+            rendered=nextcloud_module._render_compose_file(
                 stack_name="wizard-stack",
                 nextcloud_hostname="nextcloud.example.com",
                 onlyoffice_hostname="office.example.com",
@@ -225,22 +238,22 @@ def _representative_artifacts() -> tuple[_RenderedArtifact, ...]:
                 admin_user="admin",
                 admin_password="SECRET_TEST_NEXTCLOUD_ADMIN_VALUE",
                 advisor_workspace_mounts=(),
-            ).compose_file,
+            ),
         ),
-        _RenderedArtifact(
+        _artifact_from_rendered(
             owner="seaweedfs",
             service_names=("wizard-stack-seaweedfs",),
-            compose_file=render_seaweedfs_compose(
+            rendered=render_seaweedfs_compose(
                 stack_name="wizard-stack",
                 hostname="s3.example.com",
                 access_key="seaweed-access",
                 secret_key="SECRET_TEST_SEAWEEDFS_SECRET_VALUE",
             ),
         ),
-        _RenderedArtifact(
+        _artifact_from_rendered(
             owner="coder",
             service_names=("wizard-stack-coder",),
-            compose_file=render_coder_compose(
+            rendered=render_coder_compose(
                 stack_name="wizard-stack",
                 hostname="coder.example.com",
                 wildcard_hostname="*.coder.example.com",
@@ -267,14 +280,37 @@ def _assert_no_raw_secret_values(artifacts: tuple[_RenderedArtifact, ...]) -> No
         pytest.fail("raw secret values found in compose output: " + "; ".join(sorted(leaks)))
 
 
+def _assert_env_specs_cover_secret_placeholders(artifacts: tuple[_RenderedArtifact, ...]) -> None:
+    failures: list[str] = []
+    for artifact in artifacts:
+        specs_by_name = {spec.name: spec for spec in artifact.env_specs}
+        for secret in _SENTINEL_SECRETS:
+            if secret.expected_owner != artifact.owner:
+                continue
+            placeholder = f"${{{secret.key}:?{secret.key} is required}}"
+            if placeholder not in artifact.compose_file:
+                continue
+            if not artifact.env_specs:
+                continue
+            spec = specs_by_name.get(secret.key)
+            if spec is None:
+                failures.append(f"{artifact.owner}:{secret.key} missing env spec")
+                continue
+            if spec.value != secret.value:
+                failures.append(f"{artifact.owner}:{secret.key} env spec does not preserve value")
+            if spec.target_services != secret.expected_target_services:
+                failures.append(f"{artifact.owner}:{secret.key} target services mismatch")
+            if not spec.sensitive:
+                failures.append(f"{artifact.owner}:{secret.key} should be sensitive")
+    if failures:
+        pytest.fail("env specs did not cover required secret placeholders: " + "; ".join(failures))
+
+
 def test_representative_wizard_managed_compose_outputs_do_not_inline_raw_secrets() -> None:
-    artifacts = tuple(
-        artifact
-        for artifact in _representative_artifacts()
-        if artifact.owner in {"shared-core", "nextcloud"}
-    )
+    artifacts = _representative_artifacts()
 
     _assert_no_raw_secret_values(artifacts)
+    _assert_env_specs_cover_secret_placeholders(artifacts)
 
 
 def test_representative_compose_uses_explicit_service_environment_mappings() -> None:

@@ -288,9 +288,10 @@ class FakeCoderApi:
 
         return Compose()
 
-    def update_compose(self, *, compose_id: str, compose_file: str):
-        del compose_id
-        self.last_create_compose_file = compose_file
+    def update_compose(self, *, compose_id: str, compose_file: str | None = None, env: str | None = None):
+        del compose_id, env
+        if compose_file is not None:
+            self.last_create_compose_file = compose_file
 
         class Compose:
             compose_id = "compose-1"
@@ -308,7 +309,7 @@ class FakeCoderApi:
 
 
 def test_render_coder_compose_includes_root_and_wildcard_routes() -> None:
-    compose = _render_compose_file(
+    rendered = _render_compose_file(
         stack_name="wizard-stack",
         hostname="coder.example.com",
         wildcard_hostname="*.coder.example.com",
@@ -319,13 +320,15 @@ def test_render_coder_compose_includes_root_and_wildcard_routes() -> None:
             password_secret_ref="wizard-stack-coder-postgres-password",
         ),
     )
+    compose = rendered.compose_file
 
     assert 'CODER_ACCESS_URL: "https://coder.example.com/"' in compose
     assert 'CODER_WILDCARD_ACCESS_URL: "*.coder.example.com"' in compose
     assert (
-        'CODER_PG_CONNECTION_URL: "postgres://wizard_stack_coder:change-me@wizard-stack-shared-postgres:5432/wizard_stack_coder?sslmode=disable"'
+        'CODER_PG_CONNECTION_URL: "${CODER_PG_CONNECTION_URL:?CODER_PG_CONNECTION_URL is required}"'
         in compose
     )
+    assert rendered.env_specs[0].value == "postgres://wizard_stack_coder:change-me@wizard-stack-shared-postgres:5432/wizard_stack_coder?sslmode=disable"
     assert 'CODER_PROXY_TRUSTED_HEADERS: "X-Forwarded-For"' in compose
     assert 'CODER_PROXY_TRUSTED_ORIGINS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"' in compose
     assert "CODER_REDIRECT_TO_ACCESS_URL:" not in compose
@@ -1876,7 +1879,7 @@ def test_dokploy_coder_backend_skips_healthy_unchanged_rerun(
             user_name="wizard_stack_coder",
             password_secret_ref="wizard-stack-coder-postgres-password",
         ),
-    )
+    ).compose_file
     _write_coder_hash_checkpoint(
         tmp_path,
         service_name="wizard-stack-coder",
@@ -2091,7 +2094,7 @@ def test_dokploy_coder_backend_unhealthy_api_blocks_noop_skip(
             user_name="wizard_stack_coder",
             password_secret_ref="wizard-stack-coder-postgres-password",
         ),
-    )
+    ).compose_file
     _write_coder_hash_checkpoint(
         tmp_path,
         service_name="wizard-stack-coder",

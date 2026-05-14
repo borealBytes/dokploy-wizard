@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generic, Literal, Protocol, TypeVar
+from typing import Any, Generic, Literal, Protocol, TypeVar, cast
 
 from dokploy_wizard.dokploy.client import DokployComposeRecord, DokployDeployResult
+from dokploy_wizard.dokploy.env_spec import DokployEnvReconciler, RenderedCompose
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     ComposeArtifactHashState,
@@ -21,7 +22,9 @@ VerificationOutcome = bool | ServiceVerificationResult
 
 
 class ComposeMutationApi(Protocol):
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord: ...
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord: ...
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -36,7 +39,7 @@ class ComposeApplyResult(Generic[LocatorT]):
 
 def apply_compose_noop_guard(
     *,
-    rendered_compose: str,
+    rendered_compose: str | RenderedCompose,
     service_key: str,
     state_dir: Path,
     client: ComposeMutationApi,
@@ -49,16 +52,21 @@ def apply_compose_noop_guard(
 ) -> ComposeApplyResult[LocatorT]:
     """Skip compose mutation only when the rendered hash matches and verification passes."""
 
+    compose_file = _compose_file_text(rendered_compose)
     rendered_hash = ComposeArtifactHashState.from_rendered_compose(
         service_id=service_key,
-        rendered_compose=rendered_compose,
+        rendered_compose=compose_file,
     )
     stored_hash = load_compose_artifact_hash(state_dir=state_dir, service_key=service_key)
 
     if stored_hash == rendered_hash and _verification_passed(verify_current()):
         return ComposeApplyResult(locator=locator, status="already_present")
 
-    updated = client.update_compose(compose_id=compose_id, compose_file=rendered_compose)
+    updated = apply_rendered_compose_to_existing(
+        client=client,
+        compose_id=compose_id,
+        rendered_compose=rendered_compose,
+    )
     deployment = client.deploy_compose(
         compose_id=updated.compose_id,
         title=title,
@@ -71,12 +79,49 @@ def apply_compose_noop_guard(
     persist_compose_artifact_hash(
         state_dir=state_dir,
         service_key=service_key,
-        rendered_compose=rendered_compose,
+        rendered_compose=compose_file,
     )
     return ComposeApplyResult(
         locator=locator_factory(updated.compose_id),
         status="applied",
     )
+
+
+def apply_rendered_compose_to_existing(
+    *,
+    client: ComposeMutationApi,
+    compose_id: str,
+    rendered_compose: str | RenderedCompose,
+) -> DokployComposeRecord:
+    if isinstance(rendered_compose, RenderedCompose):
+        env_payload = DokployEnvReconciler(client=cast(Any, client)).build_env_payload(
+            rendered_compose
+        )
+        if env_payload:
+            _update_compose_env_if_supported(client, compose_id=compose_id, env_payload=env_payload)
+        return client.update_compose(
+            compose_id=compose_id,
+            compose_file=rendered_compose.compose_file,
+        )
+    return client.update_compose(compose_id=compose_id, compose_file=rendered_compose)
+
+
+def _compose_file_text(rendered_compose: str | RenderedCompose) -> str:
+    if isinstance(rendered_compose, RenderedCompose):
+        return rendered_compose.compose_file
+    return rendered_compose
+
+
+def _update_compose_env_if_supported(
+    client: ComposeMutationApi, *, compose_id: str, env_payload: str
+) -> None:
+    update_compose = cast(Any, client).update_compose
+    try:
+        update_compose(compose_id=compose_id, env=env_payload)
+    except TypeError as error:
+        message = str(error)
+        if "env" not in message and "compose_file" not in message:
+            raise
 
 
 def load_compose_artifact_hash(

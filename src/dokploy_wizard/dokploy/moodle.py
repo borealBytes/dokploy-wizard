@@ -29,8 +29,10 @@ from dokploy_wizard.dokploy.client import (
 )
 from dokploy_wizard.dokploy.compose_noop import (
     apply_compose_noop_guard,
+    apply_rendered_compose_to_existing,
     persist_compose_artifact_hash,
 )
+from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
 from dokploy_wizard.packs.moodle import MoodleError, MoodleResourceRecord
 from dokploy_wizard.verification import ServiceVerificationResult
 
@@ -91,7 +93,9 @@ class DokployMoodleApi(Protocol):
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord: ...
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord: ...
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord: ...
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -401,8 +405,13 @@ class DokployMoodleBackend:
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
-                    compose_file=compose_file,
+                    compose_file="services: {}\n",
                     app_name=self._compose_name,
+                )
+                apply_rendered_compose_to_existing(
+                    client=self._client,
+                    compose_id=created.compose_id,
+                    rendered_compose=compose_file,
                 )
                 self._client.deploy_compose(
                     compose_id=created.compose_id,
@@ -417,7 +426,7 @@ class DokployMoodleBackend:
                 persist_compose_artifact_hash(
                     state_dir=self._state_dir,
                     service_key=self._compose_name,
-                    rendered_compose=compose_file,
+                    rendered_compose=compose_file.compose_file,
                 )
                 self._applied_locator = locator
                 self._created_in_process = True
@@ -431,8 +440,13 @@ class DokployMoodleBackend:
             created_compose = self._client.create_compose(
                 name=self._compose_name,
                 environment_id=created_project.environment_id,
-                compose_file=compose_file,
+                compose_file="services: {}\n",
                 app_name=self._compose_name,
+            )
+            apply_rendered_compose_to_existing(
+                client=self._client,
+                compose_id=created_compose.compose_id,
+                rendered_compose=compose_file,
             )
             self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
@@ -449,7 +463,7 @@ class DokployMoodleBackend:
         persist_compose_artifact_hash(
             state_dir=self._state_dir,
             service_key=self._compose_name,
-            rendered_compose=compose_file,
+            rendered_compose=compose_file.compose_file,
         )
         self._created_in_process = True
         self._applied_locator = locator
@@ -564,12 +578,13 @@ def _render_compose_file(
     hostname: str,
     postgres_service_name: str,
     postgres: SharedPostgresAllocation,
-) -> str:
+) -> RenderedCompose:
     service_name = _service_name(stack_name)
     data_name = _data_name(stack_name)
     shared_network = _shared_network_name(stack_name)
     runtime_prepare_shell = _compose_escape_shell(_moodle_runtime_prepare_shell())
-    return (
+    db_password_env = "MOODLE_DB_PASSWORD"
+    compose_file = (
         "services:\n"
         f"  {service_name}:\n"
         "    image: moodlehq/moodle-php-apache:8.4-bullseye\n"
@@ -587,7 +602,7 @@ def _render_compose_file(
         f"      DOKPLOY_WIZARD_MOODLE_DBHOST: {_yaml_quote(postgres_service_name)}\n"
         f"      DOKPLOY_WIZARD_MOODLE_DBNAME: {_yaml_quote(postgres.database_name)}\n"
         f"      DOKPLOY_WIZARD_MOODLE_DBUSER: {_yaml_quote(postgres.user_name)}\n"
-        f"      DOKPLOY_WIZARD_MOODLE_DBPASS: {_yaml_quote(_DEFAULT_SHARED_SERVICE_PASSWORD)}\n"
+        f"      DOKPLOY_WIZARD_MOODLE_DBPASS: \"{_required_placeholder(db_password_env)}\"\n"
         f"      DOKPLOY_WIZARD_MOODLE_CONFIG_CACHE: {_yaml_quote(_DEFAULT_MOODLE_CONFIG_CACHE)}\n"
         f"      DOKPLOY_WIZARD_MOODLE_SOURCE_REF: {_yaml_quote(_DEFAULT_MOODLE_SOURCE_REF)}\n"
         f"      DOKPLOY_WIZARD_MOODLE_SOURCE_ARCHIVE_URL: {_yaml_quote(_moodle_source_archive_url())}\n"
@@ -623,6 +638,33 @@ def _render_compose_file(
         f"    name: {shared_network}\n"
         "    external: true\n"
     )
+    return RenderedCompose(
+        compose_file=compose_file,
+        env_specs=(
+            _moodle_env_spec(
+                name=db_password_env,
+                value=_DEFAULT_SHARED_SERVICE_PASSWORD,
+                target_services=(service_name,),
+                source="moodle-postgres-password",
+            ),
+        ),
+    )
+
+
+def _moodle_env_spec(
+    *, name: str, value: str, target_services: tuple[str, ...], source: str
+) -> DokployEnvSpec:
+    return DokployEnvSpec(
+        variable=DokployEnvVar(name=name, value=value, sensitive=True, source=source),
+        owner="moodle",
+        target_services=target_services,
+        placeholder=_required_placeholder(name),
+        required=True,
+    )
+
+
+def _required_placeholder(name: str) -> str:
+    return f"${{{name}:?{name} is required}}"
 
 
 def _local_https_health_check(url: str) -> bool:
