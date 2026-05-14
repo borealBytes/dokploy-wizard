@@ -30,6 +30,7 @@ class FakeDokployApiClient:
     environment_name: str = "production"
     compose_names_by_id: dict[str, str] = field(default_factory=dict)
     compose_files_by_name: dict[str, str] = field(default_factory=dict)
+    compose_env_by_name: dict[str, str] = field(default_factory=dict)
     compose_status_by_name: dict[str, str | None] = field(default_factory=dict)
     create_calls_by_name: dict[str, int] = field(default_factory=dict)
     update_calls_by_name: dict[str, int] = field(default_factory=dict)
@@ -100,10 +101,15 @@ class FakeDokployApiClient:
         self.create_calls_by_name[name] = self.create_calls_by_name.get(name, 0) + 1
         return DokployComposeRecord(compose_id=compose_id, name=name)
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
         service_name = self.compose_names_by_id[compose_id]
-        self.compose_files_by_name[service_name] = compose_file
-        self.update_calls_by_name[service_name] = self.update_calls_by_name.get(service_name, 0) + 1
+        if env is not None:
+            self.compose_env_by_name[service_name] = env
+        if compose_file is not None:
+            self.compose_files_by_name[service_name] = compose_file
+            self.update_calls_by_name[service_name] = self.update_calls_by_name.get(service_name, 0) + 1
         return DokployComposeRecord(compose_id=compose_id, name=service_name)
 
     def deploy_compose(
