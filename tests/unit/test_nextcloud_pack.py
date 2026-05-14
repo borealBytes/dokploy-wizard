@@ -30,6 +30,7 @@ from dokploy_wizard.dokploy import (
     DokployProjectSummary,
     DokployScheduleRecord,
 )
+from dokploy_wizard.dokploy.env_spec import RenderedCompose
 from dokploy_wizard.dokploy.nextcloud import (
     _ensure_nexa_service_account,
     _ensure_onlyoffice_app_config,
@@ -190,6 +191,7 @@ class FakeDokployApiClient:
     schedules: list[DokployScheduleRecord] = field(default_factory=list)
     last_create_compose_file: str | None = None
     last_update_compose_file: str | None = None
+    last_update_env: str | None = None
 
     def list_projects(self) -> tuple[DokployProjectSummary, ...]:
         return tuple(self.projects)
@@ -242,9 +244,14 @@ class FakeDokployApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
         self.update_compose_calls += 1
-        self.last_update_compose_file = compose_file
+        if compose_file is not None:
+            self.last_update_compose_file = compose_file
+        if env is not None:
+            self.last_update_env = env
         return DokployComposeRecord(compose_id=compose_id, name="wizard-stack-nextcloud")
 
     def deploy_compose(
@@ -901,23 +908,68 @@ def test_dokploy_nextcloud_backend_creates_one_compose_for_pair() -> None:
     assert client.create_project_calls == 1
     assert client.create_compose_calls == 1
     assert client.deploy_calls == 1
-    compose = client.last_create_compose_file
+    assert client.last_create_compose_file == "services: {}\n"
+    compose = client.last_update_compose_file
     assert compose is not None
+    assert client.last_update_env is not None
     assert (
         'traefik.http.routers.wizard-stack-nextcloud.rule: "Host(`nextcloud.example.com`)"'
         in compose
     )
-    assert "TRUSTED_PROXIES: 127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" in compose
-    assert "OVERWRITECLIURL: https://nextcloud.example.com" in compose
-    assert "NEXTCLOUD_ADMIN_USER: admin" in compose
-    assert "NEXTCLOUD_ADMIN_PASSWORD: ChangeMeSoon" in compose
-    assert "POSTGRES_PASSWORD: change-me" in compose
-    assert "REDIS_HOST_PASSWORD: change-me" in compose
+    assert 'TRUSTED_PROXIES: "${NEXTCLOUD_TRUSTED_PROXIES:?NEXTCLOUD_TRUSTED_PROXIES is required}"' in compose
+    assert 'OVERWRITECLIURL: "${NEXTCLOUD_OVERWRITECLIURL:?NEXTCLOUD_OVERWRITECLIURL is required}"' in compose
+    assert 'NEXTCLOUD_ADMIN_USER: "${NEXTCLOUD_ADMIN_USER:?NEXTCLOUD_ADMIN_USER is required}"' in compose
+    assert 'NEXTCLOUD_ADMIN_PASSWORD: "${NEXTCLOUD_ADMIN_PASSWORD:?NEXTCLOUD_ADMIN_PASSWORD is required}"' in compose
+    assert "ChangeMeSoon" not in compose
+    assert "change-me" not in compose
+    assert "NEXTCLOUD_ADMIN_PASSWORD=ChangeMeSoon" in client.last_update_env
+    assert "NEXTCLOUD_POSTGRES_PASSWORD=change-me" in client.last_update_env
     assert 'traefik.http.services.wizard-stack-nextcloud.loadbalancer.server.port: "80"' in compose
     assert (
         'traefik.http.routers.wizard-stack-onlyoffice.rule: "Host(`office.example.com`)"' in compose
     )
     assert 'traefik.http.services.wizard-stack-onlyoffice.loadbalancer.server.port: "80"' in compose
+
+
+def test_nextcloud_renderer_returns_safe_compose_with_targeted_env_specs() -> None:
+    postgres = SharedPostgresAllocation(
+        database_name="wizard_stack_nextcloud",
+        user_name="wizard_stack_nextcloud",
+        password_secret_ref="wizard-stack-nextcloud-postgres-password",
+    )
+    redis = SharedRedisAllocation(
+        identity_name="wizard-stack-nextcloud-redis",
+        password_secret_ref="wizard-stack-nextcloud-redis-password",
+    )
+
+    rendered = nextcloud_module._render_compose_file(
+        stack_name="wizard-stack",
+        nextcloud_hostname="nextcloud.example.com",
+        onlyoffice_hostname="office.example.com",
+        postgres_service_name="wizard-stack-shared-postgres",
+        redis_service_name="wizard-stack-shared-redis",
+        postgres=postgres,
+        redis=redis,
+        integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
+        admin_user="admin",
+        admin_password="SECRET_TEST_NEXTCLOUD_ADMIN_VALUE",
+        advisor_workspace_mounts=(),
+    )
+
+    assert isinstance(rendered, RenderedCompose)
+    assert "SECRET_TEST_NEXTCLOUD_ADMIN_VALUE" not in rendered.compose_file
+    assert "change-me" not in rendered.compose_file
+    specs = {spec.name: spec for spec in rendered.env_specs}
+    assert specs["NEXTCLOUD_ADMIN_PASSWORD"].value == "SECRET_TEST_NEXTCLOUD_ADMIN_VALUE"
+    assert specs["NEXTCLOUD_ADMIN_PASSWORD"].target_services == ("wizard-stack-nextcloud",)
+    assert specs["NEXTCLOUD_POSTGRES_PASSWORD"].value == "change-me"
+    assert specs["NEXTCLOUD_POSTGRES_PASSWORD"].target_services == ("wizard-stack-nextcloud",)
+    assert specs["NEXTCLOUD_REDIS_HOST_PASSWORD"].value.startswith("dw-")
+    assert specs["NEXTCLOUD_REDIS_HOST_PASSWORD"].target_services == ("wizard-stack-nextcloud",)
+    assert specs["ONLYOFFICE_JWT_SECRET"].value.startswith("dw-")
+    assert specs["ONLYOFFICE_JWT_SECRET"].target_services == ("wizard-stack-onlyoffice",)
+    assert specs["NEXTCLOUD_TRUSTED_DOMAINS"].value == "nextcloud.example.com"
+    assert specs["NEXTCLOUD_TRUSTED_DOMAINS"].sensitive is False
 
 
 def _openclaw_advisor_workspace_mount() -> NextcloudAdvisorWorkspaceMountContract:
@@ -1017,6 +1069,20 @@ def _render_nextcloud_compose_for_mounts(
     openclaw_volume_name: str | None = None,
     openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None = None,
 ) -> str:
+    compose, _env = _render_nextcloud_compose_and_env_for_mounts(
+        advisor_workspace_mounts=advisor_workspace_mounts,
+        openclaw_volume_name=openclaw_volume_name,
+        openclaw_workspace_contract=openclaw_workspace_contract,
+    )
+    return compose
+
+
+def _render_nextcloud_compose_and_env_for_mounts(
+    *,
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...] = (),
+    openclaw_volume_name: str | None = None,
+    openclaw_workspace_contract: NextcloudOpenClawWorkspaceContract | None = None,
+) -> tuple[str, str]:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -1066,13 +1132,15 @@ def _render_nextcloud_compose_for_mounts(
         },
     )
 
-    compose = client.last_create_compose_file
+    compose = client.last_update_compose_file
     assert compose is not None
-    return compose
+    env_payload = client.last_update_env
+    assert env_payload is not None
+    return compose, env_payload
 
 
 def test_dokploy_nextcloud_backend_renders_openclaw_only_mounts() -> None:
-    compose = _render_nextcloud_compose_for_mounts(
+    compose, env_payload = _render_nextcloud_compose_and_env_for_mounts(
         advisor_workspace_mounts=(_openclaw_advisor_workspace_mount(),),
     )
 
@@ -1080,25 +1148,25 @@ def test_dokploy_nextcloud_backend_renders_openclaw_only_mounts() -> None:
     assert "wizard-stack-my-farm-advisor-data" not in compose
     assert "  wizard-stack-openclaw-data:" in compose
     assert "    name: wizard-stack-openclaw-data" in compose
-    assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface" in compose
-    assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_NAME: /Nexa Claw" in compose
-    assert "DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: /mnt/advisors/openclaw/workspace/nexa" in compose
+    assert 'DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: "${DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE:?DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE is required}"' in compose
+    assert 'DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_NAME="/Nexa Claw"' in env_payload
+    assert "DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT=/mnt/advisors/openclaw/workspace/nexa" in env_payload
     assert (
-        "DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: "
-        "/mnt/advisors/openclaw/workspace/nexa/contract.json" in compose
+        "DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH=/mnt/advisors/openclaw/workspace/nexa/contract.json"
+        in env_payload
     )
     assert (
-        "DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: server-owned env + durable state JSON"
-        in compose
+        'DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE="server-owned env + durable state JSON"'
+        in env_payload
     )
     assert (
-        'DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MOUNTS_JSON: "[{\\"advisor_id\\":\\"openclaw\\"'
-        in compose
+        'DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MOUNTS_JSON="[{\\"advisor_id\\":\\"openclaw\\"'
+        in env_payload
     )
 
 
 def test_dokploy_nextcloud_backend_renders_farm_only_mounts_without_openclaw() -> None:
-    compose = _render_nextcloud_compose_for_mounts(
+    compose, env_payload = _render_nextcloud_compose_and_env_for_mounts(
         advisor_workspace_mounts=_my_farm_advisor_workspace_mounts(),
     )
 
@@ -1106,17 +1174,20 @@ def test_dokploy_nextcloud_backend_renders_farm_only_mounts_without_openclaw() -
     assert "wizard-stack-my-farm-advisor-data:/mnt/advisors/my-farm-advisor" in compose
     assert compose.count("wizard-stack-my-farm-advisor-data:/mnt/advisors/my-farm-advisor") == 1
     assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE" not in compose
-    assert "DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_FIELD_OPERATIONS_EXTERNAL_MOUNT_NAME: /Nexa Farm" in compose
     assert (
-        "DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_DATA_PIPELINE_EXTERNAL_MOUNT_NAME: "
-        "/Nexa Farm Data Pipeline" in compose
+        'DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_FIELD_OPERATIONS_EXTERNAL_MOUNT_NAME="/Nexa Farm"'
+        in env_payload
     )
-    assert "/mnt/advisors/my-farm-advisor/field-operations/workspace" in compose
-    assert "/mnt/advisors/my-farm-advisor/data-pipeline/workspace" in compose
+    assert (
+        'DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_DATA_PIPELINE_EXTERNAL_MOUNT_NAME="/Nexa Farm Data Pipeline"'
+        in env_payload
+    )
+    assert "/mnt/advisors/my-farm-advisor/field-operations/workspace" in env_payload
+    assert "/mnt/advisors/my-farm-advisor/data-pipeline/workspace" in env_payload
 
 
 def test_dokploy_nextcloud_backend_renders_openclaw_and_farm_mounts_together() -> None:
-    compose = _render_nextcloud_compose_for_mounts(
+    compose, env_payload = _render_nextcloud_compose_and_env_for_mounts(
         advisor_workspace_mounts=(
             _openclaw_advisor_workspace_mount(),
             *_my_farm_advisor_workspace_mounts(),
@@ -1126,11 +1197,14 @@ def test_dokploy_nextcloud_backend_renders_openclaw_and_farm_mounts_together() -
     assert "wizard-stack-openclaw-data:/mnt/advisors/openclaw" in compose
     assert "wizard-stack-my-farm-advisor-data:/mnt/advisors/my-farm-advisor" in compose
     assert compose.count("wizard-stack-my-farm-advisor-data:/mnt/advisors/my-farm-advisor") == 1
-    assert "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_NAME: /Nexa Claw" in compose
-    assert "DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_FIELD_OPERATIONS_EXTERNAL_MOUNT_NAME: /Nexa Farm" in compose
+    assert 'DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_NAME="/Nexa Claw"' in env_payload
     assert (
-        "DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_DATA_PIPELINE_EXTERNAL_MOUNT_NAME: "
-        "/Nexa Farm Data Pipeline" in compose
+        'DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_FIELD_OPERATIONS_EXTERNAL_MOUNT_NAME="/Nexa Farm"'
+        in env_payload
+    )
+    assert (
+        'DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MY_FARM_ADVISOR_DATA_PIPELINE_EXTERNAL_MOUNT_NAME="/Nexa Farm Data Pipeline"'
+        in env_payload
     )
 
 
@@ -1775,16 +1849,18 @@ def test_dokploy_nextcloud_backend_updates_existing_compose_to_keep_onlyoffice_r
     assert record.resource_id == "dokploy-compose:cmp-existing:onlyoffice-service"
     assert compose is not None
     assert client.create_compose_calls == 0
-    assert client.update_compose_calls == 1
+    assert client.update_compose_calls == 2
     assert client.deploy_calls == 1
-    assert "TRUSTED_PROXIES: 127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" in compose
-    assert "OVERWRITECLIURL: https://nextcloud.example.com" in compose
-    assert "POSTGRES_PASSWORD: change-me" in compose
-    assert "REDIS_HOST_PASSWORD: change-me" in compose
-    assert "JWT_SECRET: change-me" in compose
-    assert "JWT_HEADER: Authorization" in compose
-    assert "ALLOW_PRIVATE_IP_ADDRESS: 'true'" in compose
-    assert "ALLOW_META_IP_ADDRESS: 'true'" in compose
+    assert client.last_update_env is not None
+    assert 'TRUSTED_PROXIES: "${NEXTCLOUD_TRUSTED_PROXIES:?NEXTCLOUD_TRUSTED_PROXIES is required}"' in compose
+    assert 'OVERWRITECLIURL: "${NEXTCLOUD_OVERWRITECLIURL:?NEXTCLOUD_OVERWRITECLIURL is required}"' in compose
+    assert 'POSTGRES_PASSWORD: "${NEXTCLOUD_POSTGRES_PASSWORD:?NEXTCLOUD_POSTGRES_PASSWORD is required}"' in compose
+    assert 'REDIS_HOST_PASSWORD: "${NEXTCLOUD_REDIS_HOST_PASSWORD:?NEXTCLOUD_REDIS_HOST_PASSWORD is required}"' in compose
+    assert 'JWT_SECRET: "${ONLYOFFICE_JWT_SECRET:?ONLYOFFICE_JWT_SECRET is required}"' in compose
+    assert 'JWT_HEADER: "${ONLYOFFICE_JWT_HEADER:?ONLYOFFICE_JWT_HEADER is required}"' in compose
+    assert 'ALLOW_PRIVATE_IP_ADDRESS: "${ONLYOFFICE_ALLOW_PRIVATE_IP_ADDRESS:?ONLYOFFICE_ALLOW_PRIVATE_IP_ADDRESS is required}"' in compose
+    assert 'ALLOW_META_IP_ADDRESS: "${ONLYOFFICE_ALLOW_META_IP_ADDRESS:?ONLYOFFICE_ALLOW_META_IP_ADDRESS is required}"' in compose
+    assert "change-me" not in compose
     assert (
         'traefik.http.routers.wizard-stack-onlyoffice.middlewares: "wizard-stack-onlyoffice-forwarded-https"'
         in compose
@@ -1845,7 +1921,7 @@ def test_dokploy_nextcloud_backend_skips_redeploy_when_hash_and_readiness_match(
             ),
         ),
     )
-    compose_file = nextcloud_module._render_compose_file(
+    rendered_compose = nextcloud_module._render_compose_file(
         stack_name=desired_state.stack_name,
         nextcloud_hostname=desired_state.hostnames["nextcloud"],
         onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
@@ -1861,7 +1937,7 @@ def test_dokploy_nextcloud_backend_skips_redeploy_when_hash_and_readiness_match(
     _write_compose_hash_checkpoint(
         tmp_path,
         service_key="wizard-stack-nextcloud",
-        rendered_compose=compose_file,
+        rendered_compose=rendered_compose.compose_file,
     )
     client = FakeDokployApiClient(projects=[existing_project])
     backend = DokployNextcloudBackend(

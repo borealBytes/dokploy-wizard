@@ -225,7 +225,7 @@ def _representative_artifacts() -> tuple[_RenderedArtifact, ...]:
                 admin_user="admin",
                 admin_password="SECRET_TEST_NEXTCLOUD_ADMIN_VALUE",
                 advisor_workspace_mounts=(),
-            ),
+            ).compose_file,
         ),
         _RenderedArtifact(
             owner="seaweedfs",
@@ -269,7 +269,9 @@ def _assert_no_raw_secret_values(artifacts: tuple[_RenderedArtifact, ...]) -> No
 
 def test_representative_wizard_managed_compose_outputs_do_not_inline_raw_secrets() -> None:
     artifacts = tuple(
-        artifact for artifact in _representative_artifacts() if artifact.owner == "shared-core"
+        artifact
+        for artifact in _representative_artifacts()
+        if artifact.owner in {"shared-core", "nextcloud"}
     )
 
     _assert_no_raw_secret_values(artifacts)
@@ -278,9 +280,12 @@ def test_representative_wizard_managed_compose_outputs_do_not_inline_raw_secrets
 def test_representative_compose_uses_explicit_service_environment_mappings() -> None:
     artifacts_by_owner = {artifact.owner: artifact for artifact in _representative_artifacts()}
     shared_core = artifacts_by_owner["shared-core"].compose_file
+    nextcloud = artifacts_by_owner["nextcloud"].compose_file
     postgres_env = _service_environment(shared_core, "wizard-stack-shared-postgres")
     redis_env = _service_environment(shared_core, "wizard-stack-shared-redis")
     litellm_env = _service_environment(shared_core, "wizard-stack-shared-litellm")
+    nextcloud_env = _service_environment(nextcloud, "wizard-stack-nextcloud")
+    onlyoffice_env = _service_environment(nextcloud, "wizard-stack-onlyoffice")
 
     expected_mappings = {
         "shared-core-postgres:POSTGRES_PASSWORD": (
@@ -298,6 +303,22 @@ def test_representative_compose_uses_explicit_service_environment_mappings() -> 
         "shared-core-litellm:LITELLM_SALT_KEY": (
             litellm_env.get("LITELLM_SALT_KEY"),
             "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}",
+        ),
+        "nextcloud:NEXTCLOUD_ADMIN_PASSWORD": (
+            nextcloud_env.get("NEXTCLOUD_ADMIN_PASSWORD"),
+            "${NEXTCLOUD_ADMIN_PASSWORD:?NEXTCLOUD_ADMIN_PASSWORD is required}",
+        ),
+        "nextcloud:POSTGRES_PASSWORD": (
+            nextcloud_env.get("POSTGRES_PASSWORD"),
+            "${NEXTCLOUD_POSTGRES_PASSWORD:?NEXTCLOUD_POSTGRES_PASSWORD is required}",
+        ),
+        "nextcloud:REDIS_HOST_PASSWORD": (
+            nextcloud_env.get("REDIS_HOST_PASSWORD"),
+            "${NEXTCLOUD_REDIS_HOST_PASSWORD:?NEXTCLOUD_REDIS_HOST_PASSWORD is required}",
+        ),
+        "onlyoffice:JWT_SECRET": (
+            onlyoffice_env.get("JWT_SECRET"),
+            "${ONLYOFFICE_JWT_SECRET:?ONLYOFFICE_JWT_SECRET is required}",
         ),
     }
     missing_placeholder_mappings = [

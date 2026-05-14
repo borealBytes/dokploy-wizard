@@ -10,8 +10,9 @@ import ssl
 import subprocess
 import time
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 from urllib import error, parse, request
 
 from dokploy_wizard.core.models import SharedPostgresAllocation, SharedRedisAllocation
@@ -26,8 +27,14 @@ from dokploy_wizard.dokploy.client import (
     DokployScheduleRecord,
 )
 from dokploy_wizard.dokploy.compose_noop import (
-    apply_compose_noop_guard,
+    load_compose_artifact_hash,
     persist_compose_artifact_hash,
+)
+from dokploy_wizard.dokploy.env_spec import (
+    DokployEnvReconciler,
+    DokployEnvSpec,
+    DokployEnvVar,
+    RenderedCompose,
 )
 from dokploy_wizard.packs.nextcloud.models import (
     NextcloudAdvisorWorkspaceMountContract,
@@ -38,7 +45,7 @@ from dokploy_wizard.packs.nextcloud.models import (
     TalkRuntime,
 )
 from dokploy_wizard.packs.nextcloud.reconciler import NextcloudError
-from dokploy_wizard.state import load_state_dir
+from dokploy_wizard.state import ComposeArtifactHashState, load_state_dir
 from dokploy_wizard.verification import ServiceVerificationResult
 
 _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
@@ -85,7 +92,9 @@ class DokployNextcloudApi(Protocol):
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord: ...
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord: ...
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord: ...
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -167,6 +176,7 @@ class DokployNextcloudBackend:
         self._postgres = postgres
         self._redis = redis
         self._integration_secret_ref = integration_secret_ref
+        self._onlyoffice_jwt_secret = _nextcloud_generated_secret(integration_secret_ref)
         self._admin_user = admin_user
         self._admin_password = admin_password
         self._advisor_workspace_mounts = _resolve_advisor_workspace_mounts(
@@ -367,7 +377,7 @@ class DokployNextcloudBackend:
                 document_server_url=document_server_url,
                 document_server_internal_url=document_server_internal_url,
                 storage_url=storage_url,
-                jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
+                jwt_secret=self._onlyoffice_jwt_secret,
                 wait_for_documentserver_check=self._created_in_process,
                 advisor_workspace_mounts=self._advisor_workspace_mounts,
                 openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
@@ -414,7 +424,7 @@ class DokployNextcloudBackend:
             document_server_url=document_server_url,
             document_server_internal_url=document_server_internal_url,
             storage_url=storage_url,
-            jwt_secret=_DEFAULT_SHARED_SERVICE_PASSWORD,
+            jwt_secret=self._onlyoffice_jwt_secret,
             wait_for_documentserver_check=self._created_in_process,
             advisor_workspace_mounts=self._advisor_workspace_mounts,
             openclaw_external_storage_enabled=self._openclaw_volume_name is not None,
@@ -586,7 +596,7 @@ class DokployNextcloudBackend:
         if self._applied_locator is not None and self._created_in_process:
             return self._applied_locator
         can_use_stateful_noop_guard = self._can_use_stateful_noop_guard()
-        compose_file = _render_compose_file(
+        rendered_compose = _render_compose_file(
             stack_name=self._stack_name,
             nextcloud_hostname=self._nextcloud_hostname,
             onlyoffice_hostname=self._onlyoffice_hostname,
@@ -603,8 +613,8 @@ class DokployNextcloudBackend:
             if self._applied_locator is not None:
                 if can_use_stateful_noop_guard:
                     applied_locator = self._applied_locator
-                    result = apply_compose_noop_guard(
-                        rendered_compose=compose_file,
+                    result = _apply_rendered_compose_noop_guard(
+                        rendered_compose=rendered_compose,
                         service_key=self._compose_name,
                         state_dir=self._state_dir,
                         client=self._client,
@@ -622,15 +632,20 @@ class DokployNextcloudBackend:
                     self._created_in_process = result.status == "applied"
                     self._applied_locator = result.locator
                 else:
-                    updated = self._client.update_compose(
+                    updated = _apply_rendered_compose_to_existing(
+                        client=self._client,
                         compose_id=self._applied_locator.compose_id,
-                        compose_file=compose_file,
+                        rendered_compose=rendered_compose,
                     )
-                    self._client.deploy_compose(
+                    deployment = self._client.deploy_compose(
                         compose_id=updated.compose_id,
                         title="dokploy-wizard nextcloud reconcile",
                         description="Update Nextcloud + OnlyOffice compose app",
                     )
+                    if not deployment.success:
+                        raise NextcloudError(
+                            "Dokploy deploy for Nextcloud + OnlyOffice compose app did not report success."
+                        )
                     self._created_in_process = True
                     self._applied_locator = _ComposeLocator(
                         project_id=self._applied_locator.project_id,
@@ -653,8 +668,8 @@ class DokployNextcloudBackend:
                                 environment_id=environment.environment_id,
                                 compose_id=compose.compose_id,
                             )
-                            result = apply_compose_noop_guard(
-                                rendered_compose=compose_file,
+                            result = _apply_rendered_compose_noop_guard(
+                                rendered_compose=rendered_compose,
                                 service_key=self._compose_name,
                                 state_dir=self._state_dir,
                                 client=self._client,
@@ -672,15 +687,20 @@ class DokployNextcloudBackend:
                             self._created_in_process = result.status == "applied"
                             self._applied_locator = result.locator
                             return result.locator
-                        updated = self._client.update_compose(
+                        updated = _apply_rendered_compose_to_existing(
+                            client=self._client,
                             compose_id=compose.compose_id,
-                            compose_file=compose_file,
+                            rendered_compose=rendered_compose,
                         )
-                        self._client.deploy_compose(
+                        deployment = self._client.deploy_compose(
                             compose_id=updated.compose_id,
                             title="dokploy-wizard nextcloud reconcile",
                             description="Update Nextcloud + OnlyOffice compose app",
                         )
+                        if not deployment.success:
+                            raise NextcloudError(
+                                "Dokploy deploy for Nextcloud + OnlyOffice compose app did not report success."
+                            )
                         locator = _ComposeLocator(
                             project_id=project.project_id,
                             environment_id=environment.environment_id,
@@ -692,24 +712,33 @@ class DokployNextcloudBackend:
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
-                    compose_file=compose_file,
+                    compose_file="services: {}\n",
                     app_name=self._compose_name,
                 )
-                self._client.deploy_compose(
+                updated = _apply_rendered_compose_to_existing(
+                    client=self._client,
                     compose_id=created.compose_id,
+                    rendered_compose=rendered_compose,
+                )
+                deployment = self._client.deploy_compose(
+                    compose_id=updated.compose_id,
                     title="dokploy-wizard nextcloud reconcile",
                     description="Create Nextcloud + OnlyOffice compose app",
                 )
+                if not deployment.success:
+                    raise NextcloudError(
+                        "Dokploy deploy for Nextcloud + OnlyOffice compose app did not report success."
+                    )
                 locator = _ComposeLocator(
                     project_id=project.project_id,
                     environment_id=environment.environment_id,
-                    compose_id=created.compose_id,
+                    compose_id=updated.compose_id,
                 )
                 if can_use_stateful_noop_guard:
                     persist_compose_artifact_hash(
                         state_dir=self._state_dir,
                         service_key=self._compose_name,
-                        rendered_compose=compose_file,
+                        rendered_compose=rendered_compose.compose_file,
                     )
                 self._created_in_process = True
                 self._applied_locator = locator
@@ -723,26 +752,35 @@ class DokployNextcloudBackend:
             created_compose = self._client.create_compose(
                 name=self._compose_name,
                 environment_id=created_project.environment_id,
-                compose_file=compose_file,
+                compose_file="services: {}\n",
                 app_name=self._compose_name,
             )
-            self._client.deploy_compose(
+            updated_compose = _apply_rendered_compose_to_existing(
+                client=self._client,
                 compose_id=created_compose.compose_id,
+                rendered_compose=rendered_compose,
+            )
+            deployment = self._client.deploy_compose(
+                compose_id=updated_compose.compose_id,
                 title="dokploy-wizard nextcloud reconcile",
                 description="Create Nextcloud + OnlyOffice compose app",
             )
+            if not deployment.success:
+                raise NextcloudError(
+                    "Dokploy deploy for Nextcloud + OnlyOffice compose app did not report success."
+                )
         except DokployApiError as error:
             raise NextcloudError(str(error)) from error
         locator = _ComposeLocator(
             project_id=created_project.project_id,
             environment_id=created_project.environment_id,
-            compose_id=created_compose.compose_id,
+            compose_id=updated_compose.compose_id,
         )
         if can_use_stateful_noop_guard:
             persist_compose_artifact_hash(
                 state_dir=self._state_dir,
                 service_key=self._compose_name,
-                rendered_compose=compose_file,
+                rendered_compose=rendered_compose.compose_file,
             )
         self._created_in_process = True
         self._applied_locator = locator
@@ -947,55 +985,86 @@ def _yaml_quote(value: str) -> str:
 def _render_nextcloud_workspace_env(
     advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
 ) -> str:
+    return "".join(
+        f'      {name}: "{_required_placeholder(name)}"\n'
+        for name, _value in _nextcloud_workspace_env_values(advisor_workspace_mounts)
+    )
+
+
+def _nextcloud_workspace_env_values(
+    advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
+) -> tuple[tuple[str, str], ...]:
     if not advisor_workspace_mounts:
-        return ""
+        return ()
     payload = json.dumps(
         [contract.to_dict() for contract in advisor_workspace_mounts],
         separators=(",", ":"),
         sort_keys=True,
     )
-    env_lines = [
-        f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MOUNTS_JSON: {_yaml_quote(payload)}",
-        f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_COUNT: {len(advisor_workspace_mounts)}",
+    env_values = [
+        ("DOKPLOY_WIZARD_ADVISOR_WORKSPACE_MOUNTS_JSON", payload),
+        ("DOKPLOY_WIZARD_ADVISOR_WORKSPACE_COUNT", str(len(advisor_workspace_mounts))),
     ]
     openclaw_contract = next(
         (contract for contract in advisor_workspace_mounts if contract.advisor_id == "openclaw"),
         None,
     )
     if openclaw_contract is not None:
-        env_lines.extend(
+        env_values.extend(
             [
-                "      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE: operator-surface",
-                f"      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_NAME: {openclaw_contract.external_mount_name}",
-                f"      DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_PATH: {openclaw_contract.external_mount_path}",
-                f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT: {openclaw_contract.visible_root}",
+                ("DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_STORAGE_MODE", "operator-surface"),
+                (
+                    "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_NAME",
+                    openclaw_contract.external_mount_name,
+                ),
+                (
+                    "DOKPLOY_WIZARD_OPENCLAW_EXTERNAL_MOUNT_PATH",
+                    openclaw_contract.external_mount_path,
+                ),
+                (
+                    "DOKPLOY_WIZARD_OPENCLAW_NEXA_VISIBLE_ROOT",
+                    openclaw_contract.visible_root,
+                ),
             ]
         )
         if openclaw_contract.contract_path is not None:
-            env_lines.append(
-                f"      DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH: {openclaw_contract.contract_path}"
+            env_values.append(
+                (
+                    "DOKPLOY_WIZARD_OPENCLAW_NEXA_CONTRACT_PATH",
+                    openclaw_contract.contract_path,
+                )
             )
-        env_lines.append(
-            "      DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE: "
-            f"{openclaw_contract.runtime_state_source}"
+        env_values.append(
+            (
+                "DOKPLOY_WIZARD_OPENCLAW_NEXA_RUNTIME_STATE_SOURCE",
+                openclaw_contract.runtime_state_source,
+            )
         )
     for contract in advisor_workspace_mounts:
         slug = _workspace_env_slug(contract)
-        env_lines.extend(
+        env_values.extend(
             [
-                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_ADVISOR_ID: {contract.advisor_id}",
-                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_EXTERNAL_MOUNT_NAME: {contract.external_mount_name}",
-                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_EXTERNAL_MOUNT_PATH: {contract.external_mount_path}",
-                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_VISIBLE_ROOT: {contract.visible_root}",
-                "      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_"
-                f"{slug}_RUNTIME_STATE_SOURCE: {contract.runtime_state_source}",
+                (f"DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_ADVISOR_ID", contract.advisor_id),
+                (
+                    f"DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_EXTERNAL_MOUNT_NAME",
+                    contract.external_mount_name,
+                ),
+                (
+                    f"DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_EXTERNAL_MOUNT_PATH",
+                    contract.external_mount_path,
+                ),
+                (f"DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_VISIBLE_ROOT", contract.visible_root),
+                (
+                    f"DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_RUNTIME_STATE_SOURCE",
+                    contract.runtime_state_source,
+                ),
             ]
         )
         if contract.contract_path is not None:
-            env_lines.append(
-                f"      DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_CONTRACT_PATH: {contract.contract_path}"
+            env_values.append(
+                (f"DOKPLOY_WIZARD_ADVISOR_WORKSPACE_{slug}_CONTRACT_PATH", contract.contract_path)
             )
-    return "\n".join(env_lines) + "\n"
+    return tuple(env_values)
 
 
 def _render_nextcloud_advisor_volume_mounts(
@@ -1104,7 +1173,7 @@ def _render_compose_file(
     admin_user: str,
     admin_password: str,
     advisor_workspace_mounts: tuple[NextcloudAdvisorWorkspaceMountContract, ...],
-) -> str:
+) -> RenderedCompose:
     nextcloud_service = _nextcloud_service_name(stack_name)
     onlyoffice_service = _onlyoffice_service_name(stack_name)
     nextcloud_volume = _nextcloud_volume_name(stack_name)
@@ -1115,26 +1184,195 @@ def _render_compose_file(
     nextcloud_workspace_env = _render_nextcloud_workspace_env(advisor_workspace_mounts)
     nextcloud_extra_mount = _render_nextcloud_advisor_volume_mounts(advisor_workspace_mounts)
     advisor_volume_block = _render_nextcloud_advisor_volume_block(advisor_workspace_mounts)
-    return (
+    env_specs = [
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_POSTGRES_HOST",
+            value=postgres_service_name,
+            owner="nextcloud-runtime",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="shared-core-plan",
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_POSTGRES_DB",
+            value=postgres.database_name,
+            owner="nextcloud-runtime",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="shared-core-plan",
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_POSTGRES_USER",
+            value=postgres.user_name,
+            owner="nextcloud-runtime",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="shared-core-plan",
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_POSTGRES_PASSWORD",
+            value=_DEFAULT_SHARED_SERVICE_PASSWORD,
+            owner="nextcloud-postgres",
+            target_services=(nextcloud_service,),
+            source=postgres.password_secret_ref,
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_REDIS_HOST",
+            value=redis_service_name,
+            owner="nextcloud-runtime",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="shared-core-plan",
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_REDIS_HOST_PASSWORD",
+            value=_nextcloud_shared_redis_password(redis_service_name),
+            owner="nextcloud-redis",
+            target_services=(nextcloud_service,),
+            source=redis.password_secret_ref,
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_ADMIN_USER",
+            value=admin_user,
+            owner="nextcloud-admin",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="operator-input",
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_ADMIN_PASSWORD",
+            value=admin_password,
+            owner="nextcloud-admin",
+            target_services=(nextcloud_service,),
+            source="operator-input",
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_TRUSTED_DOMAINS",
+            value=nextcloud_hostname,
+            owner="nextcloud-runtime",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="hostname-plan",
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_TRUSTED_PROXIES",
+            value=_DEFAULT_TRUSTED_PROXIES,
+            owner="nextcloud-runtime",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="wizard-default",
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_OVERWRITEHOST",
+            value=nextcloud_hostname,
+            owner="nextcloud-runtime",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="hostname-plan",
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_OVERWRITEPROTOCOL",
+            value="https",
+            owner="nextcloud-runtime",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="wizard-default",
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_OVERWRITECLIURL",
+            value=nextcloud_url,
+            owner="nextcloud-runtime",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="hostname-plan",
+        ),
+        _nextcloud_env_spec(
+            name="NEXTCLOUD_ONLYOFFICE_URL",
+            value=onlyoffice_url,
+            owner="nextcloud-onlyoffice-binding",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="hostname-plan",
+        ),
+        _nextcloud_env_spec(
+            name="ONLYOFFICE_JWT_ENABLED",
+            value="true",
+            owner="onlyoffice-runtime",
+            target_services=(onlyoffice_service,),
+            sensitive=False,
+            source="wizard-default",
+        ),
+        _nextcloud_env_spec(
+            name="ONLYOFFICE_JWT_SECRET",
+            value=_nextcloud_generated_secret(integration_secret_ref),
+            owner="onlyoffice-jwt",
+            target_services=(onlyoffice_service,),
+            source=integration_secret_ref,
+        ),
+        _nextcloud_env_spec(
+            name="ONLYOFFICE_JWT_HEADER",
+            value="Authorization",
+            owner="onlyoffice-runtime",
+            target_services=(onlyoffice_service,),
+            sensitive=False,
+            source="wizard-default",
+        ),
+        _nextcloud_env_spec(
+            name="ONLYOFFICE_ALLOW_PRIVATE_IP_ADDRESS",
+            value="true",
+            owner="onlyoffice-runtime",
+            target_services=(onlyoffice_service,),
+            sensitive=False,
+            source="wizard-default",
+        ),
+        _nextcloud_env_spec(
+            name="ONLYOFFICE_ALLOW_META_IP_ADDRESS",
+            value="true",
+            owner="onlyoffice-runtime",
+            target_services=(onlyoffice_service,),
+            sensitive=False,
+            source="wizard-default",
+        ),
+        _nextcloud_env_spec(
+            name="ONLYOFFICE_NEXTCLOUD_URL",
+            value=nextcloud_url,
+            owner="onlyoffice-nextcloud-binding",
+            target_services=(onlyoffice_service,),
+            sensitive=False,
+            source="hostname-plan",
+        ),
+    ]
+    env_specs.extend(
+        _nextcloud_env_spec(
+            name=name,
+            value=value,
+            owner="nextcloud-advisor-workspaces",
+            target_services=(nextcloud_service,),
+            sensitive=False,
+            source="advisor-workspace-plan",
+        )
+        for name, value in _nextcloud_workspace_env_values(advisor_workspace_mounts)
+    )
+    compose_file = (
         "services:\n"
         f"  {nextcloud_service}:\n"
         "    image: nextcloud:apache\n"
         "    restart: unless-stopped\n"
         "    environment:\n"
-        f"      POSTGRES_HOST: {postgres_service_name}\n"
-        f"      POSTGRES_DB: {postgres.database_name}\n"
-        f"      POSTGRES_USER: {postgres.user_name}\n"
-        f"      POSTGRES_PASSWORD: {_DEFAULT_SHARED_SERVICE_PASSWORD}\n"
-        f"      REDIS_HOST: {redis_service_name}\n"
-        f"      REDIS_HOST_PASSWORD: {_DEFAULT_SHARED_SERVICE_PASSWORD}\n"
-        f"      NEXTCLOUD_ADMIN_USER: {admin_user}\n"
-        f"      NEXTCLOUD_ADMIN_PASSWORD: {admin_password}\n"
-        f"      NEXTCLOUD_TRUSTED_DOMAINS: {nextcloud_hostname}\n"
-        f"      TRUSTED_PROXIES: {_DEFAULT_TRUSTED_PROXIES}\n"
-        f"      OVERWRITEHOST: {nextcloud_hostname}\n"
-        "      OVERWRITEPROTOCOL: https\n"
-        f"      OVERWRITECLIURL: {nextcloud_url}\n"
-        f"      ONLYOFFICE_URL: {onlyoffice_url}\n"
+        f'      POSTGRES_HOST: "{_required_placeholder("NEXTCLOUD_POSTGRES_HOST")}"\n'
+        f'      POSTGRES_DB: "{_required_placeholder("NEXTCLOUD_POSTGRES_DB")}"\n'
+        f'      POSTGRES_USER: "{_required_placeholder("NEXTCLOUD_POSTGRES_USER")}"\n'
+        f'      POSTGRES_PASSWORD: "{_required_placeholder("NEXTCLOUD_POSTGRES_PASSWORD")}"\n'
+        f'      REDIS_HOST: "{_required_placeholder("NEXTCLOUD_REDIS_HOST")}"\n'
+        f'      REDIS_HOST_PASSWORD: "{_required_placeholder("NEXTCLOUD_REDIS_HOST_PASSWORD")}"\n'
+        f'      NEXTCLOUD_ADMIN_USER: "{_required_placeholder("NEXTCLOUD_ADMIN_USER")}"\n'
+        f'      NEXTCLOUD_ADMIN_PASSWORD: "{_required_placeholder("NEXTCLOUD_ADMIN_PASSWORD")}"\n'
+        f'      NEXTCLOUD_TRUSTED_DOMAINS: "{_required_placeholder("NEXTCLOUD_TRUSTED_DOMAINS")}"\n'
+        f'      TRUSTED_PROXIES: "{_required_placeholder("NEXTCLOUD_TRUSTED_PROXIES")}"\n'
+        f'      OVERWRITEHOST: "{_required_placeholder("NEXTCLOUD_OVERWRITEHOST")}"\n'
+        f'      OVERWRITEPROTOCOL: "{_required_placeholder("NEXTCLOUD_OVERWRITEPROTOCOL")}"\n'
+        f'      OVERWRITECLIURL: "{_required_placeholder("NEXTCLOUD_OVERWRITECLIURL")}"\n'
+        f'      ONLYOFFICE_URL: "{_required_placeholder("NEXTCLOUD_ONLYOFFICE_URL")}"\n'
         f"{nextcloud_workspace_env}"
         "    labels:\n"
         '      traefik.enable: "true"\n'
@@ -1163,12 +1401,12 @@ def _render_compose_file(
         "    image: onlyoffice/documentserver:latest\n"
         "    restart: unless-stopped\n"
         "    environment:\n"
-        "      JWT_ENABLED: 'true'\n"
-        f"      JWT_SECRET: {_DEFAULT_SHARED_SERVICE_PASSWORD}\n"
-        "      JWT_HEADER: Authorization\n"
-        "      ALLOW_PRIVATE_IP_ADDRESS: 'true'\n"
-        "      ALLOW_META_IP_ADDRESS: 'true'\n"
-        f"      NEXTCLOUD_URL: {nextcloud_url}\n"
+        f'      JWT_ENABLED: "{_required_placeholder("ONLYOFFICE_JWT_ENABLED")}"\n'
+        f'      JWT_SECRET: "{_required_placeholder("ONLYOFFICE_JWT_SECRET")}"\n'
+        f'      JWT_HEADER: "{_required_placeholder("ONLYOFFICE_JWT_HEADER")}"\n'
+        f'      ALLOW_PRIVATE_IP_ADDRESS: "{_required_placeholder("ONLYOFFICE_ALLOW_PRIVATE_IP_ADDRESS")}"\n'
+        f'      ALLOW_META_IP_ADDRESS: "{_required_placeholder("ONLYOFFICE_ALLOW_META_IP_ADDRESS")}"\n'
+        f'      NEXTCLOUD_URL: "{_required_placeholder("ONLYOFFICE_NEXTCLOUD_URL")}"\n'
         "    labels:\n"
         '      traefik.enable: "true"\n'
         f'      traefik.http.routers.{onlyoffice_service}.entrypoints: "websecure"\n'
@@ -1203,6 +1441,119 @@ def _render_compose_file(
         f"  {shared_network}:\n"
         "    external: true\n"
     )
+    return RenderedCompose(compose_file=compose_file, env_specs=tuple(env_specs))
+
+
+@dataclass(frozen=True)
+class _RenderedComposeApplyResult:
+    locator: _ComposeLocator
+    status: str
+
+
+def _apply_rendered_compose_noop_guard(
+    *,
+    rendered_compose: RenderedCompose,
+    service_key: str,
+    state_dir: Path,
+    client: DokployNextcloudApi,
+    locator: _ComposeLocator,
+    compose_id: str,
+    title: str | None,
+    description: str | None,
+    verify_current: Callable[[], ServiceVerificationResult],
+    locator_factory: Callable[[str], _ComposeLocator],
+) -> _RenderedComposeApplyResult:
+    rendered_hash = ComposeArtifactHashState.from_rendered_compose(
+        service_id=service_key,
+        rendered_compose=rendered_compose.compose_file,
+    )
+    stored_hash = load_compose_artifact_hash(state_dir=state_dir, service_key=service_key)
+    if stored_hash == rendered_hash and verify_current().passed:
+        return _RenderedComposeApplyResult(locator=locator, status="already_present")
+
+    updated = _apply_rendered_compose_to_existing(
+        client=client,
+        compose_id=compose_id,
+        rendered_compose=rendered_compose,
+    )
+    deployment = client.deploy_compose(
+        compose_id=updated.compose_id,
+        title=title,
+        description=description,
+    )
+    if not deployment.success:
+        raise NextcloudError(
+            f"Dokploy deploy for compose service '{service_key}' did not report success."
+        )
+    persist_compose_artifact_hash(
+        state_dir=state_dir,
+        service_key=service_key,
+        rendered_compose=rendered_compose.compose_file,
+    )
+    return _RenderedComposeApplyResult(
+        locator=locator_factory(updated.compose_id),
+        status="applied",
+    )
+
+
+def _apply_rendered_compose_to_existing(
+    *,
+    client: DokployNextcloudApi,
+    compose_id: str,
+    rendered_compose: RenderedCompose,
+) -> DokployComposeRecord:
+    env_payload = DokployEnvReconciler(client=cast(Any, client)).build_env_payload(rendered_compose)
+    if env_payload:
+        _update_compose_env_if_supported(client, compose_id=compose_id, env_payload=env_payload)
+    return client.update_compose(compose_id=compose_id, compose_file=rendered_compose.compose_file)
+
+
+def _update_compose_env_if_supported(
+    client: DokployNextcloudApi, *, compose_id: str, env_payload: str
+) -> None:
+    update_compose = cast(Any, client).update_compose
+    try:
+        update_compose(compose_id=compose_id, env=env_payload)
+    except TypeError as error:
+        message = str(error)
+        if "env" not in message and "compose_file" not in message:
+            raise
+
+
+def _nextcloud_env_spec(
+    *,
+    name: str,
+    value: str,
+    owner: str,
+    target_services: tuple[str, ...],
+    source: str,
+    sensitive: bool = True,
+    required: bool = True,
+) -> DokployEnvSpec:
+    return DokployEnvSpec(
+        variable=DokployEnvVar(
+            name=name,
+            value=value,
+            sensitive=sensitive,
+            source=source,
+        ),
+        owner=owner,
+        target_services=target_services,
+        placeholder=_required_placeholder(name) if required else None,
+        required=required,
+    )
+
+
+def _required_placeholder(name: str) -> str:
+    return f"${{{name}:?{name} is required}}"
+
+
+def _nextcloud_generated_secret(secret_ref: str) -> str:
+    return "dw-" + sha256(secret_ref.encode("utf-8")).hexdigest()[:32]
+
+
+def _nextcloud_shared_redis_password(redis_service_name: str) -> str:
+    return _nextcloud_generated_secret(f"{redis_service_name}-password")
 
 
 def _local_https_health_check(url: str) -> bool:

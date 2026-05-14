@@ -591,7 +591,13 @@ class FakeDokployApiClient:
     projects: list[DokployProjectSummary] = field(default_factory=list)
     create_project_calls: int = 0
     create_compose_calls: int = 0
+    update_compose_calls: int = 0
     deploy_calls: int = 0
+    compose_files_by_id: dict[str, str] = field(default_factory=dict)
+    compose_env_by_id: dict[str, str] = field(default_factory=dict)
+    compose_names_by_id: dict[str, str] = field(default_factory=dict)
+    update_sequence: list[str] = field(default_factory=list)
+    mutation_sequence: list[str] = field(default_factory=list)
 
     def list_projects(self) -> tuple[DokployProjectSummary, ...]:
         return tuple(self.projects)
@@ -620,9 +626,12 @@ class FakeDokployApiClient:
     def create_compose(
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord:
-        del compose_file, app_name
+        del app_name
         self.create_compose_calls += 1
         record = DokployComposeRecord(compose_id="cmp-1", name=name)
+        self.compose_files_by_id[record.compose_id] = compose_file
+        self.compose_names_by_id[record.compose_id] = name
+        self.mutation_sequence.append("create_compose")
         self.projects[0] = DokployProjectSummary(
             project_id="proj-1",
             name=self.projects[0].name,
@@ -643,15 +652,29 @@ class FakeDokployApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        del compose_id, compose_file
-        raise AssertionError("Nextcloud backend should not update compose apps in this task")
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        self.update_compose_calls += 1
+        if env is not None:
+            self.compose_env_by_id[compose_id] = env
+            self.update_sequence.append("env")
+            self.mutation_sequence.append("update_env")
+        if compose_file is not None:
+            self.compose_files_by_id[compose_id] = compose_file
+            self.update_sequence.append("compose_file")
+            self.mutation_sequence.append("update_compose_file")
+        return DokployComposeRecord(
+            compose_id=compose_id,
+            name=self.compose_names_by_id.get(compose_id, f"compose-{compose_id}"),
+        )
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
     ) -> DokployDeployResult:
         del title, description
         self.deploy_calls += 1
+        self.mutation_sequence.append("deploy_compose")
         return DokployDeployResult(success=True, compose_id=compose_id, message="queued")
 
     def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
@@ -824,10 +847,7 @@ def _farm_values() -> dict[str, str]:
 
 @dataclass
 class RecordingNextcloudApi(FakeDokployApiClient):
-    compose_files_by_id: dict[str, str] = field(default_factory=dict)
-    compose_names_by_id: dict[str, str] = field(default_factory=dict)
     schedules: list[DokployScheduleRecord] = field(default_factory=list)
-    update_compose_calls: int = 0
 
     def create_compose(
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
@@ -841,14 +861,6 @@ class RecordingNextcloudApi(FakeDokployApiClient):
         self.compose_files_by_id[record.compose_id] = compose_file
         self.compose_names_by_id[record.compose_id] = name
         return record
-
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        self.update_compose_calls += 1
-        self.compose_files_by_id[compose_id] = compose_file
-        return DokployComposeRecord(
-            compose_id=compose_id,
-            name=self.compose_names_by_id.get(compose_id, f"compose-{compose_id}"),
-        )
 
     def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
         del compose_id
@@ -911,6 +923,12 @@ class RecordingNextcloudApi(FakeDokployApiClient):
         else:
             self.schedules.append(record)
         return record
+
+
+def _assert_env_payload_has_key(env_payload: str, key: str) -> None:
+    if f"\n{key}=" in f"\n{env_payload}":
+        return
+    pytest.fail(f"expected Dokploy env payload to include key {key}")
 
 
 @dataclass
@@ -1637,7 +1655,26 @@ def test_install_reconciles_nextcloud_pair_via_dokploy_backend(
     assert summary["nextcloud"]["talk"]["enabled"] is True
     assert client.create_project_calls == 1
     assert client.create_compose_calls == 1
+    assert client.update_compose_calls == 2
     assert client.deploy_calls == 1
+    assert client.compose_files_by_id["cmp-1"] != "services: {}\n"
+    assert client.compose_env_by_id["cmp-1"]
+    assert client.update_sequence == ["env", "compose_file"]
+    assert client.mutation_sequence == [
+        "create_compose",
+        "update_env",
+        "update_compose_file",
+        "deploy_compose",
+    ]
+    _assert_env_payload_has_key(client.compose_env_by_id["cmp-1"], "NEXTCLOUD_ADMIN_PASSWORD")
+    _assert_env_payload_has_key(client.compose_env_by_id["cmp-1"], "NEXTCLOUD_POSTGRES_PASSWORD")
+    _assert_env_payload_has_key(client.compose_env_by_id["cmp-1"], "NEXTCLOUD_REDIS_HOST_PASSWORD")
+    _assert_env_payload_has_key(client.compose_env_by_id["cmp-1"], "ONLYOFFICE_JWT_SECRET")
+    compose_file = client.compose_files_by_id["cmp-1"]
+    assert "NEXTCLOUD_ADMIN_PASSWORD: \"${NEXTCLOUD_ADMIN_PASSWORD:?NEXTCLOUD_ADMIN_PASSWORD is required}\"" in compose_file
+    assert "JWT_SECRET: \"${ONLYOFFICE_JWT_SECRET:?ONLYOFFICE_JWT_SECRET is required}\"" in compose_file
+    assert "ChangeMeSoon" not in compose_file
+    assert "change-me" not in compose_file
     assert loaded_state.ownership_ledger is not None
 
 
