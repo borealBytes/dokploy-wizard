@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from dokploy_wizard.core.models import (
     PackSharedAllocation,
     SharedCorePlan,
@@ -13,6 +15,10 @@ from dokploy_wizard.core.models import (
     SharedRedisServicePlan,
 )
 from dokploy_wizard.packs.catalog import get_pack_definition
+from dokploy_wizard.packs.env_metadata import build_pack_env_specs as _build_pack_env_specs
+
+if TYPE_CHECKING:
+    from dokploy_wizard.dokploy.env_spec import DokployEnvSpec
 
 _DEFAULT_LITELLM_ALIAS_ORDER = (
     "local/unsloth-active",
@@ -34,6 +40,7 @@ def build_shared_core_plan(
         user_name=f"{stack_name}_litellm".replace("-", "_")[:63],
         password_secret_ref=f"{stack_name}-litellm-postgres-password",
     )
+
     requires_postgres = True
     requires_redis = False
     values = values or {}
@@ -84,6 +91,20 @@ def build_shared_core_plan(
             else SharedRedisServicePlan(service_name=f"{stack_name}-shared-redis")
         ),
         allocations=tuple(allocations),
+    )
+
+
+def build_pack_env_specs(
+    stack_name: str,
+    enabled_packs: tuple[str, ...],
+    values: dict[str, str],
+) -> tuple[DokployEnvSpec, ...]:
+    """Build explicit pack env specs for present mutable env values."""
+
+    return _build_pack_env_specs(
+        stack_name=stack_name,
+        enabled_packs=enabled_packs,
+        values=values,
     )
 
 

@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
+
 from dokploy_wizard.core import build_shared_core_plan
+from dokploy_wizard.core.planner import build_pack_env_specs
 from dokploy_wizard.packs.catalog import get_pack_definition, iter_pack_catalog
+from dokploy_wizard.packs.env_metadata import (
+    PackEnvMetadataError,
+    get_pack_env_metadata,
+    iter_pack_env_metadata,
+    validate_pack_env_metadata,
+)
 from dokploy_wizard.packs.resolver import resolve_pack_selection
 from dokploy_wizard.state import RawEnvInput, resolve_desired_state
 
@@ -100,6 +111,114 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     assert get_pack_definition("my-farm-advisor").mutable_resource_keys == (
         "MY_FARM_ADVISOR_REPLICAS",
     )
+
+
+def test_pack_env_metadata_covers_catalog_and_explicit_classifications() -> None:
+    validate_pack_env_metadata()
+    catalog_keys = {
+        (pack.name, key) for pack in iter_pack_catalog() for key in pack.mutable_env_keys
+    }
+    metadata_keys = {(entry.pack_name, entry.env_key) for entry in iter_pack_env_metadata()}
+
+    assert metadata_keys == catalog_keys
+
+    openclaw_secret = get_pack_env_metadata("openclaw", "OPENCLAW_NEXA_TALK_SHARED_SECRET")
+    assert openclaw_secret.sensitive is True
+    assert openclaw_secret.required is False
+    assert openclaw_secret.shared is False
+    assert openclaw_secret.owner == "openclaw"
+    assert openclaw_secret.target_service_suffixes == ("openclaw",)
+    assert openclaw_secret.canonical_placeholder_name == (
+        "OPENCLAW_OPENCLAW_NEXA_TALK_SHARED_SECRET"
+    )
+
+    openclaw_model = get_pack_env_metadata("openclaw", "OPENCLAW_PRIMARY_MODEL")
+    assert openclaw_model.sensitive is False
+    assert openclaw_model.required is False
+    assert openclaw_model.canonical_placeholder_name == "OPENCLAW_OPENCLAW_PRIMARY_MODEL"
+
+    shared_default = get_pack_env_metadata("my-farm-advisor", "AI_DEFAULT_API_KEY")
+    assert shared_default.sensitive is True
+    assert shared_default.shared is True
+    assert shared_default.owner == "shared-ai-defaults"
+    assert shared_default.canonical_placeholder_name == "AI_DEFAULT_API_KEY"
+
+
+def test_pack_env_metadata_rejects_unrelated_non_shared_placeholder_collisions() -> None:
+    entries = list(iter_pack_env_metadata())
+    openclaw_gateway = get_pack_env_metadata("openclaw", "OPENCLAW_GATEWAY_PASSWORD")
+    farm_gateway_index = entries.index(
+        get_pack_env_metadata("my-farm-advisor", "MY_FARM_ADVISOR_GATEWAY_PASSWORD")
+    )
+    entries[farm_gateway_index] = replace(
+        entries[farm_gateway_index],
+        canonical_placeholder_name=openclaw_gateway.canonical_placeholder_name,
+    )
+
+    with pytest.raises(PackEnvMetadataError) as exc_info:
+        validate_pack_env_metadata(entries)
+
+    message = str(exc_info.value)
+    assert "Non-shared pack env placeholder collision" in message
+    assert "OPENCLAW_OPENCLAW_GATEWAY_PASSWORD" in message
+    assert "my-farm-advisor" in message
+
+
+def test_pack_env_specs_skip_empty_optional_values_without_required_placeholders() -> None:
+    specs = build_pack_env_specs(
+        "wizard-stack",
+        ("openclaw",),
+        {
+            "OPENCLAW_TELEGRAM_OWNER_USER_ID": "",
+            "OPENCLAW_PRIMARY_MODEL": "openrouter/model-a",
+        },
+    )
+
+    specs_by_name = {spec.name: spec for spec in specs}
+    assert "OPENCLAW_OPENCLAW_TELEGRAM_OWNER_USER_ID" not in specs_by_name
+    model_spec = specs_by_name["OPENCLAW_OPENCLAW_PRIMARY_MODEL"]
+    assert model_spec.sensitive is False
+    assert model_spec.required is False
+    assert model_spec.placeholder is None
+
+
+def test_pack_env_specs_use_redaction_classification_and_target_services() -> None:
+    specs = build_pack_env_specs(
+        "wizard-stack",
+        ("my-farm-advisor", "openclaw"),
+        {
+            "AI_DEFAULT_API_KEY": "SECRET_TEST_SHARED_AI_VALUE",
+            "OPENCLAW_GATEWAY_PASSWORD": "SECRET_TEST_OPENCLAW_GATEWAY_VALUE",
+            "OPENCLAW_PRIMARY_MODEL": "openrouter/model-a",
+            "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN": "SECRET_TEST_FARM_BOT_TOKEN_VALUE",
+        },
+    )
+    specs_by_name = {spec.name: spec for spec in specs}
+
+    shared_ai = specs_by_name["AI_DEFAULT_API_KEY"]
+    assert shared_ai.sensitive is True
+    assert shared_ai.owner == "shared-ai-defaults"
+    assert shared_ai.target_services == (
+        "wizard-stack-openclaw",
+        "wizard-stack-my-farm-advisor",
+    )
+
+    openclaw_gateway = specs_by_name["OPENCLAW_OPENCLAW_GATEWAY_PASSWORD"]
+    assert openclaw_gateway.sensitive is True
+    assert openclaw_gateway.owner == "openclaw"
+    assert openclaw_gateway.target_services == ("wizard-stack-openclaw",)
+    assert openclaw_gateway.placeholder == (
+        "${OPENCLAW_OPENCLAW_GATEWAY_PASSWORD:?OPENCLAW_OPENCLAW_GATEWAY_PASSWORD is required}"
+    )
+
+    openclaw_model = specs_by_name["OPENCLAW_OPENCLAW_PRIMARY_MODEL"]
+    assert openclaw_model.sensitive is False
+    assert openclaw_model.target_services == ("wizard-stack-openclaw",)
+
+    farm_bot = specs_by_name["MY_FARM_ADVISOR_MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN"]
+    assert farm_bot.sensitive is True
+    assert farm_bot.owner == "my-farm-advisor"
+    assert farm_bot.target_services == ("wizard-stack-my-farm-advisor",)
 
 
 def test_resolver_keeps_explicit_selection_separate_from_expanded_packs() -> None:
