@@ -144,6 +144,7 @@ def test_validate_existing_state_accepts_historical_seaweedfs_checkpoint(tmp_pat
                     "matrix",
                     "nextcloud",
                     "seaweedfs",
+                    "surfsense",
                     "openclaw",
                 ],
             }
@@ -160,3 +161,4 @@ def test_validate_existing_state_accepts_historical_seaweedfs_checkpoint(tmp_pat
     assert validate_existing_state(loaded_state) is True
     assert loaded_state.applied_state is not None
     assert "seaweedfs" in loaded_state.applied_state.completed_steps
+    assert "surfsense" in loaded_state.applied_state.completed_steps

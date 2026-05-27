@@ -24,6 +24,16 @@ _ROUTE_SEARCH_DIRS = (
     Path("/opt/dokploy/traefik/dynamic"),
 )
 _ROUTE_FILE_PATTERNS = ("*.yaml", "*.yml", "*.toml")
+_SURFSENSE_AUXILIARY_COMPOSE_SERVICES = frozenset(
+    (
+        "frontend",
+        "zero-cache",
+        "searxng",
+        "celery_worker",
+        "celery_beat",
+        "migrations",
+    )
+)
 
 
 def build_live_drift_report(
@@ -496,6 +506,22 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "scope": f"stack:{desired_state.stack_name}:docuseal:service",
             }
         )
+    if "surfsense" in desired_state.enabled_packs:
+        candidates.append(
+            {
+                "aliases": (),
+                "expected_auxiliary_compose_services": _SURFSENSE_AUXILIARY_COMPOSE_SERVICES,
+                "hostname": None,
+                "managed_compose_project_prefix": f"{desired_state.stack_name}-surfsense-",
+                "managed_container_labels": {
+                    "com.docker.compose.service": "backend",
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-surfsense",
+                "pack": "surfsense",
+                "scope": f"stack:{desired_state.stack_name}:surfsense:service",
+            }
+        )
     if "coder" in desired_state.enabled_packs:
         candidates.append(
             {
@@ -621,6 +647,8 @@ def _container_proves_managed_candidate(
         return False
     if not all(labels.get(key) == value for key, value in managed_labels.items()):
         return False
+    if not _labels_match_compose_project_prefix(labels=labels, candidate=candidate):
+        return False
     if hostname is None or port is None:
         return True
     return _labels_reference_hostname(labels, hostname) and _labels_expose_port(labels, port)
@@ -636,7 +664,22 @@ def _is_expected_auxiliary_container(*, container: dict[str, Any], candidate: di
     expected_service_name = str(candidate.get("expected_service_name", ""))
     if candidate.get("pack") == "openclaw" and compose_service == f"{expected_service_name}-public":
         return True
+    auxiliary_services = candidate.get("expected_auxiliary_compose_services")
+    if (
+        isinstance(auxiliary_services, frozenset)
+        and compose_service in auxiliary_services
+        and _labels_match_compose_project_prefix(labels=labels, candidate=candidate)
+    ):
+        return True
     return False
+
+
+def _labels_match_compose_project_prefix(*, labels: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    project_prefix = candidate.get("managed_compose_project_prefix")
+    if not isinstance(project_prefix, str):
+        return True
+    compose_project = labels.get("com.docker.compose.project")
+    return isinstance(compose_project, str) and compose_project.startswith(project_prefix)
 
 
 def _labels_reference_hostname(labels: dict[str, str], hostname: str) -> bool:

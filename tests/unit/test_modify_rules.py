@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dokploy_wizard.lifecycle import classify_modify_request
+from dokploy_wizard.lifecycle import LifecyclePlan, classify_modify_request
 from dokploy_wizard.packs.catalog import (
     get_mutable_pack_env_keys,
     get_mutable_pack_resource_keys,
@@ -492,6 +492,18 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "R2_BUCKET_NAME",
         "R2_ENDPOINT",
         "R2_SECRET_ACCESS_KEY",
+        "SURFSENSE_API_PUBLIC_URL",
+        "SURFSENSE_API_SUBDOMAIN",
+        "SURFSENSE_AUTH_TYPE",
+        "SURFSENSE_EMBEDDING_MODEL",
+        "SURFSENSE_ETL_SERVICE",
+        "SURFSENSE_FALLBACK_MODELS",
+        "SURFSENSE_FRONTEND_PUBLIC_URL",
+        "SURFSENSE_PRIMARY_MODEL",
+        "SURFSENSE_SUBDOMAIN",
+        "SURFSENSE_VERSION",
+        "SURFSENSE_ZERO_PUBLIC_URL",
+        "SURFSENSE_ZERO_SUBDOMAIN",
         "TELEGRAM_ALLOWED_USERS",
         "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
         "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
@@ -592,6 +604,113 @@ def test_modify_coder_hermes_env_change_reruns_coder() -> None:
 
     assert plan.start_phase == "shared_core"
     assert plan.phases_to_run == ("shared_core", "coder")
+
+
+def _classify_surfsense_modify(
+    *,
+    existing_values: dict[str, str],
+    requested_values: dict[str, str],
+) -> LifecyclePlan:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "surfsense",
+            **existing_values,
+        }
+    )
+    requested_raw = _raw(
+        {
+            **existing_raw.values,
+            **requested_values,
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    return classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "surfsense",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "old_value", "new_value"),
+    (
+        ("SURFSENSE_VERSION", "0.0.25", "0.0.26"),
+        (
+            "SURFSENSE_FRONTEND_PUBLIC_URL",
+            "https://research.example.com",
+            "https://surfsense.example.com",
+        ),
+        (
+            "SURFSENSE_API_PUBLIC_URL",
+            "https://research-api.example.com",
+            "https://surfsense-api.example.com",
+        ),
+        (
+            "SURFSENSE_ZERO_PUBLIC_URL",
+            "https://research-zero.example.com",
+            "https://surfsense-zero.example.com",
+        ),
+        ("SURFSENSE_AUTH_TYPE", "DISABLED", "OIDC"),
+        ("SURFSENSE_ETL_SERVICE", "DOCLING", "UNSTRUCTURED"),
+        ("SURFSENSE_EMBEDDING_MODEL", "text-embedding-3-small", "custom-embedding"),
+    ),
+)
+def test_modify_surfsense_runtime_key_change_reruns_surfsense(
+    key: str, old_value: str, new_value: str
+) -> None:
+    plan = _classify_surfsense_modify(
+        existing_values={key: old_value},
+        requested_values={key: new_value},
+    )
+
+    assert plan.mode == "modify"
+    assert plan.start_phase == "surfsense"
+    assert plan.phases_to_run == ("surfsense",)
+
+
+@pytest.mark.parametrize(
+    ("key", "old_value", "new_value"),
+    (
+        (
+            "SURFSENSE_PRIMARY_MODEL",
+            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            "openrouter/hunter-alpha",
+        ),
+        (
+            "SURFSENSE_FALLBACK_MODELS",
+            "openrouter/hunter-alpha",
+            "openrouter/healer-alpha,openrouter/sonoma-dusk-alpha",
+        ),
+    )
+)
+def test_modify_surfsense_model_key_change_reruns_litellm_and_surfsense(
+    key: str, old_value: str, new_value: str
+) -> None:
+    plan = _classify_surfsense_modify(
+        existing_values={key: old_value},
+        requested_values={key: new_value},
+    )
+
+    assert plan.mode == "modify"
+    assert plan.start_phase == "shared_core"
+    assert plan.phases_to_run == ("shared_core", "surfsense")
 
 
 def test_modify_uses_explicit_pack_mutable_resource_contract() -> None:

@@ -44,6 +44,10 @@ from dokploy_wizard.packs.seaweedfs import (
     SEAWEEDFS_DATA_RESOURCE_TYPE,
     SEAWEEDFS_SERVICE_RESOURCE_TYPE,
 )
+from dokploy_wizard.packs.surfsense import (
+    SURFSENSE_DATA_RESOURCE_TYPE,
+    SURFSENSE_SERVICE_RESOURCE_TYPE,
+)
 from dokploy_wizard.state import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput
 from dokploy_wizard.tailscale import TAILSCALE_NODE_RESOURCE_TYPE
 
@@ -136,6 +140,8 @@ _RULES: dict[str, DeletionRule] = {
     DOCUSEAL_DATA_RESOURCE_TYPE: DeletionRule(phase="docuseal", retain_safe=False, priority=27),
     SEAWEEDFS_SERVICE_RESOURCE_TYPE: DeletionRule(phase="seaweedfs", retain_safe=True, priority=28),
     SEAWEEDFS_DATA_RESOURCE_TYPE: DeletionRule(phase="seaweedfs", retain_safe=False, priority=29),
+    SURFSENSE_SERVICE_RESOURCE_TYPE: DeletionRule(phase="surfsense", retain_safe=True, priority=30),
+    SURFSENSE_DATA_RESOURCE_TYPE: DeletionRule(phase="surfsense", retain_safe=False, priority=31),
     CODER_SERVICE_RESOURCE_TYPE: DeletionRule(phase="coder", retain_safe=True, priority=30),
     CODER_DATA_RESOURCE_TYPE: DeletionRule(phase="coder", retain_safe=False, priority=31),
     MATRIX_SERVICE_RESOURCE_TYPE: DeletionRule(phase="matrix", retain_safe=True, priority=30),
@@ -154,7 +160,7 @@ _RULES: dict[str, DeletionRule] = {
     TUNNEL_RESOURCE_TYPE: DeletionRule(phase="networking", retain_safe=True, priority=61),
 }
 
-_LITELLM_CONSUMER_PACKS = {"coder", "openclaw", "my-farm-advisor"}
+_LITELLM_CONSUMER_PACKS = {"coder", "openclaw", "my-farm-advisor", "surfsense"}
 
 _PHASE_ORDER = {
     "tailscale": 0,
@@ -165,11 +171,12 @@ _PHASE_ORDER = {
     "moodle": 5,
     "docuseal": 6,
     "seaweedfs": 7,
-    "coder": 8,
-    "matrix": 9,
-    "headscale": 10,
-    "shared_core": 11,
-    "networking": 12,
+    "surfsense": 8,
+    "coder": 9,
+    "matrix": 10,
+    "headscale": 11,
+    "shared_core": 12,
+    "networking": 13,
 }
 
 _PACK_RUNTIME_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
@@ -179,6 +186,7 @@ _PACK_RUNTIME_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "moodle": (MOODLE_SERVICE_RESOURCE_TYPE,),
     "docuseal": (DOCUSEAL_SERVICE_RESOURCE_TYPE,),
     "seaweedfs": (SEAWEEDFS_SERVICE_RESOURCE_TYPE,),
+    "surfsense": (SURFSENSE_SERVICE_RESOURCE_TYPE,),
     "coder": (CODER_SERVICE_RESOURCE_TYPE,),
     "openclaw": (
         OPENCLAW_SERVICE_RESOURCE_TYPE,
@@ -201,6 +209,7 @@ _PACK_DATA_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "moodle": (MOODLE_DATA_RESOURCE_TYPE,),
     "docuseal": (DOCUSEAL_DATA_RESOURCE_TYPE,),
     "seaweedfs": (SEAWEEDFS_DATA_RESOURCE_TYPE,),
+    "surfsense": (SURFSENSE_DATA_RESOURCE_TYPE,),
     "coder": (CODER_DATA_RESOURCE_TYPE,),
     "openclaw": (),
     "my-farm-advisor": (),
@@ -214,6 +223,7 @@ _PACK_HOSTNAME_KEYS: dict[str, tuple[str, ...]] = {
     "moodle": ("moodle",),
     "docuseal": ("docuseal",),
     "seaweedfs": ("s3",),
+    "surfsense": ("surfsense", "surfsense-api", "surfsense-zero"),
     "coder": ("coder",),
     "openclaw": ("openclaw",),
     "my-farm-advisor": ("my-farm-advisor",),

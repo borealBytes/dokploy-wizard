@@ -34,6 +34,7 @@ PHASE_ORDER: tuple[str, ...] = (
     "openclaw",
     "my-farm-advisor",
     "cloudflare_access",
+    "surfsense",
 )
 
 # LiteLLM is always installed as shared-core infrastructure, not as a standalone
@@ -72,6 +73,9 @@ _SUPPORTED_HOSTNAME_KEYS = {
     "OPENCLAW_SUBDOMAIN",
     "OPENCLAW_INTERNAL_SUBDOMAIN",
     "MY_FARM_ADVISOR_SUBDOMAIN",
+    "SURFSENSE_SUBDOMAIN",
+    "SURFSENSE_API_SUBDOMAIN",
+    "SURFSENSE_ZERO_SUBDOMAIN",
 }
 _SUPPORTED_ENABLEMENT_KEYS = {
     "PACKS",
@@ -83,6 +87,7 @@ _SUPPORTED_ENABLEMENT_KEYS = {
     "ENABLE_CODER",
     "ENABLE_OPENCLAW",
     "ENABLE_MY_FARM_ADVISOR",
+    "ENABLE_SURFSENSE",
 }
 _SUPPORTED_MUTABLE_PACK_ENV_KEYS = set(get_mutable_pack_env_keys())
 _SUPPORTED_MUTABLE_PACK_RESOURCE_KEYS = set(get_mutable_pack_resource_keys())
@@ -125,6 +130,9 @@ _HOSTNAME_PHASES = {
     "openclaw": ("networking", "openclaw"),
     "openclaw-internal": ("openclaw",),
     "my-farm-advisor": ("networking", "my-farm-advisor"),
+    "surfsense": ("networking", "surfsense"),
+    "surfsense-api": ("networking", "surfsense"),
+    "surfsense-zero": ("networking", "surfsense"),
 }
 _OPTIONAL_PHASE_PACKS = {
     "matrix": "matrix",
@@ -135,6 +143,7 @@ _OPTIONAL_PHASE_PACKS = {
     "coder": "coder",
     "openclaw": "openclaw",
     "my-farm-advisor": "my-farm-advisor",
+    "surfsense": "surfsense",
 }
 _OPENCLAW_RUNTIME_ENV_KEYS = {
     "AI_DEFAULT_API_KEY",
@@ -255,12 +264,26 @@ _MY_FARM_LITELLM_UPSTREAM_ENV_KEYS = {
     "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
     "MY_FARM_ADVISOR_NVIDIA_API_KEY",
 }
+_SURFSENSE_RUNTIME_ENV_KEYS = {
+    "SURFSENSE_VERSION",
+    "SURFSENSE_FRONTEND_PUBLIC_URL",
+    "SURFSENSE_API_PUBLIC_URL",
+    "SURFSENSE_ZERO_PUBLIC_URL",
+    "SURFSENSE_AUTH_TYPE",
+    "SURFSENSE_ETL_SERVICE",
+    "SURFSENSE_EMBEDDING_MODEL",
+}
+_SURFSENSE_LITELLM_MODEL_ENV_KEYS = {
+    "SURFSENSE_PRIMARY_MODEL",
+    "SURFSENSE_FALLBACK_MODELS",
+}
 _LITELLM_MUTABLE_ENV_KEYS = (
     _LITELLM_SHARED_CONFIG_ENV_KEYS
     | _OPENCLAW_LITELLM_UPSTREAM_ENV_KEYS
     | _MY_FARM_LITELLM_UPSTREAM_ENV_KEYS
+    | _SURFSENSE_LITELLM_MODEL_ENV_KEYS
 )
-_LITELLM_CONSUMER_PHASES = {"coder", "openclaw", "my-farm-advisor"}
+_LITELLM_CONSUMER_PHASES = {"coder", "openclaw", "my-farm-advisor", "surfsense"}
 
 _SUPPORTED_MODIFY_KEYS |= (
     _OPENCLAW_RUNTIME_ENV_KEYS
@@ -309,6 +332,8 @@ def applicable_phases_for(desired_state: DesiredState) -> tuple[str, ...]:
         phases.add("coder")
     if "openclaw" in desired_state.enabled_packs:
         phases.add("openclaw")
+    if "surfsense" in desired_state.enabled_packs:
+        phases.add("surfsense")
     if "my-farm-advisor" in desired_state.enabled_packs:
         phases.add("my-farm-advisor")
     if _access_enabled(desired_state):
@@ -479,6 +504,8 @@ def classify_modify_request(
         phases_to_run.add("my-farm-advisor")
     if farm_enabled_after and effective_changed_keys & _MY_FARM_RUNTIME_ENV_KEYS:
         phases_to_run.add("my-farm-advisor")
+    if "surfsense" in requested_desired.enabled_packs and effective_changed_keys & _SURFSENSE_RUNTIME_ENV_KEYS:
+        phases_to_run.add("surfsense")
     if effective_changed_keys & _OUTBOUND_MAIL_ENV_KEYS:
         phases_to_run.add("shared_core")
         if "moodle" in requested_desired.enabled_packs:
@@ -707,4 +734,6 @@ def _litellm_dependent_consumer_phases(
         phases.add("openclaw")
     if changed_keys & _MY_FARM_LITELLM_UPSTREAM_ENV_KEYS and "my-farm-advisor" in enabled_packs:
         phases.add("my-farm-advisor")
+    if changed_keys & _SURFSENSE_LITELLM_MODEL_ENV_KEYS and "surfsense" in enabled_packs:
+        phases.add("surfsense")
     return phases
