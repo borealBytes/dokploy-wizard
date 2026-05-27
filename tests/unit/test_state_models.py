@@ -178,3 +178,29 @@ def test_dokploy_api_url_is_resolved_into_desired_state() -> None:
     )
 
     assert desired_state.dokploy_api_url == "https://dokploy.example.com"
+
+
+def test_desired_state_accepts_legacy_missing_or_null_tailscale_ssh_flag() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "my-stack",
+                "ROOT_DOMAIN": "example.com",
+            },
+        )
+    )
+    payload = desired_state.to_dict()
+
+    missing_payload = dict(payload)
+    missing_payload.pop("tailscale_enable_ssh")
+    null_payload = {**payload, "tailscale_enable_ssh": None}
+    string_false_payload = {**payload, "tailscale_enable_ssh": "false"}
+    string_true_payload = {**payload, "tailscale_enable_ssh": "true"}
+    redacted_payload = {**payload, "tailscale_enable_ssh": "<REDACTED>"}
+
+    assert DesiredState.from_dict(missing_payload).tailscale_enable_ssh is False
+    assert DesiredState.from_dict(null_payload).tailscale_enable_ssh is False
+    assert DesiredState.from_dict(string_false_payload).tailscale_enable_ssh is False
+    assert DesiredState.from_dict(string_true_payload).tailscale_enable_ssh is True
+    assert DesiredState.from_dict(redacted_payload).tailscale_enable_ssh is False

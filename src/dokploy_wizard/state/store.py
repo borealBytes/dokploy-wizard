@@ -18,12 +18,14 @@ from dokploy_wizard.state.models import (
     LITELLM_GENERATED_MASTER_KEY_PREFIX,
     LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES,
     STATE_FORMAT_VERSION,
+    SURFSENSE_GENERATED_SECRET_PREFIXES,
     AppliedStateCheckpoint,
     DesiredState,
     LiteLLMGeneratedKeys,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
+    SurfSenseGeneratedSecrets,
     litellm_key_uses_virtual_key_format,
 )
 from dokploy_wizard.state.queue_models import (
@@ -44,6 +46,7 @@ INBOX_EVENTS_FILE = "inbox-events.json"
 JOB_QUEUE_FILE = "job-queue.json"
 OUTBOUND_DELIVERIES_FILE = "outbound-deliveries.json"
 LITELLM_GENERATED_KEYS_FILE = "litellm-generated-keys.json"
+SURFSENSE_GENERATED_SECRETS_FILE = "surfsense-generated-secrets.json"
 STATE_DOCUMENT_FILES = (
     RAW_INPUT_FILE,
     DESIRED_STATE_FILE,
@@ -480,6 +483,35 @@ def ensure_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys:
     return generated_keys
 
 
+def load_surfsense_generated_secrets(state_dir: Path) -> SurfSenseGeneratedSecrets | None:
+    return _load_optional_document(
+        state_dir / SURFSENSE_GENERATED_SECRETS_FILE,
+        SurfSenseGeneratedSecrets.from_dict,
+    )
+
+
+def write_surfsense_generated_secrets(
+    state_dir: Path, generated_secrets: SurfSenseGeneratedSecrets
+) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / SURFSENSE_GENERATED_SECRETS_FILE
+    _write_document(path, generated_secrets.to_dict())
+    path.chmod(0o600)
+
+
+def ensure_surfsense_generated_secrets(state_dir: Path) -> SurfSenseGeneratedSecrets:
+    existing = load_surfsense_generated_secrets(state_dir)
+    if existing is not None:
+        repaired_existing = _repair_surfsense_generated_secrets(existing)
+        if repaired_existing != existing:
+            write_surfsense_generated_secrets(state_dir, repaired_existing)
+        return repaired_existing
+
+    generated_secrets = _build_surfsense_generated_secrets()
+    write_surfsense_generated_secrets(state_dir, generated_secrets)
+    return generated_secrets
+
+
 def _build_litellm_generated_keys() -> LiteLLMGeneratedKeys:
     return LiteLLMGeneratedKeys(
         format_version=STATE_FORMAT_VERSION,
@@ -492,6 +524,16 @@ def _build_litellm_generated_keys() -> LiteLLMGeneratedKeys:
     )
 
 
+def _build_surfsense_generated_secrets() -> SurfSenseGeneratedSecrets:
+    return SurfSenseGeneratedSecrets(
+        format_version=STATE_FORMAT_VERSION,
+        secrets={
+            secret_name: _generate_secret(prefix=prefix)
+            for secret_name, prefix in SURFSENSE_GENERATED_SECRET_PREFIXES.items()
+        },
+    )
+
+
 def _repair_litellm_generated_keys(existing: LiteLLMGeneratedKeys) -> LiteLLMGeneratedKeys:
     master_key = existing.master_key
     if not litellm_key_uses_virtual_key_format(master_key):
@@ -499,8 +541,8 @@ def _repair_litellm_generated_keys(existing: LiteLLMGeneratedKeys) -> LiteLLMGen
 
     virtual_keys = dict(existing.virtual_keys)
     for consumer, prefix in LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES.items():
-        current_key = virtual_keys[consumer]
-        if litellm_key_uses_virtual_key_format(current_key):
+        current_key = virtual_keys.get(consumer)
+        if current_key is not None and litellm_key_uses_virtual_key_format(current_key):
             continue
         virtual_keys[consumer] = _generate_secret(prefix=prefix)
 
@@ -509,6 +551,20 @@ def _repair_litellm_generated_keys(existing: LiteLLMGeneratedKeys) -> LiteLLMGen
         master_key=master_key,
         salt_key=existing.salt_key,
         virtual_keys=virtual_keys,
+    )
+
+
+def _repair_surfsense_generated_secrets(
+    existing: SurfSenseGeneratedSecrets,
+) -> SurfSenseGeneratedSecrets:
+    secrets_by_name = dict(existing.secrets)
+    for secret_name, prefix in SURFSENSE_GENERATED_SECRET_PREFIXES.items():
+        if secrets_by_name.get(secret_name):
+            continue
+        secrets_by_name[secret_name] = _generate_secret(prefix=prefix)
+    return SurfSenseGeneratedSecrets(
+        format_version=existing.format_version,
+        secrets=secrets_by_name,
     )
 
 
@@ -577,6 +633,7 @@ def _validate_state_document_set(loaded_state: LoadedState) -> None:
         "dokploy_bootstrap",
         "networking",
         "shared_core",
+        "surfsense",
         "seaweedfs",
         "headscale",
         "tailscale",
@@ -707,6 +764,7 @@ def _read_json_file(path: Path) -> Any:
 
 def _write_document(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
 
 
 def _generate_secret(*, prefix: str) -> str:

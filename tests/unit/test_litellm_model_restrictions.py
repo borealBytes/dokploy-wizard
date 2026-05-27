@@ -165,6 +165,9 @@ class FakeLiteLLMAdminApi:
         self._keys[key_alias] = record
         return record
 
+    def delete_key(self, *, key_alias: str) -> None:
+        self._keys.pop(key_alias, None)
+
 
 class FakeLiteLLMRestrictionHarness:
     def __init__(
@@ -363,6 +366,30 @@ def _build_fake_harness() -> FakeLiteLLMRestrictionHarness:
 
 def _consumer_api_key(consumer: str) -> str:
     return _expected_consumer_keys()[consumer]
+
+
+def test_dokploy_ai_reconciles_with_default_model_alias_only() -> None:
+    flat_env = _qa_flat_env()
+    plan = build_shared_core_plan(
+        stack_name="wizard-stack",
+        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+    )
+    allowlists = build_litellm_consumer_model_allowlists(flat_env=flat_env, plan=plan)
+    manager = LiteLLMGatewayManager(api=FakeLiteLLMAdminApi(), sleep_fn=lambda _: None)
+
+    reconciled = manager.reconcile_virtual_keys(
+        generated_keys={"dokploy-ai": "sk-test-dokploy-ai"},
+        consumer_model_allowlists=allowlists,
+    )
+
+    assert allowlists["dokploy-ai"] == (DEFAULT_LOCAL_CANONICAL_ALIAS,)
+    assert reconciled["dokploy-ai"] == LiteLLMVirtualKeyRecord(
+        key="sk-test-dokploy-ai",
+        key_alias="dokploy-ai",
+        team_id="team-dokploy-ai",
+        models=(DEFAULT_LOCAL_CANONICAL_ALIAS,),
+        metadata={"consumer": "dokploy-ai", "managed_by": "dokploy-wizard"},
+    )
 
 
 def _model_names_from_v1_models(response: HarnessResponse) -> tuple[str, ...]:

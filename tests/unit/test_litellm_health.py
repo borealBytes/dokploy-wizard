@@ -71,6 +71,9 @@ class FakeReadinessApi:
     ) -> LiteLLMVirtualKeyRecord:
         raise AssertionError("unexpected update_key call")
 
+    def delete_key(self, *, key_alias: str) -> None:
+        raise AssertionError(f"unexpected delete_key call for {key_alias}")
+
 
 class FakeTransientReadinessApi(FakeReadinessApi):
     def __init__(self) -> None:

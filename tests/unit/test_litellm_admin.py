@@ -364,3 +364,33 @@ def test_update_key_accepts_nested_key_record_with_fallback_fields() -> None:
     assert key.key_alias == "openclaw"
     assert key.team_id == "team-openclaw"
     assert key.models == ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",)
+
+
+def test_delete_key_deletes_by_alias_list_payload() -> None:
+    recorded: list[dict[str, object]] = []
+
+    def fake_request(req: request.Request) -> object:
+        data = req.data
+        assert isinstance(data, bytes)
+        recorded.append(
+            {
+                "method": req.get_method(),
+                "url": req.full_url,
+                "body": json.loads(data.decode("utf-8")),
+            }
+        )
+        return {"deleted": True}
+
+    LiteLLMAdminClient(
+        api_url="http://litellm.internal",
+        master_key="secret",
+        request_fn=fake_request,
+    ).delete_key(key_alias="openclaw")
+
+    assert recorded == [
+        {
+            "method": "POST",
+            "url": "http://litellm.internal/key/delete",
+            "body": {"key_aliases": ["openclaw"]},
+        }
+    ]

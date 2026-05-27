@@ -143,6 +143,8 @@ class RecordingManagedDriftLiteLLMAdminApi:
     keys: dict[str, LiteLLMVirtualKeyRecord]
     update_team_calls: list[dict[str, object]] = field(default_factory=list)
     update_key_calls: list[dict[str, object]] = field(default_factory=list)
+    create_key_calls: list[dict[str, object]] = field(default_factory=list)
+    delete_key_calls: list[dict[str, object]] = field(default_factory=list)
 
     def readiness(self) -> dict[str, object]:
         return {"status": "connected", "db": "connected"}
@@ -203,6 +205,15 @@ class RecordingManagedDriftLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
+        self.create_key_calls.append(
+            {
+                "key": key,
+                "key_alias": key_alias,
+                "team_id": team_id,
+                "models": models,
+                "metadata": dict(metadata or {}),
+            }
+        )
         record = LiteLLMVirtualKeyRecord(
             key=key,
             key_alias=key_alias,
@@ -212,6 +223,10 @@ class RecordingManagedDriftLiteLLMAdminApi:
         )
         self.keys[key_alias] = record
         return record
+
+    def delete_key(self, *, key_alias: str) -> None:
+        self.delete_key_calls.append({"key_alias": key_alias})
+        self.keys.pop(key_alias, None)
 
     def update_key(
         self,
@@ -391,8 +406,10 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
+        "dokploy-ai": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
         "my-farm-advisor": (*shared_models, "nvidia/kimi-k2.5"),
         "openclaw": shared_models,
+        "surfsense": shared_models,
     }
     assert "opencode-go/minimax-m2.7" in allowlists["my-farm-advisor"]
 
@@ -426,8 +443,10 @@ def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
+        "dokploy-ai": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
         "my-farm-advisor": shared_models,
         "openclaw": shared_models,
+        "surfsense": shared_models,
     }
 
 
@@ -454,8 +473,10 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
+        "dokploy-ai": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
         "my-farm-advisor": shared_models,
         "openclaw": shared_models,
+        "surfsense": shared_models,
     }
     assert "opencode-go/*" not in allowlists["openclaw"]
     assert "opencode-go/deepseek-v4-flash" in allowlists["openclaw"]
@@ -466,7 +487,7 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
     assert "opencode-go/gpt-image-1.5" not in allowlists["openclaw"]
 
 
-def test_litellm_admin_reconciliation_preserves_live_managed_keys_during_drift(
+def test_litellm_admin_reconciliation_adopts_live_managed_keys_into_generated_state(
     tmp_path: Path,
 ) -> None:
     plan = build_shared_core_plan(
@@ -513,34 +534,38 @@ def test_litellm_admin_reconciliation_preserves_live_managed_keys_during_drift(
         litellm_generated_keys=generated_keys,
         litellm_consumer_model_allowlists=allowlists,
         litellm_admin_api=admin_api,
+        client=RecordingDokploySharedCoreApi(),
         sleep_fn=lambda _: None,
         state_dir=tmp_path,
     )
 
     backend.reconcile_litellm_runtime()
 
-    persisted = load_litellm_generated_keys(tmp_path)
-
-    assert persisted is not None
-    assert persisted.virtual_keys == {
-        consumer: f"sk-live-{consumer}" for consumer in allowlists
+    persisted_keys = load_litellm_generated_keys(tmp_path)
+    drifted_team_consumers = {
+        consumer for consumer, models in allowlists.items() if models != stale_models
     }
-    assert {call["team_alias"] for call in admin_api.update_team_calls} == set(allowlists)
-    assert {call["key_alias"] for call in admin_api.update_key_calls} == set(allowlists)
+    assert persisted_keys is None
+    assert {call["team_alias"] for call in admin_api.update_team_calls} == drifted_team_consumers
+    assert {call["key_alias"] for call in admin_api.delete_key_calls} == set(allowlists)
+    assert {call["key_alias"] for call in admin_api.create_key_calls} == set(allowlists)
+    assert admin_api.update_key_calls == []
     for consumer, models in allowlists.items():
-        assert {
-            "team_id": f"team-{consumer}",
-            "team_alias": consumer,
-            "models": models,
-            "metadata": {"consumer": consumer, "managed_by": "dokploy-wizard"},
-        } in admin_api.update_team_calls
+        if consumer in drifted_team_consumers:
+            assert {
+                "team_id": f"team-{consumer}",
+                "team_alias": consumer,
+                "models": models,
+                "metadata": {"consumer": consumer, "managed_by": "dokploy-wizard"},
+            } in admin_api.update_team_calls
+        assert {"key_alias": consumer} in admin_api.delete_key_calls
         assert {
             "key_alias": consumer,
-            "key": f"sk-live-{consumer}",
+            "key": generated_keys.virtual_keys[consumer],
             "team_id": f"team-{consumer}",
             "models": models,
             "metadata": {"consumer": consumer, "managed_by": "dokploy-wizard"},
-        } in admin_api.update_key_calls
+        } in admin_api.create_key_calls
 
 
 def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
@@ -600,8 +625,10 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
     assert set(generated_keys.virtual_keys) == {
         "coder-hermes",
         "coder-kdense",
+        "dokploy-ai",
         "my-farm-advisor",
         "openclaw",
+        "surfsense",
     }
 
 
@@ -797,9 +824,11 @@ def test_coder_and_advisor_install_persist_consumer_specific_virtual_keys(
     assert set(generated_keys.virtual_keys) == {
         "coder-hermes",
         "coder-kdense",
+        "dokploy-ai",
         "my-farm-advisor",
         "openclaw",
+        "surfsense",
     }
-    assert len(set(generated_keys.virtual_keys.values())) == 4
+    assert len(set(generated_keys.virtual_keys.values())) == 6
     assert api.compose_files_by_name["wizard-stack-openclaw"]
     assert api.compose_files_by_name["wizard-stack-my-farm-advisor"]

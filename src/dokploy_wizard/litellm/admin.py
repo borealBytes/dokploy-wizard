@@ -78,6 +78,8 @@ class LiteLLMAdminApi(Protocol):
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMVirtualKeyRecord: ...
 
+    def delete_key(self, *, key_alias: str) -> None: ...
+
 
 class LiteLLMAdminClient:
     _KEY_LIST_PAGE_SIZE = 100
@@ -242,6 +244,9 @@ class LiteLLMAdminClient:
             fallback_team_id=team_id,
         )
 
+    def delete_key(self, *, key_alias: str) -> None:
+        self._request_json("POST", "/key/delete", {"key_aliases": [key_alias]})
+
     def _request_json(
         self,
         method: str,
@@ -312,7 +317,10 @@ class LiteLLMGatewayManager:
         existing_keys = {record.key_alias: record for record in self._api.list_keys()}
         reconciled: dict[str, LiteLLMVirtualKeyRecord] = {}
         for consumer, generated_key in generated_keys.items():
-            expected_models = tuple(dict.fromkeys(consumer_model_allowlists.get(consumer, ())))
+            expected_models = _expected_models_for_consumer(
+                consumer,
+                consumer_model_allowlists,
+            )
             managed_metadata = _managed_metadata_for_consumer(consumer)
             team = existing_teams.get(consumer)
             if team is None:
@@ -346,46 +354,52 @@ class LiteLLMGatewayManager:
                     metadata=managed_metadata,
                 )
                 existing_keys[consumer] = existing_key
-            elif existing_key.key != generated_key:
-                if existing_key.models != expected_models or existing_key.team_id != team.team_id:
+            else:
+                key_value_drifted = existing_key.key != generated_key
+                key_scope_drifted = (
+                    existing_key.models != expected_models or existing_key.team_id != team.team_id
+                )
+
+                if key_value_drifted or key_scope_drifted:
                     _ensure_record_is_wizard_managed(
                         record_kind="key",
                         consumer=consumer,
                         metadata=existing_key.metadata,
                     )
-                    existing_key = self._api.update_key(
+
+                if key_value_drifted:
+                    # LiteLLM's key-list payload does not prove reusable raw token material.
+                    # For wizard-managed aliases, value drift means the DB record must be
+                    # replaced with the generated raw key instead of adopted back into state.
+                    self._api.delete_key(key_alias=consumer)
+                    existing_key = self._api.create_key(
+                        key=generated_key,
                         key_alias=consumer,
-                        key=existing_key.key,
                         team_id=team.team_id,
                         models=expected_models,
                         metadata=managed_metadata,
                     )
                     existing_keys[consumer] = existing_key
-                    reconciled[consumer] = existing_key
-                    continue
-                existing_key = LiteLLMVirtualKeyRecord(
-                    key=existing_key.key,
-                    key_alias=existing_key.key_alias,
-                    team_id=team.team_id,
-                    models=expected_models,
-                    metadata=existing_key.metadata,
-                )
-            elif existing_key.models != expected_models or existing_key.team_id != team.team_id:
-                _ensure_record_is_wizard_managed(
-                    record_kind="key",
-                    consumer=consumer,
-                    metadata=existing_key.metadata,
-                )
-                existing_key = self._api.update_key(
-                    key_alias=consumer,
-                    key=existing_key.key,
-                    team_id=team.team_id,
-                    models=expected_models,
-                    metadata=managed_metadata,
-                )
-                existing_keys[consumer] = existing_key
+                elif key_scope_drifted:
+                    # LiteLLM OSS /key/update updates settings for an existing token; use it
+                    # only when the accepted raw token value already matches wizard state.
+                    existing_key = self._api.update_key(
+                        key_alias=consumer,
+                        key=generated_key,
+                        team_id=team.team_id,
+                        models=expected_models,
+                        metadata=managed_metadata,
+                    )
+                    existing_keys[consumer] = existing_key
             reconciled[consumer] = existing_key
         return reconciled
+
+
+def _expected_models_for_consumer(
+    consumer: str,
+    consumer_model_allowlists: Mapping[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(consumer_model_allowlists.get(consumer, ())))
 
 
 def _readiness_is_healthy(snapshot: Mapping[str, Any]) -> bool:

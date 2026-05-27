@@ -42,6 +42,22 @@ def _require_bool(payload: dict[str, Any], key: str) -> bool:
     return value
 
 
+def _optional_bool(payload: dict[str, Any], key: str, *, default: bool) -> bool:
+    value = payload.get(key, default)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "", "<redacted>"}:
+            return False
+    msg = f"Expected boolean for '{key}'."
+    raise StateValidationError(msg)
+
+
 def _require_optional_nonempty_string(payload: dict[str, Any], key: str) -> str | None:
     value = payload.get(key)
     if value is None:
@@ -494,7 +510,9 @@ class DesiredState:
             dokploy_api_url=_require_optional_string(payload, "dokploy_api_url"),
             enable_tailscale=_require_bool(payload, "enable_tailscale"),
             tailscale_hostname=_require_optional_string(payload, "tailscale_hostname"),
-            tailscale_enable_ssh=_require_bool(payload, "tailscale_enable_ssh"),
+            tailscale_enable_ssh=_optional_bool(
+                payload, "tailscale_enable_ssh", default=False
+            ),
             tailscale_tags=_require_string_list(payload, "tailscale_tags"),
             tailscale_subnet_routes=_require_string_list(payload, "tailscale_subnet_routes"),
             cloudflare_access_otp_emails=_require_string_list(
@@ -551,16 +569,28 @@ def _require_optional_string(payload: dict[str, Any], key: str) -> str | None:
 LITELLM_CONSUMER_VIRTUAL_KEY_NAMES = (
     "coder-hermes",
     "coder-kdense",
+    "dokploy-ai",
     "my-farm-advisor",
     "openclaw",
+    "surfsense",
 )
 
 LITELLM_GENERATED_MASTER_KEY_PREFIX = "sk-litellm-master"
 LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES = {
     "coder-hermes": "sk-litellm-coder-hermes",
     "coder-kdense": "sk-litellm-coder-kdense",
+    "dokploy-ai": "sk-litellm-dokploy-ai",
     "my-farm-advisor": "sk-litellm-my-farm-advisor",
     "openclaw": "sk-litellm-openclaw",
+    "surfsense": "sk-litellm-surfsense",
+}
+
+SURFSENSE_GENERATED_SECRET_PREFIXES = {
+    "db_password": "surfsense-db-password",
+    "jwt_secret": "surfsense-jwt-secret",
+    "searxng_secret": "surfsense-searxng-secret",
+    "secret_key": "surfsense-secret-key",
+    "zero_admin_password": "surfsense-zero-admin-password",
 }
 
 
@@ -588,17 +618,6 @@ class LiteLLMGeneratedKeys:
             msg = "LiteLLM master_key and salt_key must be non-empty strings."
             raise StateValidationError(msg)
 
-        missing_consumers = sorted(
-            consumer
-            for consumer in LITELLM_CONSUMER_VIRTUAL_KEY_NAMES
-            if self.virtual_keys.get(consumer, "") == ""
-        )
-        if missing_consumers:
-            msg = (
-                "LiteLLM virtual_keys must contain non-empty values for "
-                f"{missing_consumers}."
-            )
-            raise StateValidationError(msg)
         if any(key == "" or value == "" for key, value in self.virtual_keys.items()):
             msg = "LiteLLM virtual_keys must use non-empty names and values."
             raise StateValidationError(msg)
@@ -618,6 +637,38 @@ class LiteLLMGeneratedKeys:
             master_key=_require_string(payload, "master_key"),
             salt_key=_require_string(payload, "salt_key"),
             virtual_keys=_require_string_map(payload, "virtual_keys"),
+        )
+
+
+@dataclass(frozen=True)
+class SurfSenseGeneratedSecrets:
+    """Wizard-managed SurfSense runtime secrets persisted outside install.env."""
+
+    format_version: int
+    secrets: dict[str, str]
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        if any(key == "" or value == "" for key, value in self.secrets.items()):
+            msg = "SurfSense generated secrets must use non-empty names and values."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format_version": self.format_version,
+            "secrets": dict(sorted(self.secrets.items())),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> SurfSenseGeneratedSecrets:
+        return cls(
+            format_version=_require_format_version(payload),
+            secrets=_require_string_map(payload, "secrets"),
         )
 
 

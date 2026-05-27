@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 import time
@@ -20,6 +21,7 @@ from dokploy_wizard.core import (
 )
 from dokploy_wizard.dokploy.client import (
     DokployAiProvider,
+    DokployAiProviderTestConnectionResult,
     DokployApiClient,
     DokployApiError,
     DokployComposeRecord,
@@ -53,7 +55,14 @@ from dokploy_wizard.litellm.model_catalog import (
     build_model_catalog,
 )
 from dokploy_wizard.state import write_litellm_generated_keys
-from dokploy_wizard.state.models import ComposeArtifactHashState, LiteLLMGeneratedKeys
+from dokploy_wizard.state.models import (
+    LITELLM_CONSUMER_VIRTUAL_KEY_NAMES,
+    ComposeArtifactHashState,
+    LiteLLMGeneratedKeys,
+)
+from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
+
+_DOKPLOY_AI_PROVIDER_NAME = "Dokploy Wizard LiteLLM"
 
 
 class DokploySharedCoreApi(Protocol):
@@ -219,6 +228,13 @@ class DokploySharedCoreBackend:
                 allocation.database_name,
                 allocation.user_name,
             )
+            if _allocation_requires_surfsense_postgres_capabilities(allocation):
+                _ensure_postgres_role_superuser(container_name, allocation.user_name)
+                _ensure_postgres_extension(
+                    container_name,
+                    database_name=allocation.database_name,
+                    extension_name="vector",
+                )
 
     def validate_postgres_allocations(
         self, allocations: tuple[SharedPostgresAllocation, ...]
@@ -523,16 +539,16 @@ class DokploySharedCoreBackend:
                 virtual_keys=updated_virtual_keys,
             )
             write_litellm_generated_keys(self._state_dir, self._litellm_generated_keys)
-            if isinstance(self._client, DokployAiProviderApi):
-                try:
-                    _ensure_dokploy_ai_provider(
-                        self._client,
-                        litellm_service_name=self._plan.litellm.service_name,
-                        generated_keys=self._litellm_generated_keys,
-                        litellm_env=self._litellm_env,
-                    )
-                except DokployApiError:
-                    pass
+        if isinstance(self._client, DokployAiProviderApi):
+            try:
+                _ensure_dokploy_ai_provider(
+                    self._client,
+                    litellm_service_name=self._plan.litellm.service_name,
+                    generated_keys=self._litellm_generated_keys,
+                    litellm_env=self._litellm_env,
+                )
+            except DokployApiError as error:
+                raise SharedCoreError(str(error)) from error
 
     def _shared_core_runtime_ready_for_noop(self) -> bool:
         postgres_allocations = [
@@ -562,6 +578,26 @@ class DokploySharedCoreBackend:
             )
         except Exception:
             return False
+        return True
+
+    def validate_litellm_virtual_keys(self) -> bool:
+        if self._plan.litellm is None:
+            return True
+        if self._litellm_admin_api is None or self._litellm_generated_keys is None:
+            return False
+        try:
+            records = {record.key_alias: record for record in self._litellm_admin_api.list_keys()}
+        except Exception:
+            return False
+        for consumer, expected_key in self._litellm_generated_keys.virtual_keys.items():
+            record = records.get(consumer)
+            if record is None or record.key != expected_key:
+                return False
+            expected_models = tuple(
+                dict.fromkeys(self._litellm_consumer_model_allowlists.get(consumer, ()))
+            )
+            if record.models != expected_models:
+                return False
         return True
 
 
@@ -674,9 +710,200 @@ def _dokploy_ai_model_alias(litellm_env: dict[str, str]) -> str:
             if provider == "local":
                 provider_alias, _, _ = DEFAULT_LOCAL_CANONICAL_ALIAS.partition("/")
                 return f"{provider_alias}/{model}"
-            if "." in provider:
-                return f"{provider}/{model}"
+            return f"{provider}/{model}"
     return DEFAULT_LOCAL_CANONICAL_ALIAS
+
+
+def verify_dokploy_ai_provider(
+    client: DokployAiProviderApi,
+    *,
+    litellm_service_name: str,
+    generated_keys: LiteLLMGeneratedKeys | None,
+    litellm_env: dict[str, str] | None = None,
+) -> ServiceVerificationResult:
+    expected_url = f"http://{litellm_service_name}:4000/v1"
+    expected_model = _dokploy_ai_model_alias(litellm_env or {})
+    expected_key = None
+    if generated_keys is not None:
+        expected_key = generated_keys.virtual_keys.get("dokploy-ai")
+    if generated_keys is None or expected_key is None:
+        return make_verification_result(
+            service_name="dokploy-ai",
+            tier="app",
+            passed=False,
+            detail=_dokploy_ai_verification_detail(
+                status="fail",
+                reason="missing_dokploy_ai_virtual_key",
+                expected_url=expected_url,
+                expected_model=expected_model,
+                providers=(),
+                generated_keys=generated_keys,
+            ),
+        )
+
+    try:
+        providers = tuple(
+            provider
+            for provider in client.ai_providers_all()
+            if provider.name == _DOKPLOY_AI_PROVIDER_NAME
+        )
+    except DokployApiError as error:
+        return make_verification_result(
+            service_name="dokploy-ai",
+            tier="app",
+            passed=False,
+            detail=f"Dokploy AI provider verification failed while listing providers: {error}",
+        )
+
+    if len(providers) != 1:
+        return make_verification_result(
+            service_name="dokploy-ai",
+            tier="app",
+            passed=False,
+            detail=_dokploy_ai_verification_detail(
+                status="fail",
+                reason="missing_provider" if not providers else "duplicate_wizard_provider",
+                expected_url=expected_url,
+                expected_model=expected_model,
+                providers=providers,
+                generated_keys=generated_keys,
+            ),
+        )
+
+    provider = providers[0]
+    key_status = _dokploy_ai_key_status(provider.api_key, generated_keys=generated_keys)
+    metadata_matches = (
+        provider.is_enabled is True
+        and provider.api_url == expected_url
+        and provider.model == expected_model
+        and key_status == "matches_dokploy_ai_virtual_key"
+    )
+    connection_result: DokployAiProviderTestConnectionResult | None = None
+    connection_error: str | None = None
+    test_connection = getattr(client, "ai_provider_test_connection", None)
+    if metadata_matches and callable(test_connection):
+        try:
+            connection_result = cast(
+                DokployAiProviderTestConnectionResult,
+                test_connection(
+                    api_url=provider.api_url,
+                    api_key=provider.api_key,
+                    model=provider.model,
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 - verification reports failures as detail
+            connection_error = _redact_dokploy_ai_text(str(error), generated_keys=generated_keys)
+
+    connection_passed = connection_result is None or connection_result.success is True
+    passed = metadata_matches and connection_passed and connection_error is None
+    if not metadata_matches:
+        reason = "provider_state_drift"
+    elif connection_error is not None:
+        reason = "test_connection_error"
+    elif connection_result is not None and not connection_result.success:
+        reason = "test_connection_failed"
+    elif connection_result is not None:
+        reason = "provider_matches_expected_state_and_test_connection_passed"
+    else:
+        reason = "provider_matches_expected_state"
+    return make_verification_result(
+        service_name="dokploy-ai",
+        tier="app",
+        passed=passed,
+        detail=_dokploy_ai_verification_detail(
+            status="pass" if passed else "fail",
+            reason=reason,
+            expected_url=expected_url,
+            expected_model=expected_model,
+            providers=providers,
+            generated_keys=generated_keys,
+            connection_result=connection_result,
+            connection_error=connection_error,
+        ),
+    )
+
+
+def _dokploy_ai_verification_detail(
+    *,
+    status: str,
+    reason: str,
+    expected_url: str,
+    expected_model: str,
+    providers: tuple[DokployAiProvider, ...],
+    generated_keys: LiteLLMGeneratedKeys | None,
+    connection_result: DokployAiProviderTestConnectionResult | None = None,
+    connection_error: str | None = None,
+) -> str:
+    payload = {
+        "expected": {
+            "api_url": expected_url,
+            "model": expected_model,
+            "name": _DOKPLOY_AI_PROVIDER_NAME,
+        },
+        "providers": [
+            _redacted_dokploy_ai_provider_metadata(provider, generated_keys=generated_keys)
+            for provider in providers
+        ],
+        "reason": reason,
+        "status": status,
+    }
+    if connection_result is not None:
+        payload["test_connection"] = {
+            "success": connection_result.success,
+            "message": _redact_dokploy_ai_text(
+                connection_result.message or "", generated_keys=generated_keys
+            ) or None,
+        }
+    if connection_error is not None:
+        payload["test_connection"] = {"success": False, "message": connection_error}
+    return "Dokploy AI provider verification: " + json.dumps(payload, sort_keys=True)
+
+
+def _redact_dokploy_ai_text(text: str, *, generated_keys: LiteLLMGeneratedKeys | None) -> str:
+    redacted = text
+    if generated_keys is not None:
+        redacted = redacted.replace(generated_keys.master_key, "<REDACTED>")
+        for key in generated_keys.virtual_keys.values():
+            redacted = redacted.replace(key, "<REDACTED>")
+    return redacted
+
+
+def _redacted_dokploy_ai_provider_metadata(
+    provider: DokployAiProvider,
+    *,
+    generated_keys: LiteLLMGeneratedKeys | None,
+) -> dict[str, object]:
+    return {
+        "api_url": provider.api_url,
+        "enabled": provider.is_enabled,
+        "key_fingerprint": _redacted_key_fingerprint(provider.api_key),
+        "key_status": _dokploy_ai_key_status(provider.api_key, generated_keys=generated_keys),
+        "model": provider.model,
+        "name": provider.name,
+    }
+
+
+def _dokploy_ai_key_status(
+    api_key: str,
+    *,
+    generated_keys: LiteLLMGeneratedKeys | None,
+    connection_result: DokployAiProviderTestConnectionResult | None = None,
+    connection_error: str | None = None,
+) -> str:
+    if generated_keys is None:
+        return "cannot_validate_without_generated_keys"
+    if api_key == generated_keys.master_key:
+        return "uses_litellm_master_key"
+    expected_key = generated_keys.virtual_keys.get("dokploy-ai")
+    if expected_key is None:
+        return "missing_dokploy_ai_virtual_key"
+    if api_key == expected_key:
+        return "matches_dokploy_ai_virtual_key"
+    return "mismatched_virtual_key"
+
+
+def _redacted_key_fingerprint(value: str) -> str:
+    return f"sha256:{sha256(value.encode('utf-8')).hexdigest()[:12]}"
 
 
 def _ensure_dokploy_ai_provider(
@@ -689,9 +916,14 @@ def _ensure_dokploy_ai_provider(
     if generated_keys is None:
         return
     internal_url = f"http://{litellm_service_name}:4000/v1"
-    name = "Dokploy Wizard LiteLLM"
+    name = _DOKPLOY_AI_PROVIDER_NAME
     model = _dokploy_ai_model_alias(litellm_env or {})
-    api_key = generated_keys.master_key
+    try:
+        api_key = generated_keys.virtual_keys["dokploy-ai"]
+    except KeyError as error:
+        raise SharedCoreError(
+            "LiteLLM generated keys are missing the required 'dokploy-ai' virtual key."
+        ) from error
     existing = client.ai_providers_all()
     wizard_provider = None
     for provider in existing:
@@ -706,15 +938,22 @@ def _ensure_dokploy_ai_provider(
             model=model,
             is_enabled=True,
         )
-    else:
-        client.ai_provider_update(
-            ai_id=wizard_provider.ai_id,
-            name=name,
-            api_url=internal_url,
-            api_key=api_key,
-            model=model,
-            is_enabled=True,
-        )
+        return
+    if (
+        wizard_provider.api_url == internal_url
+        and wizard_provider.api_key == api_key
+        and wizard_provider.model == model
+        and wizard_provider.is_enabled is True
+    ):
+        return
+    client.ai_provider_update(
+        ai_id=wizard_provider.ai_id,
+        name=name,
+        api_url=internal_url,
+        api_key=api_key,
+        model=model,
+        is_enabled=True,
+    )
 
 
 def _render_compose_file(
@@ -777,8 +1016,9 @@ def _render_compose_file(
             )
         postgres_block = (
             f"  {plan.postgres.service_name}:\n"
-            "    image: postgres:16-alpine\n"
+            "    image: pgvector/pgvector:pg16\n"
             "    restart: unless-stopped\n"
+            "    command: [\"postgres\", \"-c\", \"wal_level=logical\", \"-c\", \"max_replication_slots=10\", \"-c\", \"max_wal_senders=10\"]\n"
             "    environment:\n"
             '      POSTGRES_DB: "postgres"\n'
             '      POSTGRES_USER: "postgres"\n'
@@ -863,6 +1103,7 @@ def _render_compose_file(
         upstream_creds = _build_litellm_upstream_creds(litellm_env)
         litellm_config_payload = build_litellm_config(litellm_env, upstream_creds)
         _use_litellm_env_refs(litellm_config_payload, litellm_env)
+        _configure_local_litellm_chat_template_compatibility(litellm_config_payload)
         litellm_config = render_litellm_config_yaml(litellm_config_payload)
         postgres_service_name = (
             plan.postgres.service_name if plan.postgres is not None else "shared-postgres"
@@ -922,6 +1163,9 @@ def _render_compose_file(
             "      shared:\n"
             "        aliases:\n"
             f"          - {plan.litellm.service_name}\n"
+            "      dokploy-network:\n"
+            "        aliases:\n"
+            f"          - {plan.litellm.service_name}\n"
         )
         config_entries.append(
             f"  {config_name}:\n"
@@ -938,6 +1182,8 @@ def _render_compose_file(
         "networks:\n"
         "  shared:\n"
         f"    name: {plan.network_name}\n"
+        "  dokploy-network:\n"
+        "    external: true\n"
         "volumes:\n"
         f"{volume_block or '  {}\n'}"
         f"{config_block}"
@@ -1175,6 +1421,25 @@ def _use_litellm_env_refs(config: dict[str, object], litellm_env: dict[str, str]
             litellm_params["api_key"] = f"os.environ/LITELLM_{env_name}"
 
 
+def _configure_local_litellm_chat_template_compatibility(config: dict[str, object]) -> None:
+    model_list = config.get("model_list")
+    if not isinstance(model_list, list):
+        return
+    for entry in model_list:
+        if not isinstance(entry, dict):
+            continue
+        model_name = entry.get("model_name")
+        if not isinstance(model_name, str) or not _is_local_alias(model_name):
+            continue
+        litellm_params = entry.get("litellm_params")
+        if not isinstance(litellm_params, dict):
+            continue
+        # vLLM-hosted local chat templates can reject system-role messages unless the
+        # only system message is first. LiteLLM maps system content into user content
+        # when this flag is false, which keeps SurfSense chat histories compatible.
+        litellm_params.setdefault("supports_system_message", False)
+
+
 def build_litellm_consumer_model_allowlists(
     *,
     flat_env: dict[str, str],
@@ -1220,6 +1485,7 @@ def _build_litellm_consumer_projection_catalog(
     visible_aliases_by_consumer = {
         consumer: shared_aliases for consumer in _litellm_consumers()
     }
+    visible_aliases_by_consumer["dokploy-ai"] = default_aliases[:1]
     visible_aliases_by_consumer["my-farm-advisor"] = _advisor_alias_allowlist(
         flat_env,
         primary_key="MY_FARM_ADVISOR_PRIMARY_MODEL",
@@ -1231,6 +1497,13 @@ def _build_litellm_consumer_projection_catalog(
         flat_env,
         primary_key="OPENCLAW_PRIMARY_MODEL",
         fallback_key="OPENCLAW_FALLBACK_MODELS",
+        catalog=base_catalog,
+        default_aliases=shared_aliases,
+    )
+    visible_aliases_by_consumer["surfsense"] = _advisor_alias_allowlist(
+        flat_env,
+        primary_key="SURFSENSE_PRIMARY_MODEL",
+        fallback_key="SURFSENSE_FALLBACK_MODELS",
         catalog=base_catalog,
         default_aliases=shared_aliases,
     )
@@ -1410,7 +1683,7 @@ def _catalog_alias_lookup(catalog: ModelCatalog) -> dict[str, str]:
 
 
 def _litellm_consumers() -> tuple[str, ...]:
-    return ("coder-hermes", "coder-kdense", "my-farm-advisor", "openclaw")
+    return LITELLM_CONSUMER_VIRTUAL_KEY_NAMES
 
 
 def _optional_value(flat_env: dict[str, str], key: str) -> str | None:
@@ -1448,9 +1721,11 @@ def _render_postgres_init_script(allocations: tuple[SharedPostgresAllocation, ..
                 f'{password_env}_SQL=$(escape_sql_literal "$${{{password_env}}}")',
                 f'run_sql "DO {dollar_quote} BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = \'{_sql_literal(allocation.user_name)}\') THEN CREATE ROLE {user_name} WITH LOGIN PASSWORD \'${password_env}_SQL\'; END IF; END {dollar_quote};"',
                 f'run_sql "ALTER ROLE {user_name} WITH LOGIN PASSWORD \'${password_env}_SQL\';"',
+                *( [f'run_sql "ALTER ROLE {user_name} WITH SUPERUSER;"'] if _allocation_requires_surfsense_postgres_capabilities(allocation) else [] ),
                 f'run_sql "SELECT \'CREATE DATABASE {database_name} OWNER {user_name}\' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = \'{_sql_literal(allocation.database_name)}\')" | grep -q "CREATE DATABASE" && run_sql "CREATE DATABASE {database_name} OWNER {user_name};" || true',
                 f'run_sql "ALTER DATABASE {database_name} OWNER TO {user_name};"',
                 f'run_sql "GRANT ALL PRIVILEGES ON DATABASE {database_name} TO {user_name};"',
+                *( [f'psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname {database_name} -c "CREATE EXTENSION IF NOT EXISTS vector;"'] if _allocation_requires_surfsense_postgres_capabilities(allocation) else [] ),
                 "",
             )
         )
@@ -1566,6 +1841,10 @@ def _ensure_postgres_role(container_name: str, user_name: str, password: str) ->
     )
 
 
+def _ensure_postgres_role_superuser(container_name: str, user_name: str) -> None:
+    _run_psql(container_name, f'ALTER ROLE "{_sql_ident(user_name)}" WITH SUPERUSER;')
+
+
 def _ensure_postgres_database(container_name: str, database_name: str, owner_name: str) -> None:
     exists = _run_psql_scalar(
         container_name,
@@ -1586,6 +1865,22 @@ def _ensure_postgres_database(container_name: str, database_name: str, owner_nam
         f'GRANT ALL PRIVILEGES ON DATABASE "{_sql_ident(database_name)}" '
         f'TO "{_sql_ident(owner_name)}";',
     )
+
+
+def _ensure_postgres_extension(
+    container_name: str, *, database_name: str, extension_name: str
+) -> None:
+    _run_psql(
+        container_name,
+        f'CREATE EXTENSION IF NOT EXISTS "{_sql_ident(extension_name)}";',
+        database_name=database_name,
+    )
+
+
+def _allocation_requires_surfsense_postgres_capabilities(
+    allocation: SharedPostgresAllocation,
+) -> bool:
+    return allocation.password_secret_ref.endswith("-surfsense-postgres-password")
 
 
 def _can_connect_as_allocation(container_name: str, allocation: SharedPostgresAllocation) -> bool:
@@ -1611,10 +1906,12 @@ def _run_psql_scalar(container_name: str, sql: str) -> str:
     return result.stdout.strip()
 
 
-def _run_psql(container_name: str, sql: str) -> subprocess.CompletedProcess[str]:
+def _run_psql(
+    container_name: str, sql: str, *, database_name: str = "postgres"
+) -> subprocess.CompletedProcess[str]:
     shell = (
         'PGPASSWORD="$POSTGRES_PASSWORD" '
-        "psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 "
+        f"psql -h 127.0.0.1 -U postgres -d {shlex.quote(database_name)} -v ON_ERROR_STOP=1 "
         f"-tAc {shlex.quote(sql)}"
     )
     result = subprocess.run(
