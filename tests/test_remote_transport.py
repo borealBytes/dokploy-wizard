@@ -66,6 +66,19 @@ def _build_session(subject: ModuleType, *, transport: FakeTransport) -> Any:
     )
 
 
+def _build_session_with_progress(
+    subject: ModuleType,
+    *,
+    transport: FakeTransport,
+    progress: list[str],
+) -> Any:
+    return subject.RemoteTransportSession(
+        transport=transport,
+        remote_root="/root/dokploy-wizard",
+        progress_callback=progress.append,
+    )
+
+
 def test_upload_records_remote_path_and_env_chmod(
     remote_transport_subject: ModuleType,
     make_fake_transport: Any,
@@ -114,6 +127,29 @@ def test_proof_runs_install_verify_inspect_in_order(
             "--state-dir /root/dokploy-wizard/state"
         ),
     ]
+
+
+def test_proof_emits_progress_for_each_remote_command(
+    remote_transport_subject: ModuleType,
+    make_fake_transport: Any,
+) -> None:
+    progress: list[str] = []
+    transport = make_fake_transport()
+    session = _build_session_with_progress(
+        remote_transport_subject,
+        transport=transport,
+        progress=progress,
+    )
+
+    session.run_proof()
+
+    assert len(progress) == 6
+    assert progress[0] == "starting remote command: mutate-install"
+    assert progress[1].startswith("completed remote command: mutate-install (")
+    assert progress[2] == "starting remote command: verify-services"
+    assert progress[3].startswith("completed remote command: verify-services (")
+    assert progress[4] == "starting remote command: inspect-state"
+    assert progress[5].startswith("completed remote command: inspect-state (")
 
 
 def test_strict_proof_runs_second_install_after_verification(
@@ -293,3 +329,35 @@ def test_remote_failures_redact_dokploy_env_payload_values(
     assert sentinel not in message
     assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in message
     assert "fingerprint=sha256:abc123" in message
+
+
+def test_verbose_stream_buffer_redacts_multiline_env_payload_and_password(
+    remote_transport_subject: ModuleType,
+) -> None:
+    password = "SuperSecretPassword123!"
+    env_secret = "SECRET_TEST_OPENCLAW_PROVIDER_VALUE"
+    docker_pat = "ghp_SECRETTESTDOCKERPATVALUE"
+    output: list[tuple[str, str, str]] = []
+    buffer = remote_transport_subject._StreamLineBuffer(
+        subcommand="mutate-install",
+        stream_name="stdout",
+        callback=lambda subcommand, stream_name, line: output.append(
+            (subcommand, stream_name, line)
+        ),
+        password=password,
+    )
+
+    buffer.feed(
+        b"# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
+        b"key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:abc123\n"
+    )
+    buffer.feed(f"OPENCLAW_PROVIDER_API_KEY={env_secret}\n".encode())
+    buffer.feed(f"password={password}\nDOCKER_PAT={docker_pat}\n".encode())
+
+    rendered = "\n".join(line for _subcommand, _stream_name, line in output)
+    assert env_secret not in rendered
+    assert password not in rendered
+    assert docker_pat not in rendered
+    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in rendered
+    assert "password=<REDACTED>" in rendered
+    assert "DOCKER_PAT=<REDACTED>" in rendered
