@@ -69,6 +69,11 @@ _SENSITIVE_ENV_KEYS = frozenset(
         "OPENCODE_GO_API_KEY",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
+    "SURFSENSE_DB_PASSWORD",
+    "SURFSENSE_LITELLM_VIRTUAL_KEY",
+    "SURFSENSE_SECRET_KEY",
+    "SURFSENSE_SEARXNG_SECRET",
+        "SURFSENSE_ZERO_ADMIN_PASSWORD",
         "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
         "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
         "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
@@ -194,6 +199,20 @@ _FARM_KEYS = (
     "DATA_MODE",
     "WORKSPACE_DATA_R2_RCLONE_MOUNT",
     "WORKSPACE_DATA_R2_PREFIX",
+)
+_SURFSENSE_KEYS = (
+    "SURFSENSE_SUBDOMAIN",
+    "SURFSENSE_API_SUBDOMAIN",
+    "SURFSENSE_ZERO_SUBDOMAIN",
+    "SURFSENSE_VERSION",
+    "SURFSENSE_FRONTEND_PUBLIC_URL",
+    "SURFSENSE_API_PUBLIC_URL",
+    "SURFSENSE_ZERO_PUBLIC_URL",
+    "SURFSENSE_AUTH_TYPE",
+    "SURFSENSE_ETL_SERVICE",
+    "SURFSENSE_EMBEDDING_MODEL",
+    "SURFSENSE_PRIMARY_MODEL",
+    "SURFSENSE_FALLBACK_MODELS",
 )
 
 
@@ -427,6 +446,12 @@ _PACK_ENV_METADATA: tuple[PackEnvMetadata, ...] = (
         target_service_suffixes=("shared-postfix",),
         shared_keys=_SHARED_MAIL_ENV_KEYS,
         source="operator-input:mail-relay",
+    ),
+    *_pack_entries(
+        "surfsense",
+        _SURFSENSE_KEYS,
+        owner="surfsense",
+        target_service_suffixes=("surfsense-web", "surfsense-backend", "surfsense-zero"),
     ),
     *_pack_entries(
         "coder",

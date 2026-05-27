@@ -8,6 +8,7 @@ import pytest
 
 from dokploy_wizard.core import build_shared_core_plan
 from dokploy_wizard.core.planner import build_pack_env_specs
+from dokploy_wizard.lifecycle import applicable_phases_for
 from dokploy_wizard.packs.catalog import get_pack_definition, iter_pack_catalog
 from dokploy_wizard.packs.env_metadata import (
     PackEnvMetadataError,
@@ -72,6 +73,7 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
         "nextcloud",
         "moodle",
         "docuseal",
+        "surfsense",
         "seaweedfs",
         "coder",
         "openclaw",
@@ -111,6 +113,28 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     assert get_pack_definition("my-farm-advisor").mutable_resource_keys == (
         "MY_FARM_ADVISOR_REPLICAS",
     )
+    surfsense = get_pack_definition("surfsense")
+    assert surfsense.env_flag == "ENABLE_SURFSENSE"
+    assert surfsense.shared_core_requirements == ("postgres", "redis")
+    assert [
+        (hostname.key, hostname.default_subdomain, hostname.env_key)
+        for hostname in surfsense.hostnames
+    ] == [
+        ("surfsense", "surfsense", "SURFSENSE_SUBDOMAIN"),
+        ("surfsense-api", "surfsense-api", "SURFSENSE_API_SUBDOMAIN"),
+        ("surfsense-zero", "surfsense-zero", "SURFSENSE_ZERO_SUBDOMAIN"),
+    ]
+    assert {
+        "SURFSENSE_SUBDOMAIN",
+        "SURFSENSE_API_SUBDOMAIN",
+        "SURFSENSE_ZERO_SUBDOMAIN",
+        "SURFSENSE_VERSION",
+        "SURFSENSE_AUTH_TYPE",
+        "SURFSENSE_ETL_SERVICE",
+        "SURFSENSE_EMBEDDING_MODEL",
+        "SURFSENSE_PRIMARY_MODEL",
+        "SURFSENSE_FALLBACK_MODELS",
+    } <= set(surfsense.mutable_env_keys)
 
 
 def test_pack_env_metadata_covers_catalog_and_explicit_classifications() -> None:
@@ -142,6 +166,22 @@ def test_pack_env_metadata_covers_catalog_and_explicit_classifications() -> None
     assert shared_default.shared is True
     assert shared_default.owner == "shared-ai-defaults"
     assert shared_default.canonical_placeholder_name == "AI_DEFAULT_API_KEY"
+
+    surfsense_auth_type = get_pack_env_metadata("surfsense", "SURFSENSE_AUTH_TYPE")
+    assert surfsense_auth_type.sensitive is False
+    assert surfsense_auth_type.required is False
+    assert surfsense_auth_type.shared is False
+    assert surfsense_auth_type.owner == "surfsense"
+    assert surfsense_auth_type.target_service_suffixes == (
+        "surfsense-web",
+        "surfsense-backend",
+        "surfsense-zero",
+    )
+    assert surfsense_auth_type.canonical_placeholder_name == "SURFSENSE_SURFSENSE_AUTH_TYPE"
+
+    surfsense_model = get_pack_env_metadata("surfsense", "SURFSENSE_PRIMARY_MODEL")
+    assert surfsense_model.sensitive is False
+    assert surfsense_model.canonical_placeholder_name == "SURFSENSE_SURFSENSE_PRIMARY_MODEL"
 
 
 def test_pack_env_metadata_rejects_unrelated_non_shared_placeholder_collisions() -> None:
@@ -298,6 +338,89 @@ def test_resolver_builds_root_and_wildcard_coder_hostnames() -> None:
     }
 
 
+def test_resolver_builds_surfsense_hostnames_from_packs_selection() -> None:
+    selection = resolve_pack_selection(
+        {
+            "PACKS": "surfsense",
+        },
+        root_domain="example.com",
+    )
+
+    assert selection.selected_packs == ("surfsense",)
+    assert selection.enabled_packs == ("surfsense",)
+    assert selection.hostnames == {
+        "surfsense": "surfsense.example.com",
+        "surfsense-api": "surfsense-api.example.com",
+        "surfsense-zero": "surfsense-zero.example.com",
+    }
+
+
+def test_resolver_full_pack_list_with_surfsense_has_no_hostname_collisions() -> None:
+    selection = resolve_pack_selection(
+        {
+            "PACKS": "nextcloud,openclaw,my-farm-advisor,seaweedfs,coder,docuseal,surfsense",
+        },
+        root_domain="example.com",
+    )
+
+    assert selection.selected_packs == (
+        "coder",
+        "docuseal",
+        "my-farm-advisor",
+        "nextcloud",
+        "openclaw",
+        "seaweedfs",
+        "surfsense",
+    )
+    assert selection.enabled_packs == selection.selected_packs
+    assert selection.hostnames["surfsense"] == "surfsense.example.com"
+    assert selection.hostnames["surfsense-api"] == "surfsense-api.example.com"
+    assert selection.hostnames["surfsense-zero"] == "surfsense-zero.example.com"
+    assert len(set(selection.hostnames.values())) == len(selection.hostnames)
+
+
+def test_full_pack_lifecycle_schedules_surfsense_after_faster_application_packs() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "PACKS": "nextcloud,openclaw,my-farm-advisor,seaweedfs,coder,docuseal,surfsense",
+                "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
+                "SEAWEEDFS_ACCESS_KEY": "seaweed-access-key",
+                "SEAWEEDFS_SECRET_KEY": "seaweed-secret-key",
+            },
+        )
+    )
+
+    phases = applicable_phases_for(desired_state)
+
+    assert phases == (
+        "preflight",
+        "dokploy_bootstrap",
+        "networking",
+        "shared_core",
+        "seaweedfs",
+        "nextcloud",
+        "docuseal",
+        "coder",
+        "openclaw",
+        "my-farm-advisor",
+        "cloudflare_access",
+        "surfsense",
+    )
+    for earlier_pack in (
+        "seaweedfs",
+        "nextcloud",
+        "docuseal",
+        "coder",
+        "openclaw",
+        "my-farm-advisor",
+    ):
+        assert phases.index(earlier_pack) < phases.index("surfsense")
+
+
 def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
@@ -341,3 +464,27 @@ def test_resolved_state_includes_coder_shared_core_allocation() -> None:
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
         "coder"
     ]
+
+
+def test_resolved_state_includes_surfsense_shared_core_allocations() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "surfsense-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_SURFSENSE": "true",
+            },
+        )
+    )
+
+    assert desired_state.enabled_packs == ("surfsense",)
+    assert desired_state.hostnames["surfsense"] == "surfsense.example.com"
+    assert desired_state.hostnames["surfsense-api"] == "surfsense-api.example.com"
+    assert desired_state.hostnames["surfsense-zero"] == "surfsense-zero.example.com"
+    assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
+        "surfsense"
+    ]
+    allocation = desired_state.shared_core.allocations[0]
+    assert allocation.postgres is not None
+    assert allocation.redis is not None
