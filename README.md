@@ -110,17 +110,20 @@ stateDiagram-v2
     Input --> DesiredState : resolve hostnames\nsecrets\npacks
     DesiredState --> Preflight
     Preflight --> DokployBootstrap
-    DokployBootstrap --> Tailscale
-    Tailscale --> CloudflareNetworking
-    CloudflareNetworking --> CloudflareAccess
-    CloudflareAccess --> SharedCore
+    DokployBootstrap --> CloudflareNetworking
+    CloudflareNetworking --> SharedCore
     SharedCore --> Headscale
-    Headscale --> Matrix
-    Matrix --> NextcloudOnlyOffice
-    NextcloudOnlyOffice --> SeaweedFS
-    SeaweedFS --> OpenClaw
+    Headscale --> Tailscale
+    Tailscale --> Matrix
+    Matrix --> SeaweedFS
+    SeaweedFS --> NextcloudOnlyOffice
+    NextcloudOnlyOffice --> DocuSeal
+    DocuSeal --> Coder
+    Coder --> OpenClaw
     OpenClaw --> MyFarmAdvisor
-    MyFarmAdvisor --> Installed
+    MyFarmAdvisor --> CloudflareAccess
+    CloudflareAccess --> SurfSense
+    SurfSense --> Installed
 
     Installed --> Modify
     Installed --> Resume
@@ -135,6 +138,8 @@ stateDiagram-v2
 ### Dokploy
 
 Dokploy is the control plane the wizard targets for all compose app deployment. The wizard bootstraps Dokploy, mints or reuses an API key, and then uses that API key for all managed pack operations.
+
+After LiteLLM is ready, the wizard also reconciles Dokploy's built-in AI provider named `Dokploy Wizard LiteLLM`. That provider points at the wizard-managed internal LiteLLM gateway and uses the dedicated `dokploy-ai` virtual key restricted to the resolved default model alias, not the LiteLLM master key.
 
 ### Shared Core
 
@@ -575,6 +580,7 @@ For LiteLLM upstream API keys, the canonical names are `LITELLM_OPENROUTER_API_K
 
 The wizard auto-generates stable virtual keys for each consumer:
 
+- Dokploy built-in AI (`dokploy-ai`, restricted to the resolved default model alias)
 - My Farm Advisor
 - OpenClaw
 - Coder Hermes
