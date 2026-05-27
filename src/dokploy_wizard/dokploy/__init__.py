@@ -39,6 +39,7 @@ from dokploy_wizard.dokploy.shared_core import (
     DokploySharedCoreBackend,
     build_litellm_consumer_model_allowlists,
 )
+from dokploy_wizard.dokploy.surfsense_backend import DokploySurfSenseBackend
 
 __all__ = [
     "DokployApiClient",
@@ -60,6 +61,7 @@ __all__ = [
     "DokployNextcloudBackend",
     "DokployOpenClawBackend",
     "DokploySeaweedFsBackend",
+    "DokploySurfSenseBackend",
     "DokployEnvironmentSummary",
     "DokployProjectSummary",
     "DokployScheduleRecord",
