@@ -16,6 +16,7 @@ import subprocess
 import time
 import uuid
 import zipfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -49,6 +50,10 @@ _DEFAULT_STATE_DIR = "/mnt/openclaw/.nexa/state"
 _SUPPORTED_WORKER_MODE = "queue"
 _DEFAULT_HTTP_TIMEOUT_SECONDS = 15
 _DEFAULT_OPENCLAW_PASS_THROUGH_TIMEOUT_SECONDS = 90
+_OPENCLAW_FAIL_CLOSED_FALLBACK = (
+    "OpenClaw did not return a grounded response in time. "
+    "Please try again instead of trusting a guessed answer."
+)
 
 _ENV_NEXTCLOUD_BASE_URL = "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL"
 _ENV_TALK_SHARED_SECRET = "OPENCLAW_NEXA_TALK_SHARED_SECRET"
@@ -76,6 +81,28 @@ _XML_NAMESPACES = {
     "oc": _OWNCLOUD_NAMESPACE,
     "nc": _NEXTCLOUD_NAMESPACE,
 }
+
+
+@dataclass(frozen=True)
+class _OpenClawPassThroughDiagnostic:
+    category: str
+    reason: str
+    http_status: int | None = None
+
+    def redacted_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "category": self.category,
+            "reason": self.reason,
+        }
+        if self.http_status is not None:
+            payload["http_status"] = self.http_status
+        return payload
+
+
+@dataclass(frozen=True)
+class _OpenClawPassThroughAttempt:
+    reply: NexaPlannedTalkReply | None
+    diagnostic: _OpenClawPassThroughDiagnostic | None = None
 
 
 def main() -> int:
@@ -319,16 +346,13 @@ def _provider_talk_reply_planner(
     env: dict[str, str] | os._Environ[str],
 ) -> NexaPlannedTalkReply:
     pass_through_enabled = env.get(_ENV_OPENCLAW_INTERNAL_URL, "").strip() != ""
-    openclaw_reply = _openclaw_talk_reply_planner(payload, memory, env=env)
-    if openclaw_reply is not None:
-        return openclaw_reply
+    openclaw_attempt = _openclaw_talk_reply_attempt(payload, memory, env=env)
+    if openclaw_attempt.reply is not None:
+        return openclaw_attempt.reply
     if pass_through_enabled:
         return NexaPlannedTalkReply(
-            text=(
-                "OpenClaw did not return a grounded response in time. "
-                "Please try again instead of trusting a guessed answer."
-            ),
-            memory_content="OpenClaw pass-through timed out before producing a grounded response.",
+            text=_OPENCLAW_FAIL_CLOSED_FALLBACK,
+            memory_content=_openclaw_pass_through_memory_content(openclaw_attempt.diagnostic),
             memory_content_class="assistant_summary",
             memory_target_layer="shared",
         )
@@ -428,9 +452,56 @@ def _openclaw_talk_reply_planner(
     *,
     env: dict[str, str] | os._Environ[str],
 ) -> NexaPlannedTalkReply | None:
+    return _openclaw_talk_reply_attempt(payload, memory, env=env).reply
+
+
+def verify_openclaw_nexa_bridge(
+    *,
+    env: dict[str, str] | os._Environ[str],
+    payload: dict[str, Any] | None = None,
+    memory: Any | None = None,
+) -> dict[str, object]:
+    attempt = _openclaw_talk_reply_attempt(
+        payload or _default_nexa_bridge_verification_payload(),
+        memory if memory is not None else type("EmptyMemory", (), {"hits": ()})(),
+        env=env,
+    )
+    if attempt.reply is not None:
+        return {
+            "diagnostic": None,
+            "passed": True,
+            "reply_status": "grounded_response",
+        }
+    diagnostic = attempt.diagnostic or _OpenClawPassThroughDiagnostic(
+        category="unknown",
+        reason="pass_through_returned_no_grounded_reply",
+    )
+    return {
+        "diagnostic": diagnostic.redacted_payload(),
+        "fail_closed_fallback": _OPENCLAW_FAIL_CLOSED_FALLBACK,
+        "passed": False,
+        "reply_status": "fail_closed",
+    }
+
+
+def _default_nexa_bridge_verification_payload() -> dict[str, Any]:
+    return {
+        "context": {"threadId": "verification"},
+        "conversation": {"id": "verification"},
+        "initiator": {"id": "nexa-verifier"},
+        "message": {"id": "verification", "text": "Verify Nexa OpenClaw bridge health."},
+    }
+
+
+def _openclaw_talk_reply_attempt(
+    payload: dict[str, Any],
+    memory: Any,
+    *,
+    env: dict[str, str] | os._Environ[str],
+) -> _OpenClawPassThroughAttempt:
     base_url = env.get(_ENV_OPENCLAW_INTERNAL_URL, "").strip()
     if base_url == "":
-        return None
+        return _OpenClawPassThroughAttempt(reply=None)
     input_items: list[dict[str, object]] = []
     recent_conversation = payload.get("recentConversation")
     if isinstance(recent_conversation, list):
@@ -472,25 +543,41 @@ def _openclaw_talk_reply_planner(
             headers=headers,
             timeout_seconds=_DEFAULT_OPENCLAW_PASS_THROUGH_TIMEOUT_SECONDS,
         )
-    except RuntimeError:
-        LOGGER.warning("OpenClaw pass-through planner failed", exc_info=True)
-        return None
+    except RuntimeError as exc:
+        diagnostic = _classify_openclaw_pass_through_error(exc)
+        LOGGER.warning(
+            "OpenClaw pass-through planner failed: %s",
+            json.dumps(diagnostic.redacted_payload(), sort_keys=True),
+        )
+        return _OpenClawPassThroughAttempt(reply=None, diagnostic=diagnostic)
     text = _extract_openclaw_responses_text(response_payload).strip()
     if text == "":
-        return None
-    return NexaPlannedTalkReply(
+        return _OpenClawPassThroughAttempt(
+            reply=None,
+            diagnostic=_OpenClawPassThroughDiagnostic(
+                category="empty_output",
+                reason="empty_response_schema",
+            ),
+        )
+    no_answer_diagnostic = _classify_openclaw_no_answer_text(text)
+    if no_answer_diagnostic is not None:
+        return _OpenClawPassThroughAttempt(reply=None, diagnostic=no_answer_diagnostic)
+    return _OpenClawPassThroughAttempt(reply=NexaPlannedTalkReply(
         text=text,
         memory_content=f"Nexa replied through OpenClaw pass-through: {text}",
         memory_content_class="assistant_summary",
         memory_target_layer="shared",
-    )
+    ))
 
 
 def _extract_openclaw_responses_text(payload: dict[str, Any]) -> str:
+    top_level_text = payload.get("output_text")
+    chunks: list[str] = []
+    if isinstance(top_level_text, str) and top_level_text.strip() != "":
+        chunks.append(top_level_text.strip())
     output = payload.get("output")
     if not isinstance(output, list):
-        return ""
-    chunks: list[str] = []
+        return "\n\n".join(chunks)
     for item in output:
         if not isinstance(item, dict) or item.get("type") != "message":
             continue
@@ -498,12 +585,97 @@ def _extract_openclaw_responses_text(payload: dict[str, Any]) -> str:
         if not isinstance(content, list):
             continue
         for part in content:
-            if not isinstance(part, dict) or part.get("type") != "output_text":
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type not in (None, "output_text", "text"):
                 continue
             text = part.get("text")
             if isinstance(text, str) and text.strip() != "":
                 chunks.append(text.strip())
     return "\n\n".join(chunks)
+
+
+def _openclaw_pass_through_memory_content(
+    diagnostic: _OpenClawPassThroughDiagnostic | None,
+) -> str:
+    if diagnostic is None:
+        diagnostic = _OpenClawPassThroughDiagnostic(
+            category="unknown",
+            reason="pass_through_returned_no_grounded_reply",
+        )
+    return (
+        "OpenClaw pass-through failed before producing a grounded response. "
+        "Redacted diagnostic: "
+        f"{json.dumps(diagnostic.redacted_payload(), sort_keys=True)}"
+    )
+
+
+def _classify_openclaw_pass_through_error(exc: RuntimeError) -> _OpenClawPassThroughDiagnostic:
+    message = str(exc)
+    lowered = message.lower()
+    status = _extract_http_status(message)
+    if "timed out" in lowered or "timeout" in lowered:
+        return _OpenClawPassThroughDiagnostic(category="timeout", reason="request_timeout", http_status=status)
+    if status in {401, 403}:
+        return _OpenClawPassThroughDiagnostic(category="auth_rejected", reason="auth_or_header_rejected", http_status=status)
+    if status is not None:
+        return _OpenClawPassThroughDiagnostic(category="http_error", reason="http_status", http_status=status)
+    if "expected json" in lowered or "non-json" in lowered or "non json" in lowered:
+        return _OpenClawPassThroughDiagnostic(category="non_json", reason="non_json_response")
+    if _looks_like_dns_or_connectivity_error(lowered):
+        return _OpenClawPassThroughDiagnostic(category="dns_connectivity", reason="dns_or_connectivity")
+    return _OpenClawPassThroughDiagnostic(category="unknown", reason="unclassified_runtime_error")
+
+
+def _extract_http_status(message: str) -> int | None:
+    parts = message.replace(":", " ").split()
+    for index, part in enumerate(parts[:-1]):
+        if part.upper() != "HTTP":
+            continue
+        try:
+            return int(parts[index + 1])
+        except ValueError:
+            return None
+    return None
+
+
+def _looks_like_dns_or_connectivity_error(lowered_message: str) -> bool:
+    indicators = (
+        "name or service not known",
+        "temporary failure in name resolution",
+        "nodename nor servname provided",
+        "no address associated with hostname",
+        "connection refused",
+        "connection reset",
+        "failed to establish",
+        "network is unreachable",
+        "no route to host",
+        "remote end closed connection",
+    )
+    return any(indicator in lowered_message for indicator in indicators)
+
+
+def _classify_openclaw_no_answer_text(text: str) -> _OpenClawPassThroughDiagnostic | None:
+    lowered = text.lower()
+    indicators = (
+        "no grounded response",
+        "no grounded answer",
+        "no answer",
+        "cannot answer",
+        "can't answer",
+        "unable to answer",
+        "do not know",
+        "don't know",
+        "insufficient context",
+        "not enough information",
+    )
+    if any(indicator in lowered for indicator in indicators):
+        return _OpenClawPassThroughDiagnostic(
+            category="grounding_no_answer",
+            reason="response_content_declined_grounded_answer",
+        )
+    return None
 
 
 def _openclaw_session_key(payload: dict[str, Any]) -> str:
@@ -532,54 +704,54 @@ def _send_talk_reply(payload: dict[str, Any], *, env: dict[str, str] | os._Envir
         body["replyTo"] = reply_to["messageId"]
     if agent_password is not None:
         try:
-            response_payload = _json_request(
-                f"{base_url.rstrip('/')}/ocs/v2.php/apps/spreed/api/v1/chat/{parse.quote(conversation_token, safe='')}",
-                method="POST",
+            response_payload = _send_talk_reply_with_basic_auth(
+                base_url=base_url,
+                conversation_token=conversation_token,
                 body=body,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "OCS-APIRequest": "true",
-                },
-                auth_user=agent_user,
-                auth_password=agent_password,
+                agent_user=agent_user,
+                agent_password=agent_password,
             )
         except RuntimeError as exc:
             if "reply-to" in str(exc).lower() and "replyTo" in body:
                 fallback_body = {key: value for key, value in body.items() if key != "replyTo"}
-                response_payload = _json_request(
-                    f"{base_url.rstrip('/')}/ocs/v2.php/apps/spreed/api/v1/chat/{parse.quote(conversation_token, safe='')}",
-                    method="POST",
-                    body=fallback_body,
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        "OCS-APIRequest": "true",
-                    },
-                    auth_user=agent_user,
-                    auth_password=agent_password,
+                try:
+                    response_payload = _send_talk_reply_with_basic_auth(
+                        base_url=base_url,
+                        conversation_token=conversation_token,
+                        body=fallback_body,
+                        agent_user=agent_user,
+                        agent_password=agent_password,
+                    )
+                except RuntimeError as retry_exc:
+                    if not _is_talk_chat_forbidden_error(retry_exc):
+                        raise
+                    response_payload = _send_talk_reply_with_bot_endpoint(
+                        base_url=base_url,
+                        conversation_token=conversation_token,
+                        body=fallback_body,
+                        message=message,
+                        signing_secret=signing_secret,
+                        shared_secret=shared_secret,
+                    )
+            elif _is_talk_chat_forbidden_error(exc):
+                response_payload = _send_talk_reply_with_bot_endpoint(
+                    base_url=base_url,
+                    conversation_token=conversation_token,
+                    body=body,
+                    message=message,
+                    signing_secret=signing_secret,
+                    shared_secret=shared_secret,
                 )
             else:
                 raise
     else:
-        random_header = secrets.token_hex(32)
-        signature = hmac.new(
-            signing_secret.encode("utf-8"),
-            f"{random_header}{message}".encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        response_payload = _json_request(
-            f"{base_url.rstrip('/')}/ocs/v2.php/apps/spreed/api/v1/bot/{parse.quote(conversation_token, safe='')}/message",
-            method="POST",
+        response_payload = _send_talk_reply_with_bot_endpoint(
+            base_url=base_url,
+            conversation_token=conversation_token,
             body=body,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "OCS-APIRequest": "true",
-                "X-Nextcloud-Talk-Bot-Random": random_header,
-                "X-Nextcloud-Talk-Bot-Signature": signature,
-                "X-Nextcloud-Talk-Secret": shared_secret,
-            },
+            message=message,
+            signing_secret=signing_secret,
+            shared_secret=shared_secret,
         )
     message_id = _extract_talk_response_string(response_payload, ("messageId",), fallback_paths=(("ocs", "data", "id"), ("ocs", "data", "messageId")))
     request_id = _extract_talk_response_string(response_payload, ("requestId",), fallback_paths=(("ocs", "meta", "requestid"),), required=False)
@@ -587,6 +759,62 @@ def _send_talk_reply(payload: dict[str, Any], *, env: dict[str, str] | os._Envir
     if request_id is not None:
         result["requestId"] = request_id
     return result
+
+
+def _send_talk_reply_with_basic_auth(
+    *,
+    base_url: str,
+    conversation_token: str,
+    body: dict[str, Any],
+    agent_user: str,
+    agent_password: str,
+) -> dict[str, Any]:
+    return _json_request(
+        f"{base_url.rstrip('/')}/ocs/v2.php/apps/spreed/api/v1/chat/{parse.quote(conversation_token, safe='')}",
+        method="POST",
+        body=body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "OCS-APIRequest": "true",
+        },
+        auth_user=agent_user,
+        auth_password=agent_password,
+    )
+
+
+def _send_talk_reply_with_bot_endpoint(
+    *,
+    base_url: str,
+    conversation_token: str,
+    body: dict[str, Any],
+    message: str,
+    signing_secret: str,
+    shared_secret: str,
+) -> dict[str, Any]:
+    random_header = secrets.token_hex(32)
+    signature = hmac.new(
+        signing_secret.encode("utf-8"),
+        f"{random_header}{message}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return _json_request(
+        f"{base_url.rstrip('/')}/ocs/v2.php/apps/spreed/api/v1/bot/{parse.quote(conversation_token, safe='')}/message",
+        method="POST",
+        body=body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "OCS-APIRequest": "true",
+            "X-Nextcloud-Talk-Bot-Random": random_header,
+            "X-Nextcloud-Talk-Bot-Signature": signature,
+            "X-Nextcloud-Talk-Secret": shared_secret,
+        },
+    )
+
+
+def _is_talk_chat_forbidden_error(exc: RuntimeError) -> bool:
+    return "HTTP 403" in str(exc)
 
 
 def _load_canonical_file(

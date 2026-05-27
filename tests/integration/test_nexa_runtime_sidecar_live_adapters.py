@@ -115,6 +115,55 @@ def test_runtime_sidecar_live_talk_sender_completes_healthy_queue_job(tmp_path: 
     assert "live sidecar path is healthy" in talk_body["message"]
 
 
+def test_runtime_sidecar_live_talk_sender_falls_back_to_bot_endpoint_on_chat_403(tmp_path: Path) -> None:
+    store = DurableQueueStore(tmp_path)
+    payload = load_json_fixture("nexa-talk-webhook-room-message.json")
+    body = json_bytes(payload)
+    ack = handle_talk_webhook(
+        body=body,
+        headers=build_talk_headers(body),
+        talk_shared_secret=TALK_SHARED_SECRET,
+        talk_signing_secret=TALK_SIGNING_SECRET,
+        store=store,
+    )
+    leased = store.lease_next_job(lease_owner="sidecar-talk", now=datetime.now(UTC))
+    assert leased is not None
+
+    with run_recording_nextcloud_server(
+        talk_shared_secret=TALK_SHARED_SECRET,
+        talk_signing_secret=TALK_SIGNING_SECRET,
+        webdav_user="nexa-agent",
+        webdav_password="webdav-app-password",
+        webdav_file_id="file-991",
+        webdav_etag='"etag-171"',
+        webdav_content=b"unused",
+        webdav_content_type="text/plain; charset=utf-8",
+        talk_chat_status_code=403,
+    ) as server:
+        env = _sidecar_env(base_url=nextcloud_base_url(server), state_dir=tmp_path / ".nexa-state")
+        result = run_queued_nexa_job(
+            leased,
+            store=store,
+            env=env,
+            dependencies=_runtime_dependencies_from_env(env),
+            now=_ts(12, 47),
+        )
+
+    assert ack == {"status_code": 202, "body": {"accepted": True}}
+    assert result.status == "completed"
+    talk_result = result.result
+    assert isinstance(talk_result, NexaTalkRuntimeResult)
+    assert talk_result.reply_dispatch.outcome == "sent"
+    chat_requests = [req for req in server.requests if req.path.startswith("/ocs/v2.php/apps/spreed/api/v1/chat/")]
+    bot_requests = [req for req in server.requests if req.path.startswith("/ocs/v2.php/apps/spreed/api/v1/bot/")]
+    assert len(chat_requests) == 1
+    assert len(bot_requests) == 1
+    bot_body = json.loads(bot_requests[0].body.decode("utf-8"))
+    assert bot_requests[0].path == "/ocs/v2.php/apps/spreed/api/v1/bot/x9m3abp4/message"
+    assert bot_requests[0].headers["X-Nextcloud-Talk-Secret"] == TALK_SHARED_SECRET
+    assert "live sidecar path is healthy" in bot_body["message"]
+
+
 def test_runtime_sidecar_live_webdav_loader_and_onlyoffice_executor_complete_authoritative_job(
     tmp_path: Path,
 ) -> None:

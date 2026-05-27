@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -936,6 +937,7 @@ class NextcloudOccRecorder:
     mounts: list[dict[str, object]] = field(default_factory=list)
     commands: list[tuple[str, ...]] = field(default_factory=list)
     shell_commands: list[str] = field(default_factory=list)
+    docker_commands: list[list[str]] = field(default_factory=list)
     next_mount_id: int = 1
 
     def patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -955,12 +957,12 @@ class NextcloudOccRecorder:
         )
         monkeypatch.setattr(nextcloud_module, "_nextcloud_user_exists", lambda *args, **kwargs: True)
         monkeypatch.setattr(nextcloud_module, "_ensure_trusted_domain", lambda *args, **kwargs: None)
+        monkeypatch.setattr(nextcloud_module, "_list_external_storage_mounts", lambda _: tuple(self.mounts))
         monkeypatch.setattr(
             nextcloud_module,
             "_ensure_external_storage_path",
-            lambda *args, **kwargs: None,
+            self._ensure_external_storage_path,
         )
-        monkeypatch.setattr(nextcloud_module, "_list_external_storage_mounts", lambda _: tuple(self.mounts))
         monkeypatch.setattr(nextcloud_module, "_run_occ", self._run_occ)
         monkeypatch.setattr(nextcloud_module, "_run_occ_shell", self._run_occ_shell)
         monkeypatch.setattr(
@@ -972,6 +974,26 @@ class NextcloudOccRecorder:
     def _run_occ_shell(self, container_name: str, shell_command: str) -> None:
         assert container_name == "nextcloud-container"
         self.shell_commands.append(shell_command)
+
+    def _ensure_external_storage_path(
+        self, container_name: str, *, datadir: str, volume_root: str
+    ) -> None:
+        assert container_name == "nextcloud-container"
+        path = shlex.quote(datadir)
+        volume_root = shlex.quote(volume_root)
+        self.docker_commands.append(
+            [
+                "docker",
+                "exec",
+                container_name,
+                "sh",
+                "-lc",
+                f"mkdir -p {path} && "
+                f"chmod 0777 {volume_root} {path} && "
+                f"find {path} -type d -exec chmod a+rwx {{}} + && "
+                f"find {path} -type f -exec chmod a+rw {{}} +",
+            ]
+        )
 
     def _run_occ(self, container_name: str, args: list[str]) -> None:
         assert container_name == "nextcloud-container"
@@ -1013,6 +1035,14 @@ def _files_external_create_commands(
 
 def _files_scan_commands(commands: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
     return [command for command in commands if command[:1] == ("files:scan",)]
+
+
+def _external_storage_prepare_shell_commands(docker_commands: list[list[str]]) -> list[str]:
+    return [
+        command[5]
+        for command in docker_commands
+        if command[:5] == ["docker", "exec", "nextcloud-container", "sh", "-lc"]
+    ]
 
 
 def _patch_real_dokploy_nextcloud_backend(
@@ -1081,6 +1111,12 @@ def test_install_farm_only_nextcloud_creates_both_farm_external_mounts(
             "datadir=/mnt/advisors/my-farm-advisor/data-pipeline",
         ),
     ]
+    assert (
+        "mkdir -p /mnt/advisors/my-farm-advisor/field-operations && "
+        "chmod 0777 /mnt/advisors/my-farm-advisor /mnt/advisors/my-farm-advisor/field-operations && "
+        "find /mnt/advisors/my-farm-advisor/field-operations -type d -exec chmod a+rwx {} + && "
+        "find /mnt/advisors/my-farm-advisor/field-operations -type f -exec chmod a+rw {} +"
+    ) in _external_storage_prepare_shell_commands(occ.docker_commands)
     assert (
         "files:scan",
         "--path=admin@example.com/files/Nexa Farm",
@@ -1154,6 +1190,12 @@ def test_install_both_advisors_nextcloud_creates_openclaw_and_farm_mounts(
             "datadir=/mnt/advisors/my-farm-advisor/data-pipeline",
         ),
     ]
+    assert (
+        "mkdir -p /mnt/advisors/openclaw/workspace && "
+        "chmod 0777 /mnt/advisors/openclaw /mnt/advisors/openclaw/workspace && "
+        "find /mnt/advisors/openclaw/workspace -type d -exec chmod a+rwx {} + && "
+        "find /mnt/advisors/openclaw/workspace -type f -exec chmod a+rw {} +"
+    ) in _external_storage_prepare_shell_commands(occ.docker_commands)
     assert (
         "files:scan",
         "--path=admin@example.com/files/Nexa Claw",

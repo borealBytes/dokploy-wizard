@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import http.cookiejar
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeGuard
 from urllib import error, request
 
 AUTH_SIGN_IN_PATHS = ("/api/auth/sign-in/email", "/api/auth/sign-in")
@@ -418,6 +419,242 @@ class DokployBootstrapAuthClient:
             )
         return payload
 
+    def list_ai_providers(
+        self,
+        *,
+        admin_email: str,
+        admin_password: str,
+    ) -> list[dict[str, Any]]:
+        self._authenticate(admin_email=admin_email, admin_password=admin_password)
+        self._resolve_session()
+        payload = self._request_json("GET", "/api/ai.getAll", None)
+        if not isinstance(payload, list):
+            raise DokployBootstrapAuthError(
+                "Dokploy session ai.getAll response must decode to a JSON array."
+            )
+        return payload
+
+    def create_ai_provider(
+        self,
+        *,
+        admin_email: str,
+        admin_password: str,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+    ) -> dict[str, Any]:
+        self._authenticate(admin_email=admin_email, admin_password=admin_password)
+        self._resolve_session()
+        payload = self._request_json(
+            "POST",
+            "/api/ai.create",
+            {
+                "name": name,
+                "apiUrl": api_url,
+                "apiKey": api_key,
+                "model": model,
+                "isEnabled": is_enabled,
+            },
+            allow_scalar_data=True,
+        )
+        if _is_ai_provider_payload(payload):
+            return payload
+        return self._recover_ai_provider_after_mutation(
+            operation="ai.create",
+            name=name,
+            api_url=api_url,
+            api_key=api_key,
+            model=model,
+            is_enabled=is_enabled,
+        )
+
+    def _recover_ai_provider_after_mutation(
+        self,
+        *,
+        operation: str,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+        ai_id: str | None = None,
+    ) -> dict[str, Any]:
+        providers = self._request_json("GET", "/api/ai.getAll", None)
+        if not isinstance(providers, list):
+            raise DokployBootstrapAuthError(
+                f"Dokploy session {operation} recovery list response must decode to a JSON array."
+            )
+        matches = [
+            provider
+            for provider in providers
+            if _matches_ai_provider(
+                provider,
+                name=name,
+                api_url=api_url,
+                api_key=api_key,
+                model=model,
+                is_enabled=is_enabled,
+                ai_id=ai_id,
+            )
+        ]
+        if len(matches) != 1:
+            raise DokployBootstrapAuthError(
+                f"Dokploy session {operation} succeeded but provider recovery found "
+                f"{len(matches)} matching records."
+            )
+        return matches[0]
+
+    def update_ai_provider(
+        self,
+        *,
+        admin_email: str,
+        admin_password: str,
+        ai_id: str,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+    ) -> dict[str, Any]:
+        self._authenticate(admin_email=admin_email, admin_password=admin_password)
+        self._resolve_session()
+        payload = self._request_json(
+            "POST",
+            "/api/ai.update",
+            {
+                "aiId": ai_id,
+                "name": name,
+                "apiUrl": api_url,
+                "apiKey": api_key,
+                "model": model,
+                "isEnabled": is_enabled,
+            },
+            allow_scalar_data=True,
+        )
+        if _is_ai_provider_payload(payload):
+            return payload
+        return self._recover_ai_provider_after_mutation(
+            operation="ai.update",
+            ai_id=ai_id,
+            name=name,
+            api_url=api_url,
+            api_key=api_key,
+            model=model,
+            is_enabled=is_enabled,
+        )
+
+
+    def test_ai_provider_connection(
+        self,
+        *,
+        admin_email: str,
+        admin_password: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+    ) -> dict[str, Any]:
+        self._authenticate(admin_email=admin_email, admin_password=admin_password)
+        self._resolve_session()
+        try:
+            payload = self._request_json(
+                "POST",
+                "/api/trpc/ai.testConnection?batch=1",
+                {
+                    "0": {
+                        "json": {
+                            "apiUrl": api_url,
+                            "apiKey": api_key,
+                            "model": model,
+                        }
+                    }
+                },
+            )
+        except DokployBootstrapAuthError as exc:
+            raise DokployBootstrapAuthError(
+                _redact_known_secrets(str(exc), (api_key,))
+            ) from exc
+        result = _extract_trpc_json_payload(payload, operation="ai.testConnection")
+        if isinstance(result, bool):
+            return {"success": result}
+        if not isinstance(result, dict):
+            raise DokployBootstrapAuthError(
+                "Dokploy ai.testConnection JSON payload must decode to a JSON object."
+            )
+        success = result.get("success")
+        if not isinstance(success, bool):
+            raise DokployBootstrapAuthError(
+                "Dokploy ai.testConnection success must decode to a boolean."
+            )
+        message = result.get("message")
+        if message is not None and not isinstance(message, str):
+            raise DokployBootstrapAuthError(
+                "Dokploy ai.testConnection message must decode to a string or null."
+            )
+        return {
+            "success": success,
+            "message": _redact_known_secrets(message, (api_key,)) if message else None,
+        }
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        payload: Any | None,
+        *,
+        allow_scalar_data: bool = False,
+    ) -> Any:
+        attempts = _RATE_LIMIT_RETRY_ATTEMPTS if path in _RATE_LIMIT_RETRYABLE_PATHS else 1
+        for attempt in range(1, attempts + 1):
+            data = None if payload is None else json.dumps(payload).encode("utf-8")
+            headers = {"Accept": "application/json"}
+            if payload is not None:
+                headers["Content-Type"] = "application/json"
+            req = request.Request(
+                url=f"{self._base_url}{path}",
+                method=method,
+                headers=headers,
+                data=data,
+            )
+            try:
+                response = self._request_fn(req, self._cookiejar)
+            except error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                if exc.code in {404, 405}:
+                    raise DokployBootstrapAuthError(f"endpoint-unavailable:{path}") from exc
+                if exc.code == 429 and attempt < attempts:
+                    time.sleep(_RATE_LIMIT_RETRY_DELAY_SECONDS)
+                    continue
+                safe_body = _redact_known_secrets(body or str(exc.reason), ())
+                raise DokployBootstrapAuthError(
+                    f"Dokploy auth request to {path} failed with status {exc.code}: "
+                    f"{safe_body}."
+                ) from exc
+            except error.URLError as exc:
+                raise DokployBootstrapAuthError(
+                    f"Dokploy auth request to {path} failed: {exc.reason}."
+                ) from exc
+            if isinstance(response, list):
+                return response
+            if allow_scalar_data and response in (True, False, None):
+                return response
+            if not isinstance(response, dict):
+                raise DokployBootstrapAuthError(
+                    f"Dokploy auth response from {path} must decode to a JSON object."
+                )
+            data_payload = response.get("data", response)
+            if isinstance(data_payload, (dict, list)):
+                return data_payload
+            if allow_scalar_data and data_payload in (True, False, None):
+                return data_payload
+            raise DokployBootstrapAuthError(
+                f"Dokploy auth response from {path} must decode to a JSON object."
+            )
+        raise DokployBootstrapAuthError(
+            f"Dokploy auth request to {path} exhausted rate-limit retries without a response."
+        )
+
     def _authenticate(self, *, admin_email: str, admin_password: str) -> tuple[str, bool]:
         if self._authenticated:
             return "cached-session", False
@@ -482,51 +719,55 @@ class DokployBootstrapAuthClient:
             "Could not find a working Dokploy session endpoint after authentication."
         )
 
-    def _request_json(self, method: str, path: str, payload: Any | None) -> Any:
-        attempts = _RATE_LIMIT_RETRY_ATTEMPTS if path in _RATE_LIMIT_RETRYABLE_PATHS else 1
-        for attempt in range(1, attempts + 1):
-            data = None if payload is None else json.dumps(payload).encode("utf-8")
-            headers = {"Accept": "application/json"}
-            if payload is not None:
-                headers["Content-Type"] = "application/json"
-            req = request.Request(
-                url=f"{self._base_url}{path}",
-                method=method,
-                headers=headers,
-                data=data,
-            )
-            try:
-                response = self._request_fn(req, self._cookiejar)
-            except error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
-                if exc.code in {404, 405}:
-                    raise DokployBootstrapAuthError(f"endpoint-unavailable:{path}") from exc
-                if exc.code == 429 and attempt < attempts:
-                    time.sleep(_RATE_LIMIT_RETRY_DELAY_SECONDS)
-                    continue
-                raise DokployBootstrapAuthError(
-                    f"Dokploy auth request to {path} failed with status {exc.code}: "
-                    f"{body or exc.reason}."
-                ) from exc
-            except error.URLError as exc:
-                raise DokployBootstrapAuthError(
-                    f"Dokploy auth request to {path} failed: {exc.reason}."
-                ) from exc
-            if isinstance(response, list):
-                return response
-            if not isinstance(response, dict):
-                raise DokployBootstrapAuthError(
-                    f"Dokploy auth response from {path} must decode to a JSON object."
-                )
-            data_payload = response.get("data", response)
-            if not isinstance(data_payload, (dict, list)):
-                raise DokployBootstrapAuthError(
-                    f"Dokploy auth response from {path} must decode to a JSON object."
-                )
-            return data_payload
+def _extract_trpc_json_payload(payload: Any, *, operation: str) -> Any:
+    if not isinstance(payload, list) or not payload:
         raise DokployBootstrapAuthError(
-            f"Dokploy auth request to {path} exhausted rate-limit retries without a response."
+            f"Dokploy {operation} response must decode to a non-empty JSON array."
         )
+    first = payload[0]
+    if not isinstance(first, dict):
+        raise DokployBootstrapAuthError(
+            f"Dokploy {operation} batch item must decode to a JSON object."
+        )
+    error_payload = first.get("error")
+    if isinstance(error_payload, dict):
+        error_json = error_payload.get("json")
+        message = None
+        if isinstance(error_json, dict):
+            candidate = error_json.get("message")
+            if isinstance(candidate, str):
+                message = candidate
+        if message is None:
+            candidate = error_payload.get("message")
+            if isinstance(candidate, str):
+                message = candidate
+        safe_message = _redact_known_secrets(message or str(error_payload), ())
+        raise DokployBootstrapAuthError(f"Dokploy {operation} failed: {safe_message}")
+    result = first.get("result")
+    if not isinstance(result, dict):
+        raise DokployBootstrapAuthError(
+            f"Dokploy {operation} result must decode to a JSON object."
+        )
+    data = result.get("data")
+    if isinstance(data, dict) and "json" in data:
+        return data["json"]
+    if data in (True, False):
+        return data
+    raise DokployBootstrapAuthError(
+        f"Dokploy {operation} data must include a JSON payload."
+    )
+
+
+def _redact_known_secrets(text: str | None, secrets: tuple[str, ...]) -> str:
+    if not text:
+        return ""
+    redacted = text
+    for secret in secrets:
+        if secret:
+            redacted = redacted.replace(secret, "<REDACTED>")
+    redacted = re.sub(r"sk-[A-Za-z0-9._\-]+", "sk-<REDACTED>", redacted)
+    redacted = re.sub(r"ghp_[A-Za-z0-9_]+", "ghp_<REDACTED>", redacted)
+    return redacted
 
 
 def _default_request(req: request.Request, jar: http.cookiejar.CookieJar) -> Any:
@@ -562,3 +803,43 @@ def _extract_api_key(payload: dict[str, Any]) -> str:
     raise DokployBootstrapAuthError(
         "Dokploy API-key creation response did not include a usable API key."
     )
+
+
+def _is_ai_provider_payload(payload: Any) -> TypeGuard[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return False
+    return (
+        _is_non_empty_string(payload.get("aiId"))
+        and _is_non_empty_string(payload.get("name"))
+        and _is_non_empty_string(payload.get("apiUrl"))
+        and _is_non_empty_string(payload.get("apiKey"))
+        and _is_non_empty_string(payload.get("model"))
+        and isinstance(payload.get("isEnabled"), bool)
+    )
+
+
+def _matches_ai_provider(
+    payload: Any,
+    *,
+    name: str,
+    api_url: str,
+    api_key: str,
+    model: str,
+    is_enabled: bool,
+    ai_id: str | None,
+) -> TypeGuard[dict[str, Any]]:
+    if not _is_ai_provider_payload(payload):
+        return False
+    if ai_id is not None and payload["aiId"] != ai_id:
+        return False
+    return (
+        payload["name"] == name
+        and payload["apiUrl"] == api_url
+        and payload["apiKey"] == api_key
+        and payload["model"] == model
+        and payload["isEnabled"] is is_enabled
+    )
+
+
+def _is_non_empty_string(value: Any) -> TypeGuard[str]:
+    return isinstance(value, str) and value != ""

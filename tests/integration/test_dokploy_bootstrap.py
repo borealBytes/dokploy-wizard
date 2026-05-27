@@ -553,6 +553,7 @@ def test_install_auth_success_refreshes_persisted_target_state_before_execution(
             {
                 "__init__": lambda self: None,
                 "list_projects": lambda self: (),
+                "ai_providers_all": lambda self: (),
             },
         )(),
     )
@@ -634,6 +635,7 @@ def test_install_auth_success_defaults_missing_admin_password_for_env_file_mode(
             {
                 "__init__": lambda self: None,
                 "list_projects": lambda self: (),
+                "ai_providers_all": lambda self: (),
             },
         )(),
     )

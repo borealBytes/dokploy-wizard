@@ -932,19 +932,34 @@ def _coder_first_user_exists(hostname: str) -> bool:
     return True
 
 
-def _create_coder_first_user(*, hostname: str, email: str, password: str) -> None:
-    _coder_request(
-        hostname=hostname,
-        method="POST",
-        path="/api/v2/users/first",
-        payload={
-            "email": email,
-            "username": _username_from_email(email),
-            "name": _display_name_from_email(email),
-            "password": password,
-        },
-        expected_statuses={201},
-    )
+def _create_coder_first_user(
+    *, hostname: str, email: str, password: str, attempts: int = 12, delay_seconds: float = 5.0
+) -> None:
+    path = "/api/v2/users/first"
+    payload: dict[str, object] = {
+        "email": email,
+        "username": _username_from_email(email),
+        "name": _display_name_from_email(email),
+        "password": password,
+    }
+    for attempt in range(attempts):
+        try:
+            _coder_request(
+                hostname=hostname,
+                method="POST",
+                path=path,
+                payload=payload,
+                expected_statuses={201},
+            )
+            return
+        except _CoderHTTPError as exc:
+            if exc.status == 404 and attempt < attempts - 1:
+                time.sleep(delay_seconds)
+                continue
+            raise CoderError(
+                f"Coder bootstrap first-user creation failed at POST {path}: HTTP {exc.status}."
+            ) from exc
+    raise CoderError(f"Coder bootstrap first-user creation failed at POST {path}.")
 
 
 def _coder_login(*, hostname: str, email: str, password: str) -> str:

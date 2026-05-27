@@ -2075,6 +2075,12 @@ def _find_external_storage_mount_id(
 def _ensure_external_storage_path(container_name: str, *, datadir: str, volume_root: str) -> None:
     path = shlex.quote(datadir)
     volume_root = shlex.quote(volume_root)
+    prepare_command = (
+        f"mkdir -p {path} && "
+        f"chmod 0777 {volume_root} {path} && "
+        f"find {path} -type d -exec chmod a+rwx {{}} + && "
+        f"find {path} -type f -exec chmod a+rw {{}} +"
+    )
     result = subprocess.run(
         [
             "docker",
@@ -2082,7 +2088,7 @@ def _ensure_external_storage_path(container_name: str, *, datadir: str, volume_r
             container_name,
             "sh",
             "-lc",
-            f"mkdir -p {path} && chmod 0777 {volume_root} {path}",
+            prepare_command,
         ],
         check=False,
         capture_output=True,

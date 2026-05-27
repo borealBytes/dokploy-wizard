@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from dokploy_wizard.dokploy.client import (
     DokployAiProvider,
+    DokployAiProviderTestConnectionResult,
     DokployComposeRecord,
     DokployComposeSummary,
     DokployCreatedProject,
@@ -222,3 +223,10 @@ class FakeDokployApiClient:
         )
         self._ai_providers.append(ai_provider)
         return ai_provider
+
+
+    def ai_provider_test_connection(
+        self, *, api_url: str, api_key: str, model: str
+    ) -> DokployAiProviderTestConnectionResult:
+        del api_url, api_key, model
+        return DokployAiProviderTestConnectionResult(success=True, message="ok")

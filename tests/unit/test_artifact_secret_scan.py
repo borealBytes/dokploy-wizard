@@ -94,6 +94,43 @@ def test_scan_uses_generated_env_spec_secret_source_and_skips_source_file(tmp_pa
     assert generated_secret not in rendered
 
 
+def test_scan_uses_surfsense_generated_secret_source_and_skips_source_file(tmp_path: Path) -> None:
+    generated_secret = "SECRET_TEST_SURFSENSE_GENERATED_SECRET_KEY"
+    secret_source = tmp_path / "surfsense-generated-secrets.json"
+    secret_source.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "secrets": {
+                    "db_password": "SECRET_TEST_SURFSENSE_GENERATED_DB_PASSWORD",
+                    "jwt_secret": "SECRET_TEST_SURFSENSE_GENERATED_JWT_SECRET",
+                    "searxng_secret": "SECRET_TEST_SURFSENSE_GENERATED_SEARXNG_SECRET",
+                    "secret_key": generated_secret,
+                    "zero_admin_password": "SECRET_TEST_SURFSENSE_GENERATED_ZERO_ADMIN_PASSWORD",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact_dir = tmp_path / "collected-remote"
+    artifact_dir.mkdir()
+    (artifact_dir / "inspect-state.json").write_text(
+        f'{{"SURFSENSE_SECRET_KEY":"{generated_secret}"}}\n',
+        encoding="utf-8",
+    )
+
+    result = scan_artifacts(
+        artifact_roots=(artifact_dir, secret_source),
+        candidates=collect_secret_candidates(env_file=None, secret_sources=(secret_source,)),
+        secret_source_paths=(secret_source,),
+    )
+
+    assert not result.passed
+    rendered = json.dumps(result.to_dict(), sort_keys=True)
+    assert "surfsense-generated-secrets.json:secrets:secret_key" in rendered
+    assert generated_secret not in rendered
+
+
 def test_cli_writes_json_summary_and_returns_nonzero_on_leak(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

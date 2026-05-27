@@ -2284,6 +2284,77 @@ def test_wait_for_public_https_health_uses_expanded_bounded_budget(monkeypatch) 
     assert sleep_calls == [5.0] * 18
 
 
+def test_create_coder_first_user_retries_route_not_ready_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, object]] = []
+    sleep_calls: list[float] = []
+    failures_remaining = 2
+
+    def fake_coder_request(**kwargs: object) -> dict[str, object]:
+        nonlocal failures_remaining
+        requests.append(kwargs)
+        if failures_remaining > 0:
+            failures_remaining -= 1
+            raise coder_module._CoderHTTPError(status=404)
+        return {}
+
+    monkeypatch.setattr(coder_module, "_coder_request", fake_coder_request)
+    monkeypatch.setattr(coder_module.time, "sleep", lambda delay: sleep_calls.append(delay))
+
+    coder_module._create_coder_first_user(
+        hostname="coder.example.com",
+        email="admin@example.com",
+        password="ChangeMeSoon",
+        attempts=3,
+        delay_seconds=0.25,
+    )
+
+    assert [request["method"] for request in requests] == ["POST", "POST", "POST"]
+    assert [request["path"] for request in requests] == [
+        "/api/v2/users/first",
+        "/api/v2/users/first",
+        "/api/v2/users/first",
+    ]
+    assert sleep_calls == [0.25, 0.25]
+    assert requests[-1]["payload"] == {
+        "email": "admin@example.com",
+        "username": "admin",
+        "name": "Admin",
+        "password": "ChangeMeSoon",
+    }
+
+
+def test_create_coder_first_user_persistent_404_raises_redacted_coder_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, object]] = []
+    sleep_calls: list[float] = []
+
+    def fake_coder_request(**kwargs: object) -> dict[str, object]:
+        requests.append(kwargs)
+        raise coder_module._CoderHTTPError(status=404)
+
+    monkeypatch.setattr(coder_module, "_coder_request", fake_coder_request)
+    monkeypatch.setattr(coder_module.time, "sleep", lambda delay: sleep_calls.append(delay))
+
+    with pytest.raises(coder_module.CoderError) as exc_info:
+        coder_module._create_coder_first_user(
+            hostname="coder.example.com",
+            email="admin@example.com",
+            password="ChangeMeSoon",
+            attempts=3,
+            delay_seconds=0.25,
+        )
+
+    message = str(exc_info.value)
+    assert "POST /api/v2/users/first" in message
+    assert "HTTP 404" in message
+    assert "ChangeMeSoon" not in message
+    assert len(requests) == 3
+    assert sleep_calls == [0.25, 0.25]
+
+
 def test_default_workspace_name_uses_domain_derived_coder_safe_pattern() -> None:
     assert (
         coder_module._default_workspace_name("coder.yourwebsite.com", today=date(2026, 4, 18))

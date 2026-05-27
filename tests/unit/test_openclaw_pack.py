@@ -15,6 +15,7 @@ from urllib import error
 
 import pytest
 
+import dokploy_wizard.dokploy.openclaw as openclaw_backend
 from dokploy_wizard import cli
 from dokploy_wizard.dokploy.client import (
     DokployComposeRecord,
@@ -50,12 +51,14 @@ from dokploy_wizard.packs.openclaw import (
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     ComposeArtifactHashState,
+    LiteLLMGeneratedKeys,
     OwnedResource,
     OwnershipLedger,
     RawEnvInput,
     StateValidationError,
     resolve_desired_state,
     write_applied_checkpoint,
+    write_litellm_generated_keys,
 )
 from dokploy_wizard.verification import ServiceVerificationResult
 
@@ -213,6 +216,15 @@ def _service_environment(compose: str, service_name: str) -> dict[str, str]:
         key, raw_value = line.strip().split(": ", 1)
         environment[key] = json.loads(raw_value)
     return environment
+
+
+def _service_command(compose: str, service_name: str) -> list[str]:
+    for line in _service_block(compose, service_name).splitlines():
+        if line.startswith("    command: "):
+            command = json.loads(line.split(": ", 1)[1])
+            assert isinstance(command, list)
+            return [str(item) for item in command]
+    raise AssertionError(f"Service {service_name} did not render a command")
 
 
 def _required_placeholder(name: str) -> str:
@@ -1254,6 +1266,83 @@ def test_dokploy_openclaw_backend_healthy_unchanged_rerun_skips_update_and_deplo
     client.assert_mutation_counts(service_name, create=1, update=1, deploy=1)
 
 
+def test_dokploy_openclaw_backend_sidecar_revision_change_forces_redeploy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service_name = "wizard-stack-openclaw"
+    client = FakeDokployApiClient()
+    _write_empty_applied_checkpoint(tmp_path)
+    monkeypatch.setattr(openclaw_backend, "_ensure_nexa_sidecar_images", lambda *, runtime_config: None)
+    monkeypatch.setattr(openclaw_backend, "_nexa_runtime_sidecar_source_revision", lambda: "runtime-rev-1")
+    monkeypatch.setattr(openclaw_backend, "_nexa_mem0_sidecar_source_revision", lambda: "mem0-rev-1")
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        openclaw_nexa_env={
+            "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
+            "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
+            "OPENCLAW_NEXA_MEM0_API_KEY": "mem0-api-key",
+            "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY": "qdrant-api-key",
+            "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL": "https://nextcloud.example.com",
+            "OPENCLAW_NEXA_TALK_SHARED_SECRET": "talk-shared-secret",
+            "OPENCLAW_NEXA_TALK_SIGNING_SECRET": "talk-signing-secret",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD": "webdav-app-password",
+            "OPENCLAW_NEXA_WEBDAV_AUTH_USER": "nexa-agent",
+        },
+        client=client,
+        state_dir=tmp_path,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_verify_service_runtime",
+        lambda *, service_name, variant, url: ServiceVerificationResult(
+            service_name=service_name,
+            tier="app",
+            status="pass",
+            detail=f"{variant} runtime healthy at {url}",
+        ),
+    )
+
+    created = backend.create_service(
+        resource_name=service_name,
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+    backend.update_service(
+        resource_id=created.resource_id,
+        resource_name=service_name,
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+    client.assert_mutation_counts(service_name, create=1, update=1, deploy=1)
+
+    monkeypatch.setattr(openclaw_backend, "_nexa_runtime_sidecar_source_revision", lambda: "runtime-rev-2")
+    backend.update_service(
+        resource_id=created.resource_id,
+        resource_name=service_name,
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    client.assert_mutation_counts(service_name, create=1, update=2, deploy=2)
+    env_values = _env_payload_values(client.compose_env_by_name[service_name])
+    assert env_values["DOKPLOY_WIZARD_NEXA_RUNTIME_IMAGE_REVISION"] == "runtime-rev-2"
+    assert env_values["DOKPLOY_WIZARD_NEXA_MEM0_IMAGE_REVISION"] == "mem0-rev-1"
+
+
 def test_dokploy_my_farm_backend_healthy_unchanged_rerun_skips_update_and_deploy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1668,6 +1757,55 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
     }
 
 
+def test_openclaw_env_payload_uses_reconciled_litellm_key_from_state(tmp_path: Path) -> None:
+    api = FakeDokployOpenClawApi()
+    stale_keys = LiteLLMGeneratedKeys(
+        format_version=1,
+        master_key="sk-litellm-master-test",
+        salt_key="litellm-salt-test",
+        virtual_keys={
+            "coder-hermes": "sk-litellm-coder-hermes-test",
+            "coder-kdense": "sk-litellm-coder-kdense-test",
+            "my-farm-advisor": "sk-litellm-my-farm-advisor-test",
+            "openclaw": "sk-litellm-openclaw-stale",
+        },
+    )
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        openclaw_gateway_password="gateway-password",
+        client=api,
+        litellm_generated_keys=stale_keys,
+        state_dir=tmp_path,
+    )
+    _write_empty_applied_checkpoint(tmp_path)
+    write_litellm_generated_keys(
+        tmp_path,
+        LiteLLMGeneratedKeys(
+            format_version=1,
+            master_key=stale_keys.master_key,
+            salt_key=stale_keys.salt_key,
+            virtual_keys={**stale_keys.virtual_keys, "openclaw": "sk-litellm-openclaw-accepted"},
+        ),
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    env_values = _env_payload_values(api.last_update_env)
+    assert env_values["OPENAI_API_KEY"] == "sk-litellm-openclaw-accepted"
+    assert env_values["LITELLM_API_KEY"] == "sk-litellm-openclaw-accepted"
+    assert env_values["LITELLM_VIRTUAL_KEY_OPENCLAW"] == "sk-litellm-openclaw-accepted"
+
+
 def test_dokploy_openclaw_backend_renders_split_public_and_internal_gateways() -> None:
     api = FakeDokployOpenClawApi()
     backend = DokployOpenClawBackend(
@@ -1776,6 +1914,66 @@ def test_openclaw_seeded_provider_models_keep_full_litellm_alias_ids() -> None:
     assert "nvidia" not in seeded["models"]["providers"]
 
 
+def test_openclaw_seeded_litellm_provider_omits_live_image_incompatible_request_config() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    seeded = _decode_seeded_gateway_payload(api.last_create_compose_file or "")
+    provider = seeded["models"]["providers"]["ai-default"]
+
+    assert provider["baseUrl"] == "http://wizard-stack-shared-litellm:4000"
+    assert provider["apiKey"] == "${LITELLM_VIRTUAL_KEY_OPENCLAW}"
+    assert provider["api"] == "openai-completions"
+    assert provider["models"]
+    assert "request" not in provider
+
+
+def test_openclaw_startup_refreshes_config_before_first_run_sentinel_gate() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-openclaw",
+        hostname="openclaw.example.com",
+        template_path=None,
+        variant="openclaw",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    shell = _service_command(compose, "wizard-stack-openclaw")[2]
+    config_refresh = "node -e "
+    first_run_gate = "if [ ! -f /home/node/.openclaw/.wizard-seeded ]; then"
+
+    assert "/home/node/.openclaw/openclaw.json" in compose
+    assert shell.index(config_refresh) < shell.index(first_run_gate)
+    assert 'if (!fs.existsSync("/home/node/.openclaw/.wizard-seeded")) {' in shell
+    assert "touch /home/node/.openclaw/.wizard-seeded" in shell
+
+
 def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surface() -> None:
     api = FakeDokployOpenClawApi()
     backend = DokployOpenClawBackend(
@@ -1847,6 +2045,8 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
     assert "expose:" not in runtime_block
     assert 'image: local/dokploy-wizard-nexa-runtime:latest' in runtime_block
     assert "build:" not in runtime_block
+    mem0_env = _service_environment(compose, "mem0")
+    assert mem0_env["DOKPLOY_WIZARD_NEXA_MEM0_IMAGE_REVISION"] == _required_placeholder("DOKPLOY_WIZARD_NEXA_MEM0_IMAGE_REVISION")
     runtime_env = _service_environment(compose, "nexa-runtime")
     runtime_placeholder_names = {
         "DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH": "NEXA_RUNTIME_DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH",
@@ -1867,6 +2067,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
         "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY",
         "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL",
         "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL",
+        "DOKPLOY_WIZARD_NEXA_RUNTIME_IMAGE_REVISION",
         "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL",
         "OPENCLAW_NEXA_MEM0_BASE_URL",
         "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL",
@@ -1881,6 +2082,8 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
     assert env_values["NEXA_RUNTIME_DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH"] == "/mnt/openclaw/workspace/nexa/contract.json"
     assert env_values["NEXA_RUNTIME_DOKPLOY_WIZARD_NEXA_WORKSPACE_ROOT"] == "/mnt/openclaw/workspace/nexa"
     assert env_values["NEXA_RUNTIME_OPENCLAW_NEXA_MEM0_VECTOR_API_KEY"] == "qdrant-api-key"
+    assert len(env_values["DOKPLOY_WIZARD_NEXA_MEM0_IMAGE_REVISION"]) == 64
+    assert len(env_values["DOKPLOY_WIZARD_NEXA_RUNTIME_IMAGE_REVISION"]) == 64
     assert env_values["DOKPLOY_WIZARD_NEXA_STATE_DIR"] == "/mnt/openclaw/.nexa/state"
     assert env_values["DOKPLOY_WIZARD_NEXA_WORKER_MODE"] == "queue"
     assert "      - wizard-stack-openclaw" in runtime_block

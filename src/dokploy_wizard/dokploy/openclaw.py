@@ -41,6 +41,7 @@ from dokploy_wizard.packs.openclaw.models import (
     OpenClawResourceRecord,
 )
 from dokploy_wizard.packs.openclaw.reconciler import OpenClawError
+from dokploy_wizard.state import load_litellm_generated_keys
 from dokploy_wizard.state.models import ComposeArtifactHashState, LiteLLMGeneratedKeys
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
@@ -91,6 +92,26 @@ _DEFAULT_OPENCLAW_PUBLIC_STATE_ROOT = "/home/node/.openclaw-public"
 _DEFAULT_NEXA_RUNTIME_BUILD_CONTEXT = "."
 _DEFAULT_NEXA_RUNTIME_DOCKERFILE = "docker/nexa-runtime/Dockerfile"
 _DEFAULT_NEXA_MEM0_DOCKERFILE = "docker/nexa-mem0/Dockerfile"
+_NEXA_RUNTIME_REVISION_SOURCE_PATHS = (
+    _DEFAULT_NEXA_RUNTIME_DOCKERFILE,
+    "pyproject.toml",
+    "src/dokploy_wizard/packs/openclaw/nexa_ingress.py",
+    "src/dokploy_wizard/packs/openclaw/nexa_mem0_client.py",
+    "src/dokploy_wizard/packs/openclaw/nexa_memory.py",
+    "src/dokploy_wizard/packs/openclaw/nexa_onlyoffice.py",
+    "src/dokploy_wizard/packs/openclaw/nexa_retrieval.py",
+    "src/dokploy_wizard/packs/openclaw/nexa_runtime.py",
+    "src/dokploy_wizard/packs/openclaw/nexa_runtime_sidecar.py",
+    "src/dokploy_wizard/packs/openclaw/nexa_scope.py",
+    "src/dokploy_wizard/packs/openclaw/nexa_talk_reply.py",
+    "src/dokploy_wizard/state/store.py",
+    "src/dokploy_wizard/state/queue_models.py",
+    "src/dokploy_wizard/state/queue_policy.py",
+)
+_NEXA_MEM0_REVISION_SOURCE_PATHS = (
+    _DEFAULT_NEXA_MEM0_DOCKERFILE,
+    "src/dokploy_wizard/packs/openclaw/nexa_mem0_sidecar.py",
+)
 _DEFAULT_LOCAL_PROVIDER_ID = "tuxdesktop.tailb12aa5.ts.net"
 _DEFAULT_LOCAL_MODEL_ID = "unsloth-active"
 _DEFAULT_LOCAL_MODEL_REF = "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
@@ -549,6 +570,7 @@ class DokployOpenClawBackend:
         replicas: int,
     ) -> _ComposeLocator:
         _ensure_nexa_sidecar_images(runtime_config=self._runtime_configs[variant])
+        generated_keys = self._current_litellm_generated_keys()
         rendered_compose = _render_compose_file(
             service_name=resource_name,
             hostname=hostname,
@@ -556,7 +578,7 @@ class DokployOpenClawBackend:
             channels=channels,
             replicas=replicas,
             runtime_config=self._runtime_configs[variant],
-            generated_keys=self._litellm_generated_keys,
+            generated_keys=generated_keys,
         )
         health_url = _external_health_url(hostname=hostname, variant=variant)
         try:
@@ -690,6 +712,15 @@ class DokployOpenClawBackend:
             environment_id=created_project.environment_id,
             compose_id=updated_compose.compose_id,
         )
+
+    def _current_litellm_generated_keys(self) -> LiteLLMGeneratedKeys | None:
+        if self._state_dir is None:
+            return self._litellm_generated_keys
+        latest = load_litellm_generated_keys(self._state_dir)
+        if latest is None:
+            return self._litellm_generated_keys
+        self._litellm_generated_keys = latest
+        return latest
 
     def _verify_service_runtime(
         self,
@@ -1235,7 +1266,7 @@ def _ensure_nexa_sidecar_images(*, runtime_config: _AdvisorRuntimeConfig) -> Non
         return
     if shutil.which("docker") is None:
         return
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = _repo_root()
     _build_local_sidecar_image(
         image_name=_DEFAULT_NEXA_RUNTIME_IMAGE,
         dockerfile=_DEFAULT_NEXA_RUNTIME_DOCKERFILE,
@@ -1246,6 +1277,32 @@ def _ensure_nexa_sidecar_images(*, runtime_config: _AdvisorRuntimeConfig) -> Non
         dockerfile=_DEFAULT_NEXA_MEM0_DOCKERFILE,
         repo_root=repo_root,
     )
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _nexa_runtime_sidecar_source_revision() -> str:
+    return _nexa_sidecar_source_revision(_NEXA_RUNTIME_REVISION_SOURCE_PATHS)
+
+
+def _nexa_mem0_sidecar_source_revision() -> str:
+    return _nexa_sidecar_source_revision(_NEXA_MEM0_REVISION_SOURCE_PATHS)
+
+
+def _nexa_sidecar_source_revision(relative_paths: tuple[str, ...]) -> str:
+    repo_root = _repo_root()
+    digest = sha256()
+    for relative_path in relative_paths:
+        source_path = repo_root / relative_path
+        if not source_path.is_file():
+            raise OpenClawError(f"Missing Nexa sidecar revision input: {source_path}")
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(sha256(source_path.read_bytes()).hexdigest().encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _build_local_sidecar_image(*, image_name: str, dockerfile: str, repo_root: Path) -> None:
@@ -2297,6 +2354,7 @@ def _render_openclaw_nexa_sidecar_services(
         separators=(",", ":"),
     )
     mem0_environment = {
+        "DOKPLOY_WIZARD_NEXA_MEM0_IMAGE_REVISION": _nexa_mem0_sidecar_source_revision(),
         "HISTORY_DB_PATH": "/app/history/history.db",
         "MEM0_DEFAULT_CONFIG_JSON": mem0_config_json,
         "PYTHONUNBUFFERED": "1",
@@ -2334,6 +2392,7 @@ def _render_openclaw_nexa_sidecar_services(
         "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_BASE_URL": planner_base_url,
         "DOKPLOY_WIZARD_NEXA_PLANNER_OPENROUTER_API_KEY": planner_api_key,
         "DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY": planner_api_key,
+        "DOKPLOY_WIZARD_NEXA_RUNTIME_IMAGE_REVISION": _nexa_runtime_sidecar_source_revision(),
         "DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH": _nexa_runtime_volume_path(
             runtime_config.nexa_contract.runtime_contract_path
         ),
@@ -2806,6 +2865,9 @@ def _command_for_variant(
             if variant == "my-farm-advisor"
             else (f"{state_root}/openclaw.json",)
         ),
+        extra_files_sentinel=None
+        if variant == "my-farm-advisor"
+        else f"{state_root}/.wizard-seeded",
     )
     if variant == "my-farm-advisor":
         seed_command = (
@@ -2836,8 +2898,9 @@ def _command_for_variant(
             "-lc",
             (
                 f"umask 0000 && "
+                f"{seed_command} && "
                 f"if [ ! -f {state_root}/.wizard-seeded ]; then "
-                f"{seed_command} && chown -R node:node {state_root} && "
+                f"chown -R node:node {state_root} && "
                 f"touch {state_root}/.wizard-seeded; "
                 f"fi && "
                 f"chmod -R a+rwX {state_root} && "
@@ -3353,7 +3416,14 @@ def _render_seed_script(
     runtime_env_injection: str,
     extra_files_b64: str,
     config_targets: tuple[str, ...],
+    extra_files_sentinel: str | None,
 ) -> str:
+    extra_files_guard_start = (
+        f'if (!fs.existsSync({json.dumps(extra_files_sentinel)})) {{'
+        if extra_files_sentinel is not None
+        else ""
+    )
+    extra_files_guard_end = "}" if extra_files_sentinel is not None else ""
     return "".join(
         [
             'const fs=require("fs");',
@@ -3368,11 +3438,13 @@ def _render_seed_script(
             'const existing=fs.existsSync(target)?fs.readFileSync(target,"utf8"):null;',
             'if (existing !== rendered) { fs.writeFileSync(target, rendered); }',
             "}",
+            extra_files_guard_start,
             (
                 f'for (const item of JSON.parse(Buffer.from("{extra_files_b64}","base64").toString("utf8"))) {{'
             ),
             "fs.mkdirSync(path.dirname(item.path), {recursive:true});",
             'fs.writeFileSync(item.path, Buffer.from(item.content,"base64").toString("utf8"));',
             "}",
+            extra_files_guard_end,
         ]
     )

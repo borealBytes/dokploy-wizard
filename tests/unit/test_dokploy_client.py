@@ -413,6 +413,174 @@ def test_dokploy_client_update_compose_uses_session_fallback_on_api_key_401() ->
     assert record.name == "wizard-compose"
 
 
+def test_dokploy_client_ai_providers_all_uses_session_fallback_on_api_key_401() -> None:
+    requests_seen: list[str] = []
+
+    def fake_request(req: request.Request) -> object:
+        requests_seen.append(req.full_url)
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        ai_providers_all_session_fallback=lambda: {
+            "data": [
+                {
+                    "aiId": "ai-1",
+                    "name": "Dokploy Wizard LiteLLM",
+                    "apiUrl": "http://litellm:4000/v1",
+                    "apiKey": "sk-dokploy-ai",
+                    "model": "local/model",
+                    "isEnabled": True,
+                }
+            ]
+        },
+    )
+
+    providers = client.ai_providers_all()
+
+    assert requests_seen == ["https://dokploy.example.com/api/ai.getAll"]
+    assert providers[0].ai_id == "ai-1"
+    assert providers[0].name == "Dokploy Wizard LiteLLM"
+
+
+def test_dokploy_client_ai_provider_create_uses_session_fallback_on_api_key_401() -> None:
+    fallback_payloads: list[tuple[str, str, str, str, bool]] = []
+
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    def fallback(name: str, api_url: str, api_key: str, model: str, is_enabled: bool) -> object:
+        fallback_payloads.append((name, api_url, api_key, model, is_enabled))
+        return {
+            "data": {
+                "aiId": "ai-1",
+                "name": name,
+                "apiUrl": api_url,
+                "apiKey": api_key,
+                "model": model,
+                "isEnabled": is_enabled,
+            }
+        }
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        ai_provider_create_session_fallback=fallback,
+    )
+
+    provider = client.ai_provider_create(
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://litellm:4000/v1",
+        api_key="sk-dokploy-ai",
+        model="local/model",
+        is_enabled=True,
+    )
+
+    assert fallback_payloads == [
+        ("Dokploy Wizard LiteLLM", "http://litellm:4000/v1", "sk-dokploy-ai", "local/model", True)
+    ]
+    assert provider.ai_id == "ai-1"
+    assert provider.api_key == "sk-dokploy-ai"
+
+
+def test_dokploy_client_ai_provider_update_uses_session_fallback_on_api_key_401() -> None:
+    fallback_payloads: list[tuple[str, str, str, str, str, bool]] = []
+
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"Unauthorized"}'),
+        )
+
+    def fallback(
+        ai_id: str,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+    ) -> object:
+        fallback_payloads.append((ai_id, name, api_url, api_key, model, is_enabled))
+        return {
+            "data": {
+                "aiId": ai_id,
+                "name": name,
+                "apiUrl": api_url,
+                "apiKey": api_key,
+                "model": model,
+                "isEnabled": is_enabled,
+            }
+        }
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        ai_provider_update_session_fallback=fallback,
+    )
+
+    provider = client.ai_provider_update(
+        ai_id="ai-1",
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://litellm:4000/v1",
+        api_key="sk-dokploy-ai",
+        model="local/model",
+        is_enabled=True,
+    )
+
+    assert fallback_payloads == [
+        (
+            "ai-1",
+            "Dokploy Wizard LiteLLM",
+            "http://litellm:4000/v1",
+            "sk-dokploy-ai",
+            "local/model",
+            True,
+        )
+    ]
+    assert provider.ai_id == "ai-1"
+    assert provider.is_enabled is True
+
+
+def test_dokploy_client_ai_provider_fallback_only_handles_api_key_401() -> None:
+    def fake_request(req: request.Request) -> object:
+        raise error.HTTPError(
+            req.full_url,
+            500,
+            "Server Error",
+            hdrs=Message(),
+            fp=BytesIO(b'{"message":"boom"}'),
+        )
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+        ai_providers_all_session_fallback=lambda: [],
+    )
+
+    with pytest.raises(DokployApiError, match="status 500"):
+        client.ai_providers_all()
+
+
 def test_dokploy_client_lists_compose_schedules_with_query_string() -> None:
     captured: dict[str, object] = {}
 
@@ -552,3 +720,41 @@ def test_dokploy_client_updates_compose_schedule_with_expected_payload() -> None
         "enabled": True,
     }
     assert record.timezone == "America/Detroit"
+
+
+def test_dokploy_client_ai_provider_test_connection_uses_session_fallback() -> None:
+    fallback_payloads: list[tuple[str, str, str]] = []
+
+    def fallback(api_url: str, api_key: str, model: str) -> object:
+        fallback_payloads.append((api_url, api_key, model))
+        return {"data": {"success": True, "message": "ok"}}
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        ai_provider_test_connection_session_fallback=fallback,
+    )
+
+    result = client.ai_provider_test_connection(
+        api_url="http://litellm:4000/v1",
+        api_key="sk-dokploy-ai",
+        model="local/model",
+    )
+
+    assert fallback_payloads == [("http://litellm:4000/v1", "sk-dokploy-ai", "local/model")]
+    assert result.success is True
+    assert result.message == "ok"
+
+
+def test_dokploy_client_ai_provider_test_connection_requires_session_fallback() -> None:
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+    )
+
+    with pytest.raises(DokployApiError, match="session fallback"):
+        client.ai_provider_test_connection(
+            api_url="http://litellm:4000/v1",
+            api_key="sk-dokploy-ai",
+            model="local/model",
+        )

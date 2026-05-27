@@ -2398,6 +2398,41 @@ def test_ensure_onlyoffice_app_config_bootstraps_openclaw_external_storage(
     ) in commands
 
 
+def test_ensure_external_storage_path_recursively_prepares_seeded_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded_commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        recorded_commands.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.nextcloud.subprocess.run", fake_run)
+
+    nextcloud_module._ensure_external_storage_path(
+        "nextcloud-container",
+        datadir="/mnt/advisors/openclaw/workspace",
+        volume_root="/mnt/advisors/openclaw",
+    )
+
+    assert recorded_commands == [
+        [
+            "docker",
+            "exec",
+            "nextcloud-container",
+            "sh",
+            "-lc",
+            "mkdir -p /mnt/advisors/openclaw/workspace && "
+            "chmod 0777 /mnt/advisors/openclaw /mnt/advisors/openclaw/workspace && "
+            "find /mnt/advisors/openclaw/workspace -type d -exec chmod a+rwx {} + && "
+            "find /mnt/advisors/openclaw/workspace -type f -exec chmod a+rw {} +",
+        ]
+    ]
+
+
 def test_ensure_onlyoffice_app_config_reuses_legacy_openclaw_mount_idempotently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
