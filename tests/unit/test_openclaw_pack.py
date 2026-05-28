@@ -2429,8 +2429,8 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapp
     assert record.resource_id == "dokploy-compose:compose-existing:my-farm-advisor:replicas:3"
     assert "image: ghcr.io/borealbytes/my-farm-advisor:latest" in compose
     assert "pull_policy: always" in compose
-    assert "/app/scripts/entrypoint.sh" in compose
-    assert "exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" not in compose
+    assert "/app/scripts/entrypoint.sh" not in compose
+    assert "exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" in compose
     assert 'ADVISOR_VARIANT: "my-farm-advisor"' in compose
     assert 'ADVISOR_STARTUP_MODE: "my-farm-advisor"' in compose
     assert 'ADVISOR_CHANNELS: "matrix,telegram"' in compose
