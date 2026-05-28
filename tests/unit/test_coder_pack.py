@@ -33,7 +33,7 @@ from .fake_dokploy import FakeDokployApiClient
 
 def _expected_coder_fallback_models_json() -> str:
     return coder_module._litellm_workspace_fallback_models_json(
-        default_alias="local-model.internal/unsloth-active"
+        default_alias="opencode-go/deepseek-v4-flash"
     )
 
 
@@ -44,7 +44,7 @@ def _expected_coder_fallback_models_json_escaped() -> str:
 def test_coder_litellm_fallback_models_json_uses_full_concrete_aliases() -> None:
     aliases = json.loads(_expected_coder_fallback_models_json())
 
-    assert aliases[0] == "local-model.internal/unsloth-active"
+    assert aliases[0] == "opencode-go/deepseek-v4-flash"
     assert "opencode-go/deepseek-v4-flash" in aliases
     assert "opencode-go/minimax-m2.7" in aliases
     assert "openrouter/minimax/minimax-m2.5:free" in aliases
@@ -1180,40 +1180,40 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
 
     assert template_replacements_by_name[coder_module._default_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1299,32 +1299,32 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     )
     assert template_replacements_by_name[coder_module._default_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1536,9 +1536,9 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     assert waits == ["coder.example.com"]
     assert secret_sync_calls == [
         (
-            "dokploy-litellm",
-            "local-model.internal/unsloth-active",
-            "http://wizard-stack-shared-litellm:4000",
+                "dokploy-litellm",
+                "opencode-go/deepseek-v4-flash",
+                "http://wizard-stack-shared-litellm:4000",
         )
     ]
     assert notes == (
@@ -2608,24 +2608,24 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     ]
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -2633,15 +2633,15 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "local-model.internal/unsloth-active",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4-flash",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -2659,7 +2659,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         (
             "wizard-stack-coder-container",
             "dokploy-litellm",
-            "local-model.internal/unsloth-active",
+            "opencode-go/deepseek-v4-flash",
             None,
         )
     ]

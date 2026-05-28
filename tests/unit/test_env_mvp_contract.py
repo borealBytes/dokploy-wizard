@@ -129,6 +129,7 @@ def _farm_litellm_env(**overrides: str) -> RawEnvInput:
         "LITELLM_IMAGE_TAG": "main-v1.40.14-stable",
         "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
         "LITELLM_LOCAL_MODEL": "unsloth-active",
+        "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
         "LITELLM_ADMIN_SUBDOMAIN": "litellm",
         "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
         "OPENCODE_GO_API_KEY": "opencode-go-upstream-key",
@@ -433,7 +434,7 @@ def test_litellm_canonical_env_rejects_missing_local_endpoint_with_actionable_er
         )
 
 
-def test_ai_default_provider_and_model_resolve_local_alias_without_shared_api_pair() -> None:
+def test_ai_default_provider_and_model_resolve_local_alias_but_requires_local_base_url() -> None:
     raw_env = _farm_litellm_env(
         MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
         MY_FARM_ADVISOR_NVIDIA_API_KEY="",
@@ -448,7 +449,8 @@ def test_ai_default_provider_and_model_resolve_local_alias_without_shared_api_pa
     assert env_module.resolve_ai_default_model_ref(raw_env.values) == (
         "local-model.internal/unsloth-active"
     )
-    assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
+    with pytest.raises(StateValidationError, match="LITELLM_LOCAL_BASE_URL"):
+        resolve_desired_state(raw_env)
 
 
 def test_ai_default_provider_and_model_resolve_opencode_alias() -> None:
@@ -459,6 +461,8 @@ def test_ai_default_provider_and_model_resolve_opencode_alias() -> None:
         AI_DEFAULT_API_KEY="",
         AI_DEFAULT_BASE_URL="",
         LITELLM_LOCAL_BASE_URL="",
+        LITELLM_LOCAL_MODEL="",
+        LITELLM_LOCAL_API_KEY="",
         AI_DEFAULT_PROVIDER="opencode",
         AI_DEFAULT_MODEL="minimax/minimax-m2.5:free",
     )
@@ -477,8 +481,11 @@ def test_litellm_openrouter_models_accept_raw_openrouter_model_ids() -> None:
         AI_DEFAULT_API_KEY="",
         AI_DEFAULT_BASE_URL="",
         LITELLM_LOCAL_BASE_URL="",
-        AI_DEFAULT_PROVIDER="local-model.internal",
-        AI_DEFAULT_MODEL="unsloth-active",
+        LITELLM_LOCAL_MODEL="",
+        LITELLM_LOCAL_API_KEY="",
+        LITELLM_OPENROUTER_API_KEY="SECRET_TEST_OPENROUTER_PROVIDER_KEY",
+        AI_DEFAULT_PROVIDER="openrouter",
+        AI_DEFAULT_MODEL="openai/gpt-4.1-mini",
         LITELLM_OPENROUTER_MODELS=(
             "openrouter/openai/gpt-4.1-mini,"
             "openrouter/anthropic/claude-3.5-sonnet"

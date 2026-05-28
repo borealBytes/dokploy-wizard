@@ -2285,6 +2285,9 @@ def _build_coder_backend(
     if allocation.postgres is None or desired_state.shared_core.postgres is None:
         return ShellCoderBackend()
     litellm_generated_keys = ensure_litellm_generated_keys(state_dir)
+    ai_default_provider = _shared_ai_default_provider(raw_env)
+    ai_default_model = _shared_ai_default_model(raw_env)
+    hermes_model = raw_env.values.get("HERMES_MODEL", "").strip() or f"{ai_default_provider}/{ai_default_model}"
     return DokployCoderBackend(
         api_url=api_url,
         api_key=api_key,
@@ -2295,8 +2298,10 @@ def _build_coder_backend(
         admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
+        ai_default_provider=ai_default_provider,
+        ai_default_model=ai_default_model,
         hermes_inference_provider=raw_env.values.get("HERMES_INFERENCE_PROVIDER", "dokploy-litellm"),
-        hermes_model=raw_env.values.get("HERMES_MODEL", "unsloth-active"),
+        hermes_model=hermes_model,
         ai_default_base_url=_shared_ai_default_base_url(raw_env),
         ai_default_api_key=litellm_generated_keys.virtual_keys["coder-hermes"],
         state_dir=state_dir,

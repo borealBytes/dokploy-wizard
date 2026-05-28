@@ -37,6 +37,24 @@ def _model_entry(config: dict[str, object], model_name: str) -> dict[str, Any]:
     raise AssertionError(f"model entry not found: {model_name}")
 
 
+def test_build_litellm_config_omits_local_alias_when_local_base_url_absent() -> None:
+    config = build_litellm_config(
+        {
+            "AI_DEFAULT_PROVIDER": "openrouter",
+            "AI_DEFAULT_MODEL": "deepseek/deepseek-v4-flash:free",
+            "LITELLM_OPENROUTER_API_KEY": "SECRET_TEST_OPENROUTER_PROVIDER_KEY",
+            "LITELLM_OPENROUTER_MODELS": "deepseek/deepseek-v4-flash:free",
+        },
+        {"openrouter_api_key_env": "LITELLM_OPENROUTER_API_KEY"},
+    )
+
+    model_names = [entry["model_name"] for entry in _model_list(config)]
+
+    assert model_names == ["openrouter/deepseek/deepseek-v4-flash:free"]
+    assert "local-model.internal/unsloth-active" not in model_names
+
+
+
 def test_build_litellm_config_maps_raw_openrouter_ids_to_prefixed_aliases() -> None:
     config = build_litellm_config(
         {
@@ -97,6 +115,8 @@ def test_build_litellm_config_rejects_openrouter_wildcards() -> None:
         build_litellm_config(
             {
                 "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+                "LITELLM_LOCAL_MODEL": "unsloth-active",
+                "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
                 "LITELLM_OPENROUTER_MODELS": "*",
             },
             {
@@ -109,6 +129,8 @@ def test_build_litellm_config_skips_empty_openrouter_entries_to_match_env_contra
     config = build_litellm_config(
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "LITELLM_OPENROUTER_MODELS": (
                 "openrouter/openai/gpt-4.1-mini, , openrouter/anthropic/claude-3.5-sonnet,"
             ),
@@ -130,6 +152,8 @@ def test_build_litellm_config_exposes_verified_opencode_go_chat_models_only_when
     config = build_litellm_config(
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
         },
         {
@@ -160,6 +184,8 @@ def test_build_litellm_config_skips_opencode_go_models_without_upstream_key() ->
     config = build_litellm_config(
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
         },
         {},
@@ -174,6 +200,8 @@ def test_build_litellm_config_exposes_verified_opencode_go_models_with_default_b
     config = build_litellm_config(
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "LITELLM_OPENCODE_GO_API_KEY": "sk-opencode-go-key",
         },
         {},
@@ -199,6 +227,8 @@ def test_build_litellm_config_ignores_opencode_go_wildcard_flag_and_keeps_concre
     config = build_litellm_config(
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "LITELLM_OPENCODE_GO_API_KEY": "sk-opencode-go-key",
             "LITELLM_OPENCODE_GO_WILDCARD": raw_value,
         },
@@ -230,6 +260,8 @@ def test_build_litellm_config_prefers_canonical_litellm_env_refs_for_non_local_r
     config = build_litellm_config(
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
             "LITELLM_OPENCODE_GO_API_KEY": "sk-opencode-go-key",
             "LITELLM_OPENROUTER_API_KEY": "sk-openrouter-key",
@@ -259,6 +291,8 @@ def test_render_litellm_config_yaml_includes_new_model_aliases_only() -> None:
     config = build_litellm_config(
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "LITELLM_OPENROUTER_MODELS": "minimax/minimax-m2.5:free",
             "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
         },
@@ -284,6 +318,8 @@ def test_build_litellm_config_still_allows_optional_nvidia_route() -> None:
     config = build_litellm_config(
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "LITELLM_NVIDIA_MODELS": "nvidia/kimi-k2.5=nvidia/moonshotai/kimi-k2.5",
             "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
         },
@@ -309,6 +345,8 @@ def test_render_litellm_config_yaml_preserves_nvidia_alias_routes() -> None:
     config = build_litellm_config(
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "LITELLM_OPENROUTER_MODELS": "google/gemma-4-31b-it:free",
             "LITELLM_NVIDIA_MODELS": "nvidia/kimi-k2.5=nvidia/moonshotai/kimi-k2.5",
             "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
@@ -350,6 +388,8 @@ def test_build_litellm_config_rejects_malformed_nvidia_routes(
         build_litellm_config(
             {
                 "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+                "LITELLM_LOCAL_MODEL": "unsloth-active",
+                "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
                 "LITELLM_NVIDIA_MODELS": raw_value,
                 "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
             },
@@ -363,6 +403,7 @@ def test_build_litellm_config_normalizes_legacy_local_model_to_openai_prefix() -
     config = build_litellm_config(
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "LITELLM_LOCAL_MODEL": "unsloth/Qwen2.5-Coder-32B-Instruct",
         },
         {
@@ -380,6 +421,8 @@ def test_build_litellm_config_defaults_local_model_to_unsloth_active() -> None:
     config = build_litellm_config(
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
         },
         {
             "opencode_go_api_key_env": "OPENCODE_GO_API_KEY",
@@ -418,6 +461,8 @@ def test_build_litellm_config_preserves_hostname_provider_alias_for_local_route(
             "AI_DEFAULT_PROVIDER": "local-model.internal",
             "AI_DEFAULT_MODEL": "unsloth-active",
             "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
         },
         {
             "opencode_go_api_key_env": "OPENCODE_GO_API_KEY",
@@ -452,6 +497,7 @@ def test_build_litellm_config_rejects_mangled_hostname_provider_upstream_target(
             {
                 "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
                 "LITELLM_LOCAL_MODEL": "openai/local-model.internal/unsloth-active",
+                "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             },
             {
                 "opencode_go_api_key_env": "OPENCODE_GO_API_KEY",

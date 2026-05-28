@@ -401,6 +401,8 @@ def test_advisor_model_selection_defaults_to_catalog_visible_aliases() -> None:
             "ENABLE_OPENCLAW": "true",
             "ENABLE_MY_FARM_ADVISOR": "true",
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "LITELLM_OPENCODE_GO_API_KEY": "shared-opencode-go-key",
             "LITELLM_OPENROUTER_API_KEY": "shared-openrouter-key",
             "LITELLM_OPENROUTER_MODELS": "anthropic/claude-sonnet-4",
@@ -430,7 +432,11 @@ def test_my_farm_advisor_accepts_litellm_canonical_env() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
-            values=_farm_env_values(LITELLM_LOCAL_BASE_URL="http://100.64.0.10:8000/v1"),
+            values=_farm_env_values(
+                LITELLM_LOCAL_BASE_URL="http://100.64.0.10:8000/v1",
+                LITELLM_LOCAL_MODEL="unsloth-active",
+                LITELLM_LOCAL_API_KEY="sk-no-key-required",
+            ),
         )
     )
 
@@ -1451,7 +1457,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "ai-default/local-model.internal/unsloth-active",
+                    "primary": "ai-default/anthropic/claude-3-7-sonnet",
                 "fallbacks": [],
             },
             "tools": {
@@ -1663,7 +1669,7 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "ai-default/local-model.internal/unsloth-active",
+                    "primary": "ai-default/nvidia/moonshotai/kimi-k2.5",
                 "fallbacks": [],
             },
             "tools": {
@@ -1680,7 +1686,6 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
     ]
     assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert seeded["agents"]["defaults"]["models"] == {
-        "ai-default/local-model.internal/unsloth-active": {},
         "ai-default/nvidia/moonshotai/kimi-k2.5": {},
         "ai-default/openrouter/openrouter/free": {},
         "ai-default/openrouter/google/gemma-4-31b-it:free": {},
@@ -1691,20 +1696,6 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
         "apiKey": "${LITELLM_VIRTUAL_KEY_OPENCLAW}",
         "api": "openai-completions",
         "models": [
-            {
-                "id": "local-model.internal/unsloth-active",
-                "name": "local-model.internal/unsloth-active",
-                "reasoning": True,
-                "input": ["text"],
-                "cost": {
-                    "input": 0,
-                    "output": 0,
-                    "cacheRead": 0,
-                    "cacheWrite": 0,
-                },
-                "contextWindow": 262144,
-                "maxTokens": 32768,
-            },
             {
                 "id": "nvidia/moonshotai/kimi-k2.5",
                 "name": "nvidia/moonshotai/kimi-k2.5",
@@ -1897,12 +1888,11 @@ def test_openclaw_seeded_provider_models_keep_full_litellm_alias_ids() -> None:
         for model in provider["models"]
     ]
 
-    assert seeded["agents"]["defaults"]["model"]["primary"] == "ai-default/local-model.internal/unsloth-active"
+    assert seeded["agents"]["defaults"]["model"]["primary"] == "ai-default/opencode-go/deepseek-v4-flash"
     assert seeded["agents"]["defaults"]["model"]["fallbacks"] == [
-        "ai-default/opencode-go/deepseek-v4-flash",
         "ai-default/openrouter/minimax/minimax-m2.5:free",
     ]
-    assert "local-model.internal/unsloth-active" in provider_model_ids
+    assert "opencode-go/deepseek-v4-flash" in provider_model_ids
     assert "opencode-go/deepseek-v4-flash" in provider_model_ids
     assert "openrouter/minimax/minimax-m2.5:free" in provider_model_ids
     assert "unsloth-active" not in provider_model_ids
@@ -2110,7 +2100,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "nexa",
             "name": "Nexa",
             "model": {
-                "primary": "ai-default/local-model.internal/unsloth-active",
+                "primary": "ai-default/opencode-go/deepseek-v4-flash",
                 "fallbacks": [],
             },
             "tools": {
@@ -2128,7 +2118,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "ai-default/local-model.internal/unsloth-active",
+                "primary": "ai-default/opencode-go/deepseek-v4-flash",
                 "fallbacks": [],
             },
             "tools": {
@@ -2240,7 +2230,7 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "ai-default/local-model.internal/unsloth-active",
+                "primary": "ai-default/opencode-go/deepseek-v4-flash",
                 "fallbacks": [],
             },
             "tools": {
@@ -2259,7 +2249,7 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
     assert "channels" not in seeded or "telegram" not in seeded.get("channels", {})
 
 
-def test_telly_keeps_local_first_through_litellm() -> None:
+def test_telly_uses_remote_default_without_local_litellm_upstream() -> None:
     api = FakeDokployOpenClawApi()
     backend = DokployOpenClawBackend(
         api_url="https://dokploy.example.com/api",
@@ -2284,7 +2274,7 @@ def test_telly_keeps_local_first_through_litellm() -> None:
     telly = next(agent for agent in seeded["agents"]["list"] if agent["id"] == "telly")
 
     assert telly["model"] == {
-        "primary": "ai-default/local-model.internal/unsloth-active",
+        "primary": "ai-default/opencode-go/deepseek-v4-flash",
         "fallbacks": [],
     }
     assert set(seeded["models"]["providers"]) == {"ai-default"}
@@ -2294,8 +2284,8 @@ def test_telly_keeps_local_first_through_litellm() -> None:
         "api": "openai-completions",
         "models": [
             {
-                "id": "local-model.internal/unsloth-active",
-                "name": "local-model.internal/unsloth-active",
+                "id": "opencode-go/deepseek-v4-flash",
+                "name": "opencode-go/deepseek-v4-flash",
                 "reasoning": True,
                 "input": ["text"],
                 "cost": {
@@ -2355,7 +2345,7 @@ def test_nexa_model_routing_uses_litellm_without_openrouter_secret(monkeypatch: 
     assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL"] == _required_placeholder("DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL")
     assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY"] == _required_placeholder("DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY")
     env_values = _env_payload_values(api.last_update_env)
-    assert env_values["DOKPLOY_WIZARD_NEXA_PLANNER_MODEL"] == "local-model.internal/unsloth-active"
+    assert env_values["DOKPLOY_WIZARD_NEXA_PLANNER_MODEL"] == "opencode-go/deepseek-v4-flash"
     assert env_values["DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
     assert "or-key" not in runtime_env.values()
     assert "nv-key" not in runtime_env.values()

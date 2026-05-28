@@ -45,8 +45,8 @@ from dokploy_wizard.state import load_litellm_generated_keys
 from dokploy_wizard.state.models import ComposeArtifactHashState, LiteLLMGeneratedKeys
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
-_DEFAULT_MODEL_PROVIDER = "local-model.internal"
-_DEFAULT_MODEL_NAME = "unsloth-active"
+_DEFAULT_MODEL_PROVIDER = "opencode-go"
+_DEFAULT_MODEL_NAME = "deepseek-v4-flash"
 _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 _DEFAULT_NVIDIA_VISIBLE_DEVICES = "all"
 _DEFAULT_APP_PORT = 18789
@@ -851,7 +851,7 @@ class DokployOpenClawBackend:
                 ],
             )
 
-        expected_models = _expected_litellm_model_aliases(variant)
+        expected_models = _expected_litellm_model_aliases(runtime_config)
         if not _container_litellm_models_accessible(service_name, expected_models):
             return make_verification_result(
                 service_name=service_name,
@@ -1136,8 +1136,8 @@ def _runtime_directory_paths(
     return tuple(paths)
 
 
-def _expected_litellm_model_aliases(variant: str) -> tuple[str, ...]:
-    return (_DEFAULT_LOCAL_MODEL_REF,)
+def _expected_litellm_model_aliases(runtime_config: _AdvisorRuntimeConfig) -> tuple[str, ...]:
+    return _allowed_models(runtime_config)
 
 
 def _external_health_url(*, hostname: str, variant: str) -> str:
@@ -2381,10 +2381,10 @@ def _render_openclaw_nexa_sidecar_services(
     runtime_environment = {
         **_nexa_runtime_env_for_sidecar(runtime_config.nexa_env, planner_api_key=planner_api_key, planner_base_url=planner_base_url),
         "DOKPLOY_WIZARD_OPENCLAW_INTERNAL_URL": f"http://{service_name}:{_DEFAULT_APP_PORT}",
-        "DOKPLOY_WIZARD_NEXA_PLANNER_MODEL": runtime_config.primary_model or _DEFAULT_LOCAL_MODEL_REF,
+        "DOKPLOY_WIZARD_NEXA_PLANNER_MODEL": runtime_config.primary_model or _DEFAULT_AI_DEFAULT_MODEL_REF,
         "DOKPLOY_WIZARD_NEXA_PLANNER_MODEL_PROVIDER": _provider_for_model_ref(
-            runtime_config.primary_model or _DEFAULT_LOCAL_MODEL_REF,
-            default=_DEFAULT_LOCAL_PROVIDER_ID,
+            runtime_config.primary_model or _DEFAULT_AI_DEFAULT_MODEL_REF,
+            default=_DEFAULT_AI_DEFAULT_PROVIDER_ID,
         ),
         "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL": planner_base_url,
         "DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_API_KEY": planner_api_key,
@@ -2668,8 +2668,6 @@ def _command_for_variant(
         include_runtime_seed=include_runtime_seed and variant == "openclaw",
     )
     if runtime_config.primary_model is not None or runtime_config.fallback_models:
-        if _DEFAULT_LOCAL_MODEL_REF not in allowed_models:
-            allowed_models = (_DEFAULT_LOCAL_MODEL_REF, *allowed_models)
         model_defaults = _litellm_selection_model_defaults(
             primary=_resolved_primary_model(runtime_config),
             fallbacks=_resolved_fallback_models(runtime_config),
@@ -2757,7 +2755,7 @@ def _command_for_variant(
         ):
             bindings.append({"agentId": _DEFAULT_NEXA_AGENT_ID, "match": {"channel": "nextcloud-talk"}})
     if include_runtime_seed and "telegram" in channels:
-        telly_model_defaults = _telly_model_defaults()
+        telly_model_defaults = _telly_model_defaults(runtime_config)
         agents_list = agents_payload.setdefault(
             "list",
             [
@@ -2930,14 +2928,14 @@ def _allowed_models(runtime_config: _AdvisorRuntimeConfig) -> tuple[str, ...]:
 def _nexa_model_defaults(runtime_config: _AdvisorRuntimeConfig) -> dict[str, object]:
     return _specialized_agent_model_defaults(
         runtime_config,
-        default_primary=_DEFAULT_LOCAL_MODEL_REF,
+        default_primary=_resolved_primary_model(runtime_config),
         default_fallbacks=(),
     )
 
 
-def _telly_model_defaults() -> dict[str, object]:
+def _telly_model_defaults(runtime_config: _AdvisorRuntimeConfig) -> dict[str, object]:
     return {
-        "primary": _DEFAULT_LOCAL_MODEL_REF,
+        "primary": _resolved_primary_model(runtime_config),
         "fallbacks": [],
     }
 
@@ -2972,7 +2970,7 @@ def _openclaw_seed_model_refs(
                 if isinstance(model_ref, str):
                     _append(model_ref)
     if "telegram" in channels:
-        _append(_DEFAULT_LOCAL_MODEL_REF)
+        _append(_resolved_primary_model(runtime_config))
     return tuple(ordered)
 
 
@@ -2989,7 +2987,12 @@ def _specialized_agent_model_defaults(
 
 
 def _resolved_primary_model(runtime_config: _AdvisorRuntimeConfig) -> str:
-    return runtime_config.primary_model or _DEFAULT_LOCAL_MODEL_REF
+    if runtime_config.primary_model is not None:
+        return runtime_config.primary_model
+    fallback = _normalize_runtime_model_ref(
+        f"{runtime_config.model_provider}/{runtime_config.model_name}"
+    )
+    return fallback or _DEFAULT_AI_DEFAULT_MODEL_REF
 
 
 def _resolved_fallback_models(runtime_config: _AdvisorRuntimeConfig) -> tuple[str, ...]:

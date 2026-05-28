@@ -294,6 +294,7 @@ def _litellm_route_env(**overrides: str) -> dict[str, str]:
     values = {
         "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
         "LITELLM_LOCAL_MODEL": "unsloth-active",
+        "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
         "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
         "LITELLM_OPENCODE_GO_API_KEY": "sk-opencode-go-key",
         "LITELLM_OPENROUTER_API_KEY": "sk-openrouter-key",
