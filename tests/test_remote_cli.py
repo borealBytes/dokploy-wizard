@@ -213,7 +213,7 @@ def test_quiet_remote_output_suppresses_stream_lines(
 
 
 @pytest.mark.parametrize("subcommand", ["install", "modify", "proof"])
-def test_successful_lifecycle_prints_ready_notice_for_enabled_service_links(
+def test_successful_lifecycle_prints_expected_service_urls_for_enabled_service_links(
     subcommand: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -237,14 +237,56 @@ def test_successful_lifecycle_prints_ready_notice_for_enabled_service_links(
 
     stderr = capsys.readouterr().err
     assert exit_code == 0
-    assert "[remote] ready for use:" in stderr
-    assert "[remote]   Dokploy: https://dokploy.openmerge.me" in stderr
-    assert "[remote]   Nextcloud: https://nextcloud.openmerge.me" in stderr
-    assert "[remote]   Coder: https://coder.openmerge.me" in stderr
-    assert "[remote]   My Farm Advisor/Farm: https://farm.openmerge.me" in stderr
+    assert "[remote] expected service URLs:" in stderr
+    assert "ready for use" not in stderr
+    assert "[remote]   Dokploy: https://dokploy.openmerge.me/" in stderr
+    assert "[remote]   Nextcloud: https://nextcloud.openmerge.me/" in stderr
+    assert "[remote]   Coder: https://coder.openmerge.me/" in stderr
+    assert "[remote]   My Farm Advisor/Farm: https://farm.openmerge.me/" in stderr
 
 
-def test_successful_lifecycle_ready_notice_omits_disabled_pack_links(
+@pytest.mark.parametrize(
+    ("subcommand", "remote_command"),
+    [
+        ("install", "install"),
+        ("modify", "modify"),
+        ("proof", "mutate-install"),
+    ],
+)
+def test_lifecycle_prints_expected_service_urls_before_long_mutation(
+    subcommand: str,
+    remote_command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = _write_remote_env(tmp_path, packs="my-farm-advisor,nextcloud")
+    _patch_successful_remote_run(monkeypatch, remote_cli)
+
+    exit_code = remote_cli.main(
+        [
+            subcommand,
+            "--host",
+            "example.com",
+            "--password",
+            "super-secret-password",
+            "--env-file",
+            str(env_file),
+        ]
+    )
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 0
+    assert stderr.count("[remote] expected service URLs:") == 1
+    assert "ready for use" not in stderr
+    url_notice = stderr.index("[remote] expected service URLs:")
+    dokploy_link = stderr.index("[remote]   Dokploy: https://dokploy.openmerge.me/")
+    started_mutation = stderr.index(f"[remote] starting remote command: {remote_command}")
+    assert url_notice < dokploy_link < started_mutation
+
+
+def test_successful_lifecycle_expected_service_urls_omits_disabled_pack_links(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -267,8 +309,10 @@ def test_successful_lifecycle_ready_notice_omits_disabled_pack_links(
 
     stderr = capsys.readouterr().err
     assert exit_code == 0
-    assert "[remote]   Dokploy: https://dokploy.openmerge.me" in stderr
-    assert "[remote]   Nextcloud: https://nextcloud.openmerge.me" in stderr
+    assert "[remote] expected service URLs:" in stderr
+    assert "ready for use" not in stderr
+    assert "[remote]   Dokploy: https://dokploy.openmerge.me/" in stderr
+    assert "[remote]   Nextcloud: https://nextcloud.openmerge.me/" in stderr
     assert "Coder:" not in stderr
     assert "My Farm Advisor/Farm:" not in stderr
 
