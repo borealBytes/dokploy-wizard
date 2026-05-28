@@ -1428,6 +1428,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
     assert record.resource_name == "wizard-stack-openclaw"
     assert record.resource_id == "dokploy-compose:compose-1:openclaw:replicas:2"
     assert "image: ghcr.io/openclaw/openclaw:latest" in compose
+    assert "pull_policy:" not in compose
     assert "exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" in compose
     assert 'ADVISOR_CANONICAL_URL: "https://openclaw.example.com"' in compose
     assert 'CONTROL_UI_ALLOWED_ORIGINS: "https://openclaw.example.com"' in compose
@@ -2427,6 +2428,7 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapp
     service_environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
     assert record.resource_id == "dokploy-compose:compose-existing:my-farm-advisor:replicas:3"
     assert "image: ghcr.io/borealbytes/my-farm-advisor:latest" in compose
+    assert "pull_policy: always" in compose
     assert "/app/scripts/entrypoint.sh" in compose
     assert "exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured" not in compose
     assert 'ADVISOR_VARIANT: "my-farm-advisor"' in compose
