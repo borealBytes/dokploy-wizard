@@ -2183,6 +2183,36 @@ def test_install_retry_accepts_stale_state_when_only_dokploy_api_url_differs(
     assert summary["state_status"] == "existing"
 
 
+def test_install_classification_ignores_remote_helper_key_differences() -> None:
+    existing_raw = _raw_input({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})
+    requested_raw = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "VPS_HOST": "203.0.113.10",
+            "VPS_ROOT_PASSWORD": "temporary-root-password",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_install_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=applicable_phases_for(existing_desired),
+        ),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "noop"
+    assert plan.raw_equivalent is True
+    assert plan.desired_equivalent is True
+
+
 def test_install_retry_sanitizes_legacy_disabled_openclaw_token_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -4866,6 +4896,26 @@ def test_docker_hub_auth_is_removed_from_persisted_raw_input() -> None:
 
     assert "DOCKER_USERNAME" not in persistable_raw_env.values
     assert "DOCKER_PAT" not in persistable_raw_env.values
+    assert persistable_raw_env.values == {
+        "STACK_NAME": "wizard-stack",
+        "ROOT_DOMAIN": "example.com",
+    }
+
+
+def test_remote_helper_keys_are_removed_from_persisted_raw_input() -> None:
+    raw_env = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "VPS_HOST": "203.0.113.10",
+            "VPS_ROOT_PASSWORD": "temporary-root-password",
+        }
+    )
+
+    persistable_raw_env = cli._state_persistable_raw_env_input(raw_env)
+
+    assert "VPS_HOST" not in persistable_raw_env.values
+    assert "VPS_ROOT_PASSWORD" not in persistable_raw_env.values
     assert persistable_raw_env.values == {
         "STACK_NAME": "wizard-stack",
         "ROOT_DOMAIN": "example.com",

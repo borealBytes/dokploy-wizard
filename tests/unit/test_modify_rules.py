@@ -430,6 +430,44 @@ def test_modify_ignores_ephemeral_docker_auth_key_differences() -> None:
     assert plan.desired_equivalent is True
 
 
+def test_modify_ignores_remote_helper_key_differences() -> None:
+    existing_raw = _raw({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "VPS_HOST": "203.0.113.10",
+            "VPS_ROOT_PASSWORD": "temporary-root-password",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "noop"
+    assert plan.phases_to_run == ()
+    assert plan.start_phase is None
+    assert plan.raw_equivalent is True
+    assert plan.desired_equivalent is True
+
+
 def test_modify_ignores_desired_only_dokploy_api_url_drift() -> None:
     raw = _raw({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})
     requested_desired = resolve_desired_state(raw)

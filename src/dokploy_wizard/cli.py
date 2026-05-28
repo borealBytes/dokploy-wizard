@@ -192,6 +192,8 @@ _PERSISTED_RETRY_KEYS = {
     "SEAWEEDFS_SECRET_KEY",
 }
 _EPHEMERAL_DOCKER_AUTH_KEYS = {"DOCKER_USERNAME", "DOCKER_PAT"}
+_EPHEMERAL_REMOTE_HELPER_KEYS = {"VPS_HOST", "VPS_ROOT_PASSWORD"}
+_EPHEMERAL_RAW_ENV_STATE_KEYS = _EPHEMERAL_DOCKER_AUTH_KEYS | _EPHEMERAL_REMOTE_HELPER_KEYS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -899,7 +901,7 @@ def _state_persistable_raw_env_input(raw_env: RawEnvInput) -> RawEnvInput:
     values = {
         key: value
         for key, value in raw_env.values.items()
-        if key not in _EPHEMERAL_DOCKER_AUTH_KEYS
+        if key not in _EPHEMERAL_RAW_ENV_STATE_KEYS
     }
     return RawEnvInput(format_version=raw_env.format_version, values=values)
 

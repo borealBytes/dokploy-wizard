@@ -199,6 +199,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     password=args.password,
                 )
+            _print_expected_service_urls(
+                reporter,
+                _resolve_expected_service_url_links(args.env_file),
+            )
             _run_remote_command(
                 session=session,
                 subcommand="install",
@@ -206,7 +210,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 password=args.password,
             )
             exit_code = 0
-            _print_ready_notice(reporter, _resolve_ready_notice_links(args.env_file))
             return exit_code
         if args.command == "modify":
             if args.fresh:
@@ -225,6 +228,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     password=args.password,
                 )
+            _print_expected_service_urls(
+                reporter,
+                _resolve_expected_service_url_links(args.env_file),
+            )
             _run_remote_command(
                 session=session,
                 subcommand="modify",
@@ -232,7 +239,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 password=args.password,
             )
             exit_code = 0
-            _print_ready_notice(reporter, _resolve_ready_notice_links(args.env_file))
             return exit_code
         if args.command == "uninstall":
             remote_confirm_path = _upload_confirm_file(
@@ -269,6 +275,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 confirm_file=args.confirm_file,
                 reporter=reporter,
             )
+        _print_expected_service_urls(
+            reporter,
+            _resolve_expected_service_url_links(args.env_file),
+        )
         session.run_proof(
             password=args.password,
             fresh=args.fresh,
@@ -276,7 +286,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             strict_idempotency=args.strict_idempotency,
         )
         exit_code = 0
-        _print_ready_notice(reporter, _resolve_ready_notice_links(args.env_file))
         return exit_code
     except (OSError, RemoteCommandFailure, RuntimeError, StateValidationError, ValueError) as error:
         print(_redact_runtime_message(str(error), password=args.password), file=sys.stderr)
@@ -591,9 +600,9 @@ def _run_remote_command(
     session.run_command(subcommand=subcommand, command=command, password=password)
 
 
-def _resolve_ready_notice_links(env_file: Path) -> tuple[tuple[str, str], ...]:
+def _resolve_expected_service_url_links(env_file: Path) -> tuple[tuple[str, str], ...]:
     desired_state = resolve_desired_state(parse_env_file(env_file))
-    links: list[tuple[str, str]] = [("Dokploy", desired_state.dokploy_url)]
+    links: list[tuple[str, str]] = [("Dokploy", _user_facing_url(desired_state.dokploy_url))]
     for hostname_key, label in (
         ("nextcloud", "Nextcloud"),
         ("coder", "Coder"),
@@ -601,15 +610,19 @@ def _resolve_ready_notice_links(env_file: Path) -> tuple[tuple[str, str], ...]:
     ):
         hostname = desired_state.hostnames.get(hostname_key)
         if hostname:
-            links.append((label, f"https://{hostname}"))
+            links.append((label, _user_facing_url(f"https://{hostname}")))
     return tuple(links)
 
 
-def _print_ready_notice(
+def _user_facing_url(url: str) -> str:
+    return f"{url.rstrip('/')}/"
+
+
+def _print_expected_service_urls(
     reporter: "_RemoteProgressReporter",
     links: tuple[tuple[str, str], ...],
 ) -> None:
-    reporter.progress("ready for use:")
+    reporter.progress("expected service URLs:")
     for label, url in links:
         reporter.progress(f"  {label}: {url}")
 
