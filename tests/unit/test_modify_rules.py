@@ -555,6 +555,9 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "DATA_MODE",
         "HERMES_INFERENCE_PROVIDER",
         "HERMES_MODEL",
+        "LITELLM_NVIDIA_API_KEY",
+        "LITELLM_NVIDIA_BASE_URL",
+        "LITELLM_NVIDIA_MODELS",
         "LITELLM_OPENCODE_GO_API_KEY",
         "LITELLM_OPENROUTER_API_KEY",
         "LITELLM_OPENROUTER_MODELS",
@@ -639,6 +642,58 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "WORKSPACE_DATA_R2_PREFIX",
         "WORKSPACE_DATA_R2_RCLONE_MOUNT",
     )
+
+
+def test_modify_accepts_canonical_nvidia_litellm_key_rotation_for_consumers() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "coder,my-farm-advisor",
+            "AI_DEFAULT_PROVIDER": "nvidia",
+            "AI_DEFAULT_MODEL": "moonshotai/kimi-k2.5",
+            "LITELLM_NVIDIA_API_KEY": "old-fake-key",
+            "LITELLM_NVIDIA_BASE_URL": "https://integrate.api.nvidia.example.com/v1",
+            "LITELLM_NVIDIA_MODELS": "moonshotai/kimi-k2.6",
+        }
+    )
+    requested_raw = _raw(
+        {
+            **existing_raw.values,
+            "LITELLM_NVIDIA_API_KEY": "new-fake-key",
+            "LITELLM_NVIDIA_BASE_URL": "https://integrate.api.nvidia-new.example.com/v1",
+            "LITELLM_NVIDIA_MODELS": (
+                "moonshotai/kimi-k2.6,nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+            ),
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "coder",
+                "my-farm-advisor",
+                "cloudflare_access",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert plan.phases_to_run == ("shared_core", "coder", "my-farm-advisor")
+    assert plan.initial_completed_steps == ("preflight", "dokploy_bootstrap", "networking")
 
 
 def test_modify_runs_nextcloud_when_nexa_service_account_fields_change() -> None:

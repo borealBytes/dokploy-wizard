@@ -108,6 +108,9 @@ def _build_litellm_default_alias_order(values: dict[str, str]) -> tuple[str, ...
     if _litellm_openrouter_upstream_configured(values):
         aliases.extend(alias for alias, _target in _parse_litellm_openrouter_models(values))
 
+    if _litellm_nvidia_upstream_configured(values):
+        aliases.extend(alias for alias, _target in _parse_litellm_nvidia_models(values))
+
     return tuple(dict.fromkeys(aliases)) or _DEFAULT_LITELLM_ALIAS_ORDER
 
 
@@ -134,6 +137,10 @@ def _alias_has_active_upstream(alias: str, values: dict[str, str]) -> bool:
         return _litellm_openrouter_upstream_configured(values)
     if provider_slug == "opencode-go":
         return _optional_value(values, "LITELLM_OPENCODE_GO_API_KEY") is not None
+    if provider_slug == "nvidia":
+        return _litellm_nvidia_upstream_configured(values) and any(
+            route_alias == alias for route_alias, _target in _parse_litellm_nvidia_models(values)
+        )
     return True
 
 
@@ -161,6 +168,49 @@ def _litellm_openrouter_upstream_configured(values: dict[str, str]) -> bool:
         _optional_value(values, "LITELLM_OPENROUTER_API_KEY") is not None
         and bool(_parse_litellm_openrouter_models(values))
     )
+
+
+def _litellm_nvidia_upstream_configured(values: dict[str, str]) -> bool:
+    return (
+        _optional_value(values, "LITELLM_NVIDIA_API_KEY") is not None
+        and _litellm_nvidia_base_url(values) is not None
+        and bool(_parse_litellm_nvidia_models(values))
+    )
+
+
+def _parse_litellm_nvidia_models(values: dict[str, str]) -> tuple[tuple[str, str], ...]:
+    raw_value = _optional_value(values, "LITELLM_NVIDIA_MODELS")
+    if raw_value is None:
+        return ()
+    pairs: list[tuple[str, str]] = []
+    for item in raw_value.split(","):
+        normalized_item = item.strip()
+        if normalized_item == "":
+            continue
+        alias, separator, target_model = normalized_item.partition("=")
+        if separator == "=":
+            normalized_alias = _normalize_nvidia_ref(alias.strip())
+            normalized_target = _normalize_nvidia_ref(target_model.strip())
+        else:
+            normalized_alias = _normalize_nvidia_ref(normalized_item)
+            normalized_target = normalized_alias
+        if normalized_alias and normalized_target:
+            pairs.append((normalized_alias, normalized_target))
+    return tuple(pairs)
+
+
+def _litellm_nvidia_base_url(values: dict[str, str]) -> str | None:
+    return _optional_value(values, "LITELLM_NVIDIA_BASE_URL") or _optional_value(
+        values, "NVIDIA_BASE_URL"
+    )
+
+
+def _normalize_nvidia_ref(model_ref: str) -> str:
+    if model_ref == "" or model_ref.startswith("nvidia/"):
+        return model_ref
+    if model_ref == "nvidia/moonshot/kimi-k2.5":
+        return "nvidia/moonshotai/kimi-k2.5"
+    return f"nvidia/{model_ref}"
 
 
 def _parse_litellm_openrouter_models(values: dict[str, str]) -> tuple[tuple[str, str], ...]:

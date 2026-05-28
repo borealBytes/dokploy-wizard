@@ -47,6 +47,7 @@ _SENSITIVE_ENV_KEYS = frozenset(
         "ANTHROPIC_API_KEY",
         "LITELLM_OPENCODE_GO_API_KEY",
         "LITELLM_OPENROUTER_API_KEY",
+        "LITELLM_NVIDIA_API_KEY",
         "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
         "MY_FARM_ADVISOR_NVIDIA_API_KEY",
         "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
@@ -93,7 +94,15 @@ _SHARED_AI_ENV_KEYS = frozenset(
     {"AI_DEFAULT_API_KEY", "AI_DEFAULT_BASE_URL", "AI_DEFAULT_MODEL", "AI_DEFAULT_PROVIDER"}
 )
 _SHARED_LITELLM_ENV_KEYS = frozenset(
-    {"LITELLM_OPENCODE_GO_API_KEY", "LITELLM_OPENROUTER_API_KEY", "LITELLM_OPENROUTER_MODELS"}
+    {
+        "LITELLM_OPENCODE_GO_API_KEY",
+        "LITELLM_OPENROUTER_API_KEY",
+        "LITELLM_OPENROUTER_MODELS",
+        "LITELLM_NVIDIA_API_KEY",
+        "LITELLM_NVIDIA_BASE_URL",
+        "LITELLM_NVIDIA_MODELS",
+        "NVIDIA_BASE_URL",
+    }
 )
 _SHARED_MAIL_ENV_KEYS = frozenset({"OUTBOUND_SMTP_FROM_ADDRESS", "OUTBOUND_SMTP_HOSTNAME"})
 _FARM_LITELLM_SHARED_ENV_KEYS = frozenset({"ANTHROPIC_API_KEY", "NVIDIA_BASE_URL"})
@@ -110,6 +119,10 @@ _CODER_KEYS = (
     "LITELLM_OPENCODE_GO_API_KEY",
     "LITELLM_OPENROUTER_API_KEY",
     "LITELLM_OPENROUTER_MODELS",
+    "LITELLM_NVIDIA_API_KEY",
+    "LITELLM_NVIDIA_BASE_URL",
+    "LITELLM_NVIDIA_MODELS",
+    "NVIDIA_BASE_URL",
     "OPENCODE_GO_API_KEY",
     "OPENCODE_GO_BASE_URL",
 )
@@ -148,6 +161,10 @@ _OPENCLAW_KEYS = (
     "LITELLM_OPENCODE_GO_API_KEY",
     "LITELLM_OPENROUTER_API_KEY",
     "LITELLM_OPENROUTER_MODELS",
+    "LITELLM_NVIDIA_API_KEY",
+    "LITELLM_NVIDIA_BASE_URL",
+    "LITELLM_NVIDIA_MODELS",
+    "NVIDIA_BASE_URL",
     "OPENCLAW_OPENROUTER_API_KEY",
     "OPENCLAW_NVIDIA_API_KEY",
     "OPENCLAW_PRIMARY_MODEL",
@@ -167,6 +184,9 @@ _FARM_KEYS = (
     "LITELLM_OPENCODE_GO_API_KEY",
     "LITELLM_OPENROUTER_API_KEY",
     "LITELLM_OPENROUTER_MODELS",
+    "LITELLM_NVIDIA_API_KEY",
+    "LITELLM_NVIDIA_BASE_URL",
+    "LITELLM_NVIDIA_MODELS",
     "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
     "MY_FARM_ADVISOR_NVIDIA_API_KEY",
     "NVIDIA_BASE_URL",
@@ -386,12 +406,12 @@ def _pack_entry(
 def _target_suffixes_for_key(
     key: str, *, default_suffixes: tuple[str, ...]
 ) -> tuple[str, ...]:
+    if key in _FARM_LITELLM_SHARED_ENV_KEYS:
+        return tuple(dict.fromkeys((*default_suffixes, "shared-litellm")))
     if key in _SHARED_LITELLM_ENV_KEYS:
         return ("shared-litellm",)
     if key in _OPENCLAW_AGENT_USER_ENV_KEYS:
         return tuple(dict.fromkeys((*default_suffixes, "nextcloud")))
-    if key in _FARM_LITELLM_SHARED_ENV_KEYS:
-        return tuple(dict.fromkeys((*default_suffixes, "shared-litellm")))
     return default_suffixes
 
 
