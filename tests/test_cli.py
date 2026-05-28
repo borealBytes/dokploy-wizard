@@ -516,6 +516,8 @@ def test_inspect_state_redacts_litellm_generated_secrets(
                 "DOKPLOY_ADMIN_PASSWORD=super-secret-password",
                 "ENABLE_MY_FARM_ADVISOR=true",
                 "LITELLM_LOCAL_BASE_URL=http://local-model.internal:61434/v1",
+                "LITELLM_LOCAL_MODEL=unsloth-active",
+                "LITELLM_LOCAL_API_KEY=sk-no-key-required",
                 "LITELLM_MASTER_KEY=litellm-master-secret",
                 "LITELLM_SALT_KEY=litellm-salt-secret",
                 "LITELLM_VIRTUAL_KEY_OPENCLAW=litellm-virtual-secret",
@@ -559,6 +561,8 @@ def test_inspect_state_redacts_litellm_provider_api_keys(
                 "AI_DEFAULT_PROVIDER=openrouter",
                 "AI_DEFAULT_MODEL=anthropic/claude-sonnet-4",
                 "LITELLM_LOCAL_BASE_URL=http://local-model.internal:61434/v1",
+                "LITELLM_LOCAL_MODEL=unsloth-active",
+                "LITELLM_LOCAL_API_KEY=sk-no-key-required",
                 "LITELLM_OPENROUTER_API_KEY=sk-test-openrouter-secret-12345678",
                 "LITELLM_OPENROUTER_MODELS=anthropic/claude-sonnet-4",
                 "LITELLM_OPENCODE_GO_API_KEY=sk-test-opencode-secret-12345678",
@@ -6552,7 +6556,7 @@ def _run_lifecycle_refresh(
 
 
 def test_execute_lifecycle_plan_initializes_checkpoint_before_compose_hash_persistence(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     raw_env = _raw_input(_lifecycle_refresh_values())
     desired_state = resolve_desired_state(raw_env)
@@ -6624,6 +6628,11 @@ def test_execute_lifecycle_plan_initializes_checkpoint_before_compose_hash_persi
             openclaw=cast(Any, object()),
         ),
     )
+
+    stderr = capsys.readouterr().err
+
+    assert "[dokploy-wizard] Lifecycle phase 'shared_core' starting." in stderr
+    assert "[dokploy-wizard] Lifecycle phase 'shared_core' finished." in stderr
 
     applied_state = load_state_dir(state_dir).applied_state
     assert applied_state is not None

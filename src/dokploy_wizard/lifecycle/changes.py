@@ -106,6 +106,8 @@ _IGNORED_MODIFY_RAW_ENV_KEYS = {
     "DOKPLOY_API_KEY",
     "DOKPLOY_BOOTSTRAP_MOCK_API_KEY",
     "DOKPLOY_MOCK_API_MODE",
+    "DOCKER_USERNAME",
+    "DOCKER_PAT",
 }
 _SUPPORTED_MODIFY_KEYS = (
     _SUPPORTED_AUTH_KEYS
@@ -410,7 +412,9 @@ def classify_modify_request(
     raw_equivalent = _normalized_modify_raw_values(existing_raw) == _normalized_modify_raw_values(
         requested_raw
     )
-    desired_equivalent = existing_desired.to_dict() == requested_desired.to_dict()
+    desired_equivalent = _normalized_modify_desired_values(
+        existing_desired
+    ) == _normalized_modify_desired_values(requested_desired)
     if raw_equivalent and desired_equivalent:
         return _classify_same_target(
             existing_applied=existing_applied,
@@ -711,6 +715,12 @@ def _normalized_modify_raw_values(raw_env: RawEnvInput) -> dict[str, str]:
 
 
 def _normalized_install_desired_values(desired_state: DesiredState) -> dict[str, object]:
+    payload = desired_state.to_dict()
+    payload["dokploy_api_url"] = None
+    return payload
+
+
+def _normalized_modify_desired_values(desired_state: DesiredState) -> dict[str, object]:
     payload = desired_state.to_dict()
     payload["dokploy_api_url"] = None
     return payload
