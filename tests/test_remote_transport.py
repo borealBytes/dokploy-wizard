@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -115,6 +116,58 @@ def test_upload_records_remote_path_and_env_chmod(
         (str(install_env_file), "/root/dokploy-wizard/.install.env"),
     ]
     assert transport.chmod_calls == [("/root/dokploy-wizard/.install.env", 0o600)]
+
+
+def test_paramiko_ssh_exception_is_wrapped_redacted_and_closes_client(
+    remote_transport_subject: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "SuperSecretPassword123!"
+    clients: list[Any] = []
+
+    class FakeSSHException(Exception):
+        pass
+
+    class FakeAutoAddPolicy:
+        pass
+
+    class FakeSSHClient:
+        def __init__(self) -> None:
+            self.closed = False
+            clients.append(self)
+
+        def set_missing_host_key_policy(self, _policy: Any) -> None:
+            return None
+
+        def connect(self, **_kwargs: Any) -> None:
+            raise FakeSSHException(f"bad auth with password={secret}")
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paramiko",
+        SimpleNamespace(
+            SSHClient=FakeSSHClient,
+            AutoAddPolicy=FakeAutoAddPolicy,
+            SSHException=FakeSSHException,
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        remote_transport_subject.ParamikoRemoteTransport.connect(
+            hostname="127.0.0.1",
+            username="root",
+            password=secret,
+            remote_root="/root/dokploy-wizard",
+        )
+
+    message = str(excinfo.value)
+    assert "SSH connection failed for root@127.0.0.1:22" in message
+    assert secret not in message
+    assert "<REDACTED>" in message
+    assert clients[0].closed is True
 
 
 def test_proof_runs_install_verify_inspect_in_order(
