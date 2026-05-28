@@ -838,7 +838,6 @@ def test_surfsense_desired_state_selection_and_env_spec_contract_rejects_upstrea
                 "PACKS": "surfsense",
                 "LITELLM_OPENROUTER_API_KEY": "SECRET_TEST_OPENROUTER_PROVIDER_KEY",
                 "OPENROUTER_API_KEY": "SECRET_TEST_OPENROUTER_PROVIDER_KEY",
-                "LITELLM_LOCAL_API_KEY": "SECRET_TEST_LOCAL_PROVIDER_KEY",
                 "AI_DEFAULT_API_KEY": "SECRET_TEST_AI_DEFAULT_PROVIDER_KEY",
             },
         )

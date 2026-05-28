@@ -131,7 +131,67 @@ def test_litellm_plan_exists_without_ai_packs() -> None:
         user_name="openmerge_litellm",
         password_secret_ref="openmerge-litellm-postgres-password",
     )
-    assert plan.litellm.default_model_alias_order == ("local/unsloth-active",)
+    assert plan.litellm.default_model_alias_order == ("opencode-go/deepseek-v4-flash",)
+
+
+def test_litellm_plan_uses_openrouter_default_without_local_upstream() -> None:
+    values = {
+        "AI_DEFAULT_PROVIDER": "openrouter",
+        "AI_DEFAULT_MODEL": "deepseek/deepseek-v4-flash:free",
+        "LITELLM_OPENROUTER_API_KEY": "SECRET_TEST_OPENROUTER_PROVIDER_KEY",
+        "LITELLM_OPENROUTER_MODELS": "deepseek/deepseek-v4-flash:free",
+    }
+
+    plan = build_shared_core_plan(
+        stack_name="openmerge",
+        enabled_packs=("my-farm-advisor", "openclaw"),
+        values=values,
+    )
+    allowlists = build_litellm_consumer_model_allowlists(flat_env=values, plan=plan)
+
+    assert plan.litellm is not None
+    assert plan.litellm.default_model_alias_order == (
+        "openrouter/deepseek/deepseek-v4-flash:free",
+    )
+    for aliases in allowlists.values():
+        assert "local-model.internal/unsloth-active" not in aliases
+    assert allowlists["my-farm-advisor"] == (
+        "openrouter/deepseek/deepseek-v4-flash:free",
+    )
+    assert allowlists["openclaw"] == (
+        "openrouter/deepseek/deepseek-v4-flash:free",
+    )
+    assert allowlists["dokploy-ai"] == (
+        "openrouter/deepseek/deepseek-v4-flash:free",
+    )
+
+
+def test_litellm_plan_keeps_local_default_when_local_upstream_is_active() -> None:
+    values = {
+        "AI_DEFAULT_PROVIDER": "local-model.internal",
+        "AI_DEFAULT_MODEL": "unsloth-active",
+        "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+        "LITELLM_LOCAL_MODEL": "unsloth-active",
+        "LITELLM_LOCAL_API_KEY": "SECRET_TEST_LOCAL_PROVIDER_KEY",
+    }
+
+    plan = build_shared_core_plan(
+        stack_name="openmerge",
+        enabled_packs=("my-farm-advisor", "openclaw"),
+        values=values,
+    )
+    allowlists = build_litellm_consumer_model_allowlists(flat_env=values, plan=plan)
+
+    assert plan.litellm is not None
+    assert plan.litellm.default_model_alias_order == (
+        "local-model.internal/unsloth-active",
+    )
+    assert allowlists["my-farm-advisor"] == (
+        "local-model.internal/unsloth-active",
+    )
+    assert allowlists["openclaw"] == (
+        "local-model.internal/unsloth-active",
+    )
 
 
 def test_litellm_db_allocation_is_dedicated_and_not_a_pack_allocation() -> None:
@@ -435,6 +495,7 @@ def test_litellm_inline_config_name_changes_when_openrouter_model_inventory_chan
         {},
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "LITELLM_LOCAL_MODEL": "unsloth-active",
             "LITELLM_OPENROUTER_API_KEY": "litellm-openrouter-key",
             "LITELLM_OPENROUTER_MODELS": "minimax/minimax-m2.5:free",
@@ -445,6 +506,7 @@ def test_litellm_inline_config_name_changes_when_openrouter_model_inventory_chan
         {},
         {
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "LITELLM_LOCAL_MODEL": "unsloth-active",
             "LITELLM_OPENROUTER_API_KEY": "litellm-openrouter-key",
             "LITELLM_OPENROUTER_MODELS": (
@@ -527,6 +589,7 @@ def test_shared_core_matching_healthy_hash_skips_update_and_deploy(
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
     litellm_env = {
         "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+        "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
         "LITELLM_LOCAL_MODEL": "unsloth-active",
     }
     generated_keys = _generated_keys()
@@ -606,6 +669,7 @@ def test_shared_core_unhealthy_litellm_blocks_noop_skip(
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
     litellm_env = {
         "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+        "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
         "LITELLM_LOCAL_MODEL": "unsloth-active",
     }
     generated_keys = _generated_keys()
@@ -812,6 +876,8 @@ def test_litellm_allowlists_keep_local_and_bare_aliases_for_advisors() -> None:
     allowlists = build_litellm_consumer_model_allowlists(
         flat_env={
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "MY_FARM_ADVISOR_PRIMARY_MODEL": "local/unsloth-active",
             "OPENCLAW_PRIMARY_MODEL": "local/unsloth-active",
         },
@@ -1159,17 +1225,17 @@ def test_ai_client_request_payloads_via_fake_request_fn() -> None:
 def test_ai_model_alias_default_with_no_env() -> None:
     from dokploy_wizard.dokploy.shared_core import _dokploy_ai_model_alias
 
-    assert _dokploy_ai_model_alias({}) == "local-model.internal/unsloth-active"
+    assert _dokploy_ai_model_alias({}) == "opencode-go/deepseek-v4-flash"
 
 
-def test_ai_model_alias_custom_provider_with_dot() -> None:
+def test_ai_model_alias_custom_provider_with_dot_without_local_base_url_falls_back() -> None:
     from dokploy_wizard.dokploy.shared_core import _dokploy_ai_model_alias
 
     result = _dokploy_ai_model_alias({
         "AI_DEFAULT_PROVIDER": "custom.example.internal",
         "AI_DEFAULT_MODEL": "agent-model",
     })
-    assert result == "custom.example.internal/agent-model"
+    assert result == "opencode-go/deepseek-v4-flash"
 
 
 def test_ai_model_alias_opencode_go_provider_uses_configured_alias() -> None:
@@ -1198,6 +1264,9 @@ def test_ai_model_alias_local_provider_maps_to_default_local() -> None:
     result = _dokploy_ai_model_alias({
         "AI_DEFAULT_PROVIDER": "local",
         "AI_DEFAULT_MODEL": "custom-model",
+        "LITELLM_LOCAL_BASE_URL": "http://local-litellm-upstream.example/v1",
+        "LITELLM_LOCAL_MODEL": "custom-model",
+        "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
     })
     assert result.startswith("local-model.internal/")
     assert result == "local-model.internal/custom-model"
@@ -1206,8 +1275,8 @@ def test_ai_model_alias_local_provider_maps_to_default_local() -> None:
 def test_ai_model_alias_partial_env_falls_back_to_default() -> None:
     from dokploy_wizard.dokploy.shared_core import _dokploy_ai_model_alias
 
-    assert _dokploy_ai_model_alias({"AI_DEFAULT_PROVIDER": "local"}) == "local-model.internal/unsloth-active"
-    assert _dokploy_ai_model_alias({"AI_DEFAULT_MODEL": "model-x"}) == "local-model.internal/unsloth-active"
+    assert _dokploy_ai_model_alias({"AI_DEFAULT_PROVIDER": "local"}) == "opencode-go/deepseek-v4-flash"
+    assert _dokploy_ai_model_alias({"AI_DEFAULT_MODEL": "model-x"}) == "opencode-go/deepseek-v4-flash"
 
 
 def test_ai_reconcile_creates_provider_when_missing() -> None:
@@ -1229,7 +1298,7 @@ def test_ai_reconcile_creates_provider_when_missing() -> None:
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(fake._ai_provider_creates[0], generated)
     )
-    assert fake._ai_provider_creates[0]["model"] == "local-model.internal/unsloth-active"
+    assert fake._ai_provider_creates[0]["model"] == "opencode-go/deepseek-v4-flash"
     assert fake._ai_provider_creates[0]["isEnabled"] is True
 
 
@@ -1262,7 +1331,7 @@ def test_ai_reconcile_updates_provider_when_present() -> None:
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(update, generated)
     )
-    assert update["model"] == "local-model.internal/unsloth-active"
+    assert update["model"] == "opencode-go/deepseek-v4-flash"
 
 
 def test_ai_reconcile_does_not_create_duplicate_on_repeat() -> None:
@@ -1289,10 +1358,10 @@ def test_ai_reconcile_uses_canonical_model_alias_not_bare() -> None:
 
     for create in fake._ai_provider_creates:
         assert create["model"] != "unsloth-active"
-        assert create["model"] == "local-model.internal/unsloth-active"
+        assert create["model"] == "opencode-go/deepseek-v4-flash"
     for update in fake._ai_provider_updates:
         assert update["model"] != "unsloth-active"
-        assert update["model"] == "local-model.internal/unsloth-active"
+        assert update["model"] == "opencode-go/deepseek-v4-flash"
 
 
 def test_ai_reconcile_skips_when_no_generated_keys() -> None:
@@ -1370,7 +1439,7 @@ def test_ai_reconcile_uses_custom_provider_alias() -> None:
     )
 
     assert len(fake._ai_provider_creates) == 1
-    assert fake._ai_provider_creates[0]["model"] == "custom.example.internal/agent-model"
+    assert fake._ai_provider_creates[0]["model"] == "opencode-go/deepseek-v4-flash"
     assert fake._ai_provider_creates[0]["apiUrl"] == "http://my-stack-shared-litellm:4000/v1"
 
 
@@ -1416,7 +1485,7 @@ def test_ai_reconcile_noops_when_existing_wizard_provider_matches() -> None:
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.virtual_keys["dokploy-ai"],
-            model="local-model.internal/unsloth-active",
+            model="opencode-go/deepseek-v4-flash",
             is_enabled=True,
         )
     ]
@@ -1459,7 +1528,7 @@ def test_ai_reconcile_updates_disabled_or_drifted_wizard_provider() -> None:
     update = fake._ai_provider_updates[0]
     assert update["aiId"] == "ai-wizard-existing"
     assert update["apiUrl"] == "http://openmerge-shared-litellm:4000/v1"
-    assert update["model"] == "local-model.internal/unsloth-active"
+    assert update["model"] == "opencode-go/deepseek-v4-flash"
     assert update["isEnabled"] is True
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(update, generated)
@@ -1553,7 +1622,7 @@ def test_verify_dokploy_ai_provider_reports_only_redacted_key_metadata() -> None
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=raw_key,
-            model="local-model.internal/unsloth-active",
+            model="opencode-go/deepseek-v4-flash",
             is_enabled=True,
         )
     ]
@@ -1586,7 +1655,7 @@ def test_verify_dokploy_ai_provider_fails_when_provider_uses_master_key_without_
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.master_key,
-            model="local-model.internal/unsloth-active",
+            model="opencode-go/deepseek-v4-flash",
             is_enabled=True,
         )
     ]
@@ -1615,7 +1684,7 @@ def test_verify_dokploy_ai_provider_fails_on_duplicate_wizard_provider() -> None
         name="Dokploy Wizard LiteLLM",
         api_url="http://openmerge-shared-litellm:4000/v1",
         api_key=generated.virtual_keys["dokploy-ai"],
-        model="local-model.internal/unsloth-active",
+        model="opencode-go/deepseek-v4-flash",
         is_enabled=True,
     )
     fake._ai_providers = [
@@ -1679,7 +1748,7 @@ def test_verify_dokploy_ai_provider_runs_test_connection_when_available() -> Non
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.virtual_keys["dokploy-ai"],
-            model="local-model.internal/unsloth-active",
+            model="opencode-go/deepseek-v4-flash",
             is_enabled=True,
         )
     ]
@@ -1696,7 +1765,7 @@ def test_verify_dokploy_ai_provider_runs_test_connection_when_available() -> Non
         (
             "http://openmerge-shared-litellm:4000/v1",
             generated.virtual_keys["dokploy-ai"],
-            "local-model.internal/unsloth-active",
+            "opencode-go/deepseek-v4-flash",
         )
     ]
     assert generated.virtual_keys["dokploy-ai"] not in result.detail
@@ -1719,7 +1788,7 @@ def test_verify_dokploy_ai_provider_fails_on_test_connection_error_without_leaki
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.virtual_keys["dokploy-ai"],
-            model="local-model.internal/unsloth-active",
+            model="opencode-go/deepseek-v4-flash",
             is_enabled=True,
         )
     ]

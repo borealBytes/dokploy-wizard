@@ -70,10 +70,10 @@ class _ComposeLocator:
     compose_id: str
 
 
-_DEFAULT_AI_DEFAULT_PROVIDER = "local-model.internal"
-_DEFAULT_AI_DEFAULT_MODEL = "unsloth-active"
+_DEFAULT_AI_DEFAULT_PROVIDER = "opencode-go"
+_DEFAULT_AI_DEFAULT_MODEL = "deepseek-v4-flash"
 _DEFAULT_HERMES_INFERENCE_PROVIDER = "dokploy-litellm"
-_DEFAULT_HERMES_MODEL = DEFAULT_LOCAL_CANONICAL_ALIAS
+_DEFAULT_HERMES_MODEL = "opencode-go/deepseek-v4-flash"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_INTERNAL_PORT = 4000
 _DEFAULT_CODER_OPENROUTER_ALIAS_SAMPLE = "openrouter/minimax/minimax-m2.5:free"

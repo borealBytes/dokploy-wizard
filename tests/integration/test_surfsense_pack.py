@@ -105,7 +105,6 @@ def _surfsense_raw_env(**overrides: str) -> RawEnvInput:
         PACKS="surfsense",
         LITELLM_OPENROUTER_API_KEY="SECRET_TEST_OPENROUTER_PROVIDER_KEY",
         OPENROUTER_API_KEY="SECRET_TEST_OPENROUTER_PROVIDER_KEY",
-        LITELLM_LOCAL_API_KEY="SECRET_TEST_LOCAL_PROVIDER_KEY",
         AI_DEFAULT_API_KEY="SECRET_TEST_AI_DEFAULT_PROVIDER_KEY",
     )
     values.update(overrides)

@@ -132,6 +132,7 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
     )
     resolve_ai_default_model_ref(values)
     parse_litellm_openrouter_models(values)
+    _validate_litellm_local_env(values)
     dokploy_subdomain = _get_configured_value(values, "DOKPLOY_SUBDOMAIN") or "dokploy"
     hostnames: dict[str, str] = {
         "dokploy": _join_hostname(dokploy_subdomain, root_domain),
@@ -273,6 +274,39 @@ def parse_litellm_openrouter_models(values: dict[str, str]) -> tuple[tuple[str, 
             )
         pairs.append((alias, target))
     return tuple(pairs)
+
+
+def _validate_litellm_local_env(values: dict[str, str]) -> None:
+    if _has_configured_value(values, "LITELLM_LOCAL_BASE_URL"):
+        missing_local_keys = sorted(
+            key
+            for key in ("LITELLM_LOCAL_MODEL", "LITELLM_LOCAL_API_KEY")
+            if not _has_configured_value(values, key)
+        )
+        if missing_local_keys:
+            joined = ", ".join(missing_local_keys)
+            raise StateValidationError(
+                "Local LiteLLM routing requires LITELLM_LOCAL_BASE_URL, "
+                f"LITELLM_LOCAL_MODEL, and LITELLM_LOCAL_API_KEY. Missing: {joined}."
+            )
+        return
+    provider = _get_configured_value(values, "AI_DEFAULT_PROVIDER")
+    default_selects_local = provider is not None and _ai_default_provider_is_local(provider)
+    dangling_local_keys = sorted(
+        key
+        for key in ("LITELLM_LOCAL_MODEL", "LITELLM_LOCAL_API_KEY")
+        if _has_configured_value(values, key)
+    )
+    if default_selects_local or dangling_local_keys:
+        raise StateValidationError(
+            "Local LiteLLM routing requires LITELLM_LOCAL_BASE_URL. Leave local model keys "
+            "commented to use OpenRouter or another remote provider by default."
+        )
+
+
+def _ai_default_provider_is_local(provider: str) -> bool:
+    normalized = _canonical_ai_default_provider(provider)
+    return normalized == "local" or "." in normalized
 
 
 def _canonical_ai_default_provider(provider: str) -> str:

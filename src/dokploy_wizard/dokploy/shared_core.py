@@ -63,6 +63,7 @@ from dokploy_wizard.state.models import (
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 _DOKPLOY_AI_PROVIDER_NAME = "Dokploy Wizard LiteLLM"
+_DEFAULT_REMOTE_MODEL_ALIAS = "opencode-go/deepseek-v4-flash"
 
 
 class DokploySharedCoreApi(Protocol):
@@ -709,9 +710,13 @@ def _dokploy_ai_model_alias(litellm_env: dict[str, str]) -> str:
         if provider:
             if provider == "local":
                 provider_alias, _, _ = DEFAULT_LOCAL_CANONICAL_ALIAS.partition("/")
-                return f"{provider_alias}/{model}"
-            return f"{provider}/{model}"
-    return DEFAULT_LOCAL_CANONICAL_ALIAS
+                alias = f"{provider_alias}/{model}"
+            else:
+                alias = f"{provider}/{model}"
+            if _is_local_alias(alias) and _optional_value(litellm_env, "LITELLM_LOCAL_BASE_URL") is None:
+                return _DEFAULT_REMOTE_MODEL_ALIAS
+            return alias
+    return _DEFAULT_REMOTE_MODEL_ALIAS
 
 
 def verify_dokploy_ai_provider(
@@ -1469,16 +1474,25 @@ def _build_litellm_consumer_projection_catalog(
     if litellm_plan is None:
         raise ValueError("LiteLLM consumer projection catalog requires an active LiteLLM plan.")
     base_catalog = _build_catalog_from_litellm_config(config)
-    default_aliases = _resolve_litellm_default_aliases(
-        aliases=litellm_plan.default_model_alias_order,
-        catalog=base_catalog,
+    configured_aliases = _configured_litellm_aliases(config)
+    default_aliases = tuple(
+        alias
+        for alias in _resolve_litellm_default_aliases(
+            aliases=(*base_catalog.default_alias_order, *litellm_plan.default_model_alias_order),
+            catalog=base_catalog,
+        )
+        if alias in configured_aliases and _is_shared_default_alias(alias)
     )
     shared_aliases = tuple(
         dict.fromkeys(
             [
                 *default_aliases,
-                *(entry.alias for entry in base_catalog.entries if entry.provider_slug == "opencode-go"),
-                *(entry.alias for entry in base_catalog.entries if entry.provider_slug == "openrouter"),
+                *(
+                    entry.alias
+                    for entry in base_catalog.entries
+                    if entry.alias in configured_aliases
+                    and entry.provider_slug in {"opencode-go", "openrouter"}
+                ),
             ]
         )
     )
@@ -1492,6 +1506,7 @@ def _build_litellm_consumer_projection_catalog(
         fallback_key="MY_FARM_ADVISOR_FALLBACK_MODELS",
         catalog=base_catalog,
         default_aliases=shared_aliases,
+        available_aliases=configured_aliases,
     )
     visible_aliases_by_consumer["openclaw"] = _advisor_alias_allowlist(
         flat_env,
@@ -1499,6 +1514,7 @@ def _build_litellm_consumer_projection_catalog(
         fallback_key="OPENCLAW_FALLBACK_MODELS",
         catalog=base_catalog,
         default_aliases=shared_aliases,
+        available_aliases=configured_aliases,
     )
     visible_aliases_by_consumer["surfsense"] = _advisor_alias_allowlist(
         flat_env,
@@ -1506,6 +1522,7 @@ def _build_litellm_consumer_projection_catalog(
         fallback_key="SURFSENSE_FALLBACK_MODELS",
         catalog=base_catalog,
         default_aliases=shared_aliases,
+        available_aliases=configured_aliases,
     )
     return _project_catalog(base_catalog, visible_aliases_by_consumer)
 
@@ -1517,19 +1534,40 @@ def _advisor_alias_allowlist(
     fallback_key: str,
     catalog: ModelCatalog,
     default_aliases: tuple[str, ...],
+    available_aliases: set[str],
 ) -> tuple[str, ...]:
-    aliases = list(default_aliases)
+    aliases = [alias for alias in default_aliases if alias in available_aliases]
     primary_model = _optional_value(flat_env, primary_key)
     resolved_primary = _resolve_requested_catalog_alias(primary_model, catalog)
-    if resolved_primary is not None:
+    if resolved_primary is not None and resolved_primary in available_aliases:
         aliases.append(resolved_primary)
     fallback_models = _optional_value(flat_env, fallback_key)
     if fallback_models is not None:
         for model in fallback_models.split(","):
             resolved_alias = _resolve_requested_catalog_alias(model.strip(), catalog)
-            if resolved_alias is not None:
+            if resolved_alias is not None and resolved_alias in available_aliases:
                 aliases.append(resolved_alias)
     return tuple(dict.fromkeys(aliases))
+
+
+def _configured_litellm_aliases(config: Mapping[str, object]) -> set[str]:
+    model_entries = config.get("model_list")
+    if not isinstance(model_entries, list):
+        return set()
+    aliases: set[str] = set()
+    for entry in model_entries:
+        if not isinstance(entry, dict):
+            continue
+        alias = entry.get("model_name")
+        if isinstance(alias, str) and alias.strip():
+            aliases.add(alias)
+    return aliases
+
+
+def _is_shared_default_alias(alias: str) -> bool:
+    provider_slug, _, _ = alias.partition("/")
+    local_provider, _, _ = DEFAULT_LOCAL_CANONICAL_ALIAS.partition("/")
+    return provider_slug in {local_provider, "opencode-go", "openrouter"} or "." in provider_slug
 
 
 def _build_catalog_from_litellm_config(config: Mapping[str, object]) -> ModelCatalog:

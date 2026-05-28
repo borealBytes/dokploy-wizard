@@ -44,7 +44,7 @@ def build_litellm_config(
     local_base_url = _optional(flat_env, "LITELLM_LOCAL_BASE_URL")
     local_alias = _local_alias(flat_env)
     local_model = _normalize_local_model_ref(_local_model(flat_env))
-    local_api_key = _optional(flat_env, "LITELLM_LOCAL_API_KEY") or DEFAULT_LOCAL_API_KEY
+    local_api_key = _optional(flat_env, "LITELLM_LOCAL_API_KEY")
 
     opencode_go_api_key_env = _provider_api_key_env(
         flat_env,
@@ -97,7 +97,11 @@ def build_litellm_config(
 
     for entry in catalog.entries:
         if entry.alias == local_alias:
-            if local_base_url is None:
+            if (
+                local_base_url is None
+                or local_api_key is None
+                or _optional(flat_env, "LITELLM_LOCAL_MODEL") is None
+            ):
                 continue
             model_list.append(
                 {
