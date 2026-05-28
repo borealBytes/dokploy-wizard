@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from dokploy_wizard.packs.catalog import get_pack_definition
+from dokploy_wizard.state.env import derive_stack_name_from_root_domain
 from dokploy_wizard.state.models import RawEnvInput, StateValidationError
 
 PromptFn = Callable[[str], str]
@@ -682,8 +683,4 @@ def _emit_cloudflare_help(output: Callable[[str], None]) -> None:
 
 
 def _suggest_stack_name(root_domain: str) -> str:
-    primary_label = root_domain.split(".", 1)[0].strip().lower()
-    normalized = "".join(
-        character if character.isalnum() or character == "-" else "-" for character in primary_label
-    ).strip("-")
-    return normalized or "dokploy-stack"
+    return derive_stack_name_from_root_domain(root_domain)

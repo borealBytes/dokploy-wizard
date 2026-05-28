@@ -80,9 +80,7 @@ _SENSITIVE_ENV_KEYS = frozenset(
         "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
     }
 )
-_REQUIRED_ENV_KEYS = frozenset(
-    {"ADVISOR_GATEWAY_PASSWORD", "MY_FARM_ADVISOR_GATEWAY_PASSWORD", "OPENCLAW_GATEWAY_PASSWORD"}
-)
+_REQUIRED_ENV_KEYS: frozenset[str] = frozenset()
 _OPENCLAW_AGENT_USER_ENV_KEYS = frozenset(
     {
         "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
@@ -276,9 +274,10 @@ def build_pack_env_specs(
     specs_by_name: dict[str, DokployEnvSpec] = {}
     for metadata in _metadata_for_enabled_packs(enabled_packs):
         raw_value = values.get(metadata.env_key, "")
-        if raw_value.strip() == "":
+        value = raw_value if raw_value.strip() != "" else _default_value_for_key(metadata.env_key)
+        if value is None:
             continue
-        spec = _metadata_to_env_spec(metadata, stack_name=stack_name, value=raw_value)
+        spec = _metadata_to_env_spec(metadata, stack_name=stack_name, value=value)
         existing = specs_by_name.get(spec.name)
         if existing is None:
             specs_by_name[spec.name] = spec
@@ -311,6 +310,12 @@ def build_pack_env_specs(
 def _metadata_for_enabled_packs(enabled_packs: tuple[str, ...]) -> tuple[PackEnvMetadata, ...]:
     enabled = set(enabled_packs)
     return tuple(metadata for metadata in _PACK_ENV_METADATA if metadata.pack_name in enabled)
+
+
+def _default_value_for_key(key: str) -> str | None:
+    if key == "TZ":
+        return "UTC"
+    return None
 
 
 def _metadata_to_env_spec(

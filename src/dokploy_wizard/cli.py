@@ -133,10 +133,13 @@ from dokploy_wizard.state import (
     LiteLLMGeneratedKeys,
     OwnershipLedger,
     RawEnvInput,
+    SeaweedFsGeneratedSecrets,
     StateValidationError,
     SurfSenseGeneratedSecrets,
     ensure_litellm_generated_keys,
+    ensure_seaweedfs_generated_secrets,
     load_litellm_generated_keys,
+    load_seaweedfs_generated_secrets,
     load_state_dir,
     load_surfsense_generated_secrets,
     parse_env_file,
@@ -638,6 +641,7 @@ def _handle_inspect_state(args: argparse.Namespace) -> int:
             raw_env=raw_env,
             desired_state=desired_state,
             litellm_generated_keys=load_litellm_generated_keys(args.state_dir),
+            seaweedfs_generated_secrets=load_seaweedfs_generated_secrets(args.state_dir),
             surfsense_generated_secrets=load_surfsense_generated_secrets(args.state_dir),
             ownership_ledger=loaded_state.ownership_ledger,
         )
@@ -674,6 +678,7 @@ def _build_public_inspection_snapshot(
     raw_env: RawEnvInput,
     desired_state: DesiredState,
     litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
+    seaweedfs_generated_secrets: SeaweedFsGeneratedSecrets | None = None,
     surfsense_generated_secrets: SurfSenseGeneratedSecrets | None = None,
     ownership_ledger: OwnershipLedger | None = None,
 ) -> dict[str, Any]:
@@ -714,6 +719,10 @@ def _build_public_inspection_snapshot(
                 for consumer in sorted(litellm_generated_keys.virtual_keys)
             },
         }
+    snapshot["seaweedfs_status"] = _build_seaweedfs_inspection_status(
+        desired_state=desired_state,
+        generated_secrets=seaweedfs_generated_secrets,
+    )
     snapshot["surfsense_status"] = _build_surfsense_inspection_status(
         desired_state=desired_state,
         ownership_ledger=ownership_ledger,
@@ -730,6 +739,37 @@ def _build_public_inspection_snapshot(
             dict(entry) for entry in redacted_env_spec_metadata(pack_env_specs)
         ]
     return snapshot
+
+
+def _build_seaweedfs_inspection_status(
+    *,
+    desired_state: DesiredState,
+    generated_secrets: SeaweedFsGeneratedSecrets | None,
+) -> dict[str, Any]:
+    enabled = "seaweedfs" in desired_state.enabled_packs
+    generated_present = generated_secrets is not None
+    return {
+        "display_name": "SeaweedFS",
+        "enabled": enabled,
+        "hostname": desired_state.hostnames.get("s3") if enabled else None,
+        "credential_source": None
+        if not enabled
+        else "env"
+        if desired_state.seaweedfs_access_key is not None
+        else "generated-state",
+        "generated_runtime_values": [
+            {
+                "name": "access_key",
+                "present": generated_present,
+                "source": "seaweedfs-generated-secrets.json" if generated_present else None,
+            },
+            {
+                "name": "secret_key",
+                "present": generated_present,
+                "source": "seaweedfs-generated-secrets.json" if generated_present else None,
+            },
+        ],
+    }
 
 
 def _build_surfsense_inspection_status(
@@ -1458,6 +1498,12 @@ def _run_lifecycle_flow(
         lifecycle_plan=lifecycle_plan,
         backends=lifecycle_backends,
     )
+    if not dry_run and lifecycle_plan.mode != "noop":
+        write_target_state(
+            state_dir,
+            _state_persistable_raw_env_input(raw_env),
+            desired_state,
+        )
     if allow_modify and disable_plan is not None:
         summary["disable_teardown"] = {
             "planned_deletions": [item.to_dict() for item in disable_plan.deletions],
@@ -2194,6 +2240,10 @@ def _build_seaweedfs_backend(
     hostname = desired_state.hostnames.get("s3")
     access_key = desired_state.seaweedfs_access_key
     secret_key = desired_state.seaweedfs_secret_key
+    if access_key is None and secret_key is None and "seaweedfs" in desired_state.enabled_packs:
+        generated_secrets = ensure_seaweedfs_generated_secrets(state_dir)
+        access_key = generated_secrets.access_key
+        secret_key = generated_secrets.secret_key
     if hostname is None or access_key is None or secret_key is None:
         return ShellSeaweedFsBackend(raw_env)
     return DokploySeaweedFsBackend(
@@ -2444,6 +2494,7 @@ def _build_openclaw_backend(
             "ADVISOR_TRUSTED_PROXIES",
             default="127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
         ),
+        tz=_advisor_env_value(raw_env, "TZ", default="UTC"),
         nvidia_visible_devices=_advisor_env_value(
             raw_env,
             "ADVISOR_NVIDIA_VISIBLE_DEVICES",
@@ -2889,8 +2940,6 @@ def _optional_stripped_env_value(values: dict[str, str], key: str) -> str | None
 def _resolve_dokploy_admin_auth(values: dict[str, str]) -> tuple[str | None, str | None]:
     admin_email = _optional_stripped_env_value(values, "DOKPLOY_ADMIN_EMAIL")
     admin_password = _optional_stripped_env_value(values, "DOKPLOY_ADMIN_PASSWORD")
-    if admin_email is not None and admin_password is None:
-        admin_password = _DEFAULT_DOKPLOY_ADMIN_PASSWORD
     return admin_email, admin_password
 
 
@@ -2930,7 +2979,8 @@ def _ensure_dokploy_api_auth(
     if admin_email is None or admin_password is None:
         raise StateValidationError(
             "Dokploy admin email/password are required to bootstrap local "
-            "Dokploy API auth for real installs."
+            "Dokploy API auth for real installs. Set DOKPLOY_ADMIN_EMAIL and "
+            "DOKPLOY_ADMIN_PASSWORD."
         )
 
     reconcile_dokploy(dry_run=False, backend=bootstrap_backend)

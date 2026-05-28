@@ -467,6 +467,9 @@ class RecordingNextcloudBackend(FakeNextcloudBackend):
 
 @dataclass
 class FakeSeaweedFsBackend:
+    def get_credentials(self) -> tuple[str, str] | None:
+        return None
+
     def get_service(self, resource_id: str) -> SeaweedFsResourceRecord | None:
         del resource_id
         return None

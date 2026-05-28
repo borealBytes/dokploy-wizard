@@ -68,7 +68,7 @@ def test_build_litellm_config_maps_raw_openrouter_ids_to_prefixed_aliases() -> N
     model_names = [entry["model_name"] for entry in model_list]
 
     assert model_names == [
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         "openrouter/minimax/minimax-m2.5:free",
         "openrouter/google/gemma-4-31b-it:free",
     ]
@@ -119,7 +119,7 @@ def test_build_litellm_config_skips_empty_openrouter_entries_to_match_env_contra
     )
 
     assert [entry["model_name"] for entry in _model_list(config)] == [
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         "openrouter/openai/gpt-4.1-mini",
         "openrouter/anthropic/claude-3.5-sonnet",
     ]
@@ -140,7 +140,7 @@ def test_build_litellm_config_exposes_verified_opencode_go_chat_models_only_when
     model_names = [entry["model_name"] for entry in _model_list(config)]
 
     assert model_names == [
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
     ]
     assert "deepseek-v4-flash" not in model_names
@@ -166,7 +166,7 @@ def test_build_litellm_config_skips_opencode_go_models_without_upstream_key() ->
     )
 
     assert [entry["model_name"] for entry in _model_list(config)] == [
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
     ]
 
 
@@ -182,7 +182,7 @@ def test_build_litellm_config_exposes_verified_opencode_go_models_with_default_b
     model_names = [entry["model_name"] for entry in _model_list(config)]
 
     assert model_names == [
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
     ]
     assert _model_entry(config, "opencode-go/minimax-m2.7")["litellm_params"] == {
@@ -208,7 +208,7 @@ def test_build_litellm_config_ignores_opencode_go_wildcard_flag_and_keeps_concre
     model_names = [entry["model_name"] for entry in _model_list(config)]
 
     assert model_names == [
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
     ]
     assert _model_entry(config, "opencode-go/minimax-m2.7")["litellm_params"] == {
@@ -270,7 +270,7 @@ def test_render_litellm_config_yaml_includes_new_model_aliases_only() -> None:
 
     rendered_yaml = render_litellm_config_yaml(config)
 
-    assert 'model_name: "tuxdesktop.tailb12aa5.ts.net/unsloth-active"' in rendered_yaml
+    assert 'model_name: "local-model.internal/unsloth-active"' in rendered_yaml
     assert 'model_name: "opencode-go/minimax-m2.7"' in rendered_yaml
     assert 'model_name: "opencode-go/mimo-v2.5"' in rendered_yaml
     assert 'model_name: "openrouter/minimax/minimax-m2.5:free"' in rendered_yaml
@@ -295,7 +295,7 @@ def test_build_litellm_config_still_allows_optional_nvidia_route() -> None:
     model_list = _model_list(config)
 
     assert [entry["model_name"] for entry in model_list] == [
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         "nvidia/kimi-k2.5",
     ]
     assert model_list[1]["litellm_params"] == {
@@ -372,7 +372,7 @@ def test_build_litellm_config_normalizes_legacy_local_model_to_openai_prefix() -
 
     model_list = _model_list(config)
 
-    assert model_list[0]["model_name"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert model_list[0]["model_name"] == "local-model.internal/unsloth-active"
     assert model_list[0]["litellm_params"]["model"] == "openai/unsloth/Qwen2.5-Coder-32B-Instruct"
 
 
@@ -388,7 +388,7 @@ def test_build_litellm_config_defaults_local_model_to_unsloth_active() -> None:
 
     model_list = _model_list(config)
 
-    assert model_list[0]["model_name"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert model_list[0]["model_name"] == "local-model.internal/unsloth-active"
     assert model_list[0]["litellm_params"]["model"] == "openai/unsloth-active"
     assert model_list[0]["litellm_params"]["api_key"] == "sk-no-key-required"
 
@@ -407,7 +407,7 @@ def test_build_litellm_config_allows_local_api_key_override() -> None:
 
     model_list = _model_list(config)
 
-    assert model_list[0]["model_name"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert model_list[0]["model_name"] == "local-model.internal/unsloth-active"
     assert model_list[0]["litellm_params"]["model"] == "openai/unsloth-active"
     assert model_list[0]["litellm_params"]["api_key"] == "sk-local-override"
 
@@ -415,9 +415,9 @@ def test_build_litellm_config_allows_local_api_key_override() -> None:
 def test_build_litellm_config_preserves_hostname_provider_alias_for_local_route() -> None:
     config = build_litellm_config(
         {
-            "AI_DEFAULT_PROVIDER": "tuxdesktop.tailb12aa5.ts.net",
+            "AI_DEFAULT_PROVIDER": "local-model.internal",
             "AI_DEFAULT_MODEL": "unsloth-active",
-            "LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
+            "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
         },
         {
             "opencode_go_api_key_env": "OPENCODE_GO_API_KEY",
@@ -427,31 +427,31 @@ def test_build_litellm_config_preserves_hostname_provider_alias_for_local_route(
     model_list = _model_list(config)
 
     assert [entry["model_name"] for entry in model_list] == [
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
     ]
     assert model_list[0]["litellm_params"] == {
         "model": "openai/unsloth-active",
-        "api_base": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
+        "api_base": "http://local-model.internal:61434/v1",
         "api_key": "sk-no-key-required",
     }
 
     rendered_yaml = render_litellm_config_yaml(config)
-    assert 'model_name: "tuxdesktop.tailb12aa5.ts.net/unsloth-active"' in rendered_yaml
+    assert 'model_name: "local-model.internal/unsloth-active"' in rendered_yaml
     assert 'model: "openai/unsloth-active"' in rendered_yaml
-    assert 'model: "openai/tuxdesktop.tailb12aa5.ts.net/unsloth-active"' not in rendered_yaml
+    assert 'model: "openai/local-model.internal/unsloth-active"' not in rendered_yaml
     assert 'model_name: "unsloth-active"' not in rendered_yaml
 
 
 def test_build_litellm_config_rejects_mangled_hostname_provider_upstream_target() -> None:
     with pytest.raises(
         ValueError,
-        match=r"openai/tuxdesktop\.tailb12aa5\.ts\.net/unsloth-active",
+        match=r"openai/local-model\.internal/unsloth-active",
     ):
         build_litellm_config(
             {
-                "LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
-                "LITELLM_LOCAL_MODEL": "openai/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
+                "LITELLM_LOCAL_MODEL": "openai/local-model.internal/unsloth-active",
             },
             {
                 "opencode_go_api_key_env": "OPENCODE_GO_API_KEY",

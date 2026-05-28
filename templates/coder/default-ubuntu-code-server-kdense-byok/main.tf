@@ -31,7 +31,7 @@ locals {
   kdense_model_options = [
     {
       name  = "Unsloth Active (local alias)"
-      value = "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+      value = "local-model.internal/unsloth-active"
       icon  = "/emojis/1f3e0.png"
     },
     {
@@ -143,7 +143,7 @@ data "coder_parameter" "kdense_default_model" {
   icon         = "/emojis/1f9e0.png"
   type         = "string"
   mutable      = true
-  default      = "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+  default      = "local-model.internal/unsloth-active"
 
   dynamic "option" {
     for_each = local.kdense_model_options

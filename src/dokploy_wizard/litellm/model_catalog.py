@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
-DEFAULT_LOCAL_CANONICAL_ALIAS = "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+DEFAULT_LOCAL_CANONICAL_ALIAS = "local-model.internal/unsloth-active"
 DEFAULT_LOCAL_UPSTREAM_TARGET = "openai/unsloth-active"
 
 _KNOWN_UPSTREAM_PROVIDERS = frozenset(

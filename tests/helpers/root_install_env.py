@@ -46,7 +46,7 @@ def root_install_env() -> RawEnvInput:
             "ADVISOR_GATEWAY_PASSWORD": "advisor-password",
             "AI_DEFAULT_API_KEY": "shared-ai-key",
             "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
-            "LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
+            "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
             "LITELLM_LOCAL_MODEL": "unsloth-active",
             "LITELLM_ADMIN_SUBDOMAIN": "litellm",
             "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",

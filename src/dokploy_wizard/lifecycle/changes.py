@@ -423,6 +423,8 @@ def classify_modify_request(
     farm_enabled_before = "my-farm-advisor" in existing_desired.enabled_packs
     farm_enabled_after = "my-farm-advisor" in requested_desired.enabled_packs
     effective_changed_keys = set(changed_keys)
+    if desired_equivalent:
+        effective_changed_keys -= _SUPPORTED_ENABLEMENT_KEYS
     if not farm_enabled_before and not farm_enabled_after:
         effective_changed_keys -= _MY_FARM_RUNTIME_ENV_KEYS - {
             "AI_DEFAULT_API_KEY",

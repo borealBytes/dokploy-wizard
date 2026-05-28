@@ -255,7 +255,7 @@ Shared service behavior:
 Model behavior inside SurfSense:
 
 - SurfSense model labels are rendered as `LiteLLM - <alias>`, so users see the gateway-backed alias they are selecting.
-- Local `tuxdesktop.tailb12aa5.ts.net/unsloth-active` traffic goes through LiteLLM. The wizard-generated LiteLLM config includes the compatibility setting needed for local chat templates that reject non-leading system messages.
+- Local private model traffic goes through LiteLLM when `LITELLM_LOCAL_BASE_URL` is configured. The wizard-generated LiteLLM config includes the compatibility setting needed for local chat templates that reject non-leading system messages.
 - OpenCode Go aliases also go through LiteLLM when `LITELLM_OPENCODE_GO_API_KEY` is set.
 - SurfSense never receives raw OpenRouter, NVIDIA, OpenCode Go, or local upstream provider keys.
 
@@ -457,15 +457,24 @@ chmod 0600 .install.env
 
 Then edit `.install.env` and replace placeholders with operator-owned values.
 
+### Cloudflare values
+
+Use Cloudflare values for the one account and one zone that will host this stack. In the Cloudflare dashboard, find the Account ID from Account home by using the account row menu and selecting Copy account ID. Find the Zone ID by opening the target domain and copying Zone ID from the Overview page API section.
+
+Create a Cloudflare API token for the wizard instead of using a Global API Key. Scope the token to the target account and target zone. The token needs Zone DNS Edit for the target zone, plus account-level Cloudflare Tunnel Edit or the current Cloudflare One connector write permission for the target account so the wizard can manage the tunnel and route hostnames. If Cloudflare Access OTP apps are enabled, also grant Access Apps Write/Edit and Access Policies Write/Edit on the target account. Do not use all-account or all-zone scopes unless you are testing in a disposable Cloudflare account.
+
 Important details:
 
 - `.install.env.example` is placeholder-only. It documents the expected key groups without storing live secrets.
 - `.install.env` contains real Cloudflare credentials, Dokploy credentials, optional Tailscale values, and optional upstream model-provider keys. Keep it `0600` and uncommitted.
 - `.install.env` stays flat. It contains `key=value` pairs, not nested LiteLLM config or generated app state.
+- `STACK_NAME` defaults from `ROOT_DOMAIN` by lowercasing it and replacing dots or other unsafe characters with hyphens, so `openmerge.me` becomes `openmerge-me`. Wizard-managed Dokploy projects, Docker networks, services, volumes, and tunnel names use that prefix. Set `STACK_NAME` only to preserve an existing explicit stack name.
 - `PACKS` can include `surfsense` alongside packs such as `nextcloud`, `openclaw`, `my-farm-advisor`, `seaweedfs`, `coder`, and `docuseal`.
 - Nexa functionality is enabled by the presence of `OPENCLAW_NEXA_*` values.
 - SurfSense hostnames default to `SURFSENSE_SUBDOMAIN=surfsense`, `SURFSENSE_API_SUBDOMAIN=surfsense-api`, and `SURFSENSE_ZERO_SUBDOMAIN=surfsense-zero`.
 - Generated values such as Dokploy API keys, SurfSense app secrets, SurfSense database/runtime secrets, SurfSense Zero admin password, and LiteLLM virtual keys are state-backed. Do not hand-fill them for normal installs.
+- `DOKPLOY_SUBDOMAIN` defaults to `dokploy`; set it only when you need a different Dokploy hostname.
+- `MY_FARM_ADVISOR_SUBDOMAIN` defaults to `farm` when the My Farm Advisor pack is enabled; set it only when you need a different farm hostname.
 - The remote proof helper copies `.install.env` explicitly to the remote host during validation.
 
 ## Current fresh-VPS proof status
@@ -652,7 +661,7 @@ The operator env file stays flat. `.install.env` contains only key=value pairs. 
 
 The generated LiteLLM config enforces a strict precedence:
 
-1. `tuxdesktop.tailb12aa5.ts.net/unsloth-active` — the local vLLM or Tailnet endpoint, when `LITELLM_LOCAL_BASE_URL` is configured
+1. `local-model.internal/unsloth-active` — a private OpenAI-compatible endpoint, when `LITELLM_LOCAL_BASE_URL` is configured
 2. `opencode-go/*` — explicit OpenCode Go aliases covering the OpenCode Go provider fleet
 3. `openrouter/*` — explicit OpenRouter aliases, each declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS`
 
@@ -665,17 +674,17 @@ SurfSense receives the same approved alias list through its generated LiteLLM vi
 The preferred way to select the default model is with `AI_DEFAULT_PROVIDER` and `AI_DEFAULT_MODEL`:
 
 ```bash
-AI_DEFAULT_PROVIDER=tuxdesktop.tailb12aa5.ts.net
-AI_DEFAULT_MODEL=unsloth-active
+AI_DEFAULT_PROVIDER=openrouter
+AI_DEFAULT_MODEL=deepseek/deepseek-v4-flash:free
 ```
 
-Together these resolve to the canonical alias `tuxdesktop.tailb12aa5.ts.net/unsloth-active`. If you omit them, the wizard falls back to legacy `ADVISOR_MODEL_PROVIDER` and `ADVISOR_MODEL_NAME`.
+Together these resolve to the canonical alias `openrouter/deepseek/deepseek-v4-flash:free`. If you omit them, the wizard falls back to legacy `ADVISOR_MODEL_PROVIDER` and `ADVISOR_MODEL_NAME`.
 
 For LiteLLM upstream API keys, the canonical names are `LITELLM_OPENROUTER_API_KEY` and `LITELLM_OPENCODE_GO_API_KEY`. The older bare keys `OPENROUTER_API_KEY` and `OPENCODE_GO_API_KEY` are still accepted as compatibility fallbacks. The old alias `local/unsloth-active` is also resolved to the canonical alias when it appears in legacy env values.
 
 `LITELLM_OPENCODE_GO_API_KEY` is the OpenCode Go upstream credential. When it is set, generated OpenCode Go aliases are exposed through LiteLLM to approved consumers such as SurfSense, without copying that upstream key into the app container.
 
-Local model compatibility is handled in the generated LiteLLM config. For the local `tuxdesktop.tailb12aa5.ts.net/unsloth-active` path, LiteLLM adapts system-message handling before forwarding to the local OpenAI-compatible endpoint, which keeps SurfSense chats working with local unsloth templates.
+Local model compatibility is handled in the generated LiteLLM config. For a private local-model path such as `local-model.internal/unsloth-active`, LiteLLM adapts system-message handling before forwarding to the local OpenAI-compatible endpoint, which keeps SurfSense chats working with local unsloth templates.
 
 ### Virtual keys
 
@@ -688,7 +697,7 @@ The wizard auto-generates stable virtual keys for each consumer:
 - Coder Hermes
 - Coder K-Dense
 
-OpenCode Web and OpenWork currently reuse the shared Coder AI default gateway env during template bootstrap rather than receiving their own dedicated LiteLLM virtual-key consumer records. Pi Web UI does not receive a wizard-managed virtual key.
+OpenCode Web and OpenWork inherit wizard-managed LiteLLM defaults through the shared Coder AI gateway env during template bootstrap rather than receiving their own dedicated LiteLLM virtual-key consumer records. Pi Web UI is still a browser-local surface and is not centrally model-restricted. Pi Web UI does not receive a wizard-managed virtual key.
 
 These keys are generated once and reused across reruns and modify operations. They are stored in the wizard state directory, not written back into `.install.env`. If you need to rotate a key, that is a future operator action, not something that happens silently on reinstall.
 
@@ -747,13 +756,13 @@ mypy .
 
 ### Required env keys
 
-My Farm Advisor is enabled with `ENABLE_MY_FARM_ADVISOR=true`. When it is enabled, you must provide at least one model provider path.
+My Farm Advisor is enabled by including `my-farm-advisor` in `PACKS`. When it is enabled, you must provide at least one model provider path.
 
 | Key | Example | Notes |
 |---|---|---|
-| `ENABLE_MY_FARM_ADVISOR` | `true` | Pack flag |
+| `PACKS` | `my-farm-advisor,nextcloud,seaweedfs` | Pack selection source. Add other packs as needed. |
 | `MY_FARM_ADVISOR_CHANNELS` | `telegram` | Comma-separated; `telegram` and `matrix` are supported. Matrix requires the Matrix pack. |
-| `MY_FARM_ADVISOR_SUBDOMAIN` | `farm` | Defaults to `farm` |
+| `MY_FARM_ADVISOR_SUBDOMAIN` | `farm` | Optional override; defaults to `farm` |
 | `MY_FARM_ADVISOR_GATEWAY_PASSWORD` | `<generated-or-operator-password>` | Browser/control UI password. `ADVISOR_GATEWAY_PASSWORD` is a shared fallback for both advisors. |
 | **Provider (at least one)** | | |
 | `MY_FARM_ADVISOR_OPENROUTER_API_KEY` | `<your-openrouter-key>` | Farm-only OpenRouter key |

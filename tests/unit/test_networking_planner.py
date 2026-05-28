@@ -25,6 +25,7 @@ class FakeCloudflareBackend:
     access_provider: CloudflareAccessIdentityProvider | None = None
     access_apps: dict[str, CloudflareAccessApplication] = field(default_factory=dict)
     access_policies: dict[str, CloudflareAccessPolicy] = field(default_factory=dict)
+    dns_record_updates: list[tuple[str, str, str, str, bool]] = field(default_factory=list)
     update_tunnel_configuration_calls: list[tuple[str, str, tuple[dict[str, object], ...]]] = field(
         default_factory=list
     )
@@ -77,7 +78,7 @@ class FakeCloudflareBackend:
         zone_id: str,
         *,
         hostname: str,
-        record_type: str,
+        record_type: str | None,
         content: str | None,
     ) -> tuple[CloudflareDnsRecord, ...]:
         del zone_id, hostname, record_type, content
@@ -94,6 +95,24 @@ class FakeCloudflareBackend:
         del zone_id
         return CloudflareDnsRecord(
             record_id=f"dns-{hostname}",
+            name=hostname,
+            record_type="CNAME",
+            content=content,
+            proxied=proxied,
+        )
+
+    def update_dns_record(
+        self,
+        zone_id: str,
+        *,
+        record_id: str,
+        hostname: str,
+        content: str,
+        proxied: bool,
+    ) -> CloudflareDnsRecord:
+        self.dns_record_updates.append((zone_id, record_id, hostname, content, proxied))
+        return CloudflareDnsRecord(
+            record_id=record_id,
             name=hostname,
             record_type="CNAME",
             content=content,

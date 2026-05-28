@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 ProgressCallback = Callable[[str], None]
 RemoteOutputCallback = Callable[[str, str, str], None]
+REMOTE_OUTPUT_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
 def _redact_secret(value: str, password: str | None) -> str:
@@ -135,21 +136,24 @@ class RemoteTransportSession:
             self.progress_callback(message)
 
     def _build_install_command(self) -> str:
-        return self._shell_join(
-            [
-                "./bin/dokploy-wizard",
-                "install",
-                "--env-file",
-                self.remote_install_env_path,
-                "--state-dir",
-                self.remote_state_dir,
-                "--non-interactive",
-            ]
+        return self._with_unbuffered_python(
+            self._shell_join(
+                [
+                    "./bin/dokploy-wizard",
+                    "install",
+                    "--env-file",
+                    self.remote_install_env_path,
+                    "--state-dir",
+                    self.remote_state_dir,
+                    "--non-interactive",
+                ]
+            )
         )
 
     def _build_verify_services_command(self) -> str:
         return " ".join(
             [
+                "PYTHONUNBUFFERED=1",
                 "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}",
                 self._shell_join(
                     [
@@ -166,33 +170,40 @@ class RemoteTransportSession:
         )
 
     def _build_inspect_state_command(self) -> str:
-        return self._shell_join(
-            [
-                "./bin/dokploy-wizard",
-                "inspect-state",
-                "--env-file",
-                self.remote_install_env_path,
-                "--state-dir",
-                self.remote_state_dir,
-            ]
+        return self._with_unbuffered_python(
+            self._shell_join(
+                [
+                    "./bin/dokploy-wizard",
+                    "inspect-state",
+                    "--env-file",
+                    self.remote_install_env_path,
+                    "--state-dir",
+                    self.remote_state_dir,
+                ]
+            )
         )
 
     def _build_uninstall_destroy_command(self, remote_confirm_path: str) -> str:
-        return self._shell_join(
-            [
-                "./bin/dokploy-wizard",
-                "uninstall",
-                "--state-dir",
-                self.remote_state_dir,
-                "--destroy-data",
-                "--non-interactive",
-                "--confirm-file",
-                remote_confirm_path,
-            ]
+        return self._with_unbuffered_python(
+            self._shell_join(
+                [
+                    "./bin/dokploy-wizard",
+                    "uninstall",
+                    "--state-dir",
+                    self.remote_state_dir,
+                    "--destroy-data",
+                    "--non-interactive",
+                    "--confirm-file",
+                    remote_confirm_path,
+                ]
+            )
         )
 
     def _shell_join(self, arguments: list[str]) -> str:
         return " ".join(shlex.quote(argument) for argument in arguments)
+
+    def _with_unbuffered_python(self, command: str) -> str:
+        return f"PYTHONUNBUFFERED=1 {command}"
 
     def _remote_path(self, path: Path) -> str:
         remote_path = path.as_posix()
@@ -210,12 +221,14 @@ class ParamikoRemoteTransport:
         verbose: bool = False,
         output_callback: RemoteOutputCallback | None = None,
         password: str | None = None,
+        heartbeat_interval: float = REMOTE_OUTPUT_HEARTBEAT_INTERVAL_SECONDS,
     ) -> None:
         self.client = client
         self.remote_root = remote_root.rstrip("/") or "/"
         self.verbose = verbose
         self.output_callback = output_callback
         self.password = password
+        self.heartbeat_interval = heartbeat_interval
 
     @classmethod
     def connect(
@@ -335,6 +348,8 @@ class ParamikoRemoteTransport:
         )
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
+        started = time.monotonic()
+        next_heartbeat_at = started + self.heartbeat_interval
 
         while not channel.exit_status_ready():
             drained = self._drain_channel(
@@ -344,7 +359,13 @@ class ParamikoRemoteTransport:
                 stdout_parts=stdout_parts,
                 stderr_parts=stderr_parts,
             )
-            if not drained:
+            if drained:
+                next_heartbeat_at = time.monotonic() + self.heartbeat_interval
+            else:
+                now = time.monotonic()
+                if now >= next_heartbeat_at:
+                    self._emit_heartbeat(subcommand=subcommand, elapsed=now - started)
+                    next_heartbeat_at = now + self.heartbeat_interval
                 time.sleep(0.1)
 
         self._drain_channel(
@@ -358,6 +379,14 @@ class ParamikoRemoteTransport:
         stdout_buffer.flush()
         stderr_buffer.flush()
         return exit_status, "".join(stdout_parts), "".join(stderr_parts)
+
+    def _emit_heartbeat(self, *, subcommand: str, elapsed: float) -> None:
+        if self.output_callback is not None:
+            self.output_callback(
+                subcommand,
+                "progress",
+                f"still running {subcommand} ({elapsed:.0f}s elapsed, waiting for output)",
+            )
 
     def _drain_channel(
         self,

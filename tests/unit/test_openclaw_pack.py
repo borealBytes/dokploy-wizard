@@ -413,7 +413,7 @@ def test_advisor_model_selection_defaults_to_catalog_visible_aliases() -> None:
         env_prefix="OPENCLAW",
         shared_core_plan=desired_state.shared_core,
     ) == (
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         (*_EXPECTED_OPENCODE_GO_CHAT_FALLBACKS, "openrouter/anthropic/claude-sonnet-4"),
     )
     assert cli._advisor_model_selection(
@@ -421,7 +421,7 @@ def test_advisor_model_selection_defaults_to_catalog_visible_aliases() -> None:
         env_prefix="MY_FARM_ADVISOR",
         shared_core_plan=desired_state.shared_core,
     ) == (
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         (*_EXPECTED_OPENCODE_GO_CHAT_FALLBACKS, "openrouter/anthropic/claude-sonnet-4"),
     )
 
@@ -1451,7 +1451,7 @@ def test_dokploy_openclaw_backend_renders_routable_managed_compose() -> None:
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "primary": "ai-default/local-model.internal/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -1663,7 +1663,7 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "primary": "ai-default/local-model.internal/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -1680,7 +1680,7 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
     ]
     assert seeded["bindings"] == [{"agentId": "telly", "match": {"channel": "telegram"}}]
     assert seeded["agents"]["defaults"]["models"] == {
-        "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active": {},
+        "ai-default/local-model.internal/unsloth-active": {},
         "ai-default/nvidia/moonshotai/kimi-k2.5": {},
         "ai-default/openrouter/openrouter/free": {},
         "ai-default/openrouter/google/gemma-4-31b-it:free": {},
@@ -1692,8 +1692,8 @@ def test_openclaw_seeded_config_routes_through_litellm() -> None:
         "api": "openai-completions",
         "models": [
             {
-                "id": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
-                "name": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "id": "local-model.internal/unsloth-active",
+                "name": "local-model.internal/unsloth-active",
                 "reasoning": True,
                 "input": ["text"],
                 "cost": {
@@ -1897,12 +1897,12 @@ def test_openclaw_seeded_provider_models_keep_full_litellm_alias_ids() -> None:
         for model in provider["models"]
     ]
 
-    assert seeded["agents"]["defaults"]["model"]["primary"] == "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert seeded["agents"]["defaults"]["model"]["primary"] == "ai-default/local-model.internal/unsloth-active"
     assert seeded["agents"]["defaults"]["model"]["fallbacks"] == [
         "ai-default/opencode-go/deepseek-v4-flash",
         "ai-default/openrouter/minimax/minimax-m2.5:free",
     ]
-    assert "tuxdesktop.tailb12aa5.ts.net/unsloth-active" in provider_model_ids
+    assert "local-model.internal/unsloth-active" in provider_model_ids
     assert "opencode-go/deepseek-v4-flash" in provider_model_ids
     assert "openrouter/minimax/minimax-m2.5:free" in provider_model_ids
     assert "unsloth-active" not in provider_model_ids
@@ -1910,7 +1910,7 @@ def test_openclaw_seeded_provider_models_keep_full_litellm_alias_ids() -> None:
     assert "minimax/minimax-m2.5:free" not in provider_model_ids
     assert "opencode-go" not in seeded["models"]["providers"]
     assert "openrouter" not in seeded["models"]["providers"]
-    assert "tuxdesktop.tailb12aa5.ts.net" not in seeded["models"]["providers"]
+    assert "local-model.internal" not in seeded["models"]["providers"]
     assert "nvidia" not in seeded["models"]["providers"]
 
 
@@ -1974,7 +1974,8 @@ def test_openclaw_startup_refreshes_config_before_first_run_sentinel_gate() -> N
     assert "touch /home/node/.openclaw/.wizard-seeded" in shell
 
 
-def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surface() -> None:
+def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(openclaw_backend, "_build_local_sidecar_image", lambda **_: None)
     api = FakeDokployOpenClawApi()
     backend = DokployOpenClawBackend(
         api_url="https://dokploy.example.com/api",
@@ -2109,7 +2110,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "nexa",
             "name": "Nexa",
             "model": {
-                "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "primary": "ai-default/local-model.internal/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -2127,7 +2128,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "primary": "ai-default/local-model.internal/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -2239,7 +2240,7 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "primary": "ai-default/local-model.internal/unsloth-active",
                 "fallbacks": [],
             },
             "tools": {
@@ -2283,7 +2284,7 @@ def test_telly_keeps_local_first_through_litellm() -> None:
     telly = next(agent for agent in seeded["agents"]["list"] if agent["id"] == "telly")
 
     assert telly["model"] == {
-        "primary": "ai-default/tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "primary": "ai-default/local-model.internal/unsloth-active",
         "fallbacks": [],
     }
     assert set(seeded["models"]["providers"]) == {"ai-default"}
@@ -2293,8 +2294,8 @@ def test_telly_keeps_local_first_through_litellm() -> None:
         "api": "openai-completions",
         "models": [
             {
-                "id": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
-                "name": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "id": "local-model.internal/unsloth-active",
+                "name": "local-model.internal/unsloth-active",
                 "reasoning": True,
                 "input": ["text"],
                 "cost": {
@@ -2310,7 +2311,8 @@ def test_telly_keeps_local_first_through_litellm() -> None:
     }
 
 
-def test_nexa_model_routing_uses_litellm_without_openrouter_secret() -> None:
+def test_nexa_model_routing_uses_litellm_without_openrouter_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(openclaw_backend, "_build_local_sidecar_image", lambda **_: None)
     api = FakeDokployOpenClawApi()
     backend = DokployOpenClawBackend(
         api_url="https://dokploy.example.com/api",
@@ -2353,7 +2355,7 @@ def test_nexa_model_routing_uses_litellm_without_openrouter_secret() -> None:
     assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL"] == _required_placeholder("DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL")
     assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY"] == _required_placeholder("DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY")
     env_values = _env_payload_values(api.last_update_env)
-    assert env_values["DOKPLOY_WIZARD_NEXA_PLANNER_MODEL"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert env_values["DOKPLOY_WIZARD_NEXA_PLANNER_MODEL"] == "local-model.internal/unsloth-active"
     assert env_values["DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
     assert "or-key" not in runtime_env.values()
     assert "nv-key" not in runtime_env.values()
@@ -2519,6 +2521,65 @@ def test_dokploy_openclaw_backend_renders_my_farm_variant_with_explicit_env_mapp
     assert env_values["R2_SECRET_ACCESS_KEY"] == "r2-secret-key"
 
 
+def test_my_farm_advisor_compose_defaults_timezone_to_utc() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-farm-key",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
+    env_values = _env_payload_values(api.last_update_env)
+    assert environment["TZ"] == _required_placeholder("TZ")
+    assert env_values["TZ"] == "UTC"
+
+
+def test_my_farm_advisor_compose_preserves_explicit_timezone() -> None:
+    api = FakeDokployOpenClawApi()
+    backend = DokployOpenClawBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        my_farm_gateway_password="farm-ui-generated",
+        my_farm_ai_default_api_key="shared-farm-key",
+        tz="America/Chicago",
+        client=api,
+    )
+
+    backend.create_service(
+        resource_name="wizard-stack-my-farm-advisor",
+        hostname="farm.example.com",
+        template_path=None,
+        variant="my-farm-advisor",
+        channels=("telegram",),
+        replicas=1,
+        secret_refs=(),
+    )
+
+    compose = api.last_create_compose_file
+    assert compose is not None
+    environment = _service_environment(compose, "wizard-stack-my-farm-advisor")
+    env_values = _env_payload_values(api.last_update_env)
+    assert environment["TZ"] == _required_placeholder("TZ")
+    assert env_values["TZ"] == "America/Chicago"
+
+
 def test_openclaw_upstream_keys_do_not_leak() -> None:
     api = FakeDokployOpenClawApi()
     backend = DokployOpenClawBackend(
@@ -2637,7 +2698,7 @@ def test_farm_consumes_litellm_only() -> None:
         api_key="key-123",
         stack_name="wizard-stack",
         my_farm_gateway_password="farm-ui-generated",
-        my_farm_primary_model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        my_farm_primary_model="local-model.internal/unsloth-active",
         my_farm_fallback_models=("openai/*", "openrouter/openrouter/free"),
         my_farm_openrouter_api_key="openrouter-key",
         my_farm_nvidia_api_key="nvidia-key",

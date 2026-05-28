@@ -390,6 +390,16 @@ def _resolve_resource(
                 "but the backend could not find it."
             )
         if existing.resource_name != service_name:
+            desired_existing = find_by_name(service_name)
+            if desired_existing is not None:
+                return (
+                    SharedCoreManagedResource(
+                        action="reuse_existing",
+                        resource_id=desired_existing.resource_id,
+                        resource_name=desired_existing.resource_name,
+                    ),
+                    desired_existing.resource_id,
+                )
             raise SharedCoreError(
                 f"Ownership ledger resource '{resource_type}' no longer matches the desired "
                 "shared-core naming convention."

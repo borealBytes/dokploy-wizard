@@ -94,7 +94,7 @@ class CloudflareBackend(Protocol):
         zone_id: str,
         *,
         hostname: str,
-        record_type: str,
+        record_type: str | None,
         content: str | None,
     ) -> tuple[CloudflareDnsRecord, ...]: ...
 
@@ -102,6 +102,16 @@ class CloudflareBackend(Protocol):
         self,
         zone_id: str,
         *,
+        hostname: str,
+        content: str,
+        proxied: bool,
+    ) -> CloudflareDnsRecord: ...
+
+    def update_dns_record(
+        self,
+        zone_id: str,
+        *,
+        record_id: str,
         hostname: str,
         content: str,
         proxied: bool,
@@ -342,7 +352,7 @@ class CloudflareApiBackend:
         zone_id: str,
         *,
         hostname: str,
-        record_type: str,
+        record_type: str | None,
         content: str | None,
     ) -> tuple[CloudflareDnsRecord, ...]:
         if self._mock_zone_ok is not None:
@@ -352,17 +362,20 @@ class CloudflareApiBackend:
                 f"{self._mock_existing_tunnel_id or _mock_tunnel_id(self._mock_tunnel_name)}"
                 ".cfargotunnel.com"
             )
+            resolved_record_type = record_type or "CNAME"
             return (
                 CloudflareDnsRecord(
                     record_id=_mock_dns_record_id(hostname),
                     name=hostname.lower(),
-                    record_type=record_type,
+                    record_type=resolved_record_type,
                     content=target,
                     proxied=True,
                 ),
             )
 
-        params = {"name.exact": hostname, "type": record_type, "per_page": "100"}
+        params = {"name.exact": hostname, "per_page": "100"}
+        if record_type is not None:
+            params["type"] = record_type
         if content is not None:
             params["content.exact"] = content
         payload = self._request_json(
@@ -400,6 +413,36 @@ class CloudflareApiBackend:
         payload = self._request_json(
             method="POST",
             path=f"/zones/{zone_id}/dns_records",
+            body={
+                "content": content,
+                "name": hostname,
+                "proxied": proxied,
+                "type": "CNAME",
+            },
+        )
+        return _parse_dns_record(payload)
+
+    def update_dns_record(
+        self,
+        zone_id: str,
+        *,
+        record_id: str,
+        hostname: str,
+        content: str,
+        proxied: bool,
+    ) -> CloudflareDnsRecord:
+        if self._mock_zone_ok is not None:
+            return CloudflareDnsRecord(
+                record_id=record_id,
+                name=hostname.lower(),
+                record_type="CNAME",
+                content=content,
+                proxied=proxied,
+            )
+
+        payload = self._request_json(
+            method="PATCH",
+            path=f"/zones/{zone_id}/dns_records/{record_id}",
             body={
                 "content": content,
                 "name": hostname,

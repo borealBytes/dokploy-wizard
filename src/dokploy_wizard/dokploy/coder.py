@@ -70,7 +70,7 @@ class _ComposeLocator:
     compose_id: str
 
 
-_DEFAULT_AI_DEFAULT_PROVIDER = "tuxdesktop.tailb12aa5.ts.net"
+_DEFAULT_AI_DEFAULT_PROVIDER = "local-model.internal"
 _DEFAULT_AI_DEFAULT_MODEL = "unsloth-active"
 _DEFAULT_HERMES_INFERENCE_PROVIDER = "dokploy-litellm"
 _DEFAULT_HERMES_MODEL = DEFAULT_LOCAL_CANONICAL_ALIAS

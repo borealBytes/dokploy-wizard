@@ -110,7 +110,7 @@ def test_list_keys_preserves_metadata_from_payload() -> None:
                     "key": "key-1",
                     "key_alias": "alias-1",
                     "team_id": "team-1",
-                    "models": ["tuxdesktop.tailb12aa5.ts.net/unsloth-active"],
+                    "models": ["local-model.internal/unsloth-active"],
                     "metadata": {"consumer": "alias-1", "managed_by": "dokploy-wizard"},
                 }
             ]
@@ -139,7 +139,7 @@ def test_update_team_posts_models_and_metadata() -> None:
             "team_id": "team-my-farm-advisor",
             "team_alias": "my-farm-advisor",
             "models": [
-                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             ],
             "metadata": {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
@@ -153,7 +153,7 @@ def test_update_team_posts_models_and_metadata() -> None:
         team_id="team-my-farm-advisor",
         team_alias="my-farm-advisor",
         models=(
-            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            "local-model.internal/unsloth-active",
             "openrouter/anthropic/claude-3.5-sonnet",
         ),
         metadata={"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
@@ -165,7 +165,7 @@ def test_update_team_posts_models_and_metadata() -> None:
         "team_id": "team-my-farm-advisor",
         "team_alias": "my-farm-advisor",
         "models": [
-            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            "local-model.internal/unsloth-active",
             "openrouter/anthropic/claude-3.5-sonnet",
         ],
         "metadata": {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
@@ -241,7 +241,7 @@ def test_update_team_accepts_enveloped_team_info_response() -> None:
             "team_info": {
                 "team_id": "team-my-farm-advisor",
                 "team_alias": "my-farm-advisor",
-                "models": ["tuxdesktop.tailb12aa5.ts.net/unsloth-active"],
+                "models": ["local-model.internal/unsloth-active"],
                 "metadata": {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
             },
         }
@@ -253,20 +253,20 @@ def test_update_team_accepts_enveloped_team_info_response() -> None:
     ).update_team(
         team_id="team-my-farm-advisor",
         team_alias="my-farm-advisor",
-        models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+        models=("local-model.internal/unsloth-active",),
         metadata={"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
     )
 
     assert team.team_id == "team-my-farm-advisor"
     assert team.team_alias == "my-farm-advisor"
-    assert team.models == ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",)
+    assert team.models == ("local-model.internal/unsloth-active",)
 
 
 def test_update_team_accepts_aliasless_direct_team_response_with_fallbacks() -> None:
     def fake_request(_: request.Request) -> object:
         return {
             "team_id": "team-openclaw",
-            "models": ["tuxdesktop.tailb12aa5.ts.net/unsloth-active"],
+            "models": ["local-model.internal/unsloth-active"],
             "metadata": {"consumer": "openclaw", "managed_by": "dokploy-wizard"},
         }
 
@@ -277,13 +277,13 @@ def test_update_team_accepts_aliasless_direct_team_response_with_fallbacks() -> 
     ).update_team(
         team_id="team-openclaw",
         team_alias="openclaw",
-        models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+        models=("local-model.internal/unsloth-active",),
         metadata={"consumer": "openclaw", "managed_by": "dokploy-wizard"},
     )
 
     assert team.team_id == "team-openclaw"
     assert team.team_alias == "openclaw"
-    assert team.models == ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",)
+    assert team.models == ("local-model.internal/unsloth-active",)
     assert team.metadata == {"consumer": "openclaw", "managed_by": "dokploy-wizard"}
 
 
@@ -343,7 +343,7 @@ def test_update_key_accepts_nested_key_record_with_fallback_fields() -> None:
     def fake_request(_: request.Request) -> object:
         return {
             "result": {
-                "models": ["tuxdesktop.tailb12aa5.ts.net/unsloth-active"],
+                "models": ["local-model.internal/unsloth-active"],
                 "metadata": {"consumer": "openclaw", "managed_by": "dokploy-wizard"},
             }
         }
@@ -356,14 +356,14 @@ def test_update_key_accepts_nested_key_record_with_fallback_fields() -> None:
         key_alias="openclaw",
         key="sk-existing",
         team_id="team-openclaw",
-        models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+        models=("local-model.internal/unsloth-active",),
         metadata={"consumer": "openclaw", "managed_by": "dokploy-wizard"},
     )
 
     assert key.key == "sk-existing"
     assert key.key_alias == "openclaw"
     assert key.team_id == "team-openclaw"
-    assert key.models == ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",)
+    assert key.models == ("local-model.internal/unsloth-active",)
 
 
 def test_delete_key_deletes_by_alias_list_payload() -> None:

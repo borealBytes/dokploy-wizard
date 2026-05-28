@@ -494,9 +494,9 @@ def test_surfsense_global_llm_config_exposes_each_allowed_chat_model_without_emb
         redis=_redis(),
         generated_secrets=_SURFSENSE_SECRETS,
         litellm_generated_keys=_LITELLM_KEYS,
-        litellm_model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        litellm_model="local-model.internal/unsloth-active",
         litellm_models=(
-            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            "local-model.internal/unsloth-active",
             "opencode-go/deepseek-v4-flash",
             "openrouter/hunter-alpha",
         ),
@@ -505,12 +505,12 @@ def test_surfsense_global_llm_config_exposes_each_allowed_chat_model_without_emb
     compose = rendered.compose_file
     specs = _env_specs_by_name(rendered)
 
-    assert specs["SURFSENSE_LITELLM_MODEL"].value == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert specs["SURFSENSE_LITELLM_MODEL"].value == "local-model.internal/unsloth-active"
     assert compose.count("provider: OPENAI") == 3
     assert "id: -1" in compose
     assert "id: -2" in compose
     assert "id: -3" in compose
-    assert 'name: "LiteLLM - tuxdesktop.tailb12aa5.ts.net/unsloth-active"' in compose
+    assert 'name: "LiteLLM - local-model.internal/unsloth-active"' in compose
     assert 'name: "LiteLLM - opencode-go/deepseek-v4-flash"' in compose
     assert 'name: "LiteLLM - openrouter/hunter-alpha"' in compose
     assert "model_name: ${SURFSENSE_LITELLM_MODEL:?SURFSENSE_LITELLM_MODEL is required}" in compose
@@ -618,7 +618,7 @@ def test_surfsense_runtime_overrides_flow_into_env_specs_and_image_tags() -> Non
         redis=_redis(),
         generated_secrets=_SURFSENSE_SECRETS,
         litellm_generated_keys=_LITELLM_KEYS,
-        litellm_model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        litellm_model="local-model.internal/unsloth-active",
         surfsense_version="0.0.26",
         frontend_public_url="https://research.example.com",
         api_public_url="https://research-api.example.com",
@@ -637,7 +637,7 @@ def test_surfsense_runtime_overrides_flow_into_env_specs_and_image_tags() -> Non
     assert specs["SURFSENSE_AUTH_TYPE"].value == "OIDC"
     assert specs["SURFSENSE_ETL_SERVICE"].value == "UNSTRUCTURED"
     assert specs["SURFSENSE_EMBEDDING_MODEL"].value == "custom-embedding-model"
-    assert specs["SURFSENSE_LITELLM_MODEL"].value == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert specs["SURFSENSE_LITELLM_MODEL"].value == "local-model.internal/unsloth-active"
 
 
 def test_surfsense_backend_boundary_consumes_generated_state_without_install_env_mutation(

@@ -57,7 +57,7 @@ def test_build_model_catalog_returns_deterministic_aliases_targets_and_costs() -
 
     local_entry = catalog.entry_for(DEFAULT_LOCAL_CANONICAL_ALIAS)
     assert local_entry.upstream_target == DEFAULT_LOCAL_UPSTREAM_TARGET
-    assert local_entry.provider_slug == "tuxdesktop.tailb12aa5.ts.net"
+    assert local_entry.provider_slug == "local-model.internal"
     assert local_entry.model_id == "unsloth-active"
     assert local_entry.visible_to_consumers == (
         "coder-hermes",

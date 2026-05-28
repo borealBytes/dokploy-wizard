@@ -78,6 +78,9 @@ class DokploySeaweedFsBackend:
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
 
+    def get_credentials(self) -> tuple[str, str] | None:
+        return self._access_key, self._secret_key
+
     def get_service(self, resource_id: str) -> SeaweedFsResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "service")
         if compose_id is None:

@@ -41,7 +41,7 @@ class SeaweedFsResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "access_key": self.access_key,
+            "access_key": "<redacted>" if self.access_key is not None else None,
             "enabled": self.enabled,
             "health_check": None if self.health_check is None else self.health_check.to_dict(),
             "hostname": self.hostname,

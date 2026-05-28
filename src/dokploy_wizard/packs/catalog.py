@@ -217,7 +217,7 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
             ),
             PackHostname(
                 key="coder-wildcard",
-                default_subdomain="*.coder",
+                default_subdomain="*",
                 env_key="CODER_WILDCARD_SUBDOMAIN",
             ),
         ),
