@@ -1681,6 +1681,7 @@ def _render_compose_file(
             _render_gateway_service_block(
                 service_name=service_name,
                 image=image,
+                pull_policy=_pull_policy_for_variant(variant),
                 command=_command_for_variant(
                     stack_name=stack_name,
                     variant=variant,
@@ -1729,6 +1730,7 @@ def _render_compose_file(
             _render_gateway_service_block(
                 service_name=public_service_name,
                 image=image,
+                pull_policy=_pull_policy_for_variant(variant),
                 command=_command_for_variant(
                     stack_name=stack_name,
                     variant=variant,
@@ -1790,6 +1792,7 @@ def _render_compose_file(
             _render_gateway_service_block(
                 service_name=service_name,
                 image=image,
+                pull_policy=_pull_policy_for_variant(variant),
                 command=_command_for_variant(
                     stack_name=stack_name,
                     variant=variant,
@@ -1864,6 +1867,12 @@ def _image_for_variant(variant: str) -> str:
     if variant == "my-farm-advisor":
         return "ghcr.io/borealbytes/my-farm-advisor:latest"
     return "ghcr.io/openclaw/openclaw:latest"
+
+
+def _pull_policy_for_variant(variant: str) -> str | None:
+    if variant == "my-farm-advisor":
+        return "always"
+    return None
 
 
 def _openclaw_data_volume_name(stack_name: str) -> str:
@@ -2272,6 +2281,7 @@ def _render_gateway_service_block(
     *,
     service_name: str,
     image: str,
+    pull_policy: str | None,
     command: str,
     environment: dict[str, str],
     labels: dict[str, str] | None,
@@ -2284,6 +2294,7 @@ def _render_gateway_service_block(
     lines = [
         f"  {service_name}:",
         f"    image: {image}",
+        *([f"    pull_policy: {pull_policy}"] if pull_policy else []),
         "    restart: unless-stopped",
         f"    command: {command}",
         "    environment:",
