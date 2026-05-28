@@ -146,6 +146,7 @@ def execute_lifecycle_plan(
                     backends=backends,
                 )
             continue
+        _emit_lifecycle_phase_progress(phase, "starting")
         if phase == "dokploy_bootstrap":
             result = reconcile_dokploy(dry_run=dry_run, backend=backends.bootstrap)
             phase_results[phase] = result.to_dict()
@@ -392,6 +393,7 @@ def execute_lifecycle_plan(
                     policy_resource_ids=access.policy_resource_ids,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
+        _emit_lifecycle_phase_progress(phase, "finished")
         if not dry_run:
             if phase == nextcloud_refresh_phase:
                 backends.nextcloud.refresh_openclaw_external_storage(
@@ -474,6 +476,10 @@ def _emit_dokploy_ready_hint(url: str) -> None:
         f"Dokploy is ready: {url} — you can open it now and watch the rest of the install.",
         file=sys.stderr,
     )
+
+
+def _emit_lifecycle_phase_progress(phase: str, status: str) -> None:
+    print(f"[dokploy-wizard] Lifecycle phase '{phase}' {status}.", file=sys.stderr)
 
 
 def _build_summary(
