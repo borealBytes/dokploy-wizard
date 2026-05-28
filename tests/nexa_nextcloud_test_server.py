@@ -39,6 +39,7 @@ class RecordingNextcloudServer(ThreadingHTTPServer):
         webdav_acl_principals: tuple[str, ...] = (),
         talk_auth_user: str | None = None,
         talk_auth_password: str | None = None,
+        talk_chat_status_code: int = 201,
         talk_conversations: tuple[dict[str, Any], ...] = (),
         talk_messages_by_token: dict[str, tuple[dict[str, Any], ...]] | None = None,
         public_share_base_url: str = "https://nextcloud.example.com/s/",
@@ -56,6 +57,7 @@ class RecordingNextcloudServer(ThreadingHTTPServer):
         self.webdav_acl_principals = webdav_acl_principals
         self.talk_auth_user = talk_auth_user or webdav_user
         self.talk_auth_password = talk_auth_password or webdav_password
+        self.talk_chat_status_code = talk_chat_status_code
         self.talk_conversations = talk_conversations
         self.talk_messages_by_token = talk_messages_by_token or {}
         self.public_share_base_url = public_share_base_url
@@ -100,6 +102,12 @@ class _NextcloudHandler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/ocs/v2.php/apps/spreed/api/v1/chat/"):
             if not self._check_talk_auth():
+                return
+            if server.talk_chat_status_code != 201:
+                self._write_json(
+                    server.talk_chat_status_code,
+                    {"ocs": {"meta": {"status": "failure"}, "data": {}}},
+                )
                 return
             self._write_json(
                 201,
@@ -252,6 +260,7 @@ def run_recording_nextcloud_server(
     webdav_acl_principals: tuple[str, ...] = (),
     talk_auth_user: str | None = None,
     talk_auth_password: str | None = None,
+    talk_chat_status_code: int = 201,
     talk_conversations: tuple[dict[str, Any], ...] = (),
     talk_messages_by_token: dict[str, tuple[dict[str, Any], ...]] | None = None,
     public_share_base_url: str = "https://nextcloud.example.com/s/",
@@ -270,6 +279,7 @@ def run_recording_nextcloud_server(
         webdav_acl_principals=webdav_acl_principals,
         talk_auth_user=talk_auth_user,
         talk_auth_password=talk_auth_password,
+        talk_chat_status_code=talk_chat_status_code,
         talk_conversations=talk_conversations,
         talk_messages_by_token=talk_messages_by_token,
         public_share_base_url=public_share_base_url,

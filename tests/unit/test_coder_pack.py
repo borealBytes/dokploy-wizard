@@ -31,6 +31,179 @@ from dokploy_wizard.state import (
 from .fake_dokploy import FakeDokployApiClient
 
 
+def _expected_coder_fallback_models_json() -> str:
+    return coder_module._litellm_workspace_fallback_models_json(
+        default_alias="opencode-go/deepseek-v4-flash"
+    )
+
+
+def _expected_coder_fallback_models_json_escaped() -> str:
+    return coder_module._shell_double_quote_escape(_expected_coder_fallback_models_json())
+
+
+def test_coder_litellm_fallback_models_json_uses_full_concrete_aliases() -> None:
+    aliases = json.loads(_expected_coder_fallback_models_json())
+
+    assert aliases[0] == "opencode-go/deepseek-v4-flash"
+    assert "opencode-go/deepseek-v4-flash" in aliases
+    assert "opencode-go/minimax-m2.7" in aliases
+    assert "openrouter/minimax/minimax-m2.5:free" in aliases
+    assert "deepseek-v4-flash" not in aliases
+    assert "minimax/minimax-m2.5:free" not in aliases
+    assert "opencode-go/*" not in aliases
+
+
+def test_copilot_byok_contract_documents_official_chat_only_scope() -> None:
+    contract = coder_module._copilot_byok_contract()
+
+    assert contract["setting"] == "github.copilot.chat.customOAIModels"
+    assert contract["provider_label"] == "Dokploy LiteLLM"
+    assert contract["scope"] == "chat-and-agents-only"
+    assert "inline completions" in contract["limitation"]
+    assert "code.visualstudio.com/docs/copilot/customization/language-models" in contract["reference"]
+
+
+def test_copilot_byok_settings_json_contains_litellm_models() -> None:
+    settings = json.loads(
+        coder_module._copilot_byok_settings_json(
+            base_url="http://wizard-stack-shared-litellm:4000",
+            api_key="fake-litellm-key",
+            default_alias="local-model.internal/unsloth-active",
+            fallback_models_json=_expected_coder_fallback_models_json(),
+        )
+    )
+
+    custom_models = settings["github.copilot.chat.customOAIModels"]
+    assert "local-model.internal/unsloth-active" in custom_models
+    assert "opencode-go/deepseek-v4-flash" in custom_models
+    default_model = custom_models["local-model.internal/unsloth-active"]
+    assert default_model["name"] == "Dokploy LiteLLM: local-model.internal/unsloth-active"
+    assert default_model["url"] == "http://wizard-stack-shared-litellm:4000/v1"
+    assert default_model["apiKey"] == "fake-litellm-key"
+    assert default_model["requiresAPIKey"] is True
+    assert default_model["toolCalling"] is True
+    assert default_model["vision"] is False
+    assert default_model["thinking"] is False
+    assert "sk-" not in json.dumps(settings)
+    assert "ghp_" not in json.dumps(settings)
+
+
+def test_copilot_byok_compatibility_probe_is_secret_safe() -> None:
+    probe = coder_module._copilot_byok_compatibility_probe()
+
+    assert "official-byok-supported" in probe
+    assert "github.copilot.chat.customOAIModels" in probe
+    assert "chat-and-agents-only" in probe
+    assert "secret" in probe.lower()
+    assert "sk-" not in probe
+    assert "ghp_" not in probe
+
+
+def test_coder_live_template_update_command_bundle_is_non_destructive_and_redacted() -> None:
+    bundle = "\n".join(coder_module._coder_live_template_update_command_bundle())
+
+    assert "inspect-state" in bundle
+    assert "focused-coder-template-reseed" in bundle
+    assert "ensure_application_ready" in bundle
+    assert "github.copilot.chat.customOAIModels" in bundle
+    assert "<redacted" in bundle
+    assert "uninstall" not in bundle
+    assert "destroy-data" not in bundle
+    assert "reinstall" not in bundle.lower()
+    assert "sk-" not in bundle
+    assert "ghp_" not in bundle
+
+
+def test_coder_state_gap_diagnosis_requires_focused_reseed_when_checkpoint_incomplete() -> None:
+    diagnosis = coder_module._coder_state_gap_diagnosis(("desired-state.json", "raw-input.json"))
+
+    assert "state-incomplete" in diagnosis
+    assert "focused-coder-template-reseed-required" in diagnosis
+    assert "applied-state.json" in diagnosis
+    assert "ownership-ledger.json" in diagnosis
+    assert "do-not-reinstall" in diagnosis
+
+
+def _assert_template_preseeds_copilot_byok(template: str) -> None:
+    assert "github.copilot.chat.customOAIModels" in template
+    assert "Official Copilot BYOK is intentionally chat/agent-only" in template
+    assert "/home/coder/.local/share/code-server/User/settings.json" in template
+    assert "/home/coder/.config/code-server/User/settings.json" in template
+    assert "Dokploy LiteLLM: {model_id}" in template
+    assert '"toolCalling": True' in template
+    assert '"vision": False' in template
+    assert '"thinking": False' in template
+    assert "vivswan.litellm-vscode-chat" not in template
+    assert "calgan.oai-provider" not in template
+    assert "openai-compat-provider.providers" not in template
+
+
+def test_base_copilot_byok_template_settings() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
+    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
+
+
+def test_pi_web_copilot_byok_template_settings() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-pi-web/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
+
+
+def test_opencode_web_copilot_byok_template_settings() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-opencode-web/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert "OPENCODE_WEB_PORT=4096" in template
+    assert "OPENCODE_PROXY_PORT=4097" in template
+
+
+def test_openwork_copilot_byok_template_settings() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-openwork/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert "OPENWORK_UI_PORT=8790" in template
+    assert "OPENWORK_PROXY_PORT=8788" in template
+
+
+def test_hermes_copilot_byok_template_settings() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-hermes/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_HERMES_API_KEY__"' in template
+    assert 'upsert_env OPENAI_API_KEY "$OPENAI_API_KEY"' in template
+
+
+def test_kdense_copilot_byok_uses_central_gateway() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_template_preseeds_copilot_byok(template)
+    assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"' in template
+    assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"' in template
+    assert 'export KDENSE_COPILOT_DEFAULT_ALIAS="__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__/__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__"' in template
+    assert 'base_url = os.environ["KDENSE_CENTRAL_LITELLM_BASE_URL"].rstrip("/")' in template
+    assert 'api_key = os.environ.get("KDENSE_CENTRAL_LITELLM_API_KEY", "")' in template
+    assert 'KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"' in template
+    assert 'append_env OPENROUTER_API_KEY ' not in template
+    assert 'append_env NVIDIA_API_KEY ' not in template
+    assert 'append_env ANTHROPIC_API_KEY ' not in template
+
+
 @dataclass
 class FakeCoderBackend:
     existing_service: CoderResourceRecord | None = None
@@ -115,9 +288,10 @@ class FakeCoderApi:
 
         return Compose()
 
-    def update_compose(self, *, compose_id: str, compose_file: str):
-        del compose_id
-        self.last_create_compose_file = compose_file
+    def update_compose(self, *, compose_id: str, compose_file: str | None = None, env: str | None = None):
+        del compose_id, env
+        if compose_file is not None:
+            self.last_create_compose_file = compose_file
 
         class Compose:
             compose_id = "compose-1"
@@ -135,7 +309,7 @@ class FakeCoderApi:
 
 
 def test_render_coder_compose_includes_root_and_wildcard_routes() -> None:
-    compose = _render_compose_file(
+    rendered = _render_compose_file(
         stack_name="wizard-stack",
         hostname="coder.example.com",
         wildcard_hostname="*.coder.example.com",
@@ -146,13 +320,15 @@ def test_render_coder_compose_includes_root_and_wildcard_routes() -> None:
             password_secret_ref="wizard-stack-coder-postgres-password",
         ),
     )
+    compose = rendered.compose_file
 
     assert 'CODER_ACCESS_URL: "https://coder.example.com/"' in compose
     assert 'CODER_WILDCARD_ACCESS_URL: "*.coder.example.com"' in compose
     assert (
-        'CODER_PG_CONNECTION_URL: "postgres://wizard_stack_coder:change-me@wizard-stack-shared-postgres:5432/wizard_stack_coder?sslmode=disable"'
+        'CODER_PG_CONNECTION_URL: "${CODER_PG_CONNECTION_URL:?CODER_PG_CONNECTION_URL is required}"'
         in compose
     )
+    assert rendered.env_specs[0].value == "postgres://wizard_stack_coder:change-me@wizard-stack-shared-postgres:5432/wizard_stack_coder?sslmode=disable"
     assert 'CODER_PROXY_TRUSTED_HEADERS: "X-Forwarded-For"' in compose
     assert 'CODER_PROXY_TRUSTED_ORIGINS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"' in compose
     assert "CODER_REDIRECT_TO_ACCESS_URL:" not in compose
@@ -184,6 +360,23 @@ def test_render_coder_compose_includes_root_and_wildcard_routes() -> None:
         in compose
     )
     assert 'traefik.http.services.wizard-stack-coder.loadbalancer.server.port: "3000"' in compose
+    assert "traefik.hz" not in compose
+    assert compose.count("traefik.http.routers.wizard-stack-coder.rule:") == 1
+    assert compose.count("traefik.http.routers.wizard-stack-coder-wildcard.rule:") == 1
+    assert compose.count("traefik.http.routers.wizard-stack-coder-wildcard.middlewares:") == 1
+    assert compose.count("traefik.http.routers.wizard-stack-coder-wildcard.tls:") == 1
+    assert (
+        compose.count(
+            "traefik.http.middlewares.wizard-stack-coder-forwarded-https.headers.customrequestheaders.X-Forwarded-Proto: \"https\""
+        )
+        == 1
+    )
+    assert (
+        compose.count(
+            "traefik.http.middlewares.wizard-stack-coder-forwarded-host.headers.customrequestheaders.X-Forwarded-Host: \"coder.example.com\""
+        )
+        == 1
+    )
 
 
 def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
@@ -204,6 +397,48 @@ def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
     assert "ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode" in template
     assert "if ! command -v zellij >/dev/null 2>&1; then" in template
     assert "zellij-$${ARCH}-unknown-linux-musl.tar.gz" in template
+    assert "if ! command -v node >/dev/null 2>&1; then" in template
+    assert "curl -fsSL https://deb.nodesource.com/setup_22.x | $_SUDO -E bash -" in template
+    assert "$_SUDO apt-get install -y nodejs" in template
+    assert "$_SUDO corepack enable" in template
+    assert "$_SUDO corepack prepare pnpm@10.27.0 --activate" in template
+    assert "export PNPM_HOME=/home/coder/.local/share/pnpm" in template
+    assert 'export PATH="$PNPM_HOME/bin:$PATH"' in template
+    assert '/home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc' in template
+    assert r'/home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc' in template
+    assert '/home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile' in template
+    assert r'/home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile' in template
+    assert "pnpm add -g @earendil-works/pi-coding-agent" in template
+    assert "command -v pi" in template
+    assert "pi --version" in template
+    assert "bash -lc 'command -v pi && pi --version'" in template
+    assert 'export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"' in template
+    assert 'export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"' in template
+    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"' in template
+    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
+    assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
+    assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
+    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
+    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
+    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
+    assert 'payload = json.load(response)' in template
+    assert 'except (OSError, ValueError, urllib.error.URLError):' in template
+    assert 'return []' in template
+    assert 'model_id = item.get("id")' in template
+    assert 'and not normalized.endswith("/*")' in template
+    assert 'and not normalized.startswith("openai/")' in template
+    assert 'model_ids = list(dict.fromkeys(fetch_model_ids() + fallback_models))' in template
+    assert '"npm": "@ai-sdk/openai-compatible"' in template
+    assert '"options": {"baseURL": base_url, "apiKey": api_key}' in template
+    assert '"models": {model_id: {} for model_id in model_ids}' in template
+    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
+    assert '"models": [{"id": model_id, "name": model_id} for model_id in model_ids]' in template
+    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
+    assert "pi.dev/install.sh" not in template
+    assert 'resource "coder_app"' not in template
+    assert "pi-web-ui" not in template
+    assert "vite preview" not in template
+    assert "subdomain =" not in template
 
 
 def test_default_opencode_web_template_includes_web_app() -> None:
@@ -220,6 +455,23 @@ def test_default_opencode_web_template_includes_web_app() -> None:
     assert "if [ ! -x /home/coder/.opencode/bin/opencode ]; then" in template
     assert "ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode" in template
     assert "NEED_NODE=true" in template
+    assert "Shared LiteLLM defaults keep OpenCode Web on the wizard-managed gateway." in template
+    assert 'export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"' in template
+    assert 'export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"' in template
+    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"' in template
+    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
+    assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
+    assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
+    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
+    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
+    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
+    assert 'payload = json.load(response)' in template
+    assert 'payload = {"data": []}' in template
+    assert 'model_ids = list(dict.fromkeys(model_ids + fallback_models))' in template
+    assert '"npm": "@ai-sdk/openai-compatible"' in template
+    assert '"options": {"baseURL": base_url, "apiKey": api_key}' in template
+    assert '"models": {model_id: {} for model_id in model_ids}' in template
+    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
     assert "OPENCODE_WEB_PORT=4096" in template
     assert "OPENCODE_PROXY_PORT=4097" in template
     assert (
@@ -279,6 +531,26 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
     assert "$_SUDO corepack enable" in template
     assert "$_SUDO corepack prepare pnpm@10.27.0 --activate" in template
     assert "$_SUDO npm install -g openwork-orchestrator" in template
+    assert (
+        "Shared LiteLLM defaults keep OpenWork's embedded OpenCode routes aligned with the wizard-managed gateway."
+        in template
+    )
+    assert 'export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"' in template
+    assert 'export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"' in template
+    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"' in template
+    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
+    assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
+    assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
+    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
+    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
+    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
+    assert 'payload = json.load(response)' in template
+    assert 'payload = {"data": []}' in template
+    assert 'model_ids = list(dict.fromkeys(model_ids + fallback_models))' in template
+    assert '"npm": "@ai-sdk/openai-compatible"' in template
+    assert '"options": {"baseURL": base_url, "apiKey": api_key}' in template
+    assert '"models": {model_id: {} for model_id in model_ids}' in template
+    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
     assert "OPENWORK_WEBUI_BUILD_KEY=v6-coder-mounted-basename" in template
     assert "OPENWORK_CLIENT_TOKEN=openwork-client-token" in template
     assert "OPENWORK_HOST_TOKEN=openwork-host-token" in template
@@ -326,6 +598,99 @@ def test_default_openwork_template_includes_full_webui_stack() -> None:
     assert 'url       = "http://localhost:8788/health"' in template
 
 
+def test_pi_web_template_helpers_and_required_template_names() -> None:
+    assert coder_module._default_pi_web_template_dir() == (
+        Path(coder_module.__file__).resolve().parents[3]
+        / "templates"
+        / "coder"
+        / "default-ubuntu-code-server-pi-web"
+    )
+    assert coder_module._default_pi_web_template_name() == "ubuntu-vscode-pi-web"
+    assert coder_module._required_template_names() == (
+        coder_module._default_template_name(),
+        coder_module._default_opencode_web_template_name(),
+        coder_module._default_openwork_template_name(),
+        coder_module._default_kdense_byok_template_name(),
+        coder_module._default_hermes_template_name(),
+        coder_module._default_pi_web_template_name(),
+    )
+    assert len(coder_module._required_template_names()) == 6
+
+
+def test_default_pi_web_template_includes_clickable_pi_web_ui() -> None:
+    template = Path("templates/coder/default-ubuntu-code-server-pi-web/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    assert "$_SUDO apt-get install -y curl git ca-certificates wget btop" in template
+    assert "curl -fsSL https://deb.nodesource.com/setup_22.x | $_SUDO -E bash -" in template
+    assert "$_SUDO corepack enable" in template
+    assert "$_SUDO corepack prepare pnpm@10.27.0 --activate" in template
+    assert "export PNPM_HOME=/home/coder/.local/share/pnpm" in template
+    assert 'export PATH="$PNPM_HOME/bin:$PATH"' in template
+    assert (
+        'grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc'
+        in template
+    )
+    assert 'grep -qxF "export PATH=\\"$PNPM_HOME/bin:$PATH\\"" /home/coder/.profile' in template
+    assert "pnpm add -g @earendil-works/pi-coding-agent" in template
+    assert 'export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"' in template
+    assert 'export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"' in template
+    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"' in template
+    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
+    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
+    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
+    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
+    assert 'payload = json.load(response)' in template
+    assert 'payload = {"data": []}' in template
+    assert '"baseUrl": base_url' in template
+    assert '"api": "openai-completions"' in template
+    assert '"apiKey": api_key' in template
+    assert '"models": [{"id": model_id, "name": model_id} for model_id in model_ids]' in template
+    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
+    assert 'PI_WEB_SRC_DIR=/home/coder/.cache/pi-web-ui' in template
+    assert 'PI_WEB_BUILD_KEY=v1-coder-mounted-preview' in template
+    assert 'PI_WEB_UI_PORT=8650' in template
+    assert 'PI_WEB_PROXY_PORT=8651' in template
+    assert "Pi Web UI stays browser-local, but the workspace now pre-seeds custom LiteLLM" in template
+    assert '"@earendil-works/pi-agent-core": "^0.74.0"' in template
+    assert '"@earendil-works/pi-ai": "^0.74.0"' in template
+    assert '"@earendil-works/pi-web-ui": "^0.74.0"' in template
+    assert "import { Agent } from '@earendil-works/pi-agent-core';" in template
+    assert "import { getModel } from '@earendil-works/pi-ai';" in template
+    assert "import '@earendil-works/pi-web-ui/app.css';" in template
+    assert 'document.title = "Pi Web UI";' in template
+    assert "CI=true pnpm install" in template
+    assert "pnpm exec vite build --base ./" in template
+    assert (
+        'pnpm exec vite preview --host 127.0.0.1 --port $PI_WEB_UI_PORT --strictPort' in template
+    )
+    assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
+    assert 'const parsed = new URL(req.url || "/", "http://localhost");' in template
+    assert 'const targetPath = needsSpaFallback(remainder) ? "/" : remainder + parsed.search;' in template
+    assert (
+        'nohup env SYNTHETIC_HEALTHCHECK=1 TARGET_PORT="$PI_WEB_UI_PORT" PROXY_PORT="$PI_WEB_PROXY_PORT" node /tmp/coder-mounted-proxy.mjs'
+        in template
+    )
+    assert 'resource "coder_app" "pi_web"' in template
+    assert 'slug         = "pi-web"' in template
+    assert 'display_name = "Pi Web UI"' in template
+    assert 'url          = "http://localhost:8651"' in template
+    assert 'share        = "owner"' in template
+    assert 'subdomain    = false' in template
+    assert 'url       = "http://localhost:8651/health"' in template
+    assert "pi.dev/install.sh" not in template
+    assert "curl | sh" not in template
+
+
+def test_readme_documents_coder_litellm_scope_boundaries() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "OpenCode Web and OpenWork inherit wizard-managed LiteLLM defaults" in readme
+    assert "Pi Web UI is still a browser-local surface and is not centrally model-restricted" in readme
+    assert "Pi Web UI does not receive a wizard-managed virtual key." in readme
+
+
 def test_default_kdense_byok_template_includes_upstream_parameterized_stack() -> None:
     template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
         encoding="utf-8"
@@ -356,7 +721,9 @@ def test_default_kdense_byok_template_includes_upstream_parameterized_stack() ->
     assert 'data "coder_parameter" "kdense_parallel_api_key" {' in template
     assert 'data "coder_parameter" "kdense_modal_token_id" {' in template
     assert 'data "coder_parameter" "kdense_modal_token_secret" {' in template
-    assert 'default      = "openrouter/anthropic/claude-opus-4.7"' in template
+    assert 'name  = "Unsloth Active (local alias)"' in template
+    assert 'value = "local-model.internal/unsloth-active"' in template
+    assert 'default      = "local-model.internal/unsloth-active"' in template
     assert 'default      = "openrouter/google/gemini-3.1-pro-preview"' in template
     assert 'default      = "disabled"' in template
     assert (
@@ -391,6 +758,8 @@ def test_default_kdense_byok_template_includes_upstream_parameterized_stack() ->
     assert "text = text.replace('// @ts-expect-error polyfill\\n', '')" in template
     assert "KDENSE_REV=archive-main" in template
     assert "normalize_model_for_gateway() {" in template
+    assert 'openrouter/*) printf \x27openai/%s\x27 "$${model#openrouter/}" ;;' in template
+    assert 'opencode-go/*) printf \x27openai/%s\x27 "$${model#opencode-go/}" ;;' in template
     assert (
         'KDENSE_DEFAULT_MODEL_EFFECTIVE=$(normalize_model_for_gateway "$KDENSE_DEFAULT_MODEL")'
         in template
@@ -428,9 +797,13 @@ def test_default_kdense_byok_template_includes_upstream_parameterized_stack() ->
     assert 'KDENSE_UPSTREAM_LITELLM="$KDENSE_SRC_DIR/litellm_config.yaml"' in template
     assert 'model_name: "openai/*"' in template
     assert "api_base: os.environ/OPENAI_API_BASE" in template
-    assert 'clone["id"] = "openai/" + str(model["id"])[len("openrouter/"):]' in template
+    assert "catalog_options = json.loads(sys.argv[5])" in template
+    assert "for option in catalog_options:" in template
+    assert 'source = dict(openrouter_models.get(option_value, {}))' in template
+    assert 'clone["id"] = "openai/" + option_value[len("openrouter/"):]' in template
     assert 'clone["provider"] = "OpenCode Go"' in template
-    assert '"id": "openai/deepseek-v4-flash"' in template
+    assert "option_value.removeprefix(\"openrouter/\")" in template
+    assert '"id": "openai/deepseek-v4-flash"' not in template
     assert "KDENSE_SETUP_STAMP=/home/coder/.cache/kdense-byok-setup-rev" in template
     assert "KDENSE_SETUP_KEY=v11-central-litellm-only" in template
     assert (
@@ -577,6 +950,10 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
         'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__"' in template
     )
     assert (
+        'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"'
+        in template
+    )
+    assert (
         'export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"'
         in template
     )
@@ -592,6 +969,7 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert 'upsert_env OPENAI_API_KEY "$OPENAI_API_KEY"' in template
     assert 'upsert_env OPENAI_API_BASE "$OPENAI_API_BASE"' in template
     assert 'upsert_env AI_DEFAULT_API_KEY "$AI_DEFAULT_API_KEY"' in template
+    assert 'upsert_env OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"' in template
     assert "upsert_env OPENROUTER_API_KEY " not in template
     assert "upsert_env NVIDIA_API_KEY " not in template
     assert "upsert_env ANTHROPIC_API_KEY " not in template
@@ -601,6 +979,11 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert 'hermes config set model.default "$HERMES_MODEL"' in template
     assert 'hermes config set model.base_url "$OPENAI_API_BASE"' in template
     assert "hermes config set terminal.cwd /home/coder" in template
+    assert 'providers[provider] = {' in template
+    assert '"name": "Dokploy LiteLLM"' in template
+    assert '"base_url": base_url' in template
+    assert '"models": {model_id: {} for model_id in model_ids}' in template
+    assert '"discover_models": False' in template
     assert "export HERMES_DASHBOARD_PORT=9119" in template
     assert "export HERMES_DASHBOARD_PROXY_PORT=9120" in template
     assert "export HERMES_WEB_UI_PORT=8648" in template
@@ -608,6 +991,8 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
     assert "export HERMES_WEBUI_PORT=8787" in template
     assert "export HERMES_WEBUI_PROXY_PORT=8788" in template
     assert "HERMES_BOOTSTRAP_SCRIPT=/tmp/hermes-workspace-bootstrap.sh" in template
+    assert 'export HERMES_HOME="$${HERMES_HOME:-/home/coder/.hermes}"' in template
+    assert 'export HERMES_INSTALL_DIR="$${HERMES_INSTALL_DIR:-/home/coder/.hermes/hermes-agent}"' in template
     assert 'nohup sh "$HERMES_BOOTSTRAP_SCRIPT" >/tmp/hermes-bootstrap.log 2>&1 &' in template
     assert "nohup hermes gateway >/tmp/hermes-gateway.log 2>&1 &" in template
     assert 'hermes dashboard --host 127.0.0.1 --port "$HERMES_DASHBOARD_PORT" --no-open' in template
@@ -616,9 +1001,10 @@ def test_default_hermes_template_includes_full_web_stack() -> None:
         in template
     )
     assert (
-        "HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install"
+        "HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR"
         in template
     )
+    assert "python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install" in template
     assert 'const SYNTHETIC_HEALTHCHECK = process.env.SYNTHETIC_HEALTHCHECK === "1";' in template
     assert (
         'const DASHBOARD_SESSION_HEADER = process.env.DASHBOARD_SESSION_HEADER === "1";' in template
@@ -728,7 +1114,7 @@ def test_hermes_template_uses_litellm_credentials(
             "hostname": "coder.example.com",
             "session_token": "session-123",
             "hermes_inference_provider": "openai",
-            "hermes_model": "unsloth-active",
+            "hermes_model": "local-model.internal/unsloth-active",
             "ai_default_base_url": "http://wizard-stack-shared-litellm:4000",
             "ai_default_api_key": "litellm-coder-hermes-key",
         }
@@ -736,13 +1122,14 @@ def test_hermes_template_uses_litellm_credentials(
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "openai",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "local-model.internal/unsloth-active",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
 
 
-def test_base_opencode_web_openwork_templates_do_not_receive_litellm_credentials(
+def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = DokployCoderBackend(
@@ -793,17 +1180,154 @@ def test_base_opencode_web_openwork_templates_do_not_receive_litellm_credentials
 
     assert template_replacements_by_name[coder_module._default_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+    assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+
+
+def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        ai_default_api_key="litellm-coder-hermes-key",
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    template_replacements_by_name: dict[str, dict[str, str] | None] = {}
+    template_push_calls: list[str] = []
+    ensure_workspace_calls: list[object] = []
+
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(
+        backend,
+        "_verify_current_compose_application",
+        lambda: type("HealthyResult", (), {"passed": True})(),
+    )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda *,
+        container_name,
+        template_dir,
+        template_name,
+        replacements: template_replacements_by_name.setdefault(template_name, replacements),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_push_default_template",
+        lambda *, template_name, **kwargs: template_push_calls.append(template_name),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: ensure_workspace_calls.append(kwargs),
+    )
+
+    notes = backend.ensure_application_ready()
+
+    assert template_push_calls == [
+        coder_module._default_template_name(),
+        coder_module._default_opencode_web_template_name(),
+        coder_module._default_openwork_template_name(),
+        coder_module._default_kdense_byok_template_name(),
+        coder_module._default_hermes_template_name(),
+        coder_module._default_pi_web_template_name(),
+    ]
+    assert ensure_workspace_calls == []
+    assert notes == (
+        "Seeded default Coder template 'ubuntu-vscode'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
+        "Seeded default Coder template 'ubuntu-vscode-openwork'.",
+        "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes'.",
+        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
+    )
+    assert template_replacements_by_name[coder_module._default_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+    assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+    assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+    assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
 
 
@@ -918,11 +1442,11 @@ def test_reconcile_coder_creates_service_and_data() -> None:
 
     assert phase.result.outcome == "applied"
     assert phase.result.hostname == "coder.example.com"
-    assert phase.result.wildcard_hostname == "*.coder.example.com"
+    assert phase.result.wildcard_hostname == "*.example.com"
     assert phase.service_resource_id == "coder-service-1"
     assert phase.data_resource_id == "coder-data-1"
     assert phase.result.config is not None
-    assert phase.result.config.wildcard_access_url == "*.coder.example.com"
+    assert phase.result.config.wildcard_access_url == "*.example.com"
 
 
 def test_reconcile_coder_runs_application_bootstrap_before_final_health_gate_on_first_apply() -> (
@@ -1011,7 +1535,11 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
 
     assert waits == ["coder.example.com"]
     assert secret_sync_calls == [
-        ("openai", "unsloth-active", "http://wizard-stack-shared-litellm:4000")
+        (
+                "dokploy-litellm",
+                "opencode-go/deepseek-v4-flash",
+                "http://wizard-stack-shared-litellm:4000",
+        )
     ]
     assert notes == (
         "Provisioned initial Coder admin for 'admin@example.com'.",
@@ -1020,6 +1548,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
         "Seeded default Coder template 'ubuntu-vscode-openwork'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
+        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
     )
 
 
@@ -1109,6 +1638,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
         coder_module._default_openwork_template_name(),
         coder_module._default_kdense_byok_template_name(),
         coder_module._default_hermes_template_name(),
+        coder_module._default_pi_web_template_name(),
     }
     assert first_user_calls == [("coder.example.com", "admin@openmerge.me", "ChangeMeSoon")]
     assert set(template_copy_calls) == expected_template_names
@@ -1126,6 +1656,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
         "Seeded default Coder template 'ubuntu-vscode-openwork'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
+        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
         "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'admin@openmerge.me'.",
     )
     assert second_notes == ()
@@ -1338,7 +1869,7 @@ def test_dokploy_coder_backend_skips_healthy_unchanged_rerun(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    compose = _render_compose_file(
+    rendered_compose = _render_compose_file(
         stack_name="wizard-stack",
         hostname="coder.example.com",
         wildcard_hostname="*.coder.example.com",
@@ -1346,13 +1877,14 @@ def test_dokploy_coder_backend_skips_healthy_unchanged_rerun(
         postgres=SharedPostgresAllocation(
             database_name="wizard_stack_coder",
             user_name="wizard_stack_coder",
-            password_secret_ref="wizard-stack-coder-postgres-password",
-        ),
-    )
+                password_secret_ref="wizard-stack-coder-postgres-password",
+            ),
+        )
+    compose = rendered_compose.compose_file
     _write_coder_hash_checkpoint(
         tmp_path,
         service_name="wizard-stack-coder",
-        compose_file=compose,
+        compose_file=rendered_compose,
     )
     client = FakeDokployApiClient()
     client.seed_existing_service(
@@ -1563,7 +2095,7 @@ def test_dokploy_coder_backend_unhealthy_api_blocks_noop_skip(
             user_name="wizard_stack_coder",
             password_secret_ref="wizard-stack-coder-postgres-password",
         ),
-    )
+    ).compose_file
     _write_coder_hash_checkpoint(
         tmp_path,
         service_name="wizard-stack-coder",
@@ -1750,6 +2282,77 @@ def test_wait_for_public_https_health_uses_expanded_bounded_budget(monkeypatch) 
     assert ok is False
     assert attempts == ["https://coder.example.com/healthz"] * 19
     assert sleep_calls == [5.0] * 18
+
+
+def test_create_coder_first_user_retries_route_not_ready_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, object]] = []
+    sleep_calls: list[float] = []
+    failures_remaining = 2
+
+    def fake_coder_request(**kwargs: object) -> dict[str, object]:
+        nonlocal failures_remaining
+        requests.append(kwargs)
+        if failures_remaining > 0:
+            failures_remaining -= 1
+            raise coder_module._CoderHTTPError(status=404)
+        return {}
+
+    monkeypatch.setattr(coder_module, "_coder_request", fake_coder_request)
+    monkeypatch.setattr(coder_module.time, "sleep", lambda delay: sleep_calls.append(delay))
+
+    coder_module._create_coder_first_user(
+        hostname="coder.example.com",
+        email="admin@example.com",
+        password="ChangeMeSoon",
+        attempts=3,
+        delay_seconds=0.25,
+    )
+
+    assert [request["method"] for request in requests] == ["POST", "POST", "POST"]
+    assert [request["path"] for request in requests] == [
+        "/api/v2/users/first",
+        "/api/v2/users/first",
+        "/api/v2/users/first",
+    ]
+    assert sleep_calls == [0.25, 0.25]
+    assert requests[-1]["payload"] == {
+        "email": "admin@example.com",
+        "username": "admin",
+        "name": "Admin",
+        "password": "ChangeMeSoon",
+    }
+
+
+def test_create_coder_first_user_persistent_404_raises_redacted_coder_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, object]] = []
+    sleep_calls: list[float] = []
+
+    def fake_coder_request(**kwargs: object) -> dict[str, object]:
+        requests.append(kwargs)
+        raise coder_module._CoderHTTPError(status=404)
+
+    monkeypatch.setattr(coder_module, "_coder_request", fake_coder_request)
+    monkeypatch.setattr(coder_module.time, "sleep", lambda delay: sleep_calls.append(delay))
+
+    with pytest.raises(coder_module.CoderError) as exc_info:
+        coder_module._create_coder_first_user(
+            hostname="coder.example.com",
+            email="admin@example.com",
+            password="ChangeMeSoon",
+            attempts=3,
+            delay_seconds=0.25,
+        )
+
+    message = str(exc_info.value)
+    assert "POST /api/v2/users/first" in message
+    assert "HTTP 404" in message
+    assert "ChangeMeSoon" not in message
+    assert len(requests) == 3
+    assert sleep_calls == [0.25, 0.25]
 
 
 def test_default_workspace_name_uses_domain_derived_coder_safe_pattern() -> None:
@@ -1959,6 +2562,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             str(coder_module._default_hermes_template_dir()),
             coder_module._default_hermes_template_name(),
         ),
+        (
+            "wizard-stack-coder-container",
+            str(coder_module._default_pi_web_template_dir()),
+            coder_module._default_pi_web_template_name(),
+        ),
     ]
     assert template_push_calls == [
         (
@@ -1991,18 +2599,52 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "session-123",
             coder_module._default_hermes_template_name(),
         ),
+        (
+            "wizard-stack-coder-container",
+            "coder.example.com",
+            "session-123",
+            coder_module._default_pi_web_template_name(),
+        ),
     ]
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+    assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+    assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "openai",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "unsloth-active",
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4-flash",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+    assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert ensure_workspace_calls == [
         (
@@ -2016,8 +2658,8 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert secret_sync_calls == [
         (
             "wizard-stack-coder-container",
-            "openai",
-            "unsloth-active",
+            "dokploy-litellm",
+            "opencode-go/deepseek-v4-flash",
             None,
         )
     ]
@@ -2028,13 +2670,17 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "Seeded default Coder template 'ubuntu-vscode-openwork'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
+        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
         "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'admin@openmerge.me'.",
     )
 
 
 def _write_coder_hash_checkpoint(
-    state_dir: Path, *, service_name: str, compose_file: str
+    state_dir: Path, *, service_name: str, compose_file: object
 ) -> None:
+    rendered_compose = getattr(compose_file, "compose_file", compose_file)
+    env_specs = getattr(compose_file, "env_specs", ())
+    assert isinstance(rendered_compose, str)
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
@@ -2044,7 +2690,8 @@ def _write_coder_hash_checkpoint(
             compose_artifact_hashes={
                 service_name: ComposeArtifactHashState.from_rendered_compose(
                     service_id=service_name,
-                    rendered_compose=compose_file,
+                    rendered_compose=rendered_compose,
+                    env_specs=env_specs,
                 )
             },
         ),

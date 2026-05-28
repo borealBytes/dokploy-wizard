@@ -10,6 +10,7 @@ from typing import Any, Callable, Literal
 from dokploy_wizard import cli
 from dokploy_wizard.bootstrap import LOCAL_HEALTH_URL
 from dokploy_wizard.dokploy import openclaw as openclaw_module
+from dokploy_wizard.packs.surfsense import SurfSenseResourceRecord
 from dokploy_wizard.state import (
     RawEnvInput,
     load_litellm_generated_keys,
@@ -100,6 +101,12 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
         session_client=dokploy_session_client,
         litellm_generated_keys=litellm_generated_keys,
     )
+    surfsense_backend = cli._build_surfsense_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
 
     results: list[ServiceVerificationResult] = [
         _verify_shared_core(shared_core_backend=shared_core_backend),
@@ -163,6 +170,13 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
                 backend=openclaw_backend,
                 desired_state=desired_state,
                 variant="my-farm-advisor",
+            )
+        )
+    if "surfsense" in desired_state.enabled_packs:
+        results.append(
+            _verify_surfsense_runtime(
+                backend=surfsense_backend,
+                desired_state=desired_state,
             )
         )
 
@@ -257,6 +271,67 @@ def _verify_advisor_runtime(
     if not isinstance(result, ServiceVerificationResult):
         raise TypeError(f"Expected ServiceVerificationResult from {variant} verifier.")
     return result
+
+
+def _verify_surfsense_runtime(*, backend: Any, desired_state: Any) -> ServiceVerificationResult:
+    check_health = getattr(backend, "check_health", None)
+    check_internal_health = getattr(backend, "check_internal_health", None)
+    if not callable(check_health) or not callable(check_internal_health):
+        return make_verification_result(
+            service_name="surfsense",
+            tier="app",
+            passed=False,
+            detail="SurfSense verification backend is unavailable.",
+        )
+
+    hostnames = {
+        "frontend": desired_state.hostnames.get("surfsense"),
+        "backend": desired_state.hostnames.get("surfsense-api"),
+        "zero": desired_state.hostnames.get("surfsense-zero"),
+    }
+    missing = sorted(name for name, hostname in hostnames.items() if not hostname)
+    if missing:
+        return make_verification_result(
+            service_name="surfsense",
+            tier="app",
+            passed=False,
+            detail=f"SurfSense verification missing hostname(s): {', '.join(missing)}.",
+        )
+
+    service = SurfSenseResourceRecord(
+        resource_id=f"{desired_state.stack_name}-surfsense",
+        resource_name=f"{desired_state.stack_name}-surfsense",
+    )
+    checks = (
+        (
+            "public frontend app",
+            check_health(service=service, url=f"https://{hostnames['frontend']}/"),
+        ),
+        (
+            "public backend /ready",
+            check_health(service=service, url=f"https://{hostnames['backend']}/ready"),
+        ),
+        (
+            "public zero-cache /keepalive",
+            check_health(service=service, url=f"https://{hostnames['zero']}/keepalive"),
+        ),
+        (
+            "internal SearXNG /healthz",
+            check_internal_health(service=service, url="http://searxng:8080/healthz"),
+        ),
+    )
+    failed = [label for label, passed in checks if not passed]
+    return make_verification_result(
+        service_name="surfsense",
+        tier="app",
+        passed=not failed,
+        detail=(
+            "SurfSense verification passed: public frontend app, public backend /ready, "
+            "public zero-cache /keepalive, and internal SearXNG /healthz are healthy."
+            if not failed
+            else "SurfSense verification failed: " + ", ".join(failed) + "."
+        ),
+    )
 
 
 @dataclass(frozen=True)

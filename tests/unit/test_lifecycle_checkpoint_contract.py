@@ -17,9 +17,9 @@ from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     RawEnvInput,
     StateValidationError,
-    parse_env_file,
     resolve_desired_state,
 )
+from tests.helpers.root_install_env import root_install_env
 
 
 def _repo_root() -> Path:
@@ -27,7 +27,7 @@ def _repo_root() -> Path:
 
 
 def _load_root_env() -> RawEnvInput:
-    raw_env = parse_env_file(_repo_root() / ".install.env")
+    raw_env = root_install_env()
     values = {
         key: value
         for key, value in raw_env.values.items()
@@ -47,8 +47,10 @@ def test_phase_order_preserves_infra_prereqs_but_uses_required_mvp_pack_sequence
     assert _index("seaweedfs") < _index("headscale") < _index("tailscale")
     assert _index("tailscale") < _index("nextcloud") < _index("coder") < _index("openclaw")
     assert _index("openclaw") < _index("my-farm-advisor")
+    assert _index("my-farm-advisor") < _index("surfsense")
     assert _index("openclaw") < _index("cloudflare_access")
     assert _index("my-farm-advisor") < _index("cloudflare_access")
+    assert _index("cloudflare_access") < _index("surfsense")
 
 
 def test_root_mvp_env_applicable_phases_follow_required_order_and_keep_coder() -> None:

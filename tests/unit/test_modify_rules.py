@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
-from dokploy_wizard.lifecycle import classify_modify_request
+from dokploy_wizard.lifecycle import LifecyclePlan, classify_modify_request
 from dokploy_wizard.packs.catalog import (
     get_mutable_pack_env_keys,
     get_mutable_pack_resource_keys,
@@ -420,16 +422,67 @@ def test_modify_rejects_unmodeled_env_changes() -> None:
         )
 
 
+def test_modify_ignores_redundant_pack_enable_flags_when_packs_is_authoritative() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "my-farm-advisor",
+            "ENABLE_MY_FARM_ADVISOR": "true",
+            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "my-farm-advisor",
+            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "my-farm-advisor",
+                "cloudflare_access",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert existing_desired.enabled_packs == requested_desired.enabled_packs == ("my-farm-advisor",)
+    assert plan.mode == "noop"
+    assert plan.phases_to_run == ()
+
+
 def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
     assert get_mutable_pack_env_keys() == (
         "ADVISOR_GATEWAY_PASSWORD",
         "AI_DEFAULT_API_KEY",
         "AI_DEFAULT_BASE_URL",
+        "AI_DEFAULT_MODEL",
+        "AI_DEFAULT_PROVIDER",
         "ANTHROPIC_API_KEY",
         "CF_ACCOUNT_ID",
         "DATA_MODE",
         "HERMES_INFERENCE_PROVIDER",
         "HERMES_MODEL",
+        "LITELLM_OPENCODE_GO_API_KEY",
+        "LITELLM_OPENROUTER_API_KEY",
+        "LITELLM_OPENROUTER_MODELS",
         "MY_FARM_ADVISOR_CHANNELS",
         "MY_FARM_ADVISOR_FALLBACK_MODELS",
         "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
@@ -487,6 +540,18 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "R2_BUCKET_NAME",
         "R2_ENDPOINT",
         "R2_SECRET_ACCESS_KEY",
+        "SURFSENSE_API_PUBLIC_URL",
+        "SURFSENSE_API_SUBDOMAIN",
+        "SURFSENSE_AUTH_TYPE",
+        "SURFSENSE_EMBEDDING_MODEL",
+        "SURFSENSE_ETL_SERVICE",
+        "SURFSENSE_FALLBACK_MODELS",
+        "SURFSENSE_FRONTEND_PUBLIC_URL",
+        "SURFSENSE_PRIMARY_MODEL",
+        "SURFSENSE_SUBDOMAIN",
+        "SURFSENSE_VERSION",
+        "SURFSENSE_ZERO_PUBLIC_URL",
+        "SURFSENSE_ZERO_SUBDOMAIN",
         "TELEGRAM_ALLOWED_USERS",
         "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
         "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
@@ -587,6 +652,210 @@ def test_modify_coder_hermes_env_change_reruns_coder() -> None:
 
     assert plan.start_phase == "shared_core"
     assert plan.phases_to_run == ("shared_core", "coder")
+
+
+def _classify_surfsense_modify(
+    *,
+    existing_values: dict[str, str],
+    requested_values: dict[str, str],
+) -> LifecyclePlan:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "surfsense",
+            **existing_values,
+        }
+    )
+    requested_raw = _raw(
+        {
+            **existing_raw.values,
+            **requested_values,
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    return classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "surfsense",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "old_value", "new_value"),
+    (
+        ("SURFSENSE_VERSION", "0.0.25", "0.0.26"),
+        (
+            "SURFSENSE_FRONTEND_PUBLIC_URL",
+            "https://research.example.com",
+            "https://surfsense.example.com",
+        ),
+        (
+            "SURFSENSE_API_PUBLIC_URL",
+            "https://research-api.example.com",
+            "https://surfsense-api.example.com",
+        ),
+        (
+            "SURFSENSE_ZERO_PUBLIC_URL",
+            "https://research-zero.example.com",
+            "https://surfsense-zero.example.com",
+        ),
+        ("SURFSENSE_AUTH_TYPE", "DISABLED", "OIDC"),
+        ("SURFSENSE_ETL_SERVICE", "DOCLING", "UNSTRUCTURED"),
+        ("SURFSENSE_EMBEDDING_MODEL", "text-embedding-3-small", "custom-embedding"),
+    ),
+)
+def test_modify_surfsense_runtime_key_change_reruns_surfsense(
+    key: str, old_value: str, new_value: str
+) -> None:
+    plan = _classify_surfsense_modify(
+        existing_values={key: old_value},
+        requested_values={key: new_value},
+    )
+
+    assert plan.mode == "modify"
+    assert plan.start_phase == "surfsense"
+    assert plan.phases_to_run == ("surfsense",)
+
+
+@pytest.mark.parametrize(
+    ("key", "old_value", "new_value"),
+    (
+        (
+            "SURFSENSE_PRIMARY_MODEL",
+            "local-model.internal/unsloth-active",
+            "openrouter/hunter-alpha",
+        ),
+        (
+            "SURFSENSE_FALLBACK_MODELS",
+            "openrouter/hunter-alpha",
+            "openrouter/healer-alpha,openrouter/sonoma-dusk-alpha",
+        ),
+    )
+)
+def test_modify_surfsense_model_key_change_reruns_litellm_and_surfsense(
+    key: str, old_value: str, new_value: str
+) -> None:
+    plan = _classify_surfsense_modify(
+        existing_values={key: old_value},
+        requested_values={key: new_value},
+    )
+
+    assert plan.mode == "modify"
+    assert plan.start_phase == "shared_core"
+    assert plan.phases_to_run == ("shared_core", "surfsense")
+
+
+def test_modify_litellm_desired_only_local_alias_removal_reruns_consumers() -> None:
+    raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "coder,my-farm-advisor,nextcloud",
+            "AI_DEFAULT_PROVIDER": "openrouter",
+            "AI_DEFAULT_MODEL": "deepseek/deepseek-v4-flash:free",
+            "LITELLM_OPENROUTER_API_KEY": "sk-test-openrouter",
+            "LITELLM_OPENROUTER_MODELS": "deepseek/deepseek-v4-flash:free",
+        }
+    )
+    requested_desired = resolve_desired_state(raw)
+    assert requested_desired.shared_core.litellm is not None
+    assert requested_desired.shared_core.litellm.default_model_alias_order == (
+        "openrouter/deepseek/deepseek-v4-flash:free",
+    )
+
+    legacy_litellm = replace(
+        requested_desired.shared_core.litellm,
+        default_model_alias_order=(
+            "local-model.internal/unsloth-active",
+            *requested_desired.shared_core.litellm.default_model_alias_order,
+        ),
+    )
+    existing_desired = replace(
+        requested_desired,
+        shared_core=replace(requested_desired.shared_core, litellm=legacy_litellm),
+    )
+
+    plan = classify_modify_request(
+        existing_raw=raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "nextcloud",
+                "coder",
+                "my-farm-advisor",
+                "cloudflare_access",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert plan.start_phase == "shared_core"
+    assert plan.raw_equivalent is True
+    assert plan.desired_equivalent is False
+    assert plan.phases_to_run == ("shared_core", "coder", "my-farm-advisor")
+
+
+def test_modify_rejects_arbitrary_desired_only_shared_core_drift() -> None:
+    raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "coder",
+        }
+    )
+    requested_desired = resolve_desired_state(raw)
+    existing_desired = replace(
+        requested_desired,
+        shared_core=replace(
+            requested_desired.shared_core,
+            network_name="legacy-shared-network",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="not modeled as supported runtime mutations"):
+        classify_modify_request(
+            existing_raw=raw,
+            existing_desired=existing_desired,
+            existing_applied=AppliedStateCheckpoint(
+                format_version=1,
+                desired_state_fingerprint=existing_desired.fingerprint(),
+                completed_steps=(
+                    "preflight",
+                    "dokploy_bootstrap",
+                    "networking",
+                    "shared_core",
+                    "coder",
+                ),
+            ),
+            existing_ledger=OwnershipLedger(format_version=1, resources=()),
+            requested_raw=raw,
+            requested_desired=requested_desired,
+        )
 
 
 def test_modify_uses_explicit_pack_mutable_resource_contract() -> None:

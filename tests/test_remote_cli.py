@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib
+import io
 import subprocess
+import tarfile
 from pathlib import Path
 from types import ModuleType
 
@@ -66,6 +68,19 @@ def test_remote_parser_defaults_match_contract() -> None:
     assert str(proof_args.env_file) == ".install.env"
     assert proof_args.strict_idempotency is False
     assert strict_proof_args.strict_idempotency is True
+
+
+@pytest.mark.parametrize(
+    "subcommand",
+    ["install", "modify", "uninstall", "inspect-state", "proof"],
+)
+def test_remote_parser_accepts_verbose_for_each_subcommand(subcommand: str) -> None:
+    remote_cli = import_remote_cli_module()
+
+    parser = remote_cli.build_parser()
+    args = parser.parse_args([subcommand, "--host", "example.com", "--verbose"])
+
+    assert args.verbose is True
 
 
 @pytest.mark.parametrize(
@@ -164,3 +179,119 @@ def test_fresh_validation_errors_redact_password() -> None:
     assert result.returncode != 0
     assert "confirm-file" in result.stderr.lower()
     assert password not in result.stderr
+
+
+def test_missing_env_file_verbose_fails_cleanly_without_traceback_or_password() -> None:
+    assert CLI.exists(), f"expected remote CLI wrapper at {CLI}"
+
+    password = "super-secret-password"
+    result = run_cli(
+        "proof",
+        "--host",
+        "example.com",
+        "--password",
+        password,
+        "--env-file",
+        "/tmp/does-not-exist",
+        "--verbose",
+    )
+
+    assert result.returncode != 0
+    assert "install env file does not exist: /tmp/does-not-exist" in result.stderr
+    assert "[remote] starting remote proof" in result.stderr
+    assert "[remote] remote proof failed" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert password not in result.stderr
+
+
+def test_create_repo_archive_excludes_local_env_backups(tmp_path: Path) -> None:
+    remote_cli = import_remote_cli_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "keep.txt").write_text("safe\n", encoding="utf-8")
+    (repo_root / ".install.env.example").write_text("safe-example\n", encoding="utf-8")
+    (repo_root / ".install.env.bak").write_text("secret\n", encoding="utf-8")
+    (repo_root / ".install.env.swp").write_text("secret\n", encoding="utf-8")
+    (repo_root / ".fresh-vps-validation.env.backup").write_text("secret\n", encoding="utf-8")
+
+    archive_path = tmp_path / "repo.tar.gz"
+    remote_cli._create_repo_archive(repo_root=repo_root, destination=archive_path)
+
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members = set(archive.getnames())
+
+    assert "keep.txt" in members
+    assert ".install.env.example" in members
+    assert ".install.env.bak" not in members
+    assert ".install.env.swp" not in members
+    assert ".fresh-vps-validation.env.backup" not in members
+
+
+def test_runtime_error_redaction_masks_env_payload_values() -> None:
+    remote_cli = import_remote_cli_module()
+    password = "super-secret-password"
+    sentinel = "SECRET_TEST_OPENCLAW_PROVIDER_VALUE"
+
+    message = remote_cli._redact_runtime_message(
+        (
+            f"ssh failed with {password}\n"
+            "# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
+            "key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:def456\n"
+            f"OPENCLAW_PROVIDER_API_KEY={sentinel}"
+        ),
+        password=password,
+    )
+
+    assert password not in message
+    assert sentinel not in message
+    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in message
+    assert "fingerprint=sha256:def456" in message
+
+
+def test_verbose_progress_output_redacts_password_env_payload_and_docker_pat() -> None:
+    remote_cli = import_remote_cli_module()
+    password = "super-secret-password"
+    env_secret = "SECRET_TEST_OPENCLAW_PROVIDER_VALUE"
+    docker_pat = "ghp_SECRETTESTDOCKERPATVALUE"
+    stream = io.StringIO()
+    reporter = remote_cli._RemoteProgressReporter(
+        verbose=True,
+        password=password,
+        stream=stream,
+    )
+
+    reporter.progress(f"connecting with password={password}")
+    reporter.remote_output(
+        "mutate-install",
+        "stdout",
+        "# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
+        "key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:def456",
+    )
+    reporter.remote_output(
+        "mutate-install",
+        "stdout",
+        f"OPENCLAW_PROVIDER_API_KEY={env_secret}",
+    )
+    reporter.remote_output("mutate-install", "stderr", f"DOCKER_PAT={docker_pat}")
+
+    output = stream.getvalue()
+    assert password not in output
+    assert env_secret not in output
+    assert docker_pat not in output
+    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in output
+    assert "DOCKER_PAT=<REDACTED>" in output
+
+
+def test_non_verbose_progress_output_suppresses_remote_stream_lines() -> None:
+    remote_cli = import_remote_cli_module()
+    stream = io.StringIO()
+    reporter = remote_cli._RemoteProgressReporter(
+        verbose=False,
+        password="super-secret-password",
+        stream=stream,
+    )
+
+    reporter.remote_output("mutate-install", "progress", "still running mutate-install")
+    reporter.remote_output("mutate-install", "stdout", "normal install output")
+
+    assert stream.getvalue() == ""

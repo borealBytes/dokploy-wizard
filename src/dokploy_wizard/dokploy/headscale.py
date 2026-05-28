@@ -17,7 +17,12 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
-from dokploy_wizard.dokploy.compose_noop import apply_compose_noop_guard
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    apply_rendered_compose_to_existing,
+    persist_compose_artifact_hash_if_checkpoint_present,
+)
+from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
 from dokploy_wizard.packs.headscale.models import HeadscaleResourceRecord
 from dokploy_wizard.packs.headscale.reconciler import HeadscaleError, _http_health_check
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
@@ -34,7 +39,9 @@ class DokployHeadscaleApi(Protocol):
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord: ...
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord: ...
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord: ...
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -178,13 +185,23 @@ class DokployHeadscaleBackend:
                 created = self._client.create_compose(
                     name=self._service_name,
                     environment_id=environment.environment_id,
-                    compose_file=compose_file,
+                    compose_file="services: {}\n",
                     app_name=self._service_name,
+                )
+                apply_rendered_compose_to_existing(
+                    client=self._client,
+                    compose_id=created.compose_id,
+                    rendered_compose=compose_file,
                 )
                 self._client.deploy_compose(
                     compose_id=created.compose_id,
                     title="dokploy-wizard headscale reconcile",
                     description="Create Headscale compose app",
+                )
+                persist_compose_artifact_hash_if_checkpoint_present(
+                    state_dir=self._state_dir,
+                    service_key=self._service_name,
+                    rendered_compose=compose_file,
                 )
                 locator = _ComposeLocator(
                     project_id=project.project_id,
@@ -202,13 +219,23 @@ class DokployHeadscaleBackend:
             created_compose = self._client.create_compose(
                 name=self._service_name,
                 environment_id=created_project.environment_id,
-                compose_file=compose_file,
+                compose_file="services: {}\n",
                 app_name=self._service_name,
+            )
+            apply_rendered_compose_to_existing(
+                client=self._client,
+                compose_id=created_compose.compose_id,
+                rendered_compose=compose_file,
             )
             self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
                 title="dokploy-wizard headscale reconcile",
                 description="Create Headscale compose app",
+            )
+            persist_compose_artifact_hash_if_checkpoint_present(
+                state_dir=self._state_dir,
+                service_key=self._service_name,
+                rendered_compose=compose_file,
             )
         except DokployApiError as error:
             raise HeadscaleError(str(error)) from error
@@ -273,10 +300,14 @@ def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSumma
     return project.environments[0]
 
 
-def _render_compose_file(service_name: str, hostname: str, secret_refs: tuple[str, ...]) -> str:
+def _render_compose_file(
+    service_name: str, hostname: str, secret_refs: tuple[str, ...]
+) -> RenderedCompose:
     admin_secret_ref, noise_secret_ref = secret_refs
+    admin_env = _env_name_from_secret_ref(admin_secret_ref)
+    noise_env = _env_name_from_secret_ref(noise_secret_ref)
     volume_name = f"{service_name}-data"
-    return (
+    compose_file = (
         "services:\n"
         f"  {service_name}:\n"
         "    image: headscale/headscale:latest\n"
@@ -298,8 +329,8 @@ def _render_compose_file(service_name: str, hostname: str, secret_refs: tuple[st
         "      HEADSCALE_LOG_LEVEL: info\n"
         "      HEADSCALE_DNS_OVERRIDE_LOCAL_DNS: 'false'\n"
         "      HEADSCALE_DNS_MAGIC_DNS: 'false'\n"
-        f"      HEADSCALE_ADMIN_API_KEY: ${{{admin_secret_ref}:-change-me}}\n"
-        f"      HEADSCALE_NOISE_PRIVATE_KEY: ${{{noise_secret_ref}:-change-me}}\n"
+        f"      HEADSCALE_ADMIN_API_KEY: \"{_required_placeholder(admin_env)}\"\n"
+        f"      HEADSCALE_NOISE_PRIVATE_KEY: \"{_required_placeholder(noise_env)}\"\n"
         "    labels:\n"
         '      traefik.enable: "true"\n'
         f'      traefik.http.routers.{service_name}.entrypoints: "websecure"\n'
@@ -319,6 +350,43 @@ def _render_compose_file(service_name: str, hostname: str, secret_refs: tuple[st
         "  dokploy-network:\n"
         "    external: true\n"
     )
+    return RenderedCompose(
+        compose_file=compose_file,
+        env_specs=(
+            _headscale_env_spec(
+                name=admin_env,
+                value="change-me",
+                target_services=(service_name,),
+                source="headscale-admin-api-key",
+            ),
+            _headscale_env_spec(
+                name=noise_env,
+                value="change-me",
+                target_services=(service_name,),
+                source="headscale-noise-private-key",
+            ),
+        ),
+    )
+
+
+def _headscale_env_spec(
+    *, name: str, value: str, target_services: tuple[str, ...], source: str
+) -> DokployEnvSpec:
+    return DokployEnvSpec(
+        variable=DokployEnvVar(name=name, value=value, sensitive=True, source=source),
+        owner="headscale",
+        target_services=target_services,
+        placeholder=_required_placeholder(name),
+        required=True,
+    )
+
+
+def _required_placeholder(name: str) -> str:
+    return f"${{{name}:?{name} is required}}"
+
+
+def _env_name_from_secret_ref(secret_ref: str) -> str:
+    return "".join(char if char.isalnum() else "_" for char in secret_ref).upper()
 
 
 def _wait_for_headscale_health(

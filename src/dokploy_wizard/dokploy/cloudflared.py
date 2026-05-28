@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import time
 from dataclasses import dataclass
@@ -19,7 +18,12 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
-from dokploy_wizard.dokploy.compose_noop import apply_compose_noop_guard
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    apply_rendered_compose_to_existing,
+    persist_compose_artifact_hash_if_checkpoint_present,
+)
+from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 
@@ -44,7 +48,9 @@ class DokployCloudflaredApi(Protocol):
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord: ...
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord: ...
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord: ...
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -141,7 +147,7 @@ class DokployCloudflaredBackend:
         return None
 
     def _ensure_compose_applied(self, *, tunnel_token: str) -> _ComposeLocator:
-        compose_file = _render_compose_file(self._service_name, tunnel_token=tunnel_token)
+        rendered_compose = _render_compose_file(self._service_name, tunnel_token=tunnel_token)
         try:
             projects = self._client.list_projects()
             for project in projects:
@@ -158,7 +164,7 @@ class DokployCloudflaredBackend:
                             compose_id=compose.compose_id,
                         )
                         applied = apply_compose_noop_guard(
-                            rendered_compose=compose_file,
+                            rendered_compose=rendered_compose,
                             service_key=self._service_name,
                             state_dir=self._state_dir,
                             client=self._client,
@@ -179,18 +185,28 @@ class DokployCloudflaredBackend:
                 created = self._client.create_compose(
                     name=self._service_name,
                     environment_id=environment.environment_id,
-                    compose_file=compose_file,
+                    compose_file="services: {}\n",
                     app_name=self._service_name,
                 )
-                self._client.deploy_compose(
+                updated = apply_rendered_compose_to_existing(
+                    client=self._client,
                     compose_id=created.compose_id,
+                    rendered_compose=rendered_compose,
+                )
+                self._client.deploy_compose(
+                    compose_id=updated.compose_id,
                     title="dokploy-wizard cloudflared reconcile",
                     description="Create Cloudflare Tunnel connector compose app",
+                )
+                persist_compose_artifact_hash_if_checkpoint_present(
+                    state_dir=self._state_dir,
+                    service_key=self._service_name,
+                    rendered_compose=rendered_compose,
                 )
                 locator = _ComposeLocator(
                     project_id=project.project_id,
                     environment_id=environment.environment_id,
-                    compose_id=created.compose_id,
+                    compose_id=updated.compose_id,
                 )
                 self._applied_locator = locator
                 return locator
@@ -203,18 +219,28 @@ class DokployCloudflaredBackend:
             created = self._client.create_compose(
                 name=self._service_name,
                 environment_id=created_project.environment_id,
-                compose_file=compose_file,
+                compose_file="services: {}\n",
                 app_name=self._service_name,
             )
-            self._client.deploy_compose(
+            updated = apply_rendered_compose_to_existing(
+                client=self._client,
                 compose_id=created.compose_id,
+                rendered_compose=rendered_compose,
+            )
+            self._client.deploy_compose(
+                compose_id=updated.compose_id,
                 title="dokploy-wizard cloudflared reconcile",
                 description="Create Cloudflare Tunnel connector compose app",
+            )
+            persist_compose_artifact_hash_if_checkpoint_present(
+                state_dir=self._state_dir,
+                service_key=self._service_name,
+                rendered_compose=rendered_compose,
             )
             locator = _ComposeLocator(
                 project_id=created_project.project_id,
                 environment_id=created_project.environment_id,
-                compose_id=created.compose_id,
+                compose_id=updated.compose_id,
             )
             self._applied_locator = locator
             return locator
@@ -259,9 +285,9 @@ def _parse_resource_id(resource_id: str) -> str | None:
     return compose_id
 
 
-def _render_compose_file(service_name: str, *, tunnel_token: str) -> str:
-    encoded_token = json.dumps(tunnel_token)
-    return (
+def _render_compose_file(service_name: str, *, tunnel_token: str) -> RenderedCompose:
+    tunnel_token_env = "CLOUDFLARE_TUNNEL_TOKEN"
+    compose_file = (
         "services:\n"
         f"  {service_name}:\n"
         "    image: cloudflare/cloudflared:latest\n"
@@ -269,8 +295,47 @@ def _render_compose_file(service_name: str, *, tunnel_token: str) -> str:
         "    network_mode: host\n"
         "    command: ['tunnel', '--no-autoupdate', 'run']\n"
         "    environment:\n"
-        f"      TUNNEL_TOKEN: {encoded_token}\n"
+        f"      TUNNEL_TOKEN: \"{_required_placeholder(tunnel_token_env)}\"\n"
     )
+    return RenderedCompose(
+        compose_file=compose_file,
+        env_specs=(
+            _cloudflared_env_spec(
+                name=tunnel_token_env,
+                value=tunnel_token,
+                owner="cloudflared",
+                target_services=(service_name,),
+                source="cloudflare-tunnel-token",
+            ),
+        ),
+    )
+
+
+def _cloudflared_env_spec(
+    *,
+    name: str,
+    value: str,
+    owner: str,
+    target_services: tuple[str, ...],
+    source: str,
+    sensitive: bool = True,
+) -> DokployEnvSpec:
+    return DokployEnvSpec(
+        variable=DokployEnvVar(
+            name=name,
+            value=value,
+            sensitive=sensitive,
+            source=source,
+        ),
+        owner=owner,
+        target_services=target_services,
+        placeholder=_required_placeholder(name),
+        required=True,
+    )
+
+
+def _required_placeholder(name: str) -> str:
+    return f"${{{name}:?{name} is required}}"
 
 
 def _docker_container_is_up(service_name: str) -> bool:

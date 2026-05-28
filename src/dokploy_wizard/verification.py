@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -36,6 +36,8 @@ _TOKEN_VALUE_PATTERN = re.compile(
     r"\b(?:sk-[A-Za-z0-9_\-]+|tskey-[A-Za-z0-9_\-]+|gh[pousr]_[A-Za-z0-9_\-]+|"
     r"github_pat_[A-Za-z0-9_\-]+)\b"
 )
+_WIZARD_ENV_MARKER_PREFIX = "# dokploy-wizard-env"
+_REDACTION_VALUE = "<REDACTED>"
 
 
 @dataclass(frozen=True)
@@ -130,12 +132,77 @@ class ServiceVerificationResult:
 def redact_text(value: str) -> str:
     """Replace token/password-like substrings with <REDACTED>."""
 
-    redacted = value
+    redacted = redact_dokploy_env_payload(value)
     for pattern in _KEY_VALUE_PATTERNS:
         redacted = pattern.sub(_replace_secret_value, redacted)
     for pattern in _AUTH_PATTERNS:
         redacted = pattern.sub(r"\1<REDACTED>", redacted)
-    return _TOKEN_VALUE_PATTERN.sub("<REDACTED>", redacted)
+    return _TOKEN_VALUE_PATTERN.sub(_REDACTION_VALUE, redacted)
+
+
+def redact_dokploy_env_payload(value: str) -> str:
+    """Redact wizard-owned Dokploy env payload assignment values."""
+
+    lines: list[str] = []
+    redact_next_assignment = False
+    for line in value.splitlines(keepends=True):
+        line_body = line.removesuffix("\n").removesuffix("\r")
+        line_ending = line[len(line_body) :]
+        if redact_next_assignment and _looks_like_env_assignment(line_body):
+            key = line_body.split("=", 1)[0]
+            lines.append(f"{key}={_REDACTION_VALUE}{line_ending}")
+            redact_next_assignment = False
+            continue
+        redact_next_assignment = line_body.startswith(_WIZARD_ENV_MARKER_PREFIX)
+        lines.append(line)
+    return "".join(lines)
+
+
+def redact_data(value: Any) -> Any:
+    """Recursively redact strings and secret-keyed mapping values."""
+
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, Mapping):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and key_is_sensitive(key):
+                redacted[key] = _REDACTION_VALUE
+            else:
+                redacted[key] = redact_data(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_data(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_data(item) for item in value)
+    return value
+
+
+def redacted_env_spec_metadata(env_specs: Sequence[Any]) -> tuple[dict[str, Any], ...]:
+    """Return public env-spec metadata without raw values."""
+
+    redacted: list[dict[str, Any]] = []
+    for spec in env_specs:
+        entry: dict[str, Any] = {
+            "dokploy_scope": getattr(spec, "dokploy_scope"),
+            "name": getattr(spec, "name"),
+            "owner": getattr(spec, "owner"),
+            "ownership_marker": getattr(spec, "ownership_marker"),
+            "redacted_fingerprint": getattr(spec, "redacted_fingerprint"),
+            "required": getattr(spec, "required"),
+            "sensitive": getattr(spec, "sensitive"),
+            "source": getattr(spec, "source"),
+            "target_services": list(getattr(spec, "target_services")),
+        }
+        placeholder = getattr(spec, "placeholder")
+        if placeholder is not None:
+            entry["placeholder"] = placeholder
+        redacted.append(entry)
+    return tuple(redacted)
+
+
+def key_is_sensitive(key: str) -> bool:
+    return re.search(_SECRET_NAME_PATTERN, key, flags=re.IGNORECASE) is not None
 
 
 def redact_command(command: Sequence[str] | str) -> str:
@@ -177,4 +244,11 @@ def make_verification_result(
 
 def _replace_secret_value(match: re.Match[str]) -> str:
     suffix = match.group(3) if match.lastindex and match.lastindex >= 3 else ""
-    return f"{match.group(1)}<REDACTED>{suffix}"
+    return f"{match.group(1)}{_REDACTION_VALUE}{suffix}"
+
+
+def _looks_like_env_assignment(line: str) -> bool:
+    if line == "" or line.lstrip().startswith("#") or "=" not in line:
+        return False
+    key = line.split("=", 1)[0]
+    return re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key) is not None

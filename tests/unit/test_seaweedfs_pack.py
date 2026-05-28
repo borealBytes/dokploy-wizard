@@ -50,6 +50,9 @@ class FakeSeaweedFsBackend:
     health_ok: bool = True
     update_service_calls: int = 0
 
+    def get_credentials(self) -> tuple[str, str] | None:
+        return None
+
     def get_service(self, resource_id: str) -> SeaweedFsResourceRecord | None:
         if self.existing_service is not None and self.existing_service.resource_id == resource_id:
             return self.existing_service
@@ -180,9 +183,13 @@ class FakeDokployApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        del compose_id, compose_file
-        raise AssertionError("SeaweedFS backend should not update compose apps in this task")
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        del env
+        if compose_file is not None:
+            self.last_create_compose_file = compose_file
+        return DokployComposeRecord(compose_id=compose_id, name="wizard-stack-seaweedfs")
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -439,16 +446,17 @@ def test_local_https_health_check_uses_host_header(monkeypatch: pytest.MonkeyPat
 def test_dokploy_seaweedfs_backend_skips_redeploy_when_hash_matches_and_container_is_up(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    compose_file = _render_compose_file(
+    rendered_compose = _render_compose_file(
         stack_name="wizard-stack",
         hostname="s3.example.com",
         access_key="seaweed-access",
         secret_key="seaweed-secret",
     )
+    compose_file = rendered_compose.compose_file
     _write_hash_checkpoint(
         tmp_path,
         service_name="wizard-stack-seaweedfs",
-        rendered_compose=compose_file,
+        rendered_compose=rendered_compose,
     )
     client = SharedFakeDokployApiClient()
     client.seed_existing_service(
@@ -486,7 +494,10 @@ def test_dokploy_seaweedfs_backend_skips_redeploy_when_hash_matches_and_containe
     client.assert_unchanged_service("wizard-stack-seaweedfs")
 
 
-def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: str) -> None:
+def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: object) -> None:
+    compose_file = getattr(rendered_compose, "compose_file", rendered_compose)
+    env_specs = getattr(rendered_compose, "env_specs", ())
+    assert isinstance(compose_file, str)
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
@@ -496,7 +507,8 @@ def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compo
             compose_artifact_hashes={
                 service_name: ComposeArtifactHashState.from_rendered_compose(
                     service_id=service_name,
-                    rendered_compose=rendered_compose,
+                    rendered_compose=compose_file,
+                    env_specs=env_specs,
                 )
             },
         ),

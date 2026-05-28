@@ -50,7 +50,12 @@ from dokploy_wizard.state import (
     write_ownership_ledger,
 )
 from dokploy_wizard.verification import make_verification_result
-from tests.unit.test_openclaw_pack import FakeDokployOpenClawApi, _service_environment
+from tests.unit.test_openclaw_pack import (
+    FakeDokployOpenClawApi,
+    _env_payload_values,
+    _required_placeholder,
+    _service_environment,
+)
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -442,6 +447,7 @@ class RecordingDokployOpenClawApi(FakeDokployOpenClawApi):
     project_name: str | None = None
     compose_names_by_id: dict[str, str] = field(default_factory=dict)
     compose_files_by_name: dict[str, str] = field(default_factory=dict)
+    compose_env_by_name: dict[str, str] = field(default_factory=dict)
     create_calls_by_name: list[str] = field(default_factory=list)
     update_calls_by_name: list[str] = field(default_factory=list)
     deploy_calls_by_name: list[str] = field(default_factory=list)
@@ -485,11 +491,18 @@ class RecordingDokployOpenClawApi(FakeDokployOpenClawApi):
         self.last_create_compose_file = compose_file
         return DokployComposeRecord(compose_id=compose_id, name=name)
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
         name = self.compose_names_by_id[compose_id]
-        self.compose_files_by_name[name] = compose_file
-        self.update_calls_by_name.append(name)
-        self.last_update_compose_file = compose_file
+        if env is not None:
+            self.compose_env_by_name[name] = env
+            self.last_update_env = env
+        if compose_file is not None:
+            self.compose_files_by_name[name] = compose_file
+            self.update_calls_by_name.append(name)
+            self.last_update_compose_file = compose_file
+            self.last_create_compose_file = compose_file
         return DokployComposeRecord(compose_id=compose_id, name=name)
 
     def deploy_compose(
@@ -621,6 +634,7 @@ def _patch_real_dokploy_openclaw_backend(
     )
     monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
     monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._build_local_sidecar_image", lambda **_: None)
     monkeypatch.setattr(
         DokployOpenClawBackend,
         "_verify_service_runtime",
@@ -1184,17 +1198,19 @@ def test_install_fresh_my_farm_only_renders_compose_and_persists_lifecycle_state
     assert "farm-stack-my-farm-advisor-data:/data" in compose
     assert service_environment["ADVISOR_VARIANT"] == "my-farm-advisor"
     assert service_environment["ADVISOR_CANONICAL_HOSTNAME"] == "farm.example.com"
-    assert service_environment["OPENAI_BASE_URL"] == "http://farm-stack-shared-litellm:4000"
-    assert service_environment["OPENAI_API_KEY"] == generated_keys.virtual_keys["my-farm-advisor"]
-    assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == generated_keys.virtual_keys[
-        "my-farm-advisor"
-    ]
-    assert service_environment["PRIMARY_MODEL"] == "anthropic/claude-sonnet-4"
+    assert service_environment["OPENAI_BASE_URL"] == _required_placeholder("OPENAI_BASE_URL")
+    assert service_environment["OPENAI_API_KEY"] == _required_placeholder("OPENAI_API_KEY")
+    assert service_environment["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == _required_placeholder("LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR")
+    assert service_environment["PRIMARY_MODEL"] == _required_placeholder("PRIMARY_MODEL")
+    env_values = _env_payload_values(api.compose_env_by_name["farm-stack-my-farm-advisor"])
+    assert env_values["OPENAI_BASE_URL"] == "http://farm-stack-shared-litellm:4000"
+    assert env_values["OPENAI_API_KEY"] == generated_keys.virtual_keys["my-farm-advisor"]
+    assert env_values["PRIMARY_MODEL"] == "anthropic/claude-sonnet-4"
     assert "OPENROUTER_API_KEY" not in service_environment
     assert "NVIDIA_API_KEY" not in service_environment
     assert "ANTHROPIC_API_KEY" not in service_environment
     assert service_environment["HOME"] == "/data"
-    assert service_environment["OPENCLAW_SYNC_SKILLS_ON_START"] == "0"
+    assert service_environment["OPENCLAW_SYNC_SKILLS_ON_START"] == _required_placeholder("OPENCLAW_SYNC_SKILLS_ON_START")
     assert loaded_state.applied_state is not None
     assert loaded_state.applied_state.completed_steps == (
         "preflight",
@@ -1338,15 +1354,17 @@ def test_dual_advisors_use_distinct_litellm_virtual_keys(
         "my-farm-advisor",
         "cloudflare_access",
     ]
-    assert openclaw_env["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
-    assert farm_env["OPENAI_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
-    assert openclaw_env["OPENAI_API_KEY"] == generated_keys.virtual_keys["openclaw"]
-    assert farm_env["OPENAI_API_KEY"] == generated_keys.virtual_keys["my-farm-advisor"]
-    assert openclaw_env["OPENAI_API_KEY"] != farm_env["OPENAI_API_KEY"]
-    assert openclaw_env["LITELLM_VIRTUAL_KEY_OPENCLAW"] == generated_keys.virtual_keys["openclaw"]
-    assert farm_env["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == generated_keys.virtual_keys[
-        "my-farm-advisor"
-    ]
+    assert openclaw_env["OPENAI_BASE_URL"] == _required_placeholder("OPENAI_BASE_URL")
+    assert farm_env["OPENAI_BASE_URL"] == _required_placeholder("OPENAI_BASE_URL")
+    assert openclaw_env["OPENAI_API_KEY"] == _required_placeholder("OPENAI_API_KEY")
+    assert farm_env["OPENAI_API_KEY"] == _required_placeholder("OPENAI_API_KEY")
+    assert openclaw_env["LITELLM_VIRTUAL_KEY_OPENCLAW"] == _required_placeholder("LITELLM_VIRTUAL_KEY_OPENCLAW")
+    assert farm_env["LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR"] == _required_placeholder("LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR")
+    openclaw_env_values = _env_payload_values(api.compose_env_by_name["wizard-stack-openclaw"])
+    farm_env_values = _env_payload_values(api.compose_env_by_name["wizard-stack-my-farm-advisor"])
+    assert openclaw_env_values["OPENAI_API_KEY"] == generated_keys.virtual_keys["openclaw"]
+    assert farm_env_values["OPENAI_API_KEY"] == generated_keys.virtual_keys["my-farm-advisor"]
+    assert openclaw_env_values["OPENAI_API_KEY"] != farm_env_values["OPENAI_API_KEY"]
     assert "OPENROUTER_API_KEY" not in openclaw_env
     assert "MY_FARM_ADVISOR_OPENROUTER_API_KEY" not in farm_env
     assert "ANTHROPIC_API_KEY" not in openclaw_env
@@ -1427,7 +1445,7 @@ def test_modify_adding_farm_later_reruns_nextcloud_without_rerunning_openclaw(
     )
     assert summary["my_farm_advisor"]["outcome"] == "applied"
     assert api.create_calls_by_name.count("wizard-stack-openclaw") == 1
-    assert "wizard-stack-openclaw" not in api.update_calls_by_name
+    assert api.update_calls_by_name.count("wizard-stack-openclaw") == 1
     assert "wizard-stack-my-farm-advisor" in api.create_calls_by_name
     assert nextcloud_backend.update_service_calls > 0
     assert loaded_state.ownership_ledger is not None
@@ -1690,6 +1708,7 @@ def test_install_renders_internal_nexa_runtime_sidecar_into_openclaw_compose(
     monkeypatch.setattr(dokploy_wizard.cli, "DokployOpenClawBackend", _build_backend)
     monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
     monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._build_local_sidecar_image", lambda **_: None)
     monkeypatch.setattr(
         DokployOpenClawBackend,
         "_verify_service_runtime",
@@ -1758,10 +1777,16 @@ def test_install_renders_internal_nexa_runtime_sidecar_into_openclaw_compose(
     assert 'image: local/dokploy-wizard-nexa-runtime:latest' in compose
     assert "build:" not in compose
     assert "openclaw-stack-openclaw-data:/mnt/openclaw" in compose
-    assert 'DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH: "/mnt/openclaw/.nexa/runtime-contract.json"' in compose
-    assert 'DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH: "/mnt/openclaw/workspace/nexa/contract.json"' in compose
-    assert 'DOKPLOY_WIZARD_NEXA_STATE_DIR: "/mnt/openclaw/.nexa/state"' in compose
-    assert 'DOKPLOY_WIZARD_NEXA_WORKER_MODE: "queue"' in compose
+    runtime_env = _service_environment(compose, "nexa-runtime")
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH"] == _required_placeholder("NEXA_RUNTIME_DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH")
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH"] == _required_placeholder("NEXA_RUNTIME_DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH")
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_STATE_DIR"] == _required_placeholder("DOKPLOY_WIZARD_NEXA_STATE_DIR")
+    assert runtime_env["DOKPLOY_WIZARD_NEXA_WORKER_MODE"] == _required_placeholder("DOKPLOY_WIZARD_NEXA_WORKER_MODE")
+    env_values = _env_payload_values(api.last_update_env)
+    assert env_values["NEXA_RUNTIME_DOKPLOY_WIZARD_NEXA_RUNTIME_CONTRACT_PATH"] == "/mnt/openclaw/.nexa/runtime-contract.json"
+    assert env_values["NEXA_RUNTIME_DOKPLOY_WIZARD_NEXA_WORKSPACE_CONTRACT_PATH"] == "/mnt/openclaw/workspace/nexa/contract.json"
+    assert env_values["DOKPLOY_WIZARD_NEXA_STATE_DIR"] == "/mnt/openclaw/.nexa/state"
+    assert env_values["DOKPLOY_WIZARD_NEXA_WORKER_MODE"] == "queue"
     assert "traefik.http.routers.nexa-runtime" not in compose
     assert "ports:" not in compose
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -466,6 +467,9 @@ class RecordingNextcloudBackend(FakeNextcloudBackend):
 
 @dataclass
 class FakeSeaweedFsBackend:
+    def get_credentials(self) -> tuple[str, str] | None:
+        return None
+
     def get_service(self, resource_id: str) -> SeaweedFsResourceRecord | None:
         del resource_id
         return None
@@ -591,7 +595,13 @@ class FakeDokployApiClient:
     projects: list[DokployProjectSummary] = field(default_factory=list)
     create_project_calls: int = 0
     create_compose_calls: int = 0
+    update_compose_calls: int = 0
     deploy_calls: int = 0
+    compose_files_by_id: dict[str, str] = field(default_factory=dict)
+    compose_env_by_id: dict[str, str] = field(default_factory=dict)
+    compose_names_by_id: dict[str, str] = field(default_factory=dict)
+    update_sequence: list[str] = field(default_factory=list)
+    mutation_sequence: list[str] = field(default_factory=list)
 
     def list_projects(self) -> tuple[DokployProjectSummary, ...]:
         return tuple(self.projects)
@@ -620,9 +630,12 @@ class FakeDokployApiClient:
     def create_compose(
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord:
-        del compose_file, app_name
+        del app_name
         self.create_compose_calls += 1
         record = DokployComposeRecord(compose_id="cmp-1", name=name)
+        self.compose_files_by_id[record.compose_id] = compose_file
+        self.compose_names_by_id[record.compose_id] = name
+        self.mutation_sequence.append("create_compose")
         self.projects[0] = DokployProjectSummary(
             project_id="proj-1",
             name=self.projects[0].name,
@@ -643,15 +656,29 @@ class FakeDokployApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        del compose_id, compose_file
-        raise AssertionError("Nextcloud backend should not update compose apps in this task")
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        self.update_compose_calls += 1
+        if env is not None:
+            self.compose_env_by_id[compose_id] = env
+            self.update_sequence.append("env")
+            self.mutation_sequence.append("update_env")
+        if compose_file is not None:
+            self.compose_files_by_id[compose_id] = compose_file
+            self.update_sequence.append("compose_file")
+            self.mutation_sequence.append("update_compose_file")
+        return DokployComposeRecord(
+            compose_id=compose_id,
+            name=self.compose_names_by_id.get(compose_id, f"compose-{compose_id}"),
+        )
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
     ) -> DokployDeployResult:
         del title, description
         self.deploy_calls += 1
+        self.mutation_sequence.append("deploy_compose")
         return DokployDeployResult(success=True, compose_id=compose_id, message="queued")
 
     def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
@@ -824,10 +851,7 @@ def _farm_values() -> dict[str, str]:
 
 @dataclass
 class RecordingNextcloudApi(FakeDokployApiClient):
-    compose_files_by_id: dict[str, str] = field(default_factory=dict)
-    compose_names_by_id: dict[str, str] = field(default_factory=dict)
     schedules: list[DokployScheduleRecord] = field(default_factory=list)
-    update_compose_calls: int = 0
 
     def create_compose(
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
@@ -841,14 +865,6 @@ class RecordingNextcloudApi(FakeDokployApiClient):
         self.compose_files_by_id[record.compose_id] = compose_file
         self.compose_names_by_id[record.compose_id] = name
         return record
-
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        self.update_compose_calls += 1
-        self.compose_files_by_id[compose_id] = compose_file
-        return DokployComposeRecord(
-            compose_id=compose_id,
-            name=self.compose_names_by_id.get(compose_id, f"compose-{compose_id}"),
-        )
 
     def list_compose_schedules(self, *, compose_id: str) -> tuple[DokployScheduleRecord, ...]:
         del compose_id
@@ -913,11 +929,18 @@ class RecordingNextcloudApi(FakeDokployApiClient):
         return record
 
 
+def _assert_env_payload_has_key(env_payload: str, key: str) -> None:
+    if f"\n{key}=" in f"\n{env_payload}":
+        return
+    pytest.fail(f"expected Dokploy env payload to include key {key}")
+
+
 @dataclass
 class NextcloudOccRecorder:
     mounts: list[dict[str, object]] = field(default_factory=list)
     commands: list[tuple[str, ...]] = field(default_factory=list)
     shell_commands: list[str] = field(default_factory=list)
+    docker_commands: list[list[str]] = field(default_factory=list)
     next_mount_id: int = 1
 
     def patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -937,12 +960,12 @@ class NextcloudOccRecorder:
         )
         monkeypatch.setattr(nextcloud_module, "_nextcloud_user_exists", lambda *args, **kwargs: True)
         monkeypatch.setattr(nextcloud_module, "_ensure_trusted_domain", lambda *args, **kwargs: None)
+        monkeypatch.setattr(nextcloud_module, "_list_external_storage_mounts", lambda _: tuple(self.mounts))
         monkeypatch.setattr(
             nextcloud_module,
             "_ensure_external_storage_path",
-            lambda *args, **kwargs: None,
+            self._ensure_external_storage_path,
         )
-        monkeypatch.setattr(nextcloud_module, "_list_external_storage_mounts", lambda _: tuple(self.mounts))
         monkeypatch.setattr(nextcloud_module, "_run_occ", self._run_occ)
         monkeypatch.setattr(nextcloud_module, "_run_occ_shell", self._run_occ_shell)
         monkeypatch.setattr(
@@ -954,6 +977,26 @@ class NextcloudOccRecorder:
     def _run_occ_shell(self, container_name: str, shell_command: str) -> None:
         assert container_name == "nextcloud-container"
         self.shell_commands.append(shell_command)
+
+    def _ensure_external_storage_path(
+        self, container_name: str, *, datadir: str, volume_root: str
+    ) -> None:
+        assert container_name == "nextcloud-container"
+        path = shlex.quote(datadir)
+        volume_root = shlex.quote(volume_root)
+        self.docker_commands.append(
+            [
+                "docker",
+                "exec",
+                container_name,
+                "sh",
+                "-lc",
+                f"mkdir -p {path} && "
+                f"chmod 0777 {volume_root} {path} && "
+                f"find {path} -type d -exec chmod a+rwx {{}} + && "
+                f"find {path} -type f -exec chmod a+rw {{}} +",
+            ]
+        )
 
     def _run_occ(self, container_name: str, args: list[str]) -> None:
         assert container_name == "nextcloud-container"
@@ -995,6 +1038,14 @@ def _files_external_create_commands(
 
 def _files_scan_commands(commands: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
     return [command for command in commands if command[:1] == ("files:scan",)]
+
+
+def _external_storage_prepare_shell_commands(docker_commands: list[list[str]]) -> list[str]:
+    return [
+        command[5]
+        for command in docker_commands
+        if command[:5] == ["docker", "exec", "nextcloud-container", "sh", "-lc"]
+    ]
 
 
 def _patch_real_dokploy_nextcloud_backend(
@@ -1063,6 +1114,12 @@ def test_install_farm_only_nextcloud_creates_both_farm_external_mounts(
             "datadir=/mnt/advisors/my-farm-advisor/data-pipeline",
         ),
     ]
+    assert (
+        "mkdir -p /mnt/advisors/my-farm-advisor/field-operations && "
+        "chmod 0777 /mnt/advisors/my-farm-advisor /mnt/advisors/my-farm-advisor/field-operations && "
+        "find /mnt/advisors/my-farm-advisor/field-operations -type d -exec chmod a+rwx {} + && "
+        "find /mnt/advisors/my-farm-advisor/field-operations -type f -exec chmod a+rw {} +"
+    ) in _external_storage_prepare_shell_commands(occ.docker_commands)
     assert (
         "files:scan",
         "--path=admin@example.com/files/Nexa Farm",
@@ -1136,6 +1193,12 @@ def test_install_both_advisors_nextcloud_creates_openclaw_and_farm_mounts(
             "datadir=/mnt/advisors/my-farm-advisor/data-pipeline",
         ),
     ]
+    assert (
+        "mkdir -p /mnt/advisors/openclaw/workspace && "
+        "chmod 0777 /mnt/advisors/openclaw /mnt/advisors/openclaw/workspace && "
+        "find /mnt/advisors/openclaw/workspace -type d -exec chmod a+rwx {} + && "
+        "find /mnt/advisors/openclaw/workspace -type f -exec chmod a+rw {} +"
+    ) in _external_storage_prepare_shell_commands(occ.docker_commands)
     assert (
         "files:scan",
         "--path=admin@example.com/files/Nexa Claw",
@@ -1637,7 +1700,26 @@ def test_install_reconciles_nextcloud_pair_via_dokploy_backend(
     assert summary["nextcloud"]["talk"]["enabled"] is True
     assert client.create_project_calls == 1
     assert client.create_compose_calls == 1
+    assert client.update_compose_calls == 2
     assert client.deploy_calls == 1
+    assert client.compose_files_by_id["cmp-1"] != "services: {}\n"
+    assert client.compose_env_by_id["cmp-1"]
+    assert client.update_sequence == ["env", "compose_file"]
+    assert client.mutation_sequence == [
+        "create_compose",
+        "update_env",
+        "update_compose_file",
+        "deploy_compose",
+    ]
+    _assert_env_payload_has_key(client.compose_env_by_id["cmp-1"], "NEXTCLOUD_ADMIN_PASSWORD")
+    _assert_env_payload_has_key(client.compose_env_by_id["cmp-1"], "NEXTCLOUD_POSTGRES_PASSWORD")
+    _assert_env_payload_has_key(client.compose_env_by_id["cmp-1"], "NEXTCLOUD_REDIS_HOST_PASSWORD")
+    _assert_env_payload_has_key(client.compose_env_by_id["cmp-1"], "ONLYOFFICE_JWT_SECRET")
+    compose_file = client.compose_files_by_id["cmp-1"]
+    assert "NEXTCLOUD_ADMIN_PASSWORD: \"${NEXTCLOUD_ADMIN_PASSWORD:?NEXTCLOUD_ADMIN_PASSWORD is required}\"" in compose_file
+    assert "JWT_SECRET: \"${ONLYOFFICE_JWT_SECRET:?ONLYOFFICE_JWT_SECRET is required}\"" in compose_file
+    assert "ChangeMeSoon" not in compose_file
+    assert "change-me" not in compose_file
     assert loaded_state.ownership_ledger is not None
 
 

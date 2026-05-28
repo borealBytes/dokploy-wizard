@@ -13,6 +13,8 @@ Today this repo is not a scaffold or mock planner. It performs real deployment, 
 - **Shared Core** services used by packs
   - PostgreSQL
   - Redis
+  - Postfix mail relay
+  - LiteLLM AI gateway
 - **Nextcloud + OnlyOffice + Talk**
 - **Moodle**
 - **DocuSeal**
@@ -20,17 +22,18 @@ Today this repo is not a scaffold or mock planner. It performs real deployment, 
 - **Nexa**, embedded inside OpenClaw as the Nextcloud/Talk/OnlyOffice-facing agent runtime
 - **Telly**, embedded inside OpenClaw as the Telegram-facing agent persona
 - **My Farm Advisor** (user-visible name: **Nexa Farm**) — separate advisor runtime with Field Operations and Data Pipeline workspaces
+- **SurfSense** — optional research/chat pack with app-login-only access and LiteLLM-routed models
 - **SeaweedFS** for S3-compatible object storage
 - **Coder** with a seeded Ubuntu + VS Code workspace template
 
-Optional packs also include Headscale, Matrix, and Coder. My Farm Advisor is optional but can run side-by-side with OpenClaw.
+Optional packs also include Headscale, Matrix, Coder, My Farm Advisor, and SurfSense. My Farm Advisor and SurfSense can run side-by-side with OpenClaw.
 
 ## Current reality
 
 - Fresh-VPS install works
 - Same-host rerun / noop proof works
 - fresh-VPS install, rerun, and inspect-state flows are part of the validation path
-- OpenClaw, Nexa, Nextcloud Talk, OnlyOffice, SeaweedFS, and Coder are all part of the wizard-managed path
+- OpenClaw, Nexa, Nextcloud Talk, OnlyOffice, SeaweedFS, Coder, and SurfSense are all part of the wizard-managed path
 - Unchanged healthy services skip Dokploy update/deploy on rerun through compose artifact hash tracking
 
 ## High-level architecture
@@ -61,20 +64,23 @@ flowchart LR
       OpenClaw[🤖 OpenClaw]
       Nextcloud[🗂️ Nextcloud]
       OnlyOffice[📝 OnlyOffice]
+      SurfSense[🔎 SurfSense]
       Coder[💻 Coder]
       Seaweed[🪣 SeaweedFS / S3]
     end
 
     subgraph Internal[Internal-only sidecars and shared services]
-      Shared[(🧱 Shared Core\nPostgres + Redis)]
+      Shared[(🧱 Shared Core\nPostgres + Redis + Postfix + LiteLLM)]
       Mem0[🧠 Mem0]
       Qdrant[🔎 Qdrant]
       NexaRuntime[🧵 Nexa runtime]
+      SurfSenseInternal[SurfSense internal\nAPI + Zero + SearXNG + Celery]
     end
 
     Traefik --> OpenClaw
     Traefik --> Nextcloud
     Traefik --> OnlyOffice
+    Traefik --> SurfSense
     Traefik --> Coder
     Traefik --> Seaweed
     Dokploy --> Shared
@@ -88,6 +94,8 @@ flowchart LR
     OpenClaw --> NexaRuntime
     NexaRuntime --> OpenClaw
     NexaRuntime --> Nextcloud
+    SurfSense --> SurfSenseInternal
+    SurfSenseInternal --> Shared
     Nextcloud --> OnlyOffice
     Apps --> Shared
 ```
@@ -110,17 +118,20 @@ stateDiagram-v2
     Input --> DesiredState : resolve hostnames\nsecrets\npacks
     DesiredState --> Preflight
     Preflight --> DokployBootstrap
-    DokployBootstrap --> Tailscale
-    Tailscale --> CloudflareNetworking
-    CloudflareNetworking --> CloudflareAccess
-    CloudflareAccess --> SharedCore
+    DokployBootstrap --> CloudflareNetworking
+    CloudflareNetworking --> SharedCore
     SharedCore --> Headscale
-    Headscale --> Matrix
-    Matrix --> NextcloudOnlyOffice
-    NextcloudOnlyOffice --> SeaweedFS
-    SeaweedFS --> OpenClaw
+    Headscale --> Tailscale
+    Tailscale --> Matrix
+    Matrix --> SeaweedFS
+    SeaweedFS --> NextcloudOnlyOffice
+    NextcloudOnlyOffice --> DocuSeal
+    DocuSeal --> Coder
+    Coder --> OpenClaw
     OpenClaw --> MyFarmAdvisor
-    MyFarmAdvisor --> Installed
+    MyFarmAdvisor --> CloudflareAccess
+    CloudflareAccess --> SurfSense
+    SurfSense --> Installed
 
     Installed --> Modify
     Installed --> Resume
@@ -136,14 +147,22 @@ stateDiagram-v2
 
 Dokploy is the control plane the wizard targets for all compose app deployment. The wizard bootstraps Dokploy, mints or reuses an API key, and then uses that API key for all managed pack operations.
 
+After LiteLLM is ready, the wizard also reconciles Dokploy's built-in AI provider named `Dokploy Wizard LiteLLM`. That provider points at the wizard-managed internal LiteLLM gateway and uses the dedicated `dokploy-ai` virtual key restricted to the resolved default model alias, not the LiteLLM master key.
+
 ### Shared Core
 
-Shared Core is the common substrate for packs that need databases or cache services. Today that means:
+Shared Core is the common substrate for packs that need databases, cache, mail relay, or AI gateway access. It is installed as core infrastructure before the optional application packs that depend on it.
 
-- PostgreSQL for Coder, Nextcloud, and OpenClaw
-- Redis for Nextcloud
+Today Shared Core includes:
+
+- **PostgreSQL** for Coder, Nextcloud, OpenClaw, SurfSense, and other packs that need wizard-owned relational storage.
+- **Redis** for Nextcloud, SurfSense, and packs that need cache or queue backing.
+- **Postfix** as the wizard-managed mail relay surface for services that need SMTP/mail delivery. It centralizes the relay endpoint inside the stack; it does not imply every application has complete mail workflows configured by default.
+- **LiteLLM** as the central AI passthrough/gateway for wizard-managed services deployed through Dokploy.
 
 These are wizard-owned resources, tracked in the ownership ledger, and reused across modify / rerun operations.
+
+LiteLLM is the AI boundary for the stack. Services use the internal Docker-network URL `http://<stack-name>-shared-litellm:4000` and receive wizard-managed virtual keys or generated gateway defaults. Upstream provider keys terminate at LiteLLM instead of being copied into each application container. The public `litellm.<root-domain>` admin hostname exists for operator management and stays Cloudflare Access-protected; service-to-service traffic should stay on the shared internal network.
 
 ### Nextcloud + OnlyOffice + Talk
 
@@ -208,6 +227,38 @@ What the wizard does for My Farm Advisor:
 
 My Farm Advisor and OpenClaw can run side by side. There is no slot conflict.
 
+### SurfSense
+
+SurfSense is an optional research/chat pack. It is deployed as a normal Dokploy compose app, but it uses wizard-managed shared infrastructure instead of bringing its own database, cache, or model gateway.
+
+Public hostnames:
+
+| Hostname | What it serves |
+|---|---|
+| `surfsense.<root-domain>` | SurfSense frontend |
+| `surfsense-api.<root-domain>` | SurfSense API |
+| `surfsense-zero.<root-domain>` | SurfSense Zero cache service |
+
+Auth and ingress behavior:
+
+- SurfSense is **app-login-only**. The wizard bootstraps the first local user with the Dokploy admin email and password.
+- SurfSense is **not** placed behind Cloudflare Access OTP. Its public surfaces rely on the app login and service-specific routes.
+- SearXNG, Celery worker, Celery beat, and database migrations are internal-only compose services. They do not get public hostnames.
+
+Shared service behavior:
+
+- SurfSense uses wizard-managed shared Postgres. The migration role gets the database permissions needed for SurfSense and Zero publication setup.
+- SurfSense uses wizard-managed shared Redis for cache and queue paths.
+- SurfSense uses wizard-managed shared LiteLLM at `http://<stack-name>-shared-litellm:4000` for model calls.
+- SurfSense receives a generated LiteLLM virtual key restricted to wizard-approved aliases. Upstream provider keys stay at LiteLLM and are not passed into SurfSense.
+
+Model behavior inside SurfSense:
+
+- SurfSense model labels are rendered as `LiteLLM - <alias>`, so users see the gateway-backed alias they are selecting.
+- Local private model traffic goes through LiteLLM when `LITELLM_LOCAL_BASE_URL` is configured. The wizard-generated LiteLLM config includes the compatibility setting needed for local chat templates that reject non-leading system messages.
+- OpenCode Go aliases also go through LiteLLM when `LITELLM_OPENCODE_GO_API_KEY` is set.
+- SurfSense never receives raw OpenRouter, NVIDIA, OpenCode Go, or local upstream provider keys.
+
 ### Coder
 
 Coder gets a seeded Ubuntu + VS Code template and a first default workspace.
@@ -219,11 +270,12 @@ On first successful bootstrap the wizard:
 
   | Template | What it provides |
   |---|---|
-  | `ubuntu-vscode` | Base Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `opencode`, `zellij` |
+  | `ubuntu-vscode` | Base Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `opencode`, `zellij`, `pi` CLI |
   | `ubuntu-vscode-opencode-web` | OpenCode Web (browser-based IDE) |
   | `ubuntu-vscode-openwork` | OpenWork (AI-assisted workspace) |
   | `ubuntu-vscode-kdense-byok` | K-Dense BYOK (Bring Your Own Key for local model inference) |
   | `ubuntu-vscode-hermes` | Hermes (on-device AI assistant) |
+  | `ubuntu-vscode-pi-web` | Pi CLI plus clickable Pi Web UI (Coder app, not a public Dokploy pack) |
 
 - creates a default workspace for the operator
 
@@ -298,6 +350,7 @@ flowchart TD
     subgraph AppLogins[Own login surfaces]
       Dokploy[Dokploy admin login]
       Nextcloud[Nextcloud admin + users]
+      SurfSense[SurfSense local app login]
       Coder[Coder admin login]
       Seaweed[SeaweedFS access key / secret key]
     end
@@ -305,7 +358,8 @@ flowchart TD
     subgraph InternalSecrets[Server-owned runtime secrets]
       Nexa[Nexa Talk/WebDAV/OnlyOffice secrets]
       DB[Database / Redis secret refs]
-      Model[OpenRouter / NVIDIA / local model config]
+      Model[LiteLLM upstream provider config]
+      Mail[Postfix relay config]
     end
 ```
 
@@ -315,6 +369,7 @@ Current Cloudflare Access scope:
 
 - `openclaw.<root-domain>`
 - `farm.<root-domain>`
+- `litellm.<root-domain>` for LiteLLM admin access
 
 Not behind Cloudflare Access in the current implementation:
 
@@ -322,6 +377,9 @@ Not behind Cloudflare Access in the current implementation:
 - `nextcloud.<root-domain>`
 - `office.<root-domain>`
 - `s3.<root-domain>`
+- `surfsense.<root-domain>`
+- `surfsense-api.<root-domain>`
+- `surfsense-zero.<root-domain>`
 - `coder.<root-domain>`
 - Coder workspace app hosts, currently routed via a controlled `*.<root-domain>` fallback
 - `matrix.<root-domain>`
@@ -332,6 +390,7 @@ Why:
 - Dokploy still needs a usable API/control plane path
 - Nextcloud and OnlyOffice have client/protocol concerns
 - SeaweedFS is an object-storage protocol surface
+- SurfSense has its own app login and API routing
 - Coder has its own application login
 - Matrix and Headscale are protocol/control-plane surfaces
 
@@ -345,6 +404,7 @@ Why:
 | OnlyOffice | JWT integration value shared with Nextcloud | currently wired by deployment bootstrap/runtime config |
 | Coder | Coder admin login | currently derived from Dokploy admin credentials |
 | SeaweedFS / S3 | access key + secret key | wizard-generated in guided mode or env-file provided |
+| SurfSense | local app login, plus internal service credentials | first user from Dokploy admin credentials; app/runtime secrets are wizard-generated and state-backed |
 | Nexa internals | Talk/WebDAV/OnlyOffice/API secrets | server-owned env |
 
 ### Credential sources
@@ -355,12 +415,14 @@ The wizard currently uses three broad credential sources:
    - Cloudflare token/account/zone
    - Dokploy admin login
    - Tailscale auth key
-   - model/provider API keys
+   - model/provider API keys that LiteLLM uses upstream
 
 2. **Wizard-generated values**
    - SeaweedFS access key + secret key in guided mode
    - OpenClaw browser/control password in guided mode
    - My Farm Advisor browser/control password in guided mode
+   - SurfSense app/runtime secrets
+   - SurfSense LiteLLM virtual key
    - Dokploy API key after bootstrap
 
 3. **Server-owned runtime secrets**
@@ -369,6 +431,8 @@ The wizard currently uses three broad credential sources:
    - Nexa WebDAV auth
    - Nexa service-account credentials
    - Mem0/Qdrant private runtime configuration
+   - SurfSense SearXNG, Zero, migration, and app-secret values
+   - shared Postfix relay configuration consumed by services that need SMTP/mail delivery
 
 ### Nexa credential mediation
 
@@ -382,14 +446,36 @@ That means:
 
 ## Current install file expectations
 
-The current repo uses `.install.env` at repo root as the working operator env file.
+The current repo uses `.install.env` at repo root as the working operator env file. The checked-in `.install.env.example` is the safe starting point for operators.
+
+Recommended setup:
+
+```bash
+cp .install.env.example .install.env
+chmod 0600 .install.env
+```
+
+Then edit `.install.env` and replace placeholders with operator-owned values.
+
+### Cloudflare values
+
+Use Cloudflare values for the one account and one zone that will host this stack. In the Cloudflare dashboard, find the Account ID from Account home by using the account row menu and selecting Copy account ID. Find the Zone ID by opening the target domain and copying Zone ID from the Overview page API section.
+
+Create a Cloudflare API token for the wizard instead of using a Global API Key. Scope the token to the target account and target zone. The token needs Zone DNS Edit for the target zone, plus account-level Cloudflare Tunnel Edit or the current Cloudflare One connector write permission for the target account so the wizard can manage the tunnel and route hostnames. If Cloudflare Access OTP apps are enabled, also grant Access Apps Write/Edit and Access Policies Write/Edit on the target account. Do not use all-account or all-zone scopes unless you are testing in a disposable Cloudflare account.
 
 Important details:
 
-- it contains sensitive credentials and should remain `0600`
-- the fresh-VPS harness copies it explicitly to the remote host
-- Nexa functionality is enabled by the presence of `OPENCLAW_NEXA_*` values
-- runtime-only values like internal sidecar URLs are synthesized later during deployment
+- `.install.env.example` is placeholder-only. It documents the expected key groups without storing live secrets.
+- `.install.env` contains real Cloudflare credentials, Dokploy credentials, optional Tailscale values, and optional upstream model-provider keys. Keep it `0600` and uncommitted.
+- `.install.env` stays flat. It contains `key=value` pairs, not nested LiteLLM config or generated app state.
+- `STACK_NAME` defaults from `ROOT_DOMAIN` by lowercasing it and replacing dots or other unsafe characters with hyphens, so `openmerge.me` becomes `openmerge-me`. Wizard-managed Dokploy projects, Docker networks, services, volumes, and tunnel names use that prefix. Set `STACK_NAME` only to preserve an existing explicit stack name.
+- `PACKS` can include `surfsense` alongside packs such as `nextcloud`, `openclaw`, `my-farm-advisor`, `seaweedfs`, `coder`, and `docuseal`.
+- Nexa functionality is enabled by the presence of `OPENCLAW_NEXA_*` values.
+- SurfSense hostnames default to `SURFSENSE_SUBDOMAIN=surfsense`, `SURFSENSE_API_SUBDOMAIN=surfsense-api`, and `SURFSENSE_ZERO_SUBDOMAIN=surfsense-zero`.
+- Generated values such as Dokploy API keys, SurfSense app secrets, SurfSense database/runtime secrets, SurfSense Zero admin password, and LiteLLM virtual keys are state-backed. Do not hand-fill them for normal installs.
+- `DOKPLOY_SUBDOMAIN` defaults to `dokploy`; set it only when you need a different Dokploy hostname.
+- `MY_FARM_ADVISOR_SUBDOMAIN` defaults to `farm` when the My Farm Advisor pack is enabled; set it only when you need a different farm hostname.
+- The remote proof helper copies `.install.env` explicitly to the remote host during validation.
 
 ## Current fresh-VPS proof status
 
@@ -420,8 +506,11 @@ By default, proof installs once, runs service verification, and then captures `i
 ./bin/dokploy-wizard-remote proof \
   --host <host> \
   --password <redacted> \
-  --env-file ./.install.env
+  --env-file ./.install.env \
+  --verbose
 ```
+
+This is the normal clean-VPS validation command shape for the current stack. Use it after filling `.install.env` from `.install.env.example`. Do not read this README as claiming the exact current branch has passed a fresh clean-VPS proof unless a matching proof artifact or operator run says so.
 
 ### Strict idempotency mode
 
@@ -502,6 +591,16 @@ What it does:
 
 The harness does not rerun install by default. Use `--strict-idempotency` with `./bin/dokploy-wizard-remote proof` when you need an explicit unchanged-healthy idempotency check.
 
+For day-to-day clean VPS validation, prefer the remote wrapper because it packages the repo, uploads `.install.env`, runs install, verifies enabled services, runs `inspect-state`, and collects logs in one operator-facing flow:
+
+```bash
+./bin/dokploy-wizard-remote proof \
+  --host <host> \
+  --password <redacted> \
+  --env-file ./.install.env \
+  --verbose
+```
+
 ## Local validation
 
 Quick checks:
@@ -541,36 +640,72 @@ pytest tests/test_cli.py -q
 
 ## LiteLLM core gateway
 
-LiteLLM is always installed as core infrastructure. It is not a pack you opt into, and it runs as a shared-core service alongside Postgres and Redis. Every AI consumer in the stack, including My Farm Advisor, OpenClaw, and Coder templates, routes model calls through LiteLLM using a per-consumer virtual key.
+LiteLLM is always installed as core infrastructure. It is not a pack you opt into, and it runs as a shared-core service alongside Postgres, Redis, and Postfix. It is the single internal AI passthrough for wizard-managed Dokploy services: services call LiteLLM, and LiteLLM calls the configured upstream model providers.
+
+Primary consumers today are:
+
+- Dokploy's built-in AI provider (`Dokploy Wizard LiteLLM`)
+- OpenClaw and its embedded Nexa/Telly runtime paths
+- My Farm Advisor
+- SurfSense
+- Coder Hermes and Coder K-Dense
+- Coder OpenCode Web and OpenWork through generated template gateway defaults
+
+Those services use internal gateway config or wizard-managed virtual keys. They should not receive raw OpenRouter, NVIDIA, OpenCode Go, local model, or other upstream provider keys directly when the wizard-managed LiteLLM path is in use. Pi Web UI remains the exception because its browser-local provider-key flow is intentionally unchanged and this repo does not control a Pi scoped-models endpoint.
 
 ### Flat env inputs
 
-The operator env file stays flat. `.install.env` contains only key=value pairs. The wizard generates the nested LiteLLM `config.yaml` internally during deployment. You do not edit raw LiteLLM proxy config by hand.
+The operator env file stays flat. `.install.env` contains only key=value pairs. The wizard reads upstream provider inputs such as local model, OpenRouter, OpenCode Go, and NVIDIA values, then generates the nested LiteLLM `config.yaml` internally during deployment. You do not edit raw LiteLLM proxy config by hand.
 
 ### Model allowlist and default order
 
 The generated LiteLLM config enforces a strict precedence:
 
-1. `local/unsloth-active` — the local vLLM or Tailnet endpoint, when `LITELLM_LOCAL_BASE_URL` is configured
-2. OpenCode Go wildcard — a single `openai/*` route that covers the OpenCode Go provider fleet
-3. Explicit OpenRouter aliases — each alias is declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS`
+1. `local-model.internal/unsloth-active` — a private OpenAI-compatible endpoint, when `LITELLM_LOCAL_BASE_URL` is configured
+2. `opencode-go/*` — explicit OpenCode Go aliases covering the OpenCode Go provider fleet
+3. `openrouter/*` — explicit OpenRouter aliases, each declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS`
 
 OpenRouter wildcard routes are not allowed. The config renderer rejects `openrouter/*` or broad `*` aliases.
+
+SurfSense receives the same approved alias list through its generated LiteLLM virtual key. Inside SurfSense, model labels are displayed as `LiteLLM - <alias>`. That keeps the user-facing choice clear while keeping upstream keys at LiteLLM.
+
+### AI env contract
+
+The preferred way to select the default model is with `AI_DEFAULT_PROVIDER` and `AI_DEFAULT_MODEL`:
+
+```bash
+AI_DEFAULT_PROVIDER=openrouter
+AI_DEFAULT_MODEL=deepseek/deepseek-v4-flash:free
+```
+
+Together these resolve to the canonical alias `openrouter/deepseek/deepseek-v4-flash:free`. If you omit them, the wizard falls back to legacy `ADVISOR_MODEL_PROVIDER` and `ADVISOR_MODEL_NAME`.
+
+For LiteLLM upstream API keys, the canonical names are `LITELLM_OPENROUTER_API_KEY` and `LITELLM_OPENCODE_GO_API_KEY`. The older bare keys `OPENROUTER_API_KEY` and `OPENCODE_GO_API_KEY` are still accepted as compatibility fallbacks. The old alias `local/unsloth-active` is also resolved to the canonical alias when it appears in legacy env values.
+
+`LITELLM_OPENCODE_GO_API_KEY` is the OpenCode Go upstream credential. When it is set, generated OpenCode Go aliases are exposed through LiteLLM to approved consumers such as SurfSense, without copying that upstream key into the app container.
+
+Local model compatibility is handled in the generated LiteLLM config. For a private local-model path such as `local-model.internal/unsloth-active`, LiteLLM adapts system-message handling before forwarding to the local OpenAI-compatible endpoint, which keeps SurfSense chats working with local unsloth templates.
 
 ### Virtual keys
 
 The wizard auto-generates stable virtual keys for each consumer:
 
+- Dokploy built-in AI (`dokploy-ai`, restricted to the resolved default model alias)
 - My Farm Advisor
 - OpenClaw
+- SurfSense
 - Coder Hermes
 - Coder K-Dense
 
+OpenCode Web and OpenWork inherit wizard-managed LiteLLM defaults through the shared Coder AI gateway env during template bootstrap rather than receiving their own dedicated LiteLLM virtual-key consumer records. Pi Web UI is still a browser-local surface and is not centrally model-restricted. Pi Web UI does not receive a wizard-managed virtual key.
+
 These keys are generated once and reused across reruns and modify operations. They are stored in the wizard state directory, not written back into `.install.env`. If you need to rotate a key, that is a future operator action, not something that happens silently on reinstall.
+
+The key point for operators is that LiteLLM is the passthrough: upstream provider credentials live in the LiteLLM shared-core config, while each service gets only the scoped credential or generated gateway defaults it needs to call LiteLLM.
 
 ### Admin access
 
-LiteLLM management UI and API are reachable at `litellm.<root-domain>`. This hostname is protected by Cloudflare Access before any public DNS or tunnel routing is created. Internal consumers use the Docker network URL `http://<stack-name>-shared-litellm:4000`, not the public admin hostname.
+LiteLLM management UI and API are reachable at `litellm.<root-domain>`. This hostname is protected by Cloudflare Access before any public DNS or tunnel routing is created. Internal consumers use the Docker network URL `http://<stack-name>-shared-litellm:4000`, not the public admin hostname and not direct upstream provider URLs.
 
 ### Post-deploy LiteLLM admin QA harness
 
@@ -605,7 +740,7 @@ This keeps admin verification aligned with the intended trust boundary: public a
 
 ### Migration from direct provider envs
 
-If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, consumers no longer receive those raw upstream keys. Instead, each consumer gets its own LiteLLM virtual key and the internal base URL. Upstream secrets terminate at the LiteLLM proxy.
+If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, wizard-managed server-side consumers receive LiteLLM virtual keys or inherited LiteLLM gateway defaults instead of raw upstream provider keys. SurfSense follows this model: it gets only its restricted LiteLLM virtual key and approved aliases. Upstream secrets terminate at the LiteLLM proxy. Pi Web UI remains the exception because its browser-local provider-key flow is intentionally unchanged.
 
 ### Validation
 
@@ -621,19 +756,19 @@ mypy .
 
 ### Required env keys
 
-My Farm Advisor is enabled with `ENABLE_MY_FARM_ADVISOR=true`. When it is enabled, you must provide at least one model provider path.
+My Farm Advisor is enabled by including `my-farm-advisor` in `PACKS`. When it is enabled, you must provide at least one model provider path.
 
 | Key | Example | Notes |
 |---|---|---|
-| `ENABLE_MY_FARM_ADVISOR` | `true` | Pack flag |
+| `PACKS` | `my-farm-advisor,nextcloud,seaweedfs` | Pack selection source. Add other packs as needed. |
 | `MY_FARM_ADVISOR_CHANNELS` | `telegram` | Comma-separated; `telegram` and `matrix` are supported. Matrix requires the Matrix pack. |
-| `MY_FARM_ADVISOR_SUBDOMAIN` | `farm` | Defaults to `farm` |
-| `MY_FARM_ADVISOR_GATEWAY_PASSWORD` | `changeme` | Browser/control UI password. `ADVISOR_GATEWAY_PASSWORD` is a shared fallback for both advisors. |
+| `MY_FARM_ADVISOR_SUBDOMAIN` | `farm` | Optional override; defaults to `farm` |
+| `MY_FARM_ADVISOR_GATEWAY_PASSWORD` | `<generated-or-operator-password>` | Browser/control UI password. `ADVISOR_GATEWAY_PASSWORD` is a shared fallback for both advisors. |
 | **Provider (at least one)** | | |
 | `MY_FARM_ADVISOR_OPENROUTER_API_KEY` | `<your-openrouter-key>` | Farm-only OpenRouter key |
 | `MY_FARM_ADVISOR_NVIDIA_API_KEY` | `<your-nvidia-key>` | Farm-only NVIDIA key |
 | `ANTHROPIC_API_KEY` | `<your-anthropic-key>` | Shared across packs |
-| `AI_DEFAULT_API_KEY` + `AI_DEFAULT_BASE_URL` | `sk-...` + `https://...` | Shared fallback pair; both must be present to count as a valid provider path |
+| `AI_DEFAULT_API_KEY` + `AI_DEFAULT_BASE_URL` | `<provider-api-key>` + `<provider-base-url>` | Shared fallback pair; both must be present to count as a valid provider path |
 
 ### Optional env keys
 
@@ -642,7 +777,7 @@ My Farm Advisor is enabled with `ENABLE_MY_FARM_ADVISOR=true`. When it is enable
 | `MY_FARM_ADVISOR_REPLICAS` | `1` | Defaults to 1 |
 | `MY_FARM_ADVISOR_PRIMARY_MODEL` | `openrouter/openrouter/hunter-alpha` | |
 | `MY_FARM_ADVISOR_FALLBACK_MODELS` | `openrouter/openrouter/healer-alpha,openrouter/nvidia/...` | Comma-separated |
-| `MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN` | `...` | Main farm Telegram bot |
+| `MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN` | `<telegram-bot-token>` | Main farm Telegram bot |
 | `MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID` | `12345678` | DM allowlist owner |
 | `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | |
 | `TZ` | `America/Chicago` | Container timezone |
@@ -673,9 +808,9 @@ R2 is only mounted when all of the following are present and `WORKSPACE_DATA_R2_
 |---|---|
 | `R2_BUCKET_NAME` | `my-farm-advisor` |
 | `R2_ENDPOINT` | `https://your-account-id.r2.cloudflarestorage.com` |
-| `R2_ACCESS_KEY_ID` | `...` |
-| `R2_SECRET_ACCESS_KEY` | `...` |
-| `CF_ACCOUNT_ID` | `...` |
+| `R2_ACCESS_KEY_ID` | `<r2-access-key-id>` |
+| `R2_SECRET_ACCESS_KEY` | `<r2-secret-access-key>` |
+| `CF_ACCOUNT_ID` | `<cloudflare-account-id>` |
 | `DATA_MODE` | `volume` |
 | `WORKSPACE_DATA_R2_RCLONE_MOUNT` | `0` or `1` |
 | `WORKSPACE_DATA_R2_PREFIX` | `workspace/data` |
@@ -765,9 +900,10 @@ Keys that kept the same name:
 - `src/dokploy_wizard/packs/` — pack models and reconcilers
 - `templates/` — deployment templates, including Coder template assets
 - `tests/` — unit, integration, and lifecycle coverage
+- `.install.env.example` — placeholder-only operator env template
 
 ## Summary
 
-Dokploy Wizard now installs a real, stateful self-hosted stack, not just a set of placeholders. It bootstraps Dokploy, wires ingress and auth, deploys application packs, embeds OpenClaw-facing agents like Nexa and Telly, and supports fresh-host reruns with state-aware lifecycle behavior.
+Dokploy Wizard now installs a real, stateful self-hosted stack, not just a set of placeholders. It bootstraps Dokploy, wires ingress and auth, deploys application packs, embeds OpenClaw-facing agents like Nexa and Telly, routes model consumers through LiteLLM, and supports fresh-host reruns with state-aware lifecycle behavior.
 
 The current repo is built around a real fresh-VPS proof workflow and is intended to be the baseline for repeatable full rebuilds.

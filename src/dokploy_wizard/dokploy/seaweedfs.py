@@ -18,7 +18,12 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
-from dokploy_wizard.dokploy.compose_noop import apply_compose_noop_guard
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    apply_rendered_compose_to_existing,
+    persist_compose_artifact_hash_if_checkpoint_present,
+)
+from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
 from dokploy_wizard.packs.seaweedfs import SeaweedFsError, SeaweedFsResourceRecord
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
@@ -34,7 +39,9 @@ class DokploySeaweedFsApi(Protocol):
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord: ...
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord: ...
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord: ...
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -70,6 +77,9 @@ class DokploySeaweedFsBackend:
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
+
+    def get_credentials(self) -> tuple[str, str] | None:
+        return self._access_key, self._secret_key
 
     def get_service(self, resource_id: str) -> SeaweedFsResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "service")
@@ -271,13 +281,23 @@ class DokploySeaweedFsBackend:
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
-                    compose_file=compose_file,
+                    compose_file="services: {}\n",
                     app_name=self._compose_name,
+                )
+                apply_rendered_compose_to_existing(
+                    client=self._client,
+                    compose_id=created.compose_id,
+                    rendered_compose=compose_file,
                 )
                 self._client.deploy_compose(
                     compose_id=created.compose_id,
                     title="dokploy-wizard seaweedfs reconcile",
                     description="Create SeaweedFS compose app",
+                )
+                persist_compose_artifact_hash_if_checkpoint_present(
+                    state_dir=self._state_dir,
+                    service_key=self._compose_name,
+                    rendered_compose=compose_file,
                 )
                 locator = _ComposeLocator(
                     project_id=project.project_id,
@@ -296,13 +316,23 @@ class DokploySeaweedFsBackend:
             created_compose = self._client.create_compose(
                 name=self._compose_name,
                 environment_id=created_project.environment_id,
-                compose_file=compose_file,
+                compose_file="services: {}\n",
                 app_name=self._compose_name,
+            )
+            apply_rendered_compose_to_existing(
+                client=self._client,
+                compose_id=created_compose.compose_id,
+                rendered_compose=compose_file,
             )
             self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
                 title="dokploy-wizard seaweedfs reconcile",
                 description="Create SeaweedFS compose app",
+            )
+            persist_compose_artifact_hash_if_checkpoint_present(
+                state_dir=self._state_dir,
+                service_key=self._compose_name,
+                rendered_compose=compose_file,
             )
         except DokployApiError as error:
             raise SeaweedFsError(str(error)) from error
@@ -361,18 +391,20 @@ def _parse_resource_id(resource_id: str, kind: str) -> str | None:
 
 def _render_compose_file(
     *, stack_name: str, hostname: str, access_key: str, secret_key: str
-) -> str:
+) -> RenderedCompose:
     service_name = _service_name(stack_name)
     data_name = _data_name(stack_name)
-    return (
+    access_key_env = "SEAWEEDFS_ACCESS_KEY"
+    secret_key_env = "SEAWEEDFS_SECRET_KEY"
+    compose_file = (
         "services:\n"
         f"  {service_name}:\n"
         "    image: chrislusf/seaweedfs:latest\n"
         "    restart: unless-stopped\n"
         "    command: ['server', '-dir=/data', '-s3', '-ip.bind=0.0.0.0']\n"
         "    environment:\n"
-        f"      AWS_ACCESS_KEY_ID: {access_key}\n"
-        f"      AWS_SECRET_ACCESS_KEY: {secret_key}\n"
+        f"      AWS_ACCESS_KEY_ID: \"{_required_placeholder(access_key_env)}\"\n"
+        f"      AWS_SECRET_ACCESS_KEY: \"{_required_placeholder(secret_key_env)}\"\n"
         f"      S3_DOMAIN_NAME: {hostname}\n"
         "    labels:\n"
         '      traefik.enable: "true"\n'
@@ -397,6 +429,39 @@ def _render_compose_file(
         "  dokploy-network:\n"
         "    external: true\n"
     )
+    return RenderedCompose(
+        compose_file=compose_file,
+        env_specs=(
+            _seaweedfs_env_spec(
+                name=access_key_env,
+                value=access_key,
+                target_services=(service_name,),
+                source="seaweedfs-access-key",
+            ),
+            _seaweedfs_env_spec(
+                name=secret_key_env,
+                value=secret_key,
+                target_services=(service_name,),
+                source="seaweedfs-secret-key",
+            ),
+        ),
+    )
+
+
+def _seaweedfs_env_spec(
+    *, name: str, value: str, target_services: tuple[str, ...], source: str
+) -> DokployEnvSpec:
+    return DokployEnvSpec(
+        variable=DokployEnvVar(name=name, value=value, sensitive=True, source=source),
+        owner="seaweedfs",
+        target_services=target_services,
+        placeholder=_required_placeholder(name),
+        required=True,
+    )
+
+
+def _required_placeholder(name: str) -> str:
+    return f"${{{name}:?{name} is required}}"
 
 
 def _docker_container_is_up(service_name: str) -> bool:

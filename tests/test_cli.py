@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -55,18 +56,25 @@ from dokploy_wizard.preflight import (
 )
 from dokploy_wizard.remote_transport import RemoteTransportSession
 from dokploy_wizard.state import (
+    SEAWEEDFS_GENERATED_SECRETS_FILE,
     AppliedStateCheckpoint,
     ComposeArtifactHashState,
+    LiteLLMGeneratedKeys,
     OwnedResource,
     OwnershipLedger,
     RawEnvInput,
+    SeaweedFsGeneratedSecrets,
     StateValidationError,
+    SurfSenseGeneratedSecrets,
     ensure_litellm_generated_keys,
     load_state_dir,
     parse_env_file,
     resolve_desired_state,
     write_applied_checkpoint,
+    write_litellm_generated_keys,
     write_ownership_ledger,
+    write_seaweedfs_generated_secrets,
+    write_surfsense_generated_secrets,
     write_target_state,
 )
 from dokploy_wizard.state import inspection as inspection_module
@@ -128,15 +136,18 @@ def _classify_modify_plan(
 class _ProofTransport:
     def __init__(self) -> None:
         self.commands: list[tuple[str, str]] = []
+        self.ensured_dirs: list[str] = []
+        self.uploads: list[tuple[Path, str]] = []
+        self.chmods: list[tuple[str, int]] = []
 
     def ensure_dir(self, remote_path: str) -> None:
-        del remote_path
+        self.ensured_dirs.append(remote_path)
 
     def upload(self, local_path: Path, remote_path: str) -> None:
-        del local_path, remote_path
+        self.uploads.append((local_path, remote_path))
 
     def chmod(self, remote_path: str, mode: int) -> None:
-        del remote_path, mode
+        self.chmods.append((remote_path, mode))
 
     def run(self, subcommand: str, command: str) -> None:
         self.commands.append((subcommand, command))
@@ -239,18 +250,20 @@ def test_remote_proof_default_flow_is_verification_first_after_install() -> None
     assert transport.commands == [
         (
             "mutate-install",
-            "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
+            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+            "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state --non-interactive",
         ),
         (
             "verify-services",
-            "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
+            "PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state",
         ),
         (
             "inspect-state",
-            "./bin/dokploy-wizard inspect-state --env-file /root/dokploy-wizard/.install.env "
+            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
+            "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state",
         ),
     ]
@@ -265,26 +278,49 @@ def test_remote_proof_strict_mode_keeps_explicit_idempotency_install() -> None:
     assert transport.commands == [
         (
             "mutate-install",
-            "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
+            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+            "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state --non-interactive",
         ),
         (
             "verify-services",
-            "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
+            "PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state",
         ),
         (
             "assert-strict-idempotency",
-            "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
+            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+            "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state --non-interactive",
         ),
         (
             "inspect-state",
-            "./bin/dokploy-wizard inspect-state --env-file /root/dokploy-wizard/.install.env "
+            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
+            "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state",
         ),
     ]
+
+
+def test_remote_upload_accepts_install_min_env_for_proof_without_remote_name_drift(
+    tmp_path: Path,
+) -> None:
+    transport = _ProofTransport()
+    session = RemoteTransportSession(transport=transport, remote_root="/root/dokploy-wizard")
+    repo_archive = tmp_path / "repo.tar.gz"
+    install_min_env = tmp_path / ".install-min.env"
+    repo_archive.write_bytes(b"placeholder archive")
+    install_min_env.write_text("STACK_NAME=wizard-stack\nROOT_DOMAIN=example.com\n", encoding="utf-8")
+
+    session.upload_bundle(repo_archive, install_min_env)
+
+    assert transport.ensured_dirs == ["/root/dokploy-wizard"]
+    assert transport.uploads == [
+        (repo_archive, "/root/dokploy-wizard/repo.tar.gz"),
+        (install_min_env, "/root/dokploy-wizard/.install.env"),
+    ]
+    assert transport.chmods == [("/root/dokploy-wizard/.install.env", 0o600)]
 
 
 def test_help_lists_expected_subcommands() -> None:
@@ -389,6 +425,7 @@ def test_inspect_state_reports_farm_status_with_redacted_secrets(
                 "AI_DEFAULT_BASE_URL=https://models.example.com/v1",
                 "MY_FARM_ADVISOR_PRIMARY_MODEL=anthropic/claude-sonnet-4",
                 "MY_FARM_ADVISOR_GATEWAY_PASSWORD=farm-secret-password",
+                "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN=SECRET_TEST_FARM_BOT_TOKEN_VALUE",
                 "",
             ]
         ),
@@ -403,20 +440,28 @@ def test_inspect_state_reports_farm_status_with_redacted_secrets(
         == 0
     )
 
-    payload = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr().out
+    payload = json.loads(output)
     assert payload["advisor_status"]["my_farm_advisor"] == {
         "display_name": "Nexa Farm",
         "enabled": True,
         "hostname": "farm.example.com",
-        "channels": [],
+        "channels": ["telegram"],
         "workspace_mount_names": ["/Nexa Farm", "/Nexa Farm Data Pipeline"],
     }
     raw_snapshot = json.loads((tmp_path / "state" / "raw-input.json").read_text(encoding="utf-8"))
     assert raw_snapshot["values"]["CLOUDFLARE_API_TOKEN"] == "<redacted>"
     assert raw_snapshot["values"]["DOKPLOY_ADMIN_PASSWORD"] == "<redacted>"
     assert raw_snapshot["values"]["AI_DEFAULT_API_KEY"] == "<redacted>"
+    assert raw_snapshot["values"]["MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN"] == "<redacted>"
+    env_specs = {entry["name"]: entry for entry in payload["dokploy_env_specs"]}
+    bot_token_spec = env_specs["MY_FARM_ADVISOR_MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN"]
+    assert bot_token_spec["owner"] == "my-farm-advisor"
+    assert bot_token_spec["sensitive"] is True
+    assert bot_token_spec["redacted_fingerprint"].startswith("sha256:")
     assert "cf-secret-token" not in json.dumps(payload)
     assert "shared-secret-key" not in json.dumps(payload)
+    assert "SECRET_TEST_FARM_BOT_TOKEN_VALUE" not in output
 
 
 def test_inspect_state_reports_disabled_farm_status(
@@ -470,7 +515,7 @@ def test_inspect_state_redacts_litellm_generated_secrets(
                 "DOKPLOY_ADMIN_EMAIL=operator@example.com",
                 "DOKPLOY_ADMIN_PASSWORD=super-secret-password",
                 "ENABLE_MY_FARM_ADVISOR=true",
-                "LITELLM_LOCAL_BASE_URL=http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
+                "LITELLM_LOCAL_BASE_URL=http://local-model.internal:61434/v1",
                 "LITELLM_MASTER_KEY=litellm-master-secret",
                 "LITELLM_SALT_KEY=litellm-salt-secret",
                 "LITELLM_VIRTUAL_KEY_OPENCLAW=litellm-virtual-secret",
@@ -497,6 +542,458 @@ def test_inspect_state_redacts_litellm_generated_secrets(
     assert "litellm-master-secret" not in json.dumps(payload)
     assert "litellm-salt-secret" not in json.dumps(payload)
     assert "litellm-virtual-secret" not in json.dumps(payload)
+
+
+def test_inspect_state_redacts_litellm_provider_api_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / "inspect-litellm-provider-keys.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "DOKPLOY_SUBDOMAIN=dokploy",
+                "DOKPLOY_ADMIN_EMAIL=operator@example.com",
+                "ENABLE_MY_FARM_ADVISOR=true",
+                "AI_DEFAULT_PROVIDER=openrouter",
+                "AI_DEFAULT_MODEL=anthropic/claude-sonnet-4",
+                "LITELLM_LOCAL_BASE_URL=http://local-model.internal:61434/v1",
+                "LITELLM_OPENROUTER_API_KEY=sk-test-openrouter-secret-12345678",
+                "LITELLM_OPENROUTER_MODELS=anthropic/claude-sonnet-4",
+                "LITELLM_OPENCODE_GO_API_KEY=sk-test-opencode-secret-12345678",
+                "LITELLM_OPENCODE_GO_BASE_URL=https://opencode-go.example.com/v1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "build_live_drift_report", lambda **_: {"status": "clean"})
+
+    assert (
+        cli._handle_inspect_state(
+            argparse.Namespace(env_file=env_file, state_dir=tmp_path / "state", dry_run=False)
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    raw_snapshot = json.loads((tmp_path / "state" / "raw-input.json").read_text(encoding="utf-8"))
+
+    assert raw_snapshot["values"]["LITELLM_OPENROUTER_API_KEY"] == "<redacted>"
+    assert raw_snapshot["values"]["LITELLM_OPENCODE_GO_API_KEY"] == "<redacted>"
+    assert "sk-test-openrouter-secret-12345678" not in json.dumps(payload)
+    assert "sk-test-opencode-secret-12345678" not in json.dumps(payload)
+
+
+def test_inspect_state_reports_surfsense_redacted_resource_and_secret_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / "inspect-surfsense.env"
+    state_dir = tmp_path / "state"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "DOKPLOY_SUBDOMAIN=dokploy",
+                "DOKPLOY_ADMIN_EMAIL=operator@example.com",
+                "DOKPLOY_ADMIN_PASSWORD=super-secret-password",
+                "DOKPLOY_API_URL=https://dokploy.example.com/api",
+                "DOKPLOY_API_KEY=dokploy-secret-key",
+                "PACKS=surfsense",
+                "LITELLM_OPENROUTER_API_KEY=SECRET_TEST_OPENROUTER_PROVIDER_KEY",
+                "SURFSENSE_VERSION=0.0.25",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    write_ownership_ledger(
+        state_dir,
+        OwnershipLedger(
+            format_version=1,
+            resources=(
+                OwnedResource(
+                    resource_type="surfsense_service",
+                    resource_id="dokploy-compose:svc-1:surfsense-service",
+                    scope="stack:wizard-stack:surfsense:service",
+                ),
+                OwnedResource(
+                    resource_type="surfsense_data",
+                    resource_id="dokploy-compose:svc-1:surfsense-data",
+                    scope="stack:wizard-stack:surfsense:data",
+                ),
+            ),
+        ),
+    )
+    write_surfsense_generated_secrets(
+        state_dir,
+        SurfSenseGeneratedSecrets(
+            format_version=1,
+            secrets={
+                "secret_key": "SECRET_TEST_SURFSENSE_SECRET_KEY",
+                "jwt_secret": "SECRET_TEST_SURFSENSE_JWT_SECRET",
+                "db_password": "SECRET_TEST_SURFSENSE_DB_PASSWORD",
+                "zero_admin_password": "SECRET_TEST_SURFSENSE_ZERO_PASSWORD",
+                "searxng_secret": "SECRET_TEST_SURFSENSE_SEARXNG_SECRET",
+            },
+        ),
+    )
+    write_litellm_generated_keys(
+        state_dir,
+        LiteLLMGeneratedKeys(
+            format_version=1,
+            master_key="sk-litellm-master-secret",
+            salt_key="litellm-salt-secret",
+            virtual_keys={"surfsense": "sk-litellm-surfsense-secret"},
+        ),
+    )
+    monkeypatch.setattr(cli, "build_live_drift_report", lambda **_: {"status": "clean"})
+
+    assert (
+        cli._handle_inspect_state(
+            argparse.Namespace(env_file=env_file, state_dir=state_dir, dry_run=False)
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+    surfsense_status = payload["surfsense_status"]
+    public_surfaces = json.dumps(surfsense_status["public_surfaces"]).lower()
+
+    assert surfsense_status["enabled"] is True
+    assert surfsense_status["hostnames"] == {
+        "frontend": "surfsense.example.com",
+        "backend": "surfsense-api.example.com",
+        "zero_cache": "surfsense-zero.example.com",
+    }
+    assert surfsense_status["public_surfaces"] == [
+        {"name": "frontend", "url": "https://surfsense.example.com/"},
+        {"name": "backend_ready", "url": "https://surfsense-api.example.com/ready"},
+        {"name": "zero_keepalive", "url": "https://surfsense-zero.example.com/keepalive"},
+    ]
+    assert surfsense_status["internal_health_checks"] == [
+        {"name": "searxng_healthz", "url": "http://searxng:8080/healthz", "public": False}
+    ]
+    assert surfsense_status["owned_resources"]["service"]["present"] is True
+    assert surfsense_status["owned_resources"]["data"]["present"] is True
+    assert surfsense_status["generated_runtime_values"] == [
+        {"name": "secret_key", "present": True, "source": "surfsense-generated-secrets.json"},
+        {"name": "jwt_secret", "present": True, "source": "surfsense-generated-secrets.json"},
+        {"name": "db_password", "present": True, "source": "surfsense-generated-secrets.json"},
+        {
+            "name": "zero_admin_password",
+            "present": True,
+            "source": "surfsense-generated-secrets.json",
+        },
+        {"name": "searxng_secret", "present": True, "source": "surfsense-generated-secrets.json"},
+    ]
+    assert surfsense_status["litellm_consumer"] == {
+        "name": "surfsense",
+        "credential_kind": "virtual_key",
+        "present": True,
+        "source": "litellm-generated-keys.json:surfsense",
+    }
+    for forbidden in ("postgres", "redis", "searxng", "celery", "migrations"):
+        assert forbidden not in public_surfaces
+    for secret in (
+        "super-secret-password",
+        "dokploy-secret-key",
+        "SECRET_TEST_OPENROUTER_PROVIDER_KEY",
+        "SECRET_TEST_SURFSENSE_SECRET_KEY",
+        "SECRET_TEST_SURFSENSE_JWT_SECRET",
+        "SECRET_TEST_SURFSENSE_DB_PASSWORD",
+        "SECRET_TEST_SURFSENSE_ZERO_PASSWORD",
+        "SECRET_TEST_SURFSENSE_SEARXNG_SECRET",
+        "sk-litellm-surfsense-secret",
+    ):
+        assert secret not in output
+
+
+def test_seaweedfs_env_file_mode_generates_state_backed_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state"
+    install_env = tmp_path / "install.env"
+    install_env.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "DOKPLOY_API_URL=https://dokploy.example.com/api",
+                "DOKPLOY_API_KEY=dokploy-api-key",
+                "PACKS=seaweedfs",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    original_install_env = install_env.read_text(encoding="utf-8")
+    raw_env = parse_env_file(install_env)
+    desired_state = resolve_desired_state(raw_env)
+
+    monkeypatch.setattr(cli, "_build_dokploy_api_client", lambda **_: cast(Any, object()))
+
+    first_backend = cli._build_seaweedfs_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+    )
+    second_backend = cli._build_seaweedfs_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+    )
+
+    first_credentials = first_backend.get_credentials()
+    second_credentials = second_backend.get_credentials()
+
+    assert desired_state.seaweedfs_access_key is None
+    assert desired_state.seaweedfs_secret_key is None
+    assert first_credentials is not None
+    assert first_credentials == second_credentials
+    assert first_credentials[0].startswith("seaweedfs-access-key-")
+    assert first_credentials[1].startswith("seaweedfs-secret-key-")
+    assert install_env.read_text(encoding="utf-8") == original_install_env
+    assert (state_dir / SEAWEEDFS_GENERATED_SECRETS_FILE).stat().st_mode & 0o777 == 0o600
+
+
+def test_inspect_state_reports_seaweedfs_generated_credentials_without_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / "inspect-seaweedfs.env"
+    state_dir = tmp_path / "state"
+    env_file.write_text(
+        "\n".join(
+            [
+                "STACK_NAME=wizard-stack",
+                "ROOT_DOMAIN=example.com",
+                "PACKS=seaweedfs",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    write_seaweedfs_generated_secrets(
+        state_dir,
+        SeaweedFsGeneratedSecrets(
+            format_version=1,
+            access_key="SECRET_TEST_SEAWEEDFS_GENERATED_ACCESS",
+            secret_key="SECRET_TEST_SEAWEEDFS_GENERATED_SECRET",
+        ),
+    )
+    monkeypatch.setattr(cli, "build_live_drift_report", lambda **_: {"status": "clean"})
+
+    assert (
+        cli._handle_inspect_state(
+            argparse.Namespace(env_file=env_file, state_dir=state_dir, dry_run=False)
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+
+    assert payload["seaweedfs_access_key"] == "<REDACTED>"
+    assert payload["seaweedfs_secret_key"] == "<REDACTED>"
+    assert payload["seaweedfs_status"] == {
+        "display_name": "SeaweedFS",
+        "enabled": True,
+        "hostname": "s3.example.com",
+        "credential_source": "generated-state",
+        "generated_runtime_values": [
+            {
+                "name": "access_key",
+                "present": True,
+                "source": "seaweedfs-generated-secrets.json",
+            },
+            {
+                "name": "secret_key",
+                "present": True,
+                "source": "seaweedfs-generated-secrets.json",
+            },
+        ],
+    }
+    assert "SECRET_TEST_SEAWEEDFS_GENERATED_ACCESS" not in output
+    assert "SECRET_TEST_SEAWEEDFS_GENERATED_SECRET" not in output
+
+
+def test_resolve_desired_state_accepts_litellm_routing_env_without_legacy_advisor_model_keys() -> None:
+    raw_env = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_MY_FARM_ADVISOR": "true",
+            "AI_DEFAULT_PROVIDER": "openrouter",
+            "AI_DEFAULT_MODEL": "anthropic/claude-sonnet-4",
+            "LITELLM_OPENROUTER_API_KEY": "<REDACTED>",
+            "LITELLM_OPENROUTER_MODELS": "anthropic/claude-sonnet-4",
+            "LITELLM_OPENCODE_GO_API_KEY": "<REDACTED>",
+        }
+    )
+
+    desired_state = resolve_desired_state(raw_env)
+
+    assert "my-farm-advisor" in desired_state.enabled_packs
+
+
+def test_surfsense_litellm_model_uses_shared_consumer_allowlist_default() -> None:
+    raw_env = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "surfsense",
+            "AI_DEFAULT_PROVIDER": "local-model.internal",
+            "AI_DEFAULT_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "SECRET_TEST_LOCAL_PROVIDER_KEY",
+            "LITELLM_OPENROUTER_API_KEY": "SECRET_TEST_OPENROUTER_PROVIDER_KEY",
+            "LITELLM_OPENROUTER_MODELS": "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini",
+        }
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    model = cli._surfsense_litellm_model(
+        raw_env=raw_env,
+        shared_core_plan=desired_state.shared_core,
+    )
+    models = cli._surfsense_litellm_models(
+        raw_env=raw_env,
+        shared_core_plan=desired_state.shared_core,
+    )
+
+    assert model == "local-model.internal/unsloth-active"
+    assert models == (
+        "local-model.internal/unsloth-active",
+        "openrouter/hunter-alpha",
+    )
+
+
+def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults() -> None:
+    full_example_path = REPO_ROOT / ".install.env.example"
+    farm_example_path = REPO_ROOT / ".install-my-farm-advisor.env.example"
+    examples = {
+        full_example_path: parse_env_file(full_example_path),
+        farm_example_path: parse_env_file(farm_example_path),
+    }
+
+    assert examples[full_example_path].values["PACKS"] == (
+        "nextcloud,openclaw,my-farm-advisor,seaweedfs,coder,docuseal,surfsense"
+    )
+    assert examples[farm_example_path].values["PACKS"] == "my-farm-advisor,nextcloud,seaweedfs"
+    assert examples[full_example_path].values["SURFSENSE_SUBDOMAIN"] == "surfsense"
+    assert examples[full_example_path].values["SURFSENSE_API_SUBDOMAIN"] == "surfsense-api"
+    assert examples[full_example_path].values["SURFSENSE_ZERO_SUBDOMAIN"] == "surfsense-zero"
+    assert examples[full_example_path].values["SURFSENSE_VERSION"] == "0.0.25"
+    assert examples[full_example_path].values["LITELLM_OPENROUTER_MODELS"] == examples[
+        farm_example_path
+    ].values["LITELLM_OPENROUTER_MODELS"]
+    install_min_path = REPO_ROOT / ".install-min.env"
+    if install_min_path.exists():
+        assert examples[full_example_path].values["LITELLM_OPENROUTER_MODELS"] == parse_env_file(
+            install_min_path
+        ).values["LITELLM_OPENROUTER_MODELS"]
+
+    for parsed in examples.values():
+        assert parsed.values["AI_DEFAULT_PROVIDER"] == "openrouter"
+        assert parsed.values["AI_DEFAULT_MODEL"] == "deepseek/deepseek-v4-flash:free"
+        assert "ENABLE_MY_FARM_ADVISOR" not in parsed.values
+        resolve_desired_state(parsed)
+
+    shared_optional_commented_keys = (
+        "DOCKER_USERNAME",
+        "DOCKER_PAT",
+        "ENABLE_TAILSCALE",
+        "TAILSCALE_AUTH_KEY",
+        "TAILSCALE_HOSTNAME",
+        "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
+        "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
+        "R2_BUCKET_NAME",
+        "R2_ENDPOINT",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "CF_ACCOUNT_ID",
+        "LITELLM_LOCAL_BASE_URL",
+        "LITELLM_LOCAL_MODEL",
+        "LITELLM_LOCAL_API_KEY",
+        "LITELLM_OPENCODE_GO_API_KEY",
+        "LITELLM_OPENCODE_GO_WILDCARD",
+        "LITELLM_NVIDIA_API_KEY",
+        "NVIDIA_BASE_URL",
+    )
+    optional_commented_keys_by_example = {
+        full_example_path: ("OPENCLAW_TELEGRAM_BOT_TOKEN", *shared_optional_commented_keys),
+        farm_example_path: shared_optional_commented_keys,
+    }
+    for example_env_path, optional_commented_keys in optional_commented_keys_by_example.items():
+        parsed = examples[example_env_path]
+        example_env = example_env_path.read_text(encoding="utf-8")
+        for key in optional_commented_keys:
+            assert f"# {key}=" in example_env
+            assert key not in parsed.values
+
+    generated_secret_keys = (
+        "DOKPLOY_API_KEY",
+        "DOKPLOY_PASSWORD",
+        "SEAWEEDFS_ACCESS_KEY",
+        "SEAWEEDFS_SECRET_KEY",
+        "OPENCLAW_GATEWAY_PASSWORD",
+        "OPENCLAW_GATEWAY_TOKEN",
+        "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
+        "SURFSENSE_SECRET_KEY",
+        "SURFSENSE_JWT_SECRET",
+        "SURFSENSE_DB_PASSWORD",
+        "SURFSENSE_ZERO_ADMIN_PASSWORD",
+        "SURFSENSE_SEARXNG_SECRET",
+        "SURFSENSE_LITELLM_VIRTUAL_KEY",
+    )
+    for key in generated_secret_keys:
+        for example_env_path, parsed in examples.items():
+            example_env = example_env_path.read_text(encoding="utf-8")
+            assert key in example_env
+            assert key not in parsed.values
+
+    live_secret_patterns = (
+        r"sk-[A-Za-z0-9_-]{8,}",
+        r"github_pat_[A-Za-z0-9_]{20,}",
+        r"ghp_[A-Za-z0-9]{20,}",
+        r"xox[baprs]-[A-Za-z0-9-]{10,}",
+        r"AKIA[0-9A-Z]{16}",
+        r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----",
+    )
+    forbidden_literals = [
+        "Global API Key=<",
+        "".join(chr(code) for code in (116, 117, 120, 100, 101, 115, 107, 116, 111, 112, 46, 116, 97, 105, 108, 98, 49, 50, 97, 97, 53, 46, 116, 115, 46, 110, 101, 116)),
+        "local-model.internal",
+    ]
+    install_min_values = parse_env_file(REPO_ROOT / ".install-min.env").values
+    for key in ("ROOT_DOMAIN", "TAILSCALE_HOSTNAME"):
+        private_value = install_min_values.get(key, "")
+        if private_value and private_value != "example.com":
+            forbidden_literals.append(private_value)
+    private_local_base_url = install_min_values.get("LITELLM_LOCAL_BASE_URL", "")
+    if private_local_base_url:
+        forbidden_literals.append(private_local_base_url)
+    for example_env_path in examples:
+        example_env = example_env_path.read_text(encoding="utf-8")
+        for pattern in live_secret_patterns:
+            assert re.search(pattern, example_env) is None
+        for literal in forbidden_literals:
+            assert literal not in example_env
+
+    placeholder_keys = (
+        "CLOUDFLARE_API_TOKEN",
+        "DOKPLOY_ADMIN_PASSWORD",
+        "LITELLM_OPENROUTER_API_KEY",
+    )
+    for key in placeholder_keys:
+        for parsed in examples.values():
+            value = parsed.values[key]
+            assert value.startswith("<") and value.endswith(">")
 
 
 def test_inspect_state_reports_both_advisors_with_user_visible_names(
@@ -1046,6 +1543,101 @@ def test_build_live_drift_report_does_not_match_seaweedfs_alias_by_random_substr
     )
 
 
+def test_build_live_drift_report_recognizes_surfsense_compose_label_containers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
+            "STACK_NAME": "openmerge",
+            "ROOT_DOMAIN": "openmerge.me",
+            "PACKS": "surfsense",
+            "LITELLM_OPENROUTER_API_KEY": "shared-key",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+    ownership_ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                "surfsense_service",
+                "svc-surfsense",
+                f"stack:{desired_state.stack_name}:surfsense:service",
+            ),
+        ),
+    )
+    surfsense_project = "openmerge-surfsense-mzch4i"
+    surfsense_containers = tuple(
+        {
+            "name": f"{surfsense_project}-{service}-1",
+            "status": "Up 2 minutes (healthy)",
+            "labels": {
+                "com.docker.compose.project": surfsense_project,
+                "com.docker.compose.service": service,
+            },
+        }
+        for service in (
+            "backend",
+            "frontend",
+            "zero-cache",
+            "searxng",
+            "celery_worker",
+            "celery_beat",
+            "migrations",
+        )
+    )
+    unrelated_stack_container = "openmerge-surfsense-mzch4i-debug-shell-1"
+
+    monkeypatch.setattr(inspection_module, "_docker_cli_available", lambda: True)
+    monkeypatch.setattr(inspection_module, "_list_docker_services", lambda: ())
+    monkeypatch.setattr(
+        inspection_module,
+        "_list_docker_containers",
+        lambda: (
+            *surfsense_containers,
+            {
+                "name": unrelated_stack_container,
+                "status": "Up 2 minutes",
+                "labels": {
+                    "com.docker.compose.project": surfsense_project,
+                    "com.docker.compose.service": "debug-shell",
+                },
+            },
+        ),
+    )
+    monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", ())
+
+    report = inspection_module.build_live_drift_report(
+        desired_state=desired_state,
+        ownership_ledger=ownership_ledger,
+    )
+
+    wizard_entries = [
+        entry for entry in report["entries"] if entry["classification"] == "wizard_managed"
+    ]
+    unknown_entries = [
+        entry
+        for entry in report["entries"]
+        if entry["classification"] == "unknown_unmanaged"
+    ]
+    manual_entries = [
+        entry for entry in report["entries"] if entry["classification"] == "manual_collision"
+    ]
+
+    assert any(
+        entry["pack"] == "surfsense"
+        and entry["scope"] == f"stack:{desired_state.stack_name}:surfsense:service"
+        and entry["live_kind"] == "container"
+        and entry["live_name"] == f"{surfsense_project}-backend-1"
+        for entry in wizard_entries
+    )
+    for container in surfsense_containers:
+        assert not any(entry["live_name"] == container["name"] for entry in unknown_entries)
+        assert not any(entry["live_name"] == container["name"] for entry in manual_entries)
+    assert [entry["live_name"] for entry in unknown_entries] == [unrelated_stack_container]
+
+
 def test_install_help_lists_task_three_flags() -> None:
     result = run_cli("install", "--help")
 
@@ -1085,7 +1677,7 @@ def test_guided_install_prompts_include_dokploy_guidance() -> None:
 
     values = prompt_for_initial_install_values(fake_prompt)
 
-    assert values.stack_name == "example"
+    assert values.stack_name == "example-com"
     assert values.dokploy_subdomain == "dokploy"
     assert values.dokploy_admin_email == "admin@example.com"
     assert values.dokploy_admin_password == "secret-123"
@@ -1469,6 +2061,7 @@ def test_install_persists_post_auth_target_before_later_failure(
             {
                 "__init__": lambda self: None,
                 "list_projects": lambda self: (),
+                "ai_providers_all": lambda self: (),
             },
         )(),
     )
@@ -1512,7 +2105,7 @@ def test_install_persists_post_auth_target_before_later_failure(
     assert loaded_state.raw_input is not None
     assert loaded_state.desired_state is not None
     assert loaded_state.applied_state is not None
-    assert loaded_state.raw_input.values["DOKPLOY_API_KEY"] == "dokp-key-123"
+    assert "DOKPLOY_API_KEY" not in loaded_state.raw_input.values
     assert loaded_state.desired_state.dokploy_api_url == "http://127.0.0.1:3000"
 
     requested_raw = parse_env_file(env_file)
@@ -1584,6 +2177,76 @@ def test_install_retry_accepts_stale_state_when_only_dokploy_api_url_differs(
 
     assert summary["lifecycle"]["mode"] == "noop"
     assert summary["state_status"] == "existing"
+
+
+def test_install_retry_sanitizes_legacy_disabled_openclaw_token_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state"
+    existing_raw = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "my-farm-advisor",
+            "AI_DEFAULT_API_KEY": "shared-key",
+            "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+        },
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    write_target_state(state_dir, existing_raw, existing_desired)
+    legacy_desired_payload = existing_desired.to_dict()
+    legacy_desired_payload["openclaw_gateway_token"] = "legacy-openclaw-token"
+    (state_dir / "desired-state.json").write_text(
+        json.dumps(legacy_desired_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=existing_desired.format_version,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=applicable_phases_for(existing_desired),
+        ),
+    )
+    write_ownership_ledger(
+        state_dir,
+        OwnershipLedger(format_version=existing_desired.format_version, resources=()),
+    )
+    monkeypatch.setattr(cli, "collect_host_facts", lambda _: _host_facts())
+    monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    monkeypatch.setattr(cli, "write_target_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "ShellTailscaleBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "ShellOpenClawBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(
+        cli,
+        "execute_lifecycle_plan",
+        lambda **kwargs: {
+            "lifecycle": {"mode": kwargs["lifecycle_plan"].mode},
+            "state_status": "existing",
+            "ok": True,
+        },
+    )
+
+    summary = cli.run_install_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=existing_raw,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    assert summary["lifecycle"]["mode"] == "noop"
+    assert summary["state_status"] == "existing"
+    assert load_state_dir(state_dir).desired_state is not None
+    assert load_state_dir(state_dir).desired_state.openclaw_gateway_token is None
 
 
 def test_install_retry_accepts_cloudflare_token_rotation(
@@ -2163,17 +2826,30 @@ def test_modify_disabled_farm_ignores_empty_pack_only_env_drift() -> None:
 
 def test_modify_shared_ai_defaults_rerun_only_selected_advisor_phases() -> None:
     farm_only_plan = _classify_modify_plan(
-        existing_values=_farm_modify_values(),
-        requested_values=_farm_modify_values(AI_DEFAULT_API_KEY="shared-key-2"),
+        existing_values=_farm_modify_values(
+            AI_DEFAULT_PROVIDER="openrouter",
+            AI_DEFAULT_MODEL="anthropic/claude-sonnet-4",
+        ),
+        requested_values=_farm_modify_values(
+            AI_DEFAULT_PROVIDER="opencode-go",
+            AI_DEFAULT_MODEL="deepseek-v4-flash",
+        ),
     )
     both_advisors_plan = _classify_modify_plan(
-        existing_values=_farm_modify_values(ENABLE_OPENCLAW="true"),
+        existing_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            AI_DEFAULT_PROVIDER="openrouter",
+            AI_DEFAULT_MODEL="anthropic/claude-sonnet-4",
+        ),
         requested_values=_farm_modify_values(
             ENABLE_OPENCLAW="true",
-            AI_DEFAULT_BASE_URL="https://models.example.com/v2",
+            AI_DEFAULT_PROVIDER="openrouter",
+            AI_DEFAULT_MODEL="anthropic/claude-opus-4.1",
         ),
     )
 
+    assert "AI_DEFAULT_PROVIDER" in farm_only_plan.reasons[0]
+    assert "AI_DEFAULT_MODEL" in both_advisors_plan.reasons[0]
     assert farm_only_plan.phases_to_run == ("shared_core", "my-farm-advisor")
     assert both_advisors_plan.phases_to_run == (
         "shared_core",
@@ -2183,16 +2859,22 @@ def test_modify_shared_ai_defaults_rerun_only_selected_advisor_phases() -> None:
 
 
 def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() -> None:
-    plan = _classify_modify_plan(
+    alias_plan = _classify_modify_plan(
         existing_values=_farm_modify_values(
             ENABLE_OPENCLAW="true",
             ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
             OPENCODE_GO_API_KEY="opencode-go-key",
             LITELLM_OPENROUTER_MODELS=("openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"),
         ),
         requested_values=_farm_modify_values(
             ENABLE_OPENCLAW="true",
             ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
             OPENCODE_GO_API_KEY="opencode-go-key",
             LITELLM_OPENROUTER_MODELS=(
                 "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini,"
@@ -2201,10 +2883,80 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
         ),
     )
 
-    assert plan.mode == "modify"
-    assert "LITELLM_OPENROUTER_MODELS" in plan.reasons[0]
-    assert plan.start_phase == "shared_core"
-    assert plan.phases_to_run == ("shared_core", "coder", "openclaw", "my-farm-advisor")
+    key_reconcile_plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+            LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
+            AI_DEFAULT_PROVIDER="opencode-go",
+            AI_DEFAULT_MODEL="deepseek-v4-flash",
+        ),
+        requested_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+            LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-2",
+            AI_DEFAULT_PROVIDER="opencode-go",
+            AI_DEFAULT_MODEL="deepseek-v4-flash",
+        ),
+    )
+
+    wildcard_plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+            LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
+            LITELLM_OPENCODE_GO_WILDCARD="false",
+            AI_DEFAULT_PROVIDER="opencode-go",
+            AI_DEFAULT_MODEL="deepseek-v4-flash",
+        ),
+        requested_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+            LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
+            LITELLM_OPENCODE_GO_WILDCARD="true",
+            AI_DEFAULT_PROVIDER="opencode-go",
+            AI_DEFAULT_MODEL="deepseek-v4-flash",
+        ),
+    )
+
+    assert alias_plan.mode == "modify"
+    assert "LITELLM_OPENROUTER_MODELS" in alias_plan.reasons[0]
+    assert alias_plan.start_phase == "shared_core"
+    assert alias_plan.phases_to_run == ("shared_core", "coder", "openclaw", "my-farm-advisor")
+    assert key_reconcile_plan.mode == "modify"
+    assert "LITELLM_OPENCODE_GO_API_KEY" in key_reconcile_plan.reasons[0]
+    assert key_reconcile_plan.phases_to_run == (
+        "shared_core",
+        "coder",
+        "openclaw",
+        "my-farm-advisor",
+    )
+    assert wildcard_plan.mode == "modify"
+    assert "LITELLM_OPENCODE_GO_WILDCARD" in wildcard_plan.reasons[0]
+    assert wildcard_plan.phases_to_run == (
+        "shared_core",
+        "coder",
+        "openclaw",
+        "my-farm-advisor",
+    )
+    assert "nextcloud" not in alias_plan.phases_to_run
+    assert "seaweedfs" not in alias_plan.phases_to_run
+    assert "nextcloud" not in key_reconcile_plan.phases_to_run
+    assert "seaweedfs" not in key_reconcile_plan.phases_to_run
+    assert "nextcloud" not in wildcard_plan.phases_to_run
+    assert "seaweedfs" not in wildcard_plan.phases_to_run
 
 
 def test_modify_litellm_consumer_removal_reruns_shared_core() -> None:
@@ -2216,6 +2968,31 @@ def test_modify_litellm_consumer_removal_reruns_shared_core() -> None:
     assert plan.mode == "modify"
     assert "ENABLE_OPENCLAW" in plan.reasons[0]
     assert plan.phases_to_run == ("networking", "shared_core", "cloudflare_access")
+
+
+def test_modify_litellm_coder_removal_reruns_shared_core_without_unrelated_packs() -> None:
+    plan = _classify_modify_plan(
+        existing_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="true",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+        ),
+        requested_values=_farm_modify_values(
+            ENABLE_OPENCLAW="true",
+            ENABLE_CODER="false",
+            ENABLE_SEAWEEDFS="true",
+            SEAWEEDFS_ACCESS_KEY="seaweed-access",
+            SEAWEEDFS_SECRET_KEY="seaweed-secret",
+        ),
+    )
+
+    assert plan.mode == "modify"
+    assert "ENABLE_CODER" in plan.reasons[0]
+    assert plan.phases_to_run == ("networking", "shared_core")
+    assert "nextcloud" not in plan.phases_to_run
+    assert "seaweedfs" not in plan.phases_to_run
 
 
 def test_modify_add_my_farm_later_refreshes_nextcloud_without_openclaw() -> None:
@@ -2485,7 +3262,7 @@ def test_guided_install_tailscale_mode_prompts_for_auth_key() -> None:
 
     values = prompt_for_initial_install_values(fake_prompt)
 
-    assert values.stack_name == "example"
+    assert values.stack_name == "example-com"
     assert values.enable_headscale is False
     assert values.enable_tailscale is True
     assert values.tailscale_auth_key == "tskey-123"
@@ -2958,6 +3735,7 @@ def test_ensure_dokploy_api_auth_rewrites_env_with_generated_key(
         },
     )
     desired_state = resolve_desired_state(raw_env)
+    qualified_endpoints: list[str] = []
 
     class FakeBootstrapBackend:
         def is_healthy(self) -> bool:
@@ -2991,6 +3769,11 @@ def test_ensure_dokploy_api_auth_rewrites_env_with_generated_key(
             assert api_key == "dokp-key-123"
 
         def list_projects(self) -> tuple[object, ...]:
+            qualified_endpoints.append("project.all")
+            return ()
+
+        def ai_providers_all(self) -> tuple[object, ...]:
+            qualified_endpoints.append("ai.getAll")
             return ()
 
     monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
@@ -3007,6 +3790,7 @@ def test_ensure_dokploy_api_auth_rewrites_env_with_generated_key(
 
     assert updated.values["DOKPLOY_API_KEY"] == "dokp-key-123"
     assert updated.values["DOKPLOY_API_URL"] == "http://127.0.0.1:3000"
+    assert qualified_endpoints == ["project.all"]
     written = env_file.read_text(encoding="utf-8")
     assert "DOKPLOY_API_KEY=dokp-key-123" in written
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
@@ -3065,6 +3849,10 @@ def test_ensure_dokploy_api_auth_refreshes_invalid_existing_key(
             assert self.api_key == "fresh-key-123"
             return ()
 
+        def ai_providers_all(self) -> tuple[object, ...]:
+            assert self.api_key == "fresh-key-123"
+            return ()
+
     monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
     monkeypatch.setattr(cli, "DokployApiClient", ValidatingDokployClient)
 
@@ -3079,6 +3867,136 @@ def test_ensure_dokploy_api_auth_refreshes_invalid_existing_key(
 
     assert updated.values["DOKPLOY_API_KEY"] == "fresh-key-123"
     assert updated.values["DOKPLOY_API_URL"] == "http://127.0.0.1:3000"
+
+
+def test_ensure_dokploy_api_auth_reuses_project_key_when_ai_requires_session_auth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "install.env"
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "guided-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "secret-123",
+            "DOKPLOY_API_KEY": "project-only-key",
+            "DOKPLOY_API_URL": "http://127.0.0.1:3000",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    class FakeBootstrapBackend:
+        def is_healthy(self) -> bool:
+            return True
+
+        def install(self) -> None:
+            raise AssertionError("install should not be called")
+
+    class FakeAuthClient:
+        def __init__(self, *, base_url: str) -> None:
+            raise AssertionError(f"bootstrap auth refresh should not be called for {base_url}")
+
+        def ensure_api_key(
+            self, *, admin_email: str, admin_password: str, key_name: str = "dokploy-wizard"
+        ) -> DokployBootstrapAuthResult:
+            raise AssertionError("bootstrap auth refresh should not be called")
+
+    class ValidatingDokployClient:
+        def __init__(self, *, api_url: str, api_key: str) -> None:
+            assert api_url == "http://127.0.0.1:3000"
+            self.api_key = api_key
+
+        def list_projects(self) -> tuple[object, ...]:
+            assert self.api_key == "project-only-key"
+            return ()
+
+        def ai_providers_all(self) -> tuple[object, ...]:
+            raise AssertionError("ai.getAll is session-backed and not part of API-key qualification")
+
+    monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
+    monkeypatch.setattr(cli, "DokployApiClient", ValidatingDokployClient)
+
+    updated = cli._ensure_dokploy_api_auth(
+        env_file=env_file,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        bootstrap_backend=FakeBootstrapBackend(),
+        dry_run=False,
+        require_real_dokploy_auth=True,
+    )
+
+    assert updated.values["DOKPLOY_API_KEY"] == "project-only-key"
+    assert updated.values["DOKPLOY_API_URL"] == "http://127.0.0.1:3000"
+    assert "DOKPLOY_API_KEY=project-only-key" in env_file.read_text(encoding="utf-8")
+
+
+def test_ensure_dokploy_api_auth_accepts_new_project_key_when_ai_requires_session_auth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "install.env"
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "guided-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOKPLOY_SUBDOMAIN": "dokploy",
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "secret-123",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+
+    class FakeBootstrapBackend:
+        def is_healthy(self) -> bool:
+            return True
+
+        def install(self) -> None:
+            raise AssertionError("install should not be called")
+
+    class FakeAuthClient:
+        def __init__(self, *, base_url: str) -> None:
+            assert base_url == "http://127.0.0.1:3000"
+
+        def ensure_api_key(
+            self, *, admin_email: str, admin_password: str, key_name: str = "dokploy-wizard"
+        ) -> DokployBootstrapAuthResult:
+            return DokployBootstrapAuthResult(
+                api_key="fresh-project-only-key",
+                api_url="http://127.0.0.1:3000",
+                admin_email=admin_email,
+                organization_id="org-1",
+                used_sign_up=False,
+                auth_path="/api/auth/sign-in/email",
+                session_path="/api/user.session",
+            )
+
+    class ProjectOnlyDokployClient:
+        def __init__(self, *, api_url: str, api_key: str) -> None:
+            assert api_url == "http://127.0.0.1:3000"
+            assert api_key == "fresh-project-only-key"
+
+        def list_projects(self) -> tuple[object, ...]:
+            return ()
+
+        def ai_providers_all(self) -> tuple[object, ...]:
+            raise AssertionError("ai.getAll is session-backed and not part of API-key qualification")
+
+    monkeypatch.setattr(cli, "DokployBootstrapAuthClient", FakeAuthClient)
+    monkeypatch.setattr(cli, "DokployApiClient", ProjectOnlyDokployClient)
+
+    updated = cli._ensure_dokploy_api_auth(
+        env_file=env_file,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        bootstrap_backend=FakeBootstrapBackend(),
+        dry_run=False,
+        require_real_dokploy_auth=True,
+    )
+
+    assert updated.values["DOKPLOY_API_KEY"] == "fresh-project-only-key"
+    assert "DOKPLOY_API_KEY=fresh-project-only-key" in env_file.read_text(encoding="utf-8")
 
 
 def test_ensure_dokploy_api_auth_reuses_valid_existing_key_even_when_password_present(
@@ -3112,6 +4030,9 @@ def test_ensure_dokploy_api_auth_reuses_valid_existing_key_even_when_password_pr
             assert api_key == "valid-key"
 
         def list_projects(self) -> tuple[object, ...]:
+            return ()
+
+        def ai_providers_all(self) -> tuple[object, ...]:
             return ()
 
     def fail_refresh(**_: object) -> object:
@@ -3805,6 +4726,232 @@ def test_install_allows_missing_managed_service_drift_to_proceed(
     )
 
     assert summary["ok"] is True
+
+
+def test_docker_hub_auth_no_keys_skips_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[object] = []
+
+    def fail_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        raise AssertionError("docker login should not run without Docker Hub credentials")
+
+    monkeypatch.setattr(cli.subprocess, "run", fail_run)
+
+    credentials = cli._docker_hub_credentials_from_env(
+        _raw_input({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})
+    )
+    cli._docker_login_if_configured(credentials)
+
+    assert credentials is None
+    assert calls == []
+
+
+def test_docker_hub_auth_runs_login_with_pat_on_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "test-docker-token-not-for-output"
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        command: list[str],
+        *,
+        input: str,
+        text: bool,
+        capture_output: bool,
+        check: bool,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        captured.update(
+            {
+                "command": command,
+                "input": input,
+                "text": text,
+                "capture_output": capture_output,
+                "check": check,
+                "timeout": timeout,
+            }
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="Login Succeeded", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    credentials = cli._docker_hub_credentials_from_env(
+        _raw_input({"DOCKER_USERNAME": "operator", "DOCKER_PAT": token})
+    )
+    cli._docker_login_if_configured(credentials)
+
+    assert captured["command"] == [
+        "docker",
+        "login",
+        "--username",
+        "operator",
+        "--password-stdin",
+    ]
+    assert captured["input"] == token
+    assert captured["text"] is True
+    assert captured["capture_output"] is True
+    assert captured["check"] is False
+    assert captured["timeout"] == 30
+    assert token not in " ".join(cast(list[str], captured["command"]))
+
+
+def test_docker_hub_auth_partial_keys_fail_before_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "test-docker-token-not-for-output"
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("partial Docker Hub credentials must fail early"),
+    )
+
+    with pytest.raises(StateValidationError) as exc_info:
+        cli._docker_hub_credentials_from_env(_raw_input({"DOCKER_PAT": token}))
+
+    message = str(exc_info.value)
+    assert "DOCKER_USERNAME and DOCKER_PAT" in message
+    assert "Missing: DOCKER_USERNAME" in message
+    assert token not in message
+
+
+def test_docker_hub_auth_failure_redacts_pat(monkeypatch: pytest.MonkeyPatch) -> None:
+    token = "plain-test-docker-token-not-matching-generic-redactor"
+
+    def fake_run(
+        command: list[str],
+        *,
+        input: str,
+        text: bool,
+        capture_output: bool,
+        check: bool,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        del input, text, capture_output, check, timeout
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=f"stdout leaked {token}",
+            stderr=f"stderr leaked {token}",
+        )
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    credentials = cli._docker_hub_credentials_from_env(
+        _raw_input({"DOCKER_USERNAME": "operator", "DOCKER_PAT": token})
+    )
+    with pytest.raises(StateValidationError) as exc_info:
+        cli._docker_login_if_configured(credentials)
+
+    message = str(exc_info.value)
+    assert "Docker Hub login failed for username 'operator'" in message
+    assert token not in message
+    assert "<REDACTED>" in message
+
+
+def test_docker_hub_auth_is_removed_from_persisted_raw_input() -> None:
+    raw_env = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOCKER_USERNAME": "operator",
+            "DOCKER_PAT": "plain-test-docker-token-not-for-state",
+        }
+    )
+
+    persistable_raw_env = cli._state_persistable_raw_env_input(raw_env)
+
+    assert "DOCKER_USERNAME" not in persistable_raw_env.values
+    assert "DOCKER_PAT" not in persistable_raw_env.values
+    assert persistable_raw_env.values == {
+        "STACK_NAME": "wizard-stack",
+        "ROOT_DOMAIN": "example.com",
+    }
+
+
+def test_install_runs_docker_hub_login_before_lifecycle_execution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    base_raw_env = parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env")
+    raw_env = RawEnvInput(
+        format_version=base_raw_env.format_version,
+        values={
+            **base_raw_env.values,
+            "DOCKER_USERNAME": "operator",
+            "DOCKER_PAT": "test-docker-token-not-for-output",
+        },
+    )
+    order: list[str] = []
+
+    monkeypatch.setattr(cli, "collect_host_facts", lambda _: _host_facts())
+    monkeypatch.setattr(cli, "_host_supports_prerequisite_remediation", lambda _: False)
+    _stub_install_flow_after_preflight(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_docker_login_if_configured",
+        lambda credentials: order.append("docker-login"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "execute_lifecycle_plan",
+        lambda **kwargs: order.append("execute-lifecycle") or {"ok": True},
+    )
+
+    summary = cli.run_install_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    assert summary["ok"] is True
+    assert order == ["docker-login", "execute-lifecycle"]
+
+
+def test_install_does_not_persist_docker_hub_auth_to_raw_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    base_raw_env = parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env")
+    token = "plain-test-docker-token-not-for-state"
+    raw_env = RawEnvInput(
+        format_version=base_raw_env.format_version,
+        values={
+            **base_raw_env.values,
+            "DOCKER_USERNAME": "operator",
+            "DOCKER_PAT": token,
+        },
+    )
+
+    monkeypatch.setattr(cli, "collect_host_facts", lambda _: _host_facts())
+    monkeypatch.setattr(cli, "_host_supports_prerequisite_remediation", lambda _: False)
+    monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
+    monkeypatch.setattr(cli, "ShellTailscaleBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
+    monkeypatch.setattr(cli, "ShellOpenClawBackend", lambda _: cast(Any, object()))
+    monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_docker_login_if_configured", lambda credentials: None)
+
+    summary = cli.run_install_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=tmp_path / "state",
+        dry_run=False,
+        raw_env=raw_env,
+        bootstrap_backend=_FakeBootstrapBackend(),
+    )
+
+    raw_input_json = (tmp_path / "state" / "raw-input.json").read_text(encoding="utf-8")
+    persisted_raw = load_state_dir(tmp_path / "state").raw_input
+    assert summary["ok"] is True
+    assert persisted_raw is not None
+    assert "DOCKER_USERNAME" not in persisted_raw.values
+    assert "DOCKER_PAT" not in persisted_raw.values
+    assert token not in raw_input_json
 
 
 def test_install_bootstraps_missing_docker_before_strict_preflight_rerun(

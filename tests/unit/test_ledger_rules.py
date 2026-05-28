@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from dokploy_wizard.state import (
+    DesiredState,
     OwnedResource,
     OwnershipLedger,
     StateValidationError,
@@ -144,6 +145,7 @@ def test_validate_existing_state_accepts_historical_seaweedfs_checkpoint(tmp_pat
                     "matrix",
                     "nextcloud",
                     "seaweedfs",
+                    "surfsense",
                     "openclaw",
                 ],
             }
@@ -160,3 +162,61 @@ def test_validate_existing_state_accepts_historical_seaweedfs_checkpoint(tmp_pat
     assert validate_existing_state(loaded_state) is True
     assert loaded_state.applied_state is not None
     assert "seaweedfs" in loaded_state.applied_state.completed_steps
+    assert "surfsense" in loaded_state.applied_state.completed_steps
+
+
+def test_load_state_dir_sanitizes_legacy_disabled_openclaw_gateway_token(
+    tmp_path: Path,
+) -> None:
+    desired_payload = {
+        "format_version": 1,
+        "root_domain": "example.com",
+        "stack_name": "wizard-stack",
+        "dokploy_url": "https://dokploy.example.com",
+        "dokploy_api_url": "http://127.0.0.1:3000",
+        "enabled_features": ["dokploy"],
+        "selected_packs": ["my-farm-advisor"],
+        "enabled_packs": ["my-farm-advisor"],
+        "hostnames": {
+            "dokploy": "dokploy.example.com",
+            "my-farm-advisor": "farm.example.com",
+        },
+        "enable_tailscale": False,
+        "tailscale_hostname": None,
+        "tailscale_enable_ssh": False,
+        "tailscale_tags": [],
+        "tailscale_subnet_routes": [],
+        "cloudflare_access_otp_emails": [],
+        "shared_core": {
+            "network_name": "wizard-stack-shared",
+            "postgres": None,
+            "redis": None,
+            "litellm": None,
+            "mail": None,
+            "allocations": [],
+        },
+        "seaweedfs_access_key": None,
+        "seaweedfs_secret_key": None,
+        "openclaw_gateway_token": "legacy-openclaw-token",
+        "openclaw_channels": [],
+        "openclaw_replicas": None,
+        "my_farm_advisor_channels": ["telegram"],
+        "my_farm_advisor_replicas": None,
+    }
+    (tmp_path / "desired-state.json").write_text(
+        json.dumps(desired_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        StateValidationError,
+        match="OpenClaw gateway token must be omitted when the OpenClaw pack is disabled",
+    ):
+        DesiredState.from_dict(desired_payload)
+
+    loaded_state = load_state_dir(tmp_path)
+
+    assert loaded_state.desired_state is not None
+    assert loaded_state.desired_state.openclaw_gateway_token is None
+    assert loaded_state.desired_state.enabled_packs == ("my-farm-advisor",)
+    assert "openclaw" not in loaded_state.desired_state.enabled_packs

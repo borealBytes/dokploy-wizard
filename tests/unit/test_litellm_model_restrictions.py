@@ -37,13 +37,34 @@ from dokploy_wizard.litellm.admin import (
     LiteLLMVirtualKeyRecord,
 )
 from dokploy_wizard.litellm.config_renderer import build_litellm_config
+from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 
 EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
-    "my-farm-advisor": ("local/unsloth-active", "unsloth-active"),
-    "openclaw": ("local/unsloth-active", "unsloth-active"),
-    "coder-hermes": ("local/unsloth-active", "unsloth-active"),
-    "coder-kdense": (),
+    "my-farm-advisor": (
+        DEFAULT_LOCAL_CANONICAL_ALIAS,
+        "openrouter/anthropic/claude-3.5-sonnet",
+    ),
+    "openclaw": (
+        DEFAULT_LOCAL_CANONICAL_ALIAS,
+        "openrouter/anthropic/claude-3.5-sonnet",
+    ),
+    "coder-hermes": (
+        DEFAULT_LOCAL_CANONICAL_ALIAS,
+        "openrouter/anthropic/claude-3.5-sonnet",
+    ),
+    "coder-kdense": (
+        DEFAULT_LOCAL_CANONICAL_ALIAS,
+        "openrouter/anthropic/claude-3.5-sonnet",
+    ),
 }
+EXPECTED_MODEL_INFO_COSTS: dict[str, dict[str, float]] = {
+    "openrouter/anthropic/claude-3.5-sonnet": {
+        "input_cost_per_token": 0.000003,
+        "output_cost_per_token": 0.000015,
+    }
+}
+UNCONFIGURED_OPENROUTER_MODEL = "openrouter/google/gemma-4-31b-it:free"
+DENIED_BARE_LOCAL_ALIAS = "unsloth-active"
 
 LIVE_KEY_ENV_BY_CONSUMER = {
     "my-farm-advisor": "LITELLM_QA_KEY_MY_FARM_ADVISOR",
@@ -70,8 +91,36 @@ class FakeLiteLLMAdminApi:
     def list_teams(self) -> tuple[LiteLLMTeamRecord, ...]:
         return tuple(self._teams.values())
 
-    def create_team(self, *, team_alias: str, models: tuple[str, ...]) -> LiteLLMTeamRecord:
-        team = LiteLLMTeamRecord(team_id=f"team-{team_alias}", team_alias=team_alias, models=models)
+    def create_team(
+        self,
+        *,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        team = LiteLLMTeamRecord(
+            team_id=f"team-{team_alias}",
+            team_alias=team_alias,
+            models=models,
+            metadata=dict(metadata or {}),
+        )
+        self._teams[team_alias] = team
+        return team
+
+    def update_team(
+        self,
+        *,
+        team_id: str,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        team = LiteLLMTeamRecord(
+            team_id=team_id,
+            team_alias=team_alias,
+            models=models,
+            metadata=dict(metadata or {}),
+        )
         self._teams[team_alias] = team
         return team
 
@@ -87,15 +136,37 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
-        del metadata
         record = LiteLLMVirtualKeyRecord(
             key=key,
             key_alias=key_alias,
             team_id=team_id,
             models=models,
+            metadata=dict(metadata or {}),
         )
         self._keys[key_alias] = record
         return record
+
+    def update_key(
+        self,
+        *,
+        key_alias: str,
+        key: str,
+        team_id: str | None,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMVirtualKeyRecord:
+        record = LiteLLMVirtualKeyRecord(
+            key=key,
+            key_alias=key_alias,
+            team_id=team_id,
+            models=models,
+            metadata=dict(metadata or {}),
+        )
+        self._keys[key_alias] = record
+        return record
+
+    def delete_key(self, *, key_alias: str) -> None:
+        self._keys.pop(key_alias, None)
 
 
 class FakeLiteLLMRestrictionHarness:
@@ -134,13 +205,20 @@ class FakeLiteLLMRestrictionHarness:
                     {
                         "model_name": model_name,
                         "litellm_params": self._models_by_name[model_name]["litellm_params"],
-                        "model_info": {"id": f"fake-{index}-{model_name}"},
+                        "model_info": self._model_info_payload(index=index, model_name=model_name),
                     }
                     for index, model_name in enumerate(record.models, start=1)
                     if model_name in self._models_by_name
                 ]
             },
         )
+
+    def _model_info_payload(self, *, index: int, model_name: str) -> dict[str, object]:
+        payload: dict[str, object] = {"id": f"fake-{index}-{model_name}"}
+        configured_model_info = self._models_by_name[model_name].get("model_info")
+        if isinstance(configured_model_info, dict):
+            payload.update(configured_model_info)
+        return payload
 
     def chat_completion(self, api_key: str, *, model: str) -> HarnessResponse:
         record = self._authenticate(api_key)
@@ -233,6 +311,8 @@ def _qa_flat_env() -> dict[str, str]:
         "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
         "LITELLM_LOCAL_MODEL": "unsloth-active",
         "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
+        "LITELLM_OPENROUTER_API_KEY": "sk-openrouter-test",
+        "LITELLM_OPENROUTER_MODELS": "anthropic/claude-3.5-sonnet",
     }
 
 
@@ -263,6 +343,22 @@ def _build_fake_harness() -> FakeLiteLLMRestrictionHarness:
             "opencode_go_api_key_env": "OPENCODE_GO_API_KEY",
             "openrouter_api_key_env": "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
             "nvidia_api_key_env": "OPENCLAW_NVIDIA_API_KEY",
+            "openrouter_model_metadata": {
+                "anthropic/claude-3.5-sonnet": {
+                    "pricing": {
+                        "prompt": str(
+                            EXPECTED_MODEL_INFO_COSTS["openrouter/anthropic/claude-3.5-sonnet"][
+                                "input_cost_per_token"
+                            ]
+                        ),
+                        "completion": str(
+                            EXPECTED_MODEL_INFO_COSTS["openrouter/anthropic/claude-3.5-sonnet"][
+                                "output_cost_per_token"
+                            ]
+                        ),
+                    }
+                }
+            },
         },
     )
     return FakeLiteLLMRestrictionHarness(config=config, keys_by_consumer=reconciled)
@@ -270,6 +366,30 @@ def _build_fake_harness() -> FakeLiteLLMRestrictionHarness:
 
 def _consumer_api_key(consumer: str) -> str:
     return _expected_consumer_keys()[consumer]
+
+
+def test_dokploy_ai_reconciles_with_default_model_alias_only() -> None:
+    flat_env = _qa_flat_env()
+    plan = build_shared_core_plan(
+        stack_name="wizard-stack",
+        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+    )
+    allowlists = build_litellm_consumer_model_allowlists(flat_env=flat_env, plan=plan)
+    manager = LiteLLMGatewayManager(api=FakeLiteLLMAdminApi(), sleep_fn=lambda _: None)
+
+    reconciled = manager.reconcile_virtual_keys(
+        generated_keys={"dokploy-ai": "sk-test-dokploy-ai"},
+        consumer_model_allowlists=allowlists,
+    )
+
+    assert allowlists["dokploy-ai"] == (DEFAULT_LOCAL_CANONICAL_ALIAS,)
+    assert reconciled["dokploy-ai"] == LiteLLMVirtualKeyRecord(
+        key="sk-test-dokploy-ai",
+        key_alias="dokploy-ai",
+        team_id="team-dokploy-ai",
+        models=(DEFAULT_LOCAL_CANONICAL_ALIAS,),
+        metadata={"consumer": "dokploy-ai", "managed_by": "dokploy-wizard"},
+    )
 
 
 def _model_names_from_v1_models(response: HarnessResponse) -> tuple[str, ...]:
@@ -302,6 +422,52 @@ def _model_names_from_model_info(response: HarnessResponse) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _model_info_entries_by_name(response: HarnessResponse) -> dict[str, dict[str, object]]:
+    payload = response.json_body
+    entries: object = payload
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        entries = payload["data"]
+    if isinstance(payload, dict) and isinstance(payload.get("model_name"), str):
+        entries = [payload]
+    if not isinstance(entries, list):
+        raise AssertionError(f"expected list-like model/info response, got: {payload!r}")
+    result: dict[str, dict[str, object]] = {}
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("model_name"), str):
+            result[cast(str, entry["model_name"])] = entry
+    return result
+
+
+def _assert_expected_cost_metadata(
+    response: HarnessResponse,
+    *,
+    required_costs_by_model: Mapping[str, Mapping[str, float]],
+) -> None:
+    entries_by_name = _model_info_entries_by_name(response)
+    for model_name, expected_costs in required_costs_by_model.items():
+        entry = entries_by_name.get(model_name)
+        if entry is None:
+            raise AssertionError(f"missing model/info entry for {model_name}: {entries_by_name!r}")
+        model_info = entry.get("model_info")
+        if not isinstance(model_info, dict):
+            raise AssertionError(f"expected dict model_info for {model_name}: {entry!r}")
+        for field, expected_value in expected_costs.items():
+            assert model_info.get(field) == pytest.approx(expected_value)
+
+
+def _assert_numeric_cost_metadata_if_present(response: HarnessResponse, *, model_name: str) -> None:
+    entry = _model_info_entries_by_name(response).get(model_name)
+    if entry is None:
+        raise AssertionError(f"missing model/info entry for {model_name}: {response.json_body!r}")
+    model_info = entry.get("model_info")
+    if not isinstance(model_info, dict):
+        raise AssertionError(f"expected dict model_info for {model_name}: {entry!r}")
+    for field in ("input_cost_per_token", "output_cost_per_token"):
+        value = model_info.get(field)
+        if value is not None:
+            assert isinstance(value, (int, float))
+
+
 def _live_enabled() -> bool:
     return os.environ.get("LITELLM_QA_ENABLE_LIVE") == "1"
 
@@ -332,7 +498,7 @@ def test_fake_v1_models_farm_key_shows_local_and_opencode_go_wildcard(
     response = fake_harness.v1_models(_consumer_api_key("my-farm-advisor"))
 
     assert response.status_code == 200
-    assert _model_names_from_v1_models(response) == ("local/unsloth-active", "unsloth-active")
+    assert _model_names_from_v1_models(response) == EXPECTED_VISIBLE_MODELS["my-farm-advisor"]
     assert "openrouter/*" not in _model_names_from_v1_models(response)
 
 
@@ -366,6 +532,24 @@ def test_fake_model_info_matches_expected_aliases_only(
     assert _model_names_from_model_info(response) == expected_models
 
 
+@pytest.mark.parametrize("consumer", tuple(EXPECTED_VISIBLE_MODELS))
+def test_fake_model_info_preserves_cost_metadata_where_available(
+    fake_harness: FakeLiteLLMRestrictionHarness,
+    consumer: str,
+) -> None:
+    response = fake_harness.model_info(_consumer_api_key(consumer))
+
+    assert response.status_code == 200
+    _assert_expected_cost_metadata(
+        response,
+        required_costs_by_model=EXPECTED_MODEL_INFO_COSTS,
+    )
+    local_model_info = _model_info_entries_by_name(response)[DEFAULT_LOCAL_CANONICAL_ALIAS]["model_info"]
+    assert isinstance(local_model_info, dict)
+    assert "input_cost_per_token" not in local_model_info
+    assert "output_cost_per_token" not in local_model_info
+
+
 def test_fake_openrouter_wildcard_is_absent_for_all_restricted_keys(
     fake_harness: FakeLiteLLMRestrictionHarness,
 ) -> None:
@@ -392,28 +576,31 @@ def test_fake_opencode_go_wildcard_is_isolated_to_intended_alias_policy(
 
 
 @pytest.mark.parametrize("consumer", tuple(EXPECTED_VISIBLE_MODELS))
-def test_fake_denied_unknown_openrouter_alias_returns_403(
+def test_fake_denied_unconfigured_openrouter_alias_returns_403(
     fake_harness: FakeLiteLLMRestrictionHarness,
     consumer: str,
 ) -> None:
     response = fake_harness.chat_completion(
         _consumer_api_key(consumer),
-        model="openrouter/forbidden-model",
+        model=UNCONFIGURED_OPENROUTER_MODEL,
     )
 
     assert response.status_code in {400, 403}
-    assert "forbidden-model" in json.dumps(response.json_body)
+    assert UNCONFIGURED_OPENROUTER_MODEL in json.dumps(response.json_body)
 
 
-def test_fake_coder_kdense_rejects_advisor_only_openrouter_alias(
+@pytest.mark.parametrize("consumer", tuple(EXPECTED_VISIBLE_MODELS))
+def test_fake_denied_bare_local_alias_returns_403(
     fake_harness: FakeLiteLLMRestrictionHarness,
+    consumer: str,
 ) -> None:
     response = fake_harness.chat_completion(
-        _consumer_api_key("coder-kdense"),
-        model="openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        _consumer_api_key(consumer),
+        model=DENIED_BARE_LOCAL_ALIAS,
     )
 
     assert response.status_code in {400, 403}
+    assert DENIED_BARE_LOCAL_ALIAS in json.dumps(response.json_body)
 
 
 @pytest.mark.skipif(not _live_enabled(), reason="set LITELLM_QA_ENABLE_LIVE=1 to run post-deploy checks")
@@ -423,9 +610,13 @@ def test_live_litellm_restricted_keys_match_contract() -> None:
     for consumer, expected_models in EXPECTED_VISIBLE_MODELS.items():
         v1_models = harness.v1_models(_live_key(consumer))
         model_info = harness.model_info(_live_key(consumer))
-        denied_completion = harness.chat_completion(
+        denied_unconfigured_model = harness.chat_completion(
             _live_key(consumer),
-            model="openrouter/forbidden-model",
+            model=UNCONFIGURED_OPENROUTER_MODEL,
+        )
+        denied_bare_local_alias = harness.chat_completion(
+            _live_key(consumer),
+            model=DENIED_BARE_LOCAL_ALIAS,
         )
 
         assert v1_models.status_code == 200
@@ -434,5 +625,10 @@ def test_live_litellm_restricted_keys_match_contract() -> None:
 
         assert model_info.status_code == 200
         assert _model_names_from_model_info(model_info) == expected_models
+        _assert_numeric_cost_metadata_if_present(
+            model_info,
+            model_name="openrouter/anthropic/claude-3.5-sonnet",
+        )
 
-        assert denied_completion.status_code in {400, 403}
+        assert denied_unconfigured_model.status_code in {400, 403}
+        assert denied_bare_local_alias.status_code in {400, 403}

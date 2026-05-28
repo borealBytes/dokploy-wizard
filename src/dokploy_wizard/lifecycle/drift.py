@@ -44,6 +44,11 @@ from dokploy_wizard.packs.seaweedfs import (
     SeaweedFsResourceRecord,
     reconcile_seaweedfs,
 )
+from dokploy_wizard.packs.surfsense import (
+    SurfSenseBackend,
+    SurfSenseResourceRecord,
+    reconcile_surfsense,
+)
 from dokploy_wizard.state.models import DesiredState, OwnershipLedger, RawEnvInput
 from dokploy_wizard.tailscale import TailscaleBackend, reconcile_tailscale
 
@@ -93,6 +98,7 @@ def validate_preserved_phases(
     seaweedfs_backend: SeaweedFsBackend,
     coder_backend: CoderBackend,
     openclaw_backend: OpenClawBackend,
+    surfsense_backend: SurfSenseBackend | None = None,
     moodle_backend: MoodleBackend | None = None,
     docuseal_backend: DocuSealBackend | None = None,
 ) -> DriftReport:
@@ -119,6 +125,7 @@ def validate_preserved_phases(
                 seaweedfs_backend=seaweedfs_backend,
                 coder_backend=coder_backend,
                 openclaw_backend=openclaw_backend,
+                surfsense_backend=surfsense_backend,
             )
         )
     report = DriftReport(entries=tuple(entries))
@@ -149,6 +156,7 @@ def _validate_phase(
     seaweedfs_backend: SeaweedFsBackend,
     coder_backend: CoderBackend,
     openclaw_backend: OpenClawBackend,
+    surfsense_backend: SurfSenseBackend | None = None,
     moodle_backend: MoodleBackend | None = None,
     docuseal_backend: DocuSealBackend | None = None,
 ) -> DriftEntry:
@@ -341,6 +349,22 @@ def _validate_phase(
                             "rerun the shared-core phase."
                         ),
                     )
+            validate_litellm_virtual_keys = getattr(
+                shared_core_backend, "validate_litellm_virtual_keys", None
+            )
+            if (
+                callable(validate_litellm_virtual_keys)
+                and desired_state.shared_core.litellm is not None
+                and not validate_litellm_virtual_keys()
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=(
+                        "LiteLLM virtual keys no longer match wizard state or model allowlists; "
+                        "rerun the shared-core phase."
+                    ),
+                )
             return DriftEntry(
                 phase=phase, status="ok", detail="Shared core ownership remains aligned."
             )
@@ -529,6 +553,47 @@ def _validate_phase(
                     detail="DocuSeal health check no longer passes for a preserved phase.",
                 )
             return DriftEntry(phase=phase, status="ok", detail="DocuSeal ownership remains aligned.")
+        if phase == "surfsense":
+            if surfsense_backend is None:
+                return DriftEntry(phase=phase, status="drift", detail="SurfSense backend is unavailable.")
+            surfsense = reconcile_surfsense(
+                dry_run=True,
+                desired_state=desired_state,
+                ownership_ledger=ownership_ledger,
+                backend=surfsense_backend,
+            ).result
+            if surfsense.outcome == "skipped":
+                return DriftEntry(phase=phase, status="ok", detail="SurfSense remains skipped.")
+            actions = {
+                resource.action
+                for resource in (surfsense.service, surfsense.persistent_data)
+                if resource is not None
+            }
+            if actions != {"reuse_owned"}:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=f"SurfSense expected owned reuse, found actions {sorted(actions)}.",
+                )
+            if surfsense.health_check is None:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="SurfSense health check metadata is missing for a preserved phase.",
+                )
+            if surfsense.service is None or not surfsense_backend.check_health(
+                service=SurfSenseResourceRecord(
+                    resource_id=surfsense.service.resource_id,
+                    resource_name=surfsense.service.resource_name,
+                ),
+                url=surfsense.health_check.url,
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=f"SurfSense health check no longer passes for {surfsense.health_check.url!r}.",
+                )
+            return DriftEntry(phase=phase, status="ok", detail="SurfSense ownership remains aligned.")
         if phase == "seaweedfs":
             seaweedfs = reconcile_seaweedfs(
                 dry_run=True,

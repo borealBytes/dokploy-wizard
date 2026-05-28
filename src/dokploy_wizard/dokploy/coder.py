@@ -35,9 +35,13 @@ from dokploy_wizard.dokploy.client import (
 )
 from dokploy_wizard.dokploy.compose_noop import (
     apply_compose_noop_guard,
+    apply_rendered_compose_to_existing,
     persist_compose_artifact_hash,
 )
 from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
+from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
+from dokploy_wizard.litellm.config_renderer import verified_opencode_go_chat_model_ids
+from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
 from dokploy_wizard.state import load_state_dir
 from dokploy_wizard.verification import make_verification_result
@@ -51,7 +55,9 @@ class DokployCoderApi(Protocol):
     def create_compose(
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord: ...
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord: ...
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord: ...
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
     ) -> DokployDeployResult: ...
@@ -64,10 +70,21 @@ class _ComposeLocator:
     compose_id: str
 
 
-_DEFAULT_HERMES_INFERENCE_PROVIDER = "openai"
-_DEFAULT_HERMES_MODEL = "unsloth-active"
+_DEFAULT_AI_DEFAULT_PROVIDER = "opencode-go"
+_DEFAULT_AI_DEFAULT_MODEL = "deepseek-v4-flash"
+_DEFAULT_HERMES_INFERENCE_PROVIDER = "dokploy-litellm"
+_DEFAULT_HERMES_MODEL = "opencode-go/deepseek-v4-flash"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_INTERNAL_PORT = 4000
+_DEFAULT_CODER_OPENROUTER_ALIAS_SAMPLE = "openrouter/minimax/minimax-m2.5:free"
+_COPILOT_BYOK_SETTING_KEY = "github.copilot.chat.customOAIModels"
+_COPILOT_BYOK_PROVIDER_LABEL = "Dokploy LiteLLM"
+_COPILOT_BYOK_CHAT_ONLY_LIMITATION = (
+    "Official Copilot BYOK models apply to VS Code chat and agents only; "
+    "inline completions still use Copilot-managed models."
+)
+_CODER_STATE_REQUIRED_FOR_MODIFY = frozenset({"applied-state.json", "ownership-ledger.json"})
+
 
 
 class DokployCoderBackend:
@@ -83,6 +100,8 @@ class DokployCoderBackend:
         admin_password: str,
         postgres_service_name: str,
         postgres: SharedPostgresAllocation,
+        ai_default_provider: str = _DEFAULT_AI_DEFAULT_PROVIDER,
+        ai_default_model: str = _DEFAULT_AI_DEFAULT_MODEL,
         hermes_inference_provider: str = _DEFAULT_HERMES_INFERENCE_PROVIDER,
         hermes_model: str = _DEFAULT_HERMES_MODEL,
         ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
@@ -98,8 +117,12 @@ class DokployCoderBackend:
         self._admin_password = admin_password
         self._postgres_service_name = postgres_service_name
         self._postgres = postgres
-        self._hermes_inference_provider = hermes_inference_provider
-        self._hermes_model = hermes_model
+        self._ai_default_provider = ai_default_provider.strip() or _DEFAULT_AI_DEFAULT_PROVIDER
+        self._ai_default_model = _normalize_ai_default_model(ai_default_model)
+        self._hermes_inference_provider = (
+            hermes_inference_provider.strip() or _DEFAULT_HERMES_INFERENCE_PROVIDER
+        )
+        self._hermes_model = _normalize_hermes_model_ref(hermes_model)
         self._ai_default_base_url = ai_default_base_url
         self._ai_default_api_key = ai_default_api_key
         self._state_dir = state_dir
@@ -220,6 +243,11 @@ class DokployCoderBackend:
         if container_name is None:
             raise CoderError("Coder container is not running; cannot finish application bootstrap.")
         hermes_litellm_base_url = _litellm_internal_base_url(self._stack_name)
+        litellm_fallback_models_json = _shell_double_quote_escape(
+            _litellm_workspace_fallback_models_json(
+                default_alias=f"{self._ai_default_provider}/{self._ai_default_model}"
+            )
+        )
         _sync_hermes_workspace_secrets(
             container_name=container_name,
             hostname=self._hostname,
@@ -229,28 +257,86 @@ class DokployCoderBackend:
             ai_default_base_url=hermes_litellm_base_url,
             ai_default_api_key=self._ai_default_api_key,
         )
-        if bootstrap_ready:
-            return ()
         shared_network_name = _shared_network_name(self._stack_name)
         for template_name, template_dir, replacements in (
-            (_default_template_name(), _default_template_dir(), {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name}),
+            (
+                _default_template_name(),
+                _default_template_dir(),
+                {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
+                        self._ai_default_provider
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
+                        self._ai_default_model
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                },
+            ),
             (
                 _default_opencode_web_template_name(),
                 _default_opencode_web_template_dir(),
-                {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name},
+                {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
+                        self._ai_default_provider
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
+                        self._ai_default_model
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                },
             ),
-            (_default_openwork_template_name(), _default_openwork_template_dir(), {"__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name}),
+            (
+                _default_openwork_template_name(),
+                _default_openwork_template_dir(),
+                {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
+                        self._ai_default_provider
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
+                        self._ai_default_model
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                },
+            ),
             (
                 _default_kdense_byok_template_name(),
                 _default_kdense_byok_template_dir(),
                 {
                     "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
+                        self._ai_default_provider
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
+                        self._ai_default_model
+                    ),
                     "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": _shell_double_quote_escape(
                         _litellm_internal_base_url(self._stack_name)
                     ),
                     "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": _litellm_virtual_key_ref(
                         "coder-kdense"
                     ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
                 },
             ),
             (
@@ -270,6 +356,27 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
                         self._ai_default_api_key or ""
                     ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                },
+            ),
+            (
+                _default_pi_web_template_name(),
+                _default_pi_web_template_dir(),
+                {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
+                        self._ai_default_provider
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
+                        self._ai_default_model
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
                 },
             ),
         ):
@@ -282,6 +389,8 @@ class DokployCoderBackend:
                 replacements=replacements,
             ):
                 notes.append(f"Seeded default Coder template '{template_name}'.")
+        if bootstrap_ready:
+            return tuple(notes)
         workspace_name = _default_workspace_name(self._hostname)
         try:
             if _ensure_default_workspace(
@@ -364,8 +473,13 @@ class DokployCoderBackend:
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
-                    compose_file=compose_file,
+                    compose_file="services: {}\n",
                     app_name=self._compose_name,
+                )
+                apply_rendered_compose_to_existing(
+                    client=self._client,
+                    compose_id=created.compose_id,
+                    rendered_compose=compose_file,
                 )
                 deployment = self._client.deploy_compose(
                     compose_id=created.compose_id,
@@ -390,8 +504,13 @@ class DokployCoderBackend:
             created_compose = self._client.create_compose(
                 name=self._compose_name,
                 environment_id=created_project.environment_id,
-                compose_file=compose_file,
+                compose_file="services: {}\n",
                 app_name=self._compose_name,
+            )
+            apply_rendered_compose_to_existing(
+                client=self._client,
+                compose_id=created_compose.compose_id,
+                rendered_compose=compose_file,
             )
             deployment = self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
@@ -414,12 +533,13 @@ class DokployCoderBackend:
         return locator
 
     def _apply_existing_compose(
-        self, *, locator: _ComposeLocator, compose_file: str
+        self, *, locator: _ComposeLocator, compose_file: RenderedCompose
     ) -> _ComposeLocator:
         if not self._has_applied_state_checkpoint():
-            updated = self._client.update_compose(
+            updated = apply_rendered_compose_to_existing(
+                client=self._client,
                 compose_id=locator.compose_id,
-                compose_file=compose_file,
+                rendered_compose=compose_file,
             )
             deployment = self._client.deploy_compose(
                 compose_id=updated.compose_id,
@@ -457,7 +577,7 @@ class DokployCoderBackend:
     def _has_applied_state_checkpoint(self) -> bool:
         return load_state_dir(self._state_dir).applied_state is not None
 
-    def _persist_compose_hash_if_checkpoint_present(self, compose_file: str) -> None:
+    def _persist_compose_hash_if_checkpoint_present(self, compose_file: RenderedCompose) -> None:
         if not self._has_applied_state_checkpoint():
             return
         persist_compose_artifact_hash(
@@ -611,6 +731,23 @@ def _litellm_virtual_key_ref(consumer: str) -> str:
     return f"$${{LITELLM_VIRTUAL_KEY_{normalized}}}"
 
 
+def _normalize_hermes_model_ref(model_ref: str) -> str:
+    normalized = model_ref.strip()
+    if normalized in {"", "unsloth-active", "local/unsloth-active"}:
+        return DEFAULT_LOCAL_CANONICAL_ALIAS
+    return normalized
+
+
+def _normalize_ai_default_model(model_ref: str) -> str:
+    normalized = model_ref.strip()
+    if normalized == "":
+        return _DEFAULT_AI_DEFAULT_MODEL
+    provider_prefix = f"{_DEFAULT_AI_DEFAULT_PROVIDER}/"
+    if normalized.startswith(provider_prefix):
+        return normalized.removeprefix(provider_prefix)
+    return normalized
+
+
 def _wildcard_suffix(wildcard_hostname: str) -> str:
     if not wildcard_hostname.startswith("*."):
         raise CoderError("Coder wildcard hostname must start with '*.'")
@@ -624,17 +761,18 @@ def _render_compose_file(
     wildcard_hostname: str,
     postgres_service_name: str,
     postgres: SharedPostgresAllocation,
-) -> str:
+) -> RenderedCompose:
     service_name = _service_name(stack_name)
     data_name = _data_name(stack_name)
     shared_network = _shared_network_name(stack_name)
     wildcard_suffix = _wildcard_suffix(wildcard_hostname)
     wildcard_host_pattern = re.escape(wildcard_suffix).replace("\\", "\\\\")
+    pg_url_env = "CODER_PG_CONNECTION_URL"
     pg_url = (
         f"postgres://{postgres.user_name}:change-me@{postgres_service_name}:5432/"
         f"{postgres.database_name}?sslmode=disable"
     )
-    return (
+    compose_file = (
         "services:\n"
         f"  {service_name}:\n"
         "    image: ghcr.io/coder/coder:latest\n"
@@ -644,7 +782,7 @@ def _render_compose_file(
         "      CODER_HTTP_ADDRESS: 0.0.0.0:3000\n"
         f"      CODER_ACCESS_URL: {_yaml_quote(f'https://{hostname}/')}\n"
         f"      CODER_WILDCARD_ACCESS_URL: {_yaml_quote(wildcard_hostname)}\n"
-        f"      CODER_PG_CONNECTION_URL: {_yaml_quote(pg_url)}\n"
+        f"      CODER_PG_CONNECTION_URL: \"{_required_placeholder(pg_url_env)}\"\n"
         '      CODER_DERP_FORCE_WEBSOCKETS: "true"\n'
         f"      CODER_PROXY_TRUSTED_HEADERS: {_yaml_quote('X-Forwarded-For')}\n"
         f"      CODER_PROXY_TRUSTED_ORIGINS: {_yaml_quote('10.0.0.0/8,172.16.0.0/12,192.168.0.0/16')}\n"
@@ -685,6 +823,33 @@ def _render_compose_file(
         f"    name: {shared_network}\n"
         "    external: true\n"
     )
+    return RenderedCompose(
+        compose_file=compose_file,
+        env_specs=(
+            _coder_env_spec(
+                name=pg_url_env,
+                value=pg_url,
+                target_services=(service_name,),
+                source="coder-postgres-url",
+            ),
+        ),
+    )
+
+
+def _coder_env_spec(
+    *, name: str, value: str, target_services: tuple[str, ...], source: str
+) -> DokployEnvSpec:
+    return DokployEnvSpec(
+        variable=DokployEnvVar(name=name, value=value, sensitive=True, source=source),
+        owner="coder",
+        target_services=target_services,
+        placeholder=_required_placeholder(name),
+        required=True,
+    )
+
+
+def _required_placeholder(name: str) -> str:
+    return f"${{{name}:?{name} is required}}"
 
 
 def _local_https_health_check(url: str) -> bool:
@@ -767,19 +932,34 @@ def _coder_first_user_exists(hostname: str) -> bool:
     return True
 
 
-def _create_coder_first_user(*, hostname: str, email: str, password: str) -> None:
-    _coder_request(
-        hostname=hostname,
-        method="POST",
-        path="/api/v2/users/first",
-        payload={
-            "email": email,
-            "username": _username_from_email(email),
-            "name": _display_name_from_email(email),
-            "password": password,
-        },
-        expected_statuses={201},
-    )
+def _create_coder_first_user(
+    *, hostname: str, email: str, password: str, attempts: int = 12, delay_seconds: float = 5.0
+) -> None:
+    path = "/api/v2/users/first"
+    payload: dict[str, object] = {
+        "email": email,
+        "username": _username_from_email(email),
+        "name": _display_name_from_email(email),
+        "password": password,
+    }
+    for attempt in range(attempts):
+        try:
+            _coder_request(
+                hostname=hostname,
+                method="POST",
+                path=path,
+                payload=payload,
+                expected_statuses={201},
+            )
+            return
+        except _CoderHTTPError as exc:
+            if exc.status == 404 and attempt < attempts - 1:
+                time.sleep(delay_seconds)
+                continue
+            raise CoderError(
+                f"Coder bootstrap first-user creation failed at POST {path}: HTTP {exc.status}."
+            ) from exc
+    raise CoderError(f"Coder bootstrap first-user creation failed at POST {path}.")
 
 
 def _coder_login(*, hostname: str, email: str, password: str) -> str:
@@ -912,6 +1092,19 @@ def _default_hermes_template_name() -> str:
     return "ubuntu-vscode-hermes"
 
 
+def _default_pi_web_template_dir() -> Path:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "templates"
+        / "coder"
+        / "default-ubuntu-code-server-pi-web"
+    )
+
+
+def _default_pi_web_template_name() -> str:
+    return "ubuntu-vscode-pi-web"
+
+
 def _default_workspace_name(hostname: str, *, today: date | None = None) -> str:
     root_domain = (
         hostname.split(".", 1)[1] if hostname.startswith("coder.") and "." in hostname else hostname
@@ -931,6 +1124,7 @@ def _required_template_names() -> tuple[str, ...]:
         _default_openwork_template_name(),
         _default_kdense_byok_template_name(),
         _default_hermes_template_name(),
+        _default_pi_web_template_name(),
     )
 
 
@@ -1239,6 +1433,114 @@ def _shell_double_quote_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 
+def _litellm_workspace_fallback_models_json(*, default_alias: str) -> str:
+    model_ids = [default_alias]
+    model_ids.extend(f"opencode-go/{model_id}" for model_id in verified_opencode_go_chat_model_ids())
+    model_ids.append(_DEFAULT_CODER_OPENROUTER_ALIAS_SAMPLE)
+    return json.dumps(list(dict.fromkeys(model_ids)))
+
+
+def _copilot_byok_contract() -> dict[str, str]:
+    return {
+        "setting": _COPILOT_BYOK_SETTING_KEY,
+        "provider_label": _COPILOT_BYOK_PROVIDER_LABEL,
+        "scope": "chat-and-agents-only",
+        "limitation": _COPILOT_BYOK_CHAT_ONLY_LIMITATION,
+        "reference": "https://code.visualstudio.com/docs/copilot/customization/language-models",
+    }
+
+
+def _copilot_byok_openai_base_url(base_url: str) -> str:
+    normalized = base_url.strip().rstrip("/")
+    if normalized.endswith("/v1") or normalized.endswith("/v1/chat/completions"):
+        return normalized
+    return f"{normalized}/v1"
+
+
+def _copilot_byok_model_ids(*, default_alias: str, fallback_models_json: str) -> tuple[str, ...]:
+    model_ids: list[str] = []
+    try:
+        parsed = json.loads(fallback_models_json)
+    except json.JSONDecodeError:
+        parsed = []
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, str) and item.strip():
+                model_ids.append(item.strip())
+    if default_alias and default_alias not in model_ids:
+        model_ids.insert(0, default_alias)
+    return tuple(dict.fromkeys(model_ids))
+
+
+def _copilot_byok_settings_json(
+    *,
+    base_url: str,
+    api_key: str,
+    default_alias: str,
+    fallback_models_json: str,
+) -> str:
+    openai_base_url = _copilot_byok_openai_base_url(base_url)
+    model_ids = _copilot_byok_model_ids(
+        default_alias=default_alias, fallback_models_json=fallback_models_json
+    )
+    custom_models = {
+        model_id: {
+            "name": f"{_COPILOT_BYOK_PROVIDER_LABEL}: {model_id}",
+            "model": model_id,
+            "url": openai_base_url,
+            "apiKey": api_key,
+            "keyStorage": "dokploy-litellm",
+            "requiresAPIKey": bool(api_key),
+            "toolCalling": True,
+            "vision": False,
+            "thinking": False,
+            "maxInputTokens": 131072,
+            "maxOutputTokens": 8192,
+        }
+        for model_id in model_ids
+    }
+    settings = {
+        _COPILOT_BYOK_SETTING_KEY: custom_models,
+    }
+    return json.dumps(settings, indent=2, sort_keys=True)
+
+
+def _copilot_byok_compatibility_probe() -> str:
+    return (
+        f"official-byok-supported: target-setting={_COPILOT_BYOK_SETTING_KEY}; "
+        "scope=chat-and-agents-only; "
+        "requires VS Code/code-server build with Copilot Chat BYOK/OpenAI-compatible model support; "
+        "no secrets required for this dry-run probe"
+    )
+
+
+def _coder_state_gap_diagnosis(state_files: tuple[str, ...]) -> str:
+    present = set(state_files)
+    missing = sorted(_CODER_STATE_REQUIRED_FOR_MODIFY - present)
+    if not missing:
+        return "state-complete: modify can perform normal non-destructive Coder template reseed"
+    return (
+        "state-incomplete: focused-coder-template-reseed-required; "
+        f"missing={','.join(missing)}; do-not-reinstall"
+    )
+
+
+def _coder_live_template_update_command_bundle() -> tuple[str, ...]:
+    return (
+        "./bin/dokploy-wizard inspect-state --env-file ./.install.env --state-dir .dokploy-wizard-state",
+        (
+            "python3 - <<'PY'\n"
+            "# Focused Coder template reseed only. Do not print DOKPLOY_API_KEY, Coder session tokens, or LiteLLM keys.\n"
+            "# 1. Load .install.env and .dokploy-wizard-state.\n"
+            "# 2. If applied-state.json and ownership-ledger.json exist, run non-interactive modify to invoke DokployCoderBackend.ensure_application_ready().\n"
+            "# 3. If state is incomplete, authenticate to live Coder with redacted operator credentials, copy templates/coder/* into the running Coder container, and run /opt/coder templates push for the six wizard-managed templates only.\n"
+            "# 4. Query template versions and assert github.copilot.chat.customOAIModels exists in all six payloads.\n"
+            "print('focused-coder-template-reseed <redacted credentials>')\n"
+            "PY"
+        ),
+    )
+
+
 def _list_workspaces(*, container_name: str, hostname: str, session_token: str) -> tuple[str, ...]:
     result = subprocess.run(
         [
@@ -1311,11 +1613,13 @@ def _list_templates(
         raise CoderError("Coder template list returned invalid JSON.") from exc
     if not isinstance(payload, list):
         raise CoderError("Coder template list returned an unexpected payload shape.")
-    return tuple(
-        item.get("Template") if isinstance(item.get("Template"), dict) else item
-        for item in payload
-        if isinstance(item, dict)
-    )
+    templates: list[dict[str, object]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        template = item.get("Template")
+        templates.append(template if isinstance(template, dict) else item)
+    return tuple(templates)
 
 
 def _active_template_version_name(

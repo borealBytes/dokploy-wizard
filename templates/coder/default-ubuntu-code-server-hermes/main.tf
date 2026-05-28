@@ -97,6 +97,7 @@ resource "coder_agent" "main" {
     export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_HERMES_BASE_URL__"
     export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_HERMES_API_KEY__"
     export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__"
+    export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"
 
     if ! command -v hermes >/dev/null 2>&1; then
       HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup
@@ -158,6 +159,7 @@ resource "coder_agent" "main" {
     upsert_env HERMES_MODEL "$HERMES_MODEL"
     upsert_env AI_DEFAULT_BASE_URL "$AI_DEFAULT_BASE_URL"
     upsert_env OPENCODE_GO_BASE_URL "$OPENCODE_GO_BASE_URL"
+    upsert_env OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"
     upsert_env API_SERVER_ENABLED "$API_SERVER_ENABLED"
     upsert_env API_SERVER_HOST "$API_SERVER_HOST"
     upsert_env API_SERVER_PORT "$API_SERVER_PORT"
@@ -190,6 +192,141 @@ resource "coder_agent" "main" {
     hermes config set model.base_url "$OPENAI_API_BASE"
     hermes config set terminal.backend local
     hermes config set terminal.cwd /home/coder
+
+    python3 - <<'PY'
+import json
+import os
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+home = Path(os.environ.get("HERMES_HOME", "/home/coder/.hermes"))
+config_path = home / "config.yaml"
+base_url = os.environ["AI_DEFAULT_BASE_URL"].rstrip("/")
+api_key = os.environ.get("AI_DEFAULT_API_KEY", "")
+provider = os.environ.get("HERMES_INFERENCE_PROVIDER", "dokploy-litellm") or "dokploy-litellm"
+default_model = os.environ["HERMES_MODEL"]
+fallback_models = json.loads(os.environ.get("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]"))
+
+headers = {"Accept": "application/json"}
+if api_key:
+    headers["Authorization"] = f"Bearer {api_key}"
+request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+try:
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.load(response)
+except (OSError, ValueError, urllib.error.URLError):
+    payload = {"data": []}
+
+model_ids = []
+for item in payload.get("data", []):
+    if not isinstance(item, dict):
+        continue
+    model_id = item.get("id")
+    if not isinstance(model_id, str):
+        continue
+    normalized = model_id.strip()
+    if normalized and "/" in normalized and not normalized.endswith("/*") and not normalized.startswith("openai/"):
+        model_ids.append(normalized)
+
+for model_id in fallback_models:
+    if isinstance(model_id, str) and model_id.strip():
+        model_ids.append(model_id.strip())
+if default_model not in model_ids:
+    model_ids.insert(0, default_model)
+model_ids = list(dict.fromkeys(model_ids))
+
+config = {}
+if config_path.exists():
+    try:
+        if yaml is not None:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        else:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        config = {}
+if not isinstance(config, dict):
+    config = {}
+
+config["model"] = {
+    "provider": provider,
+    "default": default_model,
+    "base_url": base_url,
+}
+providers = config.setdefault("providers", {})
+if not isinstance(providers, dict):
+    providers = {}
+    config["providers"] = providers
+providers[provider] = {
+    "name": "Dokploy LiteLLM",
+    "base_url": base_url,
+    "api_key": api_key,
+    "model": default_model,
+    "default_model": default_model,
+    "transport": "chat_completions",
+    "models": {model_id: {} for model_id in model_ids},
+    "discover_models": False,
+}
+
+home.mkdir(parents=True, exist_ok=True)
+if yaml is not None:
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+else:
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+# Official Copilot BYOK is intentionally chat/agent-only; inline completions stay on Copilot-managed models.
+def _copilot_byok_openai_base_url(raw_base_url: str) -> str:
+    normalized = raw_base_url.rstrip("/")
+    if normalized.endswith("/v1") or normalized.endswith("/v1/chat/completions"):
+        return normalized
+    return f"{normalized}/v1"
+
+
+def _copilot_byok_custom_models(raw_base_url: str, raw_api_key: str, ids: list[str]) -> dict[str, dict[str, object]]:
+    url = _copilot_byok_openai_base_url(raw_base_url)
+    return {
+        model_id: {
+            "name": f"Dokploy LiteLLM: {model_id}",
+            "model": model_id,
+            "url": url,
+            "apiKey": raw_api_key,
+            "keyStorage": "dokploy-litellm",
+            "requiresAPIKey": bool(raw_api_key),
+            "toolCalling": True,
+            "vision": False,
+            "thinking": False,
+            "maxInputTokens": 131072,
+            "maxOutputTokens": 8192,
+        }
+        for model_id in ids
+    }
+
+
+def write_vscode_copilot_byok_settings(raw_base_url: str, raw_api_key: str, ids: list[str]) -> None:
+    settings_paths = [
+        Path("/home/coder/.local/share/code-server/User/settings.json"),
+        Path("/home/coder/.config/code-server/User/settings.json"),
+    ]
+    custom_models = _copilot_byok_custom_models(raw_base_url, raw_api_key, ids)
+    for settings_path in settings_paths:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+        except (OSError, ValueError):
+            settings = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["github.copilot.chat.customOAIModels"] = custom_models
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+
+write_vscode_copilot_byok_settings(base_url, api_key, model_ids)
+
+PY
 
     if ! command -v hermes-web-ui >/dev/null 2>&1; then
       npm install -g hermes-web-ui
@@ -469,6 +606,36 @@ JS
     cat >"$HERMES_BOOTSTRAP_SCRIPT" <<'SH'
 set -e
 
+export HERMES_HOME="$${HERMES_HOME:-/home/coder/.hermes}"
+export HERMES_INSTALL_DIR="$${HERMES_INSTALL_DIR:-/home/coder/.hermes/hermes-agent}"
+export NPM_CONFIG_PREFIX="$${NPM_CONFIG_PREFIX:-/home/coder/.local}"
+export PATH="/home/coder/.local/bin:$PATH"
+export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+export HERMES_TEMPLATE_PROVIDER="$${HERMES_TEMPLATE_PROVIDER:-__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__}"
+export HERMES_TEMPLATE_MODEL="$${HERMES_TEMPLATE_MODEL:-__DOKPLOY_WIZARD_HERMES_MODEL__}"
+export HERMES_TEMPLATE_BASE_URL="$${HERMES_TEMPLATE_BASE_URL:-__DOKPLOY_WIZARD_HERMES_BASE_URL__}"
+export HERMES_TEMPLATE_API_KEY="$${HERMES_TEMPLATE_API_KEY:-__DOKPLOY_WIZARD_HERMES_API_KEY__}"
+export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="$${HERMES_TEMPLATE_API_KEY_PLACEHOLDER:-__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__}"
+export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="$${DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON:-__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__}"
+export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"
+export HERMES_MODEL="$${HERMES_MODEL:-$HERMES_TEMPLATE_MODEL}"
+export OPENAI_API_BASE="$${OPENAI_API_BASE:-$HERMES_TEMPLATE_BASE_URL}"
+export OPENAI_API_KEY="$${OPENAI_API_KEY:-$HERMES_TEMPLATE_API_KEY}"
+export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-$OPENAI_API_BASE}"
+export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-$OPENAI_API_KEY}"
+export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"
+export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"
+export API_SERVER_ENABLED="$${API_SERVER_ENABLED:-true}"
+export API_SERVER_HOST="$${API_SERVER_HOST:-127.0.0.1}"
+export API_SERVER_PORT="$${API_SERVER_PORT:-8642}"
+export API_SERVER_KEY="$${API_SERVER_KEY:-hermes-local-api-key}"
+export HERMES_DASHBOARD_PORT="$${HERMES_DASHBOARD_PORT:-9119}"
+export HERMES_DASHBOARD_PROXY_PORT="$${HERMES_DASHBOARD_PROXY_PORT:-9120}"
+export HERMES_WEB_UI_PORT="$${HERMES_WEB_UI_PORT:-8648}"
+export HERMES_WEB_UI_PROXY_PORT="$${HERMES_WEB_UI_PROXY_PORT:-8649}"
+export HERMES_WEBUI_PORT="$${HERMES_WEBUI_PORT:-8787}"
+export HERMES_WEBUI_PROXY_PORT="$${HERMES_WEBUI_PROXY_PORT:-8788}"
+
 wait_for_http() {
   url="$1"
   attempts="$2"
@@ -507,6 +674,8 @@ upsert_env() {
   chmod 600 "$file"
 }
 
+upsert_env OPENAI_API_KEY "$OPENAI_API_KEY"
+upsert_env OPENAI_API_BASE "$OPENAI_API_BASE"
 upsert_env AI_DEFAULT_API_KEY "$AI_DEFAULT_API_KEY"
 upsert_env OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"
 upsert_env HERMES_INFERENCE_PROVIDER "$HERMES_INFERENCE_PROVIDER"
@@ -517,6 +686,143 @@ upsert_env API_SERVER_ENABLED "$API_SERVER_ENABLED"
 upsert_env API_SERVER_HOST "$API_SERVER_HOST"
 upsert_env API_SERVER_PORT "$API_SERVER_PORT"
 upsert_env API_SERVER_KEY "$API_SERVER_KEY"
+upsert_env HERMES_WEBUI_SKIP_ONBOARDING "1"
+upsert_env HERMES_WEBUI_DEFAULT_MODEL "$HERMES_MODEL"
+
+python3 - <<'PY'
+import json
+import os
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+home = Path(os.environ.get("HERMES_HOME", "/home/coder/.hermes"))
+config_path = home / "config.yaml"
+base_url = os.environ["AI_DEFAULT_BASE_URL"].rstrip("/")
+api_key = os.environ.get("AI_DEFAULT_API_KEY", "")
+provider = os.environ.get("HERMES_INFERENCE_PROVIDER", "dokploy-litellm") or "dokploy-litellm"
+default_model = os.environ["HERMES_MODEL"]
+fallback_models = json.loads(os.environ.get("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]"))
+
+headers = {"Accept": "application/json"}
+if api_key:
+    headers["Authorization"] = f"Bearer {api_key}"
+request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+try:
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.load(response)
+except (OSError, ValueError, urllib.error.URLError):
+    payload = {"data": []}
+
+model_ids = []
+for item in payload.get("data", []):
+    if not isinstance(item, dict):
+        continue
+    model_id = item.get("id")
+    if not isinstance(model_id, str):
+        continue
+    normalized = model_id.strip()
+    if normalized and "/" in normalized and not normalized.endswith("/*") and not normalized.startswith("openai/"):
+        model_ids.append(normalized)
+
+for model_id in fallback_models:
+    if isinstance(model_id, str) and model_id.strip():
+        model_ids.append(model_id.strip())
+if default_model not in model_ids:
+    model_ids.insert(0, default_model)
+model_ids = list(dict.fromkeys(model_ids))
+
+config = {}
+if config_path.exists():
+    try:
+        if yaml is not None:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        else:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        config = {}
+if not isinstance(config, dict):
+    config = {}
+
+config["model"] = {
+    "provider": provider,
+    "default": default_model,
+    "base_url": base_url,
+}
+providers = config.setdefault("providers", {})
+if not isinstance(providers, dict):
+    providers = {}
+    config["providers"] = providers
+providers[provider] = {
+    "name": "Dokploy LiteLLM",
+    "base_url": base_url,
+    "api_key": api_key,
+    "model": default_model,
+    "default_model": default_model,
+    "transport": "chat_completions",
+    "models": {model_id: {} for model_id in model_ids},
+    "discover_models": False,
+}
+
+home.mkdir(parents=True, exist_ok=True)
+if yaml is not None:
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+else:
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+# Official Copilot BYOK is intentionally chat/agent-only; inline completions stay on Copilot-managed models.
+def _copilot_byok_openai_base_url(raw_base_url: str) -> str:
+    normalized = raw_base_url.rstrip("/")
+    if normalized.endswith("/v1") or normalized.endswith("/v1/chat/completions"):
+        return normalized
+    return f"{normalized}/v1"
+
+
+def _copilot_byok_custom_models(raw_base_url: str, raw_api_key: str, ids: list[str]) -> dict[str, dict[str, object]]:
+    url = _copilot_byok_openai_base_url(raw_base_url)
+    return {
+        model_id: {
+            "name": f"Dokploy LiteLLM: {model_id}",
+            "model": model_id,
+            "url": url,
+            "apiKey": raw_api_key,
+            "keyStorage": "dokploy-litellm",
+            "requiresAPIKey": bool(raw_api_key),
+            "toolCalling": True,
+            "vision": False,
+            "thinking": False,
+            "maxInputTokens": 131072,
+            "maxOutputTokens": 8192,
+        }
+        for model_id in ids
+    }
+
+
+def write_vscode_copilot_byok_settings(raw_base_url: str, raw_api_key: str, ids: list[str]) -> None:
+    settings_paths = [
+        Path("/home/coder/.local/share/code-server/User/settings.json"),
+        Path("/home/coder/.config/code-server/User/settings.json"),
+    ]
+    custom_models = _copilot_byok_custom_models(raw_base_url, raw_api_key, ids)
+    for settings_path in settings_paths:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+        except (OSError, ValueError):
+            settings = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["github.copilot.chat.customOAIModels"] = custom_models
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+
+write_vscode_copilot_byok_settings(base_url, api_key, model_ids)
+
+PY
 
 if [ "$HERMES_TEMPLATE_API_KEY" = "$HERMES_TEMPLATE_API_KEY_PLACEHOLDER" ] && [ -z "$${AI_DEFAULT_API_KEY:-}" ]; then
   echo "AI_DEFAULT_API_KEY is required for the Hermes workspace template" >&2
@@ -558,22 +864,23 @@ fi
 
 if ! wait_for_http "http://127.0.0.1:$HERMES_DASHBOARD_PORT/" 1; then
   nohup hermes dashboard --host 127.0.0.1 --port "$HERMES_DASHBOARD_PORT" --no-open >/tmp/hermes-dashboard.log 2>&1 &
-  wait_for_http "http://127.0.0.1:$HERMES_DASHBOARD_PORT/" 300 || true
 fi
 
 hermes-web-ui stop >/dev/null 2>&1 || true
-hermes-web-ui start --port "$HERMES_WEB_UI_PORT" >/tmp/hermes-web-ui-start.log 2>&1 || true
-wait_for_http "http://127.0.0.1:$HERMES_WEB_UI_PORT/health" 300 || true
+nohup env PORT="$HERMES_WEB_UI_PORT" UPSTREAM="http://127.0.0.1:$API_SERVER_PORT" HERMES_HOME="$HERMES_HOME" HERMES_BIN="$(command -v hermes)" AUTH_DISABLED=true hermes-web-ui start --port "$HERMES_WEB_UI_PORT" >/tmp/hermes-web-ui-start.log 2>&1 &
 
 if ! wait_for_http "http://127.0.0.1:$HERMES_WEBUI_PORT/health" 1; then
-  nohup env HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install >/tmp/hermes-webui.log 2>&1 &
-  wait_for_http "http://127.0.0.1:$HERMES_WEBUI_PORT/health" 300 || true
+  nohup env HERMES_HOME="$HERMES_HOME" HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR HERMES_WEBUI_STATE_DIR="$HERMES_HOME/webui" HERMES_WEBUI_SKIP_ONBOARDING=1 HERMES_WEBUI_DEFAULT_MODEL="$HERMES_MODEL" PYTHONPATH="$HERMES_INSTALL_DIR:$${PYTHONPATH:-}" python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install >/tmp/hermes-webui.log 2>&1 &
 fi
 
 pkill -f "node /tmp/coder-mounted-proxy.mjs" >/dev/null 2>&1 || true
 nohup env DASHBOARD_SESSION_HEADER=1 SYNTHETIC_HEALTHCHECK=1 TARGET_PORT=$HERMES_DASHBOARD_PORT PROXY_PORT=$HERMES_DASHBOARD_PROXY_PORT node /tmp/coder-mounted-proxy.mjs >/tmp/hermes-dashboard-proxy.log 2>&1 &
 nohup env TOKEN_FILE=/home/coder/.hermes-web-ui/.token TARGET_PORT=$HERMES_WEB_UI_PORT PROXY_PORT=$HERMES_WEB_UI_PROXY_PORT node /tmp/coder-mounted-proxy.mjs >/tmp/hermes-web-ui-proxy.log 2>&1 &
 nohup env TARGET_PORT=$HERMES_WEBUI_PORT PROXY_PORT=$HERMES_WEBUI_PROXY_PORT node /tmp/coder-mounted-proxy.mjs >/tmp/hermes-webui-proxy.log 2>&1 &
+
+wait_for_http "http://127.0.0.1:$HERMES_DASHBOARD_PORT/" 60 || true
+wait_for_http "http://127.0.0.1:$HERMES_WEB_UI_PORT/health" 60 || true
+wait_for_http "http://127.0.0.1:$HERMES_WEBUI_PORT/health" 60 || true
 SH
 
     chmod 700 "$HERMES_BOOTSTRAP_SCRIPT"

@@ -74,6 +74,170 @@ resource "coder_agent" "main" {
       ZELLIJ_URL="https://github.com/zellij-org/zellij/releases/latest/download/zellij-$${ARCH}-unknown-linux-musl.tar.gz"
       curl -fsSL "$${ZELLIJ_URL}" | $_SUDO tar -C /usr/local/bin -xz
     fi
+
+    # Node.js, corepack, pnpm, and Pi CLI
+    if ! command -v node >/dev/null 2>&1; then
+      curl -fsSL https://deb.nodesource.com/setup_22.x | $_SUDO -E bash -
+      $_SUDO apt-get install -y nodejs
+    fi
+    $_SUDO corepack enable
+    $_SUDO corepack prepare pnpm@10.27.0 --activate
+
+    export PNPM_HOME=/home/coder/.local/share/pnpm
+    export PATH="$PNPM_HOME/bin:$PATH"
+    mkdir -p "$PNPM_HOME/bin"
+    touch /home/coder/.bashrc /home/coder/.profile
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile
+
+    if ! command -v pi >/dev/null 2>&1; then
+      pnpm add -g @earendil-works/pi-coding-agent
+    fi
+
+    command -v pi
+    pi --version
+    bash -lc 'command -v pi && pi --version'
+
+    # Preseed OpenCode and Pi with full LiteLLM alias IDs so selected models match
+    # the wizard-managed proxy allowlists exactly.
+    export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"
+    export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"
+    export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"
+    export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"
+    export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"
+    export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"
+    export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"
+    export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"
+
+    mkdir -p /home/coder/.config/opencode /home/coder/.pi/agent
+
+    python3 - <<'PY'
+import json
+import os
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+base_url = os.environ["AI_DEFAULT_BASE_URL"].rstrip("/")
+api_key = os.environ.get("AI_DEFAULT_API_KEY", "")
+default_alias = os.environ["LITELLM_DEFAULT_ALIAS"]
+fallback_models = json.loads(os.environ["DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON"])
+
+
+def fetch_model_ids() -> list[str]:
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError):
+        return []
+
+    model_ids: list[str] = []
+    for item in payload.get("data", []):
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id")
+        if not isinstance(model_id, str):
+            continue
+        normalized = model_id.strip()
+        if (
+            normalized
+            and "/" in normalized
+            and not normalized.endswith("/*")
+            and not normalized.startswith("openai/")
+        ):
+            model_ids.append(normalized)
+    return model_ids
+
+
+model_ids = list(dict.fromkeys(fetch_model_ids() + fallback_models))
+if default_alias not in model_ids:
+    model_ids.insert(0, default_alias)
+
+opencode_config = {
+    "provider": {
+        "litellm": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": base_url, "apiKey": api_key},
+            "models": {model_id: {} for model_id in model_ids},
+        }
+    },
+    "model": default_alias,
+}
+Path("/home/coder/.config/opencode/opencode.json").write_text(
+    json.dumps(opencode_config, indent=2) + "\n",
+    encoding="utf-8",
+)
+
+pi_models_config = {
+    "providers": {
+        "litellm": {
+            "name": "LiteLLM",
+            "baseUrl": base_url,
+            "api": "openai-completions",
+            "apiKey": api_key,
+            "models": [{"id": model_id, "name": model_id} for model_id in model_ids],
+        }
+    }
+}
+Path("/home/coder/.pi/agent/models.json").write_text(
+    json.dumps(pi_models_config, indent=2) + "\n",
+    encoding="utf-8",
+)
+# Official Copilot BYOK is intentionally chat/agent-only; inline completions stay on Copilot-managed models.
+def _copilot_byok_openai_base_url(raw_base_url: str) -> str:
+    normalized = raw_base_url.rstrip("/")
+    if normalized.endswith("/v1") or normalized.endswith("/v1/chat/completions"):
+        return normalized
+    return f"{normalized}/v1"
+
+
+def _copilot_byok_custom_models(raw_base_url: str, raw_api_key: str, ids: list[str]) -> dict[str, dict[str, object]]:
+    url = _copilot_byok_openai_base_url(raw_base_url)
+    return {
+        model_id: {
+            "name": f"Dokploy LiteLLM: {model_id}",
+            "model": model_id,
+            "url": url,
+            "apiKey": raw_api_key,
+            "keyStorage": "dokploy-litellm",
+            "requiresAPIKey": bool(raw_api_key),
+            "toolCalling": True,
+            "vision": False,
+            "thinking": False,
+            "maxInputTokens": 131072,
+            "maxOutputTokens": 8192,
+        }
+        for model_id in ids
+    }
+
+
+def write_vscode_copilot_byok_settings(raw_base_url: str, raw_api_key: str, ids: list[str]) -> None:
+    settings_paths = [
+        Path("/home/coder/.local/share/code-server/User/settings.json"),
+        Path("/home/coder/.config/code-server/User/settings.json"),
+    ]
+    custom_models = _copilot_byok_custom_models(raw_base_url, raw_api_key, ids)
+    for settings_path in settings_paths:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+        except (OSError, ValueError):
+            settings = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["github.copilot.chat.customOAIModels"] = custom_models
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+
+write_vscode_copilot_byok_settings(base_url, api_key, model_ids)
+
+PY
   EOT
 }
 

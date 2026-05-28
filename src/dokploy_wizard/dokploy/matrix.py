@@ -18,7 +18,12 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
-from dokploy_wizard.dokploy.compose_noop import apply_compose_noop_guard
+from dokploy_wizard.dokploy.compose_noop import (
+    apply_compose_noop_guard,
+    apply_rendered_compose_to_existing,
+    persist_compose_artifact_hash_if_checkpoint_present,
+)
+from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
 from dokploy_wizard.packs.matrix.models import MatrixResourceRecord
 from dokploy_wizard.packs.matrix.reconciler import MatrixError, _http_health_check
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
@@ -35,7 +40,9 @@ class DokployMatrixApi(Protocol):
         self, *, name: str, environment_id: str, compose_file: str, app_name: str
     ) -> DokployComposeRecord: ...
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord: ...
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord: ...
 
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
@@ -288,13 +295,23 @@ class DokployMatrixBackend:
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
-                    compose_file=compose_file,
+                    compose_file="services: {}\n",
                     app_name=self._compose_name,
+                )
+                apply_rendered_compose_to_existing(
+                    client=self._client,
+                    compose_id=created.compose_id,
+                    rendered_compose=compose_file,
                 )
                 self._client.deploy_compose(
                     compose_id=created.compose_id,
                     title="dokploy-wizard matrix reconcile",
                     description="Create Matrix compose app",
+                )
+                persist_compose_artifact_hash_if_checkpoint_present(
+                    state_dir=self._state_dir,
+                    service_key=self._compose_name,
+                    rendered_compose=compose_file,
                 )
                 locator = _ComposeLocator(
                     project_id=project.project_id,
@@ -313,13 +330,23 @@ class DokployMatrixBackend:
             created_compose = self._client.create_compose(
                 name=self._compose_name,
                 environment_id=created_project.environment_id,
-                compose_file=compose_file,
+                compose_file="services: {}\n",
                 app_name=self._compose_name,
+            )
+            apply_rendered_compose_to_existing(
+                client=self._client,
+                compose_id=created_compose.compose_id,
+                rendered_compose=compose_file,
             )
             self._client.deploy_compose(
                 compose_id=created_compose.compose_id,
                 title="dokploy-wizard matrix reconcile",
                 description="Create Matrix compose app",
+            )
+            persist_compose_artifact_hash_if_checkpoint_present(
+                state_dir=self._state_dir,
+                service_key=self._compose_name,
+                rendered_compose=compose_file,
             )
         except DokployApiError as error:
             raise MatrixError(str(error)) from error
@@ -401,17 +428,23 @@ def _render_compose_file(
     postgres_service_name: str,
     redis_service_name: str,
     secret_refs: tuple[str, ...],
-) -> str:
+) -> RenderedCompose:
     registration_secret_ref, macaroon_secret_ref = secret_refs
     service_name = _service_name(stack_name)
     data_name = _data_name(stack_name)
     postgres = shared_allocation.postgres
     redis = shared_allocation.redis
+    postgres_password_env = (
+        _env_name_from_secret_ref(postgres.password_secret_ref) if postgres else ""
+    )
+    redis_password_env = _env_name_from_secret_ref(redis.password_secret_ref) if redis else ""
+    registration_env = _env_name_from_secret_ref(registration_secret_ref)
+    macaroon_env = _env_name_from_secret_ref(macaroon_secret_ref)
     if postgres is None or redis is None:
         raise MatrixError(
             "Matrix compose rendering requires postgres and redis shared allocations."
         )
-    return (
+    compose_file = (
         "services:\n"
         f"  {service_name}:\n"
         "    image: matrixdotorg/synapse:latest\n"
@@ -428,11 +461,11 @@ def _render_compose_file(
         f"      POSTGRES_HOST: {postgres_service_name}\n"
         f"      POSTGRES_DB: {postgres.database_name}\n"
         f"      POSTGRES_USER: {postgres.user_name}\n"
-        f"      POSTGRES_PASSWORD: ${{{postgres.password_secret_ref}:-change-me}}\n"
+        f"      POSTGRES_PASSWORD: \"{_required_placeholder(postgres_password_env)}\"\n"
         f"      REDIS_HOST: {redis_service_name}\n"
-        f"      REDIS_PASSWORD: ${{{redis.password_secret_ref}:-change-me}}\n"
-        f"      SYNAPSE_REGISTRATION_SHARED_SECRET: ${{{registration_secret_ref}:-change-me}}\n"
-        f"      SYNAPSE_MACAROON_SECRET_KEY: ${{{macaroon_secret_ref}:-change-me}}\n"
+        f"      REDIS_PASSWORD: \"{_required_placeholder(redis_password_env)}\"\n"
+        f"      SYNAPSE_REGISTRATION_SHARED_SECRET: \"{_required_placeholder(registration_env)}\"\n"
+        f"      SYNAPSE_MACAROON_SECRET_KEY: \"{_required_placeholder(macaroon_env)}\"\n"
         "    expose:\n"
         "      - '8008'\n"
         "    healthcheck:\n"
@@ -445,3 +478,52 @@ def _render_compose_file(
         "volumes:\n"
         f"  {data_name}:\n"
     )
+    return RenderedCompose(
+        compose_file=compose_file,
+        env_specs=(
+            _matrix_env_spec(
+                name=postgres_password_env,
+                value="change-me",
+                target_services=(service_name,),
+                source="matrix-postgres-password",
+            ),
+            _matrix_env_spec(
+                name=redis_password_env,
+                value="change-me",
+                target_services=(service_name,),
+                source="matrix-redis-password",
+            ),
+            _matrix_env_spec(
+                name=registration_env,
+                value="change-me",
+                target_services=(service_name,),
+                source="matrix-registration-shared-secret",
+            ),
+            _matrix_env_spec(
+                name=macaroon_env,
+                value="change-me",
+                target_services=(service_name,),
+                source="matrix-macaroon-secret-key",
+            ),
+        ),
+    )
+
+
+def _matrix_env_spec(
+    *, name: str, value: str, target_services: tuple[str, ...], source: str
+) -> DokployEnvSpec:
+    return DokployEnvSpec(
+        variable=DokployEnvVar(name=name, value=value, sensitive=True, source=source),
+        owner="matrix",
+        target_services=target_services,
+        placeholder=_required_placeholder(name),
+        required=True,
+    )
+
+
+def _required_placeholder(name: str) -> str:
+    return f"${{{name}:?{name} is required}}"
+
+
+def _env_name_from_secret_ref(secret_ref: str) -> str:
+    return "".join(char if char.isalnum() else "_" for char in secret_ref).upper()

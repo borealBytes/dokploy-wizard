@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.cookiejar
 import json
 from email.message import Message
+from io import BytesIO
 from urllib import error, request
 
 import pytest
@@ -241,6 +242,197 @@ def test_bootstrap_auth_create_compose_posts_raw_compose_payload() -> None:
     assert update_body["branch"] is None
 
 
+def test_bootstrap_auth_ai_provider_methods_use_session_endpoints() -> None:
+    requests_seen: list[tuple[str, str, object | None]] = []
+
+    def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
+        del jar
+        body = json.loads(req.data.decode("utf-8")) if isinstance(req.data, bytes) else None
+        requests_seen.append((req.get_method(), req.full_url, body))
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            return {"ok": True}
+        if req.full_url.endswith("/api/user.session"):
+            return {"session": {"activeOrganizationId": "org-1"}}
+        if req.full_url.endswith("/api/ai.getAll"):
+            return [
+                {
+                    "aiId": "ai-1",
+                    "name": "Dokploy Wizard LiteLLM",
+                    "apiUrl": "http://litellm:4000/v1",
+                    "apiKey": "sk-dokploy-ai",
+                    "model": "local/model",
+                    "isEnabled": True,
+                }
+            ]
+        if req.full_url.endswith("/api/ai.create"):
+            assert isinstance(body, dict)
+            return {"aiId": "ai-2", **body}
+        if req.full_url.endswith("/api/ai.update"):
+            assert isinstance(body, dict)
+            return body
+        raise AssertionError(req.full_url)
+
+    client = DokployBootstrapAuthClient(
+        base_url="http://127.0.0.1:3000",
+        request_fn=fake_request,
+    )
+
+    providers = client.list_ai_providers(
+        admin_email="admin@example.com",
+        admin_password="secret-123",
+    )
+    created = client.create_ai_provider(
+        admin_email="admin@example.com",
+        admin_password="secret-123",
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://litellm:4000/v1",
+        api_key="sk-dokploy-ai",
+        model="local/model",
+        is_enabled=True,
+    )
+    updated = client.update_ai_provider(
+        admin_email="admin@example.com",
+        admin_password="secret-123",
+        ai_id="ai-2",
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://litellm:4000/v1",
+        api_key="sk-dokploy-ai",
+        model="local/model",
+        is_enabled=True,
+    )
+
+    assert providers[0]["aiId"] == "ai-1"
+    assert created["aiId"] == "ai-2"
+    assert updated["aiId"] == "ai-2"
+    assert requests_seen[2] == ("GET", "http://127.0.0.1:3000/api/ai.getAll", None)
+    assert requests_seen[3] == (
+        "POST",
+        "http://127.0.0.1:3000/api/ai.create",
+        {
+            "name": "Dokploy Wizard LiteLLM",
+            "apiUrl": "http://litellm:4000/v1",
+            "apiKey": "sk-dokploy-ai",
+            "model": "local/model",
+            "isEnabled": True,
+        },
+    )
+    assert requests_seen[4] == (
+        "POST",
+        "http://127.0.0.1:3000/api/ai.update",
+        {
+            "aiId": "ai-2",
+            "name": "Dokploy Wizard LiteLLM",
+            "apiUrl": "http://litellm:4000/v1",
+            "apiKey": "sk-dokploy-ai",
+            "model": "local/model",
+            "isEnabled": True,
+        },
+    )
+
+
+def test_bootstrap_auth_ai_create_recovers_provider_after_list_success_response() -> None:
+    requests_seen: list[str] = []
+
+    def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
+        del jar
+        requests_seen.append(req.full_url)
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            return {"ok": True}
+        if req.full_url.endswith("/api/user.session"):
+            return {"session": {"activeOrganizationId": "org-1"}}
+        if req.full_url.endswith("/api/ai.create"):
+            return []
+        if req.full_url.endswith("/api/ai.getAll"):
+            return [
+                {
+                    "aiId": "ai-1",
+                    "name": "Other Provider",
+                    "apiUrl": "http://other:4000/v1",
+                    "apiKey": "sk-other",
+                    "model": "other/model",
+                    "isEnabled": True,
+                },
+                {
+                    "aiId": "ai-2",
+                    "name": "Dokploy Wizard LiteLLM",
+                    "apiUrl": "http://litellm:4000/v1",
+                    "apiKey": "sk-dokploy-ai",
+                    "model": "local/model",
+                    "isEnabled": True,
+                },
+            ]
+        raise AssertionError(req.full_url)
+
+    created = DokployBootstrapAuthClient(
+        base_url="http://127.0.0.1:3000",
+        request_fn=fake_request,
+    ).create_ai_provider(
+        admin_email="admin@example.com",
+        admin_password="secret-123",
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://litellm:4000/v1",
+        api_key="sk-dokploy-ai",
+        model="local/model",
+        is_enabled=True,
+    )
+
+    assert created["aiId"] == "ai-2"
+    assert requests_seen == [
+        "http://127.0.0.1:3000/api/auth/sign-in/email",
+        "http://127.0.0.1:3000/api/user.session",
+        "http://127.0.0.1:3000/api/ai.create",
+        "http://127.0.0.1:3000/api/ai.getAll",
+    ]
+
+
+def test_bootstrap_auth_ai_update_recovers_provider_after_scalar_success_envelope() -> None:
+    requests_seen: list[str] = []
+
+    def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
+        del jar
+        requests_seen.append(req.full_url)
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            return {"ok": True}
+        if req.full_url.endswith("/api/user.session"):
+            return {"session": {"activeOrganizationId": "org-1"}}
+        if req.full_url.endswith("/api/ai.update"):
+            return {"data": True}
+        if req.full_url.endswith("/api/ai.getAll"):
+            return [
+                {
+                    "aiId": "ai-2",
+                    "name": "Dokploy Wizard LiteLLM",
+                    "apiUrl": "http://litellm:4000/v1",
+                    "apiKey": "sk-dokploy-ai",
+                    "model": "local/model",
+                    "isEnabled": True,
+                }
+            ]
+        raise AssertionError(req.full_url)
+
+    updated = DokployBootstrapAuthClient(
+        base_url="http://127.0.0.1:3000",
+        request_fn=fake_request,
+    ).update_ai_provider(
+        admin_email="admin@example.com",
+        admin_password="secret-123",
+        ai_id="ai-2",
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://litellm:4000/v1",
+        api_key="sk-dokploy-ai",
+        model="local/model",
+        is_enabled=True,
+    )
+
+    assert updated["aiId"] == "ai-2"
+    assert requests_seen == [
+        "http://127.0.0.1:3000/api/auth/sign-in/email",
+        "http://127.0.0.1:3000/api/user.session",
+        "http://127.0.0.1:3000/api/ai.update",
+        "http://127.0.0.1:3000/api/ai.getAll",
+    ]
+
+
 def test_bootstrap_auth_assign_domain_server_uses_trpc_batch_shape() -> None:
     requests_seen: list[tuple[str, object]] = []
 
@@ -314,3 +506,82 @@ def test_bootstrap_auth_delete_project_posts_expected_payload() -> None:
 
     assert payload == {"projectId": "proj-1", "name": "wizard-probe"}
     assert requests_seen == [("http://127.0.0.1:3000/api/project.remove", {"projectId": "proj-1"})]
+
+
+def test_bootstrap_auth_ai_provider_test_connection_uses_trpc_batch_shape() -> None:
+    requests_seen: list[tuple[str, object]] = []
+
+    def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
+        del jar
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            return {"ok": True}
+        if req.full_url.endswith("/api/user.session"):
+            return {"session": {"activeOrganizationId": "org-1"}}
+        if req.full_url.endswith("/api/trpc/ai.testConnection?batch=1"):
+            body = req.data
+            assert isinstance(body, bytes)
+            decoded = json.loads(body.decode("utf-8"))
+            requests_seen.append((req.full_url, decoded))
+            return [{"result": {"data": {"json": {"success": True, "message": "ok"}}}}]
+        raise AssertionError(req.full_url)
+
+    result = DokployBootstrapAuthClient(
+        base_url="http://127.0.0.1:3000",
+        request_fn=fake_request,
+    ).test_ai_provider_connection(
+        admin_email="admin@example.com",
+        admin_password="secret-123",
+        api_url="http://litellm:4000/v1",
+        api_key="sk-dokploy-ai",
+        model="local/model",
+    )
+
+    assert result == {"success": True, "message": "ok"}
+    assert requests_seen == [
+        (
+            "http://127.0.0.1:3000/api/trpc/ai.testConnection?batch=1",
+            {
+                "0": {
+                    "json": {
+                        "apiUrl": "http://litellm:4000/v1",
+                        "apiKey": "sk-dokploy-ai",
+                        "model": "local/model",
+                    }
+                }
+            },
+        )
+    ]
+
+
+def test_bootstrap_auth_ai_provider_test_connection_redacts_failed_secret() -> None:
+    def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
+        del jar
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            return {"ok": True}
+        if req.full_url.endswith("/api/user.session"):
+            return {"session": {"activeOrganizationId": "org-1"}}
+        if req.full_url.endswith("/api/trpc/ai.testConnection?batch=1"):
+            raise error.HTTPError(
+                req.full_url,
+                400,
+                "Bad Request",
+                hdrs=Message(),
+                fp=BytesIO(b'{"message":"fetch failed for sk-dokploy-ai"}'),
+            )
+        raise AssertionError(req.full_url)
+
+    with pytest.raises(DokployBootstrapAuthError) as exc:
+        DokployBootstrapAuthClient(
+            base_url="http://127.0.0.1:3000",
+            request_fn=fake_request,
+        ).test_ai_provider_connection(
+            admin_email="admin@example.com",
+            admin_password="secret-123",
+            api_url="http://litellm:4000/v1",
+            api_key="sk-dokploy-ai",
+            model="local/model",
+        )
+
+    rendered = str(exc.value)
+    assert "sk-dokploy-ai" not in rendered
+    assert "sk-<REDACTED>" in rendered

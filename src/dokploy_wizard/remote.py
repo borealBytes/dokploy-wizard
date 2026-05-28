@@ -10,14 +10,17 @@ import shlex
 import sys
 import tarfile
 import tempfile
+import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TextIO
 
 from dokploy_wizard.remote_transport import (
     ParamikoRemoteTransport,
     RemoteCommandFailure,
     RemoteTransportSession,
 )
+from dokploy_wizard.verification import redact_text
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -131,31 +134,59 @@ def main(argv: Sequence[str] | None = None) -> int:
     _validate_args(parser, args)
     _validate_runtime_args(parser, args)
 
-    if args.command in {"install", "modify", "uninstall", "proof"}:
-        _require_local_env_file(args.env_file)
+    reporter = _RemoteProgressReporter(
+        verbose=args.verbose,
+        password=args.password,
+        stream=sys.stderr,
+    )
+    started = time.monotonic()
+    reporter.progress(f"starting remote {args.command}")
 
     try:
+        if args.command in {"install", "modify", "uninstall", "proof"}:
+            _require_local_env_file(args.env_file)
+    except (OSError, ValueError) as error:
+        print(_redact_runtime_message(str(error), password=args.password), file=sys.stderr)
+        reporter.finish(args.command, exit_code=1, started=started)
+        return 1
+
+    try:
+        reporter.progress(
+            f"connecting to {args.user}@{args.host}:22 path={args.remote_path}"
+        )
+        connect_started = time.monotonic()
         transport = ParamikoRemoteTransport.connect(
             hostname=args.host,
             username=args.user,
             password=args.password,
             remote_root=str(args.remote_path),
+            verbose=args.verbose,
+            output_callback=reporter.remote_output,
         )
+        connect_elapsed = time.monotonic() - connect_started
+        reporter.progress(f"connected over SSH ({connect_elapsed:.1f}s)")
     except (OSError, RuntimeError, ValueError) as error:
         print(_redact_runtime_message(str(error), password=args.password), file=sys.stderr)
+        reporter.finish(args.command, exit_code=1, started=started)
         return 1
 
-    session = RemoteTransportSession(transport=transport, remote_root=str(args.remote_path))
+    session = RemoteTransportSession(
+        transport=transport,
+        remote_root=str(args.remote_path),
+        progress_callback=reporter.progress,
+    )
+    exit_code = 1
 
     try:
         if args.command in {"install", "modify", "uninstall", "proof"}:
-            _upload_remote_bundle(args=args, session=session)
+            _upload_remote_bundle(args=args, session=session, reporter=reporter)
             _extract_remote_bundle(session=session, password=args.password)
         if args.command == "install":
             if args.fresh:
                 remote_confirm_path = _upload_confirm_file(
                     session=session,
                     confirm_file=args.confirm_file,
+                    reporter=reporter,
                 )
                 _run_remote_command(
                     session=session,
@@ -173,12 +204,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 command=_build_install_command(session),
                 password=args.password,
             )
-            return 0
+            exit_code = 0
+            return exit_code
         if args.command == "modify":
             if args.fresh:
                 remote_confirm_path = _upload_confirm_file(
                     session=session,
                     confirm_file=args.confirm_file,
+                    reporter=reporter,
                 )
                 _run_remote_command(
                     session=session,
@@ -196,11 +229,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 command=_build_modify_command(session),
                 password=args.password,
             )
-            return 0
+            exit_code = 0
+            return exit_code
         if args.command == "uninstall":
             remote_confirm_path = _upload_confirm_file(
                 session=session,
                 confirm_file=args.confirm_file,
+                reporter=reporter,
             )
             _run_remote_command(
                 session=session,
@@ -212,7 +247,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 password=args.password,
             )
-            return 0
+            exit_code = 0
+            return exit_code
         if args.command == "inspect-state":
             _run_remote_command(
                 session=session,
@@ -220,28 +256,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                 command=_build_inspect_state_command(session),
                 password=args.password,
             )
-            return 0
+            exit_code = 0
+            return exit_code
 
         assert args.command == "proof"
         if args.fresh:
-            _upload_confirm_file(session=session, confirm_file=args.confirm_file)
+            _upload_confirm_file(
+                session=session,
+                confirm_file=args.confirm_file,
+                reporter=reporter,
+            )
         session.run_proof(
             password=args.password,
             fresh=args.fresh,
             confirm_file=args.confirm_file,
             strict_idempotency=args.strict_idempotency,
         )
-        return 0
+        exit_code = 0
+        return exit_code
     except (OSError, RemoteCommandFailure, RuntimeError, ValueError) as error:
         print(_redact_runtime_message(str(error), password=args.password), file=sys.stderr)
         return 1
     finally:
         transport.close()
+        reporter.progress("closed SSH connection")
+        reporter.finish(args.command, exit_code=exit_code, started=started)
 
 
 def _add_remote_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", required=True, help="target host or IP address")
     parser.add_argument("--password", help="target user password")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="stream remote stdout/stderr live with command labels",
+    )
     parser.add_argument(
         "--user",
         default="root",
@@ -308,11 +357,24 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _upload_remote_bundle(*, args: argparse.Namespace, session: RemoteTransportSession) -> None:
+def _upload_remote_bundle(
+    *,
+    args: argparse.Namespace,
+    session: RemoteTransportSession,
+    reporter: "_RemoteProgressReporter",
+) -> None:
+    started = time.monotonic()
+    reporter.progress("creating repo archive for upload")
     with tempfile.TemporaryDirectory(prefix="dokploy-wizard-remote-") as temp_dir:
         archive_path = Path(temp_dir) / "repo.tar.gz"
         _create_repo_archive(repo_root=_repo_root(), destination=archive_path)
+        reporter.progress(
+            "uploading repo archive and install env file "
+            f"to {session.remote_root} (env contents redacted)"
+        )
         session.upload_bundle(repo_archive=archive_path, install_env_file=args.env_file)
+    elapsed = time.monotonic() - started
+    reporter.progress(f"uploaded remote bundle ({elapsed:.1f}s)")
 
 
 def _extract_remote_bundle(*, session: RemoteTransportSession, password: str | None) -> None:
@@ -324,13 +386,24 @@ def _extract_remote_bundle(*, session: RemoteTransportSession, password: str | N
     )
 
 
-def _upload_confirm_file(*, session: RemoteTransportSession, confirm_file: Path) -> str:
+def _upload_confirm_file(
+    *,
+    session: RemoteTransportSession,
+    confirm_file: Path,
+    reporter: "_RemoteProgressReporter | None" = None,
+) -> str:
     remote_confirm_path = _remote_path(session.remote_root, confirm_file)
     remote_confirm_dir = posixpath.dirname(remote_confirm_path)
+    started = time.monotonic()
+    if reporter is not None:
+        reporter.progress(f"uploading confirmation file to {remote_confirm_path}")
     if remote_confirm_dir:
         session.transport.ensure_dir(remote_confirm_dir)
     session.transport.upload(confirm_file, remote_confirm_path)
     session.transport.chmod(remote_confirm_path, 0o600)
+    if reporter is not None:
+        elapsed = time.monotonic() - started
+        reporter.progress(f"uploaded confirmation file ({elapsed:.1f}s)")
     return remote_confirm_path
 
 
@@ -347,30 +420,34 @@ def _build_extract_command(session: RemoteTransportSession) -> str:
 
 
 def _build_install_command(session: RemoteTransportSession) -> str:
-    return _shell_join(
-        [
-            "./bin/dokploy-wizard",
-            "install",
-            "--env-file",
-            session.remote_install_env_path,
-            "--state-dir",
-            session.remote_state_dir,
-            "--non-interactive",
-        ]
+    return _with_unbuffered_python(
+        _shell_join(
+            [
+                "./bin/dokploy-wizard",
+                "install",
+                "--env-file",
+                session.remote_install_env_path,
+                "--state-dir",
+                session.remote_state_dir,
+                "--non-interactive",
+            ]
+        )
     )
 
 
 def _build_modify_command(session: RemoteTransportSession) -> str:
-    return _shell_join(
-        [
-            "./bin/dokploy-wizard",
-            "modify",
-            "--env-file",
-            session.remote_install_env_path,
-            "--state-dir",
-            session.remote_state_dir,
-            "--non-interactive",
-        ]
+    return _with_unbuffered_python(
+        _shell_join(
+            [
+                "./bin/dokploy-wizard",
+                "modify",
+                "--env-file",
+                session.remote_install_env_path,
+                "--state-dir",
+                session.remote_state_dir,
+                "--non-interactive",
+            ]
+        )
     )
 
 
@@ -390,19 +467,21 @@ def _build_uninstall_command(
         "--confirm-file",
         remote_confirm_path,
     ]
-    return _shell_join(command)
+    return _with_unbuffered_python(_shell_join(command))
 
 
 def _build_inspect_state_command(session: RemoteTransportSession) -> str:
-    return _shell_join(
-        [
-            "./bin/dokploy-wizard",
-            "inspect-state",
-            "--env-file",
-            session.remote_install_env_path,
-            "--state-dir",
-            session.remote_state_dir,
-        ]
+    return _with_unbuffered_python(
+        _shell_join(
+            [
+                "./bin/dokploy-wizard",
+                "inspect-state",
+                "--env-file",
+                session.remote_install_env_path,
+                "--state-dir",
+                session.remote_state_dir,
+            ]
+        )
     )
 
 
@@ -413,16 +492,7 @@ def _run_remote_command(
     command: str,
     password: str | None,
 ) -> None:
-    try:
-        session.transport.run(subcommand, command)
-    except RemoteCommandFailure:
-        raise
-    except Exception as error:
-        raise RemoteCommandFailure(
-            subcommand=subcommand,
-            error=error,
-            password=password,
-        ) from error
+    session.run_command(subcommand=subcommand, command=command, password=password)
 
 
 def _remote_path(remote_root: str, path: Path) -> str:
@@ -435,10 +505,63 @@ def _shell_join(arguments: Sequence[str]) -> str:
     return " ".join(shlex.quote(argument) for argument in arguments)
 
 
+def _with_unbuffered_python(command: str) -> str:
+    return f"PYTHONUNBUFFERED=1 {command}"
+
+
 def _redact_runtime_message(message: str, *, password: str | None) -> str:
-    if not password:
-        return message
-    return message.replace(password, "<redacted>")
+    if password:
+        message = message.replace(password, "<redacted>")
+    return redact_text(message)
+
+
+class _RemoteProgressReporter:
+    def __init__(self, *, verbose: bool, password: str | None, stream: TextIO) -> None:
+        self.verbose = verbose
+        self.password = password
+        self.stream = stream
+        self._redact_next_remote_assignment: dict[tuple[str, str], bool] = {}
+
+    def progress(self, message: str) -> None:
+        print(f"[remote] {self._redact(message)}", file=self.stream)
+
+    def remote_output(self, subcommand: str, stream_name: str, line: str) -> None:
+        if not self.verbose:
+            return
+        line = self._redact_remote_output_line(subcommand, stream_name, line)
+        print(
+            f"[remote:{subcommand}:{stream_name}] {self._redact(line)}",
+            file=self.stream,
+        )
+
+    def finish(self, command: str, *, exit_code: int, started: float) -> None:
+        elapsed = time.monotonic() - started
+        status = "completed" if exit_code == 0 else "failed"
+        self.progress(f"remote {command} {status} ({elapsed:.1f}s)")
+
+    def _redact(self, message: str) -> str:
+        return _redact_runtime_message(message, password=self.password)
+
+    def _redact_remote_output_line(
+        self,
+        subcommand: str,
+        stream_name: str,
+        line: str,
+    ) -> str:
+        key = (subcommand, stream_name)
+        if self._redact_next_remote_assignment.get(key, False):
+            self._redact_next_remote_assignment[key] = False
+            if _looks_like_env_assignment(line):
+                env_key = line.split("=", 1)[0]
+                return f"{env_key}=<REDACTED>"
+        if line.startswith("# dokploy-wizard-env"):
+            self._redact_next_remote_assignment[key] = True
+        return line
+
+
+def _looks_like_env_assignment(line: str) -> bool:
+    key, separator, _value = line.partition("=")
+    return bool(separator and key and key.replace("_", "").isalnum())
 
 
 def _create_repo_archive(*, repo_root: Path, destination: Path) -> None:
@@ -469,11 +592,23 @@ def _should_skip(relative: Path) -> bool:
         return True
     if parts[0] == ".sisyphus" and len(parts) > 1 and parts[1] == "evidence":
         return True
-    if relative.name in {".install.env", ".fresh-vps-validation.env"}:
+    if _is_secret_env_artifact(relative.name):
         return True
     if relative.suffix == ".swp":
         return True
     return any(part == "__pycache__" for part in parts)
+
+
+def _is_secret_env_artifact(name: str) -> bool:
+    sensitive_env_files = {".install.env", ".fresh-vps-validation.env"}
+    if name in sensitive_env_files:
+        return True
+    backup_suffixes = {"bak", "backup", "old", "orig", "save", "tmp"}
+    return any(
+        name == f"{env_name}.{suffix}"
+        for env_name in sensitive_env_files
+        for suffix in backup_suffixes
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

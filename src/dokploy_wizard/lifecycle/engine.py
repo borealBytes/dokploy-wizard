@@ -51,6 +51,11 @@ from dokploy_wizard.packs.seaweedfs import (
     build_seaweedfs_ledger,
     reconcile_seaweedfs,
 )
+from dokploy_wizard.packs.surfsense import (
+    SurfSenseBackend,
+    build_surfsense_ledger,
+    reconcile_surfsense,
+)
 from dokploy_wizard.preflight import PreflightReport
 from dokploy_wizard.state import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
@@ -80,6 +85,7 @@ class LifecycleBackends:
     seaweedfs: SeaweedFsBackend
     coder: CoderBackend
     openclaw: OpenClawBackend
+    surfsense: SurfSenseBackend | None = None
 
 
 def execute_lifecycle_plan(
@@ -234,6 +240,26 @@ def execute_lifecycle_plan(
                     stack_name=desired_state.stack_name,
                     service_resource_id=matrix.service_resource_id,
                     data_resource_id=matrix.data_resource_id,
+                )
+                write_ownership_ledger(state_dir, current_ledger)
+        elif phase == "surfsense":
+            if backends.surfsense is None:
+                raise RuntimeError(
+                    "SurfSense backend is required when the SurfSense phase is applicable."
+                )
+            surfsense = reconcile_surfsense(
+                dry_run=dry_run,
+                desired_state=desired_state,
+                ownership_ledger=current_ledger,
+                backend=backends.surfsense,
+            )
+            phase_results[phase] = surfsense.result.to_dict()
+            if not dry_run:
+                current_ledger = build_surfsense_ledger(
+                    existing_ledger=current_ledger,
+                    stack_name=desired_state.stack_name,
+                    service_resource_id=surfsense.service_resource_id,
+                    data_resource_id=surfsense.data_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "seaweedfs":
@@ -483,6 +509,7 @@ def _build_summary(
         "openclaw": phase_results.get("openclaw", {"outcome": "not_run"}),
         "preflight": preflight_report.to_dict(),
         "seaweedfs": phase_results.get("seaweedfs", {"outcome": "not_run"}),
+        "surfsense": phase_results.get("surfsense", {"outcome": "not_run"}),
         "shared_core": phase_results.get("shared_core", {"outcome": "not_run"}),
         "state_status": state_status,
         "tailscale": phase_results.get("tailscale", {"outcome": "not_run"}),
@@ -548,6 +575,20 @@ def _preserved_result(
             desired_state=desired_state,
             ownership_ledger=ownership_ledger,
             backend=backends.matrix,
+        ).result.to_dict()
+        if result["outcome"] != "skipped":
+            result["outcome"] = "already_present"
+        return result
+    if phase == "surfsense":
+        if backends.surfsense is None:
+            raise RuntimeError(
+                "SurfSense backend is required when the SurfSense phase is preserved."
+            )
+        result = reconcile_surfsense(
+            dry_run=True,
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            backend=backends.surfsense,
         ).result.to_dict()
         if result["outcome"] != "skipped":
             result["outcome"] = "already_present"

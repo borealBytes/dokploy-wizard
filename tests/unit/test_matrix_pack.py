@@ -166,8 +166,10 @@ class FakeDokployApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        del compose_file
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        del compose_file, env
         return DokployComposeRecord(compose_id=compose_id, name="wizard-stack-matrix")
 
     def deploy_compose(
@@ -568,7 +570,7 @@ def test_dokploy_matrix_compose_generates_static_config_on_first_start() -> None
     assert desired_state.shared_core.postgres is not None
     assert desired_state.shared_core.redis is not None
 
-    rendered = _render_compose_file(
+    rendered_compose = _render_compose_file(
         stack_name=desired_state.stack_name,
         hostname=desired_state.hostnames["matrix"],
         shared_allocation=allocation,
@@ -579,11 +581,22 @@ def test_dokploy_matrix_compose_generates_static_config_on_first_start() -> None
             "wizard-stack-matrix-macaroon-secret-key",
         ),
     )
+    rendered = rendered_compose.compose_file
 
     assert 'entrypoint: ["/bin/sh", "-c"]' in rendered
     assert "migrate_config" in rendered
     assert "SYNAPSE_NO_TLS: 'yes'" in rendered
     assert "SYNAPSE_CONFIG_PATH: /data/homeserver.yaml" in rendered
+    assert (
+        'SYNAPSE_REGISTRATION_SHARED_SECRET: '
+        '"${WIZARD_STACK_MATRIX_REGISTRATION_SHARED_SECRET:?'
+        'WIZARD_STACK_MATRIX_REGISTRATION_SHARED_SECRET is required}"'
+        in rendered
+    )
+    assert any(
+        spec.name == "WIZARD_STACK_MATRIX_REGISTRATION_SHARED_SECRET"
+        for spec in rendered_compose.env_specs
+    )
 
 
 def test_dokploy_matrix_health_prefers_local_container_state(
@@ -654,7 +667,7 @@ def test_dokploy_matrix_backend_skips_redeploy_when_hash_matches_and_container_i
     )
     assert desired_state.shared_core.postgres is not None
     assert desired_state.shared_core.redis is not None
-    compose_file = _render_compose_file(
+    rendered_compose = _render_compose_file(
         stack_name=desired_state.stack_name,
         hostname=desired_state.hostnames["matrix"],
         shared_allocation=allocation,
@@ -665,10 +678,11 @@ def test_dokploy_matrix_backend_skips_redeploy_when_hash_matches_and_container_i
             "wizard-stack-matrix-macaroon-secret-key",
         ),
     )
+    compose_file = rendered_compose.compose_file
     _write_hash_checkpoint(
         tmp_path,
         service_name="wizard-stack-matrix",
-        rendered_compose=compose_file,
+        rendered_compose=rendered_compose,
     )
     client = SharedFakeDokployApiClient()
     client.seed_existing_service(
@@ -716,7 +730,10 @@ def test_dokploy_matrix_backend_skips_redeploy_when_hash_matches_and_container_i
     client.assert_unchanged_service("wizard-stack-matrix")
 
 
-def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: str) -> None:
+def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: object) -> None:
+    compose_file = getattr(rendered_compose, "compose_file", rendered_compose)
+    env_specs = getattr(rendered_compose, "env_specs", ())
+    assert isinstance(compose_file, str)
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
@@ -726,7 +743,8 @@ def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compo
             compose_artifact_hashes={
                 service_name: ComposeArtifactHashState.from_rendered_compose(
                     service_id=service_name,
-                    rendered_compose=rendered_compose,
+                    rendered_compose=compose_file,
+                    env_specs=env_specs,
                 )
             },
         ),

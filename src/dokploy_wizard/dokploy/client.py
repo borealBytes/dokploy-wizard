@@ -13,13 +13,17 @@ from urllib import error, request
 RequestFn = Callable[[request.Request], Any]
 ListProjectsSessionFallbackFn = Callable[[], Any]
 ProjectCreateSessionFallbackFn = Callable[[str, str | None, str | None], Any]
-ComposeCreateSessionFallbackFn = Callable[[str, str, str, str], Any]
-ComposeUpdateSessionFallbackFn = Callable[[str, str], Any]
+ComposeCreateSessionFallbackFn = Callable[..., Any]
+ComposeUpdateSessionFallbackFn = Callable[..., Any]
 DeploySessionFallbackFn = Callable[[str, str | None, str | None], Any]
 ListComposeSchedulesSessionFallbackFn = Callable[[str], Any]
 CreateScheduleSessionFallbackFn = Callable[[str, str, str, str, str, str, bool], Any]
 UpdateScheduleSessionFallbackFn = Callable[[str, str, str, str, str, str, str, bool], Any]
 DeleteScheduleSessionFallbackFn = Callable[[str], Any]
+AiProvidersAllSessionFallbackFn = Callable[[], Any]
+AiProviderCreateSessionFallbackFn = Callable[[str, str, str, str, bool], Any]
+AiProviderUpdateSessionFallbackFn = Callable[[str, str, str, str, str, bool], Any]
+AiProviderTestConnectionSessionFallbackFn = Callable[[str, str, str], Any]
 
 
 class DokployApiError(RuntimeError):
@@ -79,6 +83,22 @@ class DokployScheduleRecord:
     enabled: bool
 
 
+@dataclass(frozen=True)
+class DokployAiProvider:
+    ai_id: str
+    name: str
+    api_url: str
+    api_key: str
+    model: str
+    is_enabled: bool
+
+
+@dataclass(frozen=True)
+class DokployAiProviderTestConnectionResult:
+    success: bool
+    message: str | None = None
+
+
 class DokployApiClient:
     def __init__(
         self,
@@ -96,6 +116,12 @@ class DokployApiClient:
         create_schedule_session_fallback: CreateScheduleSessionFallbackFn | None = None,
         update_schedule_session_fallback: UpdateScheduleSessionFallbackFn | None = None,
         delete_schedule_session_fallback: DeleteScheduleSessionFallbackFn | None = None,
+        ai_providers_all_session_fallback: AiProvidersAllSessionFallbackFn | None = None,
+        ai_provider_create_session_fallback: AiProviderCreateSessionFallbackFn | None = None,
+        ai_provider_update_session_fallback: AiProviderUpdateSessionFallbackFn | None = None,
+        ai_provider_test_connection_session_fallback: (
+            AiProviderTestConnectionSessionFallbackFn | None
+        ) = None,
     ) -> None:
         self._api_url = api_url.removesuffix("/").removesuffix("/api")
         self._api_key = api_key
@@ -109,6 +135,12 @@ class DokployApiClient:
         self._create_schedule_session_fallback = create_schedule_session_fallback
         self._update_schedule_session_fallback = update_schedule_session_fallback
         self._delete_schedule_session_fallback = delete_schedule_session_fallback
+        self._ai_providers_all_session_fallback = ai_providers_all_session_fallback
+        self._ai_provider_create_session_fallback = ai_provider_create_session_fallback
+        self._ai_provider_update_session_fallback = ai_provider_update_session_fallback
+        self._ai_provider_test_connection_session_fallback = (
+            ai_provider_test_connection_session_fallback
+        )
 
     def list_projects(self) -> tuple[DokployProjectSummary, ...]:
         try:
@@ -170,6 +202,7 @@ class DokployApiClient:
         environment_id: str,
         compose_file: str,
         app_name: str,
+        env: str | None = None,
     ) -> DokployComposeRecord:
         try:
             payload = self._request_json(
@@ -185,21 +218,34 @@ class DokployApiClient:
         except DokployApiError as error:
             if self._compose_create_session_fallback is None or not _is_unauthorized_error(error):
                 raise
-            payload = self._compose_create_session_fallback(
-                name, environment_id, compose_file, app_name
-            )
+            if env is None:
+                payload = self._compose_create_session_fallback(
+                    name, environment_id, compose_file, app_name
+                )
+            else:
+                payload = self._compose_create_session_fallback(
+                    name, environment_id, compose_file, app_name, env
+                )
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
         created = _parse_compose_record(payload, "compose.create")
+        if env is not None:
+            self.update_compose(compose_id=created.compose_id, env=env)
         return self.update_compose(compose_id=created.compose_id, compose_file=compose_file)
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        try:
-            payload = self._request_json(
-                "POST",
-                "/api/compose.update",
+    def update_compose(
+        self,
+        *,
+        compose_id: str,
+        compose_file: str | None = None,
+        env: str | None = None,
+    ) -> DokployComposeRecord:
+        if compose_file is None and env is None:
+            raise DokployApiError("Dokploy compose.update requires compose_file or env.")
+        update_payload: dict[str, Any] = {"composeId": compose_id}
+        if compose_file is not None:
+            update_payload.update(
                 {
-                    "composeId": compose_id,
                     "composeType": "docker-compose",
                     "sourceType": "raw",
                     "composePath": "./docker-compose.yml",
@@ -208,12 +254,23 @@ class DokployApiClient:
                     "owner": None,
                     "branch": None,
                     "composeFile": compose_file,
-                },
+                }
+            )
+        if env is not None:
+            update_payload["env"] = env
+        try:
+            payload = self._request_json(
+                "POST",
+                "/api/compose.update",
+                update_payload,
             )
         except DokployApiError as error:
             if self._compose_update_session_fallback is None or not _is_unauthorized_error(error):
                 raise
-            payload = self._compose_update_session_fallback(compose_id, compose_file)
+            if env is None:
+                payload = self._compose_update_session_fallback(compose_id, compose_file)
+            else:
+                payload = self._compose_update_session_fallback(compose_id, compose_file, env)
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
         return _parse_compose_record(payload, "compose.update")
@@ -381,6 +438,119 @@ class DokployApiClient:
         if payload is not True and not isinstance(payload, bool):
             raise DokployApiError("Dokploy schedule.delete response must be true.")
 
+    def ai_providers_all(self) -> tuple[DokployAiProvider, ...]:
+        try:
+            payload = self._request_json("GET", "/api/ai.getAll")
+        except DokployApiError as error:
+            if self._ai_providers_all_session_fallback is None or not _is_unauthorized_error(
+                error
+            ):
+                raise
+            payload = self._ai_providers_all_session_fallback()
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
+        if not isinstance(payload, list):
+            raise DokployApiError("Dokploy ai.getAll response must be a list.")
+        return tuple(_parse_ai_provider(item) for item in payload)
+
+    def ai_provider_create(
+        self,
+        *,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+    ) -> DokployAiProvider:
+        try:
+            payload = self._request_json(
+                "POST",
+                "/api/ai.create",
+                {
+                    "name": name,
+                    "apiUrl": api_url,
+                    "apiKey": api_key,
+                    "model": model,
+                    "isEnabled": is_enabled,
+                },
+            )
+        except DokployApiError as error:
+            if self._ai_provider_create_session_fallback is None or not _is_unauthorized_error(
+                error
+            ):
+                raise
+            payload = self._ai_provider_create_session_fallback(
+                name,
+                api_url,
+                api_key,
+                model,
+                is_enabled,
+            )
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
+        if not isinstance(payload, dict):
+            raise DokployApiError("Dokploy ai.create response must be an object.")
+        return _parse_ai_provider(payload)
+
+    def ai_provider_update(
+        self,
+        *,
+        ai_id: str,
+        name: str,
+        api_url: str,
+        api_key: str,
+        model: str,
+        is_enabled: bool,
+    ) -> DokployAiProvider:
+        try:
+            payload = self._request_json(
+                "POST",
+                "/api/ai.update",
+                {
+                    "aiId": ai_id,
+                    "name": name,
+                    "apiUrl": api_url,
+                    "apiKey": api_key,
+                    "model": model,
+                    "isEnabled": is_enabled,
+                },
+            )
+        except DokployApiError as error:
+            if self._ai_provider_update_session_fallback is None or not _is_unauthorized_error(
+                error
+            ):
+                raise
+            payload = self._ai_provider_update_session_fallback(
+                ai_id,
+                name,
+                api_url,
+                api_key,
+                model,
+                is_enabled,
+            )
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
+        if not isinstance(payload, dict):
+            raise DokployApiError("Dokploy ai.update response must be an object.")
+        return _parse_ai_provider(payload)
+
+
+    def ai_provider_test_connection(
+        self,
+        *,
+        api_url: str,
+        api_key: str,
+        model: str,
+    ) -> DokployAiProviderTestConnectionResult:
+        if self._ai_provider_test_connection_session_fallback is None:
+            raise DokployApiError(
+                "Dokploy ai.testConnection requires a session fallback client."
+            )
+        payload = self._ai_provider_test_connection_session_fallback(api_url, api_key, model)
+        if isinstance(payload, dict):
+            payload = payload.get("data", payload)
+        return _parse_ai_provider_test_connection_result(payload)
+
     def _request_json(self, method: str, path: str, payload: Any | None = None) -> Any:
         data = None
         headers = {
@@ -493,6 +663,22 @@ def _parse_schedule_record(payload: Any, operation: str) -> DokployScheduleRecor
     )
 
 
+def _parse_ai_provider_test_connection_result(
+    payload: Any,
+) -> DokployAiProviderTestConnectionResult:
+    if isinstance(payload, bool):
+        return DokployAiProviderTestConnectionResult(success=payload)
+    if not isinstance(payload, dict):
+        raise DokployApiError("Dokploy ai.testConnection response must be an object.")
+    success = payload.get("success")
+    if not isinstance(success, bool):
+        raise DokployApiError("Dokploy ai.testConnection success must be a boolean.")
+    message = payload.get("message")
+    if message is not None and not isinstance(message, str):
+        raise DokployApiError("Dokploy ai.testConnection message must be a string or null.")
+    return DokployAiProviderTestConnectionResult(success=success, message=message)
+
+
 def _require_string(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or value == "":
@@ -502,3 +688,19 @@ def _require_string(payload: dict[str, Any], key: str) -> str:
 
 def _is_unauthorized_error(error: DokployApiError) -> bool:
     return "status 401" in str(error).lower()
+
+
+def _parse_ai_provider(payload: Any) -> DokployAiProvider:
+    if not isinstance(payload, dict):
+        raise DokployApiError("Dokploy AI provider response must be an object.")
+    is_enabled = payload.get("isEnabled")
+    if not isinstance(is_enabled, bool):
+        raise DokployApiError("Dokploy AI provider isEnabled must be a boolean.")
+    return DokployAiProvider(
+        ai_id=_require_string(payload, "aiId"),
+        name=_require_string(payload, "name"),
+        api_url=_require_string(payload, "apiUrl"),
+        api_key=_require_string(payload, "apiKey"),
+        model=_require_string(payload, "model"),
+        is_enabled=is_enabled,
+    )

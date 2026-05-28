@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar
 from dokploy_wizard.verification import (
     ServiceVerificationResult,
     build_redacted_command_log,
     make_verification_result,
     redact_command,
+    redact_dokploy_env_payload,
     redact_text,
+    redacted_env_spec_metadata,
 )
 
 
@@ -109,3 +112,51 @@ def test_redact_command_supports_pre_rendered_shell_text() -> None:
 
     assert "sk-inline-123" not in redacted
     assert "<REDACTED>" in redacted
+
+
+def test_redact_dokploy_env_payload_masks_wizard_owned_assignment_values() -> None:
+    raw = (
+        "# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
+        "key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:abc123\n"
+        "OPENCLAW_PROVIDER_API_KEY=SECRET_TEST_OPENCLAW_PROVIDER_VALUE\n"
+        "PUBLIC_SETTING=not-secret\n"
+    )
+
+    redacted = redact_dokploy_env_payload(raw)
+
+    assert "SECRET_TEST_OPENCLAW_PROVIDER_VALUE" not in redacted
+    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in redacted
+    assert "fingerprint=sha256:abc123" in redacted
+    assert "PUBLIC_SETTING=not-secret" in redacted
+
+
+def test_redacted_env_spec_metadata_omits_raw_values() -> None:
+    spec = DokployEnvSpec(
+        variable=DokployEnvVar(
+            name="OPENCLAW_PROVIDER_API_KEY",
+            value="SECRET_TEST_OPENCLAW_PROVIDER_VALUE",
+            sensitive=True,
+            source="operator-input",
+        ),
+        owner="openclaw",
+        target_services=("wizard-stack-openclaw",),
+        placeholder="${OPENCLAW_PROVIDER_API_KEY:?OPENCLAW_PROVIDER_API_KEY is required}",
+    )
+
+    metadata = redacted_env_spec_metadata((spec,))
+
+    assert metadata == (
+        {
+            "dokploy_scope": "compose",
+            "name": "OPENCLAW_PROVIDER_API_KEY",
+            "owner": "openclaw",
+            "ownership_marker": "dokploy-wizard",
+            "placeholder": "${OPENCLAW_PROVIDER_API_KEY:?OPENCLAW_PROVIDER_API_KEY is required}",
+            "redacted_fingerprint": spec.redacted_fingerprint,
+            "required": True,
+            "sensitive": True,
+            "source": "operator-input",
+            "target_services": ["wizard-stack-openclaw"],
+        },
+    )
+    assert "SECRET_TEST_OPENCLAW_PROVIDER_VALUE" not in str(metadata)

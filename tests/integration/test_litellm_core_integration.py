@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 import dokploy_wizard.cli
 from dokploy_wizard.cli import run_install_flow, run_modify_flow
+from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.dokploy import (
     DokployComposeRecord,
     DokployComposeSummary,
@@ -22,12 +25,15 @@ from dokploy_wizard.dokploy.shared_core import (
     DokploySharedCoreBackend,
     build_litellm_consumer_model_allowlists,
 )
+from dokploy_wizard.litellm import build_litellm_config
+from dokploy_wizard.litellm.admin import LiteLLMTeamRecord, LiteLLMVirtualKeyRecord
 from dokploy_wizard.state import (
     RawEnvInput,
     load_litellm_generated_keys,
     load_state_dir,
     resolve_desired_state,
 )
+from dokploy_wizard.state.models import LiteLLMGeneratedKeys
 from tests.integration.test_networking_reconciler import (
     FakeCloudflareBackend as NetworkingCloudflareBackend,
 )
@@ -44,6 +50,23 @@ from tests.integration.test_openclaw_pack import (
     RecordingDokployOpenClawApi,
     _base_install_values,
     _patch_real_dokploy_openclaw_backend,
+)
+
+_EXPECTED_OPENCODE_GO_CHAT_ALIASES = (
+    "opencode-go/minimax-m2.7",
+    "opencode-go/minimax-m2.5",
+    "opencode-go/kimi-k2.6",
+    "opencode-go/kimi-k2.5",
+    "opencode-go/glm-5.1",
+    "opencode-go/glm-5",
+    "opencode-go/deepseek-v4-pro",
+    "opencode-go/deepseek-v4-flash",
+    "opencode-go/qwen3.6-plus",
+    "opencode-go/qwen3.5-plus",
+    "opencode-go/mimo-v2-pro",
+    "opencode-go/mimo-v2-omni",
+    "opencode-go/mimo-v2.5-pro",
+    "opencode-go/mimo-v2.5",
 )
 
 
@@ -96,10 +119,14 @@ class RecordingDokploySharedCoreApi:
         self.compose_files_by_name[name] = compose_file
         return DokployComposeRecord(compose_id=compose_id, name=name)
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        self.update_compose_calls += 1
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        del env
         name = self.compose_names_by_id[compose_id]
-        self.compose_files_by_name[name] = compose_file
+        if compose_file is not None:
+            self.update_compose_calls += 1
+            self.compose_files_by_name[name] = compose_file
         return DokployComposeRecord(compose_id=compose_id, name=name)
 
     def deploy_compose(
@@ -108,6 +135,126 @@ class RecordingDokploySharedCoreApi:
         del title, description
         self.deploy_calls += 1
         return DokployDeployResult(success=True, compose_id=compose_id, message=None)
+
+
+@dataclass
+class RecordingManagedDriftLiteLLMAdminApi:
+    teams: dict[str, LiteLLMTeamRecord]
+    keys: dict[str, LiteLLMVirtualKeyRecord]
+    update_team_calls: list[dict[str, object]] = field(default_factory=list)
+    update_key_calls: list[dict[str, object]] = field(default_factory=list)
+    create_key_calls: list[dict[str, object]] = field(default_factory=list)
+    delete_key_calls: list[dict[str, object]] = field(default_factory=list)
+
+    def readiness(self) -> dict[str, object]:
+        return {"status": "connected", "db": "connected"}
+
+    def list_teams(self) -> tuple[LiteLLMTeamRecord, ...]:
+        return tuple(self.teams.values())
+
+    def create_team(
+        self,
+        *,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        record = LiteLLMTeamRecord(
+            team_id=f"team-{team_alias}",
+            team_alias=team_alias,
+            models=models,
+            metadata=metadata or {},
+        )
+        self.teams[team_alias] = record
+        return record
+
+    def update_team(
+        self,
+        *,
+        team_id: str,
+        team_alias: str,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMTeamRecord:
+        self.update_team_calls.append(
+            {
+                "team_id": team_id,
+                "team_alias": team_alias,
+                "models": models,
+                "metadata": dict(metadata or {}),
+            }
+        )
+        record = LiteLLMTeamRecord(
+            team_id=team_id,
+            team_alias=team_alias,
+            models=models,
+            metadata=metadata or {},
+        )
+        self.teams[team_alias] = record
+        return record
+
+    def list_keys(self) -> tuple[LiteLLMVirtualKeyRecord, ...]:
+        return tuple(self.keys.values())
+
+    def create_key(
+        self,
+        *,
+        key: str,
+        key_alias: str,
+        team_id: str | None,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMVirtualKeyRecord:
+        self.create_key_calls.append(
+            {
+                "key": key,
+                "key_alias": key_alias,
+                "team_id": team_id,
+                "models": models,
+                "metadata": dict(metadata or {}),
+            }
+        )
+        record = LiteLLMVirtualKeyRecord(
+            key=key,
+            key_alias=key_alias,
+            team_id=team_id,
+            models=models,
+            metadata=metadata or {},
+        )
+        self.keys[key_alias] = record
+        return record
+
+    def delete_key(self, *, key_alias: str) -> None:
+        self.delete_key_calls.append({"key_alias": key_alias})
+        self.keys.pop(key_alias, None)
+
+    def update_key(
+        self,
+        *,
+        key_alias: str,
+        key: str,
+        team_id: str | None,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMVirtualKeyRecord:
+        self.update_key_calls.append(
+            {
+                "key_alias": key_alias,
+                "key": key,
+                "team_id": team_id,
+                "models": models,
+                "metadata": dict(metadata or {}),
+            }
+        )
+        record = LiteLLMVirtualKeyRecord(
+            key=key,
+            key_alias=key_alias,
+            team_id=team_id,
+            models=models,
+            metadata=metadata or {},
+        )
+        self.keys[key_alias] = record
+        return record
 
 
 def _core_only_raw_env(**overrides: str) -> RawEnvInput:
@@ -141,6 +288,285 @@ def _litellm_shared_core_backend(
     )
     setattr(backend, "_wait_for_shared_core_containers", lambda: None)
     return backend
+
+
+def _litellm_route_env(**overrides: str) -> dict[str, str]:
+    values = {
+        "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
+        "LITELLM_LOCAL_MODEL": "unsloth-active",
+        "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
+        "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
+        "LITELLM_OPENCODE_GO_API_KEY": "sk-opencode-go-key",
+        "LITELLM_OPENROUTER_API_KEY": "sk-openrouter-key",
+        "LITELLM_OPENROUTER_MODELS": (
+            "anthropic/claude-3.7-sonnet,"
+            "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"
+        ),
+        "LITELLM_NVIDIA_MODELS": "nvidia/kimi-k2.5=nvidia/moonshotai/kimi-k2.5",
+        "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
+        "NVIDIA_API_KEY": "sk-nvidia-key",
+    }
+    values.update(overrides)
+    return values
+
+
+def _model_names(config: dict[str, object]) -> list[str]:
+    model_list = cast(list[dict[str, Any]], config["model_list"])
+    return [str(entry["model_name"]) for entry in model_list]
+
+
+def _generated_keys_for_consumers(consumers: tuple[str, ...]) -> LiteLLMGeneratedKeys:
+    return LiteLLMGeneratedKeys(
+        format_version=1,
+        master_key="sk-master-generated",
+        salt_key="sk-salt-generated",
+        virtual_keys={consumer: f"sk-generated-{consumer}" for consumer in consumers},
+    )
+
+
+def test_build_litellm_config_integrates_all_supported_provider_types() -> None:
+    config = build_litellm_config(
+        _litellm_route_env(),
+        {
+            "nvidia_api_key_env": "NVIDIA_API_KEY",
+            "openrouter_model_metadata": {
+                "anthropic/claude-3.7-sonnet": {
+                    "pricing": {"prompt": "0.000003", "completion": "0.000015"}
+                },
+                "openrouter/openai/gpt-4.1-mini": {
+                    "pricing": {"prompt": "0.0000008", "completion": "0.0000032"}
+                },
+            }
+        },
+    )
+
+    assert _model_names(config) == [
+        "local-model.internal/unsloth-active",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
+        "openrouter/anthropic/claude-3.7-sonnet",
+        "nvidia/kimi-k2.5",
+        "openrouter/hunter-alpha",
+    ]
+
+    entries = {
+        entry["model_name"]: entry
+        for entry in cast(list[dict[str, Any]], config["model_list"])
+    }
+    assert entries["local-model.internal/unsloth-active"]["litellm_params"] == {
+        "model": "openai/unsloth-active",
+        "api_base": "http://local-model.internal:61434/v1",
+        "api_key": "sk-no-key-required",
+    }
+    assert entries["opencode-go/minimax-m2.7"]["litellm_params"] == {
+        "model": "openai/minimax-m2.7",
+        "api_base": "https://opencode.ai/zen/go/v1",
+        "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
+    }
+    assert entries["openrouter/anthropic/claude-3.7-sonnet"]["model_info"] == {
+        "input_cost_per_token": 0.000003,
+        "output_cost_per_token": 0.000015,
+    }
+    assert entries["openrouter/hunter-alpha"]["litellm_params"] == {
+        "model": "openrouter/openai/gpt-4.1-mini",
+        "api_key": "os.environ/LITELLM_OPENROUTER_API_KEY",
+    }
+    assert entries["openrouter/hunter-alpha"]["model_info"] == {
+        "input_cost_per_token": 0.0000008,
+        "output_cost_per_token": 0.0000032,
+    }
+    assert entries["nvidia/kimi-k2.5"]["litellm_params"] == {
+        "model": "nvidia/moonshotai/kimi-k2.5",
+        "api_base": "https://integrate.api.nvidia.com/v1",
+        "api_key": "os.environ/NVIDIA_API_KEY",
+    }
+
+
+def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consumers() -> None:
+    plan = build_shared_core_plan(
+        stack_name="wizard-stack",
+        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+    )
+
+    allowlists = build_litellm_consumer_model_allowlists(
+        flat_env=_litellm_route_env(
+            MY_FARM_ADVISOR_PRIMARY_MODEL="nvidia/kimi-k2.5",
+            MY_FARM_ADVISOR_FALLBACK_MODELS="opencode-go/minimax-m2.7",
+            OPENCLAW_PRIMARY_MODEL="openrouter/hunter-alpha",
+            OPENCLAW_FALLBACK_MODELS="opencode-go/mimo-v2.5",
+        ),
+        plan=plan,
+    )
+
+    shared_models = (
+        "local-model.internal/unsloth-active",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
+        "openrouter/anthropic/claude-3.7-sonnet",
+        "openrouter/hunter-alpha",
+    )
+
+    assert allowlists == {
+        "coder-hermes": shared_models,
+        "coder-kdense": shared_models,
+        "dokploy-ai": ("local-model.internal/unsloth-active",),
+        "my-farm-advisor": (*shared_models, "nvidia/kimi-k2.5"),
+        "openclaw": shared_models,
+        "surfsense": shared_models,
+    }
+    assert "opencode-go/minimax-m2.7" in allowlists["my-farm-advisor"]
+
+
+def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases() -> None:
+    plan = build_shared_core_plan(
+        stack_name="wizard-stack",
+        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+    )
+
+    allowlists = build_litellm_consumer_model_allowlists(
+        flat_env=_litellm_route_env(
+            LITELLM_OPENROUTER_MODELS=(
+                "anthropic/claude-3.7-sonnet,"
+                "google/gemma-4-31b-it:free,"
+                "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"
+            ),
+            OPENCODE_GO_BASE_URL="",
+        ),
+        plan=plan,
+    )
+
+    shared_models = (
+        "local-model.internal/unsloth-active",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
+        "openrouter/anthropic/claude-3.7-sonnet",
+        "openrouter/google/gemma-4-31b-it:free",
+        "openrouter/hunter-alpha",
+    )
+
+    assert allowlists == {
+        "coder-hermes": shared_models,
+        "coder-kdense": shared_models,
+        "dokploy-ai": ("local-model.internal/unsloth-active",),
+        "my-farm-advisor": shared_models,
+        "openclaw": shared_models,
+        "surfsense": shared_models,
+    }
+
+
+def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_flag() -> None:
+    plan = build_shared_core_plan(
+        stack_name="wizard-stack",
+        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+    )
+
+    allowlists = build_litellm_consumer_model_allowlists(
+        flat_env=_litellm_route_env(
+            LITELLM_OPENCODE_GO_WILDCARD="yes",
+        ),
+        plan=plan,
+    )
+
+    shared_models = (
+        "local-model.internal/unsloth-active",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
+        "openrouter/anthropic/claude-3.7-sonnet",
+        "openrouter/hunter-alpha",
+    )
+
+    assert allowlists == {
+        "coder-hermes": shared_models,
+        "coder-kdense": shared_models,
+        "dokploy-ai": ("local-model.internal/unsloth-active",),
+        "my-farm-advisor": shared_models,
+        "openclaw": shared_models,
+        "surfsense": shared_models,
+    }
+    assert "opencode-go/*" not in allowlists["openclaw"]
+    assert "opencode-go/deepseek-v4-flash" in allowlists["openclaw"]
+    assert "opencode-go/text-embedding-3-large" not in allowlists["openclaw"]
+    assert "opencode-go/dall-e-3" not in allowlists["openclaw"]
+    assert "opencode-go/whisper-1" not in allowlists["openclaw"]
+    assert "opencode-go/sora-2" not in allowlists["openclaw"]
+    assert "opencode-go/gpt-image-1.5" not in allowlists["openclaw"]
+
+
+def test_litellm_admin_reconciliation_adopts_live_managed_keys_into_generated_state(
+    tmp_path: Path,
+) -> None:
+    plan = build_shared_core_plan(
+        stack_name="wizard-stack",
+        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+    )
+    allowlists = build_litellm_consumer_model_allowlists(
+        flat_env=_litellm_route_env(
+            MY_FARM_ADVISOR_PRIMARY_MODEL="nvidia/kimi-k2.5",
+            MY_FARM_ADVISOR_FALLBACK_MODELS="opencode-go/minimax-m2.7",
+            OPENCLAW_PRIMARY_MODEL="openrouter/hunter-alpha",
+            OPENCLAW_FALLBACK_MODELS="opencode-go/mimo-v2.5",
+        ),
+        plan=plan,
+    )
+    generated_keys = _generated_keys_for_consumers(tuple(allowlists))
+    stale_models = ("local-model.internal/unsloth-active",)
+    admin_api = RecordingManagedDriftLiteLLMAdminApi(
+        teams={
+            consumer: LiteLLMTeamRecord(
+                team_id=f"team-{consumer}",
+                team_alias=consumer,
+                models=stale_models,
+                metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
+            )
+            for consumer in allowlists
+        },
+        keys={
+            consumer: LiteLLMVirtualKeyRecord(
+                key=f"sk-live-{consumer}",
+                key_alias=consumer,
+                team_id=None,
+                models=stale_models,
+                metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
+            )
+            for consumer in allowlists
+        },
+    )
+    backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-test-key",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists=allowlists,
+        litellm_admin_api=admin_api,
+        client=RecordingDokploySharedCoreApi(),
+        sleep_fn=lambda _: None,
+        state_dir=tmp_path,
+    )
+
+    backend.reconcile_litellm_runtime()
+
+    persisted_keys = load_litellm_generated_keys(tmp_path)
+    drifted_team_consumers = {
+        consumer for consumer, models in allowlists.items() if models != stale_models
+    }
+    assert persisted_keys is None
+    assert {call["team_alias"] for call in admin_api.update_team_calls} == drifted_team_consumers
+    assert {call["key_alias"] for call in admin_api.delete_key_calls} == set(allowlists)
+    assert {call["key_alias"] for call in admin_api.create_key_calls} == set(allowlists)
+    assert admin_api.update_key_calls == []
+    for consumer, models in allowlists.items():
+        if consumer in drifted_team_consumers:
+            assert {
+                "team_id": f"team-{consumer}",
+                "team_alias": consumer,
+                "models": models,
+                "metadata": {"consumer": consumer, "managed_by": "dokploy-wizard"},
+            } in admin_api.update_team_calls
+        assert {"key_alias": consumer} in admin_api.delete_key_calls
+        assert {
+            "key_alias": consumer,
+            "key": generated_keys.virtual_keys[consumer],
+            "team_id": f"team-{consumer}",
+            "models": models,
+            "metadata": {"consumer": consumer, "managed_by": "dokploy-wizard"},
+        } in admin_api.create_key_calls
 
 
 def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
@@ -200,8 +626,10 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
     assert set(generated_keys.virtual_keys) == {
         "coder-hermes",
         "coder-kdense",
+        "dokploy-ai",
         "my-farm-advisor",
         "openclaw",
+        "surfsense",
     }
 
 
@@ -247,11 +675,10 @@ def test_core_only_rerun_is_noop_and_preserves_litellm_keys(
     assert generated_after == generated_before
     assert api.create_project_calls == 1
     assert api.create_compose_calls == 1
-    assert api.update_compose_calls == 0
+    assert api.update_compose_calls == 1
     assert api.deploy_calls == 1
 
 
-@pytest.mark.skip(reason="Paused: non-local LiteLLM routes")
 def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_farm(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -345,7 +772,7 @@ def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_f
     assert summary["shared_core"]["outcome"] == "already_present"
     assert summary["coder"]["outcome"] in {"applied", "already_present"}
     assert summary["my_farm_advisor"]["outcome"] in {"applied", "already_present"}
-    assert shared_core_api.update_compose_calls == 1
+    assert shared_core_api.update_compose_calls == 2
     assert openclaw_backend.update_calls == 1
     assert "openrouter/healer-alpha" in shared_core_api.compose_files_by_name["wizard-stack-shared"]
     assert generated_before is not None
@@ -398,9 +825,11 @@ def test_coder_and_advisor_install_persist_consumer_specific_virtual_keys(
     assert set(generated_keys.virtual_keys) == {
         "coder-hermes",
         "coder-kdense",
+        "dokploy-ai",
         "my-farm-advisor",
         "openclaw",
+        "surfsense",
     }
-    assert len(set(generated_keys.virtual_keys.values())) == 4
+    assert len(set(generated_keys.virtual_keys.values())) == 6
     assert api.compose_files_by_name["wizard-stack-openclaw"]
     assert api.compose_files_by_name["wizard-stack-my-farm-advisor"]

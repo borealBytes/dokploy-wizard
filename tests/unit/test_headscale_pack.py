@@ -135,8 +135,10 @@ class FakeDokployApiClient:
         )
         return record
 
-    def update_compose(self, *, compose_id: str, compose_file: str) -> DokployComposeRecord:
-        del compose_file
+    def update_compose(
+        self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
+    ) -> DokployComposeRecord:
+        del compose_file, env
         return DokployComposeRecord(compose_id=compose_id, name="wizard-stack-headscale")
 
     def deploy_compose(
@@ -422,7 +424,7 @@ def _write_empty_checkpoint(state_dir: Path) -> None:
 
 
 def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
-    rendered = _render_compose_file(
+    rendered_compose = _render_compose_file(
         "wizard-stack-headscale",
         "headscale.example.com",
         (
@@ -430,6 +432,7 @@ def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
             "wizard-stack-headscale-noise-private-key",
         ),
     )
+    rendered = rendered_compose.compose_file
 
     assert "cat <<'EOF'" not in rendered
     assert "HEADSCALE_SERVER_URL: https://headscale.example.com" in rendered
@@ -439,6 +442,8 @@ def test_dokploy_headscale_compose_renders_without_heredoc() -> None:
     assert "command: ['serve']" in rendered
     assert "HEADSCALE_DERP_SERVER_ENABLED" not in rendered
     assert "healthcheck:" not in rendered
+    assert 'HEADSCALE_ADMIN_API_KEY: "${WIZARD_STACK_HEADSCALE_ADMIN_API_KEY:?WIZARD_STACK_HEADSCALE_ADMIN_API_KEY is required}"' in rendered
+    assert rendered_compose.env_specs[0].name == "WIZARD_STACK_HEADSCALE_ADMIN_API_KEY"
     assert (
         'traefik.http.routers.wizard-stack-headscale.rule: "Host(`headscale.example.com`)"'
         in rendered
@@ -559,7 +564,7 @@ def test_dokploy_headscale_backend_skips_redeploy_when_hash_matches_and_containe
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     service_name = "wizard-stack-headscale"
-    compose_file = _render_compose_file(
+    rendered_compose = _render_compose_file(
         service_name,
         "headscale.example.com",
         (
@@ -567,7 +572,10 @@ def test_dokploy_headscale_backend_skips_redeploy_when_hash_matches_and_containe
             "wizard-stack-headscale-noise-private-key",
         ),
     )
-    _write_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=compose_file)
+    compose_file = rendered_compose.compose_file
+    _write_hash_checkpoint(
+        tmp_path, service_name=service_name, rendered_compose=rendered_compose
+    )
     client = SharedFakeDokployApiClient()
     client.seed_existing_service(
         service_name=service_name,
@@ -601,7 +609,10 @@ def test_dokploy_headscale_backend_skips_redeploy_when_hash_matches_and_containe
     client.assert_unchanged_service(service_name)
 
 
-def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: str) -> None:
+def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: object) -> None:
+    compose_file = getattr(rendered_compose, "compose_file", rendered_compose)
+    env_specs = getattr(rendered_compose, "env_specs", ())
+    assert isinstance(compose_file, str)
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
@@ -611,7 +622,8 @@ def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compo
             compose_artifact_hashes={
                 service_name: ComposeArtifactHashState.from_rendered_compose(
                     service_id=service_name,
-                    rendered_compose=rendered_compose,
+                    rendered_compose=compose_file,
+                    env_specs=env_specs,
                 )
             },
         ),

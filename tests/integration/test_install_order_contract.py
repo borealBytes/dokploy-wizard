@@ -6,8 +6,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from dokploy_wizard.cli import run_install_flow
-from dokploy_wizard.state import RawEnvInput, parse_env_file
+from dokploy_wizard.state import RawEnvInput
 from dokploy_wizard.tailscale import ShellTailscaleBackend
+from tests.helpers.root_install_env import root_install_env
 from tests.integration.test_networking_reconciler import FakeCoderBackend
 from tests.integration.test_nextcloud_pack import (
     FakeCloudflareBackend,
@@ -57,7 +58,7 @@ def _repo_root() -> Path:
 
 
 def _load_env_with_host_facts(*, packs: str, strip_pack_env: bool = False) -> RawEnvInput:
-    raw_env = parse_env_file(_repo_root() / ".install.env")
+    raw_env = root_install_env()
     values = {
         key: value
         for key, value in raw_env.values.items()
