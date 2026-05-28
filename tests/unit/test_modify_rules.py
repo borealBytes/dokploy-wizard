@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from dokploy_wizard.lifecycle import LifecyclePlan, classify_modify_request
@@ -757,6 +759,103 @@ def test_modify_surfsense_model_key_change_reruns_litellm_and_surfsense(
     assert plan.mode == "modify"
     assert plan.start_phase == "shared_core"
     assert plan.phases_to_run == ("shared_core", "surfsense")
+
+
+def test_modify_litellm_desired_only_local_alias_removal_reruns_consumers() -> None:
+    raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "coder,my-farm-advisor,nextcloud",
+            "AI_DEFAULT_PROVIDER": "openrouter",
+            "AI_DEFAULT_MODEL": "deepseek/deepseek-v4-flash:free",
+            "LITELLM_OPENROUTER_API_KEY": "sk-test-openrouter",
+            "LITELLM_OPENROUTER_MODELS": "deepseek/deepseek-v4-flash:free",
+        }
+    )
+    requested_desired = resolve_desired_state(raw)
+    assert requested_desired.shared_core.litellm is not None
+    assert requested_desired.shared_core.litellm.default_model_alias_order == (
+        "openrouter/deepseek/deepseek-v4-flash:free",
+    )
+
+    legacy_litellm = replace(
+        requested_desired.shared_core.litellm,
+        default_model_alias_order=(
+            "local-model.internal/unsloth-active",
+            *requested_desired.shared_core.litellm.default_model_alias_order,
+        ),
+    )
+    existing_desired = replace(
+        requested_desired,
+        shared_core=replace(requested_desired.shared_core, litellm=legacy_litellm),
+    )
+
+    plan = classify_modify_request(
+        existing_raw=raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "nextcloud",
+                "coder",
+                "my-farm-advisor",
+                "cloudflare_access",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert plan.start_phase == "shared_core"
+    assert plan.raw_equivalent is True
+    assert plan.desired_equivalent is False
+    assert plan.phases_to_run == ("shared_core", "coder", "my-farm-advisor")
+
+
+def test_modify_rejects_arbitrary_desired_only_shared_core_drift() -> None:
+    raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "coder",
+        }
+    )
+    requested_desired = resolve_desired_state(raw)
+    existing_desired = replace(
+        requested_desired,
+        shared_core=replace(
+            requested_desired.shared_core,
+            network_name="legacy-shared-network",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="not modeled as supported runtime mutations"):
+        classify_modify_request(
+            existing_raw=raw,
+            existing_desired=existing_desired,
+            existing_applied=AppliedStateCheckpoint(
+                format_version=1,
+                desired_state_fingerprint=existing_desired.fingerprint(),
+                completed_steps=(
+                    "preflight",
+                    "dokploy_bootstrap",
+                    "networking",
+                    "shared_core",
+                    "coder",
+                ),
+            ),
+            existing_ledger=OwnershipLedger(format_version=1, resources=()),
+            requested_raw=raw,
+            requested_desired=requested_desired,
+        )
 
 
 def test_modify_uses_explicit_pack_mutable_resource_contract() -> None:

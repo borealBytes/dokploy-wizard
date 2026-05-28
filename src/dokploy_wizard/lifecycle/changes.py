@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from dokploy_wizard.packs.catalog import (
     get_mutable_pack_env_keys,
@@ -450,6 +451,9 @@ def classify_modify_request(
         )
 
     phases_to_run: set[str] = set()
+    litellm_desired_projection_changed = _desired_diff_is_only_litellm_projection(
+        existing_desired, requested_desired
+    )
     tailscale_disable_only = (
         existing_desired.enable_tailscale and not requested_desired.enable_tailscale
     )
@@ -469,11 +473,18 @@ def classify_modify_request(
         and "coder" in requested_desired.enabled_packs
     ):
         phases_to_run.add("coder")
-    if effective_changed_keys & _LITELLM_MUTABLE_ENV_KEYS:
+    if (effective_changed_keys & _LITELLM_MUTABLE_ENV_KEYS) or litellm_desired_projection_changed:
         phases_to_run.add(_LITELLM_PHASE)
         phases_to_run.update(
             _litellm_dependent_consumer_phases(effective_changed_keys, requested_desired)
         )
+        if litellm_desired_projection_changed:
+            phases_to_run.update(
+                _litellm_dependent_consumer_phases(
+                    _LITELLM_SHARED_CONFIG_ENV_KEYS,
+                    requested_desired,
+                )
+            )
     if (
         existing_desired.cloudflare_access_otp_emails
         != requested_desired.cloudflare_access_otp_emails
@@ -514,7 +525,10 @@ def classify_modify_request(
             phases_to_run.add("moodle")
         if "docuseal" in requested_desired.enabled_packs:
             phases_to_run.add("docuseal")
-    if existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict():
+    if (
+        effective_changed_keys
+        and existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict()
+    ):
         phases_to_run.add("shared_core")
     if set(removed_packs) & _LITELLM_CONSUMER_PHASES:
         phases_to_run.add("shared_core")
@@ -723,6 +737,36 @@ def _sorted_reasons(changed_keys: set[str], phases_to_run: set[str]) -> tuple[st
 
 def _access_enabled(desired_state: DesiredState) -> bool:
     return bool({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs))
+
+
+def _desired_diff_is_only_litellm_projection(
+    existing_desired: DesiredState, requested_desired: DesiredState
+) -> bool:
+    if _litellm_desired_projection(existing_desired) == _litellm_desired_projection(
+        requested_desired
+    ):
+        return False
+    existing_payload = existing_desired.to_dict()
+    requested_payload = requested_desired.to_dict()
+    _drop_litellm_desired_projection(existing_payload)
+    _drop_litellm_desired_projection(requested_payload)
+    return existing_payload == requested_payload
+
+
+def _litellm_desired_projection(desired_state: DesiredState) -> tuple[str, ...] | None:
+    litellm = desired_state.shared_core.litellm
+    if litellm is None:
+        return None
+    return litellm.default_model_alias_order
+
+
+def _drop_litellm_desired_projection(payload: dict[str, Any]) -> None:
+    shared_core = payload.get("shared_core")
+    if not isinstance(shared_core, dict):
+        return
+    litellm = shared_core.get("litellm")
+    if isinstance(litellm, dict):
+        litellm.pop("default_model_alias_order", None)
 
 
 def _litellm_dependent_consumer_phases(
