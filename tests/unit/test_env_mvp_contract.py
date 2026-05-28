@@ -67,7 +67,7 @@ _OPTIONAL_COMMENTED_KEYS = frozenset(
         "LITELLM_LOCAL_MODEL",
         "LITELLM_LOCAL_API_KEY",
         "LITELLM_NVIDIA_API_KEY",
-        "NVIDIA_BASE_URL",
+        "LITELLM_NVIDIA_BASE_URL",
     }
 )
 _DEFAULT_AI_PROVIDER = "openrouter"
@@ -138,7 +138,7 @@ def _farm_litellm_env(**overrides: str) -> RawEnvInput:
             "openrouter/healer-alpha=openrouter/anthropic/claude-3.5-sonnet"
         ),
         "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-upstream-key",
-        "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
+        "LITELLM_NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
     }
     values.update(overrides)
     return RawEnvInput(format_version=1, values=values)
@@ -500,6 +500,41 @@ def test_litellm_openrouter_models_accept_raw_openrouter_model_ids() -> None:
         (
             "openrouter/anthropic/claude-3.5-sonnet",
             "openrouter/anthropic/claude-3.5-sonnet",
+        ),
+    )
+    assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
+
+
+def test_litellm_nvidia_models_accept_user_style_raw_model_ids() -> None:
+    raw_env = _farm_litellm_env(
+        MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
+        MY_FARM_ADVISOR_NVIDIA_API_KEY="",
+        ANTHROPIC_API_KEY="",
+        AI_DEFAULT_API_KEY="",
+        AI_DEFAULT_BASE_URL="",
+        LITELLM_LOCAL_BASE_URL="",
+        LITELLM_LOCAL_MODEL="",
+        LITELLM_LOCAL_API_KEY="",
+        LITELLM_NVIDIA_API_KEY="fake-nvidia-key",
+        LITELLM_NVIDIA_BASE_URL="https://integrate.api.nvidia.example.com/v1",
+        LITELLM_NVIDIA_MODELS=(
+            "moonshotai/kimi-k2.6,"
+            "deepseek-ai/deepseek-v4-flash,"
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+        ),
+        AI_DEFAULT_PROVIDER="nvidia",
+        AI_DEFAULT_MODEL="moonshotai/kimi-k2.6",
+    )
+
+    assert env_module.parse_litellm_nvidia_models(raw_env.values) == (
+        ("nvidia/moonshotai/kimi-k2.6", "nvidia/moonshotai/kimi-k2.6"),
+        (
+            "nvidia/deepseek-ai/deepseek-v4-flash",
+            "nvidia/deepseek-ai/deepseek-v4-flash",
+        ),
+        (
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
         ),
     )
     assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
