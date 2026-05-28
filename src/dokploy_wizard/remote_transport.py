@@ -260,6 +260,12 @@ class ParamikoRemoteTransport:
                 look_for_keys=False,
                 timeout=timeout,
             )
+        except paramiko.SSHException as error:
+            client.close()
+            details = _redact_secret(str(error), password)
+            raise RuntimeError(
+                f"SSH connection failed for {username}@{hostname}:{port}: {details}"
+            ) from error
         except Exception:
             client.close()
             raise

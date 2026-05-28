@@ -96,15 +96,118 @@ def test_each_remote_subcommand_has_help(subcommand: str) -> None:
     assert result.stderr == ""
 
 
-def test_missing_host_fails_without_echoing_password() -> None:
+def test_missing_host_fails_without_echoing_password(tmp_path: Path) -> None:
     assert CLI.exists(), f"expected remote CLI wrapper at {CLI}"
 
     password = "super-secret-password"
-    result = run_cli("install", "--password", password)
+    env_file = tmp_path / "install.env"
+    env_file.write_text(f"VPS_ROOT_PASSWORD={password}\n", encoding="utf-8")
+
+    result = run_cli("install", "--env-file", str(env_file))
 
     assert result.returncode != 0
     assert "host" in result.stderr.lower()
     assert password not in result.stderr
+
+
+@pytest.mark.parametrize("subcommand", ["install", "modify", "proof"])
+def test_lifecycle_commands_accept_positional_env_file(subcommand: str) -> None:
+    remote_cli = import_remote_cli_module()
+    parser = remote_cli.build_parser()
+
+    args = parser.parse_args([subcommand, "./.install-my-farm-advisor-min.env"])
+    remote_cli._validate_args(parser, args)
+
+    assert str(args.env_file) == ".install-my-farm-advisor-min.env"
+
+
+def test_runtime_args_derive_host_and_password_from_positional_env_file(tmp_path: Path) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = tmp_path / "install.env"
+    env_file.write_text(
+        "VPS_HOST=env.example.com\nVPS_ROOT_PASSWORD=env-secret-password\n",
+        encoding="utf-8",
+    )
+    parser = remote_cli.build_parser()
+    args = parser.parse_args(["modify", str(env_file)])
+
+    remote_cli._validate_args(parser, args)
+    remote_cli._validate_runtime_args(parser, args)
+
+    assert args.env_file == env_file
+    assert args.host == "env.example.com"
+    assert args.password == "env-secret-password"
+
+
+def test_positional_env_connect_failure_is_clean_and_redacted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    remote_cli = import_remote_cli_module()
+    secret = "secret-test-password"
+    env_file = tmp_path / "install.env"
+    env_file.write_text(
+        f"VPS_HOST=127.0.0.1\nVPS_ROOT_PASSWORD={secret}\n",
+        encoding="utf-8",
+    )
+
+    def fail_connect(**_kwargs: object) -> object:
+        raise RuntimeError(f"authentication failed with password={secret}")
+
+    monkeypatch.setattr(remote_cli.ParamikoRemoteTransport, "connect", fail_connect)
+
+    exit_code = remote_cli.main(["modify", str(env_file), "--verbose"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[remote] starting remote modify" in captured.err
+    assert "connecting to root@127.0.0.1:22" in captured.err
+    assert "Traceback" not in captured.err
+    assert secret not in captured.err
+    assert "<REDACTED>" in captured.err
+
+
+def test_explicit_host_and_password_override_env_file_values(tmp_path: Path) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = tmp_path / "install.env"
+    env_file.write_text(
+        "VPS_HOST=env.example.com\nVPS_ROOT_PASSWORD=env-secret-password\n",
+        encoding="utf-8",
+    )
+    parser = remote_cli.build_parser()
+    args = parser.parse_args(
+        [
+            "proof",
+            str(env_file),
+            "--host",
+            "flag.example.com",
+            "--password",
+            "flag-secret-password",
+        ]
+    )
+
+    remote_cli._validate_args(parser, args)
+    remote_cli._validate_runtime_args(parser, args)
+
+    assert args.host == "flag.example.com"
+    assert args.password == "flag-secret-password"
+
+
+def test_positional_env_file_conflicts_with_different_env_file_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    remote_cli = import_remote_cli_module()
+    positional_env = tmp_path / "positional.env"
+    flag_env = tmp_path / "flag.env"
+    parser = remote_cli.build_parser()
+    args = parser.parse_args(["install", str(positional_env), "--env-file", str(flag_env)])
+
+    with pytest.raises(SystemExit):
+        remote_cli._validate_args(parser, args)
+
+    captured = capsys.readouterr()
+    assert "positional env file and --env-file refer to different paths" in captured.err
 
 
 def test_install_help_surfaces_fresh_flag() -> None:

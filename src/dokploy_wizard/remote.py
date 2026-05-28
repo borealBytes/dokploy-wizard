@@ -20,6 +20,7 @@ from dokploy_wizard.remote_transport import (
     RemoteCommandFailure,
     RemoteTransportSession,
 )
+from dokploy_wizard.state import StateValidationError, parse_env_file
 from dokploy_wizard.verification import redact_text
 
 
@@ -284,7 +285,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _add_remote_common_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--host", required=True, help="target host or IP address")
+    parser.add_argument(
+        "positional_env_file",
+        nargs="?",
+        type=Path,
+        metavar="ENV_FILE",
+        help=(
+            "install env file path; equivalent to --env-file and can provide VPS_HOST "
+            "and VPS_ROOT_PASSWORD"
+        ),
+    )
+    parser.add_argument("--host", help="target host or IP address")
     parser.add_argument("--password", help="target user password")
     parser.add_argument(
         "--verbose",
@@ -306,8 +317,10 @@ def _add_remote_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--env-file",
         type=Path,
         default=Path(".install.env"),
+        action=_EnvFileAction,
         help="install env file relative to the repo root (default: .install.env)",
     )
+    parser.set_defaults(_env_file_flag_provided=False)
 
 
 def _add_fresh_arguments(parser: argparse.ArgumentParser) -> None:
@@ -324,6 +337,7 @@ def _add_fresh_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    _normalize_remote_env_file(parser, args)
     command = getattr(args, "command", None)
     if command == "uninstall" and getattr(args, "fresh", False):
         parser.error("--fresh is not supported for uninstall.")
@@ -342,8 +356,80 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
 
 
 def _validate_runtime_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    _hydrate_remote_connection_args(parser, args)
+    if not getattr(args, "host", None):
+        parser.error("--host is required or VPS_HOST must be set in the selected env file.")
     if not getattr(args, "password", None):
-        parser.error("--password is required for remote SSH authentication.")
+        parser.error(
+            "--password is required for remote SSH authentication or VPS_ROOT_PASSWORD "
+            "must be set in the selected env file."
+        )
+
+
+class _EnvFileAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[str] | None,
+        option_string: str | None = None,
+    ) -> None:
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "_env_file_flag_provided", True)
+
+
+def _normalize_remote_env_file(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    positional_env_file = getattr(args, "positional_env_file", None)
+    flag_env_file = getattr(args, "env_file", Path(".install.env"))
+    flag_provided = getattr(args, "_env_file_flag_provided", False)
+    if positional_env_file is not None and flag_provided:
+        if _normalized_cli_path(positional_env_file) != _normalized_cli_path(flag_env_file):
+            parser.error(
+                "positional env file and --env-file refer to different paths; provide only one."
+            )
+    if positional_env_file is not None:
+        args.env_file = positional_env_file
+
+
+def _hydrate_remote_connection_args(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    needs_host = not getattr(args, "host", None)
+    needs_password = not getattr(args, "password", None)
+    if not needs_host and not needs_password:
+        return
+    try:
+        values = parse_env_file(args.env_file).values
+    except FileNotFoundError:
+        parser.error(f"install env file does not exist: {args.env_file}")
+    except OSError as error:
+        parser.error(_redact_runtime_message(str(error), password=getattr(args, "password", None)))
+    except StateValidationError as error:
+        parser.error(_redact_runtime_message(str(error), password=getattr(args, "password", None)))
+
+    if needs_host:
+        env_host = _configured_env_value(values, "VPS_HOST")
+        if env_host is not None:
+            args.host = env_host
+    if needs_password:
+        env_password = _configured_env_value(values, "VPS_ROOT_PASSWORD")
+        if env_password is not None:
+            args.password = env_password
+
+
+def _configured_env_value(values: dict[str, str], key: str) -> str | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _normalized_cli_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        expanded = Path.cwd() / expanded
+    return expanded.resolve(strict=False)
 
 
 def _require_local_env_file(env_file: Path) -> None:
