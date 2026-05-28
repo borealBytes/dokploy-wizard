@@ -20,7 +20,7 @@ from dokploy_wizard.remote_transport import (
     RemoteCommandFailure,
     RemoteTransportSession,
 )
-from dokploy_wizard.state import StateValidationError, parse_env_file
+from dokploy_wizard.state import StateValidationError, parse_env_file, resolve_desired_state
 from dokploy_wizard.verification import redact_text
 
 
@@ -206,6 +206,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 password=args.password,
             )
             exit_code = 0
+            _print_ready_notice(reporter, _resolve_ready_notice_links(args.env_file))
             return exit_code
         if args.command == "modify":
             if args.fresh:
@@ -231,6 +232,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 password=args.password,
             )
             exit_code = 0
+            _print_ready_notice(reporter, _resolve_ready_notice_links(args.env_file))
             return exit_code
         if args.command == "uninstall":
             remote_confirm_path = _upload_confirm_file(
@@ -274,8 +276,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             strict_idempotency=args.strict_idempotency,
         )
         exit_code = 0
+        _print_ready_notice(reporter, _resolve_ready_notice_links(args.env_file))
         return exit_code
-    except (OSError, RemoteCommandFailure, RuntimeError, ValueError) as error:
+    except (OSError, RemoteCommandFailure, RuntimeError, StateValidationError, ValueError) as error:
         print(_redact_runtime_message(str(error), password=args.password), file=sys.stderr)
         return 1
     finally:
@@ -300,7 +303,14 @@ def _add_remote_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--verbose",
         action="store_true",
+        default=True,
         help="stream remote stdout/stderr live with command labels",
+    )
+    parser.add_argument(
+        "--quiet-remote-output",
+        dest="verbose",
+        action="store_false",
+        help="suppress live remote stdout/stderr stream lines",
     )
     parser.add_argument(
         "--user",
@@ -579,6 +589,29 @@ def _run_remote_command(
     password: str | None,
 ) -> None:
     session.run_command(subcommand=subcommand, command=command, password=password)
+
+
+def _resolve_ready_notice_links(env_file: Path) -> tuple[tuple[str, str], ...]:
+    desired_state = resolve_desired_state(parse_env_file(env_file))
+    links: list[tuple[str, str]] = [("Dokploy", desired_state.dokploy_url)]
+    for hostname_key, label in (
+        ("nextcloud", "Nextcloud"),
+        ("coder", "Coder"),
+        ("my-farm-advisor", "My Farm Advisor/Farm"),
+    ):
+        hostname = desired_state.hostnames.get(hostname_key)
+        if hostname:
+            links.append((label, f"https://{hostname}"))
+    return tuple(links)
+
+
+def _print_ready_notice(
+    reporter: "_RemoteProgressReporter",
+    links: tuple[tuple[str, str], ...],
+) -> None:
+    reporter.progress("ready for use:")
+    for label, url in links:
+        reporter.progress(f"  {label}: {url}")
 
 
 def _remote_path(remote_root: str, path: Path) -> str:

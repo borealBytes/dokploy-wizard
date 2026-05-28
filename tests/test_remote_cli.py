@@ -6,6 +6,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -28,6 +29,61 @@ def import_remote_cli_module() -> ModuleType:
         return importlib.import_module("dokploy_wizard.remote")
     except ModuleNotFoundError as exc:
         assert False, f"expected dokploy_wizard.remote module for remote CLI contract: {exc}"
+
+
+class _FakeRemoteTransport:
+    def __init__(self, *, output_callback: Any | None) -> None:
+        self.output_callback = output_callback
+        self.closed = False
+
+    def ensure_dir(self, _remote_path: str) -> None:
+        return None
+
+    def upload(self, _local_path: Path, _remote_path: str) -> None:
+        return None
+
+    def chmod(self, _remote_path: str, _mode: int) -> None:
+        return None
+
+    def run(self, subcommand: str, _command: str) -> None:
+        if self.output_callback is not None:
+            self.output_callback(subcommand, "stdout", f"{subcommand} streamed")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _write_remote_env(tmp_path: Path, *, packs: str) -> Path:
+    env_file = tmp_path / "install.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "ROOT_DOMAIN=openmerge.me",
+                f"PACKS={packs}",
+                "AI_DEFAULT_PROVIDER=openrouter",
+                "AI_DEFAULT_MODEL=deepseek/deepseek-v4-flash:free",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return env_file
+
+
+def _patch_successful_remote_run(
+    monkeypatch: pytest.MonkeyPatch,
+    remote_cli: ModuleType,
+) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    def fake_connect(**kwargs: Any) -> _FakeRemoteTransport:
+        captured["verbose"] = kwargs["verbose"]
+        return _FakeRemoteTransport(output_callback=kwargs["output_callback"])
+
+    monkeypatch.setattr(remote_cli.ParamikoRemoteTransport, "connect", fake_connect)
+    monkeypatch.setattr(remote_cli, "_upload_remote_bundle", lambda **_kwargs: None)
+    monkeypatch.setattr(remote_cli, "_extract_remote_bundle", lambda **_kwargs: None)
+    return captured
 
 
 def test_help_lists_expected_subcommands() -> None:
@@ -58,14 +114,17 @@ def test_remote_parser_defaults_match_contract() -> None:
     assert install_args.user == "root"
     assert str(install_args.remote_path) == "/root/dokploy-wizard"
     assert str(install_args.env_file) == ".install.env"
+    assert install_args.verbose is True
 
     assert modify_args.user == "root"
     assert str(modify_args.remote_path) == "/root/dokploy-wizard"
     assert str(modify_args.env_file) == ".install.env"
+    assert modify_args.verbose is True
 
     assert proof_args.user == "root"
     assert str(proof_args.remote_path) == "/root/dokploy-wizard"
     assert str(proof_args.env_file) == ".install.env"
+    assert proof_args.verbose is True
     assert proof_args.strict_idempotency is False
     assert strict_proof_args.strict_idempotency is True
 
@@ -81,6 +140,137 @@ def test_remote_parser_accepts_verbose_for_each_subcommand(subcommand: str) -> N
     args = parser.parse_args([subcommand, "--host", "example.com", "--verbose"])
 
     assert args.verbose is True
+
+
+@pytest.mark.parametrize(
+    "subcommand",
+    ["install", "modify", "uninstall", "inspect-state", "proof"],
+)
+def test_remote_parser_accepts_quiet_remote_output_for_each_subcommand(
+    subcommand: str,
+) -> None:
+    remote_cli = import_remote_cli_module()
+
+    parser = remote_cli.build_parser()
+    args = parser.parse_args([subcommand, "--host", "example.com", "--quiet-remote-output"])
+
+    assert args.verbose is False
+
+
+def test_remote_stream_lines_are_shown_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = _write_remote_env(tmp_path, packs="nextcloud")
+    captured = _patch_successful_remote_run(monkeypatch, remote_cli)
+
+    exit_code = remote_cli.main(
+        [
+            "install",
+            "--host",
+            "example.com",
+            "--password",
+            "super-secret-password",
+            "--env-file",
+            str(env_file),
+        ]
+    )
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 0
+    assert captured["verbose"] is True
+    assert "[remote:install:stdout] install streamed" in stderr
+
+
+def test_quiet_remote_output_suppresses_stream_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = _write_remote_env(tmp_path, packs="nextcloud")
+    captured = _patch_successful_remote_run(monkeypatch, remote_cli)
+
+    exit_code = remote_cli.main(
+        [
+            "install",
+            "--host",
+            "example.com",
+            "--password",
+            "super-secret-password",
+            "--env-file",
+            str(env_file),
+            "--quiet-remote-output",
+        ]
+    )
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 0
+    assert captured["verbose"] is False
+    assert "[remote:install:stdout]" not in stderr
+
+
+@pytest.mark.parametrize("subcommand", ["install", "modify", "proof"])
+def test_successful_lifecycle_prints_ready_notice_for_enabled_service_links(
+    subcommand: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = _write_remote_env(tmp_path, packs="my-farm-advisor,nextcloud,coder")
+    _patch_successful_remote_run(monkeypatch, remote_cli)
+
+    exit_code = remote_cli.main(
+        [
+            subcommand,
+            "--host",
+            "example.com",
+            "--password",
+            "super-secret-password",
+            "--env-file",
+            str(env_file),
+        ]
+    )
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 0
+    assert "[remote] ready for use:" in stderr
+    assert "[remote]   Dokploy: https://dokploy.openmerge.me" in stderr
+    assert "[remote]   Nextcloud: https://nextcloud.openmerge.me" in stderr
+    assert "[remote]   Coder: https://coder.openmerge.me" in stderr
+    assert "[remote]   My Farm Advisor/Farm: https://farm.openmerge.me" in stderr
+
+
+def test_successful_lifecycle_ready_notice_omits_disabled_pack_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = _write_remote_env(tmp_path, packs="nextcloud")
+    _patch_successful_remote_run(monkeypatch, remote_cli)
+
+    exit_code = remote_cli.main(
+        [
+            "install",
+            "--host",
+            "example.com",
+            "--password",
+            "super-secret-password",
+            "--env-file",
+            str(env_file),
+        ]
+    )
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 0
+    assert "[remote]   Dokploy: https://dokploy.openmerge.me" in stderr
+    assert "[remote]   Nextcloud: https://nextcloud.openmerge.me" in stderr
+    assert "Coder:" not in stderr
+    assert "My Farm Advisor/Farm:" not in stderr
 
 
 @pytest.mark.parametrize(
