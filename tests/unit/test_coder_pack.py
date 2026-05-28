@@ -1662,6 +1662,95 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     assert second_notes == ()
 
 
+def _coder_backend_for_template_failure_tests() -> DokployCoderBackend:
+    return DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="clayton@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        ai_default_api_key="litellm-coder-hermes-key",
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+
+
+def _patch_coder_template_failure_bootstrap(
+    monkeypatch: pytest.MonkeyPatch, backend: DokployCoderBackend
+) -> None:
+    backend._created_in_process = True
+    monkeypatch.setattr(coder_module, "_wait_for_coder_bootstrap_api_ready", lambda hostname: None)
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: True)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+
+
+def test_ensure_application_ready_skips_optional_template_push_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _coder_backend_for_template_failure_tests()
+    _patch_coder_template_failure_bootstrap(monkeypatch, backend)
+    attempted_templates: list[str] = []
+
+    def fake_seed_template(*, template_name: str, **kwargs: object) -> bool:
+        attempted_templates.append(template_name)
+        if template_name == coder_module._default_kdense_byok_template_name():
+            raise coder_module.CoderError(
+                "Unable to push default Coder template 'ubuntu-vscode-kdense-byok': "
+                "Terraform registry timeout at https://registry.coder.com/.well-known/terraform.json "
+                "CODER_SESSION_TOKEN=session-123 API_KEY=sk-secret "
+                + "x" * 500
+            )
+        return True
+
+    monkeypatch.setattr(coder_module, "_seed_template", fake_seed_template)
+
+    notes = backend.ensure_application_ready()
+
+    assert attempted_templates == list(coder_module._required_template_names())
+    skipped_notes = [note for note in notes if note.startswith("Skipped optional Coder template")]
+    assert len(skipped_notes) == 1
+    skipped_note = skipped_notes[0]
+    assert "ubuntu-vscode-kdense-byok" in skipped_note
+    assert "registry.coder.com" in skipped_note
+    assert "sk-secret" not in skipped_note
+    assert "session-123" not in skipped_note
+    assert "<REDACTED>" in skipped_note
+    assert len(skipped_note) < 460
+
+
+def test_ensure_application_ready_keeps_base_template_push_failure_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _coder_backend_for_template_failure_tests()
+    _patch_coder_template_failure_bootstrap(monkeypatch, backend)
+    attempted_templates: list[str] = []
+
+    def fake_seed_template(*, template_name: str, **kwargs: object) -> bool:
+        attempted_templates.append(template_name)
+        raise coder_module.CoderError("base registry outage")
+
+    monkeypatch.setattr(coder_module, "_seed_template", fake_seed_template)
+
+    with pytest.raises(coder_module.CoderError, match="base registry outage"):
+        backend.ensure_application_ready()
+
+    assert attempted_templates == [coder_module._default_template_name()]
+
+
 def test_seed_template_skips_push_when_desired_version_is_already_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1755,7 +1844,7 @@ def test_seed_template_skips_push_when_desired_version_already_exists_but_is_not
 
 
 def test_seed_template_pushes_when_desired_version_is_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     template_dir = tmp_path / "template"
     template_dir.mkdir()
@@ -1791,11 +1880,17 @@ def test_seed_template_pushes_when_desired_version_is_missing(
         replacements=None,
     )
 
+    stderr = capsys.readouterr().err
+
     assert seeded is True
     assert copy_calls == ["ubuntu-vscode"]
     assert push_calls == [("ubuntu-vscode", push_calls[0][1])]
     assert push_calls[0][1] is not None
     assert push_calls[0][1].startswith("dokploy-wizard-")
+    assert "[dokploy-wizard] Checking Coder template 'ubuntu-vscode'." in stderr
+    assert "Pushing Coder template 'ubuntu-vscode' as version 'dokploy-wizard-" in stderr
+    assert "[dokploy-wizard] Finished Coder template 'ubuntu-vscode' push." in stderr
+    assert "session-123" not in stderr
 
 
 def test_build_coder_ledger_replaces_existing_resources() -> None:

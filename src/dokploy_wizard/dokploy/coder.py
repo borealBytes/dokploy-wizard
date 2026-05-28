@@ -11,6 +11,7 @@ import re
 import shutil
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -44,7 +45,7 @@ from dokploy_wizard.litellm.config_renderer import verified_opencode_go_chat_mod
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
 from dokploy_wizard.state import load_state_dir
-from dokploy_wizard.verification import make_verification_result
+from dokploy_wizard.verification import make_verification_result, redact_text
 
 
 class DokployCoderApi(Protocol):
@@ -380,14 +381,26 @@ class DokployCoderBackend:
                 },
             ),
         ):
-            if _seed_template(
-                container_name=container_name,
-                hostname=self._hostname,
-                session_token=session_token,
-                template_name=template_name,
-                template_dir=template_dir,
-                replacements=replacements,
-            ):
+            try:
+                seeded = _seed_template(
+                    container_name=container_name,
+                    hostname=self._hostname,
+                    session_token=session_token,
+                    template_name=template_name,
+                    template_dir=template_dir,
+                    replacements=replacements,
+                )
+            except CoderError as e:
+                if template_name == _default_template_name():
+                    raise
+                note = (
+                    f"Skipped optional Coder template '{template_name}': "
+                    f"{_safe_progress_reason(str(e))}"
+                )
+                _emit_coder_progress(note)
+                notes.append(note)
+                continue
+            if seeded:
                 notes.append(f"Seeded default Coder template '{template_name}'.")
         if bootstrap_ready:
             return tuple(notes)
@@ -1137,6 +1150,7 @@ def _seed_template(
     template_dir: Path,
     replacements: dict[str, str] | None,
 ) -> bool:
+    _emit_coder_progress(f"Checking Coder template '{template_name}'.")
     desired_version_name = _template_version_name(
         template_dir=template_dir,
         replacements=replacements,
@@ -1150,6 +1164,9 @@ def _seed_template(
         )
         == desired_version_name
     ):
+        _emit_coder_progress(
+            f"Coder template '{template_name}' already has the desired active version."
+        )
         return False
     if desired_version_name in _template_version_names(
         container_name=container_name,
@@ -1157,6 +1174,9 @@ def _seed_template(
         session_token=session_token,
         template_name=template_name,
     ):
+        _emit_coder_progress(
+            f"Coder template '{template_name}' already has desired version '{desired_version_name}'."
+        )
         return False
     _copy_template_into_container(
         container_name=container_name,
@@ -1164,14 +1184,35 @@ def _seed_template(
         template_name=template_name,
         replacements=replacements,
     )
-    _push_default_template(
-        container_name=container_name,
-        hostname=hostname,
-        session_token=session_token,
-        template_name=template_name,
-        template_version_name=desired_version_name,
+    _emit_coder_progress(
+        f"Pushing Coder template '{template_name}' as version '{desired_version_name}'."
     )
+    try:
+        _push_default_template(
+            container_name=container_name,
+            hostname=hostname,
+            session_token=session_token,
+            template_name=template_name,
+            template_version_name=desired_version_name,
+        )
+    except CoderError as e:
+        _emit_coder_progress(
+            f"Coder template '{template_name}' push failed: {_safe_progress_reason(str(e))}"
+        )
+        raise
+    _emit_coder_progress(f"Finished Coder template '{template_name}' push.")
     return True
+
+
+def _emit_coder_progress(message: str) -> None:
+    print(f"[dokploy-wizard] {message}", file=sys.stderr)
+
+
+def _safe_progress_reason(reason: str, *, limit: int = 360) -> str:
+    safe = " ".join(redact_text(reason).split())
+    if len(safe) <= limit:
+        return safe
+    return f"{safe[: limit - 1]}…"
 
 
 def _template_version_name(*, template_dir: Path, replacements: dict[str, str] | None) -> str:
