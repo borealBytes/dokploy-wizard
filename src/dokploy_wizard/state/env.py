@@ -60,6 +60,8 @@ _LITELLM_CANONICAL_ENV_KEYS = {
     "LITELLM_OPENROUTER_API_KEY",
     "LITELLM_OPENROUTER_MODELS",
     "LITELLM_OPENCODE_GO_API_KEY",
+    "LITELLM_NVIDIA_API_KEY",
+    "LITELLM_NVIDIA_BASE_URL",
     "LITELLM_NVIDIA_MODELS",
     "OPENCODE_GO_API_KEY",
     "OPENCODE_GO_BASE_URL",
@@ -132,7 +134,9 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
     )
     resolve_ai_default_model_ref(values)
     parse_litellm_openrouter_models(values)
+    parse_litellm_nvidia_models(values)
     _validate_litellm_local_env(values)
+    _validate_litellm_nvidia_env(values)
     dokploy_subdomain = _get_configured_value(values, "DOKPLOY_SUBDOMAIN") or "dokploy"
     hostnames: dict[str, str] = {
         "dokploy": _join_hostname(dokploy_subdomain, root_domain),
@@ -276,6 +280,73 @@ def parse_litellm_openrouter_models(values: dict[str, str]) -> tuple[tuple[str, 
     return tuple(pairs)
 
 
+def parse_litellm_nvidia_models(values: dict[str, str]) -> tuple[tuple[str, str], ...]:
+    raw_value = _get_configured_value(values, "LITELLM_NVIDIA_MODELS")
+    if raw_value is None:
+        return ()
+    pairs: list[tuple[str, str]] = []
+    for item in raw_value.split(","):
+        normalized_item = item.strip()
+        if normalized_item == "":
+            continue
+        alias, separator, target_model = normalized_item.partition("=")
+        if separator == "=":
+            alias = _normalize_litellm_nvidia_ref(alias.strip())
+            target = _normalize_litellm_nvidia_ref(target_model.strip())
+        else:
+            alias = _normalize_litellm_nvidia_ref(normalized_item)
+            target = alias
+        if alias == "" or target == "":
+            raise StateValidationError(
+                "LITELLM_NVIDIA_MODELS entries must be raw model IDs or non-empty "
+                "alias=model pairs."
+            )
+        pairs.append((alias, target))
+    return tuple(pairs)
+
+
+def _normalize_litellm_nvidia_ref(model_ref: str) -> str:
+    if model_ref == "" or model_ref.startswith("nvidia/"):
+        return model_ref
+    if model_ref == "nvidia/moonshot/kimi-k2.5":
+        return "nvidia/moonshotai/kimi-k2.5"
+    return f"nvidia/{model_ref}"
+
+
+def _litellm_nvidia_base_url(values: dict[str, str]) -> str | None:
+    return _get_configured_value(values, "LITELLM_NVIDIA_BASE_URL") or _get_configured_value(
+        values, "NVIDIA_BASE_URL"
+    )
+
+
+def _validate_litellm_nvidia_env(values: dict[str, str]) -> None:
+    configured_keys = {
+        key
+        for key in ("LITELLM_NVIDIA_API_KEY", "LITELLM_NVIDIA_MODELS")
+        if _has_configured_value(values, key)
+    }
+    default_provider = _get_configured_value(values, "AI_DEFAULT_PROVIDER")
+    default_selects_nvidia = (
+        default_provider is not None and _canonical_ai_default_provider(default_provider) == "nvidia"
+    )
+    if not configured_keys and not default_selects_nvidia:
+        return
+    missing = sorted(
+        key
+        for key in ("LITELLM_NVIDIA_API_KEY", "LITELLM_NVIDIA_BASE_URL", "LITELLM_NVIDIA_MODELS")
+        if not _has_configured_value(values, key)
+    )
+    if "LITELLM_NVIDIA_BASE_URL" in missing and _has_configured_value(values, "NVIDIA_BASE_URL"):
+        missing.remove("LITELLM_NVIDIA_BASE_URL")
+    if missing:
+        joined = ", ".join(missing)
+        raise StateValidationError(
+            "NVIDIA LiteLLM routing requires LITELLM_NVIDIA_API_KEY, "
+            "LITELLM_NVIDIA_BASE_URL, and LITELLM_NVIDIA_MODELS raw model IDs or "
+            f"alias=model pairs. Missing: {joined}."
+        )
+
+
 def _validate_litellm_local_env(values: dict[str, str]) -> None:
     if _has_configured_value(values, "LITELLM_LOCAL_BASE_URL"):
         missing_local_keys = sorted(
@@ -313,6 +384,14 @@ def _canonical_ai_default_provider(provider: str) -> str:
     normalized = provider.strip().lower()
     aliases = {"opencode": "opencode-go"}
     return aliases.get(normalized, normalized)
+
+
+def _litellm_nvidia_configured(values: dict[str, str]) -> bool:
+    return (
+        _has_configured_value(values, "LITELLM_NVIDIA_API_KEY")
+        and _litellm_nvidia_base_url(values) is not None
+        and bool(parse_litellm_nvidia_models(values))
+    )
 
 
 def _resolve_dokploy_api_url(values: dict[str, str]) -> str | None:
@@ -522,8 +601,12 @@ def _validate_my_farm_advisor_env(
             "AI_DEFAULT_BASE_URL. Empty strings count as unset."
         )
 
-    if resolve_ai_default_model_ref(values) is not None:
-        return
+    ai_default_model_ref = resolve_ai_default_model_ref(values)
+    if ai_default_model_ref is not None:
+        if not ai_default_model_ref.startswith("nvidia/"):
+            return
+        if _litellm_nvidia_configured(values):
+            return
 
     has_legacy_opencode_go_api_key = _has_configured_value(values, "OPENCODE_GO_API_KEY")
     has_legacy_opencode_go_base_url = _has_configured_value(values, "OPENCODE_GO_BASE_URL")
@@ -549,6 +632,9 @@ def _validate_my_farm_advisor_env(
     if _has_configured_value(values, "LITELLM_OPENCODE_GO_API_KEY"):
         return
 
+    if _litellm_nvidia_configured(values):
+        return
+
     if _has_configured_value(values, "LITELLM_LOCAL_BASE_URL"):
         return
     if _has_configured_value(values, "LITELLM_LOCAL_MODEL") or any(
@@ -565,6 +651,8 @@ def _validate_my_farm_advisor_env(
         "ANTHROPIC_API_KEY, both AI_DEFAULT_API_KEY and AI_DEFAULT_BASE_URL, both "
         "AI_DEFAULT_PROVIDER and AI_DEFAULT_MODEL, both OPENCODE_GO_API_KEY and "
         "OPENCODE_GO_BASE_URL, LITELLM_OPENROUTER_API_KEY with LITELLM_OPENROUTER_MODELS, "
-        "LITELLM_OPENCODE_GO_API_KEY, or LITELLM_LOCAL_BASE_URL for LiteLLM canonical local "
+        "LITELLM_OPENCODE_GO_API_KEY, LITELLM_NVIDIA_API_KEY with "
+        "LITELLM_NVIDIA_BASE_URL and LITELLM_NVIDIA_MODELS, or LITELLM_LOCAL_BASE_URL "
+        "for LiteLLM canonical local "
         "mode. Empty strings count as unset."
     )

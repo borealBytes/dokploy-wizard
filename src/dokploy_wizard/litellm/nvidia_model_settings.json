@@ -1,0 +1,85 @@
+{
+  "nvidia/google/gemma-4-31b-it": {
+    "max_tokens": 16384,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "stream": true,
+    "extra_body": {
+      "chat_template_kwargs": {
+        "enable_thinking": true
+      }
+    }
+  },
+  "nvidia/mistralai/mistral-medium-3.5-128b": {
+    "max_tokens": 16384,
+    "temperature": 0.7,
+    "top_p": 1.0,
+    "stream": true,
+    "reasoning_effort": "high"
+  },
+  "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {
+    "max_tokens": 65536,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "stream": true,
+    "extra_body": {
+      "chat_template_kwargs": {
+        "enable_thinking": true
+      },
+      "reasoning_budget": 16384
+    }
+  },
+  "nvidia/minimaxai/minimax-m2.7": {
+    "max_tokens": 8192,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "stream": true
+  },
+  "nvidia/moonshotai/kimi-k2.6": {
+    "max_tokens": 16384,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "stream": true,
+    "extra_body": {
+      "chat_template_kwargs": {
+        "thinking": true
+      }
+    }
+  },
+  "nvidia/deepseek-ai/deepseek-v4-flash": {
+    "max_tokens": 16384,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "stream": true,
+    "extra_body": {
+      "chat_template_kwargs": {
+        "thinking": true,
+        "reasoning_effort": "high"
+      }
+    }
+  },
+  "nvidia/z-ai/glm-5.1": {
+    "max_tokens": 16384,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "seed": 42,
+    "stream": true,
+    "extra_body": {
+      "chat_template_kwargs": {
+        "enable_thinking": true,
+        "clear_thinking": false
+      }
+    }
+  },
+  "nvidia/deepseek-ai/deepseek-v4-pro": {
+    "max_tokens": 16384,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "stream": true,
+    "extra_body": {
+      "chat_template_kwargs": {
+        "thinking": false
+      }
+    }
+  }
+}

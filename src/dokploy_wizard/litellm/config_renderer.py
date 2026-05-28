@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import copy
+import json
 from collections.abc import Mapping
+from importlib import resources
 
 from dokploy_wizard.litellm.model_catalog import (
     DEFAULT_LOCAL_CANONICAL_ALIAS,
@@ -13,6 +16,7 @@ DEFAULT_LOCAL_ALIAS = DEFAULT_LOCAL_CANONICAL_ALIAS
 DEFAULT_LOCAL_MODEL = "openai/unsloth-active"
 DEFAULT_LOCAL_API_KEY = "sk-no-key-required"
 DEFAULT_OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
+_NVIDIA_MODEL_SETTINGS_RESOURCE = "nvidia_model_settings.json"
 
 _VERIFIED_OPENCODE_GO_CHAT_MODEL_IDS: tuple[str, ...] = (
     "minimax-m2.7",
@@ -82,9 +86,15 @@ def build_litellm_config(
             continue
         explicit_openrouter_routes.append((alias, target_model, model_info))
 
-    nvidia_api_key_env = _optional_env_name(upstream_creds, "nvidia_api_key_env")
-    nvidia_base_url = _optional(flat_env, "NVIDIA_BASE_URL")
-    nvidia_alias_targets = dict(_parse_alias_models(flat_env, "LITELLM_NVIDIA_MODELS"))
+    nvidia_api_key_env = _provider_api_key_env(
+        flat_env,
+        upstream_creds,
+        canonical_env_name="LITELLM_NVIDIA_API_KEY",
+        upstream_cred_key="nvidia_api_key_env",
+        legacy_env_names=("NVIDIA_API_KEY",),
+    )
+    nvidia_base_url = _nvidia_base_url(flat_env)
+    nvidia_alias_targets = dict(_parse_nvidia_models(flat_env, "LITELLM_NVIDIA_MODELS"))
 
     catalog = build_model_catalog(
         local_alias=local_alias,
@@ -145,15 +155,20 @@ def build_litellm_config(
             continue
         if entry.alias in nvidia_alias_targets:
             if nvidia_base_url is None or nvidia_api_key_env is None:
-                raise ValueError("NVIDIA routes require NVIDIA_BASE_URL and nvidia_api_key_env")
+                raise ValueError(
+                    "NVIDIA routes require LITELLM_NVIDIA_BASE_URL and "
+                    "LITELLM_NVIDIA_API_KEY"
+                )
+            litellm_params: dict[str, object] = {
+                "model": entry.upstream_target,
+                "api_base": nvidia_base_url,
+                "api_key": _env_ref(nvidia_api_key_env),
+            }
+            litellm_params.update(nvidia_litellm_params_for(entry.upstream_target))
             model_list.append(
                 {
                     "model_name": entry.alias,
-                    "litellm_params": {
-                        "model": entry.upstream_target,
-                        "api_base": nvidia_base_url,
-                        "api_key": _env_ref(nvidia_api_key_env),
-                    },
+                    "litellm_params": litellm_params,
                 }
             )
 
@@ -176,6 +191,12 @@ def build_litellm_config(
 
 def render_litellm_config_yaml(config: Mapping[str, object]) -> str:
     return _render_yaml_node(config).rstrip() + "\n"
+
+
+def _nvidia_base_url(flat_env: Mapping[str, str]) -> str | None:
+    return _optional(flat_env, "LITELLM_NVIDIA_BASE_URL") or _optional(
+        flat_env, "NVIDIA_BASE_URL"
+    )
 
 
 def _opencode_go_base_url(flat_env: Mapping[str, str]) -> str:
@@ -277,6 +298,30 @@ def _parse_alias_models(flat_env: Mapping[str, str], key: str) -> tuple[tuple[st
     return tuple(pairs)
 
 
+def _parse_nvidia_models(flat_env: Mapping[str, str], key: str) -> tuple[tuple[str, str], ...]:
+    raw = _optional(flat_env, key)
+    if raw is None:
+        return ()
+    pairs: list[tuple[str, str]] = []
+    for item in raw.split(","):
+        normalized_item = item.strip()
+        if not normalized_item:
+            continue
+        alias, separator, target = normalized_item.partition("=")
+        if separator == "=":
+            normalized_alias = _normalize_nvidia_ref(alias.strip())
+            normalized_target = _normalize_nvidia_ref(target.strip())
+        else:
+            normalized_alias = _normalize_nvidia_ref(normalized_item)
+            normalized_target = _normalize_raw_nvidia_target(normalized_item)
+        if not normalized_alias or not normalized_target:
+            raise ValueError(
+                f"Expected raw model ID or non-empty alias=model format for {key}: {item}"
+            )
+        pairs.append((normalized_alias, normalized_target))
+    return tuple(pairs)
+
+
 def _parse_openrouter_models(flat_env: Mapping[str, str], key: str) -> tuple[tuple[str, str], ...]:
     raw = _optional(flat_env, key)
     if raw is None:
@@ -302,6 +347,20 @@ def _parse_openrouter_models(flat_env: Mapping[str, str], key: str) -> tuple[tup
 def _validate_openrouter_route(model_ref: str) -> None:
     if model_ref in {"*", "openrouter/*"}:
         raise ValueError("OpenRouter wildcard routes are not allowed")
+
+
+def _normalize_nvidia_ref(model_ref: str) -> str:
+    normalized = _normalize_model_ref(model_ref)
+    if normalized == "" or normalized.startswith("nvidia/"):
+        return normalized
+    return f"nvidia/{normalized}"
+
+
+def _normalize_raw_nvidia_target(model_ref: str) -> str:
+    normalized = _normalize_model_ref(model_ref)
+    if normalized.startswith("nvidia/") and normalized.count("/") == 1:
+        return f"nvidia/{normalized}"
+    return _normalize_nvidia_ref(normalized)
 
 
 def _normalize_openrouter_target(model_ref: str) -> str:
@@ -346,6 +405,37 @@ def _catalog_model_info(entry: ModelCatalogEntry) -> dict[str, float]:
     if entry.output_cost_per_token is not None:
         model_info["output_cost_per_token"] = entry.output_cost_per_token
     return model_info
+
+
+def nvidia_litellm_params_for(upstream_target: str) -> dict[str, object]:
+    settings = _load_nvidia_model_settings().get(upstream_target)
+    if settings is None:
+        return {}
+    return copy.deepcopy(settings)
+
+
+def _load_nvidia_model_settings() -> dict[str, dict[str, object]]:
+    payload = (
+        resources.files(__package__)
+        .joinpath(_NVIDIA_MODEL_SETTINGS_RESOURCE)
+        .read_text(encoding="utf-8")
+    )
+    raw_settings = json.loads(payload)
+    if not isinstance(raw_settings, Mapping):
+        raise TypeError(f"{_NVIDIA_MODEL_SETTINGS_RESOURCE} must contain a JSON object")
+
+    settings: dict[str, dict[str, object]] = {}
+    for model_id, params in raw_settings.items():
+        if not isinstance(model_id, str) or not model_id.startswith("nvidia/"):
+            raise TypeError(
+                f"{_NVIDIA_MODEL_SETTINGS_RESOURCE} contains invalid NVIDIA model key"
+            )
+        if not isinstance(params, Mapping):
+            raise TypeError(
+                f"{_NVIDIA_MODEL_SETTINGS_RESOURCE} settings for {model_id} must be an object"
+            )
+        settings[model_id] = dict(params)
+    return settings
 
 
 def _coerce_float(value: object) -> float | None:

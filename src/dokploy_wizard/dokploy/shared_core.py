@@ -1250,6 +1250,7 @@ def _build_litellm_upstream_creds(litellm_env: dict[str, str]) -> dict[str, str]
         upstream_creds["openrouter_api_key_env"] = "LITELLM_OPENROUTER_API_KEY"
     nvidia_env_name = _first_configured_env_name(
         litellm_env,
+        "LITELLM_NVIDIA_API_KEY",
         "MY_FARM_ADVISOR_NVIDIA_API_KEY",
         "OPENCLAW_NVIDIA_API_KEY",
         "NVIDIA_API_KEY",
