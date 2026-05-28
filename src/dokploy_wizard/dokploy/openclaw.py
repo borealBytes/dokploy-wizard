@@ -2891,7 +2891,7 @@ def _command_for_variant(
                 "-lc",
                 (
                     f"{seed_command} && "
-                    "exec /app/scripts/entrypoint.sh"
+                    f"exec node openclaw.mjs gateway --bind lan --port {app_port} --allow-unconfigured"
                 ),
             ]
         )

@@ -1,7 +1,8 @@
 version: "3.9"
 services:
   my-farm-advisor:
-    image: ghcr.io/my-farm-advisor/app:latest
+    image: ghcr.io/borealbytes/my-farm-advisor:latest
+    pull_policy: always
     labels:
       dokploy-wizard.variant: my-farm-advisor
       dokploy-wizard.slot: my-farm-advisor_suite
