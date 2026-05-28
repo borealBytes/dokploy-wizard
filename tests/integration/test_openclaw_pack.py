@@ -634,6 +634,7 @@ def _patch_real_dokploy_openclaw_backend(
     )
     monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
     monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._build_local_sidecar_image", lambda **_: None)
     monkeypatch.setattr(
         DokployOpenClawBackend,
         "_verify_service_runtime",
@@ -1707,6 +1708,7 @@ def test_install_renders_internal_nexa_runtime_sidecar_into_openclaw_compose(
     monkeypatch.setattr(dokploy_wizard.cli, "DokployOpenClawBackend", _build_backend)
     monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
     monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
+    monkeypatch.setattr("dokploy_wizard.dokploy.openclaw._build_local_sidecar_image", lambda **_: None)
     monkeypatch.setattr(
         DokployOpenClawBackend,
         "_verify_service_runtime",

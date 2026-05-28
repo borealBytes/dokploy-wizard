@@ -420,30 +420,34 @@ def _build_extract_command(session: RemoteTransportSession) -> str:
 
 
 def _build_install_command(session: RemoteTransportSession) -> str:
-    return _shell_join(
-        [
-            "./bin/dokploy-wizard",
-            "install",
-            "--env-file",
-            session.remote_install_env_path,
-            "--state-dir",
-            session.remote_state_dir,
-            "--non-interactive",
-        ]
+    return _with_unbuffered_python(
+        _shell_join(
+            [
+                "./bin/dokploy-wizard",
+                "install",
+                "--env-file",
+                session.remote_install_env_path,
+                "--state-dir",
+                session.remote_state_dir,
+                "--non-interactive",
+            ]
+        )
     )
 
 
 def _build_modify_command(session: RemoteTransportSession) -> str:
-    return _shell_join(
-        [
-            "./bin/dokploy-wizard",
-            "modify",
-            "--env-file",
-            session.remote_install_env_path,
-            "--state-dir",
-            session.remote_state_dir,
-            "--non-interactive",
-        ]
+    return _with_unbuffered_python(
+        _shell_join(
+            [
+                "./bin/dokploy-wizard",
+                "modify",
+                "--env-file",
+                session.remote_install_env_path,
+                "--state-dir",
+                session.remote_state_dir,
+                "--non-interactive",
+            ]
+        )
     )
 
 
@@ -463,19 +467,21 @@ def _build_uninstall_command(
         "--confirm-file",
         remote_confirm_path,
     ]
-    return _shell_join(command)
+    return _with_unbuffered_python(_shell_join(command))
 
 
 def _build_inspect_state_command(session: RemoteTransportSession) -> str:
-    return _shell_join(
-        [
-            "./bin/dokploy-wizard",
-            "inspect-state",
-            "--env-file",
-            session.remote_install_env_path,
-            "--state-dir",
-            session.remote_state_dir,
-        ]
+    return _with_unbuffered_python(
+        _shell_join(
+            [
+                "./bin/dokploy-wizard",
+                "inspect-state",
+                "--env-file",
+                session.remote_install_env_path,
+                "--state-dir",
+                session.remote_state_dir,
+            ]
+        )
     )
 
 
@@ -497,6 +503,10 @@ def _remote_path(remote_root: str, path: Path) -> str:
 
 def _shell_join(arguments: Sequence[str]) -> str:
     return " ".join(shlex.quote(argument) for argument in arguments)
+
+
+def _with_unbuffered_python(command: str) -> str:
+    return f"PYTHONUNBUFFERED=1 {command}"
 
 
 def _redact_runtime_message(message: str, *, password: str | None) -> str:

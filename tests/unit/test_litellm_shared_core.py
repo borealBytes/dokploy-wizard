@@ -196,6 +196,59 @@ def test_reconcile_repairs_pack_and_litellm_postgres_allocations() -> None:
     )
 
 
+def test_reconcile_reuses_desired_network_when_ledger_points_to_stale_name() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openmerge-me",
+                "ROOT_DOMAIN": "example.com",
+                "PACKS": "nextcloud",
+            },
+        )
+    )
+    backend = _RecordingSharedCoreBackend()
+    stale_network = backend._record("wizard-stack-shared")
+    desired_network = backend._record("openmerge-me-shared")
+    ownership_ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                resource_type="shared_core_network",
+                resource_id=stale_network.resource_id,
+                scope="stack:openmerge-me:shared-network",
+            ),
+        ),
+    )
+
+    phase = reconcile_shared_core(
+        dry_run=False,
+        desired_state=desired_state,
+        ownership_ledger=ownership_ledger,
+        backend=backend,
+    )
+    updated_ledger = build_shared_core_ledger(
+        existing_ledger=ownership_ledger,
+        stack_name=desired_state.stack_name,
+        network_resource_id=phase.network_resource_id,
+        postgres_resource_id=phase.postgres_resource_id,
+        redis_resource_id=phase.redis_resource_id,
+        mail_relay_resource_id=phase.mail_relay_resource_id,
+        litellm_resource_id=phase.litellm_resource_id,
+    )
+
+    assert phase.result.network is not None
+    assert phase.result.network.action == "reuse_existing"
+    assert phase.result.network.resource_id == desired_network.resource_id
+    assert phase.result.network.resource_name == "openmerge-me-shared"
+    assert phase.network_resource_id == desired_network.resource_id
+    assert next(
+        resource
+        for resource in updated_ledger.resources
+        if resource.resource_type == "shared_core_network"
+    ).resource_id == desired_network.resource_id
+
+
 def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs() -> None:
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
 
@@ -266,9 +319,9 @@ def test_rendered_litellm_local_model_disables_system_role_for_vllm_templates() 
         plan,
         {},
         {
-            "AI_DEFAULT_PROVIDER": "tuxdesktop.tailb12aa5.ts.net",
+            "AI_DEFAULT_PROVIDER": "local-model.internal",
             "AI_DEFAULT_MODEL": "unsloth-active",
-            "LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
+            "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
             "LITELLM_LOCAL_MODEL": "unsloth-active",
             "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
             "LITELLM_OPENCODE_GO_API_KEY": "opencode-go-upstream-key",
@@ -280,7 +333,7 @@ def test_rendered_litellm_local_model_disables_system_role_for_vllm_templates() 
 
     local_block = _embedded_litellm_model_block(
         compose,
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
     )
     opencode_block = _embedded_litellm_model_block(compose, "opencode-go/deepseek-v4-flash")
     openrouter_block = _embedded_litellm_model_block(compose, "openrouter/hunter-alpha")
@@ -611,7 +664,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
             key=value,
             key_alias=consumer,
             team_id=f"team-{consumer}",
-            models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",)
+            models=("local-model.internal/unsloth-active",)
             if consumer == "openclaw"
             else (),
             metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
@@ -625,7 +678,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
         plan=plan,
         litellm_generated_keys=generated_keys,
         litellm_consumer_model_allowlists={
-            "openclaw": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",)
+            "openclaw": ("local-model.internal/unsloth-active",)
         },
         litellm_admin_api=_FakeLiteLLMAdminApi(
             {"status": "connected", "db": "connected"},
@@ -651,7 +704,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
         plan=plan,
         litellm_generated_keys=generated_keys,
         litellm_consumer_model_allowlists={
-            "openclaw": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",)
+            "openclaw": ("local-model.internal/unsloth-active",)
         },
         litellm_admin_api=_FakeLiteLLMAdminApi(
             {"status": "connected", "db": "connected"},
@@ -766,10 +819,10 @@ def test_litellm_allowlists_keep_local_and_bare_aliases_for_advisors() -> None:
     )
 
     assert allowlists["my-farm-advisor"] == (
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
     )
     assert allowlists["openclaw"] == (
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
     )
 
 
@@ -982,7 +1035,7 @@ def test_ai_provider_create_records_payload_on_fake() -> None:
         name="Dokploy Wizard LiteLLM",
         api_url="http://openmerge-shared-litellm:4000/v1",
         api_key="sk-provider-fake-test-key",
-        model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        model="local-model.internal/unsloth-active",
         is_enabled=True,
     )
 
@@ -991,7 +1044,7 @@ def test_ai_provider_create_records_payload_on_fake() -> None:
     assert create["name"] == "Dokploy Wizard LiteLLM"
     assert create["apiUrl"] == "http://openmerge-shared-litellm:4000/v1"
     assert create["apiKey"] == "sk-provider-fake-test-key"
-    assert create["model"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert create["model"] == "local-model.internal/unsloth-active"
     assert create["isEnabled"] is True
 
 
@@ -1004,14 +1057,14 @@ def test_ai_provider_update_records_payload_on_fake() -> None:
         name="Dokploy Wizard LiteLLM",
         api_url="http://openmerge-shared-litellm:4000/v1",
         api_key="sk-master-fake-test-key",
-        model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        model="local-model.internal/unsloth-active",
         is_enabled=True,
     )
 
     assert len(fake._ai_provider_updates) == 1
     update = fake._ai_provider_updates[0]
     assert update["aiId"] == "ai-wizard-1"
-    assert update["model"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert update["model"] == "local-model.internal/unsloth-active"
 
 
 def test_ai_client_request_payloads_via_fake_request_fn() -> None:
@@ -1044,7 +1097,7 @@ def test_ai_client_request_payloads_via_fake_request_fn() -> None:
                     "name": "Dokploy Wizard LiteLLM",
                     "apiUrl": "http://openmerge-shared-litellm:4000/v1",
                     "apiKey": "sk-master-fake-test-key",
-                    "model": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                    "model": "local-model.internal/unsloth-active",
                     "isEnabled": True,
                 }
             }
@@ -1064,7 +1117,7 @@ def test_ai_client_request_payloads_via_fake_request_fn() -> None:
         name="Dokploy Wizard LiteLLM",
         api_url="http://openmerge-shared-litellm:4000/v1",
         api_key="sk-master-fake-test-key",
-        model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        model="local-model.internal/unsloth-active",
         is_enabled=True,
     )
     assert len(calls) == 2
@@ -1075,7 +1128,7 @@ def test_ai_client_request_payloads_via_fake_request_fn() -> None:
             "name": "Dokploy Wizard LiteLLM",
             "apiUrl": "http://openmerge-shared-litellm:4000/v1",
             "apiKey": "sk-master-fake-test-key",
-            "model": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            "model": "local-model.internal/unsloth-active",
             "isEnabled": True,
         },
     )
@@ -1085,7 +1138,7 @@ def test_ai_client_request_payloads_via_fake_request_fn() -> None:
         name="Dokploy Wizard LiteLLM",
         api_url="http://openmerge-shared-litellm:4000/v1",
         api_key="sk-master-fake-test-key",
-        model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        model="local-model.internal/unsloth-active",
         is_enabled=True,
     )
     assert len(calls) == 3
@@ -1097,7 +1150,7 @@ def test_ai_client_request_payloads_via_fake_request_fn() -> None:
             "name": "Dokploy Wizard LiteLLM",
             "apiUrl": "http://openmerge-shared-litellm:4000/v1",
             "apiKey": "sk-master-fake-test-key",
-            "model": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            "model": "local-model.internal/unsloth-active",
             "isEnabled": True,
         },
     )
@@ -1106,7 +1159,7 @@ def test_ai_client_request_payloads_via_fake_request_fn() -> None:
 def test_ai_model_alias_default_with_no_env() -> None:
     from dokploy_wizard.dokploy.shared_core import _dokploy_ai_model_alias
 
-    assert _dokploy_ai_model_alias({}) == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert _dokploy_ai_model_alias({}) == "local-model.internal/unsloth-active"
 
 
 def test_ai_model_alias_custom_provider_with_dot() -> None:
@@ -1146,15 +1199,15 @@ def test_ai_model_alias_local_provider_maps_to_default_local() -> None:
         "AI_DEFAULT_PROVIDER": "local",
         "AI_DEFAULT_MODEL": "custom-model",
     })
-    assert result.startswith("tuxdesktop.tailb12aa5.ts.net/")
-    assert result == "tuxdesktop.tailb12aa5.ts.net/custom-model"
+    assert result.startswith("local-model.internal/")
+    assert result == "local-model.internal/custom-model"
 
 
 def test_ai_model_alias_partial_env_falls_back_to_default() -> None:
     from dokploy_wizard.dokploy.shared_core import _dokploy_ai_model_alias
 
-    assert _dokploy_ai_model_alias({"AI_DEFAULT_PROVIDER": "local"}) == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
-    assert _dokploy_ai_model_alias({"AI_DEFAULT_MODEL": "model-x"}) == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert _dokploy_ai_model_alias({"AI_DEFAULT_PROVIDER": "local"}) == "local-model.internal/unsloth-active"
+    assert _dokploy_ai_model_alias({"AI_DEFAULT_MODEL": "model-x"}) == "local-model.internal/unsloth-active"
 
 
 def test_ai_reconcile_creates_provider_when_missing() -> None:
@@ -1176,7 +1229,7 @@ def test_ai_reconcile_creates_provider_when_missing() -> None:
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(fake._ai_provider_creates[0], generated)
     )
-    assert fake._ai_provider_creates[0]["model"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert fake._ai_provider_creates[0]["model"] == "local-model.internal/unsloth-active"
     assert fake._ai_provider_creates[0]["isEnabled"] is True
 
 
@@ -1209,7 +1262,7 @@ def test_ai_reconcile_updates_provider_when_present() -> None:
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(update, generated)
     )
-    assert update["model"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert update["model"] == "local-model.internal/unsloth-active"
 
 
 def test_ai_reconcile_does_not_create_duplicate_on_repeat() -> None:
@@ -1236,10 +1289,10 @@ def test_ai_reconcile_uses_canonical_model_alias_not_bare() -> None:
 
     for create in fake._ai_provider_creates:
         assert create["model"] != "unsloth-active"
-        assert create["model"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+        assert create["model"] == "local-model.internal/unsloth-active"
     for update in fake._ai_provider_updates:
         assert update["model"] != "unsloth-active"
-        assert update["model"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+        assert update["model"] == "local-model.internal/unsloth-active"
 
 
 def test_ai_reconcile_skips_when_no_generated_keys() -> None:
@@ -1363,7 +1416,7 @@ def test_ai_reconcile_noops_when_existing_wizard_provider_matches() -> None:
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.virtual_keys["dokploy-ai"],
-            model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            model="local-model.internal/unsloth-active",
             is_enabled=True,
         )
     ]
@@ -1406,7 +1459,7 @@ def test_ai_reconcile_updates_disabled_or_drifted_wizard_provider() -> None:
     update = fake._ai_provider_updates[0]
     assert update["aiId"] == "ai-wizard-existing"
     assert update["apiUrl"] == "http://openmerge-shared-litellm:4000/v1"
-    assert update["model"] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert update["model"] == "local-model.internal/unsloth-active"
     assert update["isEnabled"] is True
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(update, generated)
@@ -1417,7 +1470,7 @@ def test_litellm_runtime_reconciles_dokploy_ai_provider_even_when_virtual_keys_u
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("openclaw",))
     generated = _generated_keys()
     allowlists: dict[str, tuple[str, ...]] = {
-        "openclaw": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+        "openclaw": ("local-model.internal/unsloth-active",),
     }
     teams, keys = _managed_litellm_records_for(
         generated,
@@ -1462,7 +1515,7 @@ def test_litellm_runtime_surfaces_dokploy_ai_provider_seed_failures() -> None:
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("openclaw",))
     generated = _generated_keys()
     allowlists: dict[str, tuple[str, ...]] = {
-        "openclaw": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+        "openclaw": ("local-model.internal/unsloth-active",),
     }
     teams, keys = _managed_litellm_records_for(
         generated,
@@ -1500,7 +1553,7 @@ def test_verify_dokploy_ai_provider_reports_only_redacted_key_metadata() -> None
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=raw_key,
-            model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            model="local-model.internal/unsloth-active",
             is_enabled=True,
         )
     ]
@@ -1533,7 +1586,7 @@ def test_verify_dokploy_ai_provider_fails_when_provider_uses_master_key_without_
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.master_key,
-            model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            model="local-model.internal/unsloth-active",
             is_enabled=True,
         )
     ]
@@ -1562,7 +1615,7 @@ def test_verify_dokploy_ai_provider_fails_on_duplicate_wizard_provider() -> None
         name="Dokploy Wizard LiteLLM",
         api_url="http://openmerge-shared-litellm:4000/v1",
         api_key=generated.virtual_keys["dokploy-ai"],
-        model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        model="local-model.internal/unsloth-active",
         is_enabled=True,
     )
     fake._ai_providers = [
@@ -1626,7 +1679,7 @@ def test_verify_dokploy_ai_provider_runs_test_connection_when_available() -> Non
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.virtual_keys["dokploy-ai"],
-            model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            model="local-model.internal/unsloth-active",
             is_enabled=True,
         )
     ]
@@ -1643,7 +1696,7 @@ def test_verify_dokploy_ai_provider_runs_test_connection_when_available() -> Non
         (
             "http://openmerge-shared-litellm:4000/v1",
             generated.virtual_keys["dokploy-ai"],
-            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            "local-model.internal/unsloth-active",
         )
     ]
     assert generated.virtual_keys["dokploy-ai"] not in result.detail
@@ -1666,7 +1719,7 @@ def test_verify_dokploy_ai_provider_fails_on_test_connection_error_without_leaki
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.virtual_keys["dokploy-ai"],
-            model="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            model="local-model.internal/unsloth-active",
             is_enabled=True,
         )
     ]

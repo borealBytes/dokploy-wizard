@@ -45,7 +45,7 @@ from dokploy_wizard.state import load_litellm_generated_keys
 from dokploy_wizard.state.models import ComposeArtifactHashState, LiteLLMGeneratedKeys
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
-_DEFAULT_MODEL_PROVIDER = "tuxdesktop.tailb12aa5.ts.net"
+_DEFAULT_MODEL_PROVIDER = "local-model.internal"
 _DEFAULT_MODEL_NAME = "unsloth-active"
 _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 _DEFAULT_NVIDIA_VISIBLE_DEVICES = "all"
@@ -112,10 +112,10 @@ _NEXA_MEM0_REVISION_SOURCE_PATHS = (
     _DEFAULT_NEXA_MEM0_DOCKERFILE,
     "src/dokploy_wizard/packs/openclaw/nexa_mem0_sidecar.py",
 )
-_DEFAULT_LOCAL_PROVIDER_ID = "tuxdesktop.tailb12aa5.ts.net"
+_DEFAULT_LOCAL_PROVIDER_ID = "local-model.internal"
 _DEFAULT_LOCAL_MODEL_ID = "unsloth-active"
-_DEFAULT_LOCAL_MODEL_REF = "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
-_DEFAULT_LOCAL_MODEL_BASE_URL = "http://tuxdesktop.tailb12aa5.ts.net:61434/v1"
+_DEFAULT_LOCAL_MODEL_REF = "local-model.internal/unsloth-active"
+_DEFAULT_LOCAL_MODEL_BASE_URL = "http://local-model.internal:61434/v1"
 _DEFAULT_LOCAL_MODEL_API_KEY = "sk-no-key-required"
 _DEFAULT_AI_DEFAULT_PROVIDER_ID = "opencode-go"
 _DEFAULT_AI_DEFAULT_MODEL_ID = "deepseek-v4-flash"
@@ -322,7 +322,7 @@ class DokployOpenClawBackend:
         telegram_data_pipeline_bot_allowed_users: str | None = None,
         telegram_allowed_users: str | None = None,
         openclaw_telegram_group_policy: str | None = None,
-        tz: str | None = None,
+        tz: str | None = "UTC",
         openclaw_sync_skills_on_start: str | None = None,
         openclaw_sync_skills_overwrite: str | None = None,
         openclaw_force_skill_sync: str | None = None,

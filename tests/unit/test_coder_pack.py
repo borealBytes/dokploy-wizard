@@ -33,7 +33,7 @@ from .fake_dokploy import FakeDokployApiClient
 
 def _expected_coder_fallback_models_json() -> str:
     return coder_module._litellm_workspace_fallback_models_json(
-        default_alias="tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+        default_alias="local-model.internal/unsloth-active"
     )
 
 
@@ -44,7 +44,7 @@ def _expected_coder_fallback_models_json_escaped() -> str:
 def test_coder_litellm_fallback_models_json_uses_full_concrete_aliases() -> None:
     aliases = json.loads(_expected_coder_fallback_models_json())
 
-    assert aliases[0] == "tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    assert aliases[0] == "local-model.internal/unsloth-active"
     assert "opencode-go/deepseek-v4-flash" in aliases
     assert "opencode-go/minimax-m2.7" in aliases
     assert "openrouter/minimax/minimax-m2.5:free" in aliases
@@ -68,16 +68,16 @@ def test_copilot_byok_settings_json_contains_litellm_models() -> None:
         coder_module._copilot_byok_settings_json(
             base_url="http://wizard-stack-shared-litellm:4000",
             api_key="fake-litellm-key",
-            default_alias="tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            default_alias="local-model.internal/unsloth-active",
             fallback_models_json=_expected_coder_fallback_models_json(),
         )
     )
 
     custom_models = settings["github.copilot.chat.customOAIModels"]
-    assert "tuxdesktop.tailb12aa5.ts.net/unsloth-active" in custom_models
+    assert "local-model.internal/unsloth-active" in custom_models
     assert "opencode-go/deepseek-v4-flash" in custom_models
-    default_model = custom_models["tuxdesktop.tailb12aa5.ts.net/unsloth-active"]
-    assert default_model["name"] == "Dokploy LiteLLM: tuxdesktop.tailb12aa5.ts.net/unsloth-active"
+    default_model = custom_models["local-model.internal/unsloth-active"]
+    assert default_model["name"] == "Dokploy LiteLLM: local-model.internal/unsloth-active"
     assert default_model["url"] == "http://wizard-stack-shared-litellm:4000/v1"
     assert default_model["apiKey"] == "fake-litellm-key"
     assert default_model["requiresAPIKey"] is True
@@ -722,8 +722,8 @@ def test_default_kdense_byok_template_includes_upstream_parameterized_stack() ->
     assert 'data "coder_parameter" "kdense_modal_token_id" {' in template
     assert 'data "coder_parameter" "kdense_modal_token_secret" {' in template
     assert 'name  = "Unsloth Active (local alias)"' in template
-    assert 'value = "tuxdesktop.tailb12aa5.ts.net/unsloth-active"' in template
-    assert 'default      = "tuxdesktop.tailb12aa5.ts.net/unsloth-active"' in template
+    assert 'value = "local-model.internal/unsloth-active"' in template
+    assert 'default      = "local-model.internal/unsloth-active"' in template
     assert 'default      = "openrouter/google/gemini-3.1-pro-preview"' in template
     assert 'default      = "disabled"' in template
     assert (
@@ -1114,7 +1114,7 @@ def test_hermes_template_uses_litellm_credentials(
             "hostname": "coder.example.com",
             "session_token": "session-123",
             "hermes_inference_provider": "openai",
-            "hermes_model": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            "hermes_model": "local-model.internal/unsloth-active",
             "ai_default_base_url": "http://wizard-stack-shared-litellm:4000",
             "ai_default_api_key": "litellm-coder-hermes-key",
         }
@@ -1122,7 +1122,7 @@ def test_hermes_template_uses_litellm_credentials(
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "openai",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "local-model.internal/unsloth-active",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1180,7 +1180,7 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
 
     assert template_replacements_by_name[coder_module._default_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
@@ -1188,7 +1188,7 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
     }
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
@@ -1196,7 +1196,7 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
     }
     assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
@@ -1204,7 +1204,7 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
     }
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
@@ -1212,7 +1212,7 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
     }
     assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
@@ -1299,7 +1299,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     )
     assert template_replacements_by_name[coder_module._default_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
@@ -1307,7 +1307,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     }
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
@@ -1315,7 +1315,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     }
     assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
@@ -1323,7 +1323,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     }
     assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
@@ -1442,11 +1442,11 @@ def test_reconcile_coder_creates_service_and_data() -> None:
 
     assert phase.result.outcome == "applied"
     assert phase.result.hostname == "coder.example.com"
-    assert phase.result.wildcard_hostname == "*.coder.example.com"
+    assert phase.result.wildcard_hostname == "*.example.com"
     assert phase.service_resource_id == "coder-service-1"
     assert phase.data_resource_id == "coder-data-1"
     assert phase.result.config is not None
-    assert phase.result.config.wildcard_access_url == "*.coder.example.com"
+    assert phase.result.config.wildcard_access_url == "*.example.com"
 
 
 def test_reconcile_coder_runs_application_bootstrap_before_final_health_gate_on_first_apply() -> (
@@ -1537,7 +1537,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     assert secret_sync_calls == [
         (
             "dokploy-litellm",
-            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            "local-model.internal/unsloth-active",
             "http://wizard-stack-shared-litellm:4000",
         )
     ]
@@ -2608,7 +2608,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     ]
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
@@ -2616,7 +2616,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     }
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
@@ -2624,7 +2624,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     }
     assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
@@ -2633,14 +2633,14 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "local-model.internal/unsloth-active",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "tuxdesktop.tailb12aa5.ts.net",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "local-model.internal",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "unsloth-active",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
@@ -2659,7 +2659,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         (
             "wizard-stack-coder-container",
             "dokploy-litellm",
-            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            "local-model.internal/unsloth-active",
             None,
         )
     ]

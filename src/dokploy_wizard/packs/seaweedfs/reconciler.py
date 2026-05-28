@@ -24,6 +24,8 @@ class SeaweedFsError(RuntimeError):
 
 
 class SeaweedFsBackend(Protocol):
+    def get_credentials(self) -> tuple[str, str] | None: ...
+
     def get_service(self, resource_id: str) -> SeaweedFsResourceRecord | None: ...
 
     def find_service_by_name(self, resource_name: str) -> SeaweedFsResourceRecord | None: ...
@@ -74,8 +76,15 @@ class ShellSeaweedFsBackend:
         self._forced_existing_service_id = values.get("SEAWEEDFS_MOCK_EXISTING_SERVICE_ID")
         self._forced_existing_data_id = values.get("SEAWEEDFS_MOCK_EXISTING_DATA_ID")
         self._forced_health = _optional_bool(values, "SEAWEEDFS_MOCK_HEALTHY")
+        self._access_key = values.get("SEAWEEDFS_ACCESS_KEY")
+        self._secret_key = values.get("SEAWEEDFS_SECRET_KEY")
         self._service: SeaweedFsResourceRecord | None = None
         self._data: SeaweedFsResourceRecord | None = None
+
+    def get_credentials(self) -> tuple[str, str] | None:
+        if self._access_key is None or self._secret_key is None:
+            return None
+        return self._access_key, self._secret_key
 
     def get_service(self, resource_id: str) -> SeaweedFsResourceRecord | None:
         if self._service is not None and self._service.resource_id == resource_id:
@@ -184,12 +193,13 @@ def reconcile_seaweedfs(
         raise SeaweedFsError(
             "Desired state is missing the canonical SeaweedFS hostname at hostnames['s3']."
         )
-    access_key = desired_state.seaweedfs_access_key
-    secret_key = desired_state.seaweedfs_secret_key
-    if access_key is None or secret_key is None:
+    credentials = _credentials_from_desired_or_backend(desired_state, backend)
+    if credentials is None:
         raise SeaweedFsError(
-            "SeaweedFS access/secret key configuration is missing from desired state."
+            "SeaweedFS access/secret key configuration is missing from desired state "
+            "and generated state."
         )
+    access_key, secret_key = credentials
 
     service_name = _service_name(desired_state.stack_name)
     data_name = _data_name(desired_state.stack_name)
@@ -269,8 +279,8 @@ def reconcile_seaweedfs(
             health_check=SeaweedFsHealthCheck(url=health_url, passed=True),
             notes=(
                 f"SeaweedFS runtime '{service_name}' is reconciled and healthy.",
-                "SeaweedFS credentials are provided from desired state only; "
-                "no integrations are wired yet.",
+                "SeaweedFS credentials are provided from env input or generated state; "
+                "no secret values are included in this result.",
             ),
         ),
         service_resource_id=service_id,
@@ -318,6 +328,16 @@ def build_seaweedfs_ledger(
     return OwnershipLedger(
         format_version=existing_ledger.format_version, resources=tuple(resources)
     )
+
+
+def _credentials_from_desired_or_backend(
+    desired_state: DesiredState, backend: SeaweedFsBackend
+) -> tuple[str, str] | None:
+    access_key = desired_state.seaweedfs_access_key
+    secret_key = desired_state.seaweedfs_secret_key
+    if access_key is not None and secret_key is not None:
+        return access_key, secret_key
+    return backend.get_credentials()
 
 
 def _resolve_owned_resource(

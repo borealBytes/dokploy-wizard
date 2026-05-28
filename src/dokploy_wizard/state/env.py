@@ -126,11 +126,13 @@ def parse_env_file(path: Path) -> RawEnvInput:
 
 def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
     values = raw_env.values
-    stack_name = _require_value(values, "STACK_NAME")
     root_domain = _require_value(values, "ROOT_DOMAIN")
+    stack_name = _get_configured_value(values, "STACK_NAME") or derive_stack_name_from_root_domain(
+        root_domain
+    )
     resolve_ai_default_model_ref(values)
     parse_litellm_openrouter_models(values)
-    dokploy_subdomain = values.get("DOKPLOY_SUBDOMAIN", "dokploy")
+    dokploy_subdomain = _get_configured_value(values, "DOKPLOY_SUBDOMAIN") or "dokploy"
     hostnames: dict[str, str] = {
         "dokploy": _join_hostname(dokploy_subdomain, root_domain),
     }
@@ -183,6 +185,12 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
 
 def _join_hostname(subdomain: str, root_domain: str) -> str:
     return f"{subdomain}.{root_domain}".lower()
+
+
+def derive_stack_name_from_root_domain(root_domain: str) -> str:
+    normalized = re.sub(r"[^a-z0-9-]+", "-", root_domain.strip().lower())
+    normalized = re.sub(r"-+", "-", normalized).strip("-")
+    return normalized or "dokploy-stack"
 
 
 def _require_value(values: dict[str, str], key: str) -> str:
@@ -282,7 +290,7 @@ def _resolve_dokploy_api_url(values: dict[str, str]) -> str | None:
         raise StateValidationError("DOKPLOY_API_URL and DOKPLOY_API_KEY must be provided together.")
     if raw_url is None:
         return "https://" + _join_hostname(
-            values.get("DOKPLOY_SUBDOMAIN", "dokploy"),
+            _get_configured_value(values, "DOKPLOY_SUBDOMAIN") or "dokploy",
             _require_value(values, "ROOT_DOMAIN"),
         )
     parsed = parse.urlparse(raw_url)
@@ -396,13 +404,6 @@ def _resolve_seaweedfs_secret(
         if raw_value is not None:
             raise StateValidationError(f"{key} requires the 'seaweedfs' pack.")
         return None
-    if raw_value is None:
-        sibling = (
-            "SEAWEEDFS_SECRET_KEY" if key == "SEAWEEDFS_ACCESS_KEY" else "SEAWEEDFS_ACCESS_KEY"
-        )
-        raise StateValidationError(
-            f"{key} is required when the 'seaweedfs' pack is enabled (along with {sibling})."
-        )
     return raw_value
 
 

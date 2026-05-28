@@ -32,6 +32,25 @@ class FakeTransport:
             raise RuntimeError(failure)
 
 
+class SilentChannel:
+    def __init__(self, *, running_polls: int = 3) -> None:
+        self.running_polls = running_polls
+        self.polls = 0
+
+    def exit_status_ready(self) -> bool:
+        self.polls += 1
+        return self.polls > self.running_polls
+
+    def recv_ready(self) -> bool:
+        return False
+
+    def recv_stderr_ready(self) -> bool:
+        return False
+
+    def recv_exit_status(self) -> int:
+        return 0
+
+
 @pytest.fixture
 def remote_transport_subject() -> ModuleType:
     return importlib.import_module("dokploy_wizard.remote_transport")
@@ -114,16 +133,18 @@ def test_proof_runs_install_verify_inspect_in_order(
     ]
     assert [command for _subcommand, command in transport.commands] == [
         (
-            "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
+            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+            "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state --non-interactive"
         ),
         (
-            "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
+            "PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state"
         ),
         (
-            "./bin/dokploy-wizard inspect-state --env-file /root/dokploy-wizard/.install.env "
+            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
+            "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state"
         ),
     ]
@@ -168,7 +189,8 @@ def test_strict_proof_runs_second_install_after_verification(
         "inspect-state",
     ]
     assert transport.commands[2][1] == (
-        "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
+        "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+        "/root/dokploy-wizard/.install.env "
         "--state-dir /root/dokploy-wizard/state --non-interactive"
     )
 
@@ -248,21 +270,24 @@ def test_fresh_proof_runs_destroy_uninstall_before_proof(
     ]
     assert [command for _subcommand, command in transport.commands] == [
         (
-            "./bin/dokploy-wizard uninstall --state-dir /root/dokploy-wizard/state "
+            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard uninstall --state-dir "
+            "/root/dokploy-wizard/state "
             "--destroy-data --non-interactive --confirm-file "
             "/root/dokploy-wizard/fixtures/destroy.confirm"
         ),
         (
-            "./bin/dokploy-wizard install --env-file /root/dokploy-wizard/.install.env "
+            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+            "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state --non-interactive"
         ),
         (
-            "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
+            "PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state"
         ),
         (
-            "./bin/dokploy-wizard inspect-state --env-file /root/dokploy-wizard/.install.env "
+            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
+            "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state"
         ),
     ]
@@ -278,8 +303,25 @@ def test_verify_services_command_uses_unquoted_pythonpath_assignment(
     session.run_proof()
 
     verify_command = dict(transport.commands)["verify-services"]
-    assert verify_command.startswith("PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} ")
+    assert verify_command.startswith(
+        "PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} "
+    )
     assert "python3 -m dokploy_wizard.service_verification_runner" in verify_command
+
+
+def test_proof_lifecycle_commands_run_python_unbuffered(
+    remote_transport_subject: ModuleType,
+    make_fake_transport: Any,
+) -> None:
+    transport = make_fake_transport()
+    session = _build_session(remote_transport_subject, transport=transport)
+
+    session.run_proof(strict_idempotency=True)
+
+    assert all(
+        command.startswith("PYTHONUNBUFFERED=1 ")
+        for _subcommand, command in transport.commands
+    )
 
 
 def test_verify_service_failures_bubble_through_proof(
@@ -361,3 +403,43 @@ def test_verbose_stream_buffer_redacts_multiline_env_payload_and_password(
     assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in rendered
     assert "password=<REDACTED>" in rendered
     assert "DOCKER_PAT=<REDACTED>" in rendered
+
+
+def test_verbose_stream_outputs_heartbeat_for_silent_remote_command(
+    remote_transport_subject: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output: list[tuple[str, str, str]] = []
+    monotonic_values = iter([0.0, 0.5, 1.0])
+    monkeypatch.setattr(remote_transport_subject.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(remote_transport_subject.time, "sleep", lambda _seconds: None)
+    transport = remote_transport_subject.ParamikoRemoteTransport(
+        client=object(),
+        remote_root="/root/dokploy-wizard",
+        verbose=True,
+        output_callback=lambda subcommand, stream_name, line: output.append(
+            (subcommand, stream_name, line)
+        ),
+        heartbeat_interval=0.5,
+    )
+
+    exit_status, stdout_text, stderr_text = transport._stream_command_output(
+        SilentChannel(running_polls=2),
+        subcommand="mutate-install",
+    )
+
+    assert exit_status == 0
+    assert stdout_text == ""
+    assert stderr_text == ""
+    assert output == [
+        (
+            "mutate-install",
+            "progress",
+            "still running mutate-install (0s elapsed, waiting for output)",
+        ),
+        (
+            "mutate-install",
+            "progress",
+            "still running mutate-install (1s elapsed, waiting for output)",
+        ),
+    ]

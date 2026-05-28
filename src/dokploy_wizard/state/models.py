@@ -430,9 +430,6 @@ class DesiredState:
         if (self.seaweedfs_access_key is None) != (self.seaweedfs_secret_key is None):
             msg = "SeaweedFS access and secret keys must be provided together."
             raise StateValidationError(msg)
-        if "seaweedfs" in self.enabled_packs and self.seaweedfs_access_key is None:
-            msg = "SeaweedFS access/secret keys are required when the SeaweedFS pack is enabled."
-            raise StateValidationError(msg)
         if "seaweedfs" not in self.enabled_packs and self.seaweedfs_access_key is not None:
             msg = "SeaweedFS credentials must be omitted when the SeaweedFS pack is disabled."
             raise StateValidationError(msg)
@@ -593,6 +590,11 @@ SURFSENSE_GENERATED_SECRET_PREFIXES = {
     "zero_admin_password": "surfsense-zero-admin-password",
 }
 
+SEAWEEDFS_GENERATED_SECRET_PREFIXES = {
+    "access_key": "seaweedfs-access-key",
+    "secret_key": "seaweedfs-secret-key",
+}
+
 
 def litellm_key_uses_virtual_key_format(value: str) -> bool:
     return value.startswith("sk-")
@@ -669,6 +671,41 @@ class SurfSenseGeneratedSecrets:
         return cls(
             format_version=_require_format_version(payload),
             secrets=_require_string_map(payload, "secrets"),
+        )
+
+
+@dataclass(frozen=True)
+class SeaweedFsGeneratedSecrets:
+    """Wizard-managed SeaweedFS S3 credentials persisted outside install.env."""
+
+    format_version: int
+    access_key: str
+    secret_key: str
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        if self.access_key == "" or self.secret_key == "":
+            msg = "SeaweedFS generated access_key and secret_key must be non-empty strings."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "access_key": self.access_key,
+            "format_version": self.format_version,
+            "secret_key": self.secret_key,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> SeaweedFsGeneratedSecrets:
+        return cls(
+            format_version=_require_format_version(payload),
+            access_key=_require_string(payload, "access_key"),
+            secret_key=_require_string(payload, "secret_key"),
         )
 
 

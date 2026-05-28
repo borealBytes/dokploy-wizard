@@ -420,6 +420,52 @@ def test_modify_rejects_unmodeled_env_changes() -> None:
         )
 
 
+def test_modify_ignores_redundant_pack_enable_flags_when_packs_is_authoritative() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "my-farm-advisor",
+            "ENABLE_MY_FARM_ADVISOR": "true",
+            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "my-farm-advisor",
+            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "my-farm-advisor",
+                "cloudflare_access",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert existing_desired.enabled_packs == requested_desired.enabled_packs == ("my-farm-advisor",)
+    assert plan.mode == "noop"
+    assert plan.phases_to_run == ()
+
+
 def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
     assert get_mutable_pack_env_keys() == (
         "ADVISOR_GATEWAY_PASSWORD",
@@ -690,7 +736,7 @@ def test_modify_surfsense_runtime_key_change_reruns_surfsense(
     (
         (
             "SURFSENSE_PRIMARY_MODEL",
-            "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+            "local-model.internal/unsloth-active",
             "openrouter/hunter-alpha",
         ),
         (

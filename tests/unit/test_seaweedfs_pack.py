@@ -50,6 +50,9 @@ class FakeSeaweedFsBackend:
     health_ok: bool = True
     update_service_calls: int = 0
 
+    def get_credentials(self) -> tuple[str, str] | None:
+        return None
+
     def get_service(self, resource_id: str) -> SeaweedFsResourceRecord | None:
         if self.existing_service is not None and self.existing_service.resource_id == resource_id:
             return self.existing_service

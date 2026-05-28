@@ -161,6 +161,11 @@ def test_pack_env_metadata_covers_catalog_and_explicit_classifications() -> None
     assert openclaw_model.required is False
     assert openclaw_model.canonical_placeholder_name == "OPENCLAW_OPENCLAW_PRIMARY_MODEL"
 
+    openclaw_gateway = get_pack_env_metadata("openclaw", "OPENCLAW_GATEWAY_PASSWORD")
+    assert openclaw_gateway.sensitive is True
+    assert openclaw_gateway.required is False
+    assert openclaw_gateway.required_placeholder is None
+
     shared_default = get_pack_env_metadata("my-farm-advisor", "AI_DEFAULT_API_KEY")
     assert shared_default.sensitive is True
     assert shared_default.shared is True
@@ -222,6 +227,35 @@ def test_pack_env_specs_skip_empty_optional_values_without_required_placeholders
     assert model_spec.placeholder is None
 
 
+def test_pack_env_specs_default_my_farm_timezone_when_omitted() -> None:
+    specs = build_pack_env_specs(
+        "wizard-stack",
+        ("my-farm-advisor",),
+        {"MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder"},
+    )
+
+    specs_by_name = {spec.name: spec for spec in specs}
+    timezone_spec = specs_by_name["MY_FARM_ADVISOR_TZ"]
+    assert timezone_spec.value == "UTC"
+    assert timezone_spec.required is False
+    assert timezone_spec.placeholder is None
+    assert timezone_spec.target_services == ("wizard-stack-my-farm-advisor",)
+
+
+def test_pack_env_specs_preserve_explicit_my_farm_timezone() -> None:
+    specs = build_pack_env_specs(
+        "wizard-stack",
+        ("my-farm-advisor",),
+        {
+            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
+            "TZ": "America/Chicago",
+        },
+    )
+
+    specs_by_name = {spec.name: spec for spec in specs}
+    assert specs_by_name["MY_FARM_ADVISOR_TZ"].value == "America/Chicago"
+
+
 def test_pack_env_specs_use_redaction_classification_and_target_services() -> None:
     specs = build_pack_env_specs(
         "wizard-stack",
@@ -247,9 +281,8 @@ def test_pack_env_specs_use_redaction_classification_and_target_services() -> No
     assert openclaw_gateway.sensitive is True
     assert openclaw_gateway.owner == "openclaw"
     assert openclaw_gateway.target_services == ("wizard-stack-openclaw",)
-    assert openclaw_gateway.placeholder == (
-        "${OPENCLAW_OPENCLAW_GATEWAY_PASSWORD:?OPENCLAW_OPENCLAW_GATEWAY_PASSWORD is required}"
-    )
+    assert openclaw_gateway.placeholder is None
+    assert openclaw_gateway.required is False
 
     openclaw_model = specs_by_name["OPENCLAW_OPENCLAW_PRIMARY_MODEL"]
     assert openclaw_model.sensitive is False
@@ -297,6 +330,25 @@ def test_resolver_allows_both_advisor_packs_together() -> None:
     assert selection.my_farm_advisor_channels == ("matrix", "telegram")
 
 
+def test_resolver_defaults_my_farm_advisor_channels_when_omitted_or_blank() -> None:
+    omitted_selection = resolve_pack_selection(
+        {
+            "PACKS": "my-farm-advisor",
+        },
+        root_domain="example.com",
+    )
+    blank_selection = resolve_pack_selection(
+        {
+            "PACKS": "my-farm-advisor",
+            "MY_FARM_ADVISOR_CHANNELS": " ",
+        },
+        root_domain="example.com",
+    )
+
+    assert omitted_selection.my_farm_advisor_channels == ("telegram",)
+    assert blank_selection.my_farm_advisor_channels == ("telegram",)
+
+
 def test_resolver_allows_existing_tailscale_to_satisfy_headscale_dependency() -> None:
     selection = resolve_pack_selection(
         {
@@ -327,6 +379,22 @@ def test_resolver_builds_root_and_wildcard_coder_hostnames() -> None:
     selection = resolve_pack_selection(
         {
             "ENABLE_CODER": "true",
+        },
+        root_domain="example.com",
+    )
+
+    assert selection.enabled_packs == ("coder",)
+    assert selection.hostnames == {
+        "coder": "coder.example.com",
+        "coder-wildcard": "*.example.com",
+    }
+
+
+def test_resolver_preserves_explicit_nested_coder_wildcard_opt_in() -> None:
+    selection = resolve_pack_selection(
+        {
+            "ENABLE_CODER": "true",
+            "CODER_WILDCARD_SUBDOMAIN": "*.coder",
         },
         root_domain="example.com",
     )
@@ -388,11 +456,12 @@ def test_full_pack_lifecycle_schedules_surfsense_after_faster_application_packs(
                 "ROOT_DOMAIN": "example.com",
                 "PACKS": "nextcloud,openclaw,my-farm-advisor,seaweedfs,coder,docuseal,surfsense",
                 "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
-                "SEAWEEDFS_ACCESS_KEY": "seaweed-access-key",
-                "SEAWEEDFS_SECRET_KEY": "seaweed-secret-key",
             },
         )
     )
+
+    assert desired_state.seaweedfs_access_key is None
+    assert desired_state.seaweedfs_secret_key is None
 
     phases = applicable_phases_for(desired_state)
 
@@ -460,7 +529,7 @@ def test_resolved_state_includes_coder_shared_core_allocation() -> None:
 
     assert desired_state.enabled_packs == ("coder",)
     assert desired_state.hostnames["coder"] == "coder.example.com"
-    assert desired_state.hostnames["coder-wildcard"] == "*.coder.example.com"
+    assert desired_state.hostnames["coder-wildcard"] == "*.example.com"
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
         "coder"
     ]

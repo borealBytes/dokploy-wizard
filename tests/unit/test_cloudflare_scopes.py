@@ -79,6 +79,7 @@ class FakeCloudflareBackend:
     access_policies: dict[str, CloudflareAccessPolicy] = field(default_factory=dict)
     certificate_scope_ok: bool = True
     ordered_certificate_hosts: list[tuple[str, ...]] = field(default_factory=list)
+    dns_record_updates: list[tuple[str, str, str, str, bool]] = field(default_factory=list)
 
     def validate_account_access(self, account_id: str) -> None:
         if not self.account_ok:
@@ -125,10 +126,12 @@ class FakeCloudflareBackend:
         zone_id: str,
         *,
         hostname: str,
-        record_type: str,
+        record_type: str | None,
         content: str | None,
     ) -> tuple[CloudflareDnsRecord, ...]:
         records = self.dns_records.get(hostname, ())
+        if record_type is not None:
+            records = tuple(record for record in records if record.record_type == record_type)
         if content is None:
             return records
         return tuple(record for record in records if record.content == content)
@@ -148,6 +151,26 @@ class FakeCloudflareBackend:
             content=content,
             proxied=proxied,
         )
+
+    def update_dns_record(
+        self,
+        zone_id: str,
+        *,
+        record_id: str,
+        hostname: str,
+        content: str,
+        proxied: bool,
+    ) -> CloudflareDnsRecord:
+        self.dns_record_updates.append((zone_id, record_id, hostname, content, proxied))
+        updated_record = CloudflareDnsRecord(
+            record_id=record_id,
+            name=hostname,
+            record_type="CNAME",
+            content=content,
+            proxied=proxied,
+        )
+        self.dns_records[hostname] = (updated_record,)
+        return updated_record
 
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
         if not self.certificate_scope_ok:
@@ -310,6 +333,518 @@ def test_networking_reuses_existing_tunnel_and_dns_when_scopes_are_valid() -> No
     )
 
 
+def test_networking_uses_domain_derived_stack_name_for_tunnel_when_stack_name_omitted() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "ROOT_DOMAIN": "openmerge.me",
+                "ENABLE_CODER": "true",
+            },
+        )
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=_raw_env(),
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=FakeCloudflareBackend(),
+    )
+
+    assert desired_state.stack_name == "openmerge-me"
+    assert phase.result.tunnel.tunnel_name == "openmerge-me-tunnel"
+
+
+def test_networking_reuses_compatible_unowned_coder_wildcard_dns() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_CODER": "true",
+            },
+        )
+    )
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "dokploy.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-dokploy",
+                    name="dokploy.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+            "coder.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-coder",
+                    name="coder.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+            "*.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-wildcard",
+                    name="*.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+        },
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=_raw_env(),
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert phase.result.tunnel.action == "reuse_existing"
+    assert {
+        (record.hostname, record.action, record.record_id)
+        for record in phase.result.dns_records
+    } >= {("*.example.com", "reuse_existing", "dns-wildcard")}
+
+
+def test_networking_degrades_conflicting_unowned_coder_wildcard_dns() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_CODER": "true",
+            },
+        )
+    )
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "dokploy.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-dokploy",
+                    name="dokploy.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+            "coder.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-coder",
+                    name="coder.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+            "*.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-wildcard",
+                    name="*.example.com",
+                    record_type="CNAME",
+                    content="other-tunnel.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+        },
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=_raw_env(),
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    planned = {
+        (record.hostname, record.action, record.record_id)
+        for record in phase.result.dns_records
+    }
+    assert ("dokploy.example.com", "reuse_existing", "dns-dokploy") in planned
+    assert ("coder.example.com", "reuse_existing", "dns-coder") in planned
+    assert not any(record.hostname == "*.example.com" for record in phase.result.dns_records)
+    assert phase.dns_resource_ids == {
+        "coder.example.com": "dns-coder",
+        "dokploy.example.com": "dns-dokploy",
+    }
+    assert any(
+        "Skipped optional Coder DNS" in note
+        and "did not adopt, overwrite, delete, or retarget" in note
+        for note in phase.result.notes
+    )
+
+
+def test_networking_retargets_stale_coder_control_dns_and_degrades_wildcard_dns() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_CODER": "true",
+            },
+        )
+    )
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "dokploy.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-dokploy",
+                    name="dokploy.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+            "coder.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-coder",
+                    name="coder.example.com",
+                    record_type="CNAME",
+                    content="other-tunnel.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+            "*.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-wildcard",
+                    name="*.example.com",
+                    record_type="CNAME",
+                    content="other-tunnel.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+        },
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=_raw_env(),
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    planned = {
+        (record.hostname, record.action, record.record_id)
+        for record in phase.result.dns_records
+    }
+    assert ("dokploy.example.com", "reuse_existing", "dns-dokploy") in planned
+    assert ("coder.example.com", "update_existing", "dns-coder") in planned
+    assert not any(record.hostname == "*.example.com" for record in phase.result.dns_records)
+    assert phase.dns_resource_ids == {
+        "coder.example.com": "dns-coder",
+        "dokploy.example.com": "dns-dokploy",
+    }
+    assert backend.dns_record_updates == [
+        (
+            "zone-123",
+            "dns-coder",
+            "coder.example.com",
+            "tunnel-123.cfargotunnel.com",
+            True,
+        )
+    ]
+    assert any(
+        "Skipped optional Coder DNS for '*.example.com'" in note
+        and "explicit service hostnames continue to be reconciled" in note
+        for note in phase.result.notes
+    )
+
+
+def test_networking_degrades_stale_nested_coder_wildcard_dns() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_CODER": "true",
+                "CODER_WILDCARD_SUBDOMAIN": "*.coder",
+            },
+        )
+    )
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "dokploy.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-dokploy",
+                    name="dokploy.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+            "coder.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-coder",
+                    name="coder.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+            "*.coder.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-nested-wildcard",
+                    name="*.coder.example.com",
+                    record_type="CNAME",
+                    content="old-coder-tunnel.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+        },
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=_raw_env(),
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert not any(
+        record.hostname == "*.coder.example.com" for record in phase.result.dns_records
+    )
+    assert backend.dns_record_updates == []
+    assert "*.coder.example.com" not in phase.dns_resource_ids
+    assert any(
+        "Skipped optional Coder DNS for '*.coder.example.com'" in note
+        and "did not adopt, overwrite, delete, or retarget" in note
+        for note in phase.result.notes
+    )
+
+
+def test_networking_retargets_stale_dokploy_tunnel_cname() -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "dokploy.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-dokploy",
+                    name="dokploy.example.com",
+                    record_type="CNAME",
+                    content="old-tunnel.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+            "headscale.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-headscale",
+                    name="headscale.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+        },
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=_raw_env(),
+        desired_state=_desired_state(),
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    dokploy_record = next(
+        record for record in phase.result.dns_records if record.hostname == "dokploy.example.com"
+    )
+    assert dokploy_record.action == "update_existing"
+    assert dokploy_record.record_id == "dns-dokploy"
+    assert dokploy_record.content == "tunnel-123.cfargotunnel.com"
+    assert dokploy_record.proxied is True
+    assert phase.dns_resource_ids["dokploy.example.com"] == "dns-dokploy"
+    assert backend.dns_record_updates == [
+        (
+            "zone-123",
+            "dns-dokploy",
+            "dokploy.example.com",
+            "tunnel-123.cfargotunnel.com",
+            True,
+        )
+    ]
+
+
+def test_networking_retargets_stale_enabled_service_tunnel_cname() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_MY_FARM_ADVISOR": "true",
+                "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-key",
+            },
+        )
+    )
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "dokploy.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-dokploy",
+                    name="dokploy.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+            "farm.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-farm",
+                    name="farm.example.com",
+                    record_type="CNAME",
+                    content="old-farm-tunnel.cfargotunnel.com",
+                    proxied=False,
+                ),
+            ),
+        },
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=_raw_env(),
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    farm_record = next(
+        record for record in phase.result.dns_records if record.hostname == "farm.example.com"
+    )
+    assert farm_record.action == "update_existing"
+    assert farm_record.record_id == "dns-farm"
+    assert farm_record.content == "tunnel-123.cfargotunnel.com"
+    assert farm_record.proxied is True
+    assert backend.dns_record_updates == [
+        (
+            "zone-123",
+            "dns-farm",
+            "farm.example.com",
+            "tunnel-123.cfargotunnel.com",
+            True,
+        )
+    ]
+
+
+def test_networking_still_rejects_explicit_service_dns_conflicts() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_CODER": "true",
+            },
+        )
+    )
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "dokploy.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-dokploy",
+                    name="dokploy.example.com",
+                    record_type="CNAME",
+                    content="example.net",
+                    proxied=True,
+                ),
+            ),
+            "coder.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-coder",
+                    name="coder.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+            "*.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-wildcard",
+                    name="*.example.com",
+                    record_type="CNAME",
+                    content="other-tunnel.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+        },
+    )
+
+    with pytest.raises(
+        CloudflareError,
+        match=r"Cloudflare already has a conflicting CNAME record for 'dokploy\.example\.com'",
+    ):
+        reconcile_networking(
+            dry_run=True,
+            raw_env=_raw_env(),
+            desired_state=desired_state,
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=backend,
+        )
+
+
+def test_networking_still_rejects_multiple_explicit_service_dns_records() -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "dokploy.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-dokploy-a",
+                    name="dokploy.example.com",
+                    record_type="CNAME",
+                    content="old-tunnel.cfargotunnel.com",
+                    proxied=True,
+                ),
+                CloudflareDnsRecord(
+                    record_id="dns-dokploy-b",
+                    name="dokploy.example.com",
+                    record_type="A",
+                    content="192.0.2.10",
+                    proxied=True,
+                ),
+            ),
+            "headscale.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-headscale",
+                    name="headscale.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
+        },
+    )
+
+    with pytest.raises(
+        CloudflareError,
+        match=r"Cloudflare already has a conflicting CNAME record for 'dokploy\.example\.com'",
+    ):
+        reconcile_networking(
+            dry_run=False,
+            raw_env=_raw_env(),
+            desired_state=_desired_state(),
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=backend,
+        )
+
+
 def test_networking_fails_closed_when_owned_tunnel_drift_is_detected() -> None:
     with pytest.raises(CloudflareError, match="Ownership ledger says the Cloudflare tunnel exists"):
         reconcile_networking(
@@ -348,7 +883,7 @@ def test_networking_creates_cloudflared_connector_for_dokploy_url() -> None:
     assert connector.created == [("wizard-stack-cloudflared", "token-created-tunnel")]
 
 
-def test_networking_orders_advanced_certificate_for_nested_coder_wildcard() -> None:
+def test_networking_default_coder_wildcard_uses_no_fee_root_fallback() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -356,6 +891,33 @@ def test_networking_orders_advanced_certificate_for_nested_coder_wildcard() -> N
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
                 "ENABLE_CODER": "true",
+            },
+        )
+    )
+    backend = FakeCloudflareBackend()
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=_raw_env(),
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert desired_state.hostnames["coder-wildcard"] == "*.example.com"
+    assert backend.ordered_certificate_hosts == []
+    assert not any("advanced edge certificate" in note for note in phase.result.notes)
+
+
+def test_networking_orders_advanced_certificate_for_explicit_nested_coder_wildcard() -> None:
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_CODER": "true",
+                "CODER_WILDCARD_SUBDOMAIN": "*.coder",
             },
         )
     )
@@ -386,6 +948,7 @@ def test_networking_fails_when_nested_coder_wildcard_needs_ssl_scope() -> None:
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
                 "ENABLE_CODER": "true",
+                "CODER_WILDCARD_SUBDOMAIN": "*.coder",
             },
         )
     )
@@ -567,6 +1130,49 @@ def test_cloudflare_policy_list_parsing_uses_caller_app_id_when_missing(
     assert policy.policy_id == "policy-123"
     assert policy.app_id == "app-openclaw"
     assert policy.emails == ("clayton@superiorbyteworks.com",)
+
+
+def test_cloudflare_api_backend_patches_dns_records(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = CloudflareApiBackend(
+        RawEnvInput(format_version=1, values={"CLOUDFLARE_API_TOKEN": "token-123"})
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_request_json(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "result": {
+                "content": "tunnel-123.cfargotunnel.com",
+                "id": "dns-dokploy",
+                "name": "dokploy.example.com",
+                "proxied": True,
+                "type": "CNAME",
+            }
+        }
+
+    monkeypatch.setattr(backend, "_request_json", fake_request_json)
+
+    record = backend.update_dns_record(
+        "zone-123",
+        record_id="dns-dokploy",
+        hostname="dokploy.example.com",
+        content="tunnel-123.cfargotunnel.com",
+        proxied=True,
+    )
+
+    assert record.record_id == "dns-dokploy"
+    assert calls == [
+        {
+            "method": "PATCH",
+            "path": "/zones/zone-123/dns_records/dns-dokploy",
+            "body": {
+                "content": "tunnel-123.cfargotunnel.com",
+                "name": "dokploy.example.com",
+                "proxied": True,
+                "type": "CNAME",
+            },
+        }
+    ]
 
 
 def _raw_env() -> RawEnvInput:

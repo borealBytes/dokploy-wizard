@@ -13,6 +13,8 @@ from dokploy_wizard.packs.catalog import (
 )
 from dokploy_wizard.state.models import StateValidationError
 
+_DEFAULT_MY_FARM_ADVISOR_CHANNELS = ("telegram",)
+
 
 @dataclass(frozen=True)
 class ResolvedPackSelection:
@@ -49,7 +51,8 @@ def resolve_pack_selection(values: Mapping[str, str], *, root_domain: str) -> Re
         enabled_features.update(pack.enabled_features)
         for hostname in pack.hostnames:
             fqdn = _join_hostname(
-                values.get(hostname.env_key, hostname.default_subdomain), root_domain
+                _get_configured_value(values, hostname.env_key) or hostname.default_subdomain,
+                root_domain,
             )
             existing_key = hostname_targets.get(fqdn)
             if existing_key is not None and existing_key != hostname.key:
@@ -75,6 +78,7 @@ def resolve_pack_selection(values: Mapping[str, str], *, root_domain: str) -> Re
             enabled,
             key="MY_FARM_ADVISOR_CHANNELS",
             pack_name="my-farm-advisor",
+            default_channels=_DEFAULT_MY_FARM_ADVISOR_CHANNELS,
         )
     elif "MY_FARM_ADVISOR_CHANNELS" in values:
         raise StateValidationError("MY_FARM_ADVISOR_CHANNELS requires the 'my-farm-advisor' pack.")
@@ -166,9 +170,16 @@ def _join_hostname(subdomain: str, root_domain: str) -> str:
 
 
 def _validate_advisor_channels(
-    values: Mapping[str, str], enabled: set[str], *, key: str, pack_name: str
+    values: Mapping[str, str],
+    enabled: set[str],
+    *,
+    key: str,
+    pack_name: str,
+    default_channels: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     channels = _get_csv(values, key)
+    if not channels:
+        channels = default_channels
     supported_channels = {"telegram", "matrix"}
     invalid_channels = sorted(channel for channel in channels if channel not in supported_channels)
     if invalid_channels:
@@ -189,6 +200,16 @@ def _get_csv(values: Mapping[str, str], key: str) -> tuple[str, ...]:
         return ()
     items = {item.strip() for item in raw_value.split(",") if item.strip() != ""}
     return tuple(sorted(items))
+
+
+def _get_configured_value(values: Mapping[str, str], key: str) -> str | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    normalized = value.strip()
+    if normalized == "":
+        return None
+    return normalized
 
 
 def _parse_bool(raw_value: str, key: str) -> bool:

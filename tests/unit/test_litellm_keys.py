@@ -17,17 +17,24 @@ from dokploy_wizard.litellm.admin import (
 )
 from dokploy_wizard.state import (
     LITELLM_GENERATED_KEYS_FILE,
+    SEAWEEDFS_GENERATED_SECRETS_FILE,
     SURFSENSE_GENERATED_SECRETS_FILE,
     LiteLLMGeneratedKeys,
     RawEnvInput,
+    SeaweedFsGeneratedSecrets,
     SurfSenseGeneratedSecrets,
     ensure_litellm_generated_keys,
+    ensure_seaweedfs_generated_secrets,
     ensure_surfsense_generated_secrets,
     resolve_desired_state,
     write_litellm_generated_keys,
+    write_seaweedfs_generated_secrets,
     write_surfsense_generated_secrets,
 )
-from dokploy_wizard.state.models import SURFSENSE_GENERATED_SECRET_PREFIXES
+from dokploy_wizard.state.models import (
+    SEAWEEDFS_GENERATED_SECRET_PREFIXES,
+    SURFSENSE_GENERATED_SECRET_PREFIXES,
+)
 
 _MANAGED_METADATA = {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"}
 _EXPECTED_LITELLM_CONSUMERS = {
@@ -45,6 +52,7 @@ _EXPECTED_SURFSENSE_GENERATED_SECRET_NAMES = {
     "secret_key",
     "zero_admin_password",
 }
+_EXPECTED_SEAWEEDFS_GENERATED_SECRET_NAMES = {"access_key", "secret_key"}
 
 
 def _raw_env() -> RawEnvInput:
@@ -250,6 +258,41 @@ def test_surfsense_generated_app_secrets_are_state_backed_and_repaired(
     assert (state_dir / SURFSENSE_GENERATED_SECRETS_FILE).stat().st_mode & 0o777 == 0o600
 
 
+def test_seaweedfs_generated_s3_credentials_are_state_backed_and_repaired(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    install_env = tmp_path / ".install.env"
+    install_env.write_text("STACK_NAME=wizard-stack\nROOT_DOMAIN=example.com\n", encoding="utf-8")
+    original_install_env = install_env.read_text(encoding="utf-8")
+
+    first_secrets = ensure_seaweedfs_generated_secrets(state_dir)
+    second_secrets = ensure_seaweedfs_generated_secrets(state_dir)
+
+    assert first_secrets == second_secrets
+    assert install_env.read_text(encoding="utf-8") == original_install_env
+    assert set(SEAWEEDFS_GENERATED_SECRET_PREFIXES) == _EXPECTED_SEAWEEDFS_GENERATED_SECRET_NAMES
+    assert first_secrets.access_key.startswith(
+        f"{SEAWEEDFS_GENERATED_SECRET_PREFIXES['access_key']}-"
+    )
+    assert first_secrets.secret_key.startswith(
+        f"{SEAWEEDFS_GENERATED_SECRET_PREFIXES['secret_key']}-"
+    )
+    assert (state_dir / SEAWEEDFS_GENERATED_SECRETS_FILE).stat().st_mode & 0o777 == 0o600
+
+    legacy_secrets = SeaweedFsGeneratedSecrets(
+        format_version=1,
+        access_key="seaweedfs-access-key-existing",
+        secret_key="seaweedfs-secret-key-existing",
+    )
+    write_seaweedfs_generated_secrets(state_dir, legacy_secrets)
+
+    repaired_secrets = ensure_seaweedfs_generated_secrets(state_dir)
+
+    assert repaired_secrets == legacy_secrets
+    assert install_env.read_text(encoding="utf-8") == original_install_env
+    assert (state_dir / SEAWEEDFS_GENERATED_SECRETS_FILE).stat().st_mode & 0o777 == 0o600
+
 class FakeLiteLLMAdminApi:
     def __init__(
         self,
@@ -368,7 +411,7 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
                 team_id="team-my-farm-advisor",
                 team_alias="my-farm-advisor",
                 models=(
-                    "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                    "local-model.internal/unsloth-active",
                     "openrouter/anthropic/claude-3.5-sonnet",
                 ),
             ),
@@ -379,7 +422,7 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
                 key_alias="my-farm-advisor",
                 team_id="team-my-farm-advisor",
                 models=(
-                    "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                    "local-model.internal/unsloth-active",
                     "openrouter/anthropic/claude-3.5-sonnet",
                 ),
             ),
@@ -394,11 +437,11 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
         },
         consumer_model_allowlists={
             "my-farm-advisor": (
-                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             ),
             "coder-kdense": (
-                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             ),
         },
@@ -410,7 +453,7 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
             key_alias="coder-kdense",
             team_id="team-coder-kdense",
             models=(
-                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             ),
             metadata={"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
@@ -419,11 +462,11 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
     assert reconciled["my-farm-advisor"].key == "existing-my-farm-key"
     assert reconciled["coder-kdense"].key == "new-coder-kdense-key"
     assert api.visible_models_for_key("my-farm-advisor") == (
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         "openrouter/anthropic/claude-3.5-sonnet",
     )
     assert api.visible_models_for_key("coder-kdense") == (
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         "openrouter/anthropic/claude-3.5-sonnet",
     )
 
@@ -437,7 +480,7 @@ def test_reconcile_virtual_keys_surfaces_key_creation_failures() -> None:
             generated_keys={"coder-kdense": "new-coder-kdense-key"},
             consumer_model_allowlists={
                 "coder-kdense": (
-                    "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                    "local-model.internal/unsloth-active",
                     "openrouter/anthropic/claude-3.5-sonnet",
                 )
             },
@@ -463,7 +506,7 @@ def test_reconcile_virtual_keys_creates_model_restricted_surfsense_key_without_p
             "surfsense": (
                 "openrouter/hunter-alpha",
                 "openrouter/hunter-alpha",
-                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "local-model.internal/unsloth-active",
             )
         },
     )
@@ -472,7 +515,7 @@ def test_reconcile_virtual_keys_creates_model_restricted_surfsense_key_without_p
         LiteLLMTeamRecord(
             team_id="team-surfsense",
             team_alias="surfsense",
-            models=("openrouter/hunter-alpha", "tuxdesktop.tailb12aa5.ts.net/unsloth-active"),
+            models=("openrouter/hunter-alpha", "local-model.internal/unsloth-active"),
             metadata={"consumer": "surfsense", "managed_by": "dokploy-wizard"},
         )
     ]
@@ -481,7 +524,7 @@ def test_reconcile_virtual_keys_creates_model_restricted_surfsense_key_without_p
             key="sk-litellm-surfsense-test",
             key_alias="surfsense",
             team_id="team-surfsense",
-            models=("openrouter/hunter-alpha", "tuxdesktop.tailb12aa5.ts.net/unsloth-active"),
+            models=("openrouter/hunter-alpha", "local-model.internal/unsloth-active"),
             metadata={"consumer": "surfsense", "managed_by": "dokploy-wizard"},
         )
     ]
@@ -498,7 +541,7 @@ def test_reconcile_virtual_keys_recreates_managed_existing_key_when_generated_va
             LiteLLMTeamRecord(
                 team_id="team-my-farm-advisor",
                 team_alias="my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
@@ -507,7 +550,7 @@ def test_reconcile_virtual_keys_recreates_managed_existing_key_when_generated_va
                 key="old-my-farm-key",
                 key_alias="my-farm-advisor",
                 team_id="team-my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
@@ -517,7 +560,7 @@ def test_reconcile_virtual_keys_recreates_managed_existing_key_when_generated_va
     reconciled = manager.reconcile_virtual_keys(
         generated_keys={"my-farm-advisor": "new-my-farm-key"},
         consumer_model_allowlists={
-            "my-farm-advisor": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",)
+            "my-farm-advisor": ("local-model.internal/unsloth-active",)
         },
     )
 
@@ -525,14 +568,14 @@ def test_reconcile_virtual_keys_recreates_managed_existing_key_when_generated_va
     assert api.updated_keys == []
     assert reconciled["my-farm-advisor"].key == "new-my-farm-key"
     assert api.visible_models_for_key("my-farm-advisor") == (
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
     )
     assert api.created_keys == [
         LiteLLMVirtualKeyRecord(
             key="new-my-farm-key",
             key_alias="my-farm-advisor",
             team_id="team-my-farm-advisor",
-            models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+            models=("local-model.internal/unsloth-active",),
             metadata=_MANAGED_METADATA,
         )
     ]
@@ -545,7 +588,7 @@ def test_reconcile_virtual_keys_updates_managed_scope_drift_on_existing_accepted
             LiteLLMTeamRecord(
                 team_id="team-my-farm-advisor",
                 team_alias="my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
@@ -554,7 +597,7 @@ def test_reconcile_virtual_keys_updates_managed_scope_drift_on_existing_accepted
                 key="old-my-farm-key",
                 key_alias="my-farm-advisor",
                 team_id="team-my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
@@ -565,7 +608,7 @@ def test_reconcile_virtual_keys_updates_managed_scope_drift_on_existing_accepted
         generated_keys={"my-farm-advisor": "new-my-farm-key"},
         consumer_model_allowlists={
             "my-farm-advisor": (
-                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             )
         },
@@ -579,7 +622,7 @@ def test_reconcile_virtual_keys_updates_managed_scope_drift_on_existing_accepted
             key_alias="my-farm-advisor",
             team_id="team-my-farm-advisor",
             models=(
-                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             ),
             metadata=_MANAGED_METADATA,
@@ -594,7 +637,7 @@ def test_reconcile_virtual_keys_fails_closed_for_unmanaged_key_value_drift() -> 
             LiteLLMTeamRecord(
                 team_id="team-my-farm-advisor",
                 team_alias="my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
@@ -603,7 +646,7 @@ def test_reconcile_virtual_keys_fails_closed_for_unmanaged_key_value_drift() -> 
                 key="old-my-farm-key",
                 key_alias="my-farm-advisor",
                 team_id="team-my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
             ),
         ),
     )
@@ -613,7 +656,7 @@ def test_reconcile_virtual_keys_fails_closed_for_unmanaged_key_value_drift() -> 
         manager.reconcile_virtual_keys(
             generated_keys={"my-farm-advisor": "new-my-farm-key"},
             consumer_model_allowlists={
-                "my-farm-advisor": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",)
+                "my-farm-advisor": ("local-model.internal/unsloth-active",)
             },
         )
 
@@ -628,7 +671,7 @@ def test_reconcile_virtual_keys_updates_managed_team_and_key_model_drift_without
             LiteLLMTeamRecord(
                 team_id="team-my-farm-advisor",
                 team_alias="my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
@@ -637,7 +680,7 @@ def test_reconcile_virtual_keys_updates_managed_team_and_key_model_drift_without
                 key="existing-my-farm-key",
                 key_alias="my-farm-advisor",
                 team_id="team-my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
@@ -648,7 +691,7 @@ def test_reconcile_virtual_keys_updates_managed_team_and_key_model_drift_without
         generated_keys={"my-farm-advisor": "existing-my-farm-key"},
         consumer_model_allowlists={
             "my-farm-advisor": (
-                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             )
         },
@@ -659,7 +702,7 @@ def test_reconcile_virtual_keys_updates_managed_team_and_key_model_drift_without
             team_id="team-my-farm-advisor",
             team_alias="my-farm-advisor",
             models=(
-                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             ),
             metadata=_MANAGED_METADATA,
@@ -671,7 +714,7 @@ def test_reconcile_virtual_keys_updates_managed_team_and_key_model_drift_without
             key_alias="my-farm-advisor",
             team_id="team-my-farm-advisor",
             models=(
-                "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             ),
             metadata=_MANAGED_METADATA,
@@ -686,7 +729,7 @@ def test_reconcile_virtual_keys_fails_closed_for_unmanaged_team_model_drift() ->
             LiteLLMTeamRecord(
                 team_id="team-my-farm-advisor",
                 team_alias="my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
             ),
         ),
         keys=(
@@ -694,7 +737,7 @@ def test_reconcile_virtual_keys_fails_closed_for_unmanaged_team_model_drift() ->
                 key="existing-my-farm-key",
                 key_alias="my-farm-advisor",
                 team_id="team-my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
@@ -706,7 +749,7 @@ def test_reconcile_virtual_keys_fails_closed_for_unmanaged_team_model_drift() ->
             generated_keys={"my-farm-advisor": "existing-my-farm-key"},
             consumer_model_allowlists={
                 "my-farm-advisor": (
-                    "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                    "local-model.internal/unsloth-active",
                     "openrouter/anthropic/claude-3.5-sonnet",
                 )
             },
@@ -719,7 +762,7 @@ def test_reconcile_virtual_keys_fails_closed_for_mismatched_managed_key_metadata
             LiteLLMTeamRecord(
                 team_id="team-my-farm-advisor",
                 team_alias="my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
@@ -728,7 +771,7 @@ def test_reconcile_virtual_keys_fails_closed_for_mismatched_managed_key_metadata
                 key="existing-my-farm-key",
                 key_alias="my-farm-advisor",
                 team_id="team-my-farm-advisor",
-                models=("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+                models=("local-model.internal/unsloth-active",),
                 metadata={"consumer": "openclaw", "managed_by": "dokploy-wizard"},
             ),
         ),
@@ -740,7 +783,7 @@ def test_reconcile_virtual_keys_fails_closed_for_mismatched_managed_key_metadata
             generated_keys={"my-farm-advisor": "existing-my-farm-key"},
             consumer_model_allowlists={
                 "my-farm-advisor": (
-                    "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+                    "local-model.internal/unsloth-active",
                     "openrouter/anthropic/claude-3.5-sonnet",
                 )
             },

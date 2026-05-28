@@ -280,3 +280,18 @@ def test_verbose_progress_output_redacts_password_env_payload_and_docker_pat() -
     assert docker_pat not in output
     assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in output
     assert "DOCKER_PAT=<REDACTED>" in output
+
+
+def test_non_verbose_progress_output_suppresses_remote_stream_lines() -> None:
+    remote_cli = import_remote_cli_module()
+    stream = io.StringIO()
+    reporter = remote_cli._RemoteProgressReporter(
+        verbose=False,
+        password="super-secret-password",
+        stream=stream,
+    )
+
+    reporter.remote_output("mutate-install", "progress", "still running mutate-install")
+    reporter.remote_output("mutate-install", "stdout", "normal install output")
+
+    assert stream.getvalue() == ""

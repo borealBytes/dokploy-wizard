@@ -49,6 +49,7 @@ _LITELLM_ADMIN_SUBDOMAIN_ENV_KEY = "LITELLM_ADMIN_SUBDOMAIN"
 _LITELLM_ADMIN_DEFAULT_SUBDOMAIN = "litellm"
 _LITELLM_INTERNAL_PORT = 4000
 _DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_CLOUDFLARE_TUNNEL_CNAME_SUFFIX = ".cfargotunnel.com"
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,7 @@ def reconcile_networking(
         zone_id=credentials.zone_id,
         dns_target=dns_target,
         hostnames=tuple(sorted(_public_hostnames(desired_state).values())),
+        degradable_conflict_hostnames=_degradable_dns_conflict_hostnames(desired_state),
         ownership_ledger=ownership_ledger,
         backend=backend,
     )
@@ -642,6 +644,7 @@ def _resolve_dns_records(
     zone_id: str,
     dns_target: str,
     hostnames: tuple[str, ...],
+    degradable_conflict_hostnames: set[str],
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
 ) -> tuple[tuple[PlannedDnsRecord, ...], dict[str, str], tuple[str, ...]]:
@@ -686,7 +689,7 @@ def _resolve_dns_records(
         existing_records = backend.list_dns_records(
             zone_id,
             hostname=hostname,
-            record_type="CNAME",
+            record_type=None,
             content=None,
         )
         compatible_record = _select_compatible_record(existing_records, dns_target)
@@ -703,6 +706,45 @@ def _resolve_dns_records(
             resource_ids[hostname] = compatible_record.record_id
             continue
         if existing_records:
+            if hostname in degradable_conflict_hostnames:
+                notes.append(
+                    "Skipped optional Coder DNS for "
+                    f"'{hostname}' because Cloudflare already has an incompatible CNAME. "
+                    "The wizard did not adopt, overwrite, delete, or retarget that unowned "
+                    "record; explicit service hostnames continue to be reconciled. "
+                    "Coder public URLs that depend on this hostname remain unavailable until "
+                    "an operator removes or retargets the conflicting CNAME."
+                )
+                continue
+            stale_tunnel_record = _select_safe_stale_tunnel_record(existing_records, dns_target)
+            if stale_tunnel_record is not None:
+                if dry_run:
+                    updated_record = CloudflareDnsRecord(
+                        record_id=stale_tunnel_record.record_id,
+                        name=hostname,
+                        record_type="CNAME",
+                        content=dns_target,
+                        proxied=True,
+                    )
+                else:
+                    updated_record = backend.update_dns_record(
+                        zone_id,
+                        record_id=stale_tunnel_record.record_id,
+                        hostname=hostname,
+                        content=dns_target,
+                        proxied=True,
+                    )
+                planned_records.append(
+                    PlannedDnsRecord(
+                        action="update_existing",
+                        hostname=hostname,
+                        record_id=updated_record.record_id,
+                        content=updated_record.content,
+                        proxied=updated_record.proxied,
+                    )
+                )
+                resource_ids[hostname] = updated_record.record_id
+                continue
             raise CloudflareError(
                 f"Cloudflare already has a conflicting CNAME record for '{hostname}' in the "
                 "configured zone."
@@ -741,9 +783,19 @@ def _resolve_dns_records(
     return tuple(planned_records), resource_ids, tuple(notes)
 
 
+def _degradable_dns_conflict_hostnames(desired_state: DesiredState) -> set[str]:
+    if "coder" not in desired_state.enabled_packs:
+        return set()
+    degradable_hostnames: set[str] = set()
+    wildcard_hostname = desired_state.hostnames.get("coder-wildcard")
+    if wildcard_hostname is not None:
+        degradable_hostnames.add(wildcard_hostname)
+    return degradable_hostnames
+
+
 def _derive_outcome(tunnel_action: str, dns_records: tuple[PlannedDnsRecord, ...]) -> str:
     actions = {tunnel_action, *(record.action for record in dns_records)}
-    if "create" in actions:
+    if "create" in actions or "update_existing" in actions:
         return "applied"
     return "already_present"
 
@@ -919,10 +971,27 @@ def _resolve_connector(
 def _select_compatible_record(
     records: tuple[CloudflareDnsRecord, ...], dns_target: str
 ) -> CloudflareDnsRecord | None:
+    if len(records) != 1:
+        return None
     for record in records:
         if record.content == dns_target and record.proxied and record.record_type == "CNAME":
             return record
     return None
+
+
+def _select_safe_stale_tunnel_record(
+    records: tuple[CloudflareDnsRecord, ...], dns_target: str
+) -> CloudflareDnsRecord | None:
+    if len(records) != 1:
+        return None
+    record = records[0]
+    if record.record_type != "CNAME":
+        return None
+    if not record.content.lower().endswith(_CLOUDFLARE_TUNNEL_CNAME_SUFFIX):
+        return None
+    if record.content == dns_target:
+        return None
+    return record
 
 
 def _find_owned_tunnel(ownership_ledger: OwnershipLedger, account_id: str) -> OwnedResource | None:

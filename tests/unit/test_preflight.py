@@ -35,7 +35,11 @@ def test_supported_core_host_passes_preflight_with_local_advisory() -> None:
     assert host_facts.cpu_count == 2
     assert host_facts.memory_gb == 4
     assert host_facts.disk_gb == 40
-    assert str(host_facts.disk_path) in {"/", "/var/lib/docker"}
+    assert str(host_facts.disk_path) in {
+        "/",
+        "/var/lib/docker",
+        "/var/snap/docker/common/var-lib-docker",
+    }
     assert tuple((check.name, check.status, check.detail) for check in report.checks[:3]) == (
         ("os_support", "pass", "Ubuntu 24.04 host detected."),
         ("docker_installed", "pass", "Docker CLI is available."),

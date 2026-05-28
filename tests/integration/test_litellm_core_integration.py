@@ -292,7 +292,7 @@ def _litellm_shared_core_backend(
 
 def _litellm_route_env(**overrides: str) -> dict[str, str]:
     values = {
-        "LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
+        "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
         "LITELLM_LOCAL_MODEL": "unsloth-active",
         "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
         "LITELLM_OPENCODE_GO_API_KEY": "sk-opencode-go-key",
@@ -340,7 +340,7 @@ def test_build_litellm_config_integrates_all_supported_provider_types() -> None:
     )
 
     assert _model_names(config) == [
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
         "openrouter/anthropic/claude-3.7-sonnet",
         "nvidia/kimi-k2.5",
@@ -351,9 +351,9 @@ def test_build_litellm_config_integrates_all_supported_provider_types() -> None:
         entry["model_name"]: entry
         for entry in cast(list[dict[str, Any]], config["model_list"])
     }
-    assert entries["tuxdesktop.tailb12aa5.ts.net/unsloth-active"]["litellm_params"] == {
+    assert entries["local-model.internal/unsloth-active"]["litellm_params"] == {
         "model": "openai/unsloth-active",
-        "api_base": "http://tuxdesktop.tailb12aa5.ts.net:61434/v1",
+        "api_base": "http://local-model.internal:61434/v1",
         "api_key": "sk-no-key-required",
     }
     assert entries["opencode-go/minimax-m2.7"]["litellm_params"] == {
@@ -397,7 +397,7 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
     )
 
     shared_models = (
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
         "openrouter/anthropic/claude-3.7-sonnet",
         "openrouter/hunter-alpha",
@@ -406,7 +406,7 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
-        "dokploy-ai": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+        "dokploy-ai": ("local-model.internal/unsloth-active",),
         "my-farm-advisor": (*shared_models, "nvidia/kimi-k2.5"),
         "openclaw": shared_models,
         "surfsense": shared_models,
@@ -433,7 +433,7 @@ def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases
     )
 
     shared_models = (
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
         "openrouter/anthropic/claude-3.7-sonnet",
         "openrouter/google/gemma-4-31b-it:free",
@@ -443,7 +443,7 @@ def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
-        "dokploy-ai": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+        "dokploy-ai": ("local-model.internal/unsloth-active",),
         "my-farm-advisor": shared_models,
         "openclaw": shared_models,
         "surfsense": shared_models,
@@ -464,7 +464,7 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
     )
 
     shared_models = (
-        "tuxdesktop.tailb12aa5.ts.net/unsloth-active",
+        "local-model.internal/unsloth-active",
         *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
         "openrouter/anthropic/claude-3.7-sonnet",
         "openrouter/hunter-alpha",
@@ -473,7 +473,7 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
-        "dokploy-ai": ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",),
+        "dokploy-ai": ("local-model.internal/unsloth-active",),
         "my-farm-advisor": shared_models,
         "openclaw": shared_models,
         "surfsense": shared_models,
@@ -504,7 +504,7 @@ def test_litellm_admin_reconciliation_adopts_live_managed_keys_into_generated_st
         plan=plan,
     )
     generated_keys = _generated_keys_for_consumers(tuple(allowlists))
-    stale_models = ("tuxdesktop.tailb12aa5.ts.net/unsloth-active",)
+    stale_models = ("local-model.internal/unsloth-active",)
     admin_api = RecordingManagedDriftLiteLLMAdminApi(
         teams={
             consumer: LiteLLMTeamRecord(
