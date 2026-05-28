@@ -392,6 +392,81 @@ def test_modify_disabling_headscale_is_supported_via_networking_only() -> None:
     assert plan.phases_to_run == ("networking",)
 
 
+def test_modify_ignores_ephemeral_docker_auth_key_differences() -> None:
+    existing_raw = _raw({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOCKER_USERNAME": "operator",
+            "DOCKER_PAT": "temporary-token",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "noop"
+    assert plan.phases_to_run == ()
+    assert plan.start_phase is None
+    assert plan.raw_equivalent is True
+    assert plan.desired_equivalent is True
+
+
+def test_modify_ignores_desired_only_dokploy_api_url_drift() -> None:
+    raw = _raw({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})
+    requested_desired = resolve_desired_state(raw)
+    existing_desired = replace(
+        requested_desired,
+        dokploy_api_url="https://dokploy.previous.example.test/api",
+    )
+    requested_desired = replace(
+        requested_desired,
+        dokploy_api_url="https://dokploy.current.example.test/api",
+    )
+
+    plan = classify_modify_request(
+        existing_raw=raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "noop"
+    assert plan.phases_to_run == ()
+    assert plan.start_phase is None
+    assert plan.raw_equivalent is True
+    assert plan.desired_equivalent is True
+
+
 def test_modify_rejects_unmodeled_env_changes() -> None:
     existing_raw = _raw({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})
     requested_raw = _raw(
