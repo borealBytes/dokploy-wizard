@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from dokploy_wizard.proof.model_sync_results import ProofTransport
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuardError,
     atomic_write_bytes,
@@ -18,19 +19,15 @@ from dokploy_wizard.state import StateValidationError, parse_env_file, resolve_d
 
 _FILE_MODE: Final = 0o600
 _DIRECTORY_MODE: Final = 0o700
-_NVIDIA_KEYS: Final = frozenset(
-    {"LITELLM_NVIDIA_API_KEY", "LITELLM_NVIDIA_BASE_URL", "LITELLM_NVIDIA_MODELS"}
-)
-
-
+_NVIDIA_KEYS: Final = frozenset({
+    "LITELLM_NVIDIA_API_KEY", "LITELLM_NVIDIA_BASE_URL", "LITELLM_NVIDIA_MODELS"
+})
 @dataclass(frozen=True, slots=True)
 class EnvPreparationError(RuntimeError):
     detail: str
 
     def __str__(self) -> str:
         return self.detail
-
-
 @dataclass(frozen=True, slots=True)
 class PreparedEnv:
     env_file: Path
@@ -61,6 +58,25 @@ class ProofNamespace:
             "stack_name": self.stack_name,
             "tailscale": list(self.tailscale),
         }
+
+
+def resolve_proof_transport(env_file: Path) -> ProofTransport:
+    """Load only collector credentials without serializing them into proof namespaces."""
+    raw_env = parse_env_file(env_file)
+    values = raw_env.values
+    desired = resolve_desired_state(raw_env)
+    return ProofTransport(
+        cloudflare_account_id=values.get("CLOUDFLARE_ACCOUNT_ID") or None,
+        cloudflare_zone_id=values.get("CLOUDFLARE_ZONE_ID") or None,
+        cloudflare_zone_name=desired.root_domain,
+        cloudflare_token=values.get("CLOUDFLARE_API_TOKEN") or None,
+        dokploy_api_url=values.get("DOKPLOY_API_URL") or None,
+        dokploy_api_key=values.get("DOKPLOY_API_KEY") or None,
+        coder_email=values.get("DOKPLOY_ADMIN_EMAIL") or None,
+        coder_hostname=desired.hostnames.get("coder"),
+        coder_password=values.get("DOKPLOY_ADMIN_PASSWORD") or None,
+        tailscale_required=desired.tailscale_hostname is not None,
+    )
 
 
 def prepare_proof_env(*, env_file: Path, backup_path: Path, guard_path: Path) -> PreparedEnv:
@@ -111,12 +127,8 @@ def resolve_proof_namespace(env_file: Path) -> ProofNamespace:
         if service is not None
     )
     templates = (
-        "ubuntu-vscode",
-        "ubuntu-vscode-opencode-web",
-        "ubuntu-vscode-openwork",
-        "ubuntu-vscode-kdense-byok",
-        "ubuntu-vscode-hermes",
-        "ubuntu-vscode-pi-web",
+        "ubuntu-vscode", "ubuntu-vscode-opencode-web", "ubuntu-vscode-openwork",
+        "ubuntu-vscode-kdense-byok", "ubuntu-vscode-hermes", "ubuntu-vscode-pi-web",
     )
     return ProofNamespace(
         stack_name=stack,
