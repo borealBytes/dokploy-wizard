@@ -253,7 +253,14 @@ def _cloudflare_list(items: list[dict[str, Any]], *, page: int = 1, pages: int =
 
 
 def _wire_fixture(
-    *, empty: bool = False, many_coder: bool = False, matching: bool = False, failure: str | None = None
+    *,
+    empty: bool = False,
+    many_coder: bool = False,
+    matching: bool = False,
+    failure: str | None = None,
+    template_count: int | None = None,
+    template_malformed: bool = False,
+    template_requests: list[str] | None = None,
 ) -> Any:
     def open_request(request: Any, *, timeout: int) -> _WireResponse:
         assert timeout <= 30
@@ -328,7 +335,20 @@ def _wire_fixture(
             return _WireResponse({"session_token": "SECRET-CODER-SESSION"})
         if url.endswith("/api/v2/users/me"):
             return _WireResponse({"id": "coder-user"})
-        if "/api/v2/templates?" in url:
+        if "/api/v2/templates" in url:
+            if template_requests is not None:
+                template_requests.append(url)
+            if "?" in url:
+                return _WireResponse({"unexpected_template_query": True})
+            if template_malformed:
+                return _WireResponse({"templates": []})
+            if template_count is not None:
+                return _WireResponse(
+                    [
+                        {"id": f"template-{index}", "name": f"template-{index}"}
+                        for index in range(template_count)
+                    ]
+                )
             if failure == "coder-partial" and "offset=0" in url:
                 return _WireResponse(
                     [{"id": f"template-{index}", "name": f"template-{index}"} for index in range(100)]
@@ -336,11 +356,10 @@ def _wire_fixture(
             if failure == "coder-partial":
                 raise error.URLError("second page unavailable")
             if many_coder:
-                offset = 100 if "offset=100" in url else 0
                 return _WireResponse(
                     [
                         {"id": f"template-{index}", "name": f"template-{index}"}
-                        for index in range(101)[offset : offset + 100]
+                        for index in range(101)
                     ]
                 )
             templates = [{"id": "template-other", "name": "other-template"}]
@@ -384,6 +403,9 @@ def _collect_planes(
     matching: bool = False,
     failure: str | None = None,
     missing_tailscale: bool = False,
+    template_count: int | None = None,
+    template_malformed: bool = False,
+    template_requests: list[str] | None = None,
 ) -> dict[str, Any]:
     scope: dict[str, Any] = {"__name__": "fixture"}
     exec(model_sync_results.PREFLIGHT_SCRIPT, scope)
@@ -398,6 +420,9 @@ def _collect_planes(
         many_coder=many_coder,
         matching=matching,
         failure=failure,
+        template_count=template_count,
+        template_malformed=template_malformed,
+        template_requests=template_requests,
     )
     scope["_which"] = lambda command: (
         None
@@ -470,7 +495,10 @@ def test_authoritative_collectors_report_matching_and_nonmatching_resources() ->
 
 
 def test_coder_preflight_collects_all_identifiers_beyond_first_page() -> None:
-    resources = _collect_planes(many_coder=True, matching=True)["coder"]["resources"]
+    template_requests: list[str] = []
+    resources = _collect_planes(
+        many_coder=True, matching=True, template_requests=template_requests
+    )["coder"]["resources"]
 
     assert {item["id"] for item in resources if item["kind"] == "template"} == {
         f"template-{index}" for index in range(101)
@@ -481,6 +509,38 @@ def test_coder_preflight_collects_all_identifiers_beyond_first_page() -> None:
     assert {item["id"] for item in resources if item["kind"] == "secret"} == {
         f"secret-{index}" for index in range(101)
     }
+    assert template_requests == ["https://coder.example.test/api/v2/templates"]
+
+
+@pytest.mark.parametrize("template_count", [100, 101])
+def test_coder_preflight_accepts_unpaginated_template_arrays(
+    template_count: int,
+) -> None:
+    template_requests: list[str] = []
+
+    resources = _collect_planes(
+        matching=True,
+        template_count=template_count,
+        template_requests=template_requests,
+    )["coder"]["resources"]
+
+    assert {item["id"] for item in resources if item["kind"] == "template"} == {
+        f"template-{index}" for index in range(template_count)
+    }
+    assert template_requests == ["https://coder.example.test/api/v2/templates"]
+
+
+def test_coder_preflight_fails_closed_for_malformed_template_response() -> None:
+    template_requests: list[str] = []
+
+    planes = _collect_planes(
+        matching=True,
+        template_malformed=True,
+        template_requests=template_requests,
+    )
+
+    assert planes["coder"] == {"resources": [], "state": "error"}
+    assert template_requests == ["https://coder.example.test/api/v2/templates"]
 
 
 @pytest.mark.parametrize(
@@ -598,7 +658,9 @@ def test_preflight_script_rejects_malformed_or_unknown_transport_without_secret_
     assert b"SECRET-INPUT-SENTINEL" not in result.stdout + result.stderr
 
 
-def test_coder_pagination_collects_every_two_page_identifier(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_coder_inventory_paginates_workspace_build_and_secret_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     templates: list[dict[str, Any]] = [
         {
             "active_version_id": f"version-{index}",
@@ -636,10 +698,15 @@ def test_coder_pagination_collects_every_two_page_identifier(monkeypatch: pytest
         for index in range(101)
     ]
 
+    template_requests: list[str] = []
+
     def api(_hostname: str, _token: str | None, path: str, _body: dict[str, str] | None = None) -> Any:
         offset = 100 if "offset=100" in path else 0
         if path.startswith("/api/v2/templates"):
-            return templates[offset : offset + 100]
+            template_requests.append(path)
+            if path != "/api/v2/templates":
+                raise AssertionError(path)
+            return templates
         if path.startswith("/api/v2/workspaces?"):
             return {"count": len(workspaces), "workspaces": workspaces[offset : offset + 100]}
         if "/builds?" in path:
@@ -670,6 +737,7 @@ def test_coder_pagination_collects_every_two_page_identifier(monkeypatch: pytest
         for item in page["items"]
     } == {f"build-{index}" for index in range(101)}
     assert {item["id"] for item in captured_secrets} == {f"secret-{index}" for index in range(101)}
+    assert template_requests == ["/api/v2/templates"]
 
 
 def _snapshot_wire(*, omit_template: bool = False, malformed_build: bool = False) -> str:
