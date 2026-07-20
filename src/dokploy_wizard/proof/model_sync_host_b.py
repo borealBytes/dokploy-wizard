@@ -125,6 +125,9 @@ class _NoRedirect(request.HTTPRedirectHandler):
     def redirect_request(self, _req: request.Request, _fp: IO[bytes], _code: int, _msg: str, _headers: HTTPMessage, _new_url: str) -> None:
         return None
 def _templates(hostname: str, token: str) -> list[dict[str, JsonValue]]:
+    raw = _api(hostname, token, "/api/v2/templates")
+    if not isinstance(raw, list):
+        raise ValueError("Coder template API returned an invalid response")
     return [
         {
             "id": _field(item, "id"),
@@ -133,12 +136,7 @@ def _templates(hostname: str, token: str) -> list[dict[str, JsonValue]]:
             "active_version_name": _field(item, "active_version_name"),
             "rendered_source_sha256": _sha(item),
         }
-        for _, page in collect_coder_array_pages(
-            lambda path: _api(hostname, token, path),
-            "/api/v2/templates?limit=100&offset={offset}",
-            "template",
-        )
-        for item in page
+        for item in raw
     ]
 def _workspaces(hostname: str, token: str, container: str, templates: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
     template_names = {str(item["id"]): str(item["name"]) for item in templates}
