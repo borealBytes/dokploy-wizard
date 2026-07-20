@@ -12,7 +12,7 @@ from dokploy_wizard.proof.model_sync_artifacts import (
     finalize_capture_outputs,
     protected_manifest_bytes,
 )
-from dokploy_wizard.proof.model_sync_baseline import CapturedBaseline, canonical_sha256
+from dokploy_wizard.proof.model_sync_baseline import CapturedBaseline
 from dokploy_wizard.proof.model_sync_env import PreparedEnv, restore_proof_env
 from dokploy_wizard.proof.model_sync_remote import RemoteProbe
 from dokploy_wizard.proof.model_sync_results import build_result
@@ -66,15 +66,15 @@ def restore_after_interrupt(*, prepared: PreparedEnv, guard_path: Path, claim: G
 
 def recover_failed_proof(*, prepared: PreparedEnv, guard_path: Path, claim: GuardClaim) -> None:
     """Restore once after a timeout or signal and leave repeated recovery as a no-op."""
+    restore_proof_env(prepared=prepared, guard_path=guard_path)
     guard = read_abort_guard(guard_path)
     if guard.claimant_kind == "process":
         transfer_abort_guard_to_plan(guard_path, claim_token=claim.token)
-    restore_proof_env(prepared=prepared, guard_path=guard_path)
 
 
 def complete_resumable_step(*, prepared: PreparedEnv, guard_path: Path, claim: GuardClaim) -> None:
-    """Restore exact env bytes, then leave the successful proof plan-owned and resumable."""
-    restore_proof_env(prepared=prepared, guard_path=guard_path)
+    """Preserve proof bytes and backup while returning successful work to plan ownership."""
+    del prepared
     transfer_abort_guard_to_plan(guard_path, claim_token=claim.token)
 
 
@@ -121,7 +121,7 @@ def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
             "host_b_preflight_sha256": sha256_bytes(host_b_bytes),
             "host_identities_distinct": True,
             "host_architectures_equal": True,
-            "baseline_sha256": canonical_sha256(inputs.baseline.payload),
+            "baseline_sha256": sha256_bytes(baseline_bytes),
             "protected_artifacts_before_path": str(manifest_path),
             "protected_artifacts_before_sha256": sha256_bytes(manifest_bytes),
             "coder_secret_inventory_sha256": inputs.baseline.coder_secret_inventory_sha256,
