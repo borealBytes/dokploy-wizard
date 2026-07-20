@@ -564,6 +564,71 @@ def test_create_repo_archive_excludes_local_env_backups(tmp_path: Path) -> None:
     assert ".fresh-vps-validation.env.backup" not in members
 
 
+def test_create_repo_archive_characterizes_safe_env_and_regular_source_handling(
+    tmp_path: Path,
+) -> None:
+    remote_cli = import_remote_cli_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "src").mkdir()
+    (repo_root / "src" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo_root / ".install.env").write_text("TOP_SECRET=value\n", encoding="utf-8")
+    (repo_root / ".install.env.example").write_text("TOP_SECRET=example\n", encoding="utf-8")
+
+    archive_path = tmp_path / "repo.tar.gz"
+
+    remote_cli._create_repo_archive(repo_root=repo_root, destination=archive_path)
+
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members = set(archive.getnames())
+
+    assert "src/module.py" in members
+    assert ".install.env.example" in members
+    assert ".install.env" not in members
+
+
+def test_create_repo_archive_excludes_task_one_untracked_proof_drift(tmp_path: Path) -> None:
+    remote_cli = import_remote_cli_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".codegraph").mkdir()
+    (repo_root / ".codegraph" / "index.sqlite").write_text("drift\n", encoding="utf-8")
+    (repo_root / ".omo").mkdir()
+    (repo_root / ".omo" / "plan.json").write_text("drift\n", encoding="utf-8")
+    (repo_root / "uv.lock").write_text("drift\n", encoding="utf-8")
+    (repo_root / "src.py").write_text("safe\n", encoding="utf-8")
+
+    archive_path = tmp_path / "repo.tar.gz"
+    remote_cli._create_repo_archive(repo_root=repo_root, destination=archive_path)
+
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members = set(archive.getnames())
+
+    assert "src.py" in members
+    assert ".codegraph/index.sqlite" not in members
+    assert ".omo/plan.json" not in members
+    assert "uv.lock" not in members
+
+
+def test_remote_runtime_hydrates_connection_from_selected_env_file_unchanged(
+    tmp_path: Path,
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = tmp_path / "install.env"
+    env_file.write_text(
+        "VPS_HOST=baseline.example.com\nVPS_ROOT_PASSWORD=baseline-password\n",
+        encoding="utf-8",
+    )
+    parser = remote_cli.build_parser()
+    args = parser.parse_args(["inspect-state", "--env-file", str(env_file)])
+
+    remote_cli._validate_args(parser, args)
+    remote_cli._validate_runtime_args(parser, args)
+
+    assert args.host == "baseline.example.com"
+    assert args.password == "baseline-password"
+
+
 def test_runtime_error_redaction_masks_env_payload_values() -> None:
     remote_cli = import_remote_cli_module()
     password = "super-secret-password"

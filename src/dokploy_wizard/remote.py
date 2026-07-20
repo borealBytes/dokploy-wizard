@@ -600,6 +600,31 @@ def _run_remote_command(
     session.run_command(subcommand=subcommand, command=command, password=password)
 
 
+def capture_remote_output(
+    transport: ParamikoRemoteTransport,
+    command: str,
+    *,
+    timeout_seconds: int,
+) -> str:
+    """Run one read-only proof probe and return stdout with a bounded wait."""
+    _stdin, stdout, stderr = transport.client.exec_command(command, timeout=timeout_seconds)
+    started = time.monotonic()
+    while not stdout.channel.exit_status_ready():
+        if time.monotonic() - started > timeout_seconds:
+            stdout.channel.close()
+            raise RuntimeError("remote proof probe timed out")
+        time.sleep(0.05)
+    status = stdout.channel.recv_exit_status()
+    raw_output = stdout.read()
+    if not isinstance(raw_output, bytes):
+        raise RuntimeError("remote proof probe returned non-byte output")
+    output = raw_output.decode("utf-8", errors="replace")
+    if status != 0:
+        stderr.read()
+        raise RuntimeError("remote proof probe failed")
+    return output
+
+
 def _resolve_expected_service_url_links(env_file: Path) -> tuple[tuple[str, str], ...]:
     desired_state = resolve_desired_state(parse_env_file(env_file))
     links: list[tuple[str, str]] = [("Dokploy", _user_facing_url(desired_state.dokploy_url))]
@@ -710,7 +735,9 @@ def _should_skip(relative: Path) -> bool:
     if not parts:
         return False
     if parts[0] in {
+        ".codegraph",
         ".git",
+        ".omo",
         ".venv",
         "venv",
         "env",
@@ -721,6 +748,8 @@ def _should_skip(relative: Path) -> bool:
         ".ruff_cache",
         ".dokploy-wizard-state",
     }:
+        return True
+    if relative == Path("uv.lock"):
         return True
     if parts[0] == ".sisyphus" and len(parts) > 1 and parts[1] == "evidence":
         return True
