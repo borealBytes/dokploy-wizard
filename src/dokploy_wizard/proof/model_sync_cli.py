@@ -165,9 +165,9 @@ def _required_inputs(args: argparse.Namespace) -> tuple[str, str, str, str]:
 
 
 def _require_active_workspace_root(wrapper: Path) -> None:
-    expected = Path(__file__).resolve().parents[3] / "bin" / "dokploy-wizard-remote"
-    if wrapper.resolve() != expected:
-        raise RuntimeError("proof wrapper does not resolve to the active workspace root")
+    expected = Path("/workspaces/model-sync").resolve()
+    if not expected.exists() or wrapper.resolve().parent != expected / "bin":
+        raise RuntimeError("/workspaces/model-sync does not resolve to the active proof root")
 
 
 def _run_wrapper(wrapper: Path, host: str, password: str, env_file: Path) -> None:
