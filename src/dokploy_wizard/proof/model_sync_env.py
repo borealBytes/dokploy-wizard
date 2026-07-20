@@ -40,6 +40,29 @@ class PreparedEnv:
     mode: int
 
 
+@dataclass(frozen=True, slots=True)
+class ProofNamespace:
+    """Exact non-secret resource names derived from the proof environment."""
+
+    stack_name: str
+    docker: tuple[str, ...]
+    dokploy: tuple[str, ...]
+    cloudflare: tuple[str, ...]
+    tailscale: tuple[str, ...]
+    coder_templates: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, list[str] | str]:
+        """Return the remote probe contract without retaining raw env values."""
+        return {
+            "cloudflare": list(self.cloudflare),
+            "coder": list(self.coder_templates),
+            "docker": list(self.docker),
+            "dokploy": list(self.dokploy),
+            "stack_name": self.stack_name,
+            "tailscale": list(self.tailscale),
+        }
+
+
 def prepare_proof_env(*, env_file: Path, backup_path: Path, guard_path: Path) -> PreparedEnv:
     """Prepare an NVIDIA-free proof env only while a durable guard is armed."""
     _require_armed_guard(guard_path)
@@ -57,6 +80,52 @@ def prepare_proof_env(*, env_file: Path, backup_path: Path, guard_path: Path) ->
         atomic_write_bytes(backup_path, original, mode=_FILE_MODE)
     atomic_write_bytes(env_file, proof, mode=_FILE_MODE)
     return PreparedEnv(env_file, backup_path, original_sha256, proof_sha256, mode)
+
+
+def resolve_proof_namespace(env_file: Path) -> ProofNamespace:
+    """Resolve exact proof namespaces without replacing or persisting the operator env."""
+    original = _read_env_bytes(env_file)
+    proof = _proof_bytes(original, env_file.parent)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".model-sync-resolve-", dir=env_file.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, _FILE_MODE)
+        _write_all(descriptor, proof)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        desired = resolve_desired_state(parse_env_file(temporary))
+    except StateValidationError as error:
+        raise EnvPreparationError("proof env cannot resolve its resource namespace") from error
+    finally:
+        temporary.unlink(missing_ok=True)
+    stack = desired.stack_name
+    shared = desired.shared_core
+    docker = [stack, f"{stack}-coder", f"{stack}-cloudflared", shared.network_name]
+    docker.extend(
+        service.service_name
+        for service in (shared.litellm, shared.postgres, shared.redis, shared.mail_relay)
+        if service is not None
+    )
+    templates = (
+        "ubuntu-vscode",
+        "ubuntu-vscode-opencode-web",
+        "ubuntu-vscode-openwork",
+        "ubuntu-vscode-kdense-byok",
+        "ubuntu-vscode-hermes",
+        "ubuntu-vscode-pi-web",
+    )
+    return ProofNamespace(
+        stack_name=stack,
+        docker=tuple(sorted(set(docker))),
+        dokploy=tuple(sorted({stack, f"{stack}-coder", f"{stack}-shared"})),
+        cloudflare=tuple(sorted({stack, f"{stack}-cloudflared", *desired.hostnames.values()})),
+        tailscale=() if desired.tailscale_hostname is None else (desired.tailscale_hostname,),
+        coder_templates=templates,
+    )
 
 
 def restore_proof_env(*, prepared: PreparedEnv, guard_path: Path) -> None:
