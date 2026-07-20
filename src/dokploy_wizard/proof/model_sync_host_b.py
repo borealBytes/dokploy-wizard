@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Final
 
 _SUPPORTED_ARCHITECTURES: Final = frozenset({"amd64", "arm64"})
 
@@ -31,9 +31,7 @@ def assert_namespace_identity(*, host_a: HostIdentity, host_b: HostIdentity) -> 
 
 def assert_followup_proof_contract(
     *,
-    contract_name: Literal[
-        "upgrade_host_a_contract", "final_proof_contract", "reseed_pair_contract"
-    ],
+    contract_name: str,
     receipts: tuple[str, ...],
 ) -> None:
     """Keep later Host A/Host B actions blocked until their named receipt exists."""
@@ -41,6 +39,8 @@ def assert_followup_proof_contract(
         "upgrade_host_a_contract": "host-a-baseline",
         "final_proof_contract": "host-a-destroyed",
         "reseed_pair_contract": "host-b-clean",
-    }[contract_name]
+    }.get(contract_name)
+    if required is None:
+        raise ValueError("unknown followup proof contract")
     if required not in receipts:
         raise ValueError(f"{contract_name} requires receipt {required}")
