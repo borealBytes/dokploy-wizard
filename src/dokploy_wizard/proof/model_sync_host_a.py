@@ -9,6 +9,7 @@ from pathlib import Path
 from dokploy_wizard.proof.model_sync_env import PreparedEnv, restore_proof_env
 from dokploy_wizard.proof.model_sync_state import (
     claim_abort_guard,
+    read_abort_guard,
     transfer_abort_guard_to_plan,
 )
 
@@ -36,6 +37,14 @@ def restore_after_interrupt(*, prepared: PreparedEnv, guard_path: Path, claim: G
     """Restore exact bytes first, then return the guard to durable plan ownership."""
     restore_proof_env(prepared=prepared, guard_path=guard_path)
     transfer_abort_guard_to_plan(guard_path, claim_token=claim.token)
+
+
+def recover_failed_proof(*, prepared: PreparedEnv, guard_path: Path, claim: GuardClaim) -> None:
+    """Restore once after a timeout or signal and leave repeated recovery as a no-op."""
+    restore_proof_env(prepared=prepared, guard_path=guard_path)
+    guard = read_abort_guard(guard_path)
+    if guard.claimant_kind == "process":
+        transfer_abort_guard_to_plan(guard_path, claim_token=claim.token)
 
 
 def complete_resumable_step(*, guard_path: Path, claim: GuardClaim) -> None:

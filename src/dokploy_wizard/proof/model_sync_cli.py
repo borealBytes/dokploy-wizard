@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from types import FrameType
 from typing import Sequence
 
 from dokploy_wizard.proof.model_sync_artifacts import write_protected_manifest
-from dokploy_wizard.proof.model_sync_env import prepare_proof_env
-from dokploy_wizard.proof.model_sync_host_a import claim_plan_guard, complete_resumable_step
+from dokploy_wizard.proof.model_sync_env import PreparedEnv, prepare_proof_env
+from dokploy_wizard.proof.model_sync_host_a import (
+    GuardClaim,
+    claim_plan_guard,
+    recover_failed_proof,
+)
 from dokploy_wizard.proof.model_sync_host_b import HostIdentity, assert_namespace_identity
 from dokploy_wizard.proof.model_sync_remote import RemoteProbe, probe_host
 from dokploy_wizard.proof.model_sync_state import (
@@ -20,8 +27,9 @@ from dokploy_wizard.proof.model_sync_state import (
     arm_abort_guard,
     atomic_finalize,
     read_abort_guard,
-    sha256_bytes,
 )
+
+SignalHandler = Callable[[int, FrameType | None], object] | int | None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -91,59 +99,26 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         pid=os.getpid(),
         start_time_ticks=_self_start_time_ticks(),
     )
-    host_a_probe = probe_host(host=host_a, password=password_a, stack_name="dokploy-wizard")
-    host_b_probe = probe_host(host=host_b, password=password_b, stack_name="dokploy-wizard")
-    identity_a = HostIdentity(
-        host_a_probe.machine_sha256, host_a_probe.ssh_sha256, host_a_probe.architecture
-    )
-    identity_b = HostIdentity(
-        host_b_probe.machine_sha256, host_b_probe.ssh_sha256, host_b_probe.architecture
-    )
-    assert_namespace_identity(host_a=identity_a, host_b=identity_b)
-    if not host_a_probe.namespace_clean or not host_b_probe.namespace_clean:
-        raise RuntimeError("managed namespace residue blocks live baseline proof")
-    host_a_path = args.artifact_dir / "host-a-preflight.json"
-    host_b_path = args.artifact_dir / "host-b-preflight.json"
-    host_a_sha = write_protected_manifest(host_a_path, _probe_payload(host_a_probe))
-    host_b_sha = write_protected_manifest(host_b_path, _probe_payload(host_b_probe))
-    _run_wrapper(args.wrapper, host_a, password_a, args.env_file)
-    baseline_path = args.artifact_dir / "baseline.json"
-    baseline_sha = write_protected_manifest(baseline_path, {"templates": "six-template-baseline"})
-    protected_path = args.artifact_dir / "protected-artifacts-before.txt"
-    protected_sha = write_protected_manifest(protected_path, {"status": "no-secret-values"})
-    guard_sha = sha256_bytes(args.abort_guard.read_bytes())
-    write_protected_manifest(
-        args.output,
-        {
-            "schema_version": 1,
-            "source_base_commit": args.source_base_commit,
-            "proof_commit": args.proof_commit,
-            "coder_image_digest": "unavailable-before-capture",
-            "litellm_image_digest": "unavailable-before-capture",
-            "shared_core_image_digests": {
-                "pgvector": "",
-                "redis": "",
-                "postfix": "",
-                "litellm": "",
-            },
-            "env_original_sha256": prepared.original_sha256,
-            "env_proof_sha256": prepared.proof_sha256,
-            "env_mode": prepared.mode,
-            "external_backup_path": str(args.external_backup),
-            "abort_guard_path": str(args.abort_guard),
-            "abort_guard_sha256": guard_sha,
-            "host_a_preflight_sha256": host_a_sha,
-            "host_b_preflight_sha256": host_b_sha,
-            "host_identities_distinct": True,
-            "host_architectures_equal": True,
-            "baseline_sha256": baseline_sha,
-            "protected_artifacts_before_path": str(protected_path),
-            "protected_artifacts_before_sha256": protected_sha,
-            "coder_secret_inventory_sha256": "0" * 64,
-            "legacy_workspace_managed_fingerprints_sha256": "0" * 64,
-        },
-    )
-    complete_resumable_step(guard_path=args.abort_guard, claim=claim)
+    previous_handlers = _install_recovery_handlers(prepared, args.abort_guard, claim)
+    completed = False
+    try:
+        host_a_probe = probe_host(host=host_a, password=password_a, stack_name="dokploy-wizard")
+        host_b_probe = probe_host(host=host_b, password=password_b, stack_name="dokploy-wizard")
+        identity_a = HostIdentity(
+            host_a_probe.machine_sha256, host_a_probe.ssh_sha256, host_a_probe.architecture
+        )
+        identity_b = HostIdentity(
+            host_b_probe.machine_sha256, host_b_probe.ssh_sha256, host_b_probe.architecture
+        )
+        assert_namespace_identity(host_a=identity_a, host_b=identity_b)
+        if not host_a_probe.namespace_clean or not host_b_probe.namespace_clean:
+            raise RuntimeError("managed namespace residue blocks live baseline proof")
+        _run_wrapper(args.wrapper, host_a, password_a, args.env_file)
+        raise RuntimeError("authenticated Coder and resource-plane inventory capture is required")
+    finally:
+        _restore_recovery_handlers(previous_handlers)
+        if not completed:
+            recover_failed_proof(prepared=prepared, guard_path=args.abort_guard, claim=claim)
 
 
 def _required_inputs(args: argparse.Namespace) -> tuple[str, str, str, str]:
@@ -193,6 +168,28 @@ def _run_wrapper(wrapper: Path, host: str, password: str, env_file: Path) -> Non
 def _self_start_time_ticks() -> str:
     fields = Path("/proc/self/stat").read_text(encoding="utf-8").split()
     return fields[21]
+
+
+def _install_recovery_handlers(
+    prepared: PreparedEnv,
+    guard: Path,
+    claim: GuardClaim,
+) -> tuple[SignalHandler, SignalHandler]:
+    def restore(_signum: int, _frame: FrameType | None) -> None:
+        recover_failed_proof(prepared=prepared, guard_path=guard, claim=claim)
+        raise SystemExit(128 + _signum)
+
+    return (
+        signal.signal(signal.SIGINT, restore),
+        signal.signal(signal.SIGTERM, restore),
+    )
+
+
+def _restore_recovery_handlers(
+    previous: tuple[SignalHandler, SignalHandler],
+) -> None:
+    signal.signal(signal.SIGINT, previous[0])
+    signal.signal(signal.SIGTERM, previous[1])
 
 
 def _status_payload(status: AbortGuard) -> dict[str, str | int | None]:
