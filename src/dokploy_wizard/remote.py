@@ -310,6 +310,11 @@ def _add_remote_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", help="target host or IP address")
     parser.add_argument("--password", help="target user password")
     parser.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="read the target password from bounded UTF-8 stdin instead of argv",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         default=True,
@@ -375,6 +380,18 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
 
 
 def _validate_runtime_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.password_stdin:
+        if args.password:
+            parser.error("--password and --password-stdin are mutually exclusive.")
+        raw_password = sys.stdin.buffer.read(65537)
+        if len(raw_password) > 65536:
+            parser.error("stdin password exceeds the bounded transport limit.")
+        try:
+            args.password = raw_password.decode("utf-8").removesuffix("\n")
+        except UnicodeDecodeError:
+            parser.error("stdin password must be valid UTF-8.")
+        if "\n" in args.password or "\r" in args.password:
+            parser.error("stdin password must contain exactly one line.")
     _hydrate_remote_connection_args(parser, args)
     if not getattr(args, "host", None):
         parser.error("--host is required or VPS_HOST must be set in the selected env file.")
@@ -605,9 +622,23 @@ def capture_remote_output(
     command: str,
     *,
     timeout_seconds: int,
+    stdin_bytes: bytes | None = None,
 ) -> str:
     """Run one read-only proof probe and return stdout with a bounded wait."""
-    _stdin, stdout, stderr = transport.client.exec_command(command, timeout=timeout_seconds)
+    if stdin_bytes is not None and len(stdin_bytes) > 65536:
+        raise RuntimeError("remote proof input exceeds the bounded transport limit")
+    stdin, stdout, stderr = transport.client.exec_command(command, timeout=timeout_seconds)
+    if stdin_bytes is not None:
+        if stdin is None:
+            raise RuntimeError("remote proof transport does not provide stdin")
+        try:
+            written = stdin.write(stdin_bytes)
+            if written is not None and written != len(stdin_bytes):
+                raise RuntimeError("remote proof transport accepted only partial stdin")
+            stdin.flush()
+            stdin.close()
+        except (OSError, RuntimeError, ValueError) as error:
+            raise RuntimeError("remote proof stdin delivery failed") from error
     started = time.monotonic()
     while not stdout.channel.exit_status_ready():
         if time.monotonic() - started > timeout_seconds:
@@ -615,12 +646,17 @@ def capture_remote_output(
             raise RuntimeError("remote proof probe timed out")
         time.sleep(0.05)
     status = stdout.channel.recv_exit_status()
-    raw_output = stdout.read()
+    raw_output = stdout.read(2 * 1024 * 1024 + 1)
     if not isinstance(raw_output, bytes):
         raise RuntimeError("remote proof probe returned non-byte output")
-    output = raw_output.decode("utf-8", errors="replace")
+    if len(raw_output) > 2 * 1024 * 1024:
+        raise RuntimeError("remote proof probe output exceeds the bounded transport limit")
+    try:
+        output = raw_output.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("remote proof probe returned invalid UTF-8") from error
     if status != 0:
-        stderr.read()
+        stderr.read(2 * 1024 * 1024 + 1)
         raise RuntimeError("remote proof probe failed")
     return output
 

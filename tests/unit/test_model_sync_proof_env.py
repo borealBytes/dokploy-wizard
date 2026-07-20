@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,8 @@ import pytest
 from dokploy_wizard.proof.model_sync_env import (
     EnvPreparationError,
     prepare_proof_env,
+    resolve_proof_namespace,
+    resolve_proof_transport,
     restore_proof_env,
 )
 from dokploy_wizard.proof.model_sync_host_a import claim_plan_guard, recover_failed_proof
@@ -97,3 +100,36 @@ def test_timeout_after_env_replacement_restores_and_repeated_recovery_is_idempot
 
     assert env_file.read_bytes() == original
     assert read_abort_guard(guard).claimant_kind == "plan"
+
+
+def test_proof_transport_secrets_are_required_but_never_repr_or_namespace_serialized(
+    tmp_path: Path,
+) -> None:
+    secret = "SECRET-PROOF-TRANSPORT-SENTINEL"
+    env_file = tmp_path / "install.env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "ROOT_DOMAIN=example.test",
+                "STACK_NAME=proof-stack",
+                "PACKS=coder",
+                "AI_DEFAULT_PROVIDER=openrouter",
+                "AI_DEFAULT_MODEL=example/model",
+                "CLOUDFLARE_ACCOUNT_ID=account-proof",
+                "CLOUDFLARE_ZONE_ID=zone-proof",
+                f"CLOUDFLARE_API_TOKEN={secret}",
+                "DOKPLOY_API_URL=https://dokploy.example.test",
+                f"DOKPLOY_API_KEY={secret}",
+                "DOKPLOY_ADMIN_EMAIL=operator@example.test",
+                f"DOKPLOY_ADMIN_PASSWORD={secret}",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    transport = resolve_proof_transport(env_file)
+    namespace = resolve_proof_namespace(env_file)
+
+    assert secret not in repr(transport)
+    assert secret not in json.dumps(namespace.to_dict())

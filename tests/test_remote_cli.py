@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import io
+import json
 import subprocess
 import tarfile
 from pathlib import Path
@@ -9,6 +10,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from typing_extensions import Buffer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI = REPO_ROOT / "bin" / "dokploy-wizard-remote"
@@ -29,6 +31,124 @@ def import_remote_cli_module() -> ModuleType:
         return importlib.import_module("dokploy_wizard.remote")
     except ModuleNotFoundError as exc:
         assert False, f"expected dokploy_wizard.remote module for remote CLI contract: {exc}"
+
+
+class _CaptureChannel:
+    def __init__(self, *, ready: bool = True) -> None:
+        self.ready = ready
+
+    def close(self) -> None:
+        return None
+
+    def exit_status_ready(self) -> bool:
+        return self.ready
+
+    def recv_exit_status(self) -> int:
+        return 0
+
+
+class _CaptureStream(io.BytesIO):
+    def __init__(self, payload: bytes = b"", *, ready: bool = True) -> None:
+        super().__init__(payload)
+        self.channel = _CaptureChannel(ready=ready)
+
+
+class _PartialCaptureStream(_CaptureStream):
+    def write(self, payload: Buffer) -> int:
+        return memoryview(payload).nbytes - 1
+
+
+class _CaptureClient:
+    def __init__(
+        self,
+        *,
+        partial_write: bool = False,
+        output: bytes = b'{"ok":true}',
+        ready: bool = True,
+    ) -> None:
+        self.stdin = _PartialCaptureStream() if partial_write else _CaptureStream()
+        self.command = ""
+        self.output = output
+        self.ready = ready
+
+    def exec_command(
+        self, command: str, *, timeout: int
+    ) -> tuple[_CaptureStream, _CaptureStream, _CaptureStream]:
+        del timeout
+        self.command = command
+        return self.stdin, _CaptureStream(self.output, ready=self.ready), _CaptureStream()
+
+
+class _CaptureTransport:
+    def __init__(self, client: _CaptureClient) -> None:
+        self.client = client
+
+
+def test_remote_capture_sends_secret_payload_only_through_bounded_stdin() -> None:
+    remote_cli = import_remote_cli_module()
+    secret = "SECRET-STDIN-SENTINEL"
+    client = _CaptureClient()
+    transport = _CaptureTransport(client)
+
+    output = remote_cli.capture_remote_output(
+        transport,
+        "python3 -c safe-collector",
+        timeout_seconds=5,
+        stdin_bytes=json.dumps({"token": secret}).encode(),
+    )
+
+    assert output == '{"ok":true}'
+    assert secret not in client.command
+    assert secret not in output
+    assert secret not in repr(transport)
+
+
+def test_remote_capture_rejects_partial_stdin_without_reflecting_secret() -> None:
+    remote_cli = import_remote_cli_module()
+    secret = "SECRET-PARTIAL-WRITE-SENTINEL"
+    transport = _CaptureTransport(_CaptureClient(partial_write=True))
+
+    with pytest.raises(RuntimeError) as caught:
+        remote_cli.capture_remote_output(
+            transport,
+            "python3 -c safe-collector",
+            timeout_seconds=5,
+            stdin_bytes=secret.encode(),
+        )
+
+    assert secret not in str(caught.value)
+
+
+@pytest.mark.parametrize("output", [b"\xff", b"x" * (2 * 1024 * 1024 + 1)])
+def test_remote_capture_rejects_invalid_or_oversized_output(output: bytes) -> None:
+    remote_cli = import_remote_cli_module()
+
+    with pytest.raises(RuntimeError):
+        remote_cli.capture_remote_output(
+            _CaptureTransport(_CaptureClient(output=output)),
+            "python3 -c safe-collector",
+            timeout_seconds=5,
+        )
+
+
+def test_remote_capture_timeout_closes_without_exposing_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_cli = import_remote_cli_module()
+    secret = "SECRET-TIMEOUT-SENTINEL"
+    moments = iter((0.0, 6.0))
+    monkeypatch.setattr(remote_cli.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(remote_cli.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError) as caught:
+        remote_cli.capture_remote_output(
+            _CaptureTransport(_CaptureClient(ready=False)),
+            "python3 -c safe-collector",
+            timeout_seconds=5,
+            stdin_bytes=secret.encode(),
+        )
+
+    assert secret not in str(caught.value)
 
 
 class _FakeRemoteTransport:

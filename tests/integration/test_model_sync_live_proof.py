@@ -3,13 +3,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+from email.message import Message
 from pathlib import Path
 from typing import Any
+from urllib import error
 
 import pytest
 
-from dokploy_wizard.proof import model_sync_cli, model_sync_remote
+from dokploy_wizard.proof import (
+    model_sync_cli,
+    model_sync_host_b,
+    model_sync_remote,
+    model_sync_results,
+)
 from dokploy_wizard.proof.model_sync_cli import main
+from dokploy_wizard.proof.model_sync_env import ProofNamespace
 from dokploy_wizard.proof.model_sync_host_b import (
     HostIdentity,
     assert_followup_proof_contract,
@@ -98,15 +107,569 @@ def _preflight_wire(machine_id: str) -> str:
             "architecture": "x86_64",
             "machine_id": machine_id,
             "planes": {
-                "cloudflare": [],
-                "coder": [],
-                "docker": [],
-                "dokploy": [],
-                "tailscale": [],
+                plane: {"resources": [], "state": "absent"}
+                for plane in ("cloudflare", "coder", "docker", "dokploy", "tailscale")
             },
-            "schema_version": 1,
+            "schema_version": 2,
         }
     )
+
+
+def test_preflight_rejects_docker_as_each_resource_plane() -> None:
+    duplicated_docker_inventory = ["proof-stack", "proof-stack-coder"]
+    wire = json.dumps(
+        {
+            "architecture": "x86_64",
+            "machine_id": "machine-a",
+            "planes": {
+                "cloudflare": duplicated_docker_inventory,
+                "coder": duplicated_docker_inventory,
+                "docker": duplicated_docker_inventory,
+                "dokploy": duplicated_docker_inventory,
+                "tailscale": duplicated_docker_inventory,
+            },
+            "schema_version": 2,
+        }
+    )
+    namespace = ProofNamespace(
+        stack_name="unrelated-stack",
+        docker=(),
+        dokploy=(),
+        cloudflare=(),
+        tailscale=(),
+        coder_templates=(),
+    )
+
+    with pytest.raises(model_sync_remote.RemoteProofError, match="resource objects"):
+        model_sync_remote._parse_preflight(wire, namespace, "ssh-a")
+
+
+class _WireResponse:
+    def __init__(self, payload: Any) -> None:
+        self.status = 200
+        self._payload = json.dumps(payload).encode()
+
+    def __enter__(self) -> _WireResponse:
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        return None
+
+    def read(self, _size: int = -1) -> bytes:
+        return self._payload
+
+
+def _transport_fixture(*, tailscale_required: bool = False) -> dict[str, Any]:
+    return {
+        "cloudflare_account_id": "account-proof",
+        "cloudflare_token": "SECRET-CLOUDFLARE-TOKEN",
+        "cloudflare_zone_id": "zone-proof",
+        "cloudflare_zone_name": "example.test",
+        "coder_email": "operator@example.test",
+        "coder_hostname": "coder.example.test",
+        "coder_password": "SECRET-CODER-PASSWORD",
+        "dokploy_api_key": "SECRET-DOKPLOY-KEY",
+        "dokploy_api_url": "https://dokploy.example.test",
+        "tailscale_required": tailscale_required,
+    }
+
+
+def _command_fixture(
+    *,
+    empty: bool = False,
+    matching: bool = False,
+    missing_tailscale: bool = False,
+    failure: str | None = None,
+) -> Any:
+    def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        key = tuple(command)
+        if key[:2] == ("docker", "ps"):
+            if failure == "docker-timeout":
+                raise subprocess.TimeoutExpired(command, 20)
+            if failure == "docker-malformed":
+                return subprocess.CompletedProcess(command, 0, b"{", b"")
+            rows = [] if empty else [
+                {
+                    "ID": "container-other",
+                    "Image": "busybox:latest",
+                    "Labels": "",
+                    "Names": "other-container",
+                }
+            ]
+            return subprocess.CompletedProcess(command, 0, "\n".join(map(json.dumps, rows)).encode(), b"")
+        if key[:2] == ("docker", "info"):
+            return subprocess.CompletedProcess(command, 0, b"active\n", b"")
+        if key[:3] == ("docker", "service", "ls"):
+            service_rows = [] if empty else ["service-other\tother-service\tbusybox:latest"]
+            if matching:
+                service_rows.extend(
+                    (
+                        "service-dokploy\tdokploy\tdokploy/dokploy:latest",
+                        "service-coder\tproof-stack-coder\tghcr.io/coder/coder:latest",
+                    )
+                )
+            return subprocess.CompletedProcess(command, 0, "\n".join(service_rows).encode(), b"")
+        if key[:3] == ("docker", "network", "ls"):
+            output = b"" if empty else b"network-other\tother-network\n"
+            return subprocess.CompletedProcess(command, 0, output, b"")
+        if key[:3] == ("docker", "volume", "ls"):
+            output = b"" if empty else b"volume-other\tother-volume\n"
+            return subprocess.CompletedProcess(command, 0, output, b"")
+        if key == ("tailscale", "status", "--json"):
+            if missing_tailscale:
+                raise FileNotFoundError
+            if failure == "tailscale-malformed":
+                return subprocess.CompletedProcess(command, 0, b"{", b"")
+            payload: dict[str, Any] = {"BackendState": "NeedsLogin", "Peer": {}}
+            if matching:
+                payload = {
+                    "BackendState": "Running",
+                    "Peer": {
+                        "nodekey:peer": {
+                            "HostName": "other-tailnet-node",
+                            "ID": "peer-stable-id",
+                        }
+                    },
+                    "Self": {"HostName": "proof-tailnet-node", "ID": "self-stable-id"},
+                }
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload).encode(), b"")
+        raise AssertionError(command)
+
+    return run
+
+
+def _cloudflare_list(items: list[dict[str, Any]], *, page: int = 1, pages: int = 1) -> dict[str, Any]:
+    total_count = len(items) if pages == 1 else 101
+    return {
+        "result": items,
+        "result_info": {
+            "count": len(items),
+            "page": page,
+            "per_page": 100,
+            "total_count": total_count,
+        },
+        "success": True,
+    }
+
+
+def _wire_fixture(
+    *, empty: bool = False, many_coder: bool = False, matching: bool = False, failure: str | None = None
+) -> Any:
+    def open_request(request: Any, *, timeout: int) -> _WireResponse:
+        assert timeout <= 30
+        url = request.full_url
+        if failure == "cloudflare-unauthorized" and "api.cloudflare.com" in url:
+            raise error.HTTPError(url, 401, "unauthorized", Message(), None)
+        if "/cfd_tunnel?" in url:
+            if failure == "cloudflare-malformed":
+                return _WireResponse({"success": True})
+            tunnels = [] if empty else [{"id": "tunnel-other", "name": "other-tunnel"}]
+            if matching:
+                tunnels.append({"id": "tunnel-proof", "name": "proof-stack-cloudflared"})
+            if failure == "cloudflare-partial":
+                return _WireResponse(_cloudflare_list(tunnels, pages=2))
+            return _WireResponse(_cloudflare_list(tunnels))
+        if "/cfd_tunnel/" in url and url.endswith("/configurations"):
+            ingress = [{"hostname": "other.example.test", "service": "http://other"}]
+            if matching:
+                ingress.append({"hostname": "coder.example.test", "service": "http://coder"})
+            return _WireResponse({"result": {"config": {"ingress": ingress}}, "success": True})
+        if "/dns_records?" in url:
+            records = [] if empty else [{"id": "dns-other", "name": "other.example.test"}]
+            if matching:
+                records.append({"id": "dns-proof", "name": "coder.example.test"})
+            return _WireResponse(_cloudflare_list(records))
+        if "/access/apps?" in url:
+            apps = [] if empty else [{"domain": "other.example.test", "id": "app-other", "name": "Other"}]
+            if matching:
+                apps.append({"domain": "coder.example.test", "id": "app-proof", "name": "Coder"})
+            return _WireResponse(_cloudflare_list(apps))
+        if "/access/apps/" in url and "/policies?" in url:
+            policies = (
+                [{"id": "policy-proof", "name": "proof-stack-access"}]
+                if matching and "/app-proof/" in url
+                else [{"id": "policy-other", "name": "Other policy"}]
+            )
+            return _WireResponse(_cloudflare_list(policies))
+        if url.endswith("/api/project.all"):
+            if failure == "dokploy-unauthorized":
+                raise error.HTTPError(url, 401, "unauthorized", Message(), None)
+            if failure == "dokploy-malformed":
+                return _WireResponse({"data": {}})
+            projects: list[dict[str, Any]] = [] if empty else [
+                {"environments": [], "name": "other-project", "projectId": "project-other"}
+            ]
+            if matching:
+                projects.append(
+                    {
+                        "environments": [
+                            {
+                                "applications": [
+                                    {"applicationId": "application-proof", "name": "proof-stack-app"}
+                                ],
+                                "compose": [{"composeId": "compose-proof", "name": "proof-stack-coder"}],
+                            }
+                        ],
+                        "name": "proof-stack",
+                        "projectId": "project-proof",
+                    }
+                )
+            return _WireResponse({"data": projects})
+        if "/api/schedule.list?" in url:
+            schedules = []
+            if matching:
+                schedules.append({"name": "proof-stack-schedule", "scheduleId": "schedule-proof"})
+            return _WireResponse({"data": schedules})
+        if url.endswith("/api/v2/users/login"):
+            if failure == "coder-unauthorized":
+                raise error.HTTPError(url, 401, "unauthorized", Message(), None)
+            if failure == "coder-malformed":
+                return _WireResponse({})
+            return _WireResponse({"session_token": "SECRET-CODER-SESSION"})
+        if url.endswith("/api/v2/users/me"):
+            return _WireResponse({"id": "coder-user"})
+        if "/api/v2/templates?" in url:
+            if failure == "coder-partial" and "offset=0" in url:
+                return _WireResponse(
+                    [{"id": f"template-{index}", "name": f"template-{index}"} for index in range(100)]
+                )
+            if failure == "coder-partial":
+                raise error.URLError("second page unavailable")
+            if many_coder:
+                offset = 100 if "offset=100" in url else 0
+                return _WireResponse(
+                    [
+                        {"id": f"template-{index}", "name": f"template-{index}"}
+                        for index in range(101)[offset : offset + 100]
+                    ]
+                )
+            templates = [{"id": "template-other", "name": "other-template"}]
+            if matching:
+                templates.append({"id": "template-proof", "name": "ubuntu-vscode"})
+            return _WireResponse(templates)
+        if "/api/v2/workspaces?" in url:
+            if many_coder:
+                offset = 100 if "offset=100" in url else 0
+                workspaces = [
+                    {"id": f"workspace-{index}", "name": f"workspace-{index}"}
+                    for index in range(101)[offset : offset + 100]
+                ]
+                return _WireResponse({"count": 101, "workspaces": workspaces})
+            workspaces = [{"id": "workspace-other", "name": "other-workspace"}]
+            if matching:
+                workspaces.append({"id": "workspace-proof", "name": "proof-stack-workspace"})
+            return _WireResponse({"count": len(workspaces), "workspaces": workspaces})
+        if "/api/v2/users/coder-user/secrets?" in url:
+            if many_coder:
+                offset = 100 if "offset=100" in url else 0
+                return _WireResponse(
+                    [
+                        {"id": f"secret-{index}", "name": f"secret-{index}"}
+                        for index in range(101)[offset : offset + 100]
+                    ]
+                )
+            secrets = [{"id": "secret-other", "name": "other-secret"}]
+            if matching:
+                secrets.append({"id": "secret-proof", "name": "proof-stack-secret"})
+            return _WireResponse(secrets)
+        raise AssertionError(url)
+
+    return open_request
+
+
+def _collect_planes(
+    *,
+    empty: bool = False,
+    many_coder: bool = False,
+    matching: bool = False,
+    failure: str | None = None,
+    missing_tailscale: bool = False,
+) -> dict[str, Any]:
+    scope: dict[str, Any] = {"__name__": "fixture"}
+    exec(model_sync_results.PREFLIGHT_SCRIPT, scope)
+    scope["_run_process"] = _command_fixture(
+        empty=empty,
+        matching=matching,
+        missing_tailscale=missing_tailscale,
+        failure=failure,
+    )
+    scope["_open_request"] = _wire_fixture(
+        empty=empty,
+        many_coder=many_coder,
+        matching=matching,
+        failure=failure,
+    )
+    scope["_which"] = lambda command: (
+        None
+        if (missing_tailscale and command == "tailscale")
+        or (failure == "docker-missing" and command == "docker")
+        else command
+    )
+    result = scope["_collect_planes"](
+        _transport_fixture(tailscale_required=matching or missing_tailscale)
+    )
+    if not isinstance(result, dict):
+        raise AssertionError("collector fixture did not return resource planes")
+    return result
+
+
+def test_authoritative_collectors_report_successful_empty_planes() -> None:
+    planes = _collect_planes(empty=True)
+
+    assert {name: plane["state"] for name, plane in planes.items()} == {
+        "cloudflare": "absent",
+        "coder": "absent",
+        "docker": "absent",
+        "dokploy": "absent",
+        "tailscale": "absent",
+    }
+    assert planes["coder"]["resources"] == []
+    assert planes["tailscale"]["resources"] == []
+
+
+def test_authoritative_collectors_report_matching_and_nonmatching_resources() -> None:
+    planes = _collect_planes(matching=True)
+    wire = json.dumps(
+        {
+            "architecture": "x86_64",
+            "machine_id": "machine-a",
+            "planes": planes,
+            "schema_version": 2,
+        }
+    )
+    namespace = ProofNamespace(
+        stack_name="proof-stack",
+        docker=("proof-stack-coder",),
+        dokploy=("proof-stack", "proof-stack-coder"),
+        cloudflare=("proof-stack-cloudflared", "coder.example.test"),
+        tailscale=("proof-tailnet-node",),
+        coder_templates=("ubuntu-vscode",),
+    )
+
+    result = model_sync_remote._parse_preflight(wire, namespace, "ssh-a")
+
+    assert result.namespace_clean is False
+    assert {resource.kind for resource in result.inventory["cloudflare"]} == {
+        "access_application",
+        "access_policy",
+        "dns_record",
+        "hostname_route",
+        "tunnel",
+    }
+    assert {resource.kind for resource in result.inventory["dokploy"]} == {
+        "application",
+        "compose",
+        "project",
+        "schedule",
+    }
+    assert {resource.kind for resource in result.inventory["coder"]} == {
+        "secret",
+        "template",
+        "workspace",
+    }
+
+
+def test_coder_preflight_collects_all_identifiers_beyond_first_page() -> None:
+    resources = _collect_planes(many_coder=True, matching=True)["coder"]["resources"]
+
+    assert {item["id"] for item in resources if item["kind"] == "template"} == {
+        f"template-{index}" for index in range(101)
+    }
+    assert {item["id"] for item in resources if item["kind"] == "workspace"} == {
+        f"workspace-{index}" for index in range(101)
+    }
+    assert {item["id"] for item in resources if item["kind"] == "secret"} == {
+        f"secret-{index}" for index in range(101)
+    }
+
+
+@pytest.mark.parametrize(
+    ("failure", "failed_plane"),
+    [
+        ("cloudflare-unauthorized", "cloudflare"),
+        ("cloudflare-malformed", "cloudflare"),
+        ("cloudflare-partial", "cloudflare"),
+        ("dokploy-unauthorized", "dokploy"),
+        ("dokploy-malformed", "dokploy"),
+        ("coder-unauthorized", "coder"),
+        ("coder-malformed", "coder"),
+        ("coder-partial", "coder"),
+        ("docker-timeout", "docker"),
+        ("docker-missing", "docker"),
+        ("docker-malformed", "docker"),
+        ("tailscale-malformed", "tailscale"),
+    ],
+)
+def test_authoritative_collectors_turn_failures_into_blocking_plane_errors(
+    failure: str, failed_plane: str
+) -> None:
+    planes = _collect_planes(matching=True, failure=failure)
+
+    assert planes[failed_plane] == {"resources": [], "state": "error"}
+
+
+def test_authoritative_tailscale_collector_blocks_missing_required_command() -> None:
+    planes = _collect_planes(missing_tailscale=True)
+
+    assert planes["tailscale"] == {"resources": [], "state": "error"}
+
+
+def test_preflight_parser_rejects_error_state_and_duplicate_ids() -> None:
+    payload = json.loads(_preflight_wire("machine-a"))
+    payload["planes"]["cloudflare"] = {"resources": [], "state": "error"}
+    namespace = ProofNamespace("proof-stack", (), (), (), (), ())
+    with pytest.raises(model_sync_remote.RemoteProofError, match="cloudflare plane collection failed"):
+        model_sync_remote._parse_preflight(json.dumps(payload), namespace, "ssh-a")
+
+    payload["planes"]["cloudflare"] = {
+        "resources": [
+            {"id": "duplicate", "kind": "tunnel", "name": "one"},
+            {"id": "duplicate", "kind": "dns_record", "name": "two"},
+        ],
+        "state": "present",
+    }
+    with pytest.raises(model_sync_remote.RemoteProofError, match="IDs must be unique"):
+        model_sync_remote._parse_preflight(json.dumps(payload), namespace, "ssh-a")
+
+
+def test_coder_workspace_pagination_accepts_authoritative_empty_response() -> None:
+    assert model_sync_results.collect_coder_workspace_pages(
+        lambda _path: {"count": 0, "workspaces": []}
+    ) == []
+
+
+def test_remote_wrapper_password_is_sent_only_through_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    secret = "SECRET-REMOTE-PASSWORD"
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        captured["input"] = kwargs.get("input")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    model_sync_cli._run_wrapper(Path("wrapper"), "host-a", secret, Path("install.env"))
+
+    assert secret not in " ".join(captured["command"])
+    assert captured["input"] == secret + "\n"
+    assert "--password-stdin" in captured["command"]
+
+
+def test_coder_pointer_session_token_is_sent_only_through_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    secret = "SECRET-CODER-SESSION"
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        captured["input"] = kwargs.get("input")
+        return subprocess.CompletedProcess(command, 0, '{"scope":"pointer"}', "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    model_sync_host_b._primary_pointer(
+        "coder-container", secret, "workspace", "ubuntu-vscode", "version-1"
+    )
+
+    assert secret not in " ".join(captured["command"])
+    assert captured["input"] == secret + "\n"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"{", b"\xff", json.dumps({"unknown": "SECRET-INPUT-SENTINEL"}).encode()],
+)
+def test_preflight_script_rejects_malformed_or_unknown_transport_without_secret_output(
+    payload: bytes,
+) -> None:
+    result = subprocess.run(
+        ["python", "-c", model_sync_results.PREFLIGHT_SCRIPT],
+        input=payload,
+        check=False,
+        capture_output=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert b"SECRET-INPUT-SENTINEL" not in result.stdout + result.stderr
+
+
+def test_coder_pagination_collects_every_two_page_identifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    templates: list[dict[str, Any]] = [
+        {
+            "active_version_id": f"version-{index}",
+            "active_version_name": f"version-{index}",
+            "id": f"template-{index}",
+            "name": f"template-{index}",
+        }
+        for index in range(101)
+    ]
+    workspaces: list[dict[str, Any]] = [
+        {
+            "id": f"workspace-{index}",
+            "name": f"workspace-{index}",
+            "template_id": f"template-{index}",
+            "template_version_id": f"version-{index}",
+        }
+        for index in range(101)
+    ]
+    builds: list[dict[str, Any]] = [
+        {
+            "build_number": index + 1,
+            "id": f"build-{index}",
+            "status": "stopped",
+            "transition": "stop",
+        }
+        for index in range(101)
+    ]
+    secrets: list[dict[str, Any]] = [
+        {
+            "description": f"secret-{index}",
+            "env_name": f"SECRET_{index}",
+            "id": f"secret-{index}",
+            "name": f"secret-{index}",
+        }
+        for index in range(101)
+    ]
+
+    def api(_hostname: str, _token: str | None, path: str, _body: dict[str, str] | None = None) -> Any:
+        offset = 100 if "offset=100" in path else 0
+        if path.startswith("/api/v2/templates"):
+            return templates[offset : offset + 100]
+        if path.startswith("/api/v2/workspaces?"):
+            return {"count": len(workspaces), "workspaces": workspaces[offset : offset + 100]}
+        if "/builds?" in path:
+            return builds[offset : offset + 100]
+        if "/secrets" in path:
+            return secrets[offset : offset + 100]
+        raise AssertionError(path)
+
+    monkeypatch.setattr(model_sync_host_b, "_api", api)
+    monkeypatch.setattr(
+        model_sync_host_b,
+        "_primary_pointer",
+        lambda *_args: {"template_version_id": "version"},
+    )
+
+    captured_templates = model_sync_host_b._templates("coder.example.test", "session")
+    captured_workspaces = model_sync_host_b._workspaces(
+        "coder.example.test", "session", "coder-container", captured_templates
+    )
+    captured_builds: Any = model_sync_host_b._builds("coder.example.test", "session", captured_workspaces)
+    captured_secrets = model_sync_host_b._secrets("coder.example.test", "session", "user-1")
+
+    assert {item["id"] for item in captured_templates} == {f"template-{index}" for index in range(101)}
+    assert {item["id"] for item in captured_workspaces} == {f"workspace-{index}" for index in range(101)}
+    assert {
+        item["id"]
+        for page in captured_builds[0]["pages"]
+        for item in page["items"]
+    } == {f"build-{index}" for index in range(101)}
+    assert {item["id"] for item in captured_secrets} == {f"secret-{index}" for index in range(101)}
 
 
 def _snapshot_wire(*, omit_template: bool = False, malformed_build: bool = False) -> str:
@@ -285,8 +848,23 @@ class _FixtureStream:
         self.channel = _FixtureChannel()
         self._payload = payload.encode()
 
-    def read(self) -> bytes:
-        return self._payload
+    def read(self, size: int = -1) -> bytes:
+        return self._payload if size < 0 else self._payload[:size]
+
+
+class _FixtureStdin:
+    def __init__(self) -> None:
+        self.payload = b""
+
+    def write(self, payload: bytes) -> int:
+        self.payload += payload
+        return len(payload)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
 
 
 class _FixtureRemoteKey:
@@ -310,11 +888,16 @@ class _FixtureRemoteClient:
         self._machine_id = machine_id
         self._fingerprint = fingerprint
         self._snapshot = snapshot
+        self.commands: list[str] = []
+        self.stdins: list[_FixtureStdin] = []
 
-    def exec_command(self, command: str, *, timeout: int) -> tuple[None, _FixtureStream, _FixtureStream]:
+    def exec_command(self, command: str, *, timeout: int) -> tuple[_FixtureStdin, _FixtureStream, _FixtureStream]:
         del timeout
         payload = self._snapshot if "model-sync-snapshot" in command else _preflight_wire(self._machine_id)
-        return None, _FixtureStream(payload), _FixtureStream("")
+        stdin = _FixtureStdin()
+        self.commands.append(command)
+        self.stdins.append(stdin)
+        return stdin, _FixtureStream(payload), _FixtureStream("")
 
     def get_transport(self) -> _FixtureTransportHandle:
         return _FixtureTransportHandle(self._fingerprint)
@@ -335,22 +918,23 @@ def _install_fixture_transport(
     monkeypatch: pytest.MonkeyPatch,
     *,
     snapshot: str,
-) -> None:
+) -> list[_FixtureRemoteClient]:
+    clients: list[_FixtureRemoteClient] = []
+
     def connect(**kwargs: Any) -> _FixtureParamikoTransport:
         host = kwargs["hostname"]
         match host:
             case "host-a":
-                return _FixtureParamikoTransport(
-                    _FixtureRemoteClient(machine_id="machine-a", fingerprint=b"ssh-a", snapshot=snapshot)
-                )
+                client = _FixtureRemoteClient(machine_id="machine-a", fingerprint=b"ssh-a", snapshot=snapshot)
             case "host-b":
-                return _FixtureParamikoTransport(
-                    _FixtureRemoteClient(machine_id="machine-b", fingerprint=b"ssh-b", snapshot=snapshot)
-                )
+                client = _FixtureRemoteClient(machine_id="machine-b", fingerprint=b"ssh-b", snapshot=snapshot)
             case unexpected:
                 raise AssertionError(f"unexpected fixture host {unexpected}")
+        clients.append(client)
+        return _FixtureParamikoTransport(client)
 
     monkeypatch.setattr(model_sync_remote.ParamikoRemoteTransport, "connect", connect)
+    return clients
 
 
 def _baseline_arguments(tmp_path: Path) -> list[str]:
@@ -363,6 +947,13 @@ def _baseline_arguments(tmp_path: Path) -> list[str]:
                 "PACKS=coder",
                 "AI_DEFAULT_PROVIDER=openrouter",
                 "AI_DEFAULT_MODEL=example/model",
+                "CLOUDFLARE_ACCOUNT_ID=account-proof",
+                "CLOUDFLARE_ZONE_ID=zone-proof",
+                "CLOUDFLARE_API_TOKEN=SECRET-CLOUDFLARE-TOKEN",
+                "DOKPLOY_API_URL=https://dokploy.example.test",
+                "DOKPLOY_API_KEY=SECRET-DOKPLOY-KEY",
+                "DOKPLOY_ADMIN_EMAIL=operator@example.test",
+                "DOKPLOY_ADMIN_PASSWORD=SECRET-CODER-PASSWORD",
             )
         )
         + "\n",
@@ -397,12 +988,60 @@ def _baseline_arguments(tmp_path: Path) -> list[str]:
     ]
 
 
+def test_post_install_snapshot_uses_authoritative_cloudflare_and_tailscale_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    env_file = Path(arguments[arguments.index("--env-file") + 1])
+    observed = {
+        "cloudflare": (
+            model_sync_remote.ObservedResource("tunnel-proof", "proof-stack-cloudflared", "tunnel"),
+            model_sync_remote.ObservedResource("dns-proof", "coder.example.test", "dns_record"),
+            model_sync_remote.ObservedResource("app-proof", "coder.example.test", "access_application"),
+        ),
+        "tailscale": (
+            model_sync_remote.ObservedResource("stable-node-proof", "proof-tailnet-node", "node"),
+        ),
+        "coder": (),
+        "docker": (),
+        "dokploy": (),
+    }
+    probe = model_sync_remote.RemoteProbe(
+        machine_sha256="a" * 64,
+        ssh_sha256="b" * 64,
+        architecture="amd64",
+        namespace_clean=False,
+        inventory=observed,
+        plane_states={plane: "present" for plane in observed},
+    )
+    monkeypatch.setattr(model_sync_host_b, "capture_local_authoritative_inventory", lambda *_args: probe)
+    monkeypatch.setattr(model_sync_host_b, "_image_inventory", lambda: [])
+    monkeypatch.setattr(model_sync_host_b, "_coder_login", lambda *_args: "session")
+    monkeypatch.setattr(model_sync_host_b, "_coder_container_name", lambda *_args: "coder")
+    monkeypatch.setattr(model_sync_host_b, "_api", lambda *_args: {"id": "user-proof"})
+    monkeypatch.setattr(model_sync_host_b, "_templates", lambda *_args: [])
+    monkeypatch.setattr(model_sync_host_b, "_workspaces", lambda *_args: [])
+    monkeypatch.setattr(model_sync_host_b, "_builds", lambda *_args: [])
+    monkeypatch.setattr(model_sync_host_b, "_secrets", lambda *_args: [])
+    monkeypatch.setattr(model_sync_host_b, "_state_inventory", lambda *_args: {})
+
+    snapshot = model_sync_host_b._snapshot(env_file, tmp_path)
+
+    assert snapshot["cloudflare"] == {
+        "access_application_ids": ["app-proof"],
+        "dns_record_ids": ["dns-proof"],
+        "tunnel_ids": ["tunnel-proof"],
+    }
+    assert snapshot["tailscale"] == {"identifiers": ["stable-node-proof"]}
+
+
 def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     arguments = _baseline_arguments(tmp_path)
-    _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
+    clients = _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
     monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
     monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: None)
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
@@ -430,6 +1069,21 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     assert result["legacy_workspace_managed_fingerprints_sha256"] != "0" * 64
     assert "baseline.json" in manifest
     assert "password-a" not in (artifact_dir / "baseline.json").read_text(encoding="utf-8")
+    sentinels = (
+        "SECRET-CLOUDFLARE-TOKEN",
+        "SECRET-DOKPLOY-KEY",
+        "SECRET-CODER-PASSWORD",
+    )
+    assert all(secret not in command for client in clients for command in client.commands for secret in sentinels)
+    assert all(
+        secret not in path.read_text(encoding="utf-8")
+        for path in artifact_dir.iterdir()
+        for secret in sentinels
+    )
+    assert all(
+        secret in b"".join(stdin.payload for client in clients for stdin in client.stdins).decode()
+        for secret in sentinels
+    )
 
 
 @pytest.mark.parametrize(

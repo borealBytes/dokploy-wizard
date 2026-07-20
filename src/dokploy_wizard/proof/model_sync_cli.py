@@ -18,6 +18,7 @@ from dokploy_wizard.proof.model_sync_env import (
     PreparedEnv,
     prepare_proof_env,
     resolve_proof_namespace,
+    resolve_proof_transport,
 )
 from dokploy_wizard.proof.model_sync_host_a import (
     BaselineArtifactInputs,
@@ -96,8 +97,13 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
     host_a, password_a, host_b, password_b = _required_inputs(args)
     _require_active_workspace_root(args.wrapper)
     namespace = resolve_proof_namespace(args.env_file)
-    host_a_probe = probe_host(host=host_a, password=password_a, namespace=namespace)
-    host_b_probe = probe_host(host=host_b, password=password_b, namespace=namespace)
+    transport = resolve_proof_transport(args.env_file)
+    host_a_probe = probe_host(
+        host=host_a, password=password_a, namespace=namespace, proof_transport=transport
+    )
+    host_b_probe = probe_host(
+        host=host_b, password=password_b, namespace=namespace, proof_transport=transport
+    )
     identity_a = HostIdentity(
         host_a_probe.machine_sha256, host_a_probe.ssh_sha256, host_a_probe.architecture
     )
@@ -177,13 +183,13 @@ def _run_wrapper(wrapper: Path, host: str, password: str, env_file: Path) -> Non
             "proof",
             "--host",
             host,
-            "--password",
-            password,
+            "--password-stdin",
             "--env-file",
             str(env_file),
         ],
         check=False,
         capture_output=True,
+        input=password + "\n",
         text=True,
         timeout=3600,
     )
