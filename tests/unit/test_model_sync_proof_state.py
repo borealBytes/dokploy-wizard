@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from dokploy_wizard.proof.model_sync_artifacts import write_protected_manifest
+from dokploy_wizard.proof.model_sync_results import build_result
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuardError,
     arm_abort_guard,
@@ -95,3 +96,67 @@ def test_confirm_receipt_rejects_malformed_guard_without_mutation(tmp_path: Path
         read_abort_guard(guard)
 
     assert guard.read_bytes() == before
+
+
+def test_result_accepts_non_placeholder_captured_values() -> None:
+    result = build_result(
+        {
+            "schema_version": 1,
+            "source_base_commit": "a" * 40,
+            "proof_commit": "b" * 40,
+            "coder_image_digest": "ghcr.io/coder/coder@sha256:" + "1" * 64,
+            "litellm_image_digest": "ghcr.io/berriai/litellm@sha256:" + "2" * 64,
+            "shared_core_image_digests": {
+                "pgvector": "pgvector/pgvector@sha256:" + "3" * 64,
+                "redis": "redis@sha256:" + "4" * 64,
+                "postfix": "postfix@sha256:" + "5" * 64,
+                "litellm": "ghcr.io/berriai/litellm@sha256:" + "2" * 64,
+            },
+            "env_original_sha256": "a" * 64,
+            "env_proof_sha256": "b" * 64,
+            "env_mode": 384,
+            "external_backup_path": "/var/tmp/backup",
+            "abort_guard_path": "/tmp/guard",
+            "abort_guard_sha256": "c" * 64,
+            "host_a_preflight_sha256": "d" * 64,
+            "host_b_preflight_sha256": "e" * 64,
+            "host_identities_distinct": True,
+            "host_architectures_equal": True,
+            "baseline_sha256": "f" * 64,
+            "protected_artifacts_before_path": "/tmp/manifest",
+            "protected_artifacts_before_sha256": "0f" * 32,
+            "coder_secret_inventory_sha256": "1" * 64,
+            "legacy_workspace_managed_fingerprints_sha256": "2" * 64,
+        }
+    )
+
+    assert result["coder_image_digest"] == "ghcr.io/coder/coder@sha256:" + "1" * 64
+
+
+def test_result_rejects_placeholder_and_zero_capture_values() -> None:
+    values = {
+        "schema_version": 1,
+        "source_base_commit": "a" * 40,
+        "proof_commit": "b" * 40,
+        "coder_image_digest": "unavailable-before-capture",
+        "litellm_image_digest": "unavailable-before-capture",
+        "shared_core_image_digests": {"pgvector": "", "redis": "", "postfix": "", "litellm": ""},
+        "env_original_sha256": "a" * 64,
+        "env_proof_sha256": "b" * 64,
+        "env_mode": 384,
+        "external_backup_path": "/var/tmp/backup",
+        "abort_guard_path": "/tmp/guard",
+        "abort_guard_sha256": "c" * 64,
+        "host_a_preflight_sha256": "d" * 64,
+        "host_b_preflight_sha256": "e" * 64,
+        "host_identities_distinct": True,
+        "host_architectures_equal": True,
+        "baseline_sha256": "f" * 64,
+        "protected_artifacts_before_path": "/tmp/manifest",
+        "protected_artifacts_before_sha256": "0" * 64,
+        "coder_secret_inventory_sha256": "0" * 64,
+        "legacy_workspace_managed_fingerprints_sha256": "0" * 64,
+    }
+
+    with pytest.raises(ValueError):
+        build_result(values)

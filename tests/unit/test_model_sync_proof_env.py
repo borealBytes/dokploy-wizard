@@ -10,6 +10,7 @@ from dokploy_wizard.proof.model_sync_env import (
     prepare_proof_env,
     restore_proof_env,
 )
+from dokploy_wizard.proof.model_sync_host_a import claim_plan_guard, recover_failed_proof
 from dokploy_wizard.proof.model_sync_state import arm_abort_guard, read_abort_guard
 
 
@@ -78,3 +79,21 @@ def test_abort_signal_restore_restores_exact_env_and_plan_claim(tmp_path: Path) 
     assert env_file.read_bytes() == original
     assert status.state == "armed"
     assert status.claimant_kind == "plan"
+
+
+def test_timeout_after_env_replacement_restores_and_repeated_recovery_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "install.env"
+    original = _partial_nvidia_env(env_file)
+    backup = tmp_path / "secrets" / "install.env.backup"
+    guard = tmp_path / "abort-guard.json"
+    arm_abort_guard(guard)
+    prepared = prepare_proof_env(env_file=env_file, backup_path=backup, guard_path=guard)
+    claim = claim_plan_guard(guard_path=guard, pid=12, start_time_ticks="34")
+
+    recover_failed_proof(prepared=prepared, guard_path=guard, claim=claim)
+    recover_failed_proof(prepared=prepared, guard_path=guard, claim=claim)
+
+    assert env_file.read_bytes() == original
+    assert read_abort_guard(guard).claimant_kind == "plan"
