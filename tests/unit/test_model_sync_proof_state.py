@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dokploy_wizard.proof.model_sync_artifacts import write_protected_manifest
+from dokploy_wizard.proof.model_sync_artifacts import JsonValue, write_protected_manifest
 from dokploy_wizard.proof.model_sync_results import build_result
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuardError,
@@ -134,7 +134,7 @@ def test_result_accepts_non_placeholder_captured_values() -> None:
 
 
 def test_result_rejects_placeholder_and_zero_capture_values() -> None:
-    values = {
+    values: dict[str, JsonValue] = {
         "schema_version": 1,
         "source_base_commit": "a" * 40,
         "proof_commit": "b" * 40,

@@ -34,6 +34,7 @@ REQUIRED_RESULT_KEYS: frozenset[str] = frozenset(
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DIGEST = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 def build_result(values: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
@@ -42,6 +43,7 @@ def build_result(values: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
         raise ValueError("Task 1 result keys do not match the proof contract")
     _require_hashes(values)
     _require_digests(values)
+    _require_capture_values(values)
     return dict(values)
 
 
@@ -70,3 +72,25 @@ def _require_digests(values: Mapping[str, JsonValue]) -> None:
     image_values.extend(shared.values())
     if any(not isinstance(value, str) or not _DIGEST.fullmatch(value) for value in image_values):
         raise ValueError("all captured images must use repository@sha256 digests")
+    if shared["litellm"] != values["litellm_image_digest"]:
+        raise ValueError("LiteLLM image observations must agree across result planes")
+
+
+def _require_capture_values(values: Mapping[str, JsonValue]) -> None:
+    commits = (values["source_base_commit"], values["proof_commit"])
+    if any(not isinstance(value, str) or not _COMMIT.fullmatch(value) for value in commits):
+        raise ValueError("proof commits must be exact SHA-1 values")
+    if (
+        values["schema_version"] != 1
+        or not isinstance(values["env_mode"], int)
+        or values["env_mode"] < 1
+    ):
+        raise ValueError("result schema version and proof env mode are invalid")
+    if (
+        values["host_identities_distinct"] is not True
+        or values["host_architectures_equal"] is not True
+    ):
+        raise ValueError("result requires distinct hosts with matching architectures")
+    for key in ("external_backup_path", "abort_guard_path", "protected_artifacts_before_path"):
+        if not isinstance(values[key], str) or values[key] == "":
+            raise ValueError(f"{key} must be a non-empty protected path")
