@@ -112,10 +112,8 @@ def test_process_identity_rejects_pid_reuse_start_time_mismatch() -> None:
 def test_process_identity_parses_field_22_after_a_parenthesized_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from dokploy_wizard.proof import model_sync_state
-
     stat = "123 (cmd with ) spaces) S " + " ".join(str(value) for value in range(4, 53))
-    monkeypatch.setattr(model_sync_state.Path, "read_text", lambda _path, **_kwargs: stat)
+    monkeypatch.setattr(Path, "read_text", lambda _path, **_kwargs: stat)
 
     assert process_identity_matches(123, "22")
 
@@ -141,6 +139,23 @@ def test_schema_v1_guard_without_receipt_remains_readable(tmp_path: Path) -> Non
 
     assert status.claimant_kind == "plan"
     assert status.env_receipt is None
+
+
+def test_schema_v2_guard_rejects_boolean_receipt_mode_without_mutation(tmp_path: Path) -> None:
+    guard = tmp_path / "abort-guard.json"
+    payload = {
+        "claim_token": None, "claimant_kind": "plan", "pid": None, "schema_version": 2,
+        "start_time_ticks": None, "state": "armed",
+        "env_receipt": {"env_path": "/tmp/env", "backup_path": "/tmp/backup", "mode": True,
+                        "original_sha256": "a" * 64, "proof_sha256": "b" * 64, "complete": False},
+    }
+    guard.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    before = guard.read_bytes()
+
+    with pytest.raises(AbortGuardError):
+        read_abort_guard(guard)
+
+    assert guard.read_bytes() == before
 
 
 def test_atomic_write_removes_sibling_temp_when_write_is_interrupted(
@@ -222,19 +237,17 @@ def test_atomic_finalize_rejects_different_parent_without_output_mutation(tmp_pa
 def test_atomic_finalize_fsyncs_output_parent_after_replace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dokploy_wizard.proof import model_sync_results
-
     temp = tmp_path / "result.tmp"
     output = tmp_path / "result.json"
     temp.write_text("safe\n", encoding="utf-8")
     synced: list[int] = []
-    original_fsync = model_sync_results.os.fsync
+    original_fsync = os.fsync
 
     def record_fsync(descriptor: int) -> None:
         synced.append(descriptor)
         original_fsync(descriptor)
 
-    monkeypatch.setattr(model_sync_results.os, "fsync", record_fsync)
+    monkeypatch.setattr(os, "fsync", record_fsync)
     atomic_finalize(temp=temp, output=output)
 
     assert output.read_text(encoding="utf-8") == "safe\n"

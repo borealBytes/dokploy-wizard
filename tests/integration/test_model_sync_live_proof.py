@@ -1340,6 +1340,7 @@ model_sync_cli._baseline_host_a(args)
     )
     assert process.stdout is not None
     assert process.stdin is not None
+    assert process.stderr is not None
     assert process.stdout.readline().strip() == "READY", process.stderr.read()
 
     process.send_signal(signum)
