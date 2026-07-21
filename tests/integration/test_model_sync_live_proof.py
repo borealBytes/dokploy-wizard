@@ -1376,3 +1376,55 @@ model_sync_cli._baseline_host_a(args)
         assert read_abort_guard(guard).claimant_kind == "plan"
         assert not (tmp_path / "result.json").exists()
     assert b"SECRET-SIGNAL-SENTINEL" not in (stdout + stderr).encode()
+
+
+@pytest.mark.parametrize("signals", [(signal.SIGINT, signal.SIGTERM), (signal.SIGTERM, signal.SIGINT)])
+def test_nested_signal_does_not_interrupt_active_recovery(
+    tmp_path: Path, signals: tuple[signal.Signals, signal.Signals]
+) -> None:
+    env_file = tmp_path / "install.env"
+    original = b"ROOT_DOMAIN=proof.example.test\nLITELLM_NVIDIA_API_KEY=SECRET-NESTED\n"
+    env_file.write_bytes(original)
+    env_file.chmod(0o600)
+    backup = tmp_path / "backup.env"
+    guard = tmp_path / "abort-guard.json"
+    child = r'''
+import os, signal, sys
+from pathlib import Path
+from dokploy_wizard.proof import model_sync_cli
+from dokploy_wizard.proof.model_sync_env import prepare_proof_env
+from dokploy_wizard.proof.model_sync_host_a import ProofRecoveryPaths, begin_proof_recovery, recover_interrupted_proof
+
+env, backup, guard = map(Path, sys.argv[1:])
+recovery = begin_proof_recovery(paths=ProofRecoveryPaths(env, backup, guard), pid=os.getpid(), start_time_ticks=model_sync_cli._self_start_time_ticks())
+prepare_proof_env(env_file=env, backup_path=backup, guard_path=guard, claim_token=recovery.claim.token)
+original = model_sync_cli.recover_interrupted_proof
+def paused(value):
+    print("READY", flush=True)
+    sys.stdin.buffer.read(1)
+    original(value)
+model_sync_cli.recover_interrupted_proof = paused
+model_sync_cli._install_recovery_handlers(recovery)
+print("ARMED", flush=True)
+signal.pause()
+'''
+    process = subprocess.Popen(
+        [os.environ.get("PYTHON", "python"), "-c", child, str(env_file), str(backup), str(guard)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[2] / "src")},
+    )
+    assert process.stdout is not None and process.stdin is not None
+    assert process.stdout.readline().strip() == "ARMED"
+    process.send_signal(signals[0])
+    assert process.stdout.readline().strip() == "READY"
+    process.send_signal(signals[1])
+    process.stdin.write("x")
+    process.stdin.flush()
+    stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == 128 + signals[0]
+    assert env_file.read_bytes() == original
+    assert env_file.stat().st_mode & 0o777 == 0o600
+    assert not backup.exists()
+    assert read_abort_guard(guard).claimant_kind == "plan"
+    assert not list(tmp_path.glob(".*.tmp"))
+    assert b"SECRET-NESTED" not in (stdout + stderr).encode()
