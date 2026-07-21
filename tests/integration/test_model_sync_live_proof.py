@@ -1021,6 +1021,284 @@ def test_model_inventory_uses_workspace_python_runtime(
     assert captured["command"][node_index : node_index + 2] == ["node", "-e"]
 
 
+_KDENSE_CATALOG = (
+    ("Unsloth Active (local alias)", "local-model.internal/unsloth-active"),
+    ("Claude Opus 4.7", "openrouter/anthropic/claude-opus-4.7"),
+    ("Claude Sonnet 4.6", "openrouter/anthropic/claude-sonnet-4.6"),
+    ("GPT-5.4 Pro", "openrouter/openai/gpt-5.4-pro"),
+    ("GPT-5.4", "openrouter/openai/gpt-5.4"),
+    ("GPT-5.4 Mini", "openrouter/openai/gpt-5.4-mini"),
+    ("GPT-5.4 Nano", "openrouter/openai/gpt-5.4-nano"),
+    ("Grok 4.20 Beta", "openrouter/x-ai/grok-4.20-beta"),
+    ("Gemini 3.1 Pro Preview", "openrouter/google/gemini-3.1-pro-preview"),
+    ("Gemini 3 Flash Preview", "openrouter/google/gemini-3-flash-preview"),
+    ("Gemini 3.1 Flash Lite Preview", "openrouter/google/gemini-3.1-flash-lite-preview"),
+    ("Qwen3 Max Thinking", "openrouter/qwen/qwen3-max-thinking"),
+    ("Qwen3 Coder Next", "openrouter/qwen/qwen3-coder-next"),
+    ("GLM 5 Turbo", "openrouter/z-ai/glm-5-turbo"),
+    ("GLM 5", "openrouter/z-ai/glm-5"),
+    ("MiniMax M2.5", "openrouter/minimax/minimax-m2.5"),
+    ("MiniMax M2.5 (free)", "openrouter/minimax/minimax-m2.5:free"),
+    ("Kimi K2.5", "openrouter/moonshotai/kimi-k2.5"),
+    ("Nemotron 3 Super", "openrouter/nvidia/nemotron-3-super-120b-a12b"),
+    ("Nemotron 3 Nano Omni (free)", "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"),
+)
+
+
+def test_kdense_renderer_catalog_matches_terraform_static_options() -> None:
+    terraform = (
+        Path(__file__).parents[2]
+        / "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
+    ).read_text(encoding="utf-8")
+    block = terraform.split("kdense_model_options = [", 1)[1].split("\n  ]", 1)[0]
+    names = [line.split('"', 2)[1] for line in block.splitlines() if line.strip().startswith("name  =")]
+    values = [line.split('"', 2)[1] for line in block.splitlines() if line.strip().startswith("value =")]
+    authoritative = tuple(zip(names, values, strict=True))
+
+    assert authoritative == _KDENSE_CATALOG == model_sync_host_b._KDENSE_CATALOG
+
+
+def _terraform_kdense_models(
+    source_models: list[dict[str, Any]],
+    default_model: str = "openai/anthropic/claude-opus-4.7",
+    expert_model: str = "openai/google/gemini-3.1-pro-preview",
+) -> list[dict[str, Any]]:
+    source_by_id = {
+        str(model.get("id", "")): {
+            key: value for key, value in model.items() if key not in {"default", "expertDefault"}
+        }
+        for model in source_models
+        if str(model.get("id", "")).startswith("openrouter/")
+    }
+    merged: list[dict[str, Any]] = []
+    for label, option_value in _KDENSE_CATALOG:
+        if not option_value.startswith("openrouter/"):
+            continue
+        model = dict(source_by_id.get(option_value, {}))
+        if not model:
+            model = {"id": option_value, "label": label, "provider": "OpenRouter"}
+        model.pop("default", None)
+        model.pop("expertDefault", None)
+        model["id"] = "openai/" + option_value.removeprefix("openrouter/")
+        model["label"] = label
+        model["provider"] = "OpenCode Go"
+        description = str(model.get("description", "")).strip()
+        model["description"] = (description + "\n\n" if description else "") + "Available through the central LiteLLM OpenCode Go-compatible gateway."
+        merged.append(model)
+    deduped = list({str(model["id"]): model for model in reversed(merged)}.values())[::-1]
+    for model in deduped:
+        if model["id"] == default_model:
+            model["default"] = True
+        if model["id"] == expert_model:
+            model["expertDefault"] = True
+    if not any(model.get("default") for model in deduped):
+        deduped[0]["default"] = True
+    if not any(model.get("expertDefault") for model in deduped):
+        next((model for model in deduped if model.get("default")), deduped[0])["expertDefault"] = True
+    return deduped
+
+
+def _kdense_source_fixture() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "openrouter/anthropic/claude-opus-4.7",
+            "label": "Superseded duplicate",
+            "provider": "OpenRouter",
+            "description": "This duplicate must not survive.",
+            "contextWindow": 1,
+        },
+        {
+            "id": "openrouter/anthropic/claude-opus-4.7",
+            "label": "Upstream Opus",
+            "provider": "OpenRouter",
+            "description": "Upstream reasoning model.",
+            "contextWindow": 200_000,
+            "inputModalities": ["text", "image"],
+            "default": True,
+        },
+        {
+            "id": "openrouter/google/gemini-3.1-pro-preview",
+            "label": "Upstream Gemini",
+            "provider": "OpenRouter",
+            "description": "Upstream multimodal expert.",
+            "contextWindow": 1_048_576,
+            "outputModalities": ["text"],
+            "expertDefault": True,
+        },
+        {"id": "ollama/local-only", "label": "Ignored local model", "provider": "Ollama"},
+    ]
+
+
+def _commit_kdense_source(tmp_path: Path, source_models: list[dict[str, Any]]) -> tuple[Path, str]:
+    repo = tmp_path / "kdense-source"
+    target = repo / "web/src/data/models.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(source_models, indent=2) + "\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "fixture@example.test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/K-Dense-AI/k-dense-byok.git"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "web/src/data/models.json"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+    revision = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return repo, revision
+
+
+def _kdense_observed(renderer: model_sync_host_b.LegacyRenderer, target: list[dict[str, Any]]) -> dict[str, Any]:
+    target_path = "/home/coder/.cache/kdense-byok-src/web/src/data/models.json"
+    target_sha = model_sync_host_b._sha(target)
+    symlink_sha = model_sync_host_b._sha(target_path.encode())
+    credential_sha = model_sync_host_b._sha(renderer.credential.encode())
+    aggregate_sha = model_sync_host_b._sha(
+        {"base_url": renderer.base_url, "credential_value_sha256": credential_sha, "symlink_sha256": symlink_sha, "target_sha256": target_sha}
+    )
+    return {
+        "base_url": renderer.base_url,
+        "credential_value_sha256": credential_sha,
+        "mode": "0644",
+        "pointer": "/home/coder/.local/state/dokploy-wizard/model-sync/current",
+        "pointer_sha256": aggregate_sha,
+        "scope": "target-and-symlink",
+        "shape": "json-target-and-symlink",
+        "symlink_sha256": symlink_sha,
+        "symlink_state": "present",
+        "symlink_target": target_path,
+        "target": target_path,
+        "target_sha256": target_sha,
+    }
+
+
+@pytest.mark.parametrize(
+    ("default_model", "expert_model", "default_index", "expert_index"),
+    [
+        ("openai/anthropic/claude-opus-4.7", "openai/google/gemini-3.1-pro-preview", 0, 7),
+        ("openai/missing-default", "openai/missing-expert", 0, 0),
+    ],
+)
+def test_kdense_renderer_reconstructs_terraform_catalog_from_git_preimage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    default_model: str,
+    expert_model: str,
+    default_index: int,
+    expert_index: int,
+) -> None:
+    source_models = _kdense_source_fixture()
+    expected_target = _terraform_kdense_models(source_models, default_model, expert_model)
+    repo, revision = _commit_kdense_source(tmp_path, source_models)
+    env_file = repo / ".env"
+    env_file.write_text(
+        f"DEFAULT_AGENT_MODEL={default_model}\nDEFAULT_EXPERT_MODEL={expert_model}\n",
+        encoding="utf-8",
+    )
+    (repo / "web/src/data/models.json").write_text(
+        json.dumps(expected_target, indent=2) + "\n", encoding="utf-8"
+    )
+    renderer = model_sync_host_b.LegacyRenderer(
+        "http://proof-stack-shared-litellm:4000/v1", "credential", "unused", (), ()
+    )
+    observed = _kdense_observed(renderer, expected_target)
+    real_run = subprocess.run
+
+    def workspace_json(
+        _container: str,
+        _token: str,
+        _workspace: str,
+        script: str,
+        payload: str,
+        args: tuple[str, ...],
+        label: str,
+    ) -> model_sync_artifacts.JsonValue:
+        if label == "legacy pointer":
+            return observed
+        result = real_run(
+            ["node", "-e", script, str(repo), str(env_file), *args[2:]],
+            input=payload,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise ValueError("unable to reconstruct K-Dense legacy target")
+        return model_sync_artifacts.require_mapping(
+            json.loads(result.stdout), "K-Dense renderer output"
+        )
+
+    monkeypatch.setattr(model_sync_host_b, "_workspace_json", workspace_json)
+
+    pointer = model_sync_host_b._primary_pointer(
+        "coder", "session", "workspace", "ubuntu-vscode-kdense-byok", "historical", renderer
+    )
+
+    assert pointer["pointer_sha256"] == pointer["independent_renderer_sha256"]
+    assert pointer["renderer_source_revision"] == revision
+    assert pointer["renderer_source_path"] == "web/src/data/models.json"
+    assert len(expected_target) == 19
+    assert expected_target[0]["id"] == "openai/anthropic/claude-opus-4.7"
+    assert expected_target[0]["contextWindow"] == 200_000
+    assert expected_target[default_index]["default"] is True
+    assert expected_target[1] == {
+        "id": "openai/anthropic/claude-sonnet-4.6",
+        "label": "Claude Sonnet 4.6",
+        "provider": "OpenCode Go",
+        "description": "Available through the central LiteLLM OpenCode Go-compatible gateway.",
+    }
+    assert expected_target[expert_index]["expertDefault"] is True
+
+
+def test_kdense_renderer_fails_closed_without_git_preimage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "kdense-archive"
+    repo.mkdir()
+    env_file = repo / ".env"
+    env_file.write_text(
+        "DEFAULT_AGENT_MODEL=openai/anthropic/claude-opus-4.7\n"
+        "DEFAULT_EXPERT_MODEL=openai/google/gemini-3.1-pro-preview\n",
+        encoding="utf-8",
+    )
+    renderer = model_sync_host_b.LegacyRenderer(
+        "http://proof-stack-shared-litellm:4000/v1", "credential", "unused", (), ()
+    )
+    real_run = subprocess.run
+
+    def workspace_json(
+        _container: str,
+        _token: str,
+        _workspace: str,
+        script: str,
+        payload: str,
+        args: tuple[str, ...],
+        label: str,
+    ) -> model_sync_artifacts.JsonValue:
+        if label == "legacy pointer":
+            return _kdense_observed(renderer, _terraform_kdense_models(_kdense_source_fixture()))
+        result = real_run(
+            ["node", "-e", script, str(repo), str(env_file), *args[2:]],
+            input=payload,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise ValueError("unable to reconstruct K-Dense legacy target")
+        return model_sync_artifacts.require_mapping(
+            json.loads(result.stdout), "K-Dense renderer output"
+        )
+
+    monkeypatch.setattr(model_sync_host_b, "_workspace_json", workspace_json)
+
+    with pytest.raises(ValueError, match="unable to reconstruct K-Dense legacy target"):
+        model_sync_host_b._primary_pointer(
+            "coder", "session", "workspace", "ubuntu-vscode-kdense-byok", "historical", renderer
+        )
+
+
 def test_kdense_capture_binds_whole_target_and_current_symlink(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1033,8 +1311,8 @@ def test_kdense_capture_binds_whole_target_and_current_symlink(
     )
     target_path = "/home/coder/.cache/kdense-byok-src/web/src/data/models.json"
     symlink_target = target_path
-    target_sha = model_sync_host_b._sha([{"id": "openrouter/example"}])
-    symlink_sha = model_sync_host_b._sha(symlink_target)
+    target_sha = model_sync_host_b._sha(_terraform_kdense_models(_kdense_source_fixture()))
+    symlink_sha = model_sync_host_b._sha(symlink_target.encode())
     aggregate_sha = model_sync_host_b._sha(
         {"base_url": renderer.base_url, "credential_value_sha256": model_sync_host_b._sha(renderer.credential.encode()), "symlink_sha256": symlink_sha, "target_sha256": target_sha}
     )
@@ -1053,9 +1331,15 @@ def test_kdense_capture_binds_whole_target_and_current_symlink(
         "target_sha256": target_sha,
     }
     monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, json.dumps(observed), ""),
+        model_sync_host_b,
+        "_workspace_json",
+        lambda _container, _token, _workspace, _script, _payload, _args, label: observed
+        if label == "legacy pointer"
+        else {
+            "independent_renderer_sha256": aggregate_sha,
+            "renderer_source_path": "web/src/data/models.json",
+            "renderer_source_revision": "a" * 40,
+        },
     )
 
     pointer = model_sync_host_b._primary_pointer(
@@ -1243,6 +1527,43 @@ def test_kdense_target_symlink_and_credential_drift_are_nonexact(field: str) -> 
     assert kdense["legacy_exact"] is False
 
 
+@pytest.mark.parametrize("mutation", ["metadata", "id", "default", "expert", "order"])
+def test_kdense_terraform_target_semantic_drift_is_nonexact(mutation: str) -> None:
+    snapshot = json.loads(_snapshot_wire())
+    pointer = snapshot["coder"]["workspaces"]["pages"][0]["items"][1]["legacy_pointers"][0]
+    target = _terraform_kdense_models(_kdense_source_fixture())
+    if mutation == "metadata":
+        target[0]["contextWindow"] += 1
+    elif mutation == "id":
+        target[0]["id"] = "openrouter/anthropic/claude-opus-4.7"
+    elif mutation == "default":
+        target[0].pop("default")
+    elif mutation == "expert":
+        target[7].pop("expertDefault")
+    else:
+        target.reverse()
+    pointer["target_sha256"] = model_sync_host_b._sha(target)
+    pointer["pointer_sha256"] = model_sync_host_b._sha({
+        "base_url": pointer["base_url"],
+        "credential_value_sha256": pointer["credential_value_sha256"],
+        "symlink_sha256": pointer["symlink_sha256"],
+        "target_sha256": pointer["target_sha256"],
+    })
+
+    captured = model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    legacy = model_sync_artifacts.require_list(
+        captured.payload["legacy_workspace_managed_fingerprints"], "legacy fingerprints"
+    )
+    kdense = next(
+        item
+        for value in legacy
+        if (item := model_sync_artifacts.require_mapping(value, "legacy fingerprint"))["scope"]
+        == "target-and-symlink"
+    )
+
+    assert kdense["legacy_exact"] is False
+
+
 def test_zero_workspace_baseline_has_no_adoption_candidates() -> None:
     snapshot = json.loads(_snapshot_wire())
     snapshot["coder"]["workspaces"] = {"pages": [{"items": [], "offset": 0}], "total": 0}
@@ -1254,11 +1575,13 @@ def test_zero_workspace_baseline_has_no_adoption_candidates() -> None:
     assert captured.payload["legacy_workspace_managed_fingerprints"] == []
 
 
-@pytest.mark.parametrize("mutation", ["empty", "duplicate", "mode", "shape", "scope", "target", "path", "base", "version", "unsupported", "hash", "credential_hash", "renderer_hash"])
+@pytest.mark.parametrize("mutation", ["empty", "duplicate", "mode", "shape", "scope", "target", "path", "base", "version", "unsupported", "hash", "credential_hash", "renderer_hash", "renderer_source_revision", "renderer_source_path"])
 def test_legacy_baseline_rejects_missing_or_malformed_renderer_evidence(mutation: str) -> None:
     snapshot = json.loads(_snapshot_wire())
     primary = snapshot["coder"]["workspaces"]["pages"][0]["items"][0]
     pointer = primary["legacy_pointers"][0]
+    if mutation.startswith("renderer_source_"):
+        pointer = snapshot["coder"]["workspaces"]["pages"][0]["items"][1]["legacy_pointers"][0]
     if mutation == "empty":
         primary["legacy_pointers"] = []
     elif mutation == "duplicate":
@@ -1285,6 +1608,10 @@ def test_legacy_baseline_rejects_missing_or_malformed_renderer_evidence(mutation
         pointer["pointer_sha256"] = "not-a-sha256"
     elif mutation == "credential_hash":
         pointer["credential_value_sha256"] = "not-a-sha256"
+    elif mutation == "renderer_source_revision":
+        pointer["renderer_source_revision"] = "not-a-git-revision"
+    elif mutation == "renderer_source_path":
+        pointer["renderer_source_path"] = "web/src/data/mutated.json"
     else:
         pointer["independent_renderer_sha256"] = "not-a-sha256"
 
@@ -1426,8 +1753,8 @@ def _snapshot_wire(*, omit_template: bool = False, malformed_build: bool = False
     pointer_sha = _legacy_sha(pointer_target, pointer)
     kdense_target = "/home/coder/.cache/kdense-byok-src/web/src/data/models.json"
     kdense_pointer = "/home/coder/.local/state/dokploy-wizard/model-sync/current"
-    kdense_target_sha = model_sync_host_b._sha([{"id": "openrouter/example"}])
-    kdense_symlink_sha = model_sync_host_b._sha(kdense_target)
+    kdense_target_sha = model_sync_host_b._sha(_terraform_kdense_models(_kdense_source_fixture()))
+    kdense_symlink_sha = model_sync_host_b._sha(kdense_target.encode())
     kdense_sha = model_sync_host_b._sha({"base_url": "http://proof-stack-shared-litellm:4000/v1", "credential_value_sha256": _sha("c"), "symlink_sha256": kdense_symlink_sha, "target_sha256": kdense_target_sha})
     return json.dumps(
         {
@@ -1527,6 +1854,8 @@ def _snapshot_wire(*, omit_template: bool = False, malformed_build: bool = False
                                             "mode": "0644",
                                             "pointer": kdense_pointer,
                                             "pointer_sha256": kdense_sha,
+                                            "renderer_source_path": "web/src/data/models.json",
+                                            "renderer_source_revision": "a" * 40,
                                             "scope": "target-and-symlink",
                                             "shape": "json-target-and-symlink",
                                             "symlink_sha256": kdense_symlink_sha,
