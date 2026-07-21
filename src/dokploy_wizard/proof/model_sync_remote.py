@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +20,11 @@ from dokploy_wizard.proof.model_sync_artifacts import (
     require_text,
 )
 from dokploy_wizard.proof.model_sync_env import ProofNamespace, resolve_proof_transport
-from dokploy_wizard.proof.model_sync_results import PREFLIGHT_SCRIPT, ProofTransport
+from dokploy_wizard.proof.model_sync_results import (
+    PREFLIGHT_SCRIPT,
+    ProofTransport,
+    run_bounded_process,
+)
 from dokploy_wizard.remote import capture_remote_output
 from dokploy_wizard.remote_transport import ParamikoRemoteTransport
 
@@ -118,28 +121,25 @@ def capture_host_a_snapshot(*, host: str, password: str, timeout_seconds: int = 
         )
     finally:
         transport.close()
-
-
 def capture_local_authoritative_inventory(
     env_file: Path, namespace: ProofNamespace
 ) -> RemoteProbe:
     """Reuse the pre-upload collectors after installation without exposing credentials."""
-    result = subprocess.run(
-        [sys.executable, "-c", PREFLIGHT_SCRIPT],
-        input=_transport_bytes(resolve_proof_transport(env_file)),
-        check=False,
-        capture_output=True,
-        timeout=120,
-    )
-    if result.returncode != 0 or len(result.stdout) > 2 * 1024 * 1024:
-        raise RemoteProofError("post-install authoritative inventory failed")
     try:
-        output = result.stdout.decode("utf-8")
+        encoded = run_bounded_process(
+            [sys.executable, "-c", PREFLIGHT_SCRIPT],
+            stdin=_transport_bytes(resolve_proof_transport(env_file)),
+            output_limit=2 * 1024 * 1024,
+            timeout_seconds=120,
+            label="post-install authoritative inventory",
+        )
+    except RuntimeError as error:
+        raise RemoteProofError("post-install authoritative inventory failed") from error
+    try:
+        output = encoded.decode("utf-8")
     except UnicodeDecodeError as error:
         raise RemoteProofError("post-install inventory returned invalid UTF-8") from error
     return _parse_preflight(output, namespace, "post-install-local")
-
-
 def _parse_preflight(raw_output: str, namespace: ProofNamespace, ssh_key: str) -> RemoteProbe:
     try:
         raw = json.loads(raw_output)

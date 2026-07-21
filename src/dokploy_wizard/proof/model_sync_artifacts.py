@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, TypeAlias
+from urllib.parse import urlsplit
 
 from dokploy_wizard.verification import redact_text
 
@@ -24,8 +25,6 @@ _FILE_MODE: Final = 0o600
 def sha256_bytes(value: bytes) -> str:
     """Return a stable fingerprint for non-secret artifact bytes."""
     return hashlib.sha256(value).hexdigest()
-
-
 def atomic_write_bytes(path: Path, content: bytes, *, mode: int = _FILE_MODE) -> None:
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -43,22 +42,16 @@ def atomic_write_bytes(path: Path, content: bytes, *, mode: int = _FILE_MODE) ->
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
-
-
 def _write_all(descriptor: int, content: bytes) -> None:
     view = memoryview(content)
     while view:
         view = view[os.write(descriptor, view) :]
-
-
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-
-
 @dataclass(frozen=True, slots=True)
 class CaptureSchemaError(RuntimeError):
     """Raised when a remote capture cannot be safely normalized."""
@@ -154,22 +147,36 @@ def require_text(value: JsonValue, label: str) -> str:
     return value
 
 
+def require_safe_base_url(value: str) -> str:
+    parsed = urlsplit(value)
+    try:
+        parsed.port
+    except ValueError as error:
+        raise CaptureSchemaError("legacy pointer base URL is unsafe") from error
+    if (
+        value.strip() != value
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or any(segment in {".", ".."} for segment in parsed.path.split("/"))
+    ):
+        raise CaptureSchemaError("legacy pointer base URL is unsafe")
+    return value
 def require_sha256(value: JsonValue, label: str) -> str:
     """Return a non-placeholder SHA-256 capture fingerprint."""
     text = require_text(value, label)
     if not _SHA256.fullmatch(text) or text == "0" * 64:
         raise CaptureSchemaError(f"{label} must be a non-zero SHA-256")
     return text
-
-
 def require_digest(value: JsonValue, label: str) -> str:
     """Return a resolved immutable container image reference."""
     text = require_text(value, label)
     if not _DIGEST.fullmatch(text):
         raise CaptureSchemaError(f"{label} must use repository@sha256")
     return text
-
-
 def protected_manifest_bytes(entries: Mapping[str, str]) -> bytes:
     """Render a real text manifest from exact protected-artifact hashes."""
     lines: list[str] = []
@@ -181,8 +188,6 @@ def protected_manifest_bytes(entries: Mapping[str, str]) -> bytes:
     if not lines:
         raise CaptureSchemaError("protected manifest must not be empty")
     return "".join(lines).encode("utf-8")
-
-
 def finalize_capture_outputs(outputs: Mapping[Path, bytes]) -> None:
     """Finalize a complete capture set or remove every newly written artifact on failure."""
     if not outputs:
@@ -196,8 +201,6 @@ def finalize_capture_outputs(outputs: Mapping[Path, bytes]) -> None:
         for path in outputs:
             path.unlink(missing_ok=True)
         raise
-
-
 def parse_resource_planes(snapshot: dict[str, JsonValue]) -> ResourcePlaneCapture:
     """Reject incomplete container, state, Cloudflare, and Tailscale inventories."""
     images: dict[str, str] = {}
@@ -232,8 +235,6 @@ def parse_resource_planes(snapshot: dict[str, JsonValue]) -> ResourcePlaneCaptur
             "state_sha256": require_sha256(state["state_sha256"], "wizard state"),
         },
     )
-
-
 def _identifiers(raw: JsonValue, label: str, expected: set[str]) -> dict[str, JsonValue]:
     source = require_mapping(raw, label)
     require_keys(source, expected, label)
@@ -241,8 +242,6 @@ def _identifiers(raw: JsonValue, label: str, expected: set[str]) -> dict[str, Js
         key: sorted(_unique_strings(require_list(source[key], f"{label}.{key}"), f"{label}.{key}"))
         for key in sorted(expected)
     }
-
-
 def _unique_strings(values: list[JsonValue], label: str) -> list[str]:
     result = [require_text(value, label) for value in values]
     if len(result) != len(set(result)):

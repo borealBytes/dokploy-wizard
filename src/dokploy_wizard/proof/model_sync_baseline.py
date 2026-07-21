@@ -1,5 +1,4 @@
 # ruff: noqa: E501, I001
-"""Strict, redacted normalization of the Host A Coder baseline snapshot."""
 from __future__ import annotations
 import hashlib
 import json
@@ -12,6 +11,7 @@ from dokploy_wizard.proof.model_sync_artifacts import (
     require_keys,
     require_list,
     require_mapping,
+    require_safe_base_url,
     require_sha256,
     require_text,
 )
@@ -57,7 +57,7 @@ def parse_captured_baseline(raw_snapshot: str, *, stack_name: str) -> CapturedBa
     template_names = tuple(template["name"] for template in templates)
     if template_names != tuple(sorted(REQUIRED_TEMPLATE_NAMES)):
         raise BaselineCaptureError("baseline must contain exactly the six required Coder templates")
-    workspaces = _workspaces(coder["workspaces"], templates, stack_name)
+    workspaces = _workspaces(coder["workspaces"], templates)
     _builds(coder["builds"], workspaces)
     secrets = _secrets(coder["secrets"])
     legacy: list[JsonValue] = []
@@ -111,7 +111,7 @@ def _templates(raw: JsonValue) -> tuple[dict[str, str], ...]:
     _unique([template["id"] for template in templates], "template ids")
     _unique([template["name"] for template in templates], "template names")
     return tuple(sorted(templates, key=lambda item: item["name"]))
-def _workspaces(raw: JsonValue, templates: tuple[dict[str, str], ...], stack_name: str) -> tuple[dict[str, JsonValue], ...]:
+def _workspaces(raw: JsonValue, templates: tuple[dict[str, str], ...]) -> tuple[dict[str, JsonValue], ...]:
     template_records = {template["id"]: template for template in templates}
     workspaces: list[dict[str, JsonValue]] = []
     for item in _pages(raw, "workspaces"):
@@ -122,7 +122,7 @@ def _workspaces(raw: JsonValue, templates: tuple[dict[str, str], ...], stack_nam
         if template is None:
             raise BaselineCaptureError("workspace references an uncaptured Coder template")
         version_id = require_text(workspace["template_version_id"], "workspace template version id")
-        pointers = _legacy_pointers(workspace["legacy_pointers"], template["name"], stack_name, version_id)
+        pointers = _legacy_pointers(workspace["legacy_pointers"], template["name"], version_id)
         workspaces.append({
             "id": require_text(workspace["id"], "workspace id"),
             "legacy_fingerprints": pointers,
@@ -132,13 +132,12 @@ def _workspaces(raw: JsonValue, templates: tuple[dict[str, str], ...], stack_nam
         })
     _unique([require_text(workspace["id"], "workspace id") for workspace in workspaces], "workspace ids")
     return tuple(sorted(workspaces, key=lambda item: require_text(item["id"], "workspace id")))
-def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str, version_id: str) -> list[dict[str, JsonValue]]:
+def _legacy_pointers(raw: JsonValue, template_name: str, version_id: str) -> list[dict[str, JsonValue]]:
     pointers: list[dict[str, JsonValue]] = []
     rule = _LEGACY_RULES.get(template_name)
     if rule is None:
         raise BaselineCaptureError("workspace template has no supported legacy renderer contract")
     expected_scope, expected_target, expected_pointer, expected_mode, expected_shape = rule
-    expected_base = f"http://{stack_name}-shared-litellm:4000/v1"
     entries = require_list(raw, "legacy pointers")
     if not entries:
         raise BaselineCaptureError("workspace has no independently rendered legacy fingerprint")
@@ -151,8 +150,7 @@ def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str, versio
         require_keys(pointer, keys, "legacy pointer")
         if require_text(pointer["scope"], "legacy pointer scope") != expected_scope:
             raise BaselineCaptureError("legacy pointer scope does not match its template contract")
-        if require_text(pointer["base_url"], "legacy pointer base URL") != expected_base:
-            raise BaselineCaptureError("legacy pointer base URL does not match resolved LiteLLM")
+        observed_base = require_safe_base_url(require_text(pointer["base_url"], "legacy pointer base URL"))
         target, path = require_text(pointer["target"], "legacy pointer target"), require_text(pointer["pointer"], "legacy pointer path")
         if (target, path, require_text(pointer["mode"], "legacy pointer mode"), require_text(pointer["shape"], "legacy pointer shape")) != (expected_target, expected_pointer, expected_mode, expected_shape) or require_text(pointer["template_version_id"], "legacy pointer version") != version_id or (target, path) in seen:
             raise BaselineCaptureError("legacy pointer does not match its captured template renderer contract")
@@ -161,7 +159,7 @@ def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str, versio
         renderer_sha = require_sha256(pointer["independent_renderer_sha256"], "legacy renderer")
         exact = pointer_sha == renderer_sha
         normalized: dict[str, JsonValue] = {
-            "base_url": expected_base,
+            "base_url": observed_base,
             "credential_value_sha256": require_sha256(pointer["credential_value_sha256"], "legacy credential"),
             "independent_renderer_sha256": renderer_sha,
             "legacy_exact": exact,
@@ -188,7 +186,7 @@ def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str, versio
                 symlink_sha = require_sha256(symlink_sha, "legacy symlink")
             elif symlink_target is not None or symlink_sha is not None:
                 raise BaselineCaptureError("absent legacy symlink must not have target evidence")
-            if pointer_sha != canonical_sha256({"base_url": expected_base, "credential_value_sha256": require_sha256(pointer["credential_value_sha256"], "legacy credential"), "symlink_sha256": symlink_sha, "target_sha256": target_sha}):
+            if pointer_sha != canonical_sha256({"base_url": observed_base, "credential_value_sha256": require_sha256(pointer["credential_value_sha256"], "legacy credential"), "symlink_sha256": symlink_sha, "target_sha256": target_sha}):
                 raise BaselineCaptureError("legacy target and symlink aggregate hash is invalid")
             normalized.update({"legacy_exact": exact and state == "present", "renderer_source_path": source_path, "renderer_source_revision": revision, "symlink_sha256": symlink_sha, "symlink_state": state, "symlink_target": symlink_target, "target_sha256": target_sha})
         pointers.append(normalized)

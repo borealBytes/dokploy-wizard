@@ -30,7 +30,7 @@ from dokploy_wizard.proof.model_sync_host_a import (
 )
 from dokploy_wizard.proof.model_sync_host_b import HostIdentity, assert_namespace_identity
 from dokploy_wizard.proof.model_sync_remote import capture_host_a_snapshot, probe_host
-from dokploy_wizard.proof.model_sync_results import atomic_finalize
+from dokploy_wizard.proof.model_sync_results import atomic_finalize, run_bounded_process
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuard,
     AbortGuardError,
@@ -184,7 +184,7 @@ def _require_active_workspace_root(wrapper: Path) -> None:
 
 
 def _run_wrapper(wrapper: Path, host: str, password: str, env_file: Path) -> None:
-    result = subprocess.run(
+    run_bounded_process(
         [
             str(wrapper),
             "proof",
@@ -194,14 +194,11 @@ def _run_wrapper(wrapper: Path, host: str, password: str, env_file: Path) -> Non
             "--env-file",
             str(env_file),
         ],
-        check=False,
-        capture_output=True,
-        input=password + "\n",
-        text=True,
-        timeout=3600,
+        stdin=(password + "\n").encode(),
+        output_limit=2 * 1024 * 1024,
+        timeout_seconds=3600,
+        label="remote proof wrapper",
     )
-    if result.returncode != 0:
-        raise RuntimeError("remote proof wrapper failed")
 def _self_start_time_ticks() -> str:
     return process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8"))
 def _install_recovery_handlers(
