@@ -1228,7 +1228,7 @@ def test_capture_finalization_rolls_back_outputs_when_system_exit_interrupts_sec
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 @pytest.mark.parametrize(
     "boundary",
-    ["before-backup", "after-backup", "after-replace", "before-handler", "after-handler"],
+    ["before-backup", "after-backup", "after-replace", "before-handler", "after-handler", "after-finalize"],
 )
 def test_baseline_host_a_recovers_exact_env_for_each_signal_boundary(
     tmp_path: Path,
@@ -1247,6 +1247,8 @@ def test_baseline_host_a_recovers_exact_env_for_each_signal_boundary(
     child = r'''
 from __future__ import annotations
 import argparse
+import hashlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1280,11 +1282,27 @@ model_sync_cli._require_active_workspace_root = lambda _wrapper: None
 model_sync_cli.resolve_proof_namespace = lambda _env: SimpleNamespace(stack_name="proof-stack")
 model_sync_cli.resolve_proof_transport = lambda _env: None
 model_sync_cli.probe_host = lambda **_kwargs: SimpleNamespace(
-    machine_sha256="a" * 64, ssh_sha256="b" * 64, architecture="amd64", namespace_clean=True
+    machine_sha256="a" * 64, ssh_sha256="b" * 64, architecture="amd64", namespace_clean=True,
+    to_dict=lambda: {},
 )
 model_sync_cli.assert_namespace_identity = lambda **_kwargs: None
 model_sync_cli._run_wrapper = lambda *_args: None
+model_sync_cli.capture_host_a_snapshot = lambda **_kwargs: None
+model_sync_cli.parse_captured_baseline = lambda *_args, **_kwargs: SimpleNamespace(
+    payload={},
+    images={"coder": "coder@sha256:" + "1" * 64, "litellm": "litellm@sha256:" + "2" * 64,
+            "pgvector": "pgvector@sha256:" + "3" * 64, "redis": "redis@sha256:" + "4" * 64,
+            "postfix": "postfix@sha256:" + "5" * 64},
+    coder_secret_inventory_sha256="6" * 64,
+    legacy_workspace_managed_fingerprints_sha256="7" * 64,
+)
 original_install = model_sync_cli._install_recovery_handlers
+original_finalize = model_sync_cli.finalize_baseline_artifacts
+if boundary == "after-finalize":
+    def finalize(inputs):
+        original_finalize(inputs)
+        pause()
+    model_sync_cli.finalize_baseline_artifacts = finalize
 if boundary == "before-handler":
     def install(recovery, *_args):
         pause()
@@ -1322,7 +1340,7 @@ model_sync_cli._baseline_host_a(args)
     )
     assert process.stdout is not None
     assert process.stdin is not None
-    assert process.stdout.readline().strip() == "READY"
+    assert process.stdout.readline().strip() == "READY", process.stderr.read()
 
     process.send_signal(signum)
     stdout, stderr = process.communicate()
@@ -1335,11 +1353,26 @@ model_sync_cli._baseline_host_a(args)
             start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
         )
         recover_interrupted_proof(recovery)
+    elif boundary == "after-finalize":
+        assert process.returncode == 128 + signum
+        result = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+        manifest = (tmp_path / "protected-artifacts-before.txt").read_text(encoding="utf-8")
+        guard_bytes = guard.read_bytes()
+        guard_sha256 = hashlib.sha256(guard_bytes).hexdigest()
+        status = read_abort_guard(guard)
+        assert env_file.read_bytes() != original
+        assert backup.read_bytes() == original
+        assert status.state == "armed"
+        assert status.claimant_kind == "plan"
+        assert status.env_receipt is not None and status.env_receipt.complete
+        assert result["abort_guard_sha256"] == guard_sha256
+        assert f"{guard_sha256}  abort-guard.json" in manifest
     else:
         assert process.returncode == 128 + signum
-    assert env_file.read_bytes() == original
-    assert env_file.stat().st_mode & 0o777 == 0o600
-    assert not backup.exists()
-    assert read_abort_guard(guard).claimant_kind == "plan"
-    assert not (tmp_path / "result.json").exists()
+    if boundary != "after-finalize":
+        assert env_file.read_bytes() == original
+        assert env_file.stat().st_mode & 0o777 == 0o600
+        assert not backup.exists()
+        assert read_abort_guard(guard).claimant_kind == "plan"
+        assert not (tmp_path / "result.json").exists()
     assert b"SECRET-SIGNAL-SENTINEL" not in (stdout + stderr).encode()
