@@ -874,6 +874,9 @@ def test_legacy_observed_safe_base_url_drift_is_nonexact() -> None:
     [
         "http://proof-stack-shared-litellm:4000",
         "https://opencode.ai/zen/go/v1",
+        "http://127.0.0.1:4000",
+        "http://[::1]:4000",
+        "https://example.test/path",
     ],
 )
 def test_safe_base_url_accepts_current_template_contracts(value: str) -> None:
@@ -923,6 +926,76 @@ def test_safe_base_url_rejects_raw_whitespace_and_controls(value: str) -> None:
     ],
 )
 def test_safe_base_url_preserves_existing_fail_closed_contract(value: str) -> None:
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError, match="base URL is unsafe"):
+        model_sync_artifacts.require_safe_base_url(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://example.test/%2e%2e/escape",
+        "https://example.test/%2E%2e/escape",
+        "https://example.test/.%2e/escape",
+        "https://example.test/%2e./escape",
+        "https://example.test/a%2fb",
+        "https://example.test/a%2Fb",
+        "https://example.test/a%5cb",
+        "https://example.test/a%5Cb",
+        "https://example.test/%00path",
+        "https://example.test/%09path",
+        "https://example.test/%7fpath",
+        "https://example.test/%41",
+        "https://example.test/%",
+        "https://example.test/%2",
+        "https://example.test/%GG",
+    ],
+)
+def test_safe_base_url_rejects_percent_encoded_or_malformed_aliases(value: str) -> None:
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError, match="base URL is unsafe"):
+        model_sync_artifacts.require_safe_base_url(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://example.test\\evil/path",
+        "https:\\example.test\\path",
+        "https://example.test/path\\evil",
+        "https://example.test\\@evil.test/path",
+        "https://ｅxample.test/path",
+        "https://éxample.test/path",
+        "https://example.test/路径",
+        "https://Example.test/path",
+        "https://example.test./path",
+        "https://example..test/path",
+        "https://-example.test/path",
+        "https://example-.test/path",
+        "https://exam_ple.test/path",
+        "https://xn--example.test/path",
+        "https://999.999.999.999/path",
+        "https://127.000.000.001/path",
+        "https://[0:0:0:0:0:0:0:1]/path",
+    ],
+)
+def test_safe_base_url_rejects_noncanonical_authority_aliases(value: str) -> None:
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError, match="base URL is unsafe"):
+        model_sync_artifacts.require_safe_base_url(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://example.test:0/path",
+        "http://example.test:080/path",
+        "http://example.test:80/path",
+        "https://example.test:443/path",
+        "https://example.test:0443/path",
+        "https://example.test:/path",
+        "https://example.test/path/",
+        "https://example.test//path",
+    ],
+)
+def test_safe_base_url_rejects_noncanonical_port_or_path_aliases(value: str) -> None:
     with pytest.raises(model_sync_artifacts.CaptureSchemaError, match="base URL is unsafe"):
         model_sync_artifacts.require_safe_base_url(value)
 
