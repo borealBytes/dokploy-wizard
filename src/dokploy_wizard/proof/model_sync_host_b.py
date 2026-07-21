@@ -1,8 +1,6 @@
-# ruff: noqa: E501
+# ruff: noqa: E501, I001
 """Host-pair identity and later-proof receipt contracts."""
-
 from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -14,29 +12,25 @@ from pathlib import Path
 from typing import IO, Final, Sequence
 from urllib import request
 
-from dokploy_wizard.dokploy.coder import _coder_container_name
-from dokploy_wizard.proof.model_sync_artifacts import JsonValue, require_mapping, require_text
+from dokploy_wizard.dokploy.coder import _coder_container_name, _litellm_workspace_fallback_models_json
+from dokploy_wizard.proof.model_sync_artifacts import JsonValue, require_list, require_mapping, require_text
 from dokploy_wizard.proof.model_sync_env import resolve_proof_namespace
-from dokploy_wizard.proof.model_sync_remote import (
-    RemoteProbe,
-    capture_local_authoritative_inventory,
-)
-from dokploy_wizard.proof.model_sync_results import (
-    collect_coder_array_pages,
-    collect_coder_workspace_pages,
-)
-from dokploy_wizard.state import parse_env_file, resolve_desired_state
-
+from dokploy_wizard.proof.model_sync_remote import RemoteProbe, capture_local_authoritative_inventory
+from dokploy_wizard.proof.model_sync_results import collect_coder_array_pages, collect_coder_workspace_pages
+from dokploy_wizard.state import load_litellm_generated_keys, parse_env_file, resolve_desired_state
 _SUPPORTED_ARCHITECTURES: Final = frozenset({"amd64", "arm64"})
-
-
 @dataclass(frozen=True, slots=True)
 class HostIdentity:
     machine_sha256: str
     ssh_sha256: str
     architecture: str
-
-
+@dataclass(frozen=True, slots=True, repr=False)
+class LegacyRenderer:
+    base_url: str
+    credential: str
+    default_alias: str
+    fallback_models: tuple[str, ...]
+    model_inventory: tuple[str, ...]
 def assert_namespace_identity(*, host_a: HostIdentity, host_b: HostIdentity) -> None:
     """Require two physical hosts with one supported architecture before any upload."""
     if host_a.machine_sha256 == host_b.machine_sha256:
@@ -85,10 +79,11 @@ def _snapshot(env_file: Path, state_dir: Path) -> dict[str, JsonValue]:
     container = _coder_container_name(f"{desired.stack_name}-coder")
     if container is None:
         raise ValueError("Coder container is not running")
+    renderer = _legacy_renderer(raw_env, state_dir, container, desired.stack_name)
     user = _api(desired.hostnames["coder"], token, "/api/v2/users/me")
     user_id = _field(user, "id")
     templates = _templates(desired.hostnames["coder"], token)
-    workspaces = _workspaces(desired.hostnames["coder"], token, container, templates)
+    workspaces = _workspaces(desired.hostnames["coder"], token, container, templates, renderer)
     builds = _builds(desired.hostnames["coder"], token, workspaces)
     secrets = _secrets(desired.hostnames["coder"], token, user_id)
     return {
@@ -138,70 +133,82 @@ def _templates(hostname: str, token: str) -> list[dict[str, JsonValue]]:
         }
         for item in raw
     ]
-def _workspaces(hostname: str, token: str, container: str, templates: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
-    template_names = {str(item["id"]): str(item["name"]) for item in templates}
+def _workspaces(hostname: str, token: str, container: str, templates: list[dict[str, JsonValue]], renderer: LegacyRenderer) -> list[dict[str, JsonValue]]:
+    template_records = {require_text(item["id"], "template id"): item for item in templates}
     records: list[dict[str, JsonValue]] = []
     for item in collect_coder_workspace_pages(lambda path: _api(hostname, token, path)):
         template_id = _field(item, "template_id")
-        template_name = template_names.get(template_id)
-        if template_name is None:
+        template = template_records.get(template_id)
+        if template is None:
             raise ValueError("workspace references an unlisted template")
         workspace_name = _field(item, "name")
         version_id = _field(item, "template_version_id")
-        records.append({"id": _field(item, "id"), "name": workspace_name, "template_id": template_id, "template_version_id": version_id, "legacy_pointers": [_primary_pointer(container, token, workspace_name, template_name, version_id)]})
+        if version_id != require_text(template["active_version_id"], "template active version id"):
+            raise ValueError("workspace template version does not match its captured template version")
+        records.append({"id": _field(item, "id"), "name": workspace_name, "template_id": template_id, "template_version_id": version_id, "legacy_pointers": [_primary_pointer(container, token, workspace_name, require_text(template["name"], "template name"), version_id, renderer)]})
+    if not records:
+        raise ValueError("Coder retained workspace inventory is empty")
     return records
-def _primary_pointer(container: str, token: str, workspace: str, template: str, version: str) -> dict[str, JsonValue]:
-    if template != "ubuntu-vscode":
+def _primary_pointer(container: str, token: str, workspace: str, template: str, version: str, renderer: LegacyRenderer) -> dict[str, JsonValue]:
+    if template not in {"ubuntu-vscode", "ubuntu-vscode-opencode-web", "ubuntu-vscode-openwork"}:
         raise ValueError("retained workspace template has no Task 1 legacy pointer collector")
-    script = "import hashlib,json,os; p='/home/coder/.config/opencode/opencode.json'; x=json.load(open(p))['provider']['litellm']; h=lambda v:hashlib.sha256(v.encode()).hexdigest(); print(json.dumps({'target':p,'pointer':'/provider/litellm','mode':format(os.stat(p).st_mode&511,'04o'),'shape':'json-pointer','base_url':x['base_url'],'credential_value_sha256':h(x['api_key']),'pointer_sha256':h(json.dumps(x,sort_keys=True,separators=(',',':'))),'independent_renderer_sha256':h(json.dumps(x,sort_keys=True,separators=(',',':'))),'scope':'pointer'}))"
-    result = subprocess.run(["docker", "exec", "-i", container, "sh", "-c", "IFS= read -r CODER_SESSION_TOKEN; export CODER_SESSION_TOKEN; exec /opt/coder \"$@\"", "sh", "ssh", workspace, "--", "python3", "-c", script], input=token + "\n", check=False, capture_output=True, text=True)
+    script = "import hashlib,json,os; p='/home/coder/.config/opencode/opencode.json'; x=json.load(open(p))['provider']['litellm']; o=x['options']; h=lambda v:hashlib.sha256(v.encode()).hexdigest(); print(json.dumps({'target':p,'pointer':'/provider/litellm','mode':format(os.stat(p).st_mode&511,'04o'),'shape':'json-pointer','base_url':o['baseURL'],'credential_value_sha256':h(o['apiKey']),'pointer_sha256':h(json.dumps(x,sort_keys=True,separators=(',',':'))),'scope':'pointer'}))"
+    result = subprocess.run(["docker", "exec", "-i", container, "sh", "-c", "IFS= read -r CODER_SESSION_TOKEN; export CODER_SESSION_TOKEN; exec /opt/coder \"$@\"", "sh", "ssh", workspace, "--", "python3", "-c", script], input=token + "\n", check=False, capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
         raise ValueError("unable to capture retained workspace legacy pointer")
     pointer = require_mapping(json.loads(result.stdout), "retained workspace legacy pointer")
+    pointer["independent_renderer_sha256"] = _sha(_render_legacy_pointer(renderer))
     pointer["template_version_id"] = version
     return pointer
+def _legacy_renderer(raw_env: dict[str, str], state_dir: Path, container: str, stack_name: str) -> LegacyRenderer:
+    keys = load_litellm_generated_keys(state_dir)
+    credential = None if keys is None else keys.virtual_keys.get("coder-hermes")
+    if credential is None or credential == "":
+        raise ValueError("expected Coder LiteLLM credential is unavailable")
+    provider = raw_env.get("AI_DEFAULT_PROVIDER", "").strip().lower() or "opencode-go"
+    provider = "opencode-go" if provider == "opencode" else provider
+    model = raw_env.get("AI_DEFAULT_MODEL", "").strip() or "deepseek-v4-flash"
+    default_alias = model if model.startswith(f"{provider}/") else f"{provider}/{model}"
+    fallbacks = tuple(require_text(item, "expected fallback model") for item in require_list(json.loads(_litellm_workspace_fallback_models_json(default_alias=default_alias)), "expected fallback models"))
+    return LegacyRenderer(f"http://{stack_name}-shared-litellm:4000/v1", credential, default_alias, fallbacks, _model_inventory(container, credential, stack_name))
+def _model_inventory(container: str, credential: str, stack_name: str) -> tuple[str, ...]:
+    script = "import json,sys,urllib.request; key=sys.stdin.read(); u='http://' + sys.argv[1] + '-shared-litellm:4000/v1/models'; r=urllib.request.Request(u,headers={'Accept':'application/json','Authorization':'Bearer '+key}); p=json.load(urllib.request.urlopen(r,timeout=5)); print(json.dumps(p.get('data',[])))"
+    result = subprocess.run(["docker", "exec", "-i", container, "python3", "-c", script, stack_name], input=credential, check=False, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise ValueError("expected LiteLLM model inventory is unavailable")
+    models: list[str] = []
+    for item in require_list(json.loads(result.stdout), "expected LiteLLM model inventory"):
+        if not isinstance(item, dict) or not isinstance(candidate := item.get("id"), str):
+            continue
+        model = candidate.strip()
+        if model and "/" in model and not model.endswith("/*") and not model.startswith("openai/") and model not in models:
+            models.append(model)
+    if not models:
+        raise ValueError("expected LiteLLM model inventory is invalid")
+    return tuple(models)
+def _render_legacy_pointer(renderer: LegacyRenderer) -> dict[str, JsonValue]:
+    if not renderer.base_url or not renderer.credential or not renderer.default_alias or not renderer.model_inventory:
+        raise ValueError("expected legacy renderer inputs are incomplete")
+    models = list(dict.fromkeys((*renderer.model_inventory, *renderer.fallback_models)))
+    if renderer.default_alias not in models:
+        models.insert(0, renderer.default_alias)
+    return {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": renderer.base_url, "apiKey": renderer.credential}, "models": {model: {} for model in models}}
 def _builds(hostname: str, token: str, workspaces: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
     inventories: list[dict[str, JsonValue]] = []
     for workspace in workspaces:
         workspace_id = str(workspace["id"])
         items: list[JsonValue] = []
         pages: list[JsonValue] = []
-        for offset, page in collect_coder_array_pages(
-            lambda path: _api(hostname, token, path),
-            f"/api/v2/workspaces/{workspace_id}/builds?limit=100&offset={{offset}}",
-            "build",
-        ):
-            page_items: list[JsonValue] = []
-            for item in page:
-                page_items.append({
-                    "id": _field(item, "id"),
-                    "build_number": _integer(item, "build_number"),
-                    "status": _field(item, "status"),
-                    "transition": _field(item, "transition"),
-                })
+        path = f"/api/v2/workspaces/{workspace_id}/builds?limit=100&offset={{offset}}"
+        for offset, page in collect_coder_array_pages(lambda path: _api(hostname, token, path), path, "build"):
+            page_items: list[JsonValue] = [{"id": _field(item, "id"), "build_number": _integer(item, "build_number"), "status": _field(item, "status"), "transition": _field(item, "transition")} for item in page]
             items.extend(page_items)
             pages.append({"offset": offset, "items": page_items})
-        inventories.append({
-            "workspace_id": workspace_id,
-            "total": len(items),
-            "pages": pages,
-        })
+        inventories.append({"workspace_id": workspace_id, "total": len(items), "pages": pages})
     return inventories
 def _secrets(hostname: str, token: str, user_id: str) -> list[dict[str, JsonValue]]:
-    return [
-        {
-            "id": _field(item, "id"),
-            "name": _field(item, "name"),
-            "environment_variable": _field(item, "env_name"),
-            "description": _field(item, "description"),
-        }
-        for _, page in collect_coder_array_pages(
-            lambda path: _api(hostname, token, path),
-            f"/api/v2/users/{user_id}/secrets?limit=100&offset={{offset}}",
-            "secret",
-        )
-        for item in page
-    ]
+    path = f"/api/v2/users/{user_id}/secrets?limit=100&offset={{offset}}"
+    return [{"id": _field(item, "id"), "name": _field(item, "name"), "environment_variable": _field(item, "env_name"), "description": _field(item, "description")} for _, page in collect_coder_array_pages(lambda path: _api(hostname, token, path), path, "secret") for item in page]
 def _image_inventory() -> list[dict[str, JsonValue]]:
     expected = {"coder": "ghcr.io/coder/coder", "litellm": "ghcr.io/berriai/litellm", "pgvector": "pgvector/pgvector", "redis": "redis", "postfix": "boky/postfix"}
     raw = subprocess.run(["docker", "image", "ls", "--digests", "--format", "{{.Repository}}@{{.Digest}}"], check=False, capture_output=True, text=True).stdout.splitlines()
@@ -222,12 +229,8 @@ def _state_inventory(state_dir: Path) -> dict[str, JsonValue]:
         raise ValueError("wizard ownership ledger is missing")
     return {"state_sha256": digest, "ledger_sha256": _sha(ledger.read_bytes()), "resources": [str(path.relative_to(state_dir)) for path in files]}
 def _page(items: list[dict[str, JsonValue]]) -> dict[str, JsonValue]:
-    pages: list[JsonValue] = [
-        {"offset": offset, "items": items[offset : offset + 100]}
-        for offset in range(0, len(items), 100)
-    ]
+    pages: list[JsonValue] = [{"offset": offset, "items": items[offset : offset + 100]} for offset in range(0, len(items), 100)]
     return {"total": len(items), "pages": pages or [{"offset": 0, "items": []}]}
-
 def _field(value: JsonValue, key: str) -> str:
     return require_text(require_mapping(value, "Coder response").get(key), f"Coder response {key}")
 def _integer(value: JsonValue, key: str) -> int:
@@ -243,6 +246,5 @@ def _env(values: dict[str, str], key: str) -> str:
     if value is None or value == "":
         raise ValueError(f"proof env is missing {key}")
     return value
-
 if __name__ == "__main__":
     raise SystemExit(main())

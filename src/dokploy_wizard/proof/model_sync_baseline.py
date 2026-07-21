@@ -31,6 +31,11 @@ _BUILD_STATUSES: Final = frozenset(
     {"pending", "starting", "running", "stopping", "stopped", "failed", "canceled", "deleting", "deleted"}
 )
 _BUILD_TRANSITIONS: Final = frozenset({"start", "stop", "delete"})
+_LEGACY_RULES: Final = {
+    "ubuntu-vscode": ("pointer", "/home/coder/.config/opencode/opencode.json", "/provider/litellm", "0644", "json-pointer"),
+    "ubuntu-vscode-opencode-web": ("pointer", "/home/coder/.config/opencode/opencode.json", "/provider/litellm", "0644", "json-pointer"),
+    "ubuntu-vscode-openwork": ("pointer", "/home/coder/.config/opencode/opencode.json", "/provider/litellm", "0644", "json-pointer"),
+}
 
 
 BaselineCaptureError = CaptureSchemaError
@@ -44,8 +49,6 @@ class CapturedBaseline:
     images: dict[str, str]
     coder_secret_inventory_sha256: str
     legacy_workspace_managed_fingerprints_sha256: str
-
-
 def parse_captured_baseline(raw_snapshot: str, *, stack_name: str) -> CapturedBaseline:
     """Parse a fully paginated remote snapshot before any local artifact is finalized."""
     try:
@@ -71,6 +74,8 @@ def parse_captured_baseline(raw_snapshot: str, *, stack_name: str) -> CapturedBa
     workspace_payload: list[JsonValue] = []
     for workspace in workspaces:
         legacy.extend(require_list(workspace["legacy_fingerprints"], "legacy fingerprints"))
+    if not legacy:
+        raise BaselineCaptureError("baseline requires independently rendered retained workspace fingerprints")
     for template in templates:
         template_payload.append(dict(template))
     for workspace in workspaces:
@@ -99,13 +104,9 @@ def parse_captured_baseline(raw_snapshot: str, *, stack_name: str) -> CapturedBa
         coder_secret_inventory_sha256=canonical_sha256(secrets),
         legacy_workspace_managed_fingerprints_sha256=canonical_sha256(legacy),
     )
-
-
 def canonical_sha256(payload: JsonValue) -> str:
     """Fingerprint normalized JSON with deterministic bytes and no secret values."""
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
 def _templates(raw: JsonValue) -> tuple[dict[str, str], ...]:
     templates: list[dict[str, str]] = []
     for item in _pages(raw, "templates"):
@@ -121,41 +122,51 @@ def _templates(raw: JsonValue) -> tuple[dict[str, str], ...]:
     _unique([template["id"] for template in templates], "template ids")
     _unique([template["name"] for template in templates], "template names")
     return tuple(sorted(templates, key=lambda item: item["name"]))
-
-
 def _workspaces(raw: JsonValue, templates: tuple[dict[str, str], ...], stack_name: str) -> tuple[dict[str, JsonValue], ...]:
-    template_names = {template["id"]: template["name"] for template in templates}
+    template_records = {template["id"]: template for template in templates}
     workspaces: list[dict[str, JsonValue]] = []
     for item in _pages(raw, "workspaces"):
         workspace = require_mapping(item, "workspace")
         require_keys(workspace, {"id", "name", "template_id", "template_version_id", "legacy_pointers"}, "workspace")
         template_id = require_text(workspace["template_id"], "workspace template id")
-        template_name = template_names.get(template_id)
-        if template_name is None:
+        template = template_records.get(template_id)
+        if template is None:
             raise BaselineCaptureError("workspace references an uncaptured Coder template")
-        pointers = _legacy_pointers(workspace["legacy_pointers"], template_name, stack_name)
+        version_id = require_text(workspace["template_version_id"], "workspace template version id")
+        if version_id != template["active_version_id"]:
+            raise BaselineCaptureError("workspace template version does not match its captured template version")
+        pointers = _legacy_pointers(workspace["legacy_pointers"], template["name"], stack_name, version_id)
         workspaces.append({
             "id": require_text(workspace["id"], "workspace id"),
             "legacy_fingerprints": pointers,
             "name": require_text(workspace["name"], "workspace name"),
             "template_id": template_id,
-            "template_version_id": require_text(workspace["template_version_id"], "workspace template version id"),
+            "template_version_id": version_id,
         })
     _unique([require_text(workspace["id"], "workspace id") for workspace in workspaces], "workspace ids")
     return tuple(sorted(workspaces, key=lambda item: require_text(item["id"], "workspace id")))
-
-
-def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str) -> list[dict[str, JsonValue]]:
+def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str, version_id: str) -> list[dict[str, JsonValue]]:
     pointers: list[dict[str, JsonValue]] = []
-    expected_scope = "target-and-symlink" if template_name == "ubuntu-vscode-kdense-byok" else "pointer"
+    rule = _LEGACY_RULES.get(template_name)
+    if rule is None:
+        raise BaselineCaptureError("workspace template has no supported legacy renderer contract")
+    expected_scope, expected_target, expected_pointer, expected_mode, expected_shape = rule
     expected_base = f"http://{stack_name}-shared-litellm:4000/v1"
-    for item in require_list(raw, "legacy pointers"):
+    entries = require_list(raw, "legacy pointers")
+    if not entries:
+        raise BaselineCaptureError("workspace has no independently rendered legacy fingerprint")
+    seen: set[tuple[str, str]] = set()
+    for item in entries:
         pointer = require_mapping(item, "legacy pointer")
         require_keys(pointer, {"template_version_id", "target", "pointer", "mode", "shape", "base_url", "credential_value_sha256", "pointer_sha256", "independent_renderer_sha256", "scope"}, "legacy pointer")
         if require_text(pointer["scope"], "legacy pointer scope") != expected_scope:
             raise BaselineCaptureError("legacy pointer scope does not match its template contract")
         if require_text(pointer["base_url"], "legacy pointer base URL") != expected_base:
             raise BaselineCaptureError("legacy pointer base URL does not match resolved LiteLLM")
+        target, path = require_text(pointer["target"], "legacy pointer target"), require_text(pointer["pointer"], "legacy pointer path")
+        if (target, path, require_text(pointer["mode"], "legacy pointer mode"), require_text(pointer["shape"], "legacy pointer shape")) != (expected_target, expected_pointer, expected_mode, expected_shape) or require_text(pointer["template_version_id"], "legacy pointer version") != version_id or (target, path) in seen:
+            raise BaselineCaptureError("legacy pointer does not match its captured template renderer contract")
+        seen.add((target, path))
         pointer_sha = require_sha256(pointer["pointer_sha256"], "legacy pointer")
         renderer_sha = require_sha256(pointer["independent_renderer_sha256"], "legacy renderer")
         pointers.append({
@@ -163,17 +174,15 @@ def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str) -> lis
             "credential_value_sha256": require_sha256(pointer["credential_value_sha256"], "legacy credential"),
             "independent_renderer_sha256": renderer_sha,
             "legacy_exact": pointer_sha == renderer_sha,
-            "mode": require_text(pointer["mode"], "legacy pointer mode"),
-            "pointer": require_text(pointer["pointer"], "legacy pointer path"),
+            "mode": expected_mode,
+            "pointer": path,
             "pointer_sha256": pointer_sha,
             "scope": expected_scope,
-            "shape": require_text(pointer["shape"], "legacy pointer shape"),
-            "target": require_text(pointer["target"], "legacy pointer target"),
-            "template_version_id": require_text(pointer["template_version_id"], "legacy pointer version"),
+            "shape": expected_shape,
+            "target": target,
+            "template_version_id": version_id,
         })
     return pointers
-
-
 def _builds(raw: JsonValue, workspaces: tuple[dict[str, JsonValue], ...]) -> None:
     expected_ids = {require_text(workspace["id"], "workspace id") for workspace in workspaces}
     seen: set[str] = set()
@@ -197,8 +206,6 @@ def _builds(raw: JsonValue, workspaces: tuple[dict[str, JsonValue], ...]) -> Non
                 raise BaselineCaptureError("Coder build number must be positive")
     if seen != expected_ids:
         raise BaselineCaptureError("build inventory is incomplete")
-
-
 def _secrets(raw: JsonValue) -> list[dict[str, str]]:
     secrets: list[dict[str, str]] = []
     for value in _pages(raw, "secrets"):
@@ -208,8 +215,6 @@ def _secrets(raw: JsonValue) -> list[dict[str, str]]:
     _unique([secret["id"] for secret in secrets], "Coder secret ids")
     _unique([secret["name"] for secret in secrets], "Coder secret names")
     return sorted(secrets, key=lambda item: item["id"])
-
-
 def _pages(raw: JsonValue, label: str) -> list[JsonValue]:
     page_set = require_mapping(raw, label)
     require_keys(page_set, {"total", "pages"}, label)
@@ -231,8 +236,6 @@ def _pages(raw: JsonValue, label: str) -> list[JsonValue]:
     if offset != total:
         raise BaselineCaptureError(f"{label} pagination is incomplete")
     return items
-
-
 def _unique(values: list[str], label: str) -> list[str]:
     if len(values) != len(set(values)):
         raise BaselineCaptureError(f"{label} must be unique")
