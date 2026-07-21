@@ -8,14 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from dokploy_wizard.proof.model_sync_receipt import EnvReceipt
-from dokploy_wizard.proof.model_sync_results import ProofTransport
+from dokploy_wizard.proof.model_sync_artifacts import atomic_write_bytes, sha256_bytes
+from dokploy_wizard.proof.model_sync_results import EnvReceipt, ProofTransport
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuardError,
-    atomic_write_bytes,
     read_abort_guard,
     record_env_receipt,
-    sha256_bytes,
 )
 from dokploy_wizard.state import StateValidationError, parse_env_file, resolve_desired_state
 
@@ -91,7 +89,12 @@ def prepare_proof_env(
         guard_path,
         claim_token=claim_token,
         receipt=EnvReceipt(
-            str(env_file.resolve()), str(backup_path.resolve()), original_sha256, proof_sha256, mode
+            str(env_file.resolve()),
+            str(backup_path.resolve()),
+            original_sha256,
+            proof_sha256,
+            mode,
+            False,
         ),
     )
     _validate_backup(env_file=env_file, backup_path=backup_path, original=original, proof=proof)
