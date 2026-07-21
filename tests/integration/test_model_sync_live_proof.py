@@ -2984,6 +2984,41 @@ def test_baseline_host_a_rejects_protected_artifact_mutation_during_hash(
     assert not (tmp_path / "artifacts" / "result.json").exists()
 
 
+@pytest.mark.parametrize("replacement_kind", ["same", "different", "symlink"])
+def test_baseline_host_a_rejects_intermediate_directory_replacement_during_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    evidence = tmp_path / "repository" / ".omo" / "evidence"
+    original_read = os.read
+    replaced = False
+
+    def replace_directory_after_read(descriptor: int, size: int) -> bytes:
+        nonlocal replaced
+        chunk = original_read(descriptor, size)
+        if chunk and not replaced:
+            replaced = True
+            moved = evidence.with_name("evidence-original")
+            evidence.rename(moved)
+            if replacement_kind == "symlink":
+                evidence.symlink_to(moved, target_is_directory=True)
+            else:
+                evidence.mkdir()
+                content = b"unrelated" if replacement_kind == "same" else b"changed"
+                (evidence / "unrelated.txt").write_bytes(content)
+        return chunk
+
+    monkeypatch.setattr(os, "read", replace_directory_after_read)
+
+    exit_code = _run_baseline_fixture(arguments, tmp_path, monkeypatch)
+
+    assert exit_code == 1
+    assert replaced is True
+    assert not (tmp_path / "artifacts" / "result.json").exists()
+
+
 @pytest.mark.parametrize(
     "name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"]
 )

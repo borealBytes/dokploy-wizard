@@ -1,4 +1,4 @@
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import hashlib
 import json
@@ -9,28 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dokploy_wizard.proof.model_sync_artifacts import (
-    JsonValue,
-    ProtectedManifestEntry,
-    finalize_capture_outputs,
-    sha256_bytes,
-    validate_protected_manifest_bytes,
+    JsonValue, ProtectedManifestEntry, finalize_capture_outputs, sha256_bytes, validate_protected_manifest_bytes,  # noqa: E501
 )
 from dokploy_wizard.proof.model_sync_baseline import CapturedBaseline
 from dokploy_wizard.proof.model_sync_env import PreparedEnv, restore_proof_env
 from dokploy_wizard.proof.model_sync_remote import RemoteProbe
 from dokploy_wizard.proof.model_sync_results import build_result
 from dokploy_wizard.proof.model_sync_state import (
-    AbortGuard,
-    AbortGuardError,
-    arm_abort_guard,
-    claim_abort_guard,
-    clear_env_receipt,
-    complete_env_receipt,
-    process_identity_matches,
-    read_abort_guard,
-    reclaim_completed_receipt,
-    recover_dead_abort_claim,
-    transfer_abort_guard_to_plan,
+    AbortGuard, AbortGuardError, arm_abort_guard, claim_abort_guard, clear_env_receipt, complete_env_receipt, process_identity_matches, read_abort_guard, reclaim_completed_receipt, recover_dead_abort_claim, transfer_abort_guard_to_plan,  # noqa: E501
 )
 
 
@@ -62,12 +48,7 @@ class BaselineArtifactInputs:
     baseline: CapturedBaseline
 def claim_plan_guard(*, guard_path: Path, pid: int, start_time_ticks: str) -> GuardClaim:
     token = secrets.token_urlsafe(24)
-    claim_abort_guard(
-        guard_path,
-        pid=pid,
-        start_time_ticks=start_time_ticks,
-        claim_token=token,
-    )
+    claim_abort_guard(guard_path, pid=pid, start_time_ticks=start_time_ticks, claim_token=token)
     return GuardClaim(token=token, pid=pid, start_time_ticks=start_time_ticks)
 def begin_proof_recovery(
     *, paths: ProofRecoveryPaths, pid: int, start_time_ticks: str
@@ -76,9 +57,7 @@ def begin_proof_recovery(
         _recover_existing_guard(paths)
     else:
         arm_abort_guard(paths.guard_path)
-    claim = claim_plan_guard(
-        guard_path=paths.guard_path, pid=pid, start_time_ticks=start_time_ticks
-    )
+    claim = claim_plan_guard(guard_path=paths.guard_path, pid=pid, start_time_ticks=start_time_ticks)  # noqa: E501
     return ProofRecovery(paths, claim)
 def restore_after_interrupt(*, prepared: PreparedEnv, guard_path: Path, claim: GuardClaim) -> None:
     restore_proof_env(prepared=prepared, guard_path=guard_path)
@@ -150,6 +129,14 @@ def _restore_receipt(paths: ProofRecoveryPaths, guard: AbortGuard) -> None:
         raise AbortGuardError("abort guard receipt paths do not match the requested proof paths")
     prepared = PreparedEnv(paths.env_file, paths.backup_path, receipt.original_sha256, receipt.proof_sha256, receipt.mode)  # noqa: E501
     restore_proof_env(prepared=prepared, guard_path=paths.guard_path)
+def _open_directory(component: str, parent_descriptor: int) -> tuple[int, tuple[int, int, int]]:
+    descriptor = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_descriptor)  # noqa: E501
+    try:
+        metadata = os.fstat(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode))
 def _verify_protected_artifacts(repository_root: Path, entries: tuple[ProtectedManifestEntry, ...]) -> None:  # noqa: E501
     if len(entries) > 1_024: raise ValueError("protected artifact entry limit exceeded")  # noqa: E701
     try:
@@ -159,9 +146,11 @@ def _verify_protected_artifacts(repository_root: Path, entries: tuple[ProtectedM
     try:
         for entry in entries:
             parent_descriptor = os.dup(root_descriptor)
+            directory_identities: list[tuple[int, int, int]] = []
             try:
                 for component in entry.path.parts[:-1]:
-                    child_descriptor = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_descriptor)  # noqa: E501
+                    child_descriptor, identity = _open_directory(component, parent_descriptor)
+                    directory_identities.append(identity)
                     os.close(parent_descriptor)
                     parent_descriptor = child_descriptor
                 file_descriptor = os.open(entry.path.parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=parent_descriptor)  # noqa: E501
@@ -174,9 +163,19 @@ def _verify_protected_artifacts(repository_root: Path, entries: tuple[ProtectedM
                         bytes_read += len(chunk)
                         if bytes_read > 16 * 1024 * 1024: raise ValueError("protected artifact grew beyond its bound")  # noqa: E501,E701
                     after = os.fstat(file_descriptor)
-                    path_after = os.stat(entry.path.parts[-1], dir_fd=parent_descriptor, follow_symlinks=False)  # noqa: E501
                 finally:
                     os.close(file_descriptor)
+                revalidated_parent = os.dup(root_descriptor)
+                try:
+                    for component, expected_identity in zip(entry.path.parts[:-1], directory_identities, strict=True):  # noqa: E501
+                        child_descriptor, identity = _open_directory(component, revalidated_parent)
+                        os.close(revalidated_parent)
+                        revalidated_parent = child_descriptor
+                        if identity != expected_identity:
+                            raise ValueError("protected artifact directory identity changed")
+                    path_after = os.stat(entry.path.parts[-1], dir_fd=revalidated_parent, follow_symlinks=False)  # noqa: E501
+                finally:
+                    os.close(revalidated_parent)
             except OSError as error:
                 raise ValueError("protected artifact traversal failed") from error
             finally:
