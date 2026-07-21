@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
+import re
 import sys
 from dataclasses import dataclass
 from http.client import HTTPMessage
@@ -11,22 +11,18 @@ from pathlib import Path
 from typing import IO, Final, Sequence
 from urllib import request
 from dokploy_wizard.dokploy.coder import _coder_container_name, _litellm_internal_base_url, _litellm_workspace_fallback_models_json
-from dokploy_wizard.proof.model_sync_artifacts import JsonValue, require_list, require_mapping, require_sha256, require_text
+from dokploy_wizard.proof.model_sync_artifacts import CaptureSchemaError, JsonValue, normalize_image_repository, registry_manifest_digest, require_digest, require_list, require_mapping, require_sha256, require_text
 from dokploy_wizard.proof.model_sync_env import resolve_proof_namespace
 from dokploy_wizard.proof.model_sync_remote import RemoteProbe, capture_local_authoritative_inventory
-from dokploy_wizard.proof.model_sync_results import collect_coder_array_pages, collect_coder_workspace_pages, run_bounded_process
+from dokploy_wizard.proof.model_sync_results import HostIdentity as HostIdentity, assert_followup_proof_contract as assert_followup_proof_contract, assert_namespace_identity as assert_namespace_identity, collect_coder_array_pages, collect_coder_workspace_pages, run_bounded_process
 from dokploy_wizard.state import load_litellm_generated_keys, parse_env_file, resolve_desired_state
-_SUPPORTED_ARCHITECTURES: Final = frozenset({"amd64", "arm64"})
 _OUTPUT_LIMIT: Final = 2 * 1024 * 1024
 _MODEL_LIMIT: Final = 1_000
+_IMAGE_IDENTIFIERS: Final = (re.compile(r"^[0-9a-f]{12,64}$"), re.compile(r"^sha256:[0-9a-f]{64}$"))
+_IMAGE_SPECS: Final = (("coder", "-coder"), ("litellm", "-shared-litellm"), ("pgvector", "-shared-postgres"), ("redis", "-shared-redis"), ("postfix", "-shared-postfix"))
 _OPENCODE_TEMPLATES: Final = frozenset({"ubuntu-vscode", "ubuntu-vscode-opencode-web", "ubuntu-vscode-openwork"})
 _KDENSE_TEMPLATE: Final = "ubuntu-vscode-kdense-byok"
 _KDENSE_CATALOG: Final = (("Unsloth Active (local alias)", "local-model.internal/unsloth-active"), ("Claude Opus 4.7", "openrouter/anthropic/claude-opus-4.7"), ("Claude Sonnet 4.6", "openrouter/anthropic/claude-sonnet-4.6"), ("GPT-5.4 Pro", "openrouter/openai/gpt-5.4-pro"), ("GPT-5.4", "openrouter/openai/gpt-5.4"), ("GPT-5.4 Mini", "openrouter/openai/gpt-5.4-mini"), ("GPT-5.4 Nano", "openrouter/openai/gpt-5.4-nano"), ("Grok 4.20 Beta", "openrouter/x-ai/grok-4.20-beta"), ("Gemini 3.1 Pro Preview", "openrouter/google/gemini-3.1-pro-preview"), ("Gemini 3 Flash Preview", "openrouter/google/gemini-3-flash-preview"), ("Gemini 3.1 Flash Lite Preview", "openrouter/google/gemini-3.1-flash-lite-preview"), ("Qwen3 Max Thinking", "openrouter/qwen/qwen3-max-thinking"), ("Qwen3 Coder Next", "openrouter/qwen/qwen3-coder-next"), ("GLM 5 Turbo", "openrouter/z-ai/glm-5-turbo"), ("GLM 5", "openrouter/z-ai/glm-5"), ("MiniMax M2.5", "openrouter/minimax/minimax-m2.5"), ("MiniMax M2.5 (free)", "openrouter/minimax/minimax-m2.5:free"), ("Kimi K2.5", "openrouter/moonshotai/kimi-k2.5"), ("Nemotron 3 Super", "openrouter/nvidia/nemotron-3-super-120b-a12b"), ("Nemotron 3 Nano Omni (free)", "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"))
-@dataclass(frozen=True, slots=True)
-class HostIdentity:
-    machine_sha256: str
-    ssh_sha256: str
-    architecture: str
 @dataclass(frozen=True, slots=True, repr=False)
 class LegacyRenderer:
     base_url: str
@@ -34,20 +30,6 @@ class LegacyRenderer:
     default_alias: str
     fallback_models: tuple[str, ...]
     model_inventory: tuple[str, ...]
-def assert_namespace_identity(*, host_a: HostIdentity, host_b: HostIdentity) -> None:
-    """Require two physical hosts with one supported architecture before any upload."""
-    if host_a.machine_sha256 == host_b.machine_sha256 or host_a.ssh_sha256 == host_b.ssh_sha256:
-        raise ValueError("Host A and Host B must have distinct machine and SSH identities")
-    if host_a.architecture not in _SUPPORTED_ARCHITECTURES or host_b.architecture not in _SUPPORTED_ARCHITECTURES:
-        raise ValueError("Host architecture is unsupported")
-    if host_a.architecture != host_b.architecture:
-        raise ValueError("Host A and Host B architectures must match")
-def assert_followup_proof_contract(*, contract_name: str, receipts: tuple[str, ...]) -> None:
-    required = {"upgrade_host_a_contract": "host-a-baseline", "final_proof_contract": "host-a-destroyed", "reseed_pair_contract": "host-b-clean"}.get(contract_name)
-    if required is None:
-        raise ValueError("unknown followup proof contract")
-    if required not in receipts:
-        raise ValueError(f"{contract_name} requires receipt {required}")
 def main(argv: Sequence[str] | None = None) -> int:
     """Emit a value-free remote snapshot when invoked through the bounded SSH transport."""
     parser = argparse.ArgumentParser(prog="model-sync-snapshot")
@@ -65,7 +47,7 @@ def _snapshot(env_file: Path, state_dir: Path) -> dict[str, JsonValue]:
     desired = resolve_desired_state(parse_env_file(env_file))
     namespace = resolve_proof_namespace(env_file)
     observed = capture_local_authoritative_inventory(env_file, namespace)
-    images = _image_inventory()
+    images = _image_inventory(desired.stack_name)
     raw_env = parse_env_file(env_file).values
     email = _env(raw_env, "DOKPLOY_ADMIN_EMAIL")
     password = _env(raw_env, "DOKPLOY_ADMIN_PASSWORD")
@@ -207,16 +189,40 @@ def _builds(hostname: str, token: str, workspaces: list[dict[str, JsonValue]]) -
 def _secrets(hostname: str, token: str, user_id: str) -> list[dict[str, JsonValue]]:
     path = f"/api/v2/users/{user_id}/secrets?limit=100&offset={{offset}}"
     return [{"id": _field(item, "id"), "name": _field(item, "name"), "environment_variable": _field(item, "env_name"), "description": _field(item, "description")} for _, page in collect_coder_array_pages(lambda path: _api(hostname, token, path), path, "secret") for item in page]
-def _image_inventory() -> list[dict[str, JsonValue]]:
-    expected = {"coder": "ghcr.io/coder/coder", "litellm": "ghcr.io/berriai/litellm", "pgvector": "pgvector/pgvector", "redis": "redis", "postfix": "boky/postfix"}
-    raw = subprocess.run(["docker", "image", "ls", "--digests", "--format", "{{.Repository}}@{{.Digest}}"], check=False, capture_output=True, text=True).stdout.splitlines()
+def _image_inventory(stack_name: str) -> list[dict[str, JsonValue]]:
     records: list[dict[str, JsonValue]] = []
-    for logical_name, repository in expected.items():
-        matches = [line for line in raw if line.startswith(f"{repository}@sha256:")]
+    for logical_name, suffix in _IMAGE_SPECS:
+        label = f"{logical_name} running container"
+        raw_id = run_bounded_process(["docker", "ps", "--filter", f"label=com.docker.compose.service={stack_name}{suffix}", "--filter", "status=running", "--format", "{{.ID}}"], stdin=b"", output_limit=_OUTPUT_LIMIT, timeout_seconds=60, label=label)
+        identifiers = raw_id.decode("utf-8").splitlines()
+        if len(identifiers) != 1 or _IMAGE_IDENTIFIERS[0].fullmatch(identifiers[0]) is None:
+            raise ValueError(f"{label} must resolve exactly once")
+        container = _docker_object(["docker", "inspect", "--type", "container", identifiers[0]], f"{logical_name} running container inspect")
+        config = require_mapping(container.get("Config"), f"{logical_name} container config")
+        reference = require_text(config.get("Image"), f"{logical_name} container image reference")
+        repository = normalize_image_repository(reference, f"{logical_name} container image reference")
+        image_id = require_text(container.get("Image"), f"{logical_name} container image ID")
+        if _IMAGE_IDENTIFIERS[1].fullmatch(image_id) is None:
+            raise ValueError(f"{logical_name} container image ID is invalid")
+        image = _docker_object(["docker", "image", "inspect", image_id], f"{logical_name} local image inspect")
+        try:
+            digests = [require_digest(value, f"{logical_name} local image digest") for value in require_list(image.get("RepoDigests"), f"{logical_name} local image digests")]
+        except CaptureSchemaError as error:
+            raise ValueError(f"{logical_name} local image digest is invalid") from error
+        matches = [digest for digest in digests if digest.partition("@")[0] == repository]
         if len(matches) != 1:
-            raise ValueError("required image does not have one resolved local digest")
-        records.append({"logical_name": logical_name, "container_image": matches[0], "registry_image": matches[0]})
+            raise ValueError(f"{logical_name} local image digest is missing or ambiguous")
+        raw_registry = run_bounded_process(["docker", "buildx", "imagetools", "inspect", "--raw", matches[0]], stdin=b"", output_limit=_OUTPUT_LIMIT, timeout_seconds=60, label=f"{logical_name} registry image")
+        registry = registry_manifest_digest(raw_registry, repository, f"{logical_name} registry manifest")
+        if matches[0] != registry:
+            raise ValueError(f"{logical_name} container and registry image digests disagree")
+        records.append({"logical_name": logical_name, "container_image": matches[0], "registry_image": registry})
     return records
+def _docker_object(command: list[str], label: str) -> dict[str, JsonValue]:
+    values = require_list(json.loads(run_bounded_process(command, stdin=b"", output_limit=_OUTPUT_LIMIT, timeout_seconds=60, label=label)), label)
+    if len(values) != 1:
+        raise ValueError(f"{label} must return exactly one object")
+    return require_mapping(values[0], label)
 def _state_inventory(state_dir: Path) -> dict[str, JsonValue]:
     files = sorted(path for path in state_dir.rglob("*") if path.is_file())
     if not files:
@@ -227,8 +233,7 @@ def _state_inventory(state_dir: Path) -> dict[str, JsonValue]:
         raise ValueError("wizard ownership ledger is missing")
     return {"state_sha256": digest, "ledger_sha256": _sha(ledger.read_bytes()), "resources": [str(path.relative_to(state_dir)) for path in files]}
 def _page(items: list[dict[str, JsonValue]]) -> dict[str, JsonValue]:
-    pages: list[JsonValue] = [{"offset": offset, "items": items[offset : offset + 100]} for offset in range(0, len(items), 100)]
-    return {"total": len(items), "pages": pages or [{"offset": 0, "items": []}]}
+    return {"total": len(items), "pages": [{"offset": offset, "items": items[offset : offset + 100]} for offset in range(0, len(items), 100)] or [{"offset": 0, "items": []}]}
 def _field(value: JsonValue, key: str) -> str:
     return require_text(require_mapping(value, "Coder response").get(key), f"Coder response {key}")
 def _integer(value: JsonValue, key: str) -> int:
@@ -237,12 +242,8 @@ def _integer(value: JsonValue, key: str) -> int:
         raise ValueError(f"Coder response has invalid {key}")
     return candidate
 def _sha(value: JsonValue | bytes) -> str:
-    encoded = value if isinstance(value, bytes) else json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
+    return hashlib.sha256(value if isinstance(value, bytes) else json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 def _env(values: dict[str, str], key: str) -> str:
-    value = values.get(key)
-    if value is None or value == "":
-        raise ValueError(f"proof env is missing {key}")
-    return value
+    return require_text(values.get(key), f"proof env {key}")
 if __name__ == "__main__":
     raise SystemExit(main())
