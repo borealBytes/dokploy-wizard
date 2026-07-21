@@ -9,13 +9,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from ipaddress import ip_address
 from pathlib import Path, PurePosixPath
-from typing import Final, TypeAlias
+from typing import Final, NamedTuple, TypeAlias
 from urllib.parse import urlsplit
 
 from dokploy_wizard.verification import redact_text
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
+ProtectedManifestEntry = NamedTuple("ProtectedManifestEntry", [("path", PurePosixPath), ("sha256", str)])  # noqa: E501
 _HASH_PATTERNS: Final = (re.compile(r"^[0-9a-f]{64}$"), re.compile(r"^sha256:[0-9a-f]{64}$"))
 _REPOSITORY: Final = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$")  # noqa: E501
 _MANIFEST_MEDIA: Final = frozenset({"application/vnd.docker.distribution.manifest.v2+json", "application/vnd.oci.image.manifest.v1+json"})  # noqa: E501
@@ -113,8 +114,7 @@ def require_safe_base_url(value: str) -> str:
     if not value.isascii() or not value.startswith(("http://", "https://")) or "%" in value or "\\" in value or any(character.isspace() or not character.isprintable() for character in value):  # noqa: E501
         raise CaptureSchemaError("legacy pointer base URL is unsafe")
     try:
-        parsed = urlsplit(value)
-        port, host = parsed.port, parsed.hostname or ""
+        port, host = (parsed := urlsplit(value)).port, parsed.hostname or ""
         address = ip_address(host) if ":" in host or host.replace(".", "").isdigit() else None
     except ValueError as error:
         raise CaptureSchemaError("legacy pointer base URL is unsafe") from error
@@ -189,7 +189,7 @@ def protected_manifest_bytes(entries: Mapping[str, str]) -> bytes:
     if not lines:
         raise CaptureSchemaError("protected manifest must not be empty")
     return "".join(lines).encode("utf-8")
-def validate_protected_manifest_bytes(content: bytes) -> None:
+def validate_protected_manifest_bytes(content: bytes) -> tuple[ProtectedManifestEntry, ...]:
     try:
         lines = content.decode("utf-8").splitlines()
     except UnicodeDecodeError as error:
@@ -202,8 +202,8 @@ def validate_protected_manifest_bytes(content: bytes) -> None:
         if (duplicate := normalized in entries) or separator != "  " or not normalized.startswith((".omo/", ".sisyphus/")) or path != normalized or "" in path.split("/") or "\\" in path or any(part in {".", ".."} for part in PurePosixPath(path).parts) or any(not character.isprintable() or character.isspace() for character in path) or any(marker in path.lower() for marker in forbidden):  # noqa: E501
             raise CaptureSchemaError("protected manifest duplicate normalized path" if duplicate else "protected manifest path is unsafe")  # noqa: E501
         entries[normalized] = require_sha256(fingerprint, f"manifest fingerprint for {path}")
-    if content != protected_manifest_bytes(entries):
-        raise CaptureSchemaError("protected manifest bytes are not canonical")
+    if content != protected_manifest_bytes(entries): raise CaptureSchemaError("protected manifest bytes are not canonical")  # noqa: E501,E701
+    return tuple(ProtectedManifestEntry(PurePosixPath(path), fingerprint) for path, fingerprint in entries.items())  # noqa: E501
 def finalize_capture_outputs(outputs: Mapping[Path, bytes]) -> None:
     if not outputs:
         raise CaptureSchemaError("capture outputs must not be empty")
