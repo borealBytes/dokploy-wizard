@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from urllib import error
 
 import pytest
 
+from dokploy_wizard.dokploy import coder as coder_module
 from dokploy_wizard.dokploy.coder import _litellm_workspace_fallback_models_json
 from dokploy_wizard.proof import (
     model_sync_artifacts,
@@ -616,17 +618,17 @@ def test_remote_wrapper_password_is_sent_only_through_stdin(
     captured: dict[str, Any] = {}
     secret = "SECRET-REMOTE-PASSWORD"
 
-    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def run(command: list[str], **kwargs: Any) -> bytes:
         captured["command"] = command
-        captured["input"] = kwargs.get("input")
-        return subprocess.CompletedProcess(command, 0, "", "")
+        captured["input"] = kwargs.get("stdin")
+        return b""
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(model_sync_cli, "run_bounded_process", run)
 
     model_sync_cli._run_wrapper(Path("wrapper"), "host-a", secret, Path("install.env"))
 
     assert secret not in " ".join(captured["command"])
-    assert captured["input"] == secret + "\n"
+    assert captured["input"] == (secret + "\n").encode()
     assert "--password-stdin" in captured["command"]
 
 
@@ -636,26 +638,26 @@ def test_coder_pointer_session_token_is_sent_only_through_stdin(
     captured: dict[str, Any] = {}
     secret = "SECRET-CODER-SESSION"
 
-    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def run(command: list[str], **kwargs: Any) -> bytes:
         captured["command"] = command
-        captured["input"] = kwargs.get("input")
-        return subprocess.CompletedProcess(command, 0, '{"scope":"pointer"}', "")
+        captured["input"] = kwargs.get("stdin")
+        return b'{"scope":"pointer"}'
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", run)
 
     model_sync_host_b._primary_pointer(
         "coder-container", secret, "workspace", "ubuntu-vscode", "version-1",
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000/v1", "key", "openrouter/example", (), ("openrouter/example",)),
+        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "key", "openrouter/example", (), ("openrouter/example",)),
     )
 
     assert secret not in " ".join(captured["command"])
-    assert captured["input"] == secret + "\n"
+    assert captured["input"] == (secret + "\n").encode()
 
 
 def test_legacy_renderer_hash_is_independent_from_observed_pointer_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://proof-stack-shared-litellm:4000/v1", "apiKey": "SECRET-LEGACY-KEY"}, "models": {"openrouter/example": {}}}
+    original = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://proof-stack-shared-litellm:4000", "apiKey": "SECRET-LEGACY-KEY"}, "models": {"openrouter/example": {}}}
     drifted = {**original, "models": {"openrouter/changed": {}}}
 
     def captured_pointer(value: dict[str, Any]) -> str:
@@ -675,18 +677,18 @@ def test_legacy_renderer_hash_is_independent_from_observed_pointer_mutation(
 
     outputs = iter((captured_pointer(original), captured_pointer(drifted)))
     monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, next(outputs), ""),
+        model_sync_host_b,
+        "run_bounded_process",
+        lambda _command, **_kwargs: next(outputs).encode(),
     )
 
     first = model_sync_host_b._primary_pointer(
         "coder-container", "session", "workspace", "ubuntu-vscode", "version-1",
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000/v1", "SECRET-LEGACY-KEY", "openrouter/example", (), ("openrouter/example",)),
+        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "SECRET-LEGACY-KEY", "openrouter/example", (), ("openrouter/example",)),
     )
     second = model_sync_host_b._primary_pointer(
         "coder-container", "session", "workspace", "ubuntu-vscode", "version-1",
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000/v1", "SECRET-LEGACY-KEY", "openrouter/example", (), ("openrouter/example",)),
+        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "SECRET-LEGACY-KEY", "openrouter/example", (), ("openrouter/example",)),
     )
 
     assert first["pointer_sha256"] != second["pointer_sha256"]
@@ -696,20 +698,20 @@ def test_legacy_renderer_hash_is_independent_from_observed_pointer_mutation(
 @pytest.mark.parametrize(
     "changed",
     [
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000/v1", "changed-key", "openrouter/example", (), ("openrouter/example",)),
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000/v1", "expected-key", "openrouter/changed", (), ("openrouter/example",)),
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000/v1", "expected-key", "openrouter/example", ("openrouter/fallback",), ("openrouter/example",)),
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000/v1", "expected-key", "openrouter/example", (), ("openrouter/changed",)),
+        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "changed-key", "openrouter/example", (), ("openrouter/example",)),
+        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "expected-key", "openrouter/changed", (), ("openrouter/example",)),
+        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "expected-key", "openrouter/example", ("openrouter/fallback",), ("openrouter/example",)),
+        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "expected-key", "openrouter/example", (), ("openrouter/changed",)),
     ],
 )
 def test_observed_pointer_hash_is_independent_from_renderer_input_mutation(
     changed: model_sync_host_b.LegacyRenderer, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://proof-stack-shared-litellm:4000/v1", "apiKey": "observed-key"}, "models": {"openrouter/example": {}}}
+    observed = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://proof-stack-shared-litellm:4000", "apiKey": "observed-key"}, "models": {"openrouter/example": {}}}
     observed_sha = hashlib.sha256(json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    captured = json.dumps({"target": "/home/coder/.config/opencode/opencode.json", "pointer": "/provider/litellm", "mode": "0644", "shape": "json-pointer", "base_url": "http://proof-stack-shared-litellm:4000/v1", "credential_value_sha256": hashlib.sha256(b"observed-key").hexdigest(), "pointer_sha256": observed_sha, "scope": "pointer"})
-    monkeypatch.setattr(subprocess, "run", lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, captured, ""))
-    original = model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000/v1", "expected-key", "openrouter/example", (), ("openrouter/example",))
+    captured = json.dumps({"target": "/home/coder/.config/opencode/opencode.json", "pointer": "/provider/litellm", "mode": "0644", "shape": "json-pointer", "base_url": "http://proof-stack-shared-litellm:4000", "credential_value_sha256": hashlib.sha256(b"observed-key").hexdigest(), "pointer_sha256": observed_sha, "scope": "pointer"})
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", lambda _command, **_kwargs: captured.encode())
+    original = model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "expected-key", "openrouter/example", (), ("openrouter/example",))
 
     first = model_sync_host_b._primary_pointer("coder", "session", "workspace", "ubuntu-vscode", "version", original)
     second = model_sync_host_b._primary_pointer("coder", "session", "workspace", "ubuntu-vscode", "version", changed)
@@ -729,11 +731,11 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
     credential = "SECRET-CODER-HERMES-KEY"
     fallbacks = tuple(json.loads(_litellm_workspace_fallback_models_json(default_alias="openrouter/example/model")))
     renderer = model_sync_host_b.LegacyRenderer(
-        "http://proof-stack-shared-litellm:4000/v1", credential, "openrouter/example/model", fallbacks, ("openrouter/example/model",)
+        "http://proof-stack-shared-litellm:4000", credential, "openrouter/example/model", fallbacks, ("openrouter/example/model",)
     )
     observed = model_sync_host_b._render_legacy_pointer(renderer)
     pointer_sha = hashlib.sha256(json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    calls: list[tuple[list[str], str | None]] = []
+    calls: list[tuple[list[str], bytes | None]] = []
 
     def api(_hostname: str, _token: str | None, path: str, _body: dict[str, str] | None = None) -> Any:
         if path == "/api/v2/users/me":
@@ -748,14 +750,12 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
             return [{"id": "secret-proof", "name": "secret", "env_name": "OPENAI_API_KEY", "description": "credential"}]
         raise AssertionError(path)
 
-    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append((command, kwargs.get("input")))
-        assert kwargs["timeout"] <= 30
-        if kwargs.get("input") == "session\n":
-            return subprocess.CompletedProcess(command, 0, json.dumps({"target": "/home/coder/.config/opencode/opencode.json", "pointer": "/provider/litellm", "mode": "0644", "shape": "json-pointer", "base_url": renderer.base_url, "credential_value_sha256": hashlib.sha256(credential.encode()).hexdigest(), "pointer_sha256": pointer_sha, "scope": "pointer"}), "")
-        return subprocess.CompletedProcess(
-            command, 0, json.dumps([{"id": "openrouter/example/model"}]), ""
-        )
+    def run(command: list[str], **kwargs: Any) -> bytes:
+        calls.append((command, kwargs.get("stdin")))
+        assert kwargs["timeout_seconds"] <= 30
+        if kwargs.get("stdin") == b"session\n":
+            return json.dumps({"target": "/home/coder/.config/opencode/opencode.json", "pointer": "/provider/litellm", "mode": "0644", "shape": "json-pointer", "base_url": renderer.base_url, "credential_value_sha256": hashlib.sha256(credential.encode()).hexdigest(), "pointer_sha256": pointer_sha, "scope": "pointer"}).encode()
+        return json.dumps([{"id": "openrouter/example/model"}]).encode()
 
     probe = model_sync_remote.RemoteProbe("a" * 64, "b" * 64, "amd64", False, {"cloudflare": (), "tailscale": (), "coder": (), "docker": (), "dokploy": ()}, {plane: "absent" for plane in ("cloudflare", "tailscale", "coder", "docker", "dokploy")})
     monkeypatch.setattr(model_sync_host_b, "_api", api)
@@ -765,7 +765,7 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
     monkeypatch.setattr(model_sync_host_b, "_state_inventory", lambda _state_dir: {})
     monkeypatch.setattr(model_sync_host_b, "capture_local_authoritative_inventory", lambda *_args: probe)
     monkeypatch.setattr(model_sync_host_b, "load_litellm_generated_keys", lambda _state_dir: SimpleNamespace(virtual_keys={"coder-hermes": credential}))
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", run)
 
     snapshot = model_sync_host_b._snapshot(env_file, tmp_path)
 
@@ -780,8 +780,8 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
     assert pointer["pointer_sha256"] == pointer["independent_renderer_sha256"]
     assert credential not in json.dumps(snapshot)
     assert all(credential not in " ".join(command) for command, _input_value in calls)
-    assert [input_value for command, input_value in calls if "ssh" in command] == ["session\n" + credential, "session\n"]
-    assert [input_value for _command, input_value in calls if input_value != "session\n"] == ["session\n" + credential]
+    assert [input_value for command, input_value in calls if "ssh" in command] == [("session\n" + credential).encode(), b"session\n"]
+    assert [input_value for _command, input_value in calls if input_value != b"session\n"] == [("session\n" + credential).encode()]
     captured = capsys.readouterr()
     assert credential not in captured.out + captured.err
 
@@ -793,11 +793,12 @@ def test_legacy_baseline_hashes_are_canonical_and_drift_sensitive() -> None:
         captured.payload["legacy_workspace_managed_fingerprints"], "captured legacy fingerprints"
     )
 
-    assert all(
-        model_sync_artifacts.require_mapping(item, "captured legacy fingerprint")["legacy_exact"]
-        is True
-        for item in legacy
-    )
+    exact_by_scope = {
+        item["scope"]: item["legacy_exact"]
+        for value in legacy
+        if (item := model_sync_artifacts.require_mapping(value, "captured legacy fingerprint"))
+    }
+    assert exact_by_scope == {"pointer": True, "target-and-symlink": False}
     assert captured.legacy_workspace_managed_fingerprints_sha256 == model_sync_baseline.canonical_sha256(legacy)
     assert model_sync_host_b._sha(json.loads('{"b":2, "a":1}')) == model_sync_host_b._sha(json.loads('{ "a" : 1, "b" : 2 }'))
     snapshot["coder"]["workspaces"]["pages"][0]["items"][0]["legacy_pointers"][0]["independent_renderer_sha256"] = _sha("f")
@@ -843,14 +844,29 @@ def test_legacy_value_drift_is_nonexact_without_rejecting_valid_metadata() -> No
     assert first["credential_value_sha256"] == "d" * 64
 
 
-def test_legacy_observed_base_url_drift_fails_closed() -> None:
+def test_legacy_observed_safe_base_url_drift_is_nonexact() -> None:
     snapshot = json.loads(_snapshot_wire())
     snapshot["coder"]["workspaces"]["pages"][0]["items"][0]["legacy_pointers"][0][
         "base_url"
     ] = "https://observed.example.invalid/v1"
+    snapshot["coder"]["workspaces"]["pages"][0]["items"][0]["legacy_pointers"][0][
+        "pointer_sha256"
+    ] = _sha("d")
 
-    with pytest.raises(model_sync_baseline.BaselineCaptureError):
-        model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    captured = model_sync_baseline.parse_captured_baseline(
+        json.dumps(snapshot), stack_name="proof-stack"
+    )
+
+    pointer = next(
+        item
+        for value in model_sync_artifacts.require_list(
+            captured.payload["legacy_workspace_managed_fingerprints"], "legacy fingerprints"
+        )
+        if (item := model_sync_artifacts.require_mapping(value, "legacy fingerprint"))["scope"]
+        == "pointer"
+    )
+    assert pointer["base_url"] == "https://observed.example.invalid/v1"
+    assert pointer["legacy_exact"] is False
 
 
 def test_model_inventory_normalizes_like_legacy_template(
@@ -872,18 +888,18 @@ def test_model_inventory_normalizes_like_legacy_template(
     }
     captured: dict[str, Any] = {}
 
-    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def run(command: list[str], **kwargs: Any) -> bytes:
         captured["command"] = command
-        captured["input"] = kwargs.get("input")
-        return subprocess.CompletedProcess(command, 0, json.dumps(payload["data"]), "")
+        captured["input"] = kwargs.get("stdin")
+        return json.dumps(payload["data"]).encode()
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", run)
 
     models = model_sync_host_b._model_inventory("coder", "session", "workspace", credential, "proof-stack")
 
     assert models == ("openrouter/one", "opencode-go/two")
     assert credential not in " ".join(captured["command"])
-    assert captured["input"] == "session\n" + credential
+    assert captured["input"] == ("session\n" + credential).encode()
 
 
 def test_renderer_inputs_fail_closed_without_secret_output(
@@ -896,9 +912,9 @@ def test_renderer_inputs_fail_closed_without_secret_output(
         lambda _state_dir: SimpleNamespace(virtual_keys={"coder-hermes": credential}),
     )
     monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 1, "", "SECRET-REMOTE-ERROR"),
+        model_sync_host_b,
+        "run_bounded_process",
+        lambda _command, **_kwargs: (_ for _ in ()).throw(RuntimeError("model inventory failed")),
     )
 
     with pytest.raises(ValueError) as inventory_error:
@@ -918,11 +934,48 @@ def test_renderer_rejects_missing_base_url() -> None:
         )
 
 
+def test_legacy_renderer_uses_authoritative_internal_base_without_v1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        model_sync_host_b,
+        "load_litellm_generated_keys",
+        lambda _state_dir: SimpleNamespace(virtual_keys={"coder-hermes": "credential"}),
+    )
+    monkeypatch.setattr(
+        model_sync_host_b, "_model_inventory", lambda *_args: ("openrouter/example",)
+    )
+
+    renderer = model_sync_host_b._legacy_renderer(
+        {}, tmp_path, "coder", "session", "workspace", "proof-stack", "ubuntu-vscode"
+    )
+
+    assert renderer.base_url == coder_module._litellm_internal_base_url("proof-stack")
+    assert renderer.base_url == "http://proof-stack-shared-litellm:4000"
+
+
+def test_real_templates_preserve_authoritative_base_url_contracts() -> None:
+    root = Path(__file__).parents[2]
+    primary_templates = (
+        "default-ubuntu-code-server",
+        "default-ubuntu-code-server-opencode-web",
+        "default-ubuntu-code-server-openwork",
+    )
+    for template in primary_templates:
+        source = (root / f"templates/coder/{template}/main.tf").read_text(encoding="utf-8")
+        assert '__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__' in source
+        assert 'base_url = os.environ["AI_DEFAULT_BASE_URL"].rstrip("/")' in source
+        assert 'f"{base_url}/v1/models"' in source
+    kdense = (
+        root / "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
+    ).read_text(encoding="utf-8")
+    assert 'default      = "https://opencode.ai/zen/go/v1"' in kdense
+    assert 'KDENSE_OPENCODE_GO_BASE_URL=${data.coder_parameter.kdense_opencode_go_base_url.value}' in kdense
+
+
 def test_model_inventory_rejects_empty_response(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "[]", ""),
+        model_sync_host_b, "run_bounded_process", lambda _command, **_kwargs: b"[]"
     )
 
     with pytest.raises(ValueError):
@@ -936,13 +989,14 @@ def test_workspace_pointer_stdout_has_exact_byte_limit(
     limit = 2 * 1024 * 1024
     payload = '{"scope":"pointer"}'
     stdout = payload + " " * (limit - len(payload) + int(extra_byte))
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, stdout, ""),
-    )
+    def run(_command: list[str], **kwargs: Any) -> bytes:
+        if len(stdout.encode()) > kwargs["output_limit"]:
+            raise RuntimeError("legacy pointer exceeded output limit")
+        return stdout.encode()
+
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", run)
     renderer = model_sync_host_b.LegacyRenderer(
-        "http://proof-stack-shared-litellm:4000/v1",
+        "http://proof-stack-shared-litellm:4000",
         "credential",
         "openrouter/example",
         (),
@@ -967,11 +1021,12 @@ def test_model_inventory_stdout_has_exact_byte_limit(
     limit = 2 * 1024 * 1024
     payload = '[{"id":"openrouter/example"}]'
     stdout = payload + " " * (limit - len(payload) + int(extra_byte))
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, stdout, ""),
-    )
+    def run(_command: list[str], **kwargs: Any) -> bytes:
+        if len(stdout.encode()) > kwargs["output_limit"]:
+            raise RuntimeError("model inventory exceeded output limit")
+        return stdout.encode()
+
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", run)
 
     if extra_byte:
         with pytest.raises(ValueError):
@@ -989,9 +1044,7 @@ def test_model_inventory_has_exact_record_limit(
     count = 1_000 + int(extra_record)
     stdout = json.dumps([{"id": f"p/{index}"} for index in range(count)], separators=(",", ":"))
     monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, stdout, ""),
+        model_sync_host_b, "run_bounded_process", lambda _command, **_kwargs: stdout.encode()
     )
 
     if extra_record:
@@ -1006,12 +1059,12 @@ def test_model_inventory_uses_workspace_python_runtime(
 ) -> None:
     captured: dict[str, Any] = {}
 
-    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def run(command: list[str], **kwargs: Any) -> bytes:
         captured["command"] = command
-        captured["input"] = kwargs.get("input")
-        return subprocess.CompletedProcess(command, 0, '[{"id":"openrouter/example"}]', "")
+        captured["input"] = kwargs.get("stdin")
+        return b'[{"id":"openrouter/example"}]'
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", run)
 
     model_sync_host_b._model_inventory("coder", "session", "workspace", "credential", "proof-stack")
 
@@ -1019,6 +1072,109 @@ def test_model_inventory_uses_workspace_python_runtime(
     assert "python3" not in captured["command"]
     node_index = captured["command"].index("node")
     assert captured["command"][node_index : node_index + 2] == ["node", "-e"]
+
+
+@pytest.mark.parametrize(("stream", "extra_byte"), [("stdout", False), ("stdout", True), ("stderr", False), ("stderr", True)])
+def test_bounded_process_enforces_real_stdout_and_stderr_limits(
+    stream: str, extra_byte: bool,
+) -> None:
+    limit = 65_536
+    descriptor = 1 if stream == "stdout" else 2
+    script = "import os,sys;n=int(sys.argv[1]);fd=int(sys.argv[2]);chunk=b'x'*4096\nwhile n: w=min(n,len(chunk));os.write(fd,chunk[:w]);n-=w"
+    command = [sys.executable, "-c", script, str(limit + int(extra_byte)), str(descriptor)]
+
+    if extra_byte:
+        with pytest.raises(RuntimeError, match="bounded fixture exceeded output limit"):
+            model_sync_results.run_bounded_process(
+                command, stdin=b"", output_limit=limit, timeout_seconds=5, label="bounded fixture"
+            )
+    else:
+        output = model_sync_results.run_bounded_process(
+            command, stdin=b"", output_limit=limit, timeout_seconds=5, label="bounded fixture"
+        )
+        assert output == (b"x" * limit if stream == "stdout" else b"")
+
+
+def test_bounded_process_supports_binary_stdin_and_timeout() -> None:
+    payload = b"\x00\xffbinary-input"
+    output = model_sync_results.run_bounded_process(
+        [sys.executable, "-c", "import sys;sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+        stdin=payload,
+        output_limit=1024,
+        timeout_seconds=5,
+        label="binary fixture",
+    )
+
+    assert output == payload
+    with pytest.raises(RuntimeError, match="timeout fixture timed out"):
+        model_sync_results.run_bounded_process(
+            [sys.executable, "-c", "import time;time.sleep(10)"],
+            stdin=b"",
+            output_limit=1024,
+            timeout_seconds=0.05,
+            label="timeout fixture",
+        )
+
+
+def test_bounded_process_child_failure_redacts_stderr_and_stdin() -> None:
+    secret = b"SECRET-BOUNDED-PAYLOAD"
+    with pytest.raises(RuntimeError, match="failure fixture failed") as error:
+        model_sync_results.run_bounded_process(
+            [sys.executable, "-c", "import os,sys;data=sys.stdin.buffer.read();os.write(2,data);raise SystemExit(7)"],
+            stdin=secret,
+            output_limit=1024,
+            timeout_seconds=5,
+            label="failure fixture",
+        )
+
+    assert secret.decode() not in str(error.value)
+
+
+@pytest.mark.parametrize("mode", ["overflow", "timeout"])
+def test_bounded_process_kills_and_reaps_failed_children(tmp_path: Path, mode: str) -> None:
+    pid_file = tmp_path / "child.pid"
+    action = "os.write(1,b'x'*2048)" if mode == "overflow" else "time.sleep(10)"
+    script = "import os,sys,time;open(sys.argv[1],'w').write(str(os.getpid()));" + action
+
+    with pytest.raises(RuntimeError):
+        model_sync_results.run_bounded_process(
+            [sys.executable, "-c", script, str(pid_file)],
+            stdin=b"",
+            output_limit=1024,
+            timeout_seconds=0.1 if mode == "timeout" else 5,
+            label=f"{mode} fixture",
+        )
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text(encoding="utf-8")), 0)
+
+
+def test_local_authoritative_inventory_uses_bounded_binary_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "SECRET-LOCAL-INVENTORY"
+    captured: dict[str, Any] = {}
+    transport = model_sync_results.ProofTransport(
+        None, None, "example.test", None, None, None, "operator@example.test", "coder.example.test", secret, False
+    )
+
+    def run(command: list[str], **kwargs: Any) -> bytes:
+        captured["command"] = command
+        captured["stdin"] = kwargs["stdin"]
+        captured["limit"] = kwargs["output_limit"]
+        return _preflight_wire("machine-local").encode()
+
+    monkeypatch.setattr(model_sync_remote, "resolve_proof_transport", lambda _path: transport)
+    monkeypatch.setattr(model_sync_remote, "run_bounded_process", run)
+
+    probe = model_sync_remote.capture_local_authoritative_inventory(
+        tmp_path / "install.env", ProofNamespace("proof-stack", (), (), (), (), ())
+    )
+
+    assert probe.architecture == "amd64"
+    assert secret not in " ".join(captured["command"])
+    assert secret.encode() in captured["stdin"]
+    assert captured["limit"] == 2 * 1024 * 1024
 
 
 _KDENSE_CATALOG = (
@@ -1146,6 +1302,9 @@ def _commit_kdense_source(tmp_path: Path, source_models: list[dict[str, Any]]) -
         capture_output=True,
         text=True,
     ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", revision], check=True
+    )
     return repo, revision
 
 
@@ -1200,7 +1359,7 @@ def test_kdense_renderer_reconstructs_terraform_catalog_from_git_preimage(
         json.dumps(expected_target, indent=2) + "\n", encoding="utf-8"
     )
     renderer = model_sync_host_b.LegacyRenderer(
-        "http://proof-stack-shared-litellm:4000/v1", "credential", "unused", (), ()
+        "http://proof-stack-shared-litellm:4000", "credential", "unused", (), ()
     )
     observed = _kdense_observed(renderer, expected_target)
     real_run = subprocess.run
@@ -1263,7 +1422,61 @@ def test_kdense_renderer_fails_closed_without_git_preimage(
         encoding="utf-8",
     )
     renderer = model_sync_host_b.LegacyRenderer(
-        "http://proof-stack-shared-litellm:4000/v1", "credential", "unused", (), ()
+        "http://proof-stack-shared-litellm:4000", "credential", "unused", (), ()
+    )
+    real_run = subprocess.run
+
+    def workspace_json(
+        _container: str,
+        _token: str,
+        _workspace: str,
+        script: str,
+        payload: str,
+        args: tuple[str, ...],
+        label: str,
+    ) -> model_sync_artifacts.JsonValue:
+        if label == "legacy pointer":
+            return _kdense_observed(renderer, _terraform_kdense_models(_kdense_source_fixture()))
+        result = real_run(
+            ["node", "-e", script, str(repo), str(env_file), *args[2:]],
+            input=payload,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise ValueError("unable to reconstruct K-Dense legacy target")
+        return model_sync_artifacts.require_mapping(
+            json.loads(result.stdout), "K-Dense renderer output"
+        )
+
+    monkeypatch.setattr(model_sync_host_b, "_workspace_json", workspace_json)
+
+    with pytest.raises(ValueError, match="unable to reconstruct K-Dense legacy target"):
+        model_sync_host_b._primary_pointer(
+            "coder", "session", "workspace", "ubuntu-vscode-kdense-byok", "historical", renderer
+        )
+
+
+def test_kdense_renderer_rejects_local_head_not_bound_to_origin_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_models = _kdense_source_fixture()
+    repo, _revision = _commit_kdense_source(tmp_path, source_models)
+    env_file = repo / ".env"
+    env_file.write_text(
+        "DEFAULT_AGENT_MODEL=openai/anthropic/claude-opus-4.7\n"
+        "DEFAULT_EXPERT_MODEL=openai/google/gemini-3.1-pro-preview\n",
+        encoding="utf-8",
+    )
+    source_models[1]["contextWindow"] = 999
+    (repo / "web/src/data/models.json").write_text(
+        json.dumps(source_models, indent=2) + "\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "web/src/data/models.json"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "untrusted local commit"], check=True)
+    renderer = model_sync_host_b.LegacyRenderer(
+        "http://proof-stack-shared-litellm:4000", "credential", "unused", (), ()
     )
     real_run = subprocess.run
 
@@ -1303,7 +1516,7 @@ def test_kdense_capture_binds_whole_target_and_current_symlink(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     renderer = model_sync_host_b.LegacyRenderer(
-        "http://proof-stack-shared-litellm:4000/v1",
+        "http://proof-stack-shared-litellm:4000",
         "credential",
         "openrouter/example",
         (),
@@ -1362,13 +1575,13 @@ def test_renderer_rejects_missing_generated_key(tmp_path: Path, monkeypatch: pyt
 def test_workspace_templates_without_exact_legacy_renderer_fail_closed(
     template: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: pytest.fail("unsupported template executed"))
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", lambda *_args, **_kwargs: pytest.fail("unsupported template executed"))
 
     with pytest.raises(ValueError):
         model_sync_host_b._primary_pointer(
             "coder", "session", "workspace", template, "version",
             model_sync_host_b.LegacyRenderer(
-                "http://proof-stack-shared-litellm:4000/v1",
+                "http://proof-stack-shared-litellm:4000",
                 "credential",
                 "openrouter/example",
                 (),
@@ -1398,7 +1611,7 @@ def test_workspace_inventory_fails_closed_before_pointer_capture(
         "workspaces": [workspace],
     }
     monkeypatch.setattr(model_sync_host_b, "_api", lambda *_args: response)
-    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: pytest.fail("pointer capture executed"))
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", lambda *_args, **_kwargs: pytest.fail("pointer capture executed"))
 
     with pytest.raises(ValueError):
         model_sync_host_b._workspaces(
@@ -1440,7 +1653,7 @@ def test_historical_workspace_version_remains_bound_without_active_version_equal
         model_sync_host_b,
         "_legacy_renderer",
         lambda *_args: model_sync_host_b.LegacyRenderer(
-            "http://proof-stack-shared-litellm:4000/v1",
+            "http://proof-stack-shared-litellm:4000",
             "credential",
             "openrouter/example",
             (),
@@ -1499,6 +1712,32 @@ def test_kdense_absent_current_symlink_cannot_be_exact() -> None:
 
     assert kdense["legacy_exact"] is False
     assert kdense["symlink_state"] == "absent"
+
+
+def test_kdense_truthful_parameter_base_url_drift_is_preserved_as_nonexact() -> None:
+    snapshot = json.loads(_snapshot_wire())
+    pointer = snapshot["coder"]["workspaces"]["pages"][0]["items"][1]["legacy_pointers"][0]
+    pointer["base_url"] = "https://opencode.ai/zen/go/v1"
+    pointer["pointer_sha256"] = model_sync_host_b._sha({
+        "base_url": pointer["base_url"],
+        "credential_value_sha256": pointer["credential_value_sha256"],
+        "symlink_sha256": pointer["symlink_sha256"],
+        "target_sha256": pointer["target_sha256"],
+    })
+
+    captured = model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    legacy = model_sync_artifacts.require_list(
+        captured.payload["legacy_workspace_managed_fingerprints"], "legacy fingerprints"
+    )
+    kdense = next(
+        item
+        for value in legacy
+        if (item := model_sync_artifacts.require_mapping(value, "legacy fingerprint"))["scope"]
+        == "target-and-symlink"
+    )
+
+    assert kdense["base_url"] == "https://opencode.ai/zen/go/v1"
+    assert kdense["legacy_exact"] is False
 
 
 @pytest.mark.parametrize("field", ["target_sha256", "symlink_sha256", "credential_value_sha256"])
@@ -1597,7 +1836,7 @@ def test_legacy_baseline_rejects_missing_or_malformed_renderer_evidence(mutation
     elif mutation == "path":
         pointer["pointer"] = "/provider/other"
     elif mutation == "base":
-        pointer["base_url"] = "https://observed.example.invalid/v1"
+        pointer["base_url"] = "https://user:secret@observed.example.invalid/v1"
     elif mutation == "version":
         pointer["template_version_id"] = "wrong-version"
     elif mutation == "unsupported":
@@ -1705,7 +1944,7 @@ def test_coder_inventory_paginates_workspace_build_and_secret_identifiers(
         model_sync_host_b,
         "_legacy_renderer",
         lambda *_args: model_sync_host_b.LegacyRenderer(
-            "http://proof-stack-shared-litellm:4000/v1", "key", "openrouter/example", (), ("openrouter/example",)
+            "http://proof-stack-shared-litellm:4000", "key", "openrouter/example", (), ("openrouter/example",)
         ),
     )
 
@@ -1755,7 +1994,8 @@ def _snapshot_wire(*, omit_template: bool = False, malformed_build: bool = False
     kdense_pointer = "/home/coder/.local/state/dokploy-wizard/model-sync/current"
     kdense_target_sha = model_sync_host_b._sha(_terraform_kdense_models(_kdense_source_fixture()))
     kdense_symlink_sha = model_sync_host_b._sha(kdense_target.encode())
-    kdense_sha = model_sync_host_b._sha({"base_url": "http://proof-stack-shared-litellm:4000/v1", "credential_value_sha256": _sha("c"), "symlink_sha256": kdense_symlink_sha, "target_sha256": kdense_target_sha})
+    kdense_expected_sha = model_sync_host_b._sha({"base_url": "http://proof-stack-shared-litellm:4000", "credential_value_sha256": _sha("c"), "symlink_sha256": kdense_symlink_sha, "target_sha256": kdense_target_sha})
+    kdense_observed_sha = model_sync_host_b._sha({"base_url": "https://opencode.ai/zen/go/v1", "credential_value_sha256": _sha("c"), "symlink_sha256": kdense_symlink_sha, "target_sha256": kdense_target_sha})
     return json.dumps(
         {
             "cloudflare": {
@@ -1828,7 +2068,7 @@ def _snapshot_wire(*, omit_template: bool = False, malformed_build: bool = False
                                     "id": "workspace-primary",
                                     "legacy_pointers": [
                                         {
-                                            "base_url": "http://proof-stack-shared-litellm:4000/v1",
+                                            "base_url": "http://proof-stack-shared-litellm:4000",
                                             "credential_value_sha256": _sha("b"),
                                             "independent_renderer_sha256": pointer_sha,
                                             "mode": "0644",
@@ -1848,12 +2088,12 @@ def _snapshot_wire(*, omit_template: bool = False, malformed_build: bool = False
                                     "id": "workspace-kdense",
                                     "legacy_pointers": [
                                         {
-                                            "base_url": "http://proof-stack-shared-litellm:4000/v1",
+                                            "base_url": "https://opencode.ai/zen/go/v1",
                                             "credential_value_sha256": _sha("c"),
-                                            "independent_renderer_sha256": kdense_sha,
+                                            "independent_renderer_sha256": kdense_expected_sha,
                                             "mode": "0644",
                                             "pointer": kdense_pointer,
-                                            "pointer_sha256": kdense_sha,
+                                            "pointer_sha256": kdense_observed_sha,
                                             "renderer_source_path": "web/src/data/models.json",
                                             "renderer_source_revision": "a" * 40,
                                             "scope": "target-and-symlink",
@@ -2092,7 +2332,7 @@ def test_post_install_snapshot_uses_authoritative_cloudflare_and_tailscale_ids(
         model_sync_host_b,
         "_legacy_renderer",
         lambda *_args: model_sync_host_b.LegacyRenderer(
-            "http://proof-stack-shared-litellm:4000/v1",
+            "http://proof-stack-shared-litellm:4000",
             "expected-credential",
             "openrouter/example/model",
             (),
