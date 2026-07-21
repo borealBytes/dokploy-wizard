@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from dokploy_wizard.proof.model_sync_state import (
     atomic_finalize,
     claim_abort_guard,
     disarm_abort_guard,
+    process_identity_matches,
     read_abort_guard,
     recover_dead_abort_claim,
     transfer_abort_guard_to_plan,
@@ -23,8 +25,8 @@ def test_guard_claim_transfer(tmp_path: Path) -> None:
     guard = tmp_path / "abort-guard.json"
     arm_abort_guard(guard)
 
-    claim_abort_guard(guard, pid=1234, start_time_ticks="456", claim_token="claim-token")
-    transfer_abort_guard_to_plan(guard, claim_token="claim-token")
+    claim_abort_guard(guard, pid=1234, start_time_ticks="456", claim_token="a" * 32)
+    transfer_abort_guard_to_plan(guard, claim_token="a" * 32)
 
     status = read_abort_guard(guard)
     assert status.state == "armed"
@@ -35,7 +37,7 @@ def test_guard_claim_transfer(tmp_path: Path) -> None:
 def test_abort_dead_pid_starttime_recovery(tmp_path: Path) -> None:
     guard = tmp_path / "abort-guard.json"
     arm_abort_guard(guard)
-    claim_abort_guard(guard, pid=1234, start_time_ticks="456", claim_token="claim-token")
+    claim_abort_guard(guard, pid=1234, start_time_ticks="456", claim_token="a" * 32)
 
     recovered = recover_dead_abort_claim(
         guard,
@@ -45,6 +47,66 @@ def test_abort_dead_pid_starttime_recovery(tmp_path: Path) -> None:
     status = read_abort_guard(guard)
     assert recovered is True
     assert status.claimant_kind == "plan"
+
+
+def test_arm_rejects_an_existing_process_claim_without_overwriting_it(tmp_path: Path) -> None:
+    guard = tmp_path / "abort-guard.json"
+    arm_abort_guard(guard)
+    claim_abort_guard(guard, pid=1234, start_time_ticks="456", claim_token="a" * 32)
+    before = guard.read_bytes()
+
+    with pytest.raises(AbortGuardError):
+        arm_abort_guard(guard)
+
+    assert guard.read_bytes() == before
+
+
+def test_process_claim_rejects_an_invalid_token_without_mutating_guard(tmp_path: Path) -> None:
+    guard = tmp_path / "abort-guard.json"
+    guard.write_text(
+        json.dumps(
+            {
+                "claim_token": "invalid",
+                "claimant_kind": "process",
+                "env_receipt": None,
+                "pid": 1234,
+                "schema_version": 1,
+                "start_time_ticks": "456",
+                "state": "armed",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    before = guard.read_bytes()
+
+    with pytest.raises(AbortGuardError):
+        read_abort_guard(guard)
+
+    assert guard.read_bytes() == before
+
+
+def test_abort_dead_pid_starttime_recovery_preserves_live_claim_bytes(tmp_path: Path) -> None:
+    guard = tmp_path / "abort-guard.json"
+    arm_abort_guard(guard)
+    claim_abort_guard(guard, pid=1234, start_time_ticks="456", claim_token="a" * 32)
+    before = guard.read_bytes()
+
+    recovered = recover_dead_abort_claim(
+        guard,
+        process_identity=lambda pid, start_time: (pid, start_time) == (1234, "456"),
+    )
+
+    assert recovered is False
+    assert guard.read_bytes() == before
+
+
+def test_process_identity_rejects_pid_reuse_start_time_mismatch() -> None:
+    start_time_ticks = Path("/proc/self/stat").read_text(encoding="utf-8").split()[21]
+
+    assert process_identity_matches(os.getpid(), start_time_ticks)
+    assert not process_identity_matches(os.getpid(), "0")
 
 
 def test_abort_disarm(tmp_path: Path) -> None:

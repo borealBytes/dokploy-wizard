@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import signal
 import subprocess
 from email.message import Message
 from pathlib import Path
@@ -19,11 +21,17 @@ from dokploy_wizard.proof import (
 )
 from dokploy_wizard.proof.model_sync_cli import main
 from dokploy_wizard.proof.model_sync_env import ProofNamespace
+from dokploy_wizard.proof.model_sync_host_a import (
+    ProofRecoveryPaths,
+    begin_proof_recovery,
+    recover_interrupted_proof,
+)
 from dokploy_wizard.proof.model_sync_host_b import (
     HostIdentity,
     assert_followup_proof_contract,
     assert_namespace_identity,
 )
+from dokploy_wizard.proof.model_sync_state import read_abort_guard
 
 
 def test_namespace_identity_rejects_same_machine_and_mismatched_architecture() -> None:
@@ -1186,3 +1194,123 @@ def test_baseline_host_a_rejects_incomplete_fixture_without_finalized_outputs(
     assert not (artifact_dir / "result.json").exists()
     assert not (artifact_dir / "baseline.json").exists()
     assert not (artifact_dir / "protected-artifacts-before.txt").exists()
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+@pytest.mark.parametrize(
+    "boundary",
+    ["before-backup", "after-backup", "after-replace", "before-handler", "after-handler"],
+)
+def test_baseline_host_a_recovers_exact_env_for_each_signal_boundary(
+    tmp_path: Path,
+    boundary: str,
+    signum: signal.Signals,
+) -> None:
+    env_file = tmp_path / "install.env"
+    original = (
+        b"ROOT_DOMAIN=proof.example.test\nPACKS=coder\nAI_DEFAULT_PROVIDER=openrouter\n"
+        b"AI_DEFAULT_MODEL=example/model\nLITELLM_NVIDIA_API_KEY=SECRET-SIGNAL-SENTINEL\n"
+    )
+    env_file.write_bytes(original)
+    env_file.chmod(0o600)
+    backup = tmp_path / "secrets" / "install.env.backup"
+    guard = tmp_path / "abort-guard.json"
+    child = r'''
+from __future__ import annotations
+import argparse
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from dokploy_wizard.proof import model_sync_cli, model_sync_env
+
+boundary, env_name, backup_name, guard_name = sys.argv[1:]
+env_file = Path(env_name)
+backup = Path(backup_name)
+guard = Path(guard_name)
+original_write = model_sync_env.atomic_write_bytes
+paused = False
+
+def pause() -> None:
+    global paused
+    paused = True
+    print("READY", flush=True)
+    sys.stdin.buffer.read(1)
+
+def write(path: Path, content: bytes, *, mode: int = 0o600) -> None:
+    if boundary == "before-backup" and path == backup and not paused:
+        pause()
+    original_write(path, content, mode=mode)
+    if boundary == "after-backup" and path == backup and not paused:
+        pause()
+    if boundary == "after-replace" and path == env_file and not paused:
+        pause()
+
+model_sync_env.atomic_write_bytes = write
+model_sync_cli._required_inputs = lambda _args: ("host-a", "password-a", "host-b", "password-b")
+model_sync_cli._require_active_workspace_root = lambda _wrapper: None
+model_sync_cli.resolve_proof_namespace = lambda _env: SimpleNamespace(stack_name="proof-stack")
+model_sync_cli.resolve_proof_transport = lambda _env: None
+model_sync_cli.probe_host = lambda **_kwargs: SimpleNamespace(
+    machine_sha256="a" * 64, ssh_sha256="b" * 64, architecture="amd64", namespace_clean=True
+)
+model_sync_cli.assert_namespace_identity = lambda **_kwargs: None
+model_sync_cli._run_wrapper = lambda *_args: None
+original_install = model_sync_cli._install_recovery_handlers
+if boundary == "before-handler":
+    def install(recovery):
+        pause()
+        return original_install(recovery)
+    model_sync_cli._install_recovery_handlers = install
+if boundary == "after-handler":
+    def install(recovery):
+        previous = original_install(recovery)
+        pause()
+        return previous
+    model_sync_cli._install_recovery_handlers = install
+args = argparse.Namespace(
+    wrapper=Path("wrapper"), env_file=env_file, external_backup=backup, abort_guard=guard,
+    host_env="unused", password_env="unused", host_b_env="unused", host_b_password_env="unused",
+    source_base_commit="a" * 40, proof_commit="b" * 40, artifact_dir=env_file.parent,
+    output=env_file.parent / "result.json",
+)
+model_sync_cli._baseline_host_a(args)
+'''
+    process = subprocess.Popen(
+        [
+            os.environ.get("PYTHON", "python"),
+            "-c",
+            child,
+            boundary,
+            str(env_file),
+            str(backup),
+            str(guard),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[2] / "src")},
+    )
+    assert process.stdout is not None
+    assert process.stdin is not None
+    assert process.stdout.readline().strip() == "READY"
+
+    process.send_signal(signum)
+    stdout, stderr = process.communicate()
+
+    if boundary == "before-handler":
+        assert process.returncode == -signum
+        recovery = begin_proof_recovery(
+            paths=ProofRecoveryPaths(env_file, backup, guard),
+            pid=os.getpid(),
+            start_time_ticks=Path("/proc/self/stat").read_text(encoding="utf-8").split()[21],
+        )
+        recover_interrupted_proof(recovery)
+    else:
+        assert process.returncode == 128 + signum
+    assert env_file.read_bytes() == original
+    assert env_file.stat().st_mode & 0o777 == 0o600
+    assert not backup.exists()
+    assert read_abort_guard(guard).claimant_kind == "plan"
+    assert not (tmp_path / "result.json").exists()
+    assert b"SECRET-SIGNAL-SENTINEL" not in (stdout + stderr).encode()
