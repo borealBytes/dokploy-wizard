@@ -15,25 +15,24 @@ from typing import Sequence
 from dokploy_wizard.proof.model_sync_artifacts import write_protected_manifest
 from dokploy_wizard.proof.model_sync_baseline import parse_captured_baseline
 from dokploy_wizard.proof.model_sync_env import (
-    PreparedEnv,
     prepare_proof_env,
     resolve_proof_namespace,
     resolve_proof_transport,
 )
 from dokploy_wizard.proof.model_sync_host_a import (
     BaselineArtifactInputs,
-    GuardClaim,
-    claim_plan_guard,
+    ProofRecovery,
+    ProofRecoveryPaths,
+    begin_proof_recovery,
     complete_resumable_step,
     finalize_baseline_artifacts,
-    recover_failed_proof,
+    recover_interrupted_proof,
 )
 from dokploy_wizard.proof.model_sync_host_b import HostIdentity, assert_namespace_identity
 from dokploy_wizard.proof.model_sync_remote import capture_host_a_snapshot, probe_host
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuard,
     AbortGuardError,
-    arm_abort_guard,
     atomic_finalize,
     read_abort_guard,
 )
@@ -113,18 +112,18 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
     assert_namespace_identity(host_a=identity_a, host_b=identity_b)
     if not host_a_probe.namespace_clean or not host_b_probe.namespace_clean:
         raise RuntimeError("managed namespace residue blocks live baseline proof")
-    arm_abort_guard(args.abort_guard)
-    claim = claim_plan_guard(
-        guard_path=args.abort_guard,
+    recovery = begin_proof_recovery(
+        paths=ProofRecoveryPaths(args.env_file, args.external_backup, args.abort_guard),
         pid=os.getpid(),
         start_time_ticks=_self_start_time_ticks(),
     )
+    previous_handlers = _install_recovery_handlers(recovery)
     prepared = prepare_proof_env(
         env_file=args.env_file,
         backup_path=args.external_backup,
         guard_path=args.abort_guard,
+        claim_token=recovery.claim.token,
     )
-    previous_handlers = _install_recovery_handlers(prepared, args.abort_guard, claim)
     completed = False
     try:
         _run_wrapper(args.wrapper, host_a, password_a, args.env_file)
@@ -132,7 +131,9 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
             capture_host_a_snapshot(host=host_a, password=password_a),
             stack_name=namespace.stack_name,
         )
-        complete_resumable_step(prepared=prepared, guard_path=args.abort_guard, claim=claim)
+        complete_resumable_step(
+            prepared=prepared, guard_path=args.abort_guard, claim=recovery.claim
+        )
         finalize_baseline_artifacts(
             BaselineArtifactInputs(
                 artifact_dir=args.artifact_dir,
@@ -150,7 +151,7 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
     finally:
         _restore_recovery_handlers(previous_handlers)
         if not completed:
-            recover_failed_proof(prepared=prepared, guard_path=args.abort_guard, claim=claim)
+            recover_interrupted_proof(recovery)
 
 
 def _required_inputs(args: argparse.Namespace) -> tuple[str, str, str, str]:
@@ -202,13 +203,9 @@ def _self_start_time_ticks() -> str:
     return fields[21]
 
 
-def _install_recovery_handlers(
-    prepared: PreparedEnv,
-    guard: Path,
-    claim: GuardClaim,
-) -> tuple[SignalHandler, SignalHandler]:
+def _install_recovery_handlers(recovery: ProofRecovery) -> tuple[SignalHandler, SignalHandler]:
     def restore(_signum: int, _frame: FrameType | None) -> None:
-        recover_failed_proof(prepared=prepared, guard_path=guard, claim=claim)
+        recover_interrupted_proof(recovery)
         raise SystemExit(128 + _signum)
 
     return (

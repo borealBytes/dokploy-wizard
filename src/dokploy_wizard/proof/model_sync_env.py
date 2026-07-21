@@ -8,20 +8,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from dokploy_wizard.proof.model_sync_receipt import EnvReceipt
 from dokploy_wizard.proof.model_sync_results import ProofTransport
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuardError,
     atomic_write_bytes,
     read_abort_guard,
+    record_env_receipt,
     sha256_bytes,
 )
 from dokploy_wizard.state import StateValidationError, parse_env_file, resolve_desired_state
 
 _FILE_MODE: Final = 0o600
 _DIRECTORY_MODE: Final = 0o700
-_NVIDIA_KEYS: Final = frozenset({
-    "LITELLM_NVIDIA_API_KEY", "LITELLM_NVIDIA_BASE_URL", "LITELLM_NVIDIA_MODELS"
-})
+_NVIDIA_KEYS: Final = frozenset(
+    {"LITELLM_NVIDIA_API_KEY", "LITELLM_NVIDIA_BASE_URL", "LITELLM_NVIDIA_MODELS"}
+)
 @dataclass(frozen=True, slots=True)
 class EnvPreparationError(RuntimeError):
     detail: str
@@ -35,8 +37,6 @@ class PreparedEnv:
     original_sha256: str
     proof_sha256: str
     mode: int
-
-
 @dataclass(frozen=True, slots=True)
 class ProofNamespace:
     """Exact non-secret resource names derived from the proof environment."""
@@ -58,8 +58,6 @@ class ProofNamespace:
             "stack_name": self.stack_name,
             "tailscale": list(self.tailscale),
         }
-
-
 def resolve_proof_transport(env_file: Path) -> ProofTransport:
     """Load only collector credentials without serializing them into proof namespaces."""
     raw_env = parse_env_file(env_file)
@@ -77,9 +75,9 @@ def resolve_proof_transport(env_file: Path) -> ProofTransport:
         coder_password=values.get("DOKPLOY_ADMIN_PASSWORD") or None,
         tailscale_required=desired.tailscale_hostname is not None,
     )
-
-
-def prepare_proof_env(*, env_file: Path, backup_path: Path, guard_path: Path) -> PreparedEnv:
+def prepare_proof_env(
+    *, env_file: Path, backup_path: Path, guard_path: Path, claim_token: str
+) -> PreparedEnv:
     """Prepare an NVIDIA-free proof env only while a durable guard is armed."""
     _require_armed_guard(guard_path)
     original = _read_env_bytes(env_file)
@@ -89,6 +87,13 @@ def prepare_proof_env(*, env_file: Path, backup_path: Path, guard_path: Path) ->
     proof_sha256 = sha256_bytes(proof)
     if proof == original:
         return PreparedEnv(env_file, backup_path, original_sha256, proof_sha256, mode)
+    record_env_receipt(
+        guard_path,
+        claim_token=claim_token,
+        receipt=EnvReceipt(
+            str(env_file.resolve()), str(backup_path.resolve()), original_sha256, proof_sha256, mode
+        ),
+    )
     _validate_backup(env_file=env_file, backup_path=backup_path, original=original, proof=proof)
     if not backup_path.exists():
         backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,8 +101,6 @@ def prepare_proof_env(*, env_file: Path, backup_path: Path, guard_path: Path) ->
         atomic_write_bytes(backup_path, original, mode=_FILE_MODE)
     atomic_write_bytes(env_file, proof, mode=_FILE_MODE)
     return PreparedEnv(env_file, backup_path, original_sha256, proof_sha256, mode)
-
-
 def resolve_proof_namespace(env_file: Path) -> ProofNamespace:
     """Resolve exact proof namespaces without replacing or persisting the operator env."""
     original = _read_env_bytes(env_file)
@@ -138,8 +141,6 @@ def resolve_proof_namespace(env_file: Path) -> ProofNamespace:
         tailscale=() if desired.tailscale_hostname is None else (desired.tailscale_hostname,),
         coder_templates=templates,
     )
-
-
 def restore_proof_env(*, prepared: PreparedEnv, guard_path: Path) -> None:
     """Restore only exact recognized proof bytes and retain durable plan ownership."""
     _require_armed_guard(guard_path)
@@ -157,8 +158,6 @@ def restore_proof_env(*, prepared: PreparedEnv, guard_path: Path) -> None:
     atomic_write_bytes(prepared.env_file, backup, mode=prepared.mode)
     prepared.backup_path.unlink()
     _remove_empty_backup_parent(prepared.backup_path.parent)
-
-
 def _proof_bytes(original: bytes, parent: Path) -> bytes:
     try:
         _validate_bytes(original, parent)
@@ -175,8 +174,6 @@ def _proof_bytes(original: bytes, parent: Path) -> bytes:
             raise EnvPreparationError(message) from proof_error
         return proof
     return original
-
-
 def _validate_backup(*, env_file: Path, backup_path: Path, original: bytes, proof: bytes) -> None:
     if not backup_path.exists():
         return
@@ -186,8 +183,6 @@ def _validate_backup(*, env_file: Path, backup_path: Path, original: bytes, proo
     current = _read_env_bytes(env_file)
     if current not in {original, proof}:
         raise EnvPreparationError("existing proof env has an unknown hash")
-
-
 def _configured_nvidia_keys(content: bytes) -> frozenset[str]:
     keys = {
         line.split("=", 1)[0].strip()
@@ -195,8 +190,6 @@ def _configured_nvidia_keys(content: bytes) -> frozenset[str]:
         if "=" in line and not line.lstrip().startswith("#")
     }
     return frozenset(keys & _NVIDIA_KEYS)
-
-
 def _strip_nvidia_block(content: bytes) -> bytes:
     kept_lines = [
         line
@@ -204,8 +197,6 @@ def _strip_nvidia_block(content: bytes) -> bytes:
         if line.split("=", 1)[0].strip() not in _NVIDIA_KEYS
     ]
     return "".join(kept_lines).encode("utf-8")
-
-
 def _validate_bytes(content: bytes, parent: Path) -> None:
     descriptor, temporary_name = tempfile.mkstemp(prefix=".model-sync-validate-", dir=parent)
     temporary = Path(temporary_name)
@@ -219,15 +210,11 @@ def _validate_bytes(content: bytes, parent: Path) -> None:
         resolve_desired_state(parse_env_file(temporary))
     finally:
         temporary.unlink(missing_ok=True)
-
-
 def _read_env_bytes(path: Path) -> bytes:
     try:
         return path.read_bytes()
     except OSError as error:
         raise EnvPreparationError("proof env or backup is unreadable") from error
-
-
 def _require_armed_guard(guard_path: Path) -> None:
     try:
         guard = read_abort_guard(guard_path)
@@ -235,14 +222,10 @@ def _require_armed_guard(guard_path: Path) -> None:
         raise EnvPreparationError("abort guard must be armed before env mutation") from error
     if guard.state != "armed":
         raise EnvPreparationError("abort guard must be armed before env mutation")
-
-
 def _write_all(descriptor: int, content: bytes) -> None:
     view = memoryview(content)
     while view:
         view = view[os.write(descriptor, view) :]
-
-
 def _remove_empty_backup_parent(parent: Path) -> None:
     try:
         parent.rmdir()

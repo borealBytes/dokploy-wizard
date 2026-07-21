@@ -6,10 +6,16 @@ import hashlib
 import json
 import os
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
+
+from dokploy_wizard.proof.model_sync_receipt import (
+    EnvReceipt,
+    env_receipt_payload,
+    parse_env_receipt,
+)
 
 _SCHEMA_VERSION: Final = 1
 _FILE_MODE: Final = 0o600
@@ -30,6 +36,7 @@ class AbortGuard:
     pid: int | None
     start_time_ticks: str | None
     claim_token: str | None
+    env_receipt: EnvReceipt | None
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -67,15 +74,13 @@ def atomic_finalize(*, temp: Path, output: Path) -> None:
         os.close(descriptor)
     os.replace(temp, output)
     _fsync_directory(output.parent)
-
-
 def arm_abort_guard(path: Path) -> AbortGuard:
     """Durably arm plan ownership before any backup or proof-env write."""
-    guard = AbortGuard("armed", "plan", None, None, None)
+    if path.exists():
+        raise AbortGuardError("existing abort guard must be recovered before re-arming")
+    guard = AbortGuard("armed", "plan", None, None, None, None)
     _write_guard(path, guard)
     return guard
-
-
 def read_abort_guard(path: Path) -> AbortGuard:
     """Parse and strictly validate a durable abort guard without changing it."""
     try:
@@ -91,6 +96,7 @@ def read_abort_guard(path: Path) -> AbortGuard:
         "schema_version",
         "start_time_ticks",
         "state",
+        "env_receipt",
     }
     if set(decoded) != expected_keys or decoded.get("schema_version") != _SCHEMA_VERSION:
         raise AbortGuardError("abort guard schema is invalid")
@@ -99,6 +105,10 @@ def read_abort_guard(path: Path) -> AbortGuard:
     pid = decoded.get("pid")
     start_time = decoded.get("start_time_ticks")
     token = decoded.get("claim_token")
+    try:
+        receipt = parse_env_receipt(decoded.get("env_receipt"))
+    except ValueError as error:
+        raise AbortGuardError("abort guard env receipt is invalid") from error
     if state not in {"armed", "disarmed"} or claimant not in {"plan", "process"}:
         raise AbortGuardError("abort guard state is invalid")
     if claimant == "plan" and (pid is not None or start_time is not None or token is not None):
@@ -107,12 +117,10 @@ def read_abort_guard(path: Path) -> AbortGuard:
         not isinstance(pid, int)
         or not isinstance(start_time, str)
         or not isinstance(token, str)
-        or token == ""
+        or not _valid_claim_token(token)
     ):
         raise AbortGuardError("process abort guard requires complete process identity")
-    return AbortGuard(state, claimant, pid, start_time, token)
-
-
+    return AbortGuard(state, claimant, pid, start_time, token, receipt)
 def claim_abort_guard(
     path: Path, *, pid: int, start_time_ticks: str, claim_token: str
 ) -> AbortGuard:
@@ -120,21 +128,21 @@ def claim_abort_guard(
     guard = read_abort_guard(path)
     if guard.state != "armed" or guard.claimant_kind != "plan":
         raise AbortGuardError("only an armed plan guard may be claimed")
-    claimed = AbortGuard("armed", "process", pid, start_time_ticks, claim_token)
+    if not _valid_claim_token(claim_token):
+        raise AbortGuardError("abort guard claim token is invalid")
+    claimed = AbortGuard(
+        "armed", "process", pid, start_time_ticks, claim_token, guard.env_receipt
+    )
     _write_guard(path, claimed)
     return claimed
-
-
 def transfer_abort_guard_to_plan(path: Path, *, claim_token: str) -> AbortGuard:
     """CAS-transfer an exact process claim back to durable plan ownership."""
     guard = read_abort_guard(path)
     if guard.claimant_kind != "process" or guard.claim_token != claim_token:
         raise AbortGuardError("abort guard claim token does not authorize transfer")
-    plan_guard = AbortGuard(guard.state, "plan", None, None, None)
+    plan_guard = AbortGuard(guard.state, "plan", None, None, None, guard.env_receipt)
     _write_guard(path, plan_guard)
     return plan_guard
-
-
 def recover_dead_abort_claim(
     path: Path,
     *,
@@ -148,8 +156,46 @@ def recover_dead_abort_claim(
     assert guard.start_time_ticks is not None
     if process_identity(guard.pid, guard.start_time_ticks):
         return False
-    _write_guard(path, AbortGuard(guard.state, "plan", None, None, None))
+    _write_guard(path, AbortGuard(guard.state, "plan", None, None, None, guard.env_receipt))
     return True
+def process_identity_matches(pid: int, start_time_ticks: str) -> bool:
+    """Check an exact Linux process identity without trusting PID reuse alone."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
+    except OSError:
+        return False
+    return len(fields) > 21 and fields[21] == start_time_ticks
+
+
+def record_env_receipt(path: Path, *, claim_token: str, receipt: EnvReceipt) -> AbortGuard:
+    """Attach one exact recovery receipt to its claiming process."""
+    guard = read_abort_guard(path)
+    if guard.claimant_kind != "process" or guard.claim_token != claim_token:
+        raise AbortGuardError("abort guard claim token does not authorize receipt recording")
+    if guard.env_receipt is not None and guard.env_receipt != receipt:
+        raise AbortGuardError("abort guard already has a different env receipt")
+    recorded = AbortGuard(
+        guard.state,
+        guard.claimant_kind,
+        guard.pid,
+        guard.start_time_ticks,
+        guard.claim_token,
+        receipt,
+    )
+    _write_guard(path, recorded)
+    return recorded
+
+
+def clear_env_receipt(path: Path, *, claim_token: str) -> AbortGuard:
+    """Clear a recovered receipt only for its exact process claim."""
+    guard = read_abort_guard(path)
+    if guard.claimant_kind != "process" or guard.claim_token != claim_token:
+        raise AbortGuardError("abort guard claim token does not authorize receipt clearing")
+    cleared = AbortGuard(
+        guard.state, guard.claimant_kind, guard.pid, guard.start_time_ticks, claim_token, None
+    )
+    _write_guard(path, cleared)
+    return cleared
 
 
 def disarm_abort_guard(path: Path) -> AbortGuard:
@@ -157,15 +203,16 @@ def disarm_abort_guard(path: Path) -> AbortGuard:
     guard = read_abort_guard(path)
     if guard.claimant_kind != "plan":
         raise AbortGuardError("only the plan may disarm an abort guard")
-    disarmed = AbortGuard("disarmed", "plan", None, None, None)
+    disarmed = AbortGuard("disarmed", "plan", None, None, None, None)
     _write_guard(path, disarmed)
     return disarmed
 
 
 def _write_guard(path: Path, guard: AbortGuard) -> None:
-    payload: Mapping[str, str | int | None] = {
+    payload = {
         "claim_token": guard.claim_token,
         "claimant_kind": guard.claimant_kind,
+        "env_receipt": env_receipt_payload(guard.env_receipt),
         "pid": guard.pid,
         "schema_version": _SCHEMA_VERSION,
         "start_time_ticks": guard.start_time_ticks,
@@ -175,6 +222,10 @@ def _write_guard(path: Path, guard: AbortGuard) -> None:
         path,
         (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
     )
+
+
+def _valid_claim_token(value: str) -> bool:
+    return len(value) == 32 and all(character.isalnum() or character in "_-" for character in value)
 
 
 def _write_all(descriptor: int, content: bytes) -> None:
