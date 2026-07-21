@@ -1286,12 +1286,12 @@ model_sync_cli.assert_namespace_identity = lambda **_kwargs: None
 model_sync_cli._run_wrapper = lambda *_args: None
 original_install = model_sync_cli._install_recovery_handlers
 if boundary == "before-handler":
-    def install(recovery):
+    def install(recovery, *_args):
         pause()
         return original_install(recovery)
     model_sync_cli._install_recovery_handlers = install
 if boundary == "after-handler":
-    def install(recovery):
+    def install(recovery, *_args):
         previous = original_install(recovery)
         pause()
         return previous

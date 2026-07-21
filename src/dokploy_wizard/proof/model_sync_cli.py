@@ -118,7 +118,8 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         pid=os.getpid(),
         start_time_ticks=_self_start_time_ticks(),
     )
-    previous_handlers = _install_recovery_handlers(recovery)
+    signal_state = {"critical": False, "pending": 0}
+    previous_handlers = _install_recovery_handlers(recovery, signal_state)
     prepared = prepare_proof_env(
         env_file=args.env_file,
         backup_path=args.external_backup,
@@ -135,6 +136,7 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         complete_resumable_step(
             prepared=prepared, guard_path=args.abort_guard, claim=recovery.claim
         )
+        signal_state["critical"] = True
         finalize_baseline_artifacts(
             BaselineArtifactInputs(
                 artifact_dir=args.artifact_dir,
@@ -149,7 +151,11 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
             )
         )
         completed = True
+        signal_state["critical"] = False
+        if signal_state["pending"]:
+            raise SystemExit(128 + signal_state["pending"])
     finally:
+        signal_state["critical"] = False
         _restore_recovery_handlers(previous_handlers)
         if not completed:
             recover_interrupted_proof(recovery)
@@ -197,19 +203,22 @@ def _run_wrapper(wrapper: Path, host: str, password: str, env_file: Path) -> Non
     )
     if result.returncode != 0:
         raise RuntimeError("remote proof wrapper failed")
-
-
 def _self_start_time_ticks() -> str:
     return process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8"))
-
-
-def _install_recovery_handlers(recovery: ProofRecovery) -> tuple[SignalHandler, SignalHandler]:
+def _install_recovery_handlers(
+    recovery: ProofRecovery, signal_state: dict[str, bool | int] | None = None
+) -> tuple[SignalHandler, SignalHandler]:
+    if signal_state is None:
+        signal_state = {"critical": False, "pending": 0}
     recovering = False
 
     def restore(_signum: int, _frame: FrameType | None) -> None:
         nonlocal recovering
+        if signal_state["critical"]:
+            signal_state["pending"] = _signum
+            return
         if recovering:
-            raise SystemExit(128 + _signum)
+            return
         recovering = True
         recover_interrupted_proof(recovery)
         raise SystemExit(128 + _signum)

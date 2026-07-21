@@ -219,6 +219,28 @@ def test_atomic_finalize_rejects_different_parent_without_output_mutation(tmp_pa
     assert not output.exists()
 
 
+def test_atomic_finalize_fsyncs_output_parent_after_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dokploy_wizard.proof import model_sync_results
+
+    temp = tmp_path / "result.tmp"
+    output = tmp_path / "result.json"
+    temp.write_text("safe\n", encoding="utf-8")
+    synced: list[int] = []
+    original_fsync = model_sync_results.os.fsync
+
+    def record_fsync(descriptor: int) -> None:
+        synced.append(descriptor)
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(model_sync_results.os, "fsync", record_fsync)
+    atomic_finalize(temp=temp, output=output)
+
+    assert output.read_text(encoding="utf-8") == "safe\n"
+    assert len(synced) == 2
+
+
 def test_confirm_receipt_rejects_malformed_guard_without_mutation(tmp_path: Path) -> None:
     guard = tmp_path / "abort-guard.json"
     guard.write_text('{"state":"armed"}\n', encoding="utf-8")
