@@ -234,6 +234,32 @@ def test_atomic_finalize_rejects_different_parent_without_output_mutation(tmp_pa
     assert not output.exists()
 
 
+def test_atomic_finalize_removes_validated_temp_when_first_fsync_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sentinel = "SECRET-ATOMIC-FINALIZE-SENTINEL"
+    temp = tmp_path / "result.tmp"
+    output = tmp_path / "result.json"
+    temp.write_text(sentinel, encoding="utf-8")
+
+    def exit_on_first_file_fsync(_descriptor: int) -> None:
+        raise SystemExit(73)
+
+    monkeypatch.setattr(os, "fsync", exit_on_first_file_fsync)
+
+    with pytest.raises(SystemExit, match="73"):
+        atomic_finalize(temp=temp, output=output)
+
+    captured = capsys.readouterr()
+    assert not temp.exists()
+    assert not output.exists()
+    assert not tuple(tmp_path.iterdir())
+    assert sentinel not in captured.out
+    assert sentinel not in captured.err
+
+
 def test_atomic_finalize_fsyncs_output_parent_after_replace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

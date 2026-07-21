@@ -14,6 +14,7 @@ from urllib import error
 import pytest
 
 from dokploy_wizard.proof import (
+    model_sync_artifacts,
     model_sync_cli,
     model_sync_host_b,
     model_sync_remote,
@@ -1228,7 +1229,16 @@ def test_capture_finalization_rolls_back_outputs_when_system_exit_interrupts_sec
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 @pytest.mark.parametrize(
     "boundary",
-    ["before-backup", "after-backup", "after-replace", "before-handler", "after-handler", "after-finalize"],
+    [
+        "before-backup",
+        "after-backup",
+        "after-replace",
+        "before-handler",
+        "after-handler",
+        "after-finalize",
+        "before-restore",
+        "between-restore",
+    ],
 )
 def test_baseline_host_a_recovers_exact_env_for_each_signal_boundary(
     tmp_path: Path,
@@ -1249,6 +1259,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import signal
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1296,8 +1307,20 @@ model_sync_cli.parse_captured_baseline = lambda *_args, **_kwargs: SimpleNamespa
     coder_secret_inventory_sha256="6" * 64,
     legacy_workspace_managed_fingerprints_sha256="7" * 64,
 )
+if boundary in ("before-restore", "between-restore"):
+    def previous_handler(signum, _frame):
+        print(f"PREVIOUS:{signum}", flush=True)
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGINT, previous_handler)
+    signal.signal(signal.SIGTERM, previous_handler)
+    original_recover = model_sync_cli.recover_interrupted_proof
+    def recover(value):
+        print("RECOVERY", flush=True)
+        original_recover(value)
+    model_sync_cli.recover_interrupted_proof = recover
 original_install = model_sync_cli._install_recovery_handlers
 original_finalize = model_sync_cli.finalize_baseline_artifacts
+original_restore = model_sync_cli._restore_recovery_handlers
 if boundary == "after-finalize":
     def finalize(inputs):
         original_finalize(inputs)
@@ -1314,6 +1337,17 @@ if boundary == "after-handler":
         pause()
         return previous
     model_sync_cli._install_recovery_handlers = install
+if boundary == "before-restore":
+    def restore(previous):
+        pause()
+        original_restore(previous)
+    model_sync_cli._restore_recovery_handlers = restore
+if boundary == "between-restore":
+    def restore(previous):
+        signal.signal(signal.SIGINT, previous[0])
+        pause()
+        signal.signal(signal.SIGTERM, previous[1])
+    model_sync_cli._restore_recovery_handlers = restore
 args = argparse.Namespace(
     wrapper=Path("wrapper"), env_file=env_file, external_backup=backup, abort_guard=guard,
     host_env="unused", password_env="unused", host_b_env="unused", host_b_password_env="unused",
@@ -1346,7 +1380,88 @@ model_sync_cli._baseline_host_a(args)
     process.send_signal(signum)
     stdout, stderr = process.communicate()
 
-    if boundary == "before-handler":
+    if boundary in ("before-restore", "between-restore"):
+        assert process.returncode == 128 + signum
+        proof = env_file.read_bytes()
+        task_outputs = {
+            "abort-guard.json": guard,
+            "baseline.json": tmp_path / "baseline.json",
+            "host-a-preflight.json": tmp_path / "host-a-preflight.json",
+            "host-b-preflight.json": tmp_path / "host-b-preflight.json",
+            "protected-artifacts-before.txt": tmp_path / "protected-artifacts-before.txt",
+            "result.json": tmp_path / "result.json",
+        }
+        assert all(path.exists() for path in task_outputs.values())
+        assert proof != original
+        assert backup.read_bytes() == original
+        status = read_abort_guard(guard)
+        assert status.state == "armed"
+        assert status.claimant_kind == "plan"
+        assert status.env_receipt is not None and status.env_receipt.complete
+
+        actual_hashes = {
+            name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for name, path in task_outputs.items()
+        }
+        result = model_sync_artifacts.require_mapping(
+            json.loads(task_outputs["result.json"].read_text(encoding="utf-8")),
+            "result",
+        )
+        assert result["abort_guard_sha256"] == actual_hashes["abort-guard.json"]
+        assert result["baseline_sha256"] == actual_hashes["baseline.json"]
+        assert result["host_a_preflight_sha256"] == actual_hashes["host-a-preflight.json"]
+        assert result["host_b_preflight_sha256"] == actual_hashes["host-b-preflight.json"]
+        assert result["protected_artifacts_before_sha256"] == actual_hashes[
+            "protected-artifacts-before.txt"
+        ]
+        assert result["env_original_sha256"] == hashlib.sha256(original).hexdigest()
+        assert result["env_proof_sha256"] == hashlib.sha256(proof).hexdigest()
+
+        manifest_hashes: dict[str, str] = {}
+        for line in task_outputs["protected-artifacts-before.txt"].read_text(
+            encoding="utf-8"
+        ).splitlines():
+            fingerprint, name = line.split("  ", 1)
+            manifest_hashes[name] = fingerprint
+        assert manifest_hashes == {
+            "abort-guard.json": actual_hashes["abort-guard.json"],
+            "baseline.json": actual_hashes["baseline.json"],
+            "env-original": hashlib.sha256(original).hexdigest(),
+            "env-proof": hashlib.sha256(proof).hexdigest(),
+            "host-a-preflight.json": actual_hashes["host-a-preflight.json"],
+            "host-b-preflight.json": actual_hashes["host-b-preflight.json"],
+        }
+
+        abort_status_output = tmp_path / "status" / "abort-status.json"
+        assert main(
+            [
+                "abort-status",
+                "--guard",
+                str(guard),
+                "--output",
+                str(abort_status_output),
+            ]
+        ) == 0
+        abort_status = model_sync_artifacts.require_mapping(
+            json.loads(abort_status_output.read_text(encoding="utf-8")),
+            "abort status",
+        )
+        assert abort_status == {
+            "claim_token": "<REDACTED>",
+            "claimant_kind": "plan",
+            "pid": None,
+            "start_time_ticks": None,
+            "state": "armed",
+        }
+        mode_paths = (*task_outputs.values(), env_file, backup, abort_status_output)
+        assert all(path.stat().st_mode & 0o777 == 0o600 for path in mode_paths)
+        assert not list(tmp_path.rglob("*.tmp"))
+        assert "RECOVERY" not in stdout + stderr
+        if boundary == "between-restore" and signum == signal.SIGINT:
+            assert f"PREVIOUS:{signum}" in stdout
+        else:
+            assert "PREVIOUS:" not in stdout
+    elif boundary == "before-handler":
         assert process.returncode == -signum
         recovery = begin_proof_recovery(
             paths=ProofRecoveryPaths(env_file, backup, guard),
@@ -1370,7 +1485,7 @@ model_sync_cli._baseline_host_a(args)
         assert f"{guard_sha256}  abort-guard.json" in manifest
     else:
         assert process.returncode == 128 + signum
-    if boundary != "after-finalize":
+    if boundary not in ("after-finalize", "before-restore", "between-restore"):
         assert env_file.read_bytes() == original
         assert env_file.stat().st_mode & 0o777 == 0o600
         assert not backup.exists()
