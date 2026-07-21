@@ -11,7 +11,6 @@ from http.client import HTTPMessage
 from pathlib import Path
 from typing import IO, Final, Sequence
 from urllib import request
-
 from dokploy_wizard.dokploy.coder import _coder_container_name, _litellm_workspace_fallback_models_json
 from dokploy_wizard.proof.model_sync_artifacts import JsonValue, require_list, require_mapping, require_text
 from dokploy_wizard.proof.model_sync_env import resolve_proof_namespace
@@ -19,6 +18,10 @@ from dokploy_wizard.proof.model_sync_remote import RemoteProbe, capture_local_au
 from dokploy_wizard.proof.model_sync_results import collect_coder_array_pages, collect_coder_workspace_pages
 from dokploy_wizard.state import load_litellm_generated_keys, parse_env_file, resolve_desired_state
 _SUPPORTED_ARCHITECTURES: Final = frozenset({"amd64", "arm64"})
+_OUTPUT_LIMIT: Final = 2 * 1024 * 1024
+_MODEL_LIMIT: Final = 1_000
+_OPENCODE_TEMPLATES: Final = frozenset({"ubuntu-vscode", "ubuntu-vscode-opencode-web", "ubuntu-vscode-openwork"})
+_KDENSE_TEMPLATE: Final = "ubuntu-vscode-kdense-byok"
 @dataclass(frozen=True, slots=True)
 class HostIdentity:
     machine_sha256: str
@@ -33,23 +36,14 @@ class LegacyRenderer:
     model_inventory: tuple[str, ...]
 def assert_namespace_identity(*, host_a: HostIdentity, host_b: HostIdentity) -> None:
     """Require two physical hosts with one supported architecture before any upload."""
-    if host_a.machine_sha256 == host_b.machine_sha256:
-        raise ValueError("Host A and Host B must have distinct machine identities")
-    if host_a.ssh_sha256 == host_b.ssh_sha256:
-        raise ValueError("Host A and Host B must have distinct SSH host identities")
-    if host_a.architecture not in _SUPPORTED_ARCHITECTURES:
-        raise ValueError("Host A architecture is unsupported")
-    if host_b.architecture not in _SUPPORTED_ARCHITECTURES:
-        raise ValueError("Host B architecture is unsupported")
+    if host_a.machine_sha256 == host_b.machine_sha256 or host_a.ssh_sha256 == host_b.ssh_sha256:
+        raise ValueError("Host A and Host B must have distinct machine and SSH identities")
+    if host_a.architecture not in _SUPPORTED_ARCHITECTURES or host_b.architecture not in _SUPPORTED_ARCHITECTURES:
+        raise ValueError("Host architecture is unsupported")
     if host_a.architecture != host_b.architecture:
         raise ValueError("Host A and Host B architectures must match")
 def assert_followup_proof_contract(*, contract_name: str, receipts: tuple[str, ...]) -> None:
-    """Keep later Host A/Host B actions blocked until their named receipt exists."""
-    required = {
-        "upgrade_host_a_contract": "host-a-baseline",
-        "final_proof_contract": "host-a-destroyed",
-        "reseed_pair_contract": "host-b-clean",
-    }.get(contract_name)
+    required = {"upgrade_host_a_contract": "host-a-baseline", "final_proof_contract": "host-a-destroyed", "reseed_pair_contract": "host-b-clean"}.get(contract_name)
     if required is None:
         raise ValueError("unknown followup proof contract")
     if required not in receipts:
@@ -79,11 +73,10 @@ def _snapshot(env_file: Path, state_dir: Path) -> dict[str, JsonValue]:
     container = _coder_container_name(f"{desired.stack_name}-coder")
     if container is None:
         raise ValueError("Coder container is not running")
-    renderer = _legacy_renderer(raw_env, state_dir, container, desired.stack_name)
     user = _api(desired.hostnames["coder"], token, "/api/v2/users/me")
     user_id = _field(user, "id")
     templates = _templates(desired.hostnames["coder"], token)
-    workspaces = _workspaces(desired.hostnames["coder"], token, container, templates, renderer)
+    workspaces = _workspaces(desired.hostnames["coder"], token, container, templates, raw_env, state_dir, desired.stack_name)
     builds = _builds(desired.hostnames["coder"], token, workspaces)
     secrets = _secrets(desired.hostnames["coder"], token, user_id)
     return {
@@ -100,9 +93,7 @@ def _coder_login(hostname: str, email: str, password: str) -> str:
     response = _api(hostname, None, "/api/v2/users/login", {"email": email, "password": password})
     return _field(response, "session_token")
 def _api(hostname: str, token: str | None, path: str, body: dict[str, str] | None = None) -> dict[str, JsonValue] | list[JsonValue]:
-    headers = {"Accept": "application/json", "Host": hostname}
-    if token is not None:
-        headers["Coder-Session-Token"] = token
+    headers = {"Accept": "application/json", "Host": hostname, **({"Coder-Session-Token": token} if token is not None else {})}
     data = None if body is None else json.dumps(body).encode()
     if data is not None:
         headers["Content-Type"] = "application/json"
@@ -123,17 +114,8 @@ def _templates(hostname: str, token: str) -> list[dict[str, JsonValue]]:
     raw = _api(hostname, token, "/api/v2/templates")
     if not isinstance(raw, list):
         raise ValueError("Coder template API returned an invalid response")
-    return [
-        {
-            "id": _field(item, "id"),
-            "name": _field(item, "name"),
-            "active_version_id": _field(item, "active_version_id"),
-            "active_version_name": _field(item, "active_version_name"),
-            "rendered_source_sha256": _sha(item),
-        }
-        for item in raw
-    ]
-def _workspaces(hostname: str, token: str, container: str, templates: list[dict[str, JsonValue]], renderer: LegacyRenderer) -> list[dict[str, JsonValue]]:
+    return [{"id": _field(item, "id"), "name": _field(item, "name"), "active_version_id": _field(item, "active_version_id"), "active_version_name": _field(item, "active_version_name"), "rendered_source_sha256": _sha(item)} for item in raw]
+def _workspaces(hostname: str, token: str, container: str, templates: list[dict[str, JsonValue]], raw_env: dict[str, str], state_dir: Path, stack_name: str) -> list[dict[str, JsonValue]]:
     template_records = {require_text(item["id"], "template id"): item for item in templates}
     records: list[dict[str, JsonValue]] = []
     for item in collect_coder_workspace_pages(lambda path: _api(hostname, token, path)):
@@ -143,26 +125,27 @@ def _workspaces(hostname: str, token: str, container: str, templates: list[dict[
             raise ValueError("workspace references an unlisted template")
         workspace_name = _field(item, "name")
         version_id = _field(item, "template_version_id")
-        if version_id != require_text(template["active_version_id"], "template active version id"):
-            raise ValueError("workspace template version does not match its captured template version")
-        records.append({"id": _field(item, "id"), "name": workspace_name, "template_id": template_id, "template_version_id": version_id, "legacy_pointers": [_primary_pointer(container, token, workspace_name, require_text(template["name"], "template name"), version_id, renderer)]})
-    if not records:
-        raise ValueError("Coder retained workspace inventory is empty")
+        template_name = require_text(template["name"], "template name")
+        renderer = _legacy_renderer(raw_env, state_dir, container, token, workspace_name, stack_name, template_name)
+        records.append({"id": _field(item, "id"), "name": workspace_name, "template_id": template_id, "template_version_id": version_id, "legacy_pointers": [_primary_pointer(container, token, workspace_name, template_name, version_id, renderer)]})
     return records
 def _primary_pointer(container: str, token: str, workspace: str, template: str, version: str, renderer: LegacyRenderer) -> dict[str, JsonValue]:
-    if template not in {"ubuntu-vscode", "ubuntu-vscode-opencode-web", "ubuntu-vscode-openwork"}:
+    if template in _OPENCODE_TEMPLATES:
+        script = "const f=require('fs'),c=require('crypto'),p='/home/coder/.config/opencode/opencode.json',s=v=>Array.isArray(v)?v.map(s):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,s(v[k])])):v,h=v=>c.createHash('sha256').update(typeof v==='string'?v:JSON.stringify(s(v))).digest('hex'),x=JSON.parse(f.readFileSync(p)).provider.litellm,o=x.options,r={target:p,pointer:'/provider/litellm',mode:(f.statSync(p).mode&511).toString(8).padStart(4,'0'),shape:'json-pointer',base_url:o.baseURL,credential_value_sha256:h(o.apiKey),pointer_sha256:h(x),scope:'pointer'},b=Buffer.from(JSON.stringify(r));if(b.length>Number(process.argv[1]))process.exit(2);process.stdout.write(b)"
+        expected = _sha(_render_legacy_pointer(renderer))
+    elif template == _KDENSE_TEMPLATE:
+        script = "const f=require('fs'),c=require('crypto'),p='/home/coder/.cache/kdense-byok-src/web/src/data/models.json',l='/home/coder/.local/state/dokploy-wizard/model-sync/current',e=Object.fromEntries(f.readFileSync('/home/coder/.cache/kdense-byok-src/.env','utf8').split('\\n').filter(x=>x.includes('=')).map(x=>{let i=x.indexOf('=');return[x.slice(0,i),x.slice(i+1)]})),s=v=>Array.isArray(v)?v.map(s):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,s(v[k])])):v,h=v=>c.createHash('sha256').update(typeof v==='string'?v:JSON.stringify(s(v))).digest('hex'),x=JSON.parse(f.readFileSync(p)),t=h(x),k=h(e.OPENAI_API_KEY);let z=null,y=null,q='absent';try{if(f.lstatSync(l).isSymbolicLink()){y=f.readlinkSync(l);z=h(y);q='present'}}catch(a){if(a.code!=='ENOENT')throw a}const a=h({base_url:e.OPENAI_API_BASE,credential_value_sha256:k,symlink_sha256:z,target_sha256:t}),r={target:p,pointer:l,mode:(f.statSync(p).mode&511).toString(8).padStart(4,'0'),shape:'json-target-and-symlink',base_url:e.OPENAI_API_BASE,credential_value_sha256:k,target_sha256:t,symlink_state:q,symlink_target:y,symlink_sha256:z,pointer_sha256:a,scope:'target-and-symlink'},b=Buffer.from(JSON.stringify(r));if(b.length>Number(process.argv[1]))process.exit(2);process.stdout.write(b)"
+        expected = _sha(_render_kdense_pointer(renderer))
+    else:
         raise ValueError("retained workspace template has no Task 1 legacy pointer collector")
-    script = "import hashlib,json,os; p='/home/coder/.config/opencode/opencode.json'; x=json.load(open(p))['provider']['litellm']; o=x['options']; h=lambda v:hashlib.sha256(v.encode()).hexdigest(); print(json.dumps({'target':p,'pointer':'/provider/litellm','mode':format(os.stat(p).st_mode&511,'04o'),'shape':'json-pointer','base_url':o['baseURL'],'credential_value_sha256':h(o['apiKey']),'pointer_sha256':h(json.dumps(x,sort_keys=True,separators=(',',':'))),'scope':'pointer'}))"
-    result = subprocess.run(["docker", "exec", "-i", container, "sh", "-c", "IFS= read -r CODER_SESSION_TOKEN; export CODER_SESSION_TOKEN; exec /opt/coder \"$@\"", "sh", "ssh", workspace, "--", "python3", "-c", script], input=token + "\n", check=False, capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
-        raise ValueError("unable to capture retained workspace legacy pointer")
-    pointer = require_mapping(json.loads(result.stdout), "retained workspace legacy pointer")
-    pointer["independent_renderer_sha256"] = _sha(_render_legacy_pointer(renderer))
+    pointer = require_mapping(_workspace_json(container, token, workspace, script, "", (str(_OUTPUT_LIMIT),), "legacy pointer"), "retained workspace legacy pointer")
+    pointer["independent_renderer_sha256"] = expected
     pointer["template_version_id"] = version
     return pointer
-def _legacy_renderer(raw_env: dict[str, str], state_dir: Path, container: str, stack_name: str) -> LegacyRenderer:
+def _legacy_renderer(raw_env: dict[str, str], state_dir: Path, container: str, token: str, workspace: str, stack_name: str, template: str) -> LegacyRenderer:
     keys = load_litellm_generated_keys(state_dir)
-    credential = None if keys is None else keys.virtual_keys.get("coder-hermes")
+    consumer = "coder-kdense" if template == _KDENSE_TEMPLATE else "coder-hermes"
+    credential = None if keys is None else keys.virtual_keys.get(consumer)
     if credential is None or credential == "":
         raise ValueError("expected Coder LiteLLM credential is unavailable")
     provider = raw_env.get("AI_DEFAULT_PROVIDER", "").strip().lower() or "opencode-go"
@@ -170,14 +153,14 @@ def _legacy_renderer(raw_env: dict[str, str], state_dir: Path, container: str, s
     model = raw_env.get("AI_DEFAULT_MODEL", "").strip() or "deepseek-v4-flash"
     default_alias = model if model.startswith(f"{provider}/") else f"{provider}/{model}"
     fallbacks = tuple(require_text(item, "expected fallback model") for item in require_list(json.loads(_litellm_workspace_fallback_models_json(default_alias=default_alias)), "expected fallback models"))
-    return LegacyRenderer(f"http://{stack_name}-shared-litellm:4000/v1", credential, default_alias, fallbacks, _model_inventory(container, credential, stack_name))
-def _model_inventory(container: str, credential: str, stack_name: str) -> tuple[str, ...]:
-    script = "import json,sys,urllib.request; key=sys.stdin.read(); u='http://' + sys.argv[1] + '-shared-litellm:4000/v1/models'; r=urllib.request.Request(u,headers={'Accept':'application/json','Authorization':'Bearer '+key}); p=json.load(urllib.request.urlopen(r,timeout=5)); print(json.dumps(p.get('data',[])))"
-    result = subprocess.run(["docker", "exec", "-i", container, "python3", "-c", script, stack_name], input=credential, check=False, capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
-        raise ValueError("expected LiteLLM model inventory is unavailable")
+    return LegacyRenderer(f"http://{stack_name}-shared-litellm:4000/v1", credential, default_alias, fallbacks, _model_inventory(container, token, workspace, credential, stack_name))
+def _model_inventory(container: str, token: str, workspace: str, credential: str, stack_name: str) -> tuple[str, ...]:
+    script = "const f=require('fs'),h=require('http'),k=f.readFileSync(0,'utf8'),m=Number(process.argv[2]),n=Number(process.argv[3]),r=h.get(process.argv[1],{headers:{Accept:'application/json',Authorization:'Bearer '+k}},x=>{let z=0,a=[];x.on('data',b=>{z+=b.length;if(z>m)r.destroy();else a.push(b)});x.on('end',()=>{if(z>m)return;let p;try{p=JSON.parse(Buffer.concat(a))}catch(e){process.exit(2)}const d=p&&p.data;if(!Array.isArray(d)||d.length>n)process.exit(2);const o=Buffer.from(JSON.stringify(d));if(o.length>m)process.exit(2);process.stdout.write(o)})});r.setTimeout(5000,()=>r.destroy());r.on('error',()=>process.exit(2))"
+    values = require_list(_workspace_json(container, token, workspace, script, credential, (f"http://{stack_name}-shared-litellm:4000/v1/models", str(_OUTPUT_LIMIT), str(_MODEL_LIMIT)), "model inventory"), "expected LiteLLM model inventory")
+    if len(values) > _MODEL_LIMIT:
+        raise ValueError("expected LiteLLM model inventory exceeds the record limit")
     models: list[str] = []
-    for item in require_list(json.loads(result.stdout), "expected LiteLLM model inventory"):
+    for item in values:
         if not isinstance(item, dict) or not isinstance(candidate := item.get("id"), str):
             continue
         model = candidate.strip()
@@ -193,6 +176,23 @@ def _render_legacy_pointer(renderer: LegacyRenderer) -> dict[str, JsonValue]:
     if renderer.default_alias not in models:
         models.insert(0, renderer.default_alias)
     return {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": renderer.base_url, "apiKey": renderer.credential}, "models": {model: {} for model in models}}
+def _render_kdense_pointer(renderer: LegacyRenderer) -> dict[str, JsonValue]:
+    models = list(dict.fromkeys((*renderer.model_inventory, *renderer.fallback_models)))
+    if renderer.default_alias not in models:
+        models.insert(0, renderer.default_alias)
+    target = [{"id": model} for model in models]
+    return {"base_url": renderer.base_url, "credential_value_sha256": _sha(renderer.credential.encode()), "symlink_sha256": _sha("/home/coder/.cache/kdense-byok-src/web/src/data/models.json"), "target_sha256": _sha(target)}
+def _workspace_json(container: str, token: str, workspace: str, script: str, payload: str, args: tuple[str, ...], label: str) -> JsonValue:
+    result = subprocess.run(["docker", "exec", "-i", container, "sh", "-c", "IFS= read -r CODER_SESSION_TOKEN; export CODER_SESSION_TOKEN; exec /opt/coder \"$@\"", "sh", "ssh", workspace, "--", "node", "-e", script, *args], input=token + "\n" + payload, check=False, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise ValueError(f"unable to capture retained workspace {label}")
+    encoded = result.stdout.encode("utf-8")
+    if len(encoded) > _OUTPUT_LIMIT:
+        raise ValueError(f"retained workspace {label} exceeds the output limit")
+    raw = json.loads(encoded)
+    if not isinstance(raw, (dict, list)):
+        raise ValueError(f"retained workspace {label} has invalid JSON shape")
+    return raw
 def _builds(hostname: str, token: str, workspaces: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
     inventories: list[dict[str, JsonValue]] = []
     for workspace in workspaces:
