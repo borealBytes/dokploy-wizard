@@ -239,6 +239,48 @@ def test_protected_manifest_validation_rejects_unsafe_scope(manifest: str) -> No
         model_sync_artifacts.validate_protected_manifest_bytes(manifest.encode())
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".omo/evidence/x/",
+        ".omo/evidence/x//",
+        ".omo//evidence/x",
+        ".omo/evidence/./x",
+        ".sisyphus//evidence/x",
+        ".omo/evidence/\\x",
+        ".omo/evidence/\x00x",
+        ".omo/evidence/\tx",
+        ".omo/evidence/\x1fx",
+        ".omo/evidence/\x7fx",
+        ".omo/evidence/\x85x",
+        ".omo/evidence/ x",
+        ".omo/evidence/x ",
+        ".omo/evidence/x y",
+        ".omo/evidence/\u00a0x",
+        ".omo/evidence/\u200bx",
+    ],
+)
+def test_protected_manifest_validation_rejects_noncanonical_path_text(path: str) -> None:
+    manifest = f"{'a' * 64}  {path}\n".encode()
+
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.validate_protected_manifest_bytes(manifest)
+
+
+@pytest.mark.parametrize("alias", [".omo/evidence/x/", ".omo/evidence/x//"])
+def test_protected_manifest_validation_rejects_duplicate_normalized_path(
+    alias: str,
+) -> None:
+    manifest = (
+        f"{'a' * 64}  .omo/evidence/x\n{'b' * 64}  {alias}\n"
+    ).encode()
+
+    with pytest.raises(
+        model_sync_artifacts.CaptureSchemaError, match="duplicate normalized path"
+    ):
+        model_sync_artifacts.validate_protected_manifest_bytes(manifest)
+
+
 def test_atomic_finalize_rejects_different_parent_without_output_mutation(tmp_path: Path) -> None:
     temp_parent = tmp_path / "temp"
     output_parent = tmp_path / "output"
