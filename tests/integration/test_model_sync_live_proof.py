@@ -2667,6 +2667,9 @@ def _baseline_arguments(tmp_path: Path) -> list[str]:
     )
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
+    protected = tmp_path / "repository" / ".omo" / "evidence" / "unrelated.txt"
+    protected.parent.mkdir(parents=True)
+    protected.write_bytes(b"unrelated")
     manifest = model_sync_artifacts.protected_manifest_bytes(
         {".omo/evidence/unrelated.txt": hashlib.sha256(b"unrelated").hexdigest()}
     )
@@ -2704,6 +2707,23 @@ def _baseline_arguments(tmp_path: Path) -> list[str]:
         "--output",
         str(tmp_path / "artifacts" / "result.json"),
     ]
+
+
+def _run_baseline_fixture(
+    arguments: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> int:
+    _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
+    monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
+    monkeypatch.setattr(
+        model_sync_cli,
+        "_require_active_workspace_root",
+        lambda _wrapper: tmp_path / "repository",
+    )
+    monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
+    monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
+    monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
+    monkeypatch.setenv("FIXTURE_PASSWORD_B", "password-b")
+    return main(arguments)
 
 
 def test_post_install_snapshot_uses_authoritative_cloudflare_and_tailscale_ids(
@@ -2772,7 +2792,7 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     arguments = _baseline_arguments(tmp_path)
     clients = _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
     monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
-    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: None)
+    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: tmp_path / "repository")
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
     monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
@@ -2830,7 +2850,7 @@ def test_baseline_host_a_adopts_only_receipted_preexisting_protected_manifest(
     manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
     _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
     monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
-    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: None)
+    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: tmp_path / "repository")
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
     monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
@@ -2859,7 +2879,7 @@ def test_baseline_host_a_rejects_unknown_preexisting_protected_manifest(
     receipt_path.unlink()
     _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
     monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
-    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: None)
+    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: tmp_path / "repository")
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
     monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
@@ -2871,6 +2891,97 @@ def test_baseline_host_a_rejects_unknown_preexisting_protected_manifest(
     assert manifest_path.read_bytes() == unknown
     assert not (artifact_dir / "result.json").exists()
     assert not (artifact_dir / "baseline.json").exists()
+
+
+@pytest.mark.parametrize(
+    "invalid_kind",
+    ["missing", "digest", "symlink", "intermediate-symlink", "directory", "fifo", "oversized", "entry-count"],
+)
+def test_baseline_host_a_rejects_unverified_protected_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_kind: str,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    protected = tmp_path / "repository" / ".omo" / "evidence" / "unrelated.txt"
+    match invalid_kind:
+        case "missing":
+            protected.unlink()
+        case "digest":
+            protected.write_bytes(b"changed")
+        case "symlink":
+            protected.unlink()
+            protected.symlink_to(tmp_path / "outside.txt")
+        case "intermediate-symlink":
+            protected.unlink()
+            protected.parent.rmdir()
+            outside = tmp_path / "outside"
+            outside.mkdir()
+            (outside / "unrelated.txt").write_bytes(b"unrelated")
+            protected.parent.symlink_to(outside, target_is_directory=True)
+        case "directory":
+            protected.unlink()
+            protected.mkdir()
+        case "fifo":
+            protected.unlink()
+            os.mkfifo(protected)
+        case "oversized":
+            with protected.open("wb") as stream:
+                stream.truncate(16 * 1024 * 1024 + 1)
+        case "entry-count":
+            entries = {
+                f".omo/evidence/file-{index:04d}.txt": hashlib.sha256(b"unrelated").hexdigest()
+                for index in range(1_025)
+            }
+            manifest = model_sync_artifacts.protected_manifest_bytes(entries)
+            artifact_dir = tmp_path / "artifacts"
+            model_sync_artifacts.atomic_write_bytes(
+                artifact_dir / "protected-artifacts-before.txt", manifest
+            )
+            model_sync_artifacts.atomic_write_bytes(
+                artifact_dir / "protected-artifacts-before.sha256",
+                f"{hashlib.sha256(manifest).hexdigest()}  protected-artifacts-before.txt\n".encode(),
+            )
+        case unexpected:
+            raise AssertionError(f"unexpected fixture kind {unexpected}")
+
+    exit_code = _run_baseline_fixture(arguments, tmp_path, monkeypatch)
+
+    assert exit_code == 1
+    assert not (tmp_path / "artifacts" / "result.json").exists()
+
+
+@pytest.mark.parametrize("mutation_kind", ["rewrite", "replace"])
+def test_baseline_host_a_rejects_protected_artifact_mutation_during_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation_kind: str,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    protected = tmp_path / "repository" / ".omo" / "evidence" / "unrelated.txt"
+    original_read = os.read
+    mutated = False
+
+    def mutate_after_read(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = original_read(descriptor, size)
+        if chunk and not mutated:
+            mutated = True
+            if mutation_kind == "rewrite":
+                protected.write_bytes(b"changed")
+            else:
+                replacement = tmp_path / "replacement.txt"
+                replacement.write_bytes(b"unrelated")
+                os.replace(replacement, protected)
+        return chunk
+
+    monkeypatch.setattr(os, "read", mutate_after_read)
+
+    exit_code = _run_baseline_fixture(arguments, tmp_path, monkeypatch)
+
+    assert exit_code == 1
+    assert mutated is True
+    assert not (tmp_path / "artifacts" / "result.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -2892,7 +3003,7 @@ def test_baseline_host_a_rejects_symlinked_protected_manifest_contract(
     protected_path.symlink_to(target.name)
     _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
     monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
-    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: None)
+    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: tmp_path / "repository")
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
     monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
@@ -2924,7 +3035,7 @@ def test_baseline_host_a_rejects_incomplete_fixture_without_finalized_outputs(
     arguments = _baseline_arguments(tmp_path)
     _install_fixture_transport(monkeypatch, snapshot=snapshot)
     monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
-    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: None)
+    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: tmp_path / "repository")
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
     monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
@@ -3009,6 +3120,10 @@ boundary, env_name, backup_name, guard_name = sys.argv[1:]
 env_file = Path(env_name)
 backup = Path(backup_name)
 guard = Path(guard_name)
+repository = env_file.parent / "repository"
+protected = repository / ".omo" / "evidence" / "unrelated.txt"
+protected.parent.mkdir(parents=True)
+protected.write_bytes(b"unrelated")
 manifest = model_sync_artifacts.protected_manifest_bytes(
     {".omo/evidence/unrelated.txt": hashlib.sha256(b"unrelated").hexdigest()}
 )
@@ -3037,7 +3152,7 @@ def write(path: Path, content: bytes, *, mode: int = 0o600) -> None:
 
 model_sync_env.atomic_write_bytes = write
 model_sync_cli._required_inputs = lambda _args: ("host-a", "password-a", "host-b", "password-b")
-model_sync_cli._require_active_workspace_root = lambda _wrapper: None
+model_sync_cli._require_active_workspace_root = lambda _wrapper: repository
 model_sync_cli.resolve_proof_namespace = lambda _env: SimpleNamespace(stack_name="proof-stack")
 model_sync_cli.resolve_proof_transport = lambda _env: None
 model_sync_cli.probe_host = lambda **_kwargs: SimpleNamespace(

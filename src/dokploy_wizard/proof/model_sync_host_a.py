@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import secrets
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
 from dokploy_wizard.proof.model_sync_artifacts import (
     JsonValue,
+    ProtectedManifestEntry,
     finalize_capture_outputs,
     sha256_bytes,
     validate_protected_manifest_bytes,
@@ -35,26 +39,18 @@ class GuardClaim:
     token: str
     pid: int
     start_time_ticks: str
-
-
 @dataclass(frozen=True, slots=True)
 class ProofRecoveryPaths:
-
     env_file: Path
     backup_path: Path
     guard_path: Path
-
-
 @dataclass(frozen=True, slots=True)
 class ProofRecovery:
-
     paths: ProofRecoveryPaths
     claim: GuardClaim
-
-
 @dataclass(frozen=True, slots=True)
 class BaselineArtifactInputs:
-
+    repository_root: Path
     artifact_dir: Path
     output: Path
     source_base_commit: str
@@ -64,8 +60,6 @@ class BaselineArtifactInputs:
     host_a: RemoteProbe
     host_b: RemoteProbe
     baseline: CapturedBaseline
-
-
 def claim_plan_guard(*, guard_path: Path, pid: int, start_time_ticks: str) -> GuardClaim:
     token = secrets.token_urlsafe(24)
     claim_abort_guard(
@@ -75,8 +69,6 @@ def claim_plan_guard(*, guard_path: Path, pid: int, start_time_ticks: str) -> Gu
         claim_token=token,
     )
     return GuardClaim(token=token, pid=pid, start_time_ticks=start_time_ticks)
-
-
 def begin_proof_recovery(
     *, paths: ProofRecoveryPaths, pid: int, start_time_ticks: str
 ) -> ProofRecovery:
@@ -88,14 +80,10 @@ def begin_proof_recovery(
         guard_path=paths.guard_path, pid=pid, start_time_ticks=start_time_ticks
     )
     return ProofRecovery(paths, claim)
-
-
 def restore_after_interrupt(*, prepared: PreparedEnv, guard_path: Path, claim: GuardClaim) -> None:
     restore_proof_env(prepared=prepared, guard_path=guard_path)
     clear_env_receipt(guard_path, claim_token=claim.token)
     transfer_abort_guard_to_plan(guard_path, claim_token=claim.token)
-
-
 def recover_failed_proof(*, prepared: PreparedEnv, guard_path: Path, claim: GuardClaim) -> None:
     restore_proof_env(prepared=prepared, guard_path=guard_path)
     guard = read_abort_guard(guard_path)
@@ -104,14 +92,10 @@ def recover_failed_proof(*, prepared: PreparedEnv, guard_path: Path, claim: Guar
     guard = read_abort_guard(guard_path)
     if guard.claimant_kind == "process":
         transfer_abort_guard_to_plan(guard_path, claim_token=claim.token)
-
-
 def complete_resumable_step(*, prepared: PreparedEnv, guard_path: Path, claim: GuardClaim) -> None:
     del prepared
     complete_env_receipt(guard_path, claim_token=claim.token)
     transfer_abort_guard_to_plan(guard_path, claim_token=claim.token)
-
-
 def recover_interrupted_proof(recovery: ProofRecovery) -> None:
     guard = read_abort_guard(recovery.paths.guard_path)
     if guard.claimant_kind == "plan":
@@ -133,8 +117,6 @@ def recover_interrupted_proof(recovery: ProofRecovery) -> None:
     if guard.env_receipt is not None:
         clear_env_receipt(recovery.paths.guard_path, claim_token=recovery.claim.token)
     transfer_abort_guard_to_plan(recovery.paths.guard_path, claim_token=recovery.claim.token)
-
-
 def _recover_existing_guard(paths: ProofRecoveryPaths) -> None:
     guard = read_abort_guard(paths.guard_path)
     if guard.state != "armed":
@@ -158,30 +140,54 @@ def _recover_existing_guard(paths: ProofRecoveryPaths) -> None:
         clear_env_receipt(paths.guard_path, claim_token=guard.claim_token)
     if not recover_dead_abort_claim(paths.guard_path, process_identity=process_identity_matches):
         raise AbortGuardError("dead abort guard claim could not be recovered")
-
-
 def _restore_receipt(paths: ProofRecoveryPaths, guard: AbortGuard) -> None:
     receipt = guard.env_receipt
     if receipt is None:
         if paths.backup_path.exists():
             raise AbortGuardError("external backup exists without an abort guard receipt")
         return
-    if receipt.env_path != str(paths.env_file.resolve()) or receipt.backup_path != str(
-        paths.backup_path.resolve()
-    ):
+    if receipt.env_path != str(paths.env_file.resolve()) or receipt.backup_path != str(paths.backup_path.resolve()):  # noqa: E501
         raise AbortGuardError("abort guard receipt paths do not match the requested proof paths")
-    restore_proof_env(
-        prepared=PreparedEnv(
-            paths.env_file,
-            paths.backup_path,
-            receipt.original_sha256,
-            receipt.proof_sha256,
-            receipt.mode,
-        ),
-        guard_path=paths.guard_path,
-    )
-
-
+    prepared = PreparedEnv(paths.env_file, paths.backup_path, receipt.original_sha256, receipt.proof_sha256, receipt.mode)  # noqa: E501
+    restore_proof_env(prepared=prepared, guard_path=paths.guard_path)
+def _verify_protected_artifacts(repository_root: Path, entries: tuple[ProtectedManifestEntry, ...]) -> None:  # noqa: E501
+    if len(entries) > 1_024: raise ValueError("protected artifact entry limit exceeded")  # noqa: E701
+    try:
+        root_descriptor, aggregate_size = os.open(repository_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC), 0  # noqa: E501
+    except OSError as error:
+        raise ValueError("protected artifact root is unavailable") from error
+    try:
+        for entry in entries:
+            parent_descriptor = os.dup(root_descriptor)
+            try:
+                for component in entry.path.parts[:-1]:
+                    child_descriptor = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_descriptor)  # noqa: E501
+                    os.close(parent_descriptor)
+                    parent_descriptor = child_descriptor
+                file_descriptor = os.open(entry.path.parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=parent_descriptor)  # noqa: E501
+                try:
+                    before = os.fstat(file_descriptor)
+                    if not stat.S_ISREG(before.st_mode) or before.st_size > 16 * 1024 * 1024 or aggregate_size + before.st_size > 64 * 1024 * 1024: raise ValueError("protected artifact is not a bounded regular file")  # noqa: E501,E701
+                    digest, bytes_read = hashlib.sha256(), 0
+                    while chunk := os.read(file_descriptor, 65_536):
+                        digest.update(chunk)
+                        bytes_read += len(chunk)
+                        if bytes_read > 16 * 1024 * 1024: raise ValueError("protected artifact grew beyond its bound")  # noqa: E501,E701
+                    after = os.fstat(file_descriptor)
+                    path_after = os.stat(entry.path.parts[-1], dir_fd=parent_descriptor, follow_symlinks=False)  # noqa: E501
+                finally:
+                    os.close(file_descriptor)
+            except OSError as error:
+                raise ValueError("protected artifact traversal failed") from error
+            finally:
+                os.close(parent_descriptor)
+            aggregate_size += bytes_read
+            before_identity = (before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns, before.st_ctime_ns)  # noqa: E501
+            after_identity = (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns)  # noqa: E501
+            if before_identity != after_identity or before_identity != (path_after.st_dev, path_after.st_ino, path_after.st_mode, path_after.st_size, path_after.st_mtime_ns, path_after.st_ctime_ns) or bytes_read != before.st_size or digest.hexdigest() != entry.sha256 or aggregate_size > 64 * 1024 * 1024:  # noqa: E501
+                raise ValueError("protected artifact verification failed")
+    finally:
+        os.close(root_descriptor)
 def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
     host_a_path = inputs.artifact_dir / "host-a-preflight.json"
     host_b_path = inputs.artifact_dir / "host-b-preflight.json"
@@ -195,7 +201,8 @@ def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
     if manifest_path.is_symlink() or receipt_path.is_symlink():
         raise ValueError("protected manifest contract must use regular files")
     manifest_bytes = manifest_path.read_bytes()
-    validate_protected_manifest_bytes(manifest_bytes)
+    entries = validate_protected_manifest_bytes(manifest_bytes)
+    _verify_protected_artifacts(inputs.repository_root, entries)
     receipt_bytes = f"{sha256_bytes(manifest_bytes)}  protected-artifacts-before.txt\n".encode()
     if not manifest_path.is_file() or manifest_path.stat().st_mode & 0o777 != 0o600 or not receipt_path.is_file() or receipt_path.stat().st_mode & 0o777 != 0o600 or receipt_path.read_bytes() != receipt_bytes:  # noqa: E501
         raise ValueError("pre-existing protected manifest receipt is invalid")
@@ -239,7 +246,5 @@ def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
             inputs.output: _json_bytes(result),
         }
     )
-
-
 def _json_bytes(payload: dict[str, JsonValue]) -> bytes:
     return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")

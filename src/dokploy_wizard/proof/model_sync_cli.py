@@ -95,7 +95,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _baseline_host_a(args: argparse.Namespace) -> None:
     host_a, password_a, host_b, password_b = _required_inputs(args)
-    _require_active_workspace_root(args.wrapper)
+    repository_root = _require_active_workspace_root(args.wrapper)
     namespace = resolve_proof_namespace(args.env_file)
     transport = resolve_proof_transport(args.env_file)
     host_a_probe = probe_host(
@@ -139,6 +139,7 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         signal_state["critical"] = True
         finalize_baseline_artifacts(
             BaselineArtifactInputs(
+                repository_root=repository_root,
                 artifact_dir=args.artifact_dir,
                 output=args.output,
                 source_base_commit=args.source_base_commit,
@@ -177,10 +178,11 @@ def _required_inputs(args: argparse.Namespace) -> tuple[str, str, str, str]:
     return host_a, password_a, host_b, password_b
 
 
-def _require_active_workspace_root(wrapper: Path) -> None:
+def _require_active_workspace_root(wrapper: Path) -> Path:
     expected = Path("/workspaces/model-sync").resolve()
     if not expected.exists() or wrapper.resolve().parent != expected / "bin":
         raise RuntimeError("/workspaces/model-sync does not resolve to the active proof root")
+    return expected
 
 
 def _run_wrapper(wrapper: Path, host: str, password: str, env_file: Path) -> None:
