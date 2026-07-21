@@ -761,7 +761,7 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
     monkeypatch.setattr(model_sync_host_b, "_api", api)
     monkeypatch.setattr(model_sync_host_b, "_coder_login", lambda *_args: "session")
     monkeypatch.setattr(model_sync_host_b, "_coder_container_name", lambda *_args: "coder")
-    monkeypatch.setattr(model_sync_host_b, "_image_inventory", lambda: [])
+    monkeypatch.setattr(model_sync_host_b, "_image_inventory", lambda _stack_name: [])
     monkeypatch.setattr(model_sync_host_b, "_state_inventory", lambda _state_dir: {})
     monkeypatch.setattr(model_sync_host_b, "capture_local_authoritative_inventory", lambda *_args: probe)
     monkeypatch.setattr(model_sync_host_b, "load_litellm_generated_keys", lambda _state_dir: SimpleNamespace(virtual_keys={"coder-hermes": credential}))
@@ -1233,6 +1233,278 @@ def test_local_authoritative_inventory_uses_bounded_binary_transport(
     assert secret not in " ".join(captured["command"])
     assert secret.encode() in captured["stdin"]
     assert captured["limit"] == 2 * 1024 * 1024
+
+
+_IMAGE_LOGICAL = ("coder", "litellm", "pgvector", "redis", "postfix")
+_IMAGE_SERVICES = {
+    "coder": "proof-stack-coder",
+    "litellm": "proof-stack-shared-litellm",
+    "pgvector": "proof-stack-shared-postgres",
+    "redis": "proof-stack-shared-redis",
+    "postfix": "proof-stack-shared-postfix",
+}
+_IMAGE_REFERENCES = {
+    "coder": "ghcr.io/coder/coder:latest",
+    "litellm": "ghcr.io/berriai/litellm:main-latest",
+    "pgvector": "pgvector/pgvector:pg16",
+    "redis": "redis:7-alpine",
+    "postfix": "boky/postfix:latest",
+}
+_IMAGE_REPOSITORIES = {
+    "coder": "ghcr.io/coder/coder",
+    "litellm": "ghcr.io/berriai/litellm",
+    "pgvector": "docker.io/pgvector/pgvector",
+    "redis": "docker.io/library/redis",
+    "postfix": "docker.io/boky/postfix",
+}
+def _single_manifest_raw(marker: str) -> bytes:
+    return json.dumps(
+        {
+            "config": {"digest": f"sha256:{marker * 64}", "mediaType": "application/vnd.oci.image.config.v1+json", "size": 1},
+            "layers": [],
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "schemaVersion": 2,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+def _index_raw(platforms: list[dict[str, str]]) -> bytes:
+    return json.dumps(
+        {
+            "manifests": [
+                {
+                    "digest": f"sha256:{str(index + 1) * 64}",
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "platform": platform,
+                    "size": 1,
+                }
+                for index, platform in enumerate(platforms)
+            ],
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "schemaVersion": 2,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+_IMAGE_RAW = {
+    name: _single_manifest_raw(marker)
+    for name, marker in zip(_IMAGE_LOGICAL, "abcde", strict=True)
+}
+_IMAGE_RAW["coder"] = _index_raw(
+    [{"architecture": "amd64", "os": "linux"}, {"architecture": "arm64", "os": "linux", "variant": "v8"}]
+)
+_IMAGE_DIGESTS = {
+    name: f"sha256:{hashlib.sha256(raw).hexdigest()}" for name, raw in _IMAGE_RAW.items()
+}
+
+
+def _image_inventory_runner(
+    overrides: dict[str, Any] | None = None,
+) -> tuple[Any, list[list[str]]]:
+    values = {} if overrides is None else overrides
+    calls: list[list[str]] = []
+    ids = {name: character * 64 for name, character in zip(_IMAGE_LOGICAL, "abcde", strict=True)}
+    image_ids = {name: f"sha256:{character * 64}" for name, character in zip(_IMAGE_LOGICAL, "12345", strict=True)}
+    service_names = {service: name for name, service in _IMAGE_SERVICES.items()}
+    container_ids = {identifier: name for name, identifier in ids.items()}
+    local_ids = {identifier: name for name, identifier in image_ids.items()}
+    references = {**_IMAGE_REFERENCES, **values.get("references", {})}
+    repositories = {**_IMAGE_REPOSITORIES, **values.get("repositories", {})}
+    registry_raw = {**_IMAGE_RAW, **values.get("registry_raw", {})}
+
+    def run(command: list[str], **kwargs: Any) -> bytes:
+        calls.append(command)
+        assert kwargs["stdin"] == b""
+        assert kwargs["output_limit"] == 2 * 1024 * 1024
+        if values.get("failure_kind") in command:
+            raise RuntimeError(str(values["failure_message"]))
+        if command[1] == "ps":
+            service = next(item.removeprefix("label=com.docker.compose.service=") for item in command if item.startswith("label=com.docker.compose.service="))
+            logical_name = service_names[service]
+            if values.get("missing") == logical_name:
+                return b""
+            output = ids[logical_name]
+            if values.get("duplicate") == logical_name:
+                output += "\n" + "f" * 64
+            return (output + "\n").encode()
+        if command[1:4] == ["inspect", "--type", "container"]:
+            logical_name = container_ids[command[-1]]
+            return json.dumps([{"Config": {"Image": references[logical_name]}, "Image": image_ids[logical_name]}]).encode()
+        if command[1:3] == ["image", "inspect"]:
+            logical_name = local_ids[command[-1]]
+            local_digest = values.get("local_digests", {}).get(
+                logical_name, f"sha256:{hashlib.sha256(registry_raw[logical_name]).hexdigest()}"
+            )
+            local_evidence = values.get("local_evidence", {}).get(logical_name, f"{repositories[logical_name]}@{local_digest}")
+            return json.dumps([{"RepoDigests": values.get("repo_digests", {}).get(logical_name, [local_evidence])}]).encode()
+        if command[1:4] == ["buildx", "imagetools", "inspect"]:
+            logical_name = next(name for name, repository in repositories.items() if command[-1].startswith(f"{repository}@"))
+            raw = registry_raw[logical_name]
+            assert isinstance(raw, bytes)
+            return raw
+        raise AssertionError(command)
+
+    return run, calls
+
+
+def _resource_plane_snapshot(images: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "cloudflare": {"access_application_ids": [], "dns_record_ids": [], "tunnel_ids": []},
+        "images": images,
+        "tailscale": {"identifiers": []},
+        "wizard_state": {"ledger_sha256": "a" * 64, "resources": [], "state_sha256": "b" * 64},
+    }
+
+
+def test_image_inventory_binds_five_running_services_to_independent_registry_digests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, calls = _image_inventory_runner()
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
+
+    images = model_sync_host_b._image_inventory("proof-stack")
+    parsed = model_sync_artifacts.parse_resource_planes(_resource_plane_snapshot(images))
+
+    assert tuple(item["logical_name"] for item in images) == _IMAGE_LOGICAL
+    assert parsed.images == {
+        name: f"{_IMAGE_REPOSITORIES[name]}@{_IMAGE_DIGESTS[name]}" for name in _IMAGE_LOGICAL
+    }
+    assert sum(command[1] == "ps" for command in calls) == 5
+    assert {
+        next(item for item in command if item.startswith("label=com.docker.compose.service="))
+        for command in calls
+        if command[1] == "ps"
+    } == {f"label=com.docker.compose.service={service}" for service in _IMAGE_SERVICES.values()}
+    assert sum(command[1:3] == ["image", "inspect"] for command in calls) == 5
+    registry_calls = [command for command in calls if command[1:4] == ["buildx", "imagetools", "inspect"]]
+    assert len(registry_calls) == 5
+    assert [command[-1] for command in registry_calls] == [
+        f"{_IMAGE_REPOSITORIES[name]}@{_IMAGE_DIGESTS[name]}" for name in _IMAGE_LOGICAL
+    ]
+    assert all(command[-2] == "--raw" for command in registry_calls)
+
+
+@pytest.mark.parametrize(("condition", "message"), [("missing", "running container must resolve exactly once"), ("duplicate", "running container must resolve exactly once")])
+def test_image_inventory_rejects_missing_or_duplicate_service(
+    condition: str, message: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, _calls = _image_inventory_runner({condition: "coder"})
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
+
+    with pytest.raises((ValueError, model_sync_artifacts.CaptureSchemaError), match=message):
+        model_sync_host_b._image_inventory("proof-stack")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"local_digests": {"coder": "sha256:INVALID"}}, "local image digest is invalid"),
+        ({"local_evidence": {"coder": "ghcr.io/coder/coder:latest"}}, "local image digest is invalid"),
+        ({"local_evidence": {"coder": f"ghcr.io/other/coder@{_IMAGE_DIGESTS['coder']}"}}, "local image digest is missing or ambiguous"),
+        ({"repo_digests": {"coder": [f"ghcr.io/coder/coder@{_IMAGE_DIGESTS['coder']}"] * 2}}, "local image digest is missing or ambiguous"),
+        ({"local_digests": {"coder": "sha256:" + "f" * 64}}, "container and registry image digests disagree"),
+        ({"registry_raw": {"coder": b"{"}}, "registry manifest returned invalid JSON"),
+        ({"registry_raw": {"coder": b'{"mediaType":"application/example","schemaVersion":2}'}}, "registry manifest media type is unsupported"),
+    ],
+)
+def test_image_inventory_rejects_malformed_or_mismatched_digests(
+    overrides: dict[str, Any], message: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, _calls = _image_inventory_runner(overrides)
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
+
+    with pytest.raises((ValueError, model_sync_artifacts.CaptureSchemaError), match=message):
+        model_sync_host_b._image_inventory("proof-stack")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"config": {"digest": "sha256:" + "a" * 64, "mediaType": "application/vnd.oci.image.config.v1+json"}, "layers": [], "mediaType": "application/vnd.oci.image.manifest.v1+json", "schemaVersion": 2},
+        {"config": {"digest": "sha256:" + "a" * 64, "mediaType": "application/vnd.oci.image.config.v1+json", "size": 1}, "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "size": 1}], "mediaType": "application/vnd.oci.image.manifest.v1+json", "schemaVersion": 2},
+        {"manifests": [{"digest": "sha256:" + "a" * 64, "mediaType": "application/vnd.oci.image.manifest.v1+json", "platform": {"architecture": "amd64", "os": "linux"}}], "mediaType": "application/vnd.oci.image.index.v1+json", "schemaVersion": 2},
+    ],
+)
+def test_image_inventory_rejects_incomplete_registry_descriptors(
+    payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    runner, _calls = _image_inventory_runner({"registry_raw": {"coder": raw}})
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
+
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError, match="registry manifest descriptor"):
+        model_sync_host_b._image_inventory("proof-stack")
+
+
+@pytest.mark.parametrize("platforms", [[{"architecture": "amd64", "os": "linux"}, {"architecture": "amd64", "os": "linux"}], [{"architecture": "amd64"}]])
+def test_image_inventory_index_digest_does_not_project_platform_metadata(
+    platforms: list[dict[str, str]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, _calls = _image_inventory_runner({"registry_raw": {"coder": _index_raw(platforms)}})
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
+
+    images = model_sync_host_b._image_inventory("proof-stack")
+
+    assert images[0]["registry_image"] == images[0]["container_image"]
+
+
+def test_image_inventory_normalizes_docker_hub_and_registry_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = "registry.example.test:5000/team/coder"
+    runner, _calls = _image_inventory_runner({
+        "references": {"coder": f"{repository}:release"},
+        "repositories": {"coder": repository},
+    })
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
+
+    images = model_sync_host_b._image_inventory("proof-stack")
+
+    assert images[0]["container_image"] == f"{repository}@{_IMAGE_DIGESTS['coder']}"
+    assert images[0]["registry_image"] == images[0]["container_image"]
+    assert images[3]["container_image"] == f"docker.io/library/redis@{_IMAGE_DIGESTS['redis']}"
+
+
+def test_image_inventory_accepts_documented_single_manifest_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _single_manifest_raw("f")
+    runner, _calls = _image_inventory_runner({"registry_raw": {"coder": raw}})
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
+
+    images = model_sync_host_b._image_inventory("proof-stack")
+
+    assert images[0]["registry_image"] == images[0]["container_image"]
+
+
+def test_image_inventory_compares_multi_platform_index_digest_not_child_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, _calls = _image_inventory_runner()
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
+
+    images = model_sync_host_b._image_inventory("proof-stack")
+
+    assert images[0]["container_image"] == f"ghcr.io/coder/coder@{_IMAGE_DIGESTS['coder']}"
+    assert _IMAGE_DIGESTS["coder"] not in _IMAGE_RAW["coder"].decode()
+
+
+@pytest.mark.parametrize("failure", ["timed out", "exceeded output limit"])
+def test_image_inventory_propagates_bounded_command_failures(
+    failure: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, _calls = _image_inventory_runner({
+        "failure_kind": "buildx",
+        "failure_message": f"coder registry image {failure}",
+    })
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
+
+    with pytest.raises(RuntimeError, match=failure):
+        model_sync_host_b._image_inventory("proof-stack")
 
 
 _KDENSE_CATALOG = (
@@ -2377,7 +2649,7 @@ def test_post_install_snapshot_uses_authoritative_cloudflare_and_tailscale_ids(
         plane_states={plane: "present" for plane in observed},
     )
     monkeypatch.setattr(model_sync_host_b, "capture_local_authoritative_inventory", lambda *_args: probe)
-    monkeypatch.setattr(model_sync_host_b, "_image_inventory", lambda: [])
+    monkeypatch.setattr(model_sync_host_b, "_image_inventory", lambda _stack_name: [])
     monkeypatch.setattr(model_sync_host_b, "_coder_login", lambda *_args: "session")
     monkeypatch.setattr(model_sync_host_b, "_coder_container_name", lambda *_args: "coder")
     monkeypatch.setattr(model_sync_host_b, "_api", lambda *_args: {"id": "user-proof"})

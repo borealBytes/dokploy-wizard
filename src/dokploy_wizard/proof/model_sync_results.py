@@ -30,6 +30,26 @@ class ProofTransport:
     coder_hostname: str | None
     coder_password: str | None
     tailscale_required: bool
+@dataclass(frozen=True, slots=True)
+class HostIdentity:
+    machine_sha256: str
+    ssh_sha256: str
+    architecture: str
+def assert_namespace_identity(*, host_a: HostIdentity, host_b: HostIdentity) -> None:
+    """Require two physical hosts with one supported architecture before upload."""
+    supported = {"amd64", "arm64"}
+    if host_a.machine_sha256 == host_b.machine_sha256 or host_a.ssh_sha256 == host_b.ssh_sha256:
+        raise ValueError("Host A and Host B must have distinct machine and SSH identities")
+    if host_a.architecture not in supported or host_b.architecture not in supported:
+        raise ValueError("Host architecture is unsupported")
+    if host_a.architecture != host_b.architecture:
+        raise ValueError("Host A and Host B architectures must match")
+def assert_followup_proof_contract(*, contract_name: str, receipts: tuple[str, ...]) -> None:
+    required = {"upgrade_host_a_contract": "host-a-baseline", "final_proof_contract": "host-a-destroyed", "reseed_pair_contract": "host-b-clean"}.get(contract_name)
+    if required is None:
+        raise ValueError("unknown followup proof contract")
+    if required not in receipts:
+        raise ValueError(f"{contract_name} requires receipt {required}")
 def run_bounded_process(command: Sequence[str], *, stdin: bytes, output_limit: int, timeout_seconds: float, label: str) -> bytes:
     """Run a child while bounding both output pipes before bytes reach memory."""
     if output_limit < 1 or timeout_seconds <= 0 or not label:
@@ -151,17 +171,7 @@ def atomic_finalize(*, temp: Path, output: Path) -> None:
     except BaseException:
         temp.unlink(missing_ok=True)
         raise
-REQUIRED_RESULT_KEYS = frozenset(
-    {
-        "schema_version", "source_base_commit", "proof_commit", "coder_image_digest",
-        "litellm_image_digest", "shared_core_image_digests", "env_original_sha256",
-        "env_proof_sha256", "env_mode", "external_backup_path", "abort_guard_path",
-        "abort_guard_sha256", "host_a_preflight_sha256", "host_b_preflight_sha256",
-        "host_identities_distinct", "host_architectures_equal", "baseline_sha256",
-        "protected_artifacts_before_path", "protected_artifacts_before_sha256",
-        "coder_secret_inventory_sha256", "legacy_workspace_managed_fingerprints_sha256",
-    }
-)
+REQUIRED_RESULT_KEYS = frozenset({"schema_version", "source_base_commit", "proof_commit", "coder_image_digest", "litellm_image_digest", "shared_core_image_digests", "env_original_sha256", "env_proof_sha256", "env_mode", "external_backup_path", "abort_guard_path", "abort_guard_sha256", "host_a_preflight_sha256", "host_b_preflight_sha256", "host_identities_distinct", "host_architectures_equal", "baseline_sha256", "protected_artifacts_before_path", "protected_artifacts_before_sha256", "coder_secret_inventory_sha256", "legacy_workspace_managed_fingerprints_sha256"})
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DIGEST = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
