@@ -147,7 +147,7 @@ def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str, versio
         pointer = require_mapping(item, "legacy pointer")
         keys = {"template_version_id", "target", "pointer", "mode", "shape", "base_url", "credential_value_sha256", "pointer_sha256", "independent_renderer_sha256", "scope"}
         if expected_scope == "target-and-symlink":
-            keys.update({"target_sha256", "symlink_state", "symlink_target", "symlink_sha256"})
+            keys.update({"target_sha256", "symlink_state", "symlink_target", "symlink_sha256", "renderer_source_revision", "renderer_source_path"})
         require_keys(pointer, keys, "legacy pointer")
         if require_text(pointer["scope"], "legacy pointer scope") != expected_scope:
             raise BaselineCaptureError("legacy pointer scope does not match its template contract")
@@ -175,6 +175,9 @@ def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str, versio
         }
         if expected_scope == "target-and-symlink":
             target_sha = require_sha256(pointer["target_sha256"], "legacy target")
+            revision, source_path = require_text(pointer["renderer_source_revision"], "legacy renderer revision"), require_text(pointer["renderer_source_path"], "legacy renderer path")
+            if len(revision) != 40 or any(character not in "0123456789abcdef" for character in revision) or source_path != "web/src/data/models.json":
+                raise BaselineCaptureError("legacy renderer source binding is invalid")
             state = require_text(pointer["symlink_state"], "legacy symlink state")
             if state not in {"present", "absent"}:
                 raise BaselineCaptureError("legacy symlink state is invalid")
@@ -187,7 +190,7 @@ def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str, versio
                 raise BaselineCaptureError("absent legacy symlink must not have target evidence")
             if pointer_sha != canonical_sha256({"base_url": expected_base, "credential_value_sha256": require_sha256(pointer["credential_value_sha256"], "legacy credential"), "symlink_sha256": symlink_sha, "target_sha256": target_sha}):
                 raise BaselineCaptureError("legacy target and symlink aggregate hash is invalid")
-            normalized.update({"legacy_exact": exact and state == "present", "symlink_sha256": symlink_sha, "symlink_state": state, "symlink_target": symlink_target, "target_sha256": target_sha})
+            normalized.update({"legacy_exact": exact and state == "present", "renderer_source_path": source_path, "renderer_source_revision": revision, "symlink_sha256": symlink_sha, "symlink_state": state, "symlink_target": symlink_target, "target_sha256": target_sha})
         pointers.append(normalized)
     return pointers
 def _builds(raw: JsonValue, workspaces: tuple[dict[str, JsonValue], ...]) -> None:
