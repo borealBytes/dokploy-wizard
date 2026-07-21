@@ -87,6 +87,11 @@ def atomic_finalize(*, temp: Path, output: Path) -> None:
     finally:
         os.close(descriptor)
     os.replace(temp, output)
+    descriptor = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 REQUIRED_RESULT_KEYS = frozenset(
