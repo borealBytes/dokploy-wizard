@@ -7,7 +7,7 @@ import re
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Final, TypeAlias
 from urllib.parse import urlsplit
 
@@ -19,10 +19,9 @@ _HASH_PATTERNS: Final = (re.compile(r"^[0-9a-f]{64}$"), re.compile(r"^sha256:[0-
 _REPOSITORY: Final = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$")  # noqa: E501
 _MANIFEST_MEDIA: Final = frozenset({"application/vnd.docker.distribution.manifest.v2+json", "application/vnd.oci.image.manifest.v1+json"})  # noqa: E501
 _INDEX_MEDIA: Final = frozenset({"application/vnd.docker.distribution.manifest.list.v2+json", "application/vnd.oci.image.index.v1+json"})  # noqa: E501
-_FILE_MODE: Final = 0o600
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
-def atomic_write_bytes(path: Path, content: bytes, *, mode: int = _FILE_MODE) -> None:
+def atomic_write_bytes(path: Path, content: bytes, *, mode: int = 0o600) -> None:
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
     temporary = parent / f".{path.name}.{secrets.token_hex(12)}.tmp"
@@ -199,9 +198,10 @@ def validate_protected_manifest_bytes(content: bytes) -> None:
     forbidden = ("password", "token", "credential", "api_key", ".install", "secret", "protected-artifacts-before", ".tmp", ".lock", "coder-litellm-model-sync", "run-continuation", "start-work", "boulder.json", "plans/assets/kdense-", "/baseline.json", "/result.json", "/abort-guard.json", "/abort-status.json", "/host-a-preflight.json", "/host-b-preflight.json")  # noqa: E501
     for line in lines:
         fingerprint, separator, path = line.partition("  ")
-        if separator != "  " or not path.startswith((".omo/", ".sisyphus/")) or "  " in path or path in entries or any(part in {".", ".."} for part in Path(path).parts) or any(marker in path.lower() for marker in forbidden):  # noqa: E501
-            raise CaptureSchemaError("protected manifest path is unsafe")
-        entries[path] = require_sha256(fingerprint, f"manifest fingerprint for {path}")
+        normalized = PurePosixPath(path).as_posix()
+        if (duplicate := normalized in entries) or separator != "  " or not normalized.startswith((".omo/", ".sisyphus/")) or path != normalized or "" in path.split("/") or "\\" in path or any(part in {".", ".."} for part in PurePosixPath(path).parts) or any(not character.isprintable() or character.isspace() for character in path) or any(marker in path.lower() for marker in forbidden):  # noqa: E501
+            raise CaptureSchemaError("protected manifest duplicate normalized path" if duplicate else "protected manifest path is unsafe")  # noqa: E501
+        entries[normalized] = require_sha256(fingerprint, f"manifest fingerprint for {path}")
     if content != protected_manifest_bytes(entries):
         raise CaptureSchemaError("protected manifest bytes are not canonical")
 def finalize_capture_outputs(outputs: Mapping[Path, bytes]) -> None:
