@@ -148,14 +148,15 @@ def require_text(value: JsonValue, label: str) -> str:
 
 
 def require_safe_base_url(value: str) -> str:
+    if any(character.isspace() or not character.isprintable() for character in value):
+        raise CaptureSchemaError("legacy pointer base URL is unsafe")
     parsed = urlsplit(value)
     try:
         parsed.port
     except ValueError as error:
         raise CaptureSchemaError("legacy pointer base URL is unsafe") from error
     if (
-        value.strip() != value
-        or parsed.scheme not in {"http", "https"}
+        parsed.scheme not in {"http", "https"}
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
