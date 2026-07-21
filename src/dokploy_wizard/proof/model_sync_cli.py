@@ -118,7 +118,7 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         pid=os.getpid(),
         start_time_ticks=_self_start_time_ticks(),
     )
-    signal_state = {"critical": False, "pending": 0}
+    signal_state = {"critical": False, "completed": False, "pending": 0}
     previous_handlers = _install_recovery_handlers(recovery, signal_state)
     prepared = prepare_proof_env(
         env_file=args.env_file,
@@ -151,6 +151,7 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
             )
         )
         completed = True
+        signal_state["completed"] = True
         signal_state["critical"] = False
         if signal_state["pending"]:
             raise SystemExit(128 + signal_state["pending"])
@@ -159,8 +160,6 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         _restore_recovery_handlers(previous_handlers)
         if not completed:
             recover_interrupted_proof(recovery)
-
-
 def _required_inputs(args: argparse.Namespace) -> tuple[str, str, str, str]:
     names = (args.host_env, args.password_env, args.host_b_env, args.host_b_password_env)
     host_a = os.environ.get(args.host_env)
@@ -209,11 +208,13 @@ def _install_recovery_handlers(
     recovery: ProofRecovery, signal_state: dict[str, bool | int] | None = None
 ) -> tuple[SignalHandler, SignalHandler]:
     if signal_state is None:
-        signal_state = {"critical": False, "pending": 0}
+        signal_state = {"critical": False, "completed": False, "pending": 0}
     recovering = False
 
     def restore(_signum: int, _frame: FrameType | None) -> None:
         nonlocal recovering
+        if signal_state["completed"]:
+            raise SystemExit(128 + _signum)
         if signal_state["critical"]:
             signal_state["pending"] = _signum
             return

@@ -60,7 +60,7 @@ def parse_env_receipt(value: object) -> EnvReceipt | None:
         raise ValueError("abort guard env receipt is invalid")
     if not isinstance(original, str) or not isinstance(proof, str):
         raise ValueError("abort guard env receipt is invalid")
-    if not isinstance(complete, bool) or not isinstance(mode, int):
+    if not isinstance(complete, bool) or isinstance(mode, bool) or not isinstance(mode, int):
         raise ValueError("abort guard env receipt is invalid")
     if not backup or not env or not _SHA256.fullmatch(original) or not _SHA256.fullmatch(proof) or not 0 <= mode <= 0o777:
         raise ValueError("abort guard env receipt is invalid")
@@ -80,18 +80,22 @@ def receipt_identity(receipt: EnvReceipt) -> tuple[str, str, str, str, int]:
 def atomic_finalize(*, temp: Path, output: Path) -> None:
     if temp.parent.resolve() != output.parent.resolve() or not temp.is_file():
         raise ValueError("atomic finalization requires a regular sibling temporary file")
-    descriptor = os.open(temp, os.O_RDONLY)
     try:
-        os.fchmod(descriptor, 0o600)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    os.replace(temp, output)
-    descriptor = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        descriptor = os.open(temp, os.O_RDONLY)
+        try:
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temp, output)
+        descriptor = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
 
 
 REQUIRED_RESULT_KEYS = frozenset(
