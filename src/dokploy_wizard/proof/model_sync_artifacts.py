@@ -7,6 +7,7 @@ import re
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from ipaddress import ip_address
 from pathlib import Path, PurePosixPath
 from typing import Final, TypeAlias
 from urllib.parse import urlsplit
@@ -60,21 +61,17 @@ class ResourcePlaneCapture:
     tailscale: dict[str, JsonValue]
     wizard_state: dict[str, JsonValue]
 def write_protected_manifest(path: Path, payload: Mapping[str, JsonValue]) -> str:
-    redacted = _redact_mapping(payload)
-    encoded = (json.dumps(redacted, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    encoded = (json.dumps(_redact_mapping(payload), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")  # noqa: E501
     atomic_write_bytes(path, encoded)
     return sha256_bytes(encoded)
 def read_protected_manifest(path: Path) -> dict[str, JsonValue]:
     decoded = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(decoded, dict):
-        raise ValueError("protected manifest must be a JSON object")
+    if not isinstance(decoded, dict): raise ValueError("protected manifest must be a JSON object")  # noqa: E701
     return _redact_mapping(decoded)
 def redact_manifest_value(key: str, value: JsonValue) -> JsonValue:
-    normalized = key.lower()
-    if normalized.endswith("_sha256") or normalized.endswith("_digest"):
+    if (normalized := key.lower()).endswith("_sha256") or normalized.endswith("_digest"):
         return value
-    secret_markers = ("password", "token", "secret", "credential", "api_key", "salt")
-    if any(token in normalized for token in secret_markers):
+    if any(token in normalized for token in ("password", "token", "secret", "credential", "api_key", "salt")):  # noqa: E501
         return "<REDACTED>"
     match value:
         case str() as text:
@@ -113,14 +110,17 @@ def require_text(value: JsonValue, label: str) -> str:
         raise CaptureSchemaError(f"{label} must be a non-empty string")
     return value
 def require_safe_base_url(value: str) -> str:
-    if any(character.isspace() or not character.isprintable() for character in value):
+    if not value.isascii() or not value.startswith(("http://", "https://")) or "%" in value or "\\" in value or any(character.isspace() or not character.isprintable() for character in value):  # noqa: E501
         raise CaptureSchemaError("legacy pointer base URL is unsafe")
-    parsed = urlsplit(value)
     try:
-        parsed.port
+        parsed = urlsplit(value)
+        port, host = parsed.port, parsed.hostname or ""
+        address = ip_address(host) if ":" in host or host.replace(".", "").isdigit() else None
     except ValueError as error:
         raise CaptureSchemaError("legacy pointer base URL is unsafe") from error
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment or any(segment in {".", ".."} for segment in parsed.path.split("/")):  # noqa: E501
+    canonical_host = f"[{address.compressed}]" if address is not None and address.version == 6 else str(address) if address is not None else host  # noqa: E501
+    expected_authority, path = canonical_host + (f":{port}" if port is not None else ""), parsed.path  # noqa: E501
+    if parsed.scheme not in {"http", "https"} or not host or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment or parsed.netloc != expected_authority or (port is not None and (port == 0 or port == (80 if parsed.scheme == "http" else 443))) or (address is None and (len(host) > 253 or any(label.startswith("xn--") or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None for label in host.split(".")))) or (path and (not path.startswith("/") or path != PurePosixPath(path).as_posix() or "" in path[1:].split("/") or any(segment in {".", ".."} for segment in path.split("/")))):  # noqa: E501
         raise CaptureSchemaError("legacy pointer base URL is unsafe")
     return value
 def require_sha256(value: JsonValue, label: str) -> str:
