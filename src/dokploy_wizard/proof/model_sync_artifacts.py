@@ -1,4 +1,3 @@
-"""Redacted, fsync-backed manifest helpers for live proof evidence."""
 from __future__ import annotations
 
 import hashlib
@@ -22,7 +21,6 @@ _MANIFEST_MEDIA: Final = frozenset({"application/vnd.docker.distribution.manifes
 _INDEX_MEDIA: Final = frozenset({"application/vnd.docker.distribution.manifest.list.v2+json", "application/vnd.oci.image.index.v1+json"})  # noqa: E501
 _FILE_MODE: Final = 0o600
 def sha256_bytes(value: bytes) -> str:
-    """Return a stable fingerprint for non-secret artifact bytes."""
     return hashlib.sha256(value).hexdigest()
 def atomic_write_bytes(path: Path, content: bytes, *, mode: int = _FILE_MODE) -> None:
     parent = path.parent
@@ -53,13 +51,11 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 @dataclass(frozen=True, slots=True)
 class CaptureSchemaError(RuntimeError):
-    """Raised when a remote capture cannot be safely normalized."""
     detail: str
     def __str__(self) -> str:
         return self.detail
 @dataclass(frozen=True, slots=True)
 class ResourcePlaneCapture:
-    """Normalized non-secret resource planes captured after the wrapper succeeds."""
     cloudflare: dict[str, JsonValue]
     images: dict[str, str]
     tailscale: dict[str, JsonValue]
@@ -103,21 +99,17 @@ def _redact_item(value: JsonValue) -> JsonValue:
         case _:
             return value
 def require_mapping(value: JsonValue, label: str) -> dict[str, JsonValue]:
-    """Return a strictly JSON-compatible object or reject the capture boundary."""
     if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
         raise CaptureSchemaError(f"{label} must be an object")
     return dict(value)
 def require_list(value: JsonValue, label: str) -> list[JsonValue]:
-    """Return a JSON array or reject the capture boundary."""
     if not isinstance(value, list):
         raise CaptureSchemaError(f"{label} must be an array")
     return list(value)
 def require_keys(value: dict[str, JsonValue], expected: set[str], label: str) -> None:
-    """Reject unknown, missing, and value-bearing schema fields."""
     if set(value) != expected:
         raise CaptureSchemaError(f"{label} keys are invalid")
 def require_text(value: JsonValue, label: str) -> str:
-    """Reject empty and non-string remote fields."""
     if not isinstance(value, str) or value == "":
         raise CaptureSchemaError(f"{label} must be a non-empty string")
     return value
@@ -133,13 +125,11 @@ def require_safe_base_url(value: str) -> str:
         raise CaptureSchemaError("legacy pointer base URL is unsafe")
     return value
 def require_sha256(value: JsonValue, label: str) -> str:
-    """Return a non-placeholder SHA-256 capture fingerprint."""
     text = require_text(value, label)
     if not _HASH_PATTERNS[0].fullmatch(text) or text == "0" * 64:
         raise CaptureSchemaError(f"{label} must be a non-zero SHA-256")
     return text
 def require_digest(value: JsonValue, label: str) -> str:
-    """Return a resolved immutable container image reference."""
     text = require_text(value, label)
     if text.count("@") != 1:
         raise CaptureSchemaError(f"{label} must use repository@sha256")
@@ -165,7 +155,6 @@ def normalize_image_repository(reference: str, label: str) -> str:
         raise CaptureSchemaError(f"{label} repository is invalid")
     return base
 def registry_manifest_digest(raw: bytes, repository: str, label: str) -> str:
-    """Validate documented raw manifest/index JSON and hash the registry bytes."""
     try:
         decoded = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -192,7 +181,6 @@ def registry_manifest_digest(raw: bytes, repository: str, label: str) -> str:
             raise CaptureSchemaError(f"{label} descriptor size is invalid")
     return f"{repository}@sha256:{hashlib.sha256(raw).hexdigest()}"
 def protected_manifest_bytes(entries: Mapping[str, str]) -> bytes:
-    """Render a real text manifest from exact protected-artifact hashes."""
     lines: list[str] = []
     for path, fingerprint in sorted(entries.items()):
         require_sha256(fingerprint, f"manifest fingerprint for {path}")
@@ -202,8 +190,21 @@ def protected_manifest_bytes(entries: Mapping[str, str]) -> bytes:
     if not lines:
         raise CaptureSchemaError("protected manifest must not be empty")
     return "".join(lines).encode("utf-8")
+def validate_protected_manifest_bytes(content: bytes) -> None:
+    try:
+        lines = content.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise CaptureSchemaError("protected manifest encoding is invalid") from error
+    entries: dict[str, str] = {}
+    forbidden = ("password", "token", "credential", "api_key", ".install", "secret", "protected-artifacts-before", ".tmp", ".lock", "coder-litellm-model-sync", "run-continuation", "start-work", "boulder.json", "plans/assets/kdense-", "/baseline.json", "/result.json", "/abort-guard.json", "/abort-status.json", "/host-a-preflight.json", "/host-b-preflight.json")  # noqa: E501
+    for line in lines:
+        fingerprint, separator, path = line.partition("  ")
+        if separator != "  " or not path.startswith((".omo/", ".sisyphus/")) or "  " in path or path in entries or any(part in {".", ".."} for part in Path(path).parts) or any(marker in path.lower() for marker in forbidden):  # noqa: E501
+            raise CaptureSchemaError("protected manifest path is unsafe")
+        entries[path] = require_sha256(fingerprint, f"manifest fingerprint for {path}")
+    if content != protected_manifest_bytes(entries):
+        raise CaptureSchemaError("protected manifest bytes are not canonical")
 def finalize_capture_outputs(outputs: Mapping[Path, bytes]) -> None:
-    """Finalize a complete capture set or remove every newly written artifact on failure."""
     if not outputs:
         raise CaptureSchemaError("capture outputs must not be empty")
     if any(path.exists() for path in outputs):
@@ -216,7 +217,6 @@ def finalize_capture_outputs(outputs: Mapping[Path, bytes]) -> None:
             path.unlink(missing_ok=True)
         raise
 def parse_resource_planes(snapshot: dict[str, JsonValue]) -> ResourcePlaneCapture:
-    """Reject incomplete container, state, Cloudflare, and Tailscale inventories."""
     images: dict[str, str] = {}
     for value in require_list(snapshot["images"], "images"):
         image = require_mapping(value, "image")

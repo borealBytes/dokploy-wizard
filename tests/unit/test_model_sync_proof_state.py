@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from dokploy_wizard.proof import model_sync_artifacts
 from dokploy_wizard.proof.model_sync_artifacts import JsonValue, write_protected_manifest
 from dokploy_wizard.proof.model_sync_results import atomic_finalize, build_result
 from dokploy_wizard.proof.model_sync_state import (
@@ -218,6 +219,26 @@ def test_protected_manifest_redacts_and_fsyncs(tmp_path: Path) -> None:
     assert manifest.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        f"{'a' * 64}  ../escape.txt\n",
+        f"{'a' * 64}  .omo/evidence/duplicate.txt\n{'a' * 64}  .omo/evidence/duplicate.txt\n",
+        f"{'a' * 64}  .sisyphus/z.txt\n{'a' * 64}  .omo/a.txt\n",
+        f"{'a' * 64}  .omo/evidence/protected-artifacts-before.txt\n",
+        f"{'a' * 64}  docs/outside.txt\n",
+        f"{'a' * 64}  .omo/evidence/.manifest.tmp\n",
+        f"{'a' * 64}  .omo/evidence/password.txt\n",
+        f"{'a' * 64}  .omo/evidence/coder-litellm-model-sync/baseline.json\n",
+        f"{'a' * 64}  .omo/run-continuation/session.json\n",
+        f"{'a' * 64}  .omo/plans/assets/kdense-central-only.patch\n",
+    ],
+)
+def test_protected_manifest_validation_rejects_unsafe_scope(manifest: str) -> None:
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.validate_protected_manifest_bytes(manifest.encode())
+
+
 def test_atomic_finalize_rejects_different_parent_without_output_mutation(tmp_path: Path) -> None:
     temp_parent = tmp_path / "temp"
     output_parent = tmp_path / "output"
@@ -278,6 +299,37 @@ def test_atomic_finalize_fsyncs_output_parent_after_replace(
 
     assert output.read_text(encoding="utf-8") == "safe\n"
     assert len(synced) == 2
+
+
+def test_atomic_finalize_rejects_unknown_existing_destination_bytes(tmp_path: Path) -> None:
+    temp = tmp_path / "result.tmp"
+    output = tmp_path / "result.json"
+    temp.write_bytes(b"expected\n")
+    output.write_bytes(b"unknown\n")
+    os.chmod(output, 0o600)
+
+    with pytest.raises(ValueError, match="existing output does not match"):
+        atomic_finalize(temp=temp, output=output)
+
+    assert output.read_bytes() == b"unknown\n"
+    assert not temp.exists()
+
+
+def test_atomic_finalize_accepts_exact_mode_0600_destination_without_rewrite(
+    tmp_path: Path,
+) -> None:
+    temp = tmp_path / "result.tmp"
+    output = tmp_path / "result.json"
+    temp.write_bytes(b"expected\n")
+    output.write_bytes(b"expected\n")
+    os.chmod(output, 0o600)
+    before = output.stat()
+
+    atomic_finalize(temp=temp, output=output)
+
+    after = output.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert not temp.exists()
 
 
 def test_confirm_receipt_rejects_malformed_guard_without_mutation(tmp_path: Path) -> None:

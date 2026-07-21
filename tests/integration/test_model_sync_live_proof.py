@@ -2592,6 +2592,18 @@ def _baseline_arguments(tmp_path: Path) -> list[str]:
         + "\n",
         encoding="utf-8",
     )
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    manifest = model_sync_artifacts.protected_manifest_bytes(
+        {".omo/evidence/unrelated.txt": hashlib.sha256(b"unrelated").hexdigest()}
+    )
+    model_sync_artifacts.atomic_write_bytes(
+        artifact_dir / "protected-artifacts-before.txt", manifest
+    )
+    model_sync_artifacts.atomic_write_bytes(
+        artifact_dir / "protected-artifacts-before.sha256",
+        f"{hashlib.sha256(manifest).hexdigest()}  protected-artifacts-before.txt\n".encode(),
+    )
     return [
         "baseline-host-a",
         "--wrapper",
@@ -2713,8 +2725,9 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     assert result["coder_secret_inventory_sha256"] != "0" * 64
     assert result["legacy_workspace_managed_fingerprints_sha256"] != "0" * 64
     assert result["abort_guard_sha256"] == guard_sha256
-    assert f"{guard_sha256}  abort-guard.json" in manifest
-    assert "baseline.json" in manifest
+    assert ".omo/evidence/unrelated.txt" in manifest
+    assert "abort-guard.json" not in manifest
+    assert "baseline.json" not in manifest
     assert "password-a" not in (artifact_dir / "baseline.json").read_text(encoding="utf-8")
     sentinels = (
         "SECRET-CLOUDFLARE-TOKEN",
@@ -2731,6 +2744,92 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
         secret in b"".join(stdin.payload for client in clients for stdin in client.stdins).decode()
         for secret in sentinels
     )
+
+
+def test_baseline_host_a_adopts_only_receipted_preexisting_protected_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    artifact_dir = tmp_path / "artifacts"
+    manifest_path = artifact_dir / "protected-artifacts-before.txt"
+    manifest_bytes = manifest_path.read_bytes()
+    manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
+    _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
+    monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
+    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: None)
+    monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
+    monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
+    monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
+    monkeypatch.setenv("FIXTURE_PASSWORD_B", "password-b")
+
+    exit_code = main(arguments)
+
+    result = json.loads((artifact_dir / "result.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert manifest_path.read_bytes() == manifest_bytes
+    assert manifest_path.stat().st_mode & 0o777 == 0o600
+    assert result["protected_artifacts_before_sha256"] == manifest_hash
+
+
+def test_baseline_host_a_rejects_unknown_preexisting_protected_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    artifact_dir = tmp_path / "artifacts"
+    manifest_path = artifact_dir / "protected-artifacts-before.txt"
+    receipt_path = artifact_dir / "protected-artifacts-before.sha256"
+    unknown = b"unknown protected bytes\n"
+    manifest_path.write_bytes(unknown)
+    os.chmod(manifest_path, 0o600)
+    receipt_path.unlink()
+    _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
+    monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
+    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: None)
+    monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
+    monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
+    monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
+    monkeypatch.setenv("FIXTURE_PASSWORD_B", "password-b")
+
+    exit_code = main(arguments)
+
+    assert exit_code == 1
+    assert manifest_path.read_bytes() == unknown
+    assert not (artifact_dir / "result.json").exists()
+    assert not (artifact_dir / "baseline.json").exists()
+
+
+@pytest.mark.parametrize(
+    "name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"]
+)
+def test_baseline_host_a_rejects_symlinked_protected_manifest_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    artifact_dir = tmp_path / "artifacts"
+    protected_path = artifact_dir / name
+    target = artifact_dir / f"{name}.target"
+    protected_bytes = protected_path.read_bytes()
+    protected_path.unlink()
+    target.write_bytes(protected_bytes)
+    os.chmod(target, 0o600)
+    protected_path.symlink_to(target.name)
+    _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
+    monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
+    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: None)
+    monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
+    monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
+    monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
+    monkeypatch.setenv("FIXTURE_PASSWORD_B", "password-b")
+
+    exit_code = main(arguments)
+
+    assert exit_code == 1
+    assert target.read_bytes() == protected_bytes
+    assert not (artifact_dir / "result.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -2764,7 +2863,8 @@ def test_baseline_host_a_rejects_incomplete_fixture_without_finalized_outputs(
     assert exit_code == 1
     assert not (artifact_dir / "result.json").exists()
     assert not (artifact_dir / "baseline.json").exists()
-    assert not (artifact_dir / "protected-artifacts-before.txt").exists()
+    assert (artifact_dir / "protected-artifacts-before.txt").exists()
+    assert (artifact_dir / "protected-artifacts-before.sha256").exists()
 
 
 def test_capture_finalization_rolls_back_outputs_when_system_exit_interrupts_second_write(
@@ -2830,12 +2930,20 @@ import signal
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from dokploy_wizard.proof import model_sync_cli, model_sync_env
+from dokploy_wizard.proof import model_sync_artifacts, model_sync_cli, model_sync_env
 
 boundary, env_name, backup_name, guard_name = sys.argv[1:]
 env_file = Path(env_name)
 backup = Path(backup_name)
 guard = Path(guard_name)
+manifest = model_sync_artifacts.protected_manifest_bytes(
+    {".omo/evidence/unrelated.txt": hashlib.sha256(b"unrelated").hexdigest()}
+)
+model_sync_artifacts.atomic_write_bytes(env_file.parent / "protected-artifacts-before.txt", manifest)
+model_sync_artifacts.atomic_write_bytes(
+    env_file.parent / "protected-artifacts-before.sha256",
+    f"{hashlib.sha256(manifest).hexdigest()}  protected-artifacts-before.txt\n".encode(),
+)
 original_write = model_sync_env.atomic_write_bytes
 paused = False
 
@@ -2991,12 +3099,7 @@ model_sync_cli._baseline_host_a(args)
             fingerprint, name = line.split("  ", 1)
             manifest_hashes[name] = fingerprint
         assert manifest_hashes == {
-            "abort-guard.json": actual_hashes["abort-guard.json"],
-            "baseline.json": actual_hashes["baseline.json"],
-            "env-original": hashlib.sha256(original).hexdigest(),
-            "env-proof": hashlib.sha256(proof).hexdigest(),
-            "host-a-preflight.json": actual_hashes["host-a-preflight.json"],
-            "host-b-preflight.json": actual_hashes["host-b-preflight.json"],
+            ".omo/evidence/unrelated.txt": hashlib.sha256(b"unrelated").hexdigest(),
         }
 
         abort_status_output = tmp_path / "status" / "abort-status.json"
@@ -3049,7 +3152,7 @@ model_sync_cli._baseline_host_a(args)
         assert status.claimant_kind == "plan"
         assert status.env_receipt is not None and status.env_receipt.complete
         assert result["abort_guard_sha256"] == guard_sha256
-        assert f"{guard_sha256}  abort-guard.json" in manifest
+        assert ".omo/evidence/unrelated.txt" in manifest
     else:
         assert process.returncode == 128 + signum
     if boundary not in ("after-finalize", "before-restore", "between-restore"):

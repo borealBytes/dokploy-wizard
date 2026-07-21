@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import filecmp
 import os
 import re
 import selectors
@@ -51,7 +52,6 @@ def assert_followup_proof_contract(*, contract_name: str, receipts: tuple[str, .
     if required not in receipts:
         raise ValueError(f"{contract_name} requires receipt {required}")
 def run_bounded_process(command: Sequence[str], *, stdin: bytes, output_limit: int, timeout_seconds: float, label: str) -> bytes:
-    """Run a child while bounding both output pipes before bytes reach memory."""
     if output_limit < 1 or timeout_seconds <= 0 or not label:
         raise ValueError("bounded process limits are invalid")
     process = subprocess.Popen(list(command), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -153,9 +153,14 @@ def receipt_payload(receipt: EnvReceipt | None) -> dict[str, str | int | bool] |
 def receipt_identity(receipt: EnvReceipt) -> tuple[str, str, str, str, int]:
     return (receipt.env_path, receipt.backup_path, receipt.original_sha256, receipt.proof_sha256, receipt.mode)
 def atomic_finalize(*, temp: Path, output: Path) -> None:
-    if temp.parent.resolve() != output.parent.resolve() or not temp.is_file():
+    if temp.parent.resolve() != output.parent.resolve() or temp.is_symlink() or not temp.is_file():
         raise ValueError("atomic finalization requires a regular sibling temporary file")
     try:
+        if output.exists():
+            if output.is_symlink() or not output.is_file() or output.stat().st_mode & 0o777 != 0o600 or not filecmp.cmp(temp, output, shallow=False):
+                raise ValueError("existing output does not match finalized bytes")
+            temp.unlink()
+            return
         descriptor = os.open(temp, os.O_RDONLY)
         try:
             os.fchmod(descriptor, 0o600)
@@ -176,7 +181,6 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DIGEST = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 def build_result(values: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
-    """Reject incomplete result documents before their protected finalization."""
     if frozenset(values) != REQUIRED_RESULT_KEYS:
         raise ValueError("Task 1 result keys do not match the proof contract")
     _require_hashes(values)
@@ -214,10 +218,7 @@ def _require_capture_values(values: Mapping[str, JsonValue]) -> None:
     for key in ("external_backup_path", "abort_guard_path", "protected_artifacts_before_path"):
         if not isinstance(values[key], str) or values[key] == "":
             raise ValueError(f"{key} must be a non-empty protected path")
-def collect_coder_array_pages(
-    fetch: Callable[[str], JsonValue], path: str, label: str
-) -> list[tuple[int, list[JsonValue]]]:
-    """Fetch bounded Coder array pages through the empty-page exhaustion boundary."""
+def collect_coder_array_pages(fetch: Callable[[str], JsonValue], path: str, label: str) -> list[tuple[int, list[JsonValue]]]:
     pages: list[tuple[int, list[JsonValue]]] = []
     offset = 0
     while True:
@@ -229,7 +230,6 @@ def collect_coder_array_pages(
             return pages
         offset += len(raw)
 def collect_coder_workspace_pages(fetch: Callable[[str], JsonValue]) -> list[JsonValue]:
-    """Fetch Coder workspace pages until their server-declared count is exact."""
     offset = 0
     expected_count: int | None = None
     workspaces: list[JsonValue] = []
