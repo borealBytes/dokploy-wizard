@@ -869,6 +869,64 @@ def test_legacy_observed_safe_base_url_drift_is_nonexact() -> None:
     assert pointer["legacy_exact"] is False
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://proof-stack-shared-litellm:4000",
+        "https://opencode.ai/zen/go/v1",
+    ],
+)
+def test_safe_base_url_accepts_current_template_contracts(value: str) -> None:
+    assert model_sync_artifacts.require_safe_base_url(value) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        " http://example.test",
+        "http://example.test ",
+        "http://exa mple.test",
+        "http://example.test/path with space",
+        "http://exa\tmple.test",
+        "http://example.test/\tpath",
+        "http://example.test/\rpath",
+        "http://example.test/\npath",
+        "http://exa\x00mple.test",
+        "http://example.test/\x01path",
+        "http://example.test/\x7fpath",
+        "http://example.test/\x85path",
+        "http://exa\u00a0mple.test",
+        "http://example.test/\u2003path",
+        "http://example.test/\u200bpath",
+        "\nhttp://[bad",
+        "\x00http://[bad",
+        "http://[::1\x00",
+    ],
+)
+def test_safe_base_url_rejects_raw_whitespace_and_controls(value: str) -> None:
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError, match="base URL is unsafe"):
+        model_sync_artifacts.require_safe_base_url(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ftp://example.test",
+        "//example.test/path",
+        "http:///path",
+        "http://example.test:invalid/path",
+        "http://user:secret@example.test/path",
+        "http://example.test/path?query=value",
+        "http://example.test/path#fragment",
+        "http://example.test/../path",
+        "http://example.test/./path",
+    ],
+)
+def test_safe_base_url_preserves_existing_fail_closed_contract(value: str) -> None:
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError, match="base URL is unsafe"):
+        model_sync_artifacts.require_safe_base_url(value)
+
+
 def test_model_inventory_normalizes_like_legacy_template(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
