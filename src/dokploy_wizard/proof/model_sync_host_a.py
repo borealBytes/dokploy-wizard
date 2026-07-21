@@ -8,8 +8,8 @@ from pathlib import Path
 from dokploy_wizard.proof.model_sync_artifacts import (
     JsonValue,
     finalize_capture_outputs,
-    protected_manifest_bytes,
     sha256_bytes,
+    validate_protected_manifest_bytes,
 )
 from dokploy_wizard.proof.model_sync_baseline import CapturedBaseline
 from dokploy_wizard.proof.model_sync_env import PreparedEnv, restore_proof_env
@@ -183,7 +183,6 @@ def _restore_receipt(paths: ProofRecoveryPaths, guard: AbortGuard) -> None:
 
 
 def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
-    """Write every required output only after all inventories, hashes, and recovery complete."""
     host_a_path = inputs.artifact_dir / "host-a-preflight.json"
     host_b_path = inputs.artifact_dir / "host-b-preflight.json"
     baseline_path = inputs.artifact_dir / "baseline.json"
@@ -192,16 +191,14 @@ def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
     host_b_bytes = _json_bytes(inputs.host_b.to_dict())
     baseline_bytes = _json_bytes(inputs.baseline.payload)
     guard_bytes = inputs.guard_path.read_bytes()
-    manifest_bytes = protected_manifest_bytes(
-        {
-            "abort-guard.json": sha256_bytes(guard_bytes),
-            "baseline.json": sha256_bytes(baseline_bytes),
-            "env-original": inputs.prepared.original_sha256,
-            "env-proof": inputs.prepared.proof_sha256,
-            "host-a-preflight.json": sha256_bytes(host_a_bytes),
-            "host-b-preflight.json": sha256_bytes(host_b_bytes),
-        }
-    )
+    receipt_path = inputs.artifact_dir / "protected-artifacts-before.sha256"
+    if manifest_path.is_symlink() or receipt_path.is_symlink():
+        raise ValueError("protected manifest contract must use regular files")
+    manifest_bytes = manifest_path.read_bytes()
+    validate_protected_manifest_bytes(manifest_bytes)
+    receipt_bytes = f"{sha256_bytes(manifest_bytes)}  protected-artifacts-before.txt\n".encode()
+    if not manifest_path.is_file() or manifest_path.stat().st_mode & 0o777 != 0o600 or not receipt_path.is_file() or receipt_path.stat().st_mode & 0o777 != 0o600 or receipt_path.read_bytes() != receipt_bytes:  # noqa: E501
+        raise ValueError("pre-existing protected manifest receipt is invalid")
     result = build_result(
         {
             "schema_version": 1,
@@ -239,7 +236,6 @@ def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
             host_a_path: host_a_bytes,
             host_b_path: host_b_bytes,
             baseline_path: baseline_bytes,
-            manifest_path: manifest_bytes,
             inputs.output: _json_bytes(result),
         }
     )
