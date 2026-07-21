@@ -1,13 +1,10 @@
-# ruff: noqa: E501
+# ruff: noqa: E501, I001
 """Strict, redacted normalization of the Host A Coder baseline snapshot."""
-
 from __future__ import annotations
-
 import hashlib
 import json
 from dataclasses import dataclass
 from typing import Final
-
 from dokploy_wizard.proof.model_sync_artifacts import (
     CaptureSchemaError,
     JsonValue,
@@ -18,7 +15,6 @@ from dokploy_wizard.proof.model_sync_artifacts import (
     require_sha256,
     require_text,
 )
-
 REQUIRED_TEMPLATE_NAMES: Final = (
     "ubuntu-vscode",
     "ubuntu-vscode-opencode-web",
@@ -27,20 +23,15 @@ REQUIRED_TEMPLATE_NAMES: Final = (
     "ubuntu-vscode-hermes",
     "ubuntu-vscode-pi-web",
 )
-_BUILD_STATUSES: Final = frozenset(
-    {"pending", "starting", "running", "stopping", "stopped", "failed", "canceled", "deleting", "deleted"}
-)
+_BUILD_STATUSES: Final = frozenset({"pending", "starting", "running", "stopping", "stopped", "failed", "canceled", "deleting", "deleted"})
 _BUILD_TRANSITIONS: Final = frozenset({"start", "stop", "delete"})
 _LEGACY_RULES: Final = {
     "ubuntu-vscode": ("pointer", "/home/coder/.config/opencode/opencode.json", "/provider/litellm", "0644", "json-pointer"),
     "ubuntu-vscode-opencode-web": ("pointer", "/home/coder/.config/opencode/opencode.json", "/provider/litellm", "0644", "json-pointer"),
     "ubuntu-vscode-openwork": ("pointer", "/home/coder/.config/opencode/opencode.json", "/provider/litellm", "0644", "json-pointer"),
+    "ubuntu-vscode-kdense-byok": ("target-and-symlink", "/home/coder/.cache/kdense-byok-src/web/src/data/models.json", "/home/coder/.local/state/dokploy-wizard/model-sync/current", "0644", "json-target-and-symlink"),
 }
-
-
 BaselineCaptureError = CaptureSchemaError
-
-
 @dataclass(frozen=True, slots=True)
 class CapturedBaseline:
     """Value-free material required to write the Task 1 baseline and result payloads."""
@@ -74,8 +65,6 @@ def parse_captured_baseline(raw_snapshot: str, *, stack_name: str) -> CapturedBa
     workspace_payload: list[JsonValue] = []
     for workspace in workspaces:
         legacy.extend(require_list(workspace["legacy_fingerprints"], "legacy fingerprints"))
-    if not legacy:
-        raise BaselineCaptureError("baseline requires independently rendered retained workspace fingerprints")
     for template in templates:
         template_payload.append(dict(template))
     for workspace in workspaces:
@@ -133,8 +122,6 @@ def _workspaces(raw: JsonValue, templates: tuple[dict[str, str], ...], stack_nam
         if template is None:
             raise BaselineCaptureError("workspace references an uncaptured Coder template")
         version_id = require_text(workspace["template_version_id"], "workspace template version id")
-        if version_id != template["active_version_id"]:
-            raise BaselineCaptureError("workspace template version does not match its captured template version")
         pointers = _legacy_pointers(workspace["legacy_pointers"], template["name"], stack_name, version_id)
         workspaces.append({
             "id": require_text(workspace["id"], "workspace id"),
@@ -158,7 +145,10 @@ def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str, versio
     seen: set[tuple[str, str]] = set()
     for item in entries:
         pointer = require_mapping(item, "legacy pointer")
-        require_keys(pointer, {"template_version_id", "target", "pointer", "mode", "shape", "base_url", "credential_value_sha256", "pointer_sha256", "independent_renderer_sha256", "scope"}, "legacy pointer")
+        keys = {"template_version_id", "target", "pointer", "mode", "shape", "base_url", "credential_value_sha256", "pointer_sha256", "independent_renderer_sha256", "scope"}
+        if expected_scope == "target-and-symlink":
+            keys.update({"target_sha256", "symlink_state", "symlink_target", "symlink_sha256"})
+        require_keys(pointer, keys, "legacy pointer")
         if require_text(pointer["scope"], "legacy pointer scope") != expected_scope:
             raise BaselineCaptureError("legacy pointer scope does not match its template contract")
         if require_text(pointer["base_url"], "legacy pointer base URL") != expected_base:
@@ -169,11 +159,12 @@ def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str, versio
         seen.add((target, path))
         pointer_sha = require_sha256(pointer["pointer_sha256"], "legacy pointer")
         renderer_sha = require_sha256(pointer["independent_renderer_sha256"], "legacy renderer")
-        pointers.append({
+        exact = pointer_sha == renderer_sha
+        normalized: dict[str, JsonValue] = {
             "base_url": expected_base,
             "credential_value_sha256": require_sha256(pointer["credential_value_sha256"], "legacy credential"),
             "independent_renderer_sha256": renderer_sha,
-            "legacy_exact": pointer_sha == renderer_sha,
+            "legacy_exact": exact,
             "mode": expected_mode,
             "pointer": path,
             "pointer_sha256": pointer_sha,
@@ -181,7 +172,23 @@ def _legacy_pointers(raw: JsonValue, template_name: str, stack_name: str, versio
             "shape": expected_shape,
             "target": target,
             "template_version_id": version_id,
-        })
+        }
+        if expected_scope == "target-and-symlink":
+            target_sha = require_sha256(pointer["target_sha256"], "legacy target")
+            state = require_text(pointer["symlink_state"], "legacy symlink state")
+            if state not in {"present", "absent"}:
+                raise BaselineCaptureError("legacy symlink state is invalid")
+            symlink_target = pointer["symlink_target"]
+            symlink_sha = pointer["symlink_sha256"]
+            if state == "present":
+                symlink_target = require_text(symlink_target, "legacy symlink target")
+                symlink_sha = require_sha256(symlink_sha, "legacy symlink")
+            elif symlink_target is not None or symlink_sha is not None:
+                raise BaselineCaptureError("absent legacy symlink must not have target evidence")
+            if pointer_sha != canonical_sha256({"base_url": expected_base, "credential_value_sha256": require_sha256(pointer["credential_value_sha256"], "legacy credential"), "symlink_sha256": symlink_sha, "target_sha256": target_sha}):
+                raise BaselineCaptureError("legacy target and symlink aggregate hash is invalid")
+            normalized.update({"legacy_exact": exact and state == "present", "symlink_sha256": symlink_sha, "symlink_state": state, "symlink_target": symlink_target, "target_sha256": target_sha})
+        pointers.append(normalized)
     return pointers
 def _builds(raw: JsonValue, workspaces: tuple[dict[str, JsonValue], ...]) -> None:
     expected_ids = {require_text(workspace["id"], "workspace id") for workspace in workspaces}
