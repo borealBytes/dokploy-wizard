@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
 import zlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from dokploy_wizard.proof.model_sync_artifacts import JsonValue
 
@@ -31,6 +33,60 @@ class ProofTransport:
     coder_hostname: str | None
     coder_password: str | None
     tailscale_required: bool
+
+
+@dataclass(frozen=True, slots=True)
+class EnvReceipt:
+    env_path: str
+    backup_path: str
+    original_sha256: str
+    proof_sha256: str
+    mode: int
+    complete: bool
+
+
+def parse_env_receipt(value: object) -> EnvReceipt | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("abort guard env receipt is invalid")
+    payload: dict[str, object] = value
+    required = {"backup_path", "complete", "env_path", "mode", "original_sha256", "proof_sha256"}
+    if set(payload) != required:
+        raise ValueError("abort guard env receipt is invalid")
+    backup, complete, env = payload.get("backup_path"), payload.get("complete"), payload.get("env_path")
+    mode, original, proof = payload.get("mode"), payload.get("original_sha256"), payload.get("proof_sha256")
+    if not isinstance(backup, str) or not isinstance(env, str):
+        raise ValueError("abort guard env receipt is invalid")
+    if not isinstance(original, str) or not isinstance(proof, str):
+        raise ValueError("abort guard env receipt is invalid")
+    if not isinstance(complete, bool) or not isinstance(mode, int):
+        raise ValueError("abort guard env receipt is invalid")
+    if not backup or not env or not _SHA256.fullmatch(original) or not _SHA256.fullmatch(proof) or not 0 <= mode <= 0o777:
+        raise ValueError("abort guard env receipt is invalid")
+    return EnvReceipt(env, backup, original, proof, mode, complete)
+
+
+def receipt_payload(receipt: EnvReceipt | None) -> dict[str, str | int | bool] | None:
+    if receipt is None:
+        return None
+    return {"backup_path": receipt.backup_path, "complete": receipt.complete, "env_path": receipt.env_path, "mode": receipt.mode, "original_sha256": receipt.original_sha256, "proof_sha256": receipt.proof_sha256}
+
+
+def receipt_identity(receipt: EnvReceipt) -> tuple[str, str, str, str, int]:
+    return (receipt.env_path, receipt.backup_path, receipt.original_sha256, receipt.proof_sha256, receipt.mode)
+
+
+def atomic_finalize(*, temp: Path, output: Path) -> None:
+    if temp.parent.resolve() != output.parent.resolve() or not temp.is_file():
+        raise ValueError("atomic finalization requires a regular sibling temporary file")
+    descriptor = os.open(temp, os.O_RDONLY)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temp, output)
 
 
 REQUIRED_RESULT_KEYS = frozenset(

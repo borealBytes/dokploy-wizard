@@ -24,8 +24,35 @@ from dokploy_wizard.proof.model_sync_host_a import (
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuardError,
     arm_abort_guard,
+    process_start_time_ticks,
     read_abort_guard,
 )
+
+
+def test_abort_status_rejects_incomplete_plan_owned_receipt(tmp_path: Path) -> None:
+    from dokploy_wizard.proof import model_sync_cli
+    from dokploy_wizard.proof.model_sync_results import EnvReceipt
+    from dokploy_wizard.proof.model_sync_state import (
+        record_env_receipt,
+        transfer_abort_guard_to_plan,
+    )
+
+    guard = tmp_path / "abort-guard.json"
+    output = tmp_path / "status.json"
+    arm_abort_guard(guard)
+    claim = claim_plan_guard(guard_path=guard, pid=12, start_time_ticks="34")
+    record_env_receipt(
+        guard,
+        claim_token=claim.token,
+        receipt=EnvReceipt("/tmp/env", "/tmp/backup", "a" * 64, "b" * 64, 0o600, False),
+    )
+    transfer_abort_guard_to_plan(guard, claim_token=claim.token)
+
+    status = model_sync_cli.main(
+        ["abort-status", "--guard", str(guard), "--output", str(output)]
+    )
+    assert status == 1
+    assert not output.exists()
 
 
 def _partial_nvidia_env(path: Path) -> bytes:
@@ -150,7 +177,7 @@ def test_dead_claim_resume_restores_receipted_original_before_a_second_prepare(
     resumed = begin_proof_recovery(
         paths=paths,
         pid=os.getpid(),
-        start_time_ticks=Path("/proc/self/stat").read_text(encoding="utf-8").split()[21],
+        start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
     )
     second = prepare_proof_env(
         env_file=env_file,
@@ -187,7 +214,7 @@ def test_interrupted_receipt_recovers_recognized_current_hashes(
     recovery = begin_proof_recovery(
         paths=ProofRecoveryPaths(env_file, backup, guard),
         pid=os.getpid(),
-        start_time_ticks=Path("/proc/self/stat").read_text(encoding="utf-8").split()[21],
+        start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
     )
     recover_interrupted_proof(recovery)
 
@@ -214,7 +241,7 @@ def test_interrupted_receipt_rejects_unknown_current_hash_without_transferring_c
         begin_proof_recovery(
             paths=ProofRecoveryPaths(env_file, backup, guard),
             pid=os.getpid(),
-            start_time_ticks=Path("/proc/self/stat").read_text(encoding="utf-8").split()[21],
+            start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
         )
 
     assert read_abort_guard(guard).claimant_kind == "process"
@@ -239,7 +266,7 @@ def test_interrupted_receipt_rejects_missing_backup_without_transferring_claim(
         begin_proof_recovery(
             paths=ProofRecoveryPaths(env_file, backup, guard),
             pid=os.getpid(),
-            start_time_ticks=Path("/proc/self/stat").read_text(encoding="utf-8").split()[21],
+            start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
         )
 
     assert read_abort_guard(guard).claimant_kind == "process"
@@ -250,7 +277,7 @@ def test_live_claim_blocks_resume_without_mutating_guard(tmp_path: Path) -> None
     _partial_nvidia_env(env_file)
     backup = tmp_path / "secrets" / "install.env.backup"
     guard = tmp_path / "abort-guard.json"
-    start_time_ticks = Path("/proc/self/stat").read_text(encoding="utf-8").split()[21]
+    start_time_ticks = process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8"))
     arm_abort_guard(guard)
     claim_plan_guard(guard_path=guard, pid=os.getpid(), start_time_ticks=start_time_ticks)
     before = guard.read_bytes()

@@ -1,5 +1,3 @@
-"""Host A guard lifecycle helpers for the baseline orchestrator."""
-
 from __future__ import annotations
 
 import json
@@ -11,6 +9,7 @@ from dokploy_wizard.proof.model_sync_artifacts import (
     JsonValue,
     finalize_capture_outputs,
     protected_manifest_bytes,
+    sha256_bytes,
 )
 from dokploy_wizard.proof.model_sync_baseline import CapturedBaseline
 from dokploy_wizard.proof.model_sync_env import PreparedEnv, restore_proof_env
@@ -22,10 +21,11 @@ from dokploy_wizard.proof.model_sync_state import (
     arm_abort_guard,
     claim_abort_guard,
     clear_env_receipt,
+    complete_env_receipt,
     process_identity_matches,
     read_abort_guard,
+    reclaim_completed_receipt,
     recover_dead_abort_claim,
-    sha256_bytes,
     transfer_abort_guard_to_plan,
 )
 
@@ -39,7 +39,6 @@ class GuardClaim:
 
 @dataclass(frozen=True, slots=True)
 class ProofRecoveryPaths:
-    """Non-secret paths needed to restore an interrupted proof preparation."""
 
     env_file: Path
     backup_path: Path
@@ -48,7 +47,6 @@ class ProofRecoveryPaths:
 
 @dataclass(frozen=True, slots=True)
 class ProofRecovery:
-    """The exact process claim that owns one proof preparation attempt."""
 
     paths: ProofRecoveryPaths
     claim: GuardClaim
@@ -56,7 +54,6 @@ class ProofRecovery:
 
 @dataclass(frozen=True, slots=True)
 class BaselineArtifactInputs:
-    """Complete value-free capture material required before artifact finalization."""
 
     artifact_dir: Path
     output: Path
@@ -70,7 +67,6 @@ class BaselineArtifactInputs:
 
 
 def claim_plan_guard(*, guard_path: Path, pid: int, start_time_ticks: str) -> GuardClaim:
-    """Claim durable plan ownership for this exact process before a guarded proof step."""
     token = secrets.token_urlsafe(24)
     claim_abort_guard(
         guard_path,
@@ -84,7 +80,6 @@ def claim_plan_guard(*, guard_path: Path, pid: int, start_time_ticks: str) -> Gu
 def begin_proof_recovery(
     *, paths: ProofRecoveryPaths, pid: int, start_time_ticks: str
 ) -> ProofRecovery:
-    """Recover a dead claim before acquiring one exact process claim."""
     if paths.guard_path.exists():
         _recover_existing_guard(paths)
     else:
@@ -96,14 +91,12 @@ def begin_proof_recovery(
 
 
 def restore_after_interrupt(*, prepared: PreparedEnv, guard_path: Path, claim: GuardClaim) -> None:
-    """Restore exact bytes first, then return the guard to durable plan ownership."""
     restore_proof_env(prepared=prepared, guard_path=guard_path)
     clear_env_receipt(guard_path, claim_token=claim.token)
     transfer_abort_guard_to_plan(guard_path, claim_token=claim.token)
 
 
 def recover_failed_proof(*, prepared: PreparedEnv, guard_path: Path, claim: GuardClaim) -> None:
-    """Restore once after a timeout or signal and leave repeated recovery as a no-op."""
     restore_proof_env(prepared=prepared, guard_path=guard_path)
     guard = read_abort_guard(guard_path)
     if guard.claimant_kind == "process":
@@ -114,18 +107,28 @@ def recover_failed_proof(*, prepared: PreparedEnv, guard_path: Path, claim: Guar
 
 
 def complete_resumable_step(*, prepared: PreparedEnv, guard_path: Path, claim: GuardClaim) -> None:
-    """Preserve proof bytes and backup while returning successful work to plan ownership."""
     del prepared
+    complete_env_receipt(guard_path, claim_token=claim.token)
     transfer_abort_guard_to_plan(guard_path, claim_token=claim.token)
 
 
 def recover_interrupted_proof(recovery: ProofRecovery) -> None:
-    """Restore the durable receipt before returning this exact claim to the plan."""
     guard = read_abort_guard(recovery.paths.guard_path)
     if guard.claimant_kind == "plan":
-        return
+        if guard.env_receipt is None or not guard.env_receipt.complete:
+            return
+        reclaim_completed_receipt(
+            recovery.paths.guard_path,
+            pid=recovery.claim.pid,
+            start_time_ticks=recovery.claim.start_time_ticks,
+            claim_token=recovery.claim.token,
+        )
+        guard = read_abort_guard(recovery.paths.guard_path)
     if guard.claim_token != recovery.claim.token:
         raise AbortGuardError("abort guard claim token does not authorize recovery")
+    if guard.env_receipt is not None and guard.env_receipt.complete:
+        transfer_abort_guard_to_plan(recovery.paths.guard_path, claim_token=recovery.claim.token)
+        return
     _restore_receipt(recovery.paths, guard)
     if guard.env_receipt is not None:
         clear_env_receipt(recovery.paths.guard_path, claim_token=recovery.claim.token)
@@ -138,6 +141,8 @@ def _recover_existing_guard(paths: ProofRecoveryPaths) -> None:
         raise AbortGuardError("existing abort guard is not armed")
     if guard.claimant_kind == "plan":
         if guard.env_receipt is not None:
+            if guard.env_receipt.complete:
+                raise AbortGuardError("proof baseline is already complete")
             raise AbortGuardError("armed plan guard has an unresolved env receipt")
         return
     assert guard.pid is not None
@@ -145,6 +150,9 @@ def _recover_existing_guard(paths: ProofRecoveryPaths) -> None:
     assert guard.claim_token is not None
     if process_identity_matches(guard.pid, guard.start_time_ticks):
         raise AbortGuardError("existing abort guard is claimed by a live process")
+    if guard.env_receipt is not None and guard.env_receipt.complete:
+        recover_dead_abort_claim(paths.guard_path, process_identity=process_identity_matches)
+        return
     _restore_receipt(paths, guard)
     if guard.env_receipt is not None:
         clear_env_receipt(paths.guard_path, claim_token=guard.claim_token)

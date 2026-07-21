@@ -30,10 +30,11 @@ from dokploy_wizard.proof.model_sync_host_a import (
 )
 from dokploy_wizard.proof.model_sync_host_b import HostIdentity, assert_namespace_identity
 from dokploy_wizard.proof.model_sync_remote import capture_host_a_snapshot, probe_host
+from dokploy_wizard.proof.model_sync_results import atomic_finalize
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuard,
     AbortGuardError,
-    atomic_finalize,
+    process_start_time_ticks,
     read_abort_guard,
 )
 
@@ -199,12 +200,17 @@ def _run_wrapper(wrapper: Path, host: str, password: str, env_file: Path) -> Non
 
 
 def _self_start_time_ticks() -> str:
-    fields = Path("/proc/self/stat").read_text(encoding="utf-8").split()
-    return fields[21]
+    return process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8"))
 
 
 def _install_recovery_handlers(recovery: ProofRecovery) -> tuple[SignalHandler, SignalHandler]:
+    recovering = False
+
     def restore(_signum: int, _frame: FrameType | None) -> None:
+        nonlocal recovering
+        if recovering:
+            raise SystemExit(128 + _signum)
+        recovering = True
         recover_interrupted_proof(recovery)
         raise SystemExit(128 + _signum)
 
@@ -222,6 +228,8 @@ def _restore_recovery_handlers(
 
 
 def _status_payload(status: AbortGuard) -> dict[str, str | int | None]:
+    if status.env_receipt is not None and not status.env_receipt.complete:
+        raise AbortGuardError("abort guard has unresolved recovery state")
     return {
         "state": status.state,
         "claimant_kind": status.claimant_kind,

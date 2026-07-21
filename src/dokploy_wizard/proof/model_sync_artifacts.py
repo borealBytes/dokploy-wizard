@@ -2,20 +2,61 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, TypeAlias
 
-from dokploy_wizard.proof.model_sync_state import atomic_write_bytes, sha256_bytes
 from dokploy_wizard.verification import redact_text
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 _SHA256: Final = re.compile(r"^[0-9a-f]{64}$")
 _DIGEST: Final = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
+_FILE_MODE: Final = 0o600
+
+
+def sha256_bytes(value: bytes) -> str:
+    """Return a stable fingerprint for non-secret artifact bytes."""
+    return hashlib.sha256(value).hexdigest()
+
+
+def atomic_write_bytes(path: Path, content: bytes, *, mode: int = _FILE_MODE) -> None:
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    temporary = parent / f".{path.name}.{secrets.token_hex(12)}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        try:
+            _write_all(descriptor, content)
+            os.fchmod(descriptor, mode)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        _fsync_directory(parent)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    view = memoryview(content)
+    while view:
+        view = view[os.write(descriptor, view) :]
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +80,6 @@ class ResourcePlaneCapture:
 
 
 def write_protected_manifest(path: Path, payload: Mapping[str, JsonValue]) -> str:
-    """Write a redacted mode-0600 manifest and return its content fingerprint."""
     redacted = _redact_mapping(payload)
     encoded = (json.dumps(redacted, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     atomic_write_bytes(path, encoded)
@@ -47,7 +87,6 @@ def write_protected_manifest(path: Path, payload: Mapping[str, JsonValue]) -> st
 
 
 def read_protected_manifest(path: Path) -> dict[str, JsonValue]:
-    """Read a manifest only when it is a JSON object with no raw secret fields."""
     decoded = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(decoded, dict):
         raise ValueError("protected manifest must be a JSON object")
@@ -55,7 +94,6 @@ def read_protected_manifest(path: Path) -> dict[str, JsonValue]:
 
 
 def redact_manifest_value(key: str, value: JsonValue) -> JsonValue:
-    """Retain fingerprints while replacing values in secret-bearing fields."""
     normalized = key.lower()
     if normalized.endswith("_sha256") or normalized.endswith("_digest"):
         return value
@@ -151,13 +189,11 @@ def finalize_capture_outputs(outputs: Mapping[Path, bytes]) -> None:
         raise CaptureSchemaError("capture outputs must not be empty")
     if any(path.exists() for path in outputs):
         raise CaptureSchemaError("capture output already exists")
-    finalized: list[Path] = []
     try:
         for path, content in sorted(outputs.items(), key=lambda item: str(item[0])):
             atomic_write_bytes(path, content)
-            finalized.append(path)
-    except OSError:
-        for path in finalized:
+    except BaseException:
+        for path in outputs:
             path.unlink(missing_ok=True)
         raise
 

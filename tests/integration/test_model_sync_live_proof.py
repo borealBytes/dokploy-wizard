@@ -31,7 +31,7 @@ from dokploy_wizard.proof.model_sync_host_b import (
     assert_followup_proof_contract,
     assert_namespace_identity,
 )
-from dokploy_wizard.proof.model_sync_state import read_abort_guard
+from dokploy_wizard.proof.model_sync_state import process_start_time_ticks, read_abort_guard
 
 
 def test_namespace_identity_rejects_same_machine_and_mismatched_architecture() -> None:
@@ -1131,6 +1131,7 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     result = json.loads((artifact_dir / "result.json").read_text(encoding="utf-8"))
     baseline = json.loads((artifact_dir / "baseline.json").read_text(encoding="utf-8"))
     manifest = (artifact_dir / "protected-artifacts-before.txt").read_text(encoding="utf-8")
+    guard_sha256 = hashlib.sha256((tmp_path / "abort-guard.json").read_bytes()).hexdigest()
     assert exit_code == 0
     assert [template["name"] for template in baseline["templates"]] == [
         "ubuntu-vscode",
@@ -1143,6 +1144,8 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     assert result["coder_image_digest"] == "ghcr.io/coder/coder@sha256:" + _sha("1")
     assert result["coder_secret_inventory_sha256"] != "0" * 64
     assert result["legacy_workspace_managed_fingerprints_sha256"] != "0" * 64
+    assert result["abort_guard_sha256"] == guard_sha256
+    assert f"{guard_sha256}  abort-guard.json" in manifest
     assert "baseline.json" in manifest
     assert "password-a" not in (artifact_dir / "baseline.json").read_text(encoding="utf-8")
     sentinels = (
@@ -1194,6 +1197,32 @@ def test_baseline_host_a_rejects_incomplete_fixture_without_finalized_outputs(
     assert not (artifact_dir / "result.json").exists()
     assert not (artifact_dir / "baseline.json").exists()
     assert not (artifact_dir / "protected-artifacts-before.txt").exists()
+
+
+def test_capture_finalization_rolls_back_outputs_when_system_exit_interrupts_second_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dokploy_wizard.proof import model_sync_artifacts
+
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    writes = 0
+    original = model_sync_artifacts.atomic_write_bytes
+
+    def write(path: Path, content: bytes) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise SystemExit(1)
+        original(path, content)
+
+    monkeypatch.setattr(model_sync_artifacts, "atomic_write_bytes", write)
+
+    with pytest.raises(SystemExit):
+        model_sync_artifacts.finalize_capture_outputs({first: b"one", second: b"two"})
+
+    assert not first.exists()
+    assert not second.exists()
 
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
@@ -1303,7 +1332,7 @@ model_sync_cli._baseline_host_a(args)
         recovery = begin_proof_recovery(
             paths=ProofRecoveryPaths(env_file, backup, guard),
             pid=os.getpid(),
-            start_time_ticks=Path("/proc/self/stat").read_text(encoding="utf-8").split()[21],
+            start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
         )
         recover_interrupted_proof(recovery)
     else:

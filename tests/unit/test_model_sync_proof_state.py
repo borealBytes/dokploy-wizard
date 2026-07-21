@@ -7,14 +7,14 @@ from pathlib import Path
 import pytest
 
 from dokploy_wizard.proof.model_sync_artifacts import JsonValue, write_protected_manifest
-from dokploy_wizard.proof.model_sync_results import build_result
+from dokploy_wizard.proof.model_sync_results import atomic_finalize, build_result
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuardError,
     arm_abort_guard,
-    atomic_finalize,
     claim_abort_guard,
     disarm_abort_guard,
     process_identity_matches,
+    process_start_time_ticks,
     read_abort_guard,
     recover_dead_abort_claim,
     transfer_abort_guard_to_plan,
@@ -103,10 +103,80 @@ def test_abort_dead_pid_starttime_recovery_preserves_live_claim_bytes(tmp_path: 
 
 
 def test_process_identity_rejects_pid_reuse_start_time_mismatch() -> None:
-    start_time_ticks = Path("/proc/self/stat").read_text(encoding="utf-8").split()[21]
+    start_time_ticks = process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8"))
 
     assert process_identity_matches(os.getpid(), start_time_ticks)
     assert not process_identity_matches(os.getpid(), "0")
+
+
+def test_process_identity_parses_field_22_after_a_parenthesized_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dokploy_wizard.proof import model_sync_state
+
+    stat = "123 (cmd with ) spaces) S " + " ".join(str(value) for value in range(4, 53))
+    monkeypatch.setattr(model_sync_state.Path, "read_text", lambda _path, **_kwargs: stat)
+
+    assert process_identity_matches(123, "22")
+
+
+def test_schema_v1_guard_without_receipt_remains_readable(tmp_path: Path) -> None:
+    guard = tmp_path / "abort-guard.json"
+    guard.write_text(
+        json.dumps(
+            {
+                "claim_token": None,
+                "claimant_kind": "plan",
+                "pid": None,
+                "schema_version": 1,
+                "start_time_ticks": None,
+                "state": "armed",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    status = read_abort_guard(guard)
+
+    assert status.claimant_kind == "plan"
+    assert status.env_receipt is None
+
+
+def test_atomic_write_removes_sibling_temp_when_write_is_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dokploy_wizard.proof import model_sync_artifacts
+
+    output = tmp_path / "secret.env"
+
+    def interrupt(_descriptor: int, _content: bytes) -> None:
+        raise SystemExit(1)
+
+    monkeypatch.setattr(model_sync_artifacts, "_write_all", interrupt)
+
+    with pytest.raises(SystemExit):
+        model_sync_artifacts.atomic_write_bytes(output, b"SECRET-NOT-PERSISTED")
+
+    assert not list(tmp_path.glob(".secret.env.*.tmp"))
+
+
+def test_disarm_rejects_plan_owned_unresolved_receipt(tmp_path: Path) -> None:
+    guard = tmp_path / "abort-guard.json"
+    arm_abort_guard(guard)
+    claim_abort_guard(guard, pid=1234, start_time_ticks="456", claim_token="a" * 32)
+    from dokploy_wizard.proof.model_sync_results import EnvReceipt
+    from dokploy_wizard.proof.model_sync_state import record_env_receipt
+
+    record_env_receipt(
+        guard,
+        claim_token="a" * 32,
+        receipt=EnvReceipt("/tmp/env", "/tmp/backup", "a" * 64, "b" * 64, 0o600, False),
+    )
+    transfer_abort_guard_to_plan(guard, claim_token="a" * 32)
+
+    with pytest.raises(AbortGuardError):
+        disarm_abort_guard(guard)
 
 
 def test_abort_disarm(tmp_path: Path) -> None:
@@ -142,7 +212,7 @@ def test_atomic_finalize_rejects_different_parent_without_output_mutation(tmp_pa
     output = output_parent / "result.json"
     temp.write_text("safe\n", encoding="utf-8")
 
-    with pytest.raises(AbortGuardError):
+    with pytest.raises(ValueError):
         atomic_finalize(temp=temp, output=output)
 
     assert temp.exists()
