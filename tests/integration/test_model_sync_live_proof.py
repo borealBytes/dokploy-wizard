@@ -654,7 +654,8 @@ def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> N
 
     assert source.count("_PREFLIGHT_ENCODED =") == 1
     assert "_PREFLIGHT_ENCODED_V2" not in source
-    assert "with_cloudflare_fingerprints" in source
+    assert "with_cloudflare_" + "fingerprints" not in source
+    assert ".replace(" not in source
     assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
         "194a0c3b432f0cdf80c820ff9c41cc454f543092074d4a37eedea2916235a9f0"
     )
