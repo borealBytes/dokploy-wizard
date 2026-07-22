@@ -22,6 +22,7 @@ from dokploy_wizard.proof import (
     model_sync_artifacts,
     model_sync_baseline,
     model_sync_cli,
+    model_sync_host_a,
     model_sync_host_b,
     model_sync_remote,
     model_sync_results,
@@ -38,7 +39,11 @@ from dokploy_wizard.proof.model_sync_host_b import (
     assert_followup_proof_contract,
     assert_namespace_identity,
 )
-from dokploy_wizard.proof.model_sync_state import process_start_time_ticks, read_abort_guard
+from dokploy_wizard.proof.model_sync_state import (
+    AbortGuardError,
+    process_start_time_ticks,
+    read_abort_guard,
+)
 
 
 def test_namespace_identity_rejects_same_machine_and_mismatched_architecture() -> None:
@@ -2710,6 +2715,17 @@ def _baseline_arguments(tmp_path: Path) -> list[str]:
     ]
 
 
+def _baseline_recovery_paths(arguments: list[str], tmp_path: Path) -> ProofRecoveryPaths:
+    return ProofRecoveryPaths(
+        Path(arguments[arguments.index("--env-file") + 1]),
+        Path(arguments[arguments.index("--external-backup") + 1]),
+        Path(arguments[arguments.index("--abort-guard") + 1]),
+        Path(arguments[arguments.index("--artifact-dir") + 1]),
+        Path(arguments[arguments.index("--output") + 1]),
+        tmp_path / "repository",
+    )
+
+
 def _run_baseline_fixture(
     arguments: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> int:
@@ -2963,13 +2979,16 @@ def test_baseline_host_a_rejects_protected_artifact_mutation_during_hash(
 ) -> None:
     arguments = _baseline_arguments(tmp_path)
     protected = tmp_path / "repository" / ".omo" / "evidence" / "unrelated.txt"
+    identity = (protected.stat().st_dev, protected.stat().st_ino)
     original_read = os.read
+    original_fstat = os.fstat
     mutated = False
 
     def mutate_after_read(descriptor: int, size: int) -> bytes:
         nonlocal mutated
         chunk = original_read(descriptor, size)
-        if chunk and not mutated:
+        metadata = original_fstat(descriptor)
+        if chunk and not mutated and (metadata.st_dev, metadata.st_ino) == identity:
             mutated = True
             if mutation_kind == "rewrite":
                 protected.write_bytes(b"changed")
@@ -2996,13 +3015,17 @@ def test_baseline_host_a_rejects_intermediate_directory_replacement_during_hash(
 ) -> None:
     arguments = _baseline_arguments(tmp_path)
     evidence = tmp_path / "repository" / ".omo" / "evidence"
+    protected = evidence / "unrelated.txt"
+    identity = (protected.stat().st_dev, protected.stat().st_ino)
     original_read = os.read
+    original_fstat = os.fstat
     replaced = False
 
     def replace_directory_after_read(descriptor: int, size: int) -> bytes:
         nonlocal replaced
         chunk = original_read(descriptor, size)
-        if chunk and not replaced:
+        metadata = original_fstat(descriptor)
+        if chunk and not replaced and (metadata.st_dev, metadata.st_ino) == identity:
             replaced = True
             moved = evidence.with_name("evidence-original")
             evidence.rename(moved)
@@ -3053,6 +3076,439 @@ def test_baseline_host_a_rejects_symlinked_protected_manifest_contract(
     assert exit_code == 1
     assert target.read_bytes() == protected_bytes
     assert not (artifact_dir / "result.json").exists()
+
+
+def test_protected_contract_reads_tolerate_arbitrary_short_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    paths = _baseline_recovery_paths(arguments, tmp_path)
+    manifest_path = paths.artifact_dir / "protected-artifacts-before.txt"
+    expected = manifest_path.read_bytes()
+    original_path_read = Path.read_bytes
+    original_read = os.read
+
+    def truncated_path_read(path: Path) -> bytes:
+        content = original_path_read(path)
+        if path.name.startswith("protected-artifacts-before"):
+            return content[:3]
+        return content
+
+    def short_read(descriptor: int, size: int) -> bytes:
+        return original_read(descriptor, min(size, 3))
+
+    monkeypatch.setattr(Path, "read_bytes", truncated_path_read)
+    monkeypatch.setattr(os, "read", short_read)
+
+    assert model_sync_host_a._protected_bytes(paths) == expected
+
+
+@pytest.mark.parametrize("name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"])
+@pytest.mark.parametrize("kind", ["symlink", "directory", "fifo", "mode"])
+def test_protected_contract_rejects_unauthorized_file_kinds_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    kind: str,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    paths = _baseline_recovery_paths(arguments, tmp_path)
+    target = paths.artifact_dir / name
+    content = target.read_bytes()
+    match kind:
+        case "symlink":
+            target.unlink()
+            sibling = target.with_suffix(target.suffix + ".target")
+            sibling.write_bytes(content)
+            sibling.chmod(0o600)
+            target.symlink_to(sibling.name)
+        case "directory":
+            target.unlink()
+            target.mkdir()
+        case "fifo":
+            target.unlink()
+            os.mkfifo(target, mode=0o600)
+        case "mode":
+            target.chmod(0o640)
+        case unexpected:
+            raise AssertionError(f"unexpected protected contract kind {unexpected}")
+
+    original_path_read = Path.read_bytes
+
+    def reject_unsafe_path_read(path: Path) -> bytes:
+        if path == target:
+            raise AssertionError("unauthorized contract reached Path.read_bytes")
+        return original_path_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_unsafe_path_read)
+
+    with pytest.raises(AbortGuardError):
+        model_sync_host_a._protected_bytes(paths)
+
+
+@pytest.mark.parametrize("name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"])
+def test_protected_contract_rejects_oversize_before_content_or_repository_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    paths = _baseline_recovery_paths(arguments, tmp_path)
+    target = paths.artifact_dir / name
+    if name.endswith(".txt"):
+        target.write_bytes(b"a" * (256 * 1024 + 1))
+    else:
+        target.write_bytes(b"a" * 257)
+    target.chmod(0o600)
+    original_path_read = Path.read_bytes
+
+    def reject_oversize_path_read(path: Path) -> bytes:
+        if path == target:
+            raise AssertionError("oversize contract reached Path.read_bytes")
+        return original_path_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_oversize_path_read)
+
+    with pytest.raises(AbortGuardError):
+        model_sync_host_a._protected_bytes(paths)
+
+
+@pytest.mark.parametrize(
+    "name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"]
+)
+def test_protected_contract_rejects_trailing_bytes(tmp_path: Path, name: str) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    paths = _baseline_recovery_paths(arguments, tmp_path)
+    target = paths.artifact_dir / name
+    with target.open("ab") as stream:
+        stream.write(b"\n")
+
+    with pytest.raises(AbortGuardError):
+        model_sync_host_a._protected_bytes(paths)
+
+
+@pytest.mark.parametrize("name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"])
+@pytest.mark.parametrize("mutation", ["growth", "replacement", "metadata"])
+def test_protected_contract_rejects_post_read_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    mutation: str,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    paths = _baseline_recovery_paths(arguments, tmp_path)
+    target = paths.artifact_dir / name
+    identity = (target.stat().st_dev, target.stat().st_ino)
+    original_read = os.read
+    original_fstat = os.fstat
+    mutated = False
+
+    def mutate_after_read(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = original_read(descriptor, size)
+        metadata = original_fstat(descriptor)
+        if chunk and not mutated and (metadata.st_dev, metadata.st_ino) == identity:
+            mutated = True
+            match mutation:
+                case "growth":
+                    with target.open("ab") as stream:
+                        stream.write(b"x")
+                case "replacement":
+                    replacement = target.with_suffix(target.suffix + ".replacement")
+                    replacement.write_bytes(target.read_bytes())
+                    replacement.chmod(0o600)
+                    os.replace(replacement, target)
+                case "metadata":
+                    current = target.stat()
+                    os.utime(target, ns=(current.st_atime_ns, current.st_mtime_ns + 1_000_000))
+                case unexpected:
+                    raise AssertionError(f"unexpected protected mutation {unexpected}")
+        return chunk
+
+    monkeypatch.setattr(os, "read", mutate_after_read)
+
+    with pytest.raises(AbortGuardError):
+        model_sync_host_a._protected_bytes(paths)
+    assert mutated is True
+
+
+def test_open_directory_closes_descriptor_when_fstat_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    original_open = os.open
+    original_close = os.close
+    opened: list[int] = []
+    closed: list[int] = []
+
+    def tracked_open(path: str, flags: int, *, dir_fd: int | None = None) -> int:
+        descriptor = original_open(path, flags, dir_fd=dir_fd)
+        opened.append(descriptor)
+        return descriptor
+
+    def failing_fstat(descriptor: int) -> os.stat_result:
+        if descriptor in opened:
+            raise OSError("injected fstat failure")
+        return os.fstat(descriptor)
+
+    def tracked_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        original_close(descriptor)
+
+    monkeypatch.setattr(os, "open", tracked_open)
+    monkeypatch.setattr(os, "fstat", failing_fstat)
+    monkeypatch.setattr(os, "close", tracked_close)
+    try:
+        with pytest.raises(OSError, match="injected fstat failure"):
+            model_sync_host_a._open_directory(".", parent)
+        assert opened == closed
+    finally:
+        for descriptor in set(opened) - set(closed):
+            original_close(descriptor)
+        original_close(parent)
+
+
+def test_protected_file_growth_aborts_at_streaming_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    protected = root / ".omo" / "evidence" / "unrelated.txt"
+    protected.parent.mkdir(parents=True)
+    protected.write_bytes(b"x")
+    entries = model_sync_artifacts.validate_protected_manifest_bytes(
+        model_sync_artifacts.protected_manifest_bytes(
+            {".omo/evidence/unrelated.txt": hashlib.sha256(b"x").hexdigest()}
+        )
+    )
+    identity = (protected.stat().st_dev, protected.stat().st_ino)
+    original_read = os.read
+    original_fstat = os.fstat
+    reads = 0
+
+    def growing_read(descriptor: int, size: int) -> bytes:
+        nonlocal reads
+        metadata = original_fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) == identity:
+            reads += 1
+            if reads > 300:
+                raise AssertionError("protected growth exceeded its streaming bound")
+            return b"x" * size
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(os, "read", growing_read)
+
+    with pytest.raises(AbortGuardError):
+        model_sync_host_a._verify_protected_artifacts(root, entries)
+    assert reads <= 257
+
+
+def test_protected_file_rejects_premature_end_of_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    protected = root / ".omo" / "evidence" / "unrelated.txt"
+    protected.parent.mkdir(parents=True)
+    protected.write_bytes(b"xy")
+    entries = model_sync_artifacts.validate_protected_manifest_bytes(
+        model_sync_artifacts.protected_manifest_bytes(
+            {".omo/evidence/unrelated.txt": hashlib.sha256(b"x").hexdigest()}
+        )
+    )
+    identity = (protected.stat().st_dev, protected.stat().st_ino)
+    original_read = os.read
+    original_fstat = os.fstat
+    read_once = False
+
+    def premature_eof(descriptor: int, size: int) -> bytes:
+        nonlocal read_once
+        metadata = original_fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != identity:
+            return original_read(descriptor, size)
+        if read_once:
+            return b""
+        read_once = True
+        return original_read(descriptor, 1)
+
+    monkeypatch.setattr(os, "read", premature_eof)
+
+    with pytest.raises(AbortGuardError):
+        model_sync_host_a._verify_protected_artifacts(root, entries)
+
+
+@pytest.mark.parametrize("extra_bytes", [0, 1])
+def test_protected_aggregate_bound_accepts_exact_limit_and_rejects_overflow(
+    tmp_path: Path,
+    extra_bytes: int,
+) -> None:
+    root = tmp_path / "repository"
+    evidence = root / ".omo" / "evidence"
+    evidence.mkdir(parents=True)
+    chunk_size = 16 * 1024 * 1024
+    chunk_hash = hashlib.sha256(bytes(chunk_size)).hexdigest()
+    entries = {}
+    for index in range(4):
+        path = evidence / f"chunk-{index}.bin"
+        with path.open("wb") as stream:
+            stream.truncate(chunk_size)
+        entries[f".omo/evidence/{path.name}"] = chunk_hash
+    if extra_bytes:
+        (evidence / "overflow.bin").write_bytes(b"x")
+        entries[".omo/evidence/overflow.bin"] = hashlib.sha256(b"x").hexdigest()
+    manifest = model_sync_artifacts.protected_manifest_bytes(entries)
+    parsed = model_sync_artifacts.validate_protected_manifest_bytes(manifest)
+
+    if extra_bytes:
+        with pytest.raises(AbortGuardError):
+            model_sync_host_a._verify_protected_artifacts(root, parsed)
+    else:
+        model_sync_host_a._verify_protected_artifacts(root, parsed)
+
+
+def test_terminal_recovery_tolerates_short_reads_of_generated_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    assert _run_baseline_fixture(arguments, tmp_path, monkeypatch) == 0
+    paths = _baseline_recovery_paths(arguments, tmp_path)
+    original_read = os.read
+
+    def short_read(descriptor: int, size: int) -> bytes:
+        return original_read(descriptor, min(size, 3))
+
+    monkeypatch.setattr(os, "read", short_read)
+
+    recovery = begin_proof_recovery(
+        paths=paths,
+        pid=os.getpid(),
+        start_time_ticks=process_start_time_ticks(
+            Path("/proc/self/stat").read_text(encoding="utf-8")
+        ),
+    )
+    assert recovery.terminal is True
+
+
+@pytest.mark.parametrize("name", ["baseline.json", "result.json"])
+@pytest.mark.parametrize("mutation", ["growth", "replacement", "metadata"])
+def test_terminal_recovery_rejects_generated_output_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    mutation: str,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    assert _run_baseline_fixture(arguments, tmp_path, monkeypatch) == 0
+    paths = _baseline_recovery_paths(arguments, tmp_path)
+    target = paths.artifact_dir / name
+    identity = (target.stat().st_dev, target.stat().st_ino)
+    original_read = os.read
+    original_fstat = os.fstat
+    mutated = False
+
+    def mutate_after_read(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = original_read(descriptor, size)
+        metadata = original_fstat(descriptor)
+        if chunk and not mutated and (metadata.st_dev, metadata.st_ino) == identity:
+            mutated = True
+            match mutation:
+                case "growth":
+                    with target.open("ab") as stream:
+                        stream.write(b"x")
+                case "replacement":
+                    replacement = target.with_suffix(".replacement")
+                    replacement.write_bytes(target.read_bytes())
+                    replacement.chmod(0o600)
+                    os.replace(replacement, target)
+                case "metadata":
+                    current = target.stat()
+                    os.utime(target, ns=(current.st_atime_ns, current.st_mtime_ns + 1_000_000))
+                case unexpected:
+                    raise AssertionError(f"unexpected output mutation {unexpected}")
+        return chunk
+
+    monkeypatch.setattr(os, "read", mutate_after_read)
+
+    with pytest.raises(AbortGuardError):
+        begin_proof_recovery(
+            paths=paths,
+            pid=os.getpid(),
+            start_time_ticks=process_start_time_ticks(
+                Path("/proc/self/stat").read_text(encoding="utf-8")
+            ),
+        )
+    assert mutated is True
+
+
+@pytest.mark.parametrize("name", ["baseline.json", "result.json"])
+def test_terminal_recovery_bounds_oversize_generated_output_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    assert _run_baseline_fixture(arguments, tmp_path, monkeypatch) == 0
+    paths = _baseline_recovery_paths(arguments, tmp_path)
+    target = paths.artifact_dir / name
+    with target.open("ab") as stream:
+        stream.truncate(16 * 1024 * 1024 + 1)
+    identity = (target.stat().st_dev, target.stat().st_ino)
+    original_read = os.read
+    original_fstat = os.fstat
+    guard = read_abort_guard(paths.guard_path)
+    assert guard.attestation is not None
+    result_limit = len(model_sync_results.result_bytes_from_attestation(guard.attestation)) + 1
+
+    def bounded_read(descriptor: int, size: int) -> bytes:
+        metadata = original_fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) == identity:
+            limit = result_limit if name == "result.json" else 65_536
+            if size > limit:
+                raise AssertionError("generated output requested an unbounded read")
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(os, "read", bounded_read)
+
+    with pytest.raises(AbortGuardError):
+        begin_proof_recovery(
+            paths=paths,
+            pid=os.getpid(),
+            start_time_ticks=process_start_time_ticks(
+                Path("/proc/self/stat").read_text(encoding="utf-8")
+            ),
+        )
+
+
+@pytest.mark.parametrize("unknown_name", [None, "host-a-preflight.json", "result.json"])
+def test_rollback_removes_only_exact_attested_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unknown_name: str | None,
+) -> None:
+    arguments = _baseline_arguments(tmp_path)
+    assert _run_baseline_fixture(arguments, tmp_path, monkeypatch) == 0
+    paths = _baseline_recovery_paths(arguments, tmp_path)
+    guard = read_abort_guard(paths.guard_path)
+    assert guard.attestation is not None
+    outputs = {
+        **model_sync_results.output_paths(paths),
+        "result.json": paths.output,
+    }
+    if unknown_name is not None:
+        outputs[unknown_name].write_bytes(b"unknown")
+        outputs[unknown_name].chmod(0o600)
+
+    if unknown_name is None:
+        model_sync_results.remove_authorized_outputs(paths, guard.attestation)
+        assert not any(path.exists() for path in outputs.values())
+    else:
+        with pytest.raises(AbortGuardError):
+            model_sync_results.remove_authorized_outputs(paths, guard.attestation)
+        assert outputs[unknown_name].read_bytes() == b"unknown"
 
 
 @pytest.mark.parametrize(

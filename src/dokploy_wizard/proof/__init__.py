@@ -21,6 +21,9 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GUARD_FILE_MODE: Final = 0o600
 _MAX_GUARD_BYTES: Final = 256 * 1024
 _READ_CHUNK_BYTES: Final = 64 * 1024
+_MAX_PROTECTED_ENTRIES: Final = 1_024
+_MAX_PROTECTED_FILE_BYTES: Final = 16 * 1024 * 1024
+_MAX_PROTECTED_TOTAL_BYTES: Final = 64 * 1024 * 1024
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 ProtectedManifestEntry = NamedTuple(
@@ -597,6 +600,148 @@ def read_bounded_regular_bytes(
         return bytes(content), file_mode
     finally:
         os.close(descriptor)
+
+
+def open_protected_directory(
+    component: str, parent_descriptor: int
+) -> tuple[int, tuple[int, int, int]]:
+    descriptor = os.open(
+        component,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=parent_descriptor,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+    )
+
+
+def _open_protected_parent(
+    root_descriptor: int, parts: tuple[str, ...]
+) -> tuple[int, tuple[tuple[int, int, int], ...]]:
+    parent = os.dup(root_descriptor)
+    identities: list[tuple[int, int, int]] = []
+    try:
+        for component in parts:
+            previous = parent
+            parent, identity = open_protected_directory(component, previous)
+            os.close(previous)
+            identities.append(identity)
+    except BaseException:
+        os.close(parent)
+        raise
+    return parent, tuple(identities)
+
+
+def _revalidate_protected_parent(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+    expected_identities: tuple[tuple[int, int, int], ...],
+) -> int:
+    parent = os.dup(root_descriptor)
+    try:
+        for component, expected in zip(parts, expected_identities, strict=True):
+            previous = parent
+            parent, actual = open_protected_directory(component, previous)
+            os.close(previous)
+            if actual != expected:
+                raise AbortGuardError("protected artifact directory identity changed")
+    except BaseException:
+        os.close(parent)
+        raise
+    return parent
+
+
+def _hash_protected_file(
+    descriptor: int, aggregate_bytes: int
+) -> tuple[os.stat_result, os.stat_result, int, str]:
+    before = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_size > _MAX_PROTECTED_FILE_BYTES
+        or aggregate_bytes + before.st_size > _MAX_PROTECTED_TOTAL_BYTES
+    ):
+        raise AbortGuardError("protected artifact is not a bounded regular file")
+    digest = hashlib.sha256()
+    file_bytes = 0
+    total_bytes = aggregate_bytes
+    while True:
+        request = min(
+            _READ_CHUNK_BYTES,
+            _MAX_PROTECTED_FILE_BYTES - file_bytes + 1,
+            _MAX_PROTECTED_TOTAL_BYTES - total_bytes + 1,
+        )
+        chunk = os.read(descriptor, request)
+        if not chunk:
+            break
+        file_bytes += len(chunk)
+        total_bytes += len(chunk)
+        if (
+            file_bytes > _MAX_PROTECTED_FILE_BYTES
+            or total_bytes > _MAX_PROTECTED_TOTAL_BYTES
+        ):
+            raise AbortGuardError("protected artifact grew beyond its bound")
+        digest.update(chunk)
+    after = os.fstat(descriptor)
+    if file_bytes != before.st_size:
+        raise AbortGuardError("protected artifact ended before its recorded size")
+    return before, after, total_bytes, digest.hexdigest()
+
+
+def verify_protected_artifacts(
+    repository_root: Path, entries: tuple[ProtectedManifestEntry, ...]
+) -> None:
+    if len(entries) > _MAX_PROTECTED_ENTRIES:
+        raise AbortGuardError("protected artifact entry limit exceeded")
+    root_descriptor = os.open(
+        repository_root,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    aggregate_bytes = 0
+    try:
+        for entry in entries:
+            parent, identities = _open_protected_parent(
+                root_descriptor, entry.path.parts[:-1]
+            )
+            try:
+                descriptor = os.open(
+                    entry.path.parts[-1],
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                    dir_fd=parent,
+                )
+                try:
+                    before, after, aggregate_bytes, fingerprint = _hash_protected_file(
+                        descriptor, aggregate_bytes
+                    )
+                finally:
+                    os.close(descriptor)
+            finally:
+                os.close(parent)
+            revalidated = _revalidate_protected_parent(
+                root_descriptor, entry.path.parts[:-1], identities
+            )
+            try:
+                named = os.stat(
+                    entry.path.parts[-1],
+                    dir_fd=revalidated,
+                    follow_symlinks=False,
+                )
+            finally:
+                os.close(revalidated)
+            if (
+                _guard_metadata(before) != _guard_metadata(after)
+                or _guard_metadata(after) != _guard_metadata(named)
+                or fingerprint != entry.sha256
+            ):
+                raise AbortGuardError("protected artifact verification failed")
+    finally:
+        os.close(root_descriptor)
 
 
 def parse_env_receipt(value: JsonValue | None) -> EnvReceipt | None:
