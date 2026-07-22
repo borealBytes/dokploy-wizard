@@ -1046,6 +1046,7 @@ def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
         lambda value: value.pop("schema_version"),
         lambda value: value.update({"extra": 1}),
         lambda value: value.update({"mode": True}),
+        lambda value: value.update({"mode": 0o1600}),
         lambda value: value.update({"env_path": "relative.env"}),
         lambda value: value.update({"original_sha256": "A" * 64}),
     ],

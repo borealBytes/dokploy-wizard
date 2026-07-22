@@ -109,6 +109,46 @@ class AbortGuardError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class EnvPreparationError(RuntimeError):
+    detail: str
+
+    def __str__(self) -> str:
+        return self.detail
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedEnv:
+    env_file: Path
+    backup_path: Path
+    original_sha256: str
+    proof_sha256: str
+    mode: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProofNamespace:
+    """Exact non-secret resource names derived from the proof environment."""
+
+    stack_name: str
+    docker: tuple[str, ...]
+    dokploy: tuple[str, ...]
+    cloudflare: tuple[str, ...]
+    tailscale: tuple[str, ...]
+    coder_templates: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, list[str] | str]:
+        """Return the remote probe contract without retaining raw env values."""
+        return {
+            "cloudflare": list(self.cloudflare),
+            "coder": list(self.coder_templates),
+            "docker": list(self.docker),
+            "dokploy": list(self.dokploy),
+            "stack_name": self.stack_name,
+            "tailscale": list(self.tailscale),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ResourcePlaneCapture:
     cloudflare: dict[str, JsonValue]
     images: dict[str, str]
@@ -512,6 +552,49 @@ def read_guard_bytes(path: Path) -> bytes:
         ):
             raise ValueError("abort guard changed while reading")
         return bytes(content)
+    finally:
+        os.close(descriptor)
+
+
+def read_bounded_regular_bytes(
+    path: Path, max_bytes: int, required_mode: int | None
+) -> tuple[bytes, int]:
+    before = os.lstat(path)
+    file_mode = stat.S_IMODE(before.st_mode)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or not 1 <= file_mode <= 0o777
+        or before.st_size > max_bytes
+        or (required_mode is not None and file_mode != required_mode)
+    ):
+        raise ValueError("proof env or backup is not an authorized bounded regular file")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if _guard_metadata(before) != _guard_metadata(opened):
+            raise ValueError("proof env or backup changed during inspection")
+        limit = opened.st_size + 1
+        content = bytearray()
+        while len(content) < limit:
+            remaining = min(_READ_CHUNK_BYTES, limit - len(content))
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            if len(chunk) > remaining:
+                raise ValueError("proof env or backup exceeded its inspection bound")
+            content.extend(chunk)
+        after = os.fstat(descriptor)
+        pathname = os.lstat(path)
+        if (
+            len(content) != opened.st_size
+            or _guard_metadata(opened) != _guard_metadata(after)
+            or _guard_metadata(opened) != _guard_metadata(pathname)
+        ):
+            raise ValueError("proof env or backup changed during inspection")
+        return bytes(content), file_mode
     finally:
         os.close(descriptor)
 
