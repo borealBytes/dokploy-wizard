@@ -108,6 +108,7 @@ REQUIRED_RESULT_KEYS: Final = frozenset(
         "proof_commit",
         "protected_artifacts_before_path",
         "protected_artifacts_before_sha256",
+        "preexisting_cloudflare_sha256",
         "schema_version",
         "shared_core_image_digests",
         "single_host_lifecycle_path",
@@ -1337,6 +1338,7 @@ class BaselineResultEvidence:
     protected_artifacts_before_sha256: str
     coder_secret_inventory_sha256: str
     legacy_workspace_managed_fingerprints_sha256: str
+    preexisting_cloudflare_sha256: str
 
 
 def run_bounded_process(
@@ -1529,6 +1531,7 @@ def baseline_result_values(evidence: BaselineResultEvidence) -> dict[str, JsonVa
         "legacy_workspace_managed_fingerprints_sha256": (
             evidence.legacy_workspace_managed_fingerprints_sha256
         ),
+        "preexisting_cloudflare_sha256": evidence.preexisting_cloudflare_sha256,
     }
 
 
@@ -1694,6 +1697,7 @@ def _require_result_hashes(values: Mapping[str, JsonValue]) -> None:
         "protected_artifacts_before_sha256",
         "coder_secret_inventory_sha256",
         "legacy_workspace_managed_fingerprints_sha256",
+        "preexisting_cloudflare_sha256",
     )
     for key in keys:
         value = values[key]

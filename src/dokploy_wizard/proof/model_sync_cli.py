@@ -28,7 +28,7 @@ from dokploy_wizard.proof.model_sync_host_a import (
     recover_interrupted_proof,
 )
 from dokploy_wizard.proof.model_sync_host_b import HostIdentity, assert_namespace_identity
-from dokploy_wizard.proof.model_sync_identity import HostInputNames, resolve_host_inputs
+from dokploy_wizard.proof.model_sync_host_inputs import HostInputNames, resolve_host_inputs
 from dokploy_wizard.proof.model_sync_remote import RemoteProbe, capture_host_a_snapshot, probe_host
 from dokploy_wizard.proof.model_sync_results import run_bounded_process
 from dokploy_wizard.proof.model_sync_state import AbortGuardError, read_abort_guard
@@ -148,6 +148,13 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         ):
             raise RuntimeError("managed namespace residue blocks live baseline proof")
         _run_wrapper(args.wrapper, host_a, password_a, args.env_file)
+        post_install_probe = probe_host(
+            host=host_a,
+            password=password_a,
+            namespace=namespace,
+            proof_transport=transport,
+        )
+        host_a_probe.verify_preexisting_cloudflare_unchanged(post_install_probe)
         baseline = parse_captured_baseline(
             capture_host_a_snapshot(host=host_a, password=password_a),
             stack_name=namespace.stack_name,

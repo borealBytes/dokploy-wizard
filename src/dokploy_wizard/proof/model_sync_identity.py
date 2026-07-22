@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Final, Literal, assert_never
@@ -17,6 +16,16 @@ from dokploy_wizard.proof.model_sync_artifacts import (
     require_list,
     require_mapping,
     require_text,
+)
+from dokploy_wizard.proof.model_sync_cloudflare import (
+    CloudflareMatch,
+    CloudflareProvenance,
+    CloudflareResource,
+    preexisting_cloudflare_sha256,
+)
+from dokploy_wizard.proof.model_sync_cloudflare_probe import (
+    build_cloudflare_resources,
+    verify_cloudflare_resources,
 )
 from dokploy_wizard.proof.model_sync_env import ProofNamespace
 
@@ -34,8 +43,21 @@ class ObservedResource:
     resource_id: str
     name: str
     kind: str
+    fingerprint_sha256: str | None = None
+    match: CloudflareMatch | None = None
+    provenance: CloudflareProvenance | None = None
 
     def to_dict(self) -> dict[str, JsonValue]:
+        if self.fingerprint_sha256 is not None:
+            if self.match is None or self.provenance is None:
+                raise RemoteProofError("Cloudflare resource evidence is incomplete")
+            return {
+                "fingerprint_sha256": self.fingerprint_sha256,
+                "id": self.resource_id,
+                "kind": self.kind,
+                "match": self.match,
+                "provenance": self.provenance,
+            }
         return {"id": self.resource_id, "kind": self.kind, "name": self.name}
 
 
@@ -73,39 +95,28 @@ class RemoteProbe:
             "ssh_sha256": self.ssh_sha256,
         }
 
+    @property
+    def preexisting_cloudflare_sha256(self) -> str:
+        resources = tuple(
+            CloudflareResource(
+                item.resource_id,
+                item.kind,
+                item.fingerprint_sha256,
+                item.match,
+                item.provenance,
+            )
+            for item in self.inventory["cloudflare"]
+            if item.fingerprint_sha256 is not None
+            and item.match is not None
+            and item.provenance is not None
+        )
+        return preexisting_cloudflare_sha256(resources)
 
-@dataclass(frozen=True, slots=True)
-class HostInputNames:
-    host_a: str
-    password_a: str
-    host_b: str
-    password_b: str
-
-
-def resolve_host_inputs(
-    names: HostInputNames,
-    mode: HostIdentityMode,
-) -> tuple[str, str, str, str]:
-    keys = (names.host_a, names.password_a, names.host_b, names.password_b)
-    values = tuple(os.environ.get(key) for key in keys)
-    if any(value is None or value == "" for value in values):
-        missing = ", ".join(key for key, value in zip(keys, values, strict=True) if not value)
-        raise RuntimeError(f"missing required external inputs: {missing}")
-    host_a, password_a, host_b, password_b = values
-    assert host_a is not None
-    assert password_a is not None
-    assert host_b is not None
-    assert password_b is not None
-    match mode:
-        case "distinct":
-            if host_a == host_b:
-                raise RuntimeError("same-host mapping requires --single-host-sequential")
-        case "single_sequential":
-            if (host_a, password_a) != (host_b, password_b):
-                raise RuntimeError("single-host mode requires exact host and password mapping")
-        case unexpected:
-            assert_never(unexpected)
-    return host_a, password_a, host_b, password_b
+    def verify_preexisting_cloudflare_unchanged(self, post_install: RemoteProbe) -> None:
+        verify_cloudflare_resources(
+            self.inventory["cloudflare"],
+            post_install.inventory["cloudflare"],
+        )
 
 
 def preflight_evidence(
@@ -156,7 +167,7 @@ def parse_preflight(
         machine = require_text(payload["machine_id"], "remote machine identity")
         architecture = _architecture(payload["architecture"])
         inventory, plane_states, plane_provenance = _parse_planes(
-            require_mapping(payload["planes"], "remote namespace planes")
+            require_mapping(payload["planes"], "remote namespace planes"), namespace
         )
         normalized_boot = boot_id.strip()
         if not _BOOT_ID.fullmatch(normalized_boot):
@@ -167,6 +178,7 @@ def parse_preflight(
     clean = all(
         not _plane_has_owned_name(inventory[plane], expected[plane], namespace.stack_name)
         for plane in inventory
+        if plane != "cloudflare"
     )
     return RemoteProbe(
         machine_sha256=hashlib.sha256(machine.encode()).hexdigest(),
@@ -190,6 +202,7 @@ def _architecture(value: JsonValue) -> str:
 
 def _parse_planes(
     planes: dict[str, JsonValue],
+    namespace: ProofNamespace,
 ) -> tuple[dict[str, tuple[ObservedResource, ...]], dict[str, str], dict[str, str]]:
     names = ("docker", "dokploy", "cloudflare", "tailscale", "coder")
     if set(planes) != set(names):
@@ -217,7 +230,12 @@ def _parse_planes(
             raise CaptureSchemaError(f"{plane} plane collection failed")
         if state not in {"absent", "present"}:
             raise CaptureSchemaError(f"{plane} plane state is invalid")
-        resources = _resources(require_list(source["resources"], f"{plane} resources"), plane)
+        raw_resources = require_list(source["resources"], f"{plane} resources")
+        resources = (
+            build_cloudflare_resources(raw_resources, namespace, ObservedResource)
+            if plane == "cloudflare"
+            else _resources(raw_resources, plane)
+        )
         if (state == "absent") != (not resources):
             raise CaptureSchemaError(f"{plane} plane absence is inconsistent")
         inventory[plane], states[plane] = resources, state

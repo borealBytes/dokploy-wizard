@@ -79,6 +79,7 @@ def _valid_result_values(tmp_path: Path, receipt: EnvReceipt) -> dict[str, JsonV
         "protected_artifacts_before_sha256": "7" * 64,
         "coder_secret_inventory_sha256": "8" * 64,
         "legacy_workspace_managed_fingerprints_sha256": "9" * 64,
+        "preexisting_cloudflare_sha256": "a" * 64,
     }
 
 
@@ -527,9 +528,7 @@ def test_exact_output_inspection_rejects_growth_during_read(
 
 
 @pytest.mark.parametrize("kind", ["mode", "special-mode", "symlink", "directory", "fifo"])
-def test_exact_output_inspection_rejects_unauthorized_file_kinds(
-    tmp_path: Path, kind: str
-) -> None:
+def test_exact_output_inspection_rejects_unauthorized_file_kinds(tmp_path: Path, kind: str) -> None:
     output = tmp_path / "artifact.json"
     match kind:
         case "mode":
@@ -689,9 +688,7 @@ def test_exact_output_writer_preserves_unknown_bytes_raced_into_absent_path(
     assert output.read_bytes() == unknown
 
 
-def test_exact_output_unlink_fsyncs_parent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_exact_output_unlink_fsyncs_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     output = tmp_path / "artifact.json"
     output.write_bytes(b"expected")
     output.chmod(0o600)
@@ -786,13 +783,9 @@ def test_protected_manifest_validation_rejects_noncanonical_path_text(path: str)
 def test_protected_manifest_validation_rejects_duplicate_normalized_path(
     alias: str,
 ) -> None:
-    manifest = (
-        f"{'a' * 64}  .omo/evidence/x\n{'b' * 64}  {alias}\n"
-    ).encode()
+    manifest = (f"{'a' * 64}  .omo/evidence/x\n{'b' * 64}  {alias}\n").encode()
 
-    with pytest.raises(
-        model_sync_artifacts.CaptureSchemaError, match="duplicate normalized path"
-    ):
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError, match="duplicate normalized path"):
         model_sync_artifacts.validate_protected_manifest_bytes(manifest)
 
 
@@ -933,6 +926,7 @@ def test_result_accepts_non_placeholder_captured_values() -> None:
             "protected_artifacts_before_sha256": "0f" * 32,
             "coder_secret_inventory_sha256": "1" * 64,
             "legacy_workspace_managed_fingerprints_sha256": "2" * 64,
+            "preexisting_cloudflare_sha256": "3" * 64,
         }
     )
 
@@ -1030,6 +1024,7 @@ def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
             "protected_artifacts_before_sha256": "1" * 64,
             "coder_secret_inventory_sha256": "2" * 64,
             "legacy_workspace_managed_fingerprints_sha256": "3" * 64,
+            "preexisting_cloudflare_sha256": "4" * 64,
         }
     )
     attestation = BaselineAttestation(
@@ -1054,9 +1049,10 @@ def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
     derived = derive_result_from_attestation(attestation)
 
     assert guard_path.read_bytes() != before_completion
-    assert derived["abort_guard_sha256"] == hashlib.sha256(
-        canonical_json_bytes(attestation.to_payload())
-    ).hexdigest()
+    assert (
+        derived["abort_guard_sha256"]
+        == hashlib.sha256(canonical_json_bytes(attestation.to_payload())).hexdigest()
+    )
 
 
 @pytest.mark.parametrize(
@@ -1571,9 +1567,9 @@ def test_result_and_attestation_bytes_are_bidirectionally_derived(tmp_path: Path
     attestation = _valid_attestation(tmp_path)
     projection = canonical_json_bytes(attestation.to_payload())
     digest = hashlib.sha256(projection).hexdigest()
-    expected = canonical_json_bytes(
-        {**attestation.result_body, "abort_guard_sha256": digest}
-    ) + b"\n"
+    expected = (
+        canonical_json_bytes({**attestation.result_body, "abort_guard_sha256": digest}) + b"\n"
+    )
 
     assert result_bytes_from_attestation(attestation) == expected
     verify_result_bytes(attestation, expected)
