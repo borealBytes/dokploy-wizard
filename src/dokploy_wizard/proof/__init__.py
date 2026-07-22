@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 from dokploy_wizard.verification import redact_text
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_ACTIVE_REPOSITORY_ROOT: Final = Path(__file__).parents[3]
 _GUARD_FILE_MODE: Final = 0o600
 _MAX_GUARD_BYTES: Final = 256 * 1024
 _READ_CHUNK_BYTES: Final = 64 * 1024
@@ -1182,6 +1183,86 @@ class ProofRecoveryPaths:
     repository_root: Path
 
 
+def require_active_repository_root(wrapper: Path, paths: ProofRecoveryPaths) -> Path:
+    """Bind every local baseline path to the canonical running checkout."""
+    running_root = _require_canonical_existing(
+        _ACTIVE_REPOSITORY_ROOT,
+        "running repository root",
+    )
+    root = _require_canonical_existing(paths.repository_root, "active root")
+    if root != running_root:
+        raise RuntimeError("active root does not match the running repository checkout")
+    if not stat.S_ISDIR(os.lstat(root).st_mode):
+        raise RuntimeError("active root must be an ordinary directory")
+
+    expected_wrapper = root / "bin" / "dokploy-wizard-remote"
+    if wrapper != expected_wrapper:
+        raise RuntimeError("wrapper must be the canonical active-root remote wrapper")
+    resolved_wrapper = _require_canonical_existing(wrapper, "wrapper")
+    if resolved_wrapper != expected_wrapper or not stat.S_ISREG(os.lstat(wrapper).st_mode):
+        raise RuntimeError("wrapper must be an ordinary file under the active root")
+
+    expected_env = root / ".install-min.env"
+    if paths.env_file != expected_env:
+        raise RuntimeError("env file must be the canonical active-root .install-min.env")
+    resolved_env = _require_canonical_existing(paths.env_file, "env file")
+    env_metadata = os.lstat(resolved_env)
+    if not stat.S_ISREG(env_metadata.st_mode) or stat.S_IMODE(env_metadata.st_mode) != 0o600:
+        raise RuntimeError("active-root .install-min.env must be an ordinary mode-0600 file")
+
+    artifact_dir = _require_canonical_existing(paths.artifact_dir, "artifact directory")
+    if not stat.S_ISDIR(os.lstat(artifact_dir).st_mode):
+        raise RuntimeError("artifact directory must be an ordinary directory")
+    try:
+        artifact_relative = artifact_dir.relative_to(root)
+    except ValueError as error:
+        raise RuntimeError("artifact directory must be beneath the active root") from error
+    if artifact_relative == Path("."):
+        raise RuntimeError("artifact directory must be nested beneath the active root")
+
+    for requested, name in (
+        (paths.guard_path, "abort-guard.json"),
+        (paths.output, "result.json"),
+    ):
+        expected = artifact_dir / name
+        if requested != expected:
+            raise RuntimeError(f"{name} must be the canonical artifact path")
+        if os.path.lexists(requested):
+            resolved = _require_canonical_existing(requested, name)
+            if resolved != expected or not stat.S_ISREG(os.lstat(requested).st_mode):
+                raise RuntimeError(f"{name} must be an ordinary artifact file")
+
+    backup = paths.backup_path
+    if not backup.is_absolute() or ".." in backup.parts:
+        raise RuntimeError("external backup path must be absolute and traversal-free")
+    try:
+        backup.relative_to(root)
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError("external backup path must remain outside the active root")
+    backup_ancestor = backup.parent
+    while not os.path.lexists(backup_ancestor):
+        backup_ancestor = backup_ancestor.parent
+    _require_canonical_existing(backup_ancestor, "external backup ancestor")
+    if os.path.lexists(backup):
+        resolved_backup = _require_canonical_existing(backup, "external backup")
+        backup_metadata = os.lstat(resolved_backup)
+        if not stat.S_ISREG(backup_metadata.st_mode):
+            raise RuntimeError("external backup must be an ordinary file")
+    return root
+
+
+def _require_canonical_existing(path: Path, label: str) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise RuntimeError(f"{label} must exist") from error
+    if not path.is_absolute() or path != resolved:
+        raise RuntimeError(f"{label} must be an absolute canonical path without symlinks")
+    return resolved
+
+
 @dataclass(frozen=True, slots=True)
 class ProofRecovery:
     paths: ProofRecoveryPaths
@@ -1200,6 +1281,7 @@ def build_model_sync_parser() -> argparse.ArgumentParser:
     status.add_argument("--guard", type=Path, required=True)
     status.add_argument("--output", type=Path, required=True)
     baseline = commands.add_parser("baseline-host-a")
+    baseline.add_argument("--active-root", type=Path, required=True)
     baseline.add_argument("--wrapper", type=Path, required=True)
     baseline.add_argument("--env-file", type=Path, required=True)
     baseline.add_argument("--external-backup", type=Path, required=True)
