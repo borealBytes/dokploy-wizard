@@ -8,6 +8,7 @@ import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import dokploy_wizard.proof.model_sync_state as state
 from dokploy_wizard import proof
 from dokploy_wizard.proof import (
     REQUIRED_RESULT_KEYS as REQUIRED_RESULT_KEYS,
@@ -35,6 +36,7 @@ from dokploy_wizard.proof.model_sync_artifacts import (
     JsonValue,
     sha256_bytes,
     unlink_exact_regular_bytes,
+    write_or_verify_exact_bytes,
 )
 
 __all__ = ("REQUIRED_RESULT_KEYS",)
@@ -90,7 +92,10 @@ def assert_followup_proof_contract(*, contract_name: str, receipts: tuple[str, .
 
 
 def remove_authorized_outputs(
-    paths: proof.ProofRecoveryPaths, attestation: proof.BaselineAttestation
+    paths: proof.ProofRecoveryPaths,
+    attestation: proof.BaselineAttestation,
+    *,
+    boundary_hook: proof.BoundaryHook = proof.ignore_finalization_boundary,
 ) -> None:
     for name, path in proof.output_paths(paths).items():
         if not os.path.lexists(path):
@@ -102,12 +107,36 @@ def remove_authorized_outputs(
             unlink_exact_regular_bytes(path, content)
         except CaptureSchemaError as error:
             raise proof.AbortGuardError("generated output changed during rollback") from error
+        boundary_hook(proof.FinalizationBoundary.ROLLBACK_OUTPUT_UNLINKED)
     expected_result = proof.result_bytes_from_attestation(attestation)
     proof.require_generated_bounds({}, expected_result)
     try:
         unlink_exact_regular_bytes(paths.output, expected_result)
     except CaptureSchemaError as error:
         raise proof.AbortGuardError("result output changed during rollback") from error
+
+
+def complete_resumable_finalization(
+    recovery: proof.ProofRecovery,
+    *,
+    boundary_hook: proof.BoundaryHook = proof.ignore_finalization_boundary,
+) -> None:
+    if recovery.claim is None or not recovery.resumable:
+        raise proof.AbortGuardError("no resumable finalization is active")
+    guard = state.read_abort_guard(recovery.paths.guard_path)
+    if guard.attestation is None:
+        raise proof.AbortGuardError("finalization intent has no attestation")
+    result = proof.result_bytes_from_attestation(guard.attestation)
+    proof.require_generated_bounds({}, result)
+    write_or_verify_exact_bytes(recovery.paths.output, result)
+    boundary_hook(proof.FinalizationBoundary.RESULT_PUBLISHED)
+    proof.verify_attestation(
+        recovery.paths,
+        state.read_abort_guard(recovery.paths.guard_path),
+        require_result=True,
+    )
+    state.complete_abort_guard(recovery.paths.guard_path, claim_token=recovery.claim.token)
+    boundary_hook(proof.FinalizationBoundary.COMPLETE_GUARD)
 
 
 def collect_coder_array_pages(

@@ -8,7 +8,7 @@ from typing import Never
 
 import pytest
 
-from dokploy_wizard.proof import EnvReceipt, model_sync_env
+from dokploy_wizard.proof import EnvReceipt, model_sync_artifacts, model_sync_env
 from dokploy_wizard.proof.model_sync_env import (
     EnvPreparationError,
     prepare_proof_env,
@@ -752,7 +752,7 @@ def test_validation_temp_is_removed_on_catchable_failure(
         raise SystemExit("parser exited")
 
     if failure == "write":
-        monkeypatch.setattr(model_sync_env, "_write_all", fail_write)
+        monkeypatch.setattr(model_sync_artifacts, "_write_all", fail_write)
         expected: type[BaseException] = OSError
     elif failure == "fsync":
         monkeypatch.setattr(os, "fsync", fail_fsync)
@@ -794,7 +794,7 @@ def test_namespace_temp_is_removed_on_catchable_failure(
 
     monkeypatch.setattr(model_sync_env, "_proof_bytes", keep_original)
     if failure == "write":
-        monkeypatch.setattr(model_sync_env, "_write_all", fail_write)
+        monkeypatch.setattr(model_sync_artifacts, "_write_all", fail_write)
         expected: type[BaseException] = OSError
     elif failure == "fsync":
         monkeypatch.setattr(os, "fsync", fail_fsync)

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import filecmp
 import hashlib
 import json
@@ -12,8 +13,9 @@ import selectors
 import stat
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from ipaddress import ip_address
 from pathlib import Path, PurePosixPath
 from typing import Final, Literal, NamedTuple, TypeAlias
@@ -107,6 +109,30 @@ REQUIRED_RESULT_KEYS: Final = frozenset(
         "source_base_commit",
     }
 )
+
+
+class FinalizationBoundary(StrEnum):
+    FINALIZE_INTENT = "finalize-intent"
+    BASELINE_PUBLISHED = "baseline-published"
+    HOST_A_PREFLIGHT_PUBLISHED = "host-a-preflight-published"
+    HOST_B_PREFLIGHT_PUBLISHED = "host-b-preflight-published"
+    RESULT_PUBLISHED = "result-published"
+    COMPLETE_GUARD = "complete-guard"
+    ROLLBACK_OUTPUT_UNLINKED = "rollback-output-unlinked"
+    ROLLBACK_ENV_RESTORED = "rollback-env-restored"
+    ROLLBACK_BACKUP_UNLINKED = "rollback-backup-unlinked"
+
+
+BoundaryHook: TypeAlias = Callable[[FinalizationBoundary], None]
+FINALIZATION_OUTPUT_BOUNDARIES: Final = {
+    "baseline.json": FinalizationBoundary.BASELINE_PUBLISHED,
+    "host-a-preflight.json": FinalizationBoundary.HOST_A_PREFLIGHT_PUBLISHED,
+    "host-b-preflight.json": FinalizationBoundary.HOST_B_PREFLIGHT_PUBLISHED,
+}
+
+
+def ignore_finalization_boundary(_boundary: FinalizationBoundary) -> None:
+    """Keep boundary injection inert outside deterministic crash tests."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1110,6 +1136,47 @@ class ProofRecovery:
     resumable: bool
 
 
+def build_model_sync_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="model-sync-live-proof")
+    commands = parser.add_subparsers(dest="command", required=True)
+    finalize = commands.add_parser("atomic-finalize")
+    finalize.add_argument("--temp", type=Path, required=True)
+    finalize.add_argument("--output", type=Path, required=True)
+    status = commands.add_parser("abort-status")
+    status.add_argument("--guard", type=Path, required=True)
+    status.add_argument("--output", type=Path, required=True)
+    baseline = commands.add_parser("baseline-host-a")
+    baseline.add_argument("--wrapper", type=Path, required=True)
+    baseline.add_argument("--env-file", type=Path, required=True)
+    baseline.add_argument("--external-backup", type=Path, required=True)
+    baseline.add_argument("--abort-guard", type=Path, required=True)
+    baseline.add_argument("--host-env", required=True)
+    baseline.add_argument("--password-env", required=True)
+    baseline.add_argument("--host-b-env", required=True)
+    baseline.add_argument("--host-b-password-env", required=True)
+    baseline.add_argument("--source-base-commit", required=True)
+    baseline.add_argument("--proof-commit", required=True)
+    baseline.add_argument("--artifact-dir", type=Path, required=True)
+    baseline.add_argument("--output", type=Path, required=True)
+    return parser
+
+
+def self_start_time_ticks() -> str:
+    return process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8"))
+
+
+def abort_status_payload(status: AbortGuard) -> dict[str, str | int | None]:
+    if status.phase != "complete" or status.claimant_kind != "plan":
+        raise AbortGuardError("abort guard has unresolved recovery state")
+    return {
+        "state": status.state,
+        "phase": status.phase,
+        "claimant_kind": status.claimant_kind,
+        "pid": status.pid,
+        "start_time_ticks": status.start_time_ticks,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class BaselineResultEvidence:
     source_base_commit: str
@@ -1319,6 +1386,24 @@ def baseline_output_hashes(evidence: BaselineResultEvidence) -> dict[str, str]:
         "host-b-preflight.json": evidence.host_b_preflight_sha256,
         "protected-artifacts-before.txt": evidence.protected_artifacts_before_sha256,
     }
+
+
+def build_baseline_attestation(
+    evidence: BaselineResultEvidence,
+    *,
+    guard_id: str,
+    result_path: Path,
+) -> BaselineAttestation:
+    body = build_result(baseline_result_values(evidence))
+    return BaselineAttestation(
+        guard_id,
+        str(evidence.guard_path.resolve()),
+        str(evidence.artifact_dir.resolve()),
+        str(result_path.resolve()),
+        evidence.env_receipt,
+        baseline_output_hashes(evidence),
+        {key: value for key, value in body.items() if key != "abort_guard_sha256"},
+    )
 
 
 def require_generated_bounds(payloads: Mapping[str, bytes], result: bytes) -> None:

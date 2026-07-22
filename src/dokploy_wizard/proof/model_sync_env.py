@@ -7,18 +7,14 @@ import tempfile
 from pathlib import Path
 from typing import Final
 
+import dokploy_wizard.proof.model_sync_artifacts as artifacts
+from dokploy_wizard import proof
 from dokploy_wizard.proof import (
     EnvPreparationError,
     EnvReceipt,
     PreparedEnv,
     ProofNamespace,
     read_bounded_regular_bytes,
-)
-from dokploy_wizard.proof.model_sync_artifacts import (
-    _fsync_directory,
-    _write_all,
-    atomic_write_bytes,
-    sha256_bytes,
 )
 from dokploy_wizard.proof.model_sync_results import ProofTransport
 from dokploy_wizard.proof.model_sync_state import (
@@ -35,7 +31,6 @@ from dokploy_wizard.state import (
 )
 
 __all__ = ("EnvPreparationError", "PreparedEnv", "ProofNamespace")
-
 _FILE_MODE: Final = 0o600
 _DIRECTORY_MODE: Final = 0o700
 _MAX_ENV_BYTES: Final = 256 * 1024
@@ -71,8 +66,8 @@ def prepare_proof_env(
     _require_armed_guard(guard_path)
     original, mode = _read_regular_bytes(env_file, None)
     proof = _proof_bytes(original, env_file.parent)
-    original_sha256 = sha256_bytes(original)
-    proof_sha256 = sha256_bytes(proof)
+    original_sha256 = artifacts.sha256_bytes(original)
+    proof_sha256 = artifacts.sha256_bytes(proof)
     receipt = EnvReceipt(
         str(env_file.resolve()),
         str(backup_path.resolve()),
@@ -90,9 +85,9 @@ def prepare_proof_env(
     if not backup_path.exists():
         backup_path.parent.mkdir(parents=True, exist_ok=True)
         backup_path.parent.chmod(_DIRECTORY_MODE)
-        atomic_write_bytes(backup_path, original, mode=_FILE_MODE)
+        artifacts.atomic_write_bytes(backup_path, original, mode=_FILE_MODE)
     if proof != original:
-        atomic_write_bytes(env_file, proof, mode=_FILE_MODE)
+        artifacts.atomic_write_bytes(env_file, proof, mode=_FILE_MODE)
     record_proof_active(guard_path, claim_token=claim_token)
     return PreparedEnv(env_file, backup_path, original_sha256, proof_sha256, mode)
 
@@ -132,11 +127,16 @@ def resolve_proof_namespace(env_file: Path) -> ProofNamespace:
     )
 
 
-def restore_proof_env(*, prepared: PreparedEnv, guard_path: Path) -> None:
+def restore_proof_env(
+    *,
+    prepared: PreparedEnv,
+    guard_path: Path,
+    boundary_hook: proof.BoundaryHook = proof.ignore_finalization_boundary,
+) -> None:
     """Restore only exact recognized proof bytes and retain durable plan ownership."""
     _require_armed_guard(guard_path)
     current, _mode = _read_regular_bytes(prepared.env_file, None)
-    current_sha256 = sha256_bytes(current)
+    current_sha256 = artifacts.sha256_bytes(current)
     if current_sha256 not in {prepared.original_sha256, prepared.proof_sha256}:
         raise EnvPreparationError("proof env has an unknown current hash")
     if not os.path.lexists(prepared.backup_path):
@@ -144,11 +144,13 @@ def restore_proof_env(*, prepared: PreparedEnv, guard_path: Path) -> None:
             raise EnvPreparationError("proof env requires its original external backup")
         return
     backup, _mode = _read_regular_bytes(prepared.backup_path, _FILE_MODE)
-    if sha256_bytes(backup) != prepared.original_sha256:
+    if artifacts.sha256_bytes(backup) != prepared.original_sha256:
         raise EnvPreparationError("external backup does not match the recorded original hash")
-    atomic_write_bytes(prepared.env_file, backup, mode=prepared.mode)
+    artifacts.atomic_write_bytes(prepared.env_file, backup, mode=prepared.mode)
+    boundary_hook(proof.FinalizationBoundary.ROLLBACK_ENV_RESTORED)
     os.unlink(prepared.backup_path)
-    _fsync_directory(prepared.backup_path.parent)
+    artifacts._fsync_directory(prepared.backup_path.parent)
+    boundary_hook(proof.FinalizationBoundary.ROLLBACK_BACKUP_UNLINKED)
 
 
 def _proof_bytes(original: bytes, parent: Path) -> bytes:
@@ -210,7 +212,7 @@ def _parse_bytes(content: bytes, parent: Path, prefix: str) -> RawEnvInput:
     try:
         try:
             os.fchmod(descriptor, _FILE_MODE)
-            _write_all(descriptor, content)
+            artifacts._write_all(descriptor, content)
             os.fsync(descriptor)
         except BaseException:
             try:
