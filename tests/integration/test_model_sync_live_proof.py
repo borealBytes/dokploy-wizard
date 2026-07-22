@@ -266,14 +266,16 @@ def _legacy_sha(target: str, pointer: str) -> str:
 
 
 def _preflight_wire(machine_id: str) -> str:
+    planes = {
+        plane: {"resources": [], "state": "absent"}
+        for plane in ("cloudflare", "coder", "docker", "dokploy", "tailscale")
+    }
+    planes["docker"]["provenance"] = "docker_available_inventory"
     return json.dumps(
         {
             "architecture": "x86_64",
             "machine_id": machine_id,
-            "planes": {
-                plane: {"resources": [], "state": "absent"}
-                for plane in ("cloudflare", "coder", "docker", "dokploy", "tailscale")
-            },
+            "planes": planes,
             "schema_version": 2,
         }
     )
@@ -355,6 +357,8 @@ def _command_fixture(
         if key[:2] == ("docker", "ps"):
             if failure == "docker-timeout":
                 raise subprocess.TimeoutExpired(command, 20)
+            if failure == "docker-permission":
+                return subprocess.CompletedProcess(command, 1, b"", b"permission denied")
             if failure == "docker-malformed":
                 return subprocess.CompletedProcess(command, 0, b"{", b"")
             rows = [] if empty else [
@@ -369,6 +373,8 @@ def _command_fixture(
         if key[:2] == ("docker", "info"):
             return subprocess.CompletedProcess(command, 0, b"active\n", b"")
         if key[:3] == ("docker", "service", "ls"):
+            if failure == "docker-service-unreadable":
+                return subprocess.CompletedProcess(command, 125, b"", b"service inventory unavailable")
             service_rows = [] if empty else ["service-other\tother-service\tbusybox:latest"]
             if matching:
                 service_rows.extend(
@@ -571,6 +577,8 @@ def _collect_planes(
     many_coder: bool = False,
     matching: bool = False,
     failure: str | None = None,
+    docker_evidence: frozenset[str] = frozenset({"/var/run/docker.sock"}),
+    docker_runtime: bool = False,
     missing_tailscale: bool = False,
     template_count: int | None = None,
     template_malformed: bool = False,
@@ -593,12 +601,18 @@ def _collect_planes(
         template_malformed=template_malformed,
         template_requests=template_requests,
     )
-    scope["_which"] = lambda command: (
-        None
-        if (missing_tailscale and command == "tailscale")
-        or (failure == "docker-missing" and command == "docker")
-        else command
-    )
+
+    def which(command: str) -> str | None:
+        if command in {"dockerd", "containerd"}:
+            return command if docker_runtime else None
+        if (missing_tailscale and command == "tailscale") or (
+            failure == "docker-missing" and command == "docker"
+        ):
+            return None
+        return command
+
+    scope["_which"] = which
+    scope["_path_exists"] = lambda path: path in docker_evidence
     result = scope["_collect_planes"](
         _transport_fixture(tailscale_required=matching or missing_tailscale)
     )
@@ -619,6 +633,96 @@ def test_authoritative_collectors_report_successful_empty_planes() -> None:
     }
     assert planes["coder"]["resources"] == []
     assert planes["tailscale"]["resources"] == []
+
+
+def test_authoritative_collectors_accept_complete_docker_absence() -> None:
+    planes = _collect_planes(
+        empty=True,
+        failure="docker-missing",
+        docker_evidence=frozenset(),
+    )
+
+    assert planes["docker"] == {
+        "provenance": "docker_absent_clean",
+        "resources": [],
+        "state": "absent",
+    }
+
+
+def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> None:
+    source = Path(model_sync_results.__file__).read_text(encoding="utf-8")
+
+    assert source.count("_PREFLIGHT_ENCODED =") == 1
+    assert "_PREFLIGHT_ENCODED_V2" not in source
+    assert ".replace(" not in source
+    assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
+        "893de62a7d9a52b138d5bef8218734794bf6f989562a2eae3a97547428b57ea8"
+    )
+    assert "def _docker_absent_clean():" in model_sync_results.PREFLIGHT_SCRIPT
+    assert '_which("dockerd") is None' in model_sync_results.PREFLIGHT_SCRIPT
+    assert '_which("containerd") is None' in model_sync_results.PREFLIGHT_SCRIPT
+    assert '"/var/run/docker.sock"' in model_sync_results.PREFLIGHT_SCRIPT
+    assert '"/var/lib/docker"' in model_sync_results.PREFLIGHT_SCRIPT
+    assert '"/etc/systemd/system/docker.service"' in model_sync_results.PREFLIGHT_SCRIPT
+    assert 'return [], [], "docker_absent_clean"' in model_sync_results.PREFLIGHT_SCRIPT
+
+
+def test_programmatic_probe_rejects_missing_docker_provenance() -> None:
+    probe = model_sync_remote.RemoteProbe(
+        machine_sha256="a" * 64,
+        ssh_sha256="b" * 64,
+        boot_sha256="c" * 64,
+        architecture="amd64",
+        namespace_clean=True,
+        inventory={plane: () for plane in ("cloudflare", "coder", "docker", "dokploy", "tailscale")},
+        plane_states={
+            plane: "absent"
+            for plane in ("cloudflare", "coder", "docker", "dokploy", "tailscale")
+        },
+        plane_provenance={},
+    )
+
+    with pytest.raises(model_sync_remote.RemoteProofError, match="docker plane provenance"):
+        probe.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("docker_evidence", "docker_runtime"),
+    [
+        (frozenset({"/var/run/docker.sock"}), False),
+        (frozenset({"/usr/bin/docker"}), False),
+        (frozenset({"/etc/systemd/system/docker.service"}), False),
+        (frozenset({"/var/lib/docker"}), False),
+        (frozenset({"/run/containerd/containerd.sock"}), False),
+        (frozenset(), True),
+    ],
+)
+def test_authoritative_collectors_reject_contradictory_docker_absence(
+    docker_evidence: frozenset[str],
+    docker_runtime: bool,
+) -> None:
+    planes = _collect_planes(
+        empty=True,
+        failure="docker-missing",
+        docker_evidence=docker_evidence,
+        docker_runtime=docker_runtime,
+    )
+
+    assert planes["docker"] == {
+        "provenance": "docker_error",
+        "resources": [],
+        "state": "error",
+    }
+
+
+def test_authoritative_collectors_reject_docker_cli_without_socket() -> None:
+    planes = _collect_planes(empty=True, docker_evidence=frozenset())
+
+    assert planes["docker"] == {
+        "provenance": "docker_error",
+        "resources": [],
+        "state": "error",
+    }
 
 
 def test_authoritative_collectors_report_matching_and_nonmatching_resources() -> None:
@@ -666,6 +770,10 @@ def test_authoritative_collectors_report_matching_and_nonmatching_resources() ->
         "template",
         "workspace",
     }
+    assert result.plane_provenance["docker"] == "docker_available_inventory"
+    assert any(
+        resource.name == "proof-stack-coder" for resource in result.inventory["docker"]
+    )
 
 
 def test_coder_preflight_collects_all_identifiers_beyond_first_page() -> None:
@@ -729,8 +837,9 @@ def test_coder_preflight_fails_closed_for_malformed_template_response() -> None:
         ("coder-malformed", "coder"),
         ("coder-partial", "coder"),
         ("docker-timeout", "docker"),
-        ("docker-missing", "docker"),
+        ("docker-permission", "docker"),
         ("docker-malformed", "docker"),
+        ("docker-service-unreadable", "docker"),
         ("tailscale-malformed", "tailscale"),
     ],
 )
@@ -739,13 +848,45 @@ def test_authoritative_collectors_turn_failures_into_blocking_plane_errors(
 ) -> None:
     planes = _collect_planes(matching=True, failure=failure)
 
-    assert planes[failed_plane] == {"resources": [], "state": "error"}
+    expected = {"resources": [], "state": "error"}
+    if failed_plane == "docker":
+        expected["provenance"] = "docker_error"
+    assert planes[failed_plane] == expected
 
 
 def test_authoritative_tailscale_collector_blocks_missing_required_command() -> None:
     planes = _collect_planes(missing_tailscale=True)
 
     assert planes["tailscale"] == {"resources": [], "state": "error"}
+
+
+@pytest.mark.parametrize(
+    ("state", "provenance"),
+    [
+        ("absent", "docker_error"),
+        ("error", "docker_available_inventory"),
+        ("present", "docker_absent_clean"),
+    ],
+)
+def test_preflight_parser_rejects_inconsistent_docker_provenance(
+    state: str,
+    provenance: str,
+) -> None:
+    payload = json.loads(_preflight_wire("machine-a"))
+    payload["planes"]["docker"] = {
+        "provenance": provenance,
+        "resources": [] if state != "present" else [{"id": "docker", "kind": "container", "name": "docker"}],
+        "state": state,
+    }
+    namespace = ProofNamespace("proof-stack", (), (), (), (), ())
+
+    with pytest.raises(model_sync_remote.RemoteProofError, match="docker plane provenance is inconsistent"):
+        model_sync_remote.parse_preflight(
+            json.dumps(payload),
+            namespace,
+            ssh_key="ssh-a",
+            boot_id="11111111-1111-1111-1111-111111111111",
+        )
 
 
 def test_preflight_parser_rejects_error_state_and_duplicate_ids() -> None:
@@ -760,6 +901,27 @@ def test_preflight_parser_rejects_error_state_and_duplicate_ids() -> None:
             boot_id="11111111-1111-1111-1111-111111111111",
         )
 
+    payload = json.loads(_preflight_wire("machine-a"))
+    payload["planes"]["docker"].pop("provenance")
+    with pytest.raises(model_sync_remote.RemoteProofError, match="docker resource objects"):
+        model_sync_remote.parse_preflight(
+            json.dumps(payload),
+            namespace,
+            ssh_key="ssh-a",
+            boot_id="11111111-1111-1111-1111-111111111111",
+        )
+
+    payload = json.loads(_preflight_wire("machine-a"))
+    payload["planes"]["docker"]["provenance"] = "docker_error"
+    with pytest.raises(model_sync_remote.RemoteProofError, match="docker plane provenance is inconsistent"):
+        model_sync_remote.parse_preflight(
+            json.dumps(payload),
+            namespace,
+            ssh_key="ssh-a",
+            boot_id="11111111-1111-1111-1111-111111111111",
+        )
+
+    payload = json.loads(_preflight_wire("machine-a"))
     payload["planes"]["cloudflare"] = {
         "resources": [
             {"id": "duplicate", "kind": "tunnel", "name": "one"},
