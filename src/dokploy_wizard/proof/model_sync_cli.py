@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import FrameType
-from typing import Sequence
+from typing import Sequence, assert_never
 
 from dokploy_wizard import proof
 from dokploy_wizard.proof.model_sync_artifacts import write_protected_manifest
@@ -28,7 +28,8 @@ from dokploy_wizard.proof.model_sync_host_a import (
     recover_interrupted_proof,
 )
 from dokploy_wizard.proof.model_sync_host_b import HostIdentity, assert_namespace_identity
-from dokploy_wizard.proof.model_sync_remote import capture_host_a_snapshot, probe_host
+from dokploy_wizard.proof.model_sync_identity import HostInputNames, resolve_host_inputs
+from dokploy_wizard.proof.model_sync_remote import RemoteProbe, capture_host_a_snapshot, probe_host
 from dokploy_wizard.proof.model_sync_results import run_bounded_process
 from dokploy_wizard.proof.model_sync_state import AbortGuardError, read_abort_guard
 
@@ -65,7 +66,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _baseline_host_a(args: argparse.Namespace) -> None:
-    host_a, password_a, host_b, password_b = _required_inputs(args)
+    mode: proof.HostIdentityMode = (
+        "single_sequential" if args.single_host_sequential else "distinct"
+    )
+    host_a, password_a, host_b, password_b = resolve_host_inputs(
+        HostInputNames(
+            args.host_env,
+            args.password_env,
+            args.host_b_env,
+            args.host_b_password_env,
+        ),
+        mode,
+    )
     repository_root = _require_active_workspace_root(args.wrapper)
     recovery = begin_proof_recovery(
         paths=proof.ProofRecoveryPaths(
@@ -106,21 +118,33 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         host_a_probe = probe_host(
             host=host_a, password=password_a, namespace=namespace, proof_transport=transport
         )
-        host_b_probe = probe_host(
-            host=host_b, password=password_b, namespace=namespace, proof_transport=transport
-        )
         identity_a = HostIdentity(
             host_a_probe.machine_sha256,
             host_a_probe.ssh_sha256,
             host_a_probe.architecture,
         )
-        identity_b = HostIdentity(
-            host_b_probe.machine_sha256,
-            host_b_probe.ssh_sha256,
-            host_b_probe.architecture,
-        )
-        assert_namespace_identity(host_a=identity_a, host_b=identity_b)
-        if not host_a_probe.namespace_clean or not host_b_probe.namespace_clean:
+        match mode:
+            case "distinct":
+                distinct_host_b = probe_host(
+                    host=host_b,
+                    password=password_b,
+                    namespace=namespace,
+                    proof_transport=transport,
+                )
+                identity_b = HostIdentity(
+                    distinct_host_b.machine_sha256,
+                    distinct_host_b.ssh_sha256,
+                    distinct_host_b.architecture,
+                )
+                assert_namespace_identity(host_a=identity_a, host_b=identity_b)
+                host_b_probe: RemoteProbe | None = distinct_host_b
+            case "single_sequential":
+                host_b_probe = None
+            case unexpected:
+                assert_never(unexpected)
+        if not host_a_probe.namespace_clean or (
+            host_b_probe is not None and not host_b_probe.namespace_clean
+        ):
             raise RuntimeError("managed namespace residue blocks live baseline proof")
         _run_wrapper(args.wrapper, host_a, password_a, args.env_file)
         baseline = parse_captured_baseline(
@@ -138,6 +162,7 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
                 prepared=prepared,
                 guard_path=args.abort_guard,
                 claim=recovery.claim,
+                host_identity_mode=mode,
                 host_a=host_a_probe,
                 host_b=host_b_probe,
                 baseline=baseline,
@@ -152,23 +177,6 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         _restore_recovery_handlers(previous_handlers)
         if not completed:
             recover_interrupted_proof(recovery)
-
-
-def _required_inputs(args: argparse.Namespace) -> tuple[str, str, str, str]:
-    names = (args.host_env, args.password_env, args.host_b_env, args.host_b_password_env)
-    host_a = os.environ.get(args.host_env)
-    password_a = os.environ.get(args.password_env)
-    host_b = os.environ.get(args.host_b_env)
-    password_b = os.environ.get(args.host_b_password_env)
-    values = (host_a, password_a, host_b, password_b)
-    if any(value is None or value == "" for value in values):
-        missing = ", ".join(name for name, value in zip(names, values, strict=True) if not value)
-        raise RuntimeError(f"missing required external inputs: {missing}")
-    assert host_a is not None
-    assert password_a is not None
-    assert host_b is not None
-    assert password_b is not None
-    return host_a, password_a, host_b, password_b
 
 
 def _require_active_workspace_root(wrapper: Path) -> Path:

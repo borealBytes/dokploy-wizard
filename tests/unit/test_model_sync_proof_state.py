@@ -47,7 +47,8 @@ from dokploy_wizard.proof.model_sync_state import (
 def _valid_result_values(tmp_path: Path, receipt: EnvReceipt) -> dict[str, JsonValue]:
     artifact_dir = tmp_path / "artifacts"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "host_identity_mode": "distinct",
         "source_base_commit": "a" * 40,
         "proof_commit": "b" * 40,
         "coder_image_digest": "ghcr.io/coder/coder@sha256:" + "1" * 64,
@@ -68,6 +69,9 @@ def _valid_result_values(tmp_path: Path, receipt: EnvReceipt) -> dict[str, JsonV
         "host_b_preflight_sha256": "e" * 64,
         "host_identities_distinct": True,
         "host_architectures_equal": True,
+        "single_host_lifecycle_path": None,
+        "single_host_lifecycle_sha256": None,
+        "temporal_clean_epoch_evidence": False,
         "baseline_sha256": "f" * 64,
         "protected_artifacts_before_path": str(
             (artifact_dir / "protected-artifacts-before.txt").resolve()
@@ -94,6 +98,7 @@ def _valid_attestation(tmp_path: Path, guard_id: str = "c" * 64) -> BaselineAtte
         str(artifact_dir.resolve()),
         str((artifact_dir / "result.json").resolve()),
         receipt,
+        "distinct",
         {
             "baseline.json": "f" * 64,
             "host-a-preflight.json": "d" * 64,
@@ -272,7 +277,8 @@ def test_schema_v2_guard_rejects_boolean_receipt_mode_without_mutation(tmp_path:
             "mode": True,
             "original_sha256": "a" * 64,
             "proof_sha256": "b" * 64,
-            "schema_version": 1,
+            "schema_version": 2,
+            "host_identity_mode": "distinct",
         },
         "guard_id": "c" * 64,
         "phase": "env_intent",
@@ -897,7 +903,8 @@ def test_confirm_receipt_rejects_malformed_guard_without_mutation(tmp_path: Path
 def test_result_accepts_non_placeholder_captured_values() -> None:
     result = build_result(
         {
-            "schema_version": 1,
+            "schema_version": 2,
+            "host_identity_mode": "distinct",
             "source_base_commit": "a" * 40,
             "proof_commit": "b" * 40,
             "coder_image_digest": "ghcr.io/coder/coder@sha256:" + "1" * 64,
@@ -918,6 +925,9 @@ def test_result_accepts_non_placeholder_captured_values() -> None:
             "host_b_preflight_sha256": "e" * 64,
             "host_identities_distinct": True,
             "host_architectures_equal": True,
+            "single_host_lifecycle_path": None,
+            "single_host_lifecycle_sha256": None,
+            "temporal_clean_epoch_evidence": False,
             "baseline_sha256": "f" * 64,
             "protected_artifacts_before_path": "/tmp/manifest",
             "protected_artifacts_before_sha256": "0f" * 32,
@@ -931,7 +941,8 @@ def test_result_accepts_non_placeholder_captured_values() -> None:
 
 def test_result_rejects_placeholder_and_zero_capture_values() -> None:
     values: dict[str, JsonValue] = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "host_identity_mode": "distinct",
         "source_base_commit": "a" * 40,
         "proof_commit": "b" * 40,
         "coder_image_digest": "unavailable-before-capture",
@@ -947,6 +958,9 @@ def test_result_rejects_placeholder_and_zero_capture_values() -> None:
         "host_b_preflight_sha256": "e" * 64,
         "host_identities_distinct": True,
         "host_architectures_equal": True,
+        "single_host_lifecycle_path": None,
+        "single_host_lifecycle_sha256": None,
+        "temporal_clean_epoch_evidence": False,
         "baseline_sha256": "f" * 64,
         "protected_artifacts_before_path": "/tmp/manifest",
         "protected_artifacts_before_sha256": "0" * 64,
@@ -984,7 +998,8 @@ def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
     record_proof_active(guard_path, claim_token="a" * 32)
     result = build_result(
         {
-            "schema_version": 1,
+            "schema_version": 2,
+            "host_identity_mode": "distinct",
             "source_base_commit": "a" * 40,
             "proof_commit": "b" * 40,
             "coder_image_digest": "ghcr.io/coder/coder@sha256:" + "1" * 64,
@@ -1005,6 +1020,9 @@ def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
             "host_b_preflight_sha256": "e" * 64,
             "host_identities_distinct": True,
             "host_architectures_equal": True,
+            "single_host_lifecycle_path": None,
+            "single_host_lifecycle_sha256": None,
+            "temporal_clean_epoch_evidence": False,
             "baseline_sha256": "f" * 64,
             "protected_artifacts_before_path": str(
                 (artifact_dir / "protected-artifacts-before.txt").resolve()
@@ -1020,6 +1038,7 @@ def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
         artifact_dir=str(artifact_dir.resolve()),
         result_path=str((artifact_dir / "result.json").resolve()),
         env_receipt=receipt,
+        host_identity_mode="distinct",
         output_sha256={
             "baseline.json": "f" * 64,
             "host-a-preflight.json": "d" * 64,
@@ -1395,7 +1414,7 @@ def test_baseline_attestation_round_trip_preserves_exact_canonical_bytes(
     assert canonical_json_bytes(parsed.to_payload()) == raw
 
 
-def test_baseline_attestation_v1_rejects_missing_and_extra_keys(tmp_path: Path) -> None:
+def test_baseline_attestation_v2_rejects_missing_and_extra_keys(tmp_path: Path) -> None:
     payload = _valid_attestation(tmp_path).to_payload()
     missing = dict(payload)
     missing.pop("result_path")
@@ -1413,6 +1432,7 @@ def test_baseline_attestation_v1_rejects_missing_and_extra_keys(tmp_path: Path) 
     [
         ("schema_version", True),
         ("kind", 1),
+        ("host_identity_mode", "single_sequential"),
         ("guard_id", 1),
         ("guard_path", "relative/guard.json"),
         ("artifact_dir", "relative/artifacts"),
@@ -1423,7 +1443,7 @@ def test_baseline_attestation_v1_rejects_missing_and_extra_keys(tmp_path: Path) 
         ("result_body", []),
     ],
 )
-def test_baseline_attestation_v1_rejects_wrong_types(
+def test_baseline_attestation_v2_rejects_wrong_types(
     tmp_path: Path,
     field: str,
     value: JsonValue,
@@ -1461,6 +1481,21 @@ def test_attestation_result_body_keys_are_plan_keys_without_guard_hash(tmp_path:
         validate_attestation(replace(attestation, result_body=extra))
 
 
+def test_result_and_attestation_reject_host_identity_mode_relabel(tmp_path: Path) -> None:
+    # Given
+    attestation = _valid_attestation(tmp_path)
+    body = dict(attestation.result_body)
+    body["host_identity_mode"] = "single_sequential"
+
+    # When / Then
+    with pytest.raises(ValueError):
+        validate_attestation(replace(attestation, result_body=body))
+    payload = attestation.to_payload()
+    payload["host_identity_mode"] = "single_sequential"
+    with pytest.raises(ValueError):
+        parse_baseline_attestation(payload)
+
+
 @pytest.mark.parametrize(
     ("field", "mutated"),
     [
@@ -1474,6 +1509,7 @@ def test_attestation_result_body_keys_are_plan_keys_without_guard_hash(tmp_path:
         ("baseline_sha256", "5" * 64),
         ("protected_artifacts_before_sha256", "6" * 64),
         ("protected_artifacts_before_path", "/tmp/protected-artifacts-before.txt"),
+        ("host_identity_mode", "single_sequential"),
     ],
 )
 def test_attestation_rejects_each_result_cross_binding_mutation(
