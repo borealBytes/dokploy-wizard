@@ -22,9 +22,9 @@ from dokploy_wizard.proof import (
     read_guard_bytes,
     receipt_identity,
     valid_process_identity,
+    validate_attestation,
 )
 from dokploy_wizard.proof.model_sync_artifacts import atomic_write_bytes
-from dokploy_wizard.proof.model_sync_results import validate_attestation
 
 __all__ = (
     "AbortGuard",

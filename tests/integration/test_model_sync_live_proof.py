@@ -18,22 +18,22 @@ import pytest
 from dokploy_wizard.dokploy import coder as coder_module
 from dokploy_wizard.dokploy.coder import _litellm_workspace_fallback_models_json
 from dokploy_wizard.proof import (
+    ProofRecoveryPaths,
     canonical_json_bytes,
     model_sync_artifacts,
     model_sync_baseline,
     model_sync_cli,
-    model_sync_host_a,
     model_sync_host_b,
     model_sync_remote,
     model_sync_results,
+    open_protected_directory,
+    output_paths,
+    protected_bytes,
+    verify_protected_artifacts,
 )
 from dokploy_wizard.proof.model_sync_cli import main
 from dokploy_wizard.proof.model_sync_env import ProofNamespace
-from dokploy_wizard.proof.model_sync_host_a import (
-    ProofRecoveryPaths,
-    begin_proof_recovery,
-    recover_interrupted_proof,
-)
+from dokploy_wizard.proof.model_sync_host_a import begin_proof_recovery, recover_interrupted_proof
 from dokploy_wizard.proof.model_sync_host_b import (
     HostIdentity,
     assert_followup_proof_contract,
@@ -3101,7 +3101,7 @@ def test_protected_contract_reads_tolerate_arbitrary_short_reads(
     monkeypatch.setattr(Path, "read_bytes", truncated_path_read)
     monkeypatch.setattr(os, "read", short_read)
 
-    assert model_sync_host_a._protected_bytes(paths) == expected
+    assert protected_bytes(paths) == expected
 
 
 @pytest.mark.parametrize("name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"])
@@ -3144,7 +3144,7 @@ def test_protected_contract_rejects_unauthorized_file_kinds_before_read(
     monkeypatch.setattr(Path, "read_bytes", reject_unsafe_path_read)
 
     with pytest.raises(AbortGuardError):
-        model_sync_host_a._protected_bytes(paths)
+        protected_bytes(paths)
 
 
 @pytest.mark.parametrize("name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"])
@@ -3171,7 +3171,7 @@ def test_protected_contract_rejects_oversize_before_content_or_repository_read(
     monkeypatch.setattr(Path, "read_bytes", reject_oversize_path_read)
 
     with pytest.raises(AbortGuardError):
-        model_sync_host_a._protected_bytes(paths)
+        protected_bytes(paths)
 
 
 @pytest.mark.parametrize(
@@ -3185,7 +3185,7 @@ def test_protected_contract_rejects_trailing_bytes(tmp_path: Path, name: str) ->
         stream.write(b"\n")
 
     with pytest.raises(AbortGuardError):
-        model_sync_host_a._protected_bytes(paths)
+        protected_bytes(paths)
 
 
 @pytest.mark.parametrize("name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"])
@@ -3229,7 +3229,7 @@ def test_protected_contract_rejects_post_read_drift(
     monkeypatch.setattr(os, "read", mutate_after_read)
 
     with pytest.raises(AbortGuardError):
-        model_sync_host_a._protected_bytes(paths)
+        protected_bytes(paths)
     assert mutated is True
 
 
@@ -3262,7 +3262,7 @@ def test_open_directory_closes_descriptor_when_fstat_fails(
     monkeypatch.setattr(os, "close", tracked_close)
     try:
         with pytest.raises(OSError, match="injected fstat failure"):
-            model_sync_host_a._open_directory(".", parent)
+            open_protected_directory(".", parent)
         assert opened == closed
     finally:
         for descriptor in set(opened) - set(closed):
@@ -3301,7 +3301,7 @@ def test_protected_file_growth_aborts_at_streaming_bound(
     monkeypatch.setattr(os, "read", growing_read)
 
     with pytest.raises(AbortGuardError):
-        model_sync_host_a._verify_protected_artifacts(root, entries)
+        verify_protected_artifacts(root, entries)
     assert reads <= 257
 
 
@@ -3336,7 +3336,7 @@ def test_protected_file_rejects_premature_end_of_stream(
     monkeypatch.setattr(os, "read", premature_eof)
 
     with pytest.raises(AbortGuardError):
-        model_sync_host_a._verify_protected_artifacts(root, entries)
+        verify_protected_artifacts(root, entries)
 
 
 @pytest.mark.parametrize("extra_bytes", [0, 1])
@@ -3363,9 +3363,9 @@ def test_protected_aggregate_bound_accepts_exact_limit_and_rejects_overflow(
 
     if extra_bytes:
         with pytest.raises(AbortGuardError):
-            model_sync_host_a._verify_protected_artifacts(root, parsed)
+            verify_protected_artifacts(root, parsed)
     else:
-        model_sync_host_a._verify_protected_artifacts(root, parsed)
+        verify_protected_artifacts(root, parsed)
 
 
 def test_terminal_recovery_tolerates_short_reads_of_generated_outputs(
@@ -3495,7 +3495,7 @@ def test_rollback_removes_only_exact_attested_outputs(
     guard = read_abort_guard(paths.guard_path)
     assert guard.attestation is not None
     outputs = {
-        **model_sync_results.output_paths(paths),
+        **output_paths(paths),
         "result.json": paths.output,
     }
     if unknown_name is not None:
@@ -3869,9 +3869,9 @@ def test_nested_signal_does_not_interrupt_active_recovery(
     child = r'''
 import os, signal, sys
 from pathlib import Path
-from dokploy_wizard.proof import model_sync_artifacts, model_sync_cli
+from dokploy_wizard.proof import ProofRecoveryPaths, model_sync_artifacts, model_sync_cli
 from dokploy_wizard.proof.model_sync_env import prepare_proof_env
-from dokploy_wizard.proof.model_sync_host_a import ProofRecoveryPaths, begin_proof_recovery, recover_interrupted_proof
+from dokploy_wizard.proof.model_sync_host_a import begin_proof_recovery, recover_interrupted_proof
 
 env, backup, guard = map(Path, sys.argv[1:])
 repository = env.parent / "repository"
@@ -3934,9 +3934,9 @@ import hashlib
 import os
 import sys
 from pathlib import Path
-from dokploy_wizard.proof import model_sync_artifacts, model_sync_state
+from dokploy_wizard.proof import ProofRecoveryPaths, model_sync_artifacts, model_sync_state
 from dokploy_wizard.proof.model_sync_env import prepare_proof_env
-from dokploy_wizard.proof.model_sync_host_a import ProofRecoveryPaths, begin_proof_recovery
+from dokploy_wizard.proof.model_sync_host_a import begin_proof_recovery
 
 boundary, env_name, backup_name, guard_name = sys.argv[1:]
 env, backup, guard = map(Path, (env_name, backup_name, guard_name))

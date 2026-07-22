@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 import secrets
 from dataclasses import dataclass
@@ -13,13 +11,6 @@ from dokploy_wizard import proof
 from dokploy_wizard.proof.model_sync_baseline import CapturedBaseline
 from dokploy_wizard.proof.model_sync_remote import RemoteProbe
 
-GuardClaim = results.GuardClaim
-ProofRecovery = results.ProofRecovery
-ProofRecoveryPaths = results.ProofRecoveryPaths
-_open_directory = proof.open_protected_directory
-_protected_bytes = results.protected_bytes
-_verify_protected_artifacts = proof.verify_protected_artifacts
-
 
 @dataclass(frozen=True, slots=True)
 class BaselineArtifactInputs:
@@ -30,13 +21,13 @@ class BaselineArtifactInputs:
     proof_commit: str
     prepared: env.PreparedEnv
     guard_path: Path
-    claim: GuardClaim
+    claim: proof.GuardClaim
     host_a: RemoteProbe
     host_b: RemoteProbe
     baseline: CapturedBaseline
 
 
-def claim_plan_guard(*, guard_path: Path, pid: int, start_time_ticks: str) -> GuardClaim:
+def claim_plan_guard(*, guard_path: Path, pid: int, start_time_ticks: str) -> proof.GuardClaim:
     token = secrets.token_urlsafe(24)
     state.claim_abort_guard(
         guard_path,
@@ -44,24 +35,24 @@ def claim_plan_guard(*, guard_path: Path, pid: int, start_time_ticks: str) -> Gu
         start_time_ticks=start_time_ticks,
         claim_token=token,
     )
-    return GuardClaim(token, pid, start_time_ticks)
+    return proof.GuardClaim(token, pid, start_time_ticks)
 
 
 def begin_proof_recovery(
-    *, paths: ProofRecoveryPaths, pid: int, start_time_ticks: str
-) -> ProofRecovery:
+    *, paths: proof.ProofRecoveryPaths, pid: int, start_time_ticks: str
+) -> proof.ProofRecovery:
     """Reconcile disk state before issuing one new process ownership claim."""
-    _protected_bytes(paths)
+    proof.protected_bytes(paths)
     if not os.path.lexists(paths.guard_path):
-        results.assert_no_generated_outputs(paths)
+        proof.assert_no_generated_outputs(paths)
         state.arm_abort_guard(paths.guard_path)
     guard = state.read_abort_guard(paths.guard_path)
     match guard.phase:
         case "complete":
-            results.verify_attestation(paths, guard, require_result=True)
-            return ProofRecovery(paths, None, True, False)
+            proof.verify_attestation(paths, guard, require_result=True)
+            return proof.ProofRecovery(paths, None, True, False)
         case "ready":
-            results.assert_no_generated_outputs(paths)
+            proof.assert_no_generated_outputs(paths)
         case "finalize_intent":
             if (
                 guard.pid is not None
@@ -77,8 +68,16 @@ def begin_proof_recovery(
                 claim_token=token,
                 process_identity=state.process_identity_matches,
             )
-            claim = GuardClaim(token, pid, start_time_ticks)
-            recovery = ProofRecovery(paths, claim, False, _is_resumable(paths))
+            claim = proof.GuardClaim(token, pid, start_time_ticks)
+            recovery = proof.ProofRecovery(
+                paths,
+                claim,
+                False,
+                proof.attestation_is_resumable(
+                    paths,
+                    state.read_abort_guard(paths.guard_path),
+                ),
+            )
             if recovery.resumable:
                 return recovery
             recover_interrupted_proof(recovery)
@@ -91,10 +90,10 @@ def begin_proof_recovery(
         pid=pid,
         start_time_ticks=start_time_ticks,
     )
-    return ProofRecovery(paths, claim, False, False)
+    return proof.ProofRecovery(paths, claim, False, False)
 
 
-def recover_interrupted_proof(recovery: ProofRecovery) -> None:
+def recover_interrupted_proof(recovery: proof.ProofRecovery) -> None:
     """Converge a nonterminal guard to exact rollback or durable fail-closed evidence."""
     if recovery.claim is None:
         return
@@ -121,7 +120,7 @@ def recover_interrupted_proof(recovery: ProofRecovery) -> None:
                 guard_path=recovery.paths.guard_path,
             )
         if current.attestation is None:
-            results.assert_no_generated_outputs(recovery.paths)
+            proof.assert_no_generated_outputs(recovery.paths)
         else:
             results.remove_authorized_outputs(recovery.paths, current.attestation)
     except (proof.AbortGuardError, proof.CaptureSchemaError, env.EnvPreparationError, OSError):
@@ -133,16 +132,16 @@ def recover_interrupted_proof(recovery: ProofRecovery) -> None:
     state.reset_abort_guard(recovery.paths.guard_path)
 
 
-def complete_resumable_finalization(recovery: ProofRecovery) -> None:
+def complete_resumable_finalization(recovery: proof.ProofRecovery) -> None:
     if recovery.claim is None or not recovery.resumable:
         raise proof.AbortGuardError("no resumable finalization is active")
     guard = state.read_abort_guard(recovery.paths.guard_path)
     if guard.attestation is None:
         raise proof.AbortGuardError("finalization intent has no attestation")
-    result = results.result_bytes_from_attestation(guard.attestation)
-    results.require_generated_bounds({}, result)
+    result = proof.result_bytes_from_attestation(guard.attestation)
+    proof.require_generated_bounds({}, result)
     artifacts.write_or_verify_exact_bytes(recovery.paths.output, result)
-    results.verify_attestation(
+    proof.verify_attestation(
         recovery.paths,
         state.read_abort_guard(recovery.paths.guard_path),
         require_result=True,
@@ -151,7 +150,7 @@ def complete_resumable_finalization(recovery: ProofRecovery) -> None:
 
 
 def _recover_incomplete_guard(
-    paths: ProofRecoveryPaths,
+    paths: proof.ProofRecoveryPaths,
     pid: int,
     start_time_ticks: str,
     guard: proof.AbortGuard,
@@ -177,12 +176,17 @@ def _recover_incomplete_guard(
         start_time_ticks=start_time_ticks,
         claim_token=token,
     )
-    recovery = ProofRecovery(paths, GuardClaim(token, pid, start_time_ticks), False, False)
+    recovery = proof.ProofRecovery(
+        paths,
+        proof.GuardClaim(token, pid, start_time_ticks),
+        False,
+        False,
+    )
     recover_interrupted_proof(recovery)
 
 
 def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
-    paths = ProofRecoveryPaths(
+    paths = proof.ProofRecoveryPaths(
         inputs.prepared.env_file,
         inputs.prepared.backup_path,
         inputs.guard_path,
@@ -190,8 +194,8 @@ def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
         inputs.output,
         inputs.repository_root,
     )
-    results.assert_no_generated_outputs(paths)
-    manifest = _protected_bytes(paths)
+    proof.assert_no_generated_outputs(paths)
+    manifest = proof.protected_bytes(paths)
     payloads = {
         "baseline.json": proof.canonical_json_bytes(inputs.baseline.payload) + b"\n",
         "host-a-preflight.json": proof.canonical_json_bytes(inputs.host_a.to_dict()) + b"\n",
@@ -200,13 +204,23 @@ def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
     guard = state.read_abort_guard(inputs.guard_path)
     if guard.env_receipt is None:
         raise proof.AbortGuardError("proof-active guard lacks env receipt")
-    body = results.build_result(
-        results.baseline_result_values(inputs, manifest, payloads, "f" * 64)
+    evidence = proof.BaselineResultEvidence(
+        inputs.source_base_commit,
+        inputs.proof_commit,
+        inputs.baseline.images,
+        guard.env_receipt,
+        inputs.guard_path,
+        inputs.artifact_dir,
+        "f" * 64,
+        artifacts.sha256_bytes(payloads["host-a-preflight.json"]),
+        artifacts.sha256_bytes(payloads["host-b-preflight.json"]),
+        artifacts.sha256_bytes(payloads["baseline.json"]),
+        artifacts.sha256_bytes(manifest),
+        inputs.baseline.coder_secret_inventory_sha256,
+        inputs.baseline.legacy_workspace_managed_fingerprints_sha256,
     )
-    output_hashes = {
-        **{name: artifacts.sha256_bytes(value) for name, value in payloads.items()},
-        "protected-artifacts-before.txt": artifacts.sha256_bytes(manifest),
-    }
+    body = proof.build_result(proof.baseline_result_values(evidence))
+    output_hashes = proof.baseline_output_hashes(evidence)
     result_body = {key: value for key, value in body.items() if key != "abort_guard_sha256"}
     attestation = proof.BaselineAttestation(
         guard.guard_id,
@@ -217,8 +231,8 @@ def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
         output_hashes,
         result_body,
     )
-    result = results.result_bytes_from_attestation(attestation)
-    results.require_generated_bounds(payloads, result)
+    result = proof.result_bytes_from_attestation(attestation)
+    proof.require_generated_bounds(payloads, result)
     state.record_finalize_intent(
         inputs.guard_path,
         claim_token=inputs.claim.token,
@@ -227,21 +241,9 @@ def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
     for name in sorted(payloads):
         artifacts.write_or_verify_exact_bytes(inputs.artifact_dir / name, payloads[name])
     artifacts.write_or_verify_exact_bytes(inputs.output, result)
-    results.verify_attestation(
+    proof.verify_attestation(
         paths,
         state.read_abort_guard(inputs.guard_path),
         require_result=True,
     )
     state.complete_abort_guard(inputs.guard_path, claim_token=inputs.claim.token)
-
-
-def _is_resumable(paths: ProofRecoveryPaths) -> bool:
-    try:
-        results.verify_attestation(
-            paths,
-            state.read_abort_guard(paths.guard_path),
-            require_result=False,
-        )
-    except (proof.AbortGuardError, proof.CaptureSchemaError, env.EnvPreparationError, OSError):
-        return False
-    return True
