@@ -13,6 +13,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Sequence
 
+from dokploy_wizard.proof import ProofRecovery, ProofRecoveryPaths, atomic_finalize
 from dokploy_wizard.proof.model_sync_artifacts import write_protected_manifest
 from dokploy_wizard.proof.model_sync_baseline import parse_captured_baseline
 from dokploy_wizard.proof.model_sync_env import (
@@ -22,8 +23,6 @@ from dokploy_wizard.proof.model_sync_env import (
 )
 from dokploy_wizard.proof.model_sync_host_a import (
     BaselineArtifactInputs,
-    ProofRecovery,
-    ProofRecoveryPaths,
     begin_proof_recovery,
     complete_resumable_finalization,
     finalize_baseline_artifacts,
@@ -31,7 +30,7 @@ from dokploy_wizard.proof.model_sync_host_a import (
 )
 from dokploy_wizard.proof.model_sync_host_b import HostIdentity, assert_namespace_identity
 from dokploy_wizard.proof.model_sync_remote import capture_host_a_snapshot, probe_host
-from dokploy_wizard.proof.model_sync_results import atomic_finalize, run_bounded_process
+from dokploy_wizard.proof.model_sync_results import run_bounded_process
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuard,
     AbortGuardError,

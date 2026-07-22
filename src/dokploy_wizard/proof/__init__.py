@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import filecmp
 import hashlib
 import json
 import os
 import re
+import selectors
 import stat
+import subprocess
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -24,6 +28,12 @@ _READ_CHUNK_BYTES: Final = 64 * 1024
 _MAX_PROTECTED_ENTRIES: Final = 1_024
 _MAX_PROTECTED_FILE_BYTES: Final = 16 * 1024 * 1024
 _MAX_PROTECTED_TOTAL_BYTES: Final = 64 * 1024 * 1024
+_MAX_PROTECTED_MANIFEST_BYTES: Final = 256 * 1024
+_MAX_PROTECTED_RECEIPT_BYTES: Final = 256
+_MAX_DATA_OUTPUT_BYTES: Final = 16 * 1024 * 1024
+_MAX_RESULT_BYTES: Final = 256 * 1024
+_RESULT_DIGEST = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
+_RESULT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 ProtectedManifestEntry = NamedTuple(
@@ -682,10 +692,7 @@ def _hash_protected_file(
             break
         file_bytes += len(chunk)
         total_bytes += len(chunk)
-        if (
-            file_bytes > _MAX_PROTECTED_FILE_BYTES
-            or total_bytes > _MAX_PROTECTED_TOTAL_BYTES
-        ):
+        if file_bytes > _MAX_PROTECTED_FILE_BYTES or total_bytes > _MAX_PROTECTED_TOTAL_BYTES:
             raise AbortGuardError("protected artifact grew beyond its bound")
         digest.update(chunk)
     after = os.fstat(descriptor)
@@ -706,9 +713,7 @@ def verify_protected_artifacts(
     aggregate_bytes = 0
     try:
         for entry in entries:
-            parent, identities = _open_protected_parent(
-                root_descriptor, entry.path.parts[:-1]
-            )
+            parent, identities = _open_protected_parent(root_descriptor, entry.path.parts[:-1])
             try:
                 descriptor = os.open(
                     entry.path.parts[-1],
@@ -839,10 +844,7 @@ def validate_baseline_attestation_bindings(attestation: BaselineAttestation) -> 
     }
     if set(attestation.output_sha256) != expected_outputs:
         raise ValueError("abort guard attestation outputs are invalid")
-    outputs = {
-        key: _hash(value)
-        for key, value in attestation.output_sha256.items()
-    }
+    outputs = {key: _hash(value) for key, value in attestation.output_sha256.items()}
     body = attestation.result_body
     if frozenset(body) != REQUIRED_RESULT_KEYS - frozenset({"abort_guard_sha256"}):
         raise ValueError("abort guard attestation result keys are invalid")
@@ -858,9 +860,8 @@ def validate_baseline_attestation_bindings(attestation: BaselineAttestation) -> 
         "protected_artifacts_before_path": f"{artifact_dir}/protected-artifacts-before.txt",
         "protected_artifacts_before_sha256": outputs["protected-artifacts-before.txt"],
     }
-    if (
-        result_path != f"{artifact_dir}/result.json"
-        or any(body[key] != value for key, value in expected_bindings.items())
+    if result_path != f"{artifact_dir}/result.json" or any(
+        body[key] != value for key, value in expected_bindings.items()
     ):
         raise ValueError("abort guard attestation bindings are invalid")
 
@@ -878,11 +879,7 @@ def parse_abort_guard(value: JsonValue) -> AbortGuard:
         "start_time_ticks",
         "state",
     }
-    if (
-        not isinstance(value, dict)
-        or set(value) != expected
-        or value["schema_version"] != 3
-    ):
+    if not isinstance(value, dict) or set(value) != expected or value["schema_version"] != 3:
         raise ValueError("abort guard schema is invalid")
     pid = value["pid"]
     start_time = value["start_time_ticks"]
@@ -944,8 +941,7 @@ def validate_abort_guard(guard: AbortGuard) -> None:
     if guard.attestation is not None and (
         guard.env_receipt is None
         or guard.attestation.guard_id != guard.guard_id
-        or receipt_identity(guard.attestation.env_receipt)
-        != receipt_identity(guard.env_receipt)
+        or receipt_identity(guard.attestation.env_receipt) != receipt_identity(guard.env_receipt)
     ):
         raise ValueError("abort guard attestation binding is invalid")
 
@@ -975,9 +971,7 @@ def process_start_time_ticks(stat_text: str) -> str:
 
 def process_identity_matches(pid: int, start_time_ticks: str) -> bool:
     try:
-        actual = process_start_time_ticks(
-            Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-        )
+        actual = process_start_time_ticks(Path(f"/proc/{pid}/stat").read_text(encoding="utf-8"))
     except OSError:
         return False
     return actual == start_time_ticks
@@ -1031,14 +1025,16 @@ def _guard_state(value: JsonValue) -> GuardState:
 def _guard_phase(value: JsonValue) -> GuardPhase:
     match value:
         case (
-            "ready"
-            | "claimed"
-            | "env_intent"
-            | "proof_active"
-            | "finalize_intent"
-            | "rollback"
-            | "complete"
-        ) as phase:
+            (
+                "ready"
+                | "claimed"
+                | "env_intent"
+                | "proof_active"
+                | "finalize_intent"
+                | "rollback"
+                | "complete"
+            ) as phase
+        ):
             return phase
         case _:
             raise ValueError("abort guard phase is invalid")
@@ -1069,20 +1065,13 @@ def _path(value: JsonValue) -> str:
 
 
 def _hash(value: JsonValue) -> str:
-    if (
-        not isinstance(value, str)
-        or _SHA256.fullmatch(value) is None
-        or value == "0" * 64
-    ):
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None or value == "0" * 64:
         raise ValueError("abort guard hash is invalid")
     return value
 
 
 def _authorized_guard_metadata(metadata: os.stat_result) -> bool:
-    return (
-        stat.S_ISREG(metadata.st_mode)
-        and stat.S_IMODE(metadata.st_mode) == _GUARD_FILE_MODE
-    )
+    return stat.S_ISREG(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == _GUARD_FILE_MODE
 
 
 def _guard_metadata(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -1094,3 +1083,415 @@ def _guard_metadata(metadata: os.stat_result) -> tuple[int, int, int, int, int, 
         metadata.st_mtime_ns,
         metadata.st_ctime_ns,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class GuardClaim:
+    token: str
+    pid: int
+    start_time_ticks: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProofRecoveryPaths:
+    env_file: Path
+    backup_path: Path
+    guard_path: Path
+    artifact_dir: Path
+    output: Path
+    repository_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ProofRecovery:
+    paths: ProofRecoveryPaths
+    claim: GuardClaim | None
+    terminal: bool
+    resumable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineResultEvidence:
+    source_base_commit: str
+    proof_commit: str
+    images: Mapping[str, str]
+    env_receipt: EnvReceipt
+    guard_path: Path
+    artifact_dir: Path
+    abort_guard_sha256: str
+    host_a_preflight_sha256: str
+    host_b_preflight_sha256: str
+    baseline_sha256: str
+    protected_artifacts_before_sha256: str
+    coder_secret_inventory_sha256: str
+    legacy_workspace_managed_fingerprints_sha256: str
+
+
+def run_bounded_process(
+    command: Sequence[str],
+    *,
+    stdin: bytes,
+    output_limit: int,
+    timeout_seconds: float,
+    label: str,
+) -> bytes:
+    if output_limit < 1 or timeout_seconds <= 0 or not label:
+        raise ValueError("bounded process limits are invalid")
+    process = subprocess.Popen(
+        list(command),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    selector = selectors.DefaultSelector()
+    stdout = bytearray()
+    stderr_size = 0
+    pending = memoryview(stdin)
+    deadline = time.monotonic() + timeout_seconds
+    failure: str | None = None
+    returncode: int | None = None
+    for stream, role in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, role)
+    os.set_blocking(process.stdin.fileno(), False)
+    if pending:
+        selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+    else:
+        process.stdin.close()
+    try:
+        while selector.get_map() and failure is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failure = "timed out"
+                break
+            for key, _mask in selector.select(remaining):
+                if key.data == "stdin":
+                    try:
+                        pending = pending[os.write(key.fd, pending) :]
+                    except BrokenPipeError:
+                        pending = pending[len(pending) :]
+                    if not pending:
+                        selector.unregister(key.fileobj)
+                        process.stdin.close()
+                    continue
+                chunk = os.read(key.fd, 65_536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    (process.stdout if key.data == "stdout" else process.stderr).close()
+                    continue
+                if key.data == "stdout":
+                    stdout.extend(chunk)
+                    size = len(stdout)
+                else:
+                    stderr_size += len(chunk)
+                    size = stderr_size
+                if size > output_limit:
+                    failure = "exceeded output limit"
+                    break
+        if failure is None:
+            returncode = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+    except (OSError, subprocess.TimeoutExpired):
+        failure = "failed" if time.monotonic() < deadline else "timed out"
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if not stream.closed:
+                stream.close()
+    if failure is not None:
+        raise RuntimeError(f"{label} {failure}")
+    if returncode != 0:
+        raise RuntimeError(f"{label} failed")
+    return bytes(stdout)
+
+
+def atomic_finalize(*, temp: Path, output: Path) -> None:
+    if temp.parent.resolve() != output.parent.resolve() or temp.is_symlink() or not temp.is_file():
+        raise ValueError("atomic finalization requires a regular sibling temporary file")
+    try:
+        if output.exists():
+            if (
+                output.is_symlink()
+                or not output.is_file()
+                or output.stat().st_mode & 0o777 != 0o600
+                or not filecmp.cmp(temp, output, shallow=False)
+            ):
+                raise ValueError("existing output does not match finalized bytes")
+            temp.unlink()
+            return
+        descriptor = os.open(temp, os.O_RDONLY)
+        try:
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temp, output)
+        descriptor = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+
+
+def build_result(values: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    if frozenset(values) != REQUIRED_RESULT_KEYS:
+        raise ValueError("Task 1 result keys do not match the proof contract")
+    _require_result_hashes(values)
+    _require_result_digests(values)
+    _require_capture_values(values)
+    return dict(values)
+
+
+def validate_attestation(attestation: BaselineAttestation) -> None:
+    try:
+        build_result({**attestation.result_body, "abort_guard_sha256": "f" * 64})
+        validate_baseline_attestation_bindings(attestation)
+    except ValueError as error:
+        raise ValueError("abort guard attestation result body is invalid") from error
+
+
+def derive_result_from_attestation(attestation: BaselineAttestation) -> dict[str, JsonValue]:
+    validate_attestation(attestation)
+    return build_result(
+        {
+            **attestation.result_body,
+            "abort_guard_sha256": abort_guard_sha256(attestation),
+        }
+    )
+
+
+def result_bytes_from_attestation(attestation: BaselineAttestation) -> bytes:
+    return canonical_json_bytes(derive_result_from_attestation(attestation)) + b"\n"
+
+
+def verify_result_bytes(attestation: BaselineAttestation, value: bytes) -> None:
+    if value != result_bytes_from_attestation(attestation):
+        raise ValueError("result bytes do not match abort guard attestation")
+
+
+def baseline_result_values(evidence: BaselineResultEvidence) -> dict[str, JsonValue]:
+    return {
+        "schema_version": 1,
+        "source_base_commit": evidence.source_base_commit,
+        "proof_commit": evidence.proof_commit,
+        "coder_image_digest": evidence.images["coder"],
+        "litellm_image_digest": evidence.images["litellm"],
+        "shared_core_image_digests": {
+            "pgvector": evidence.images["pgvector"],
+            "redis": evidence.images["redis"],
+            "postfix": evidence.images["postfix"],
+            "litellm": evidence.images["litellm"],
+        },
+        "env_original_sha256": evidence.env_receipt.original_sha256,
+        "env_proof_sha256": evidence.env_receipt.proof_sha256,
+        "env_mode": evidence.env_receipt.mode,
+        "external_backup_path": evidence.env_receipt.backup_path,
+        "abort_guard_path": str(evidence.guard_path.resolve()),
+        "abort_guard_sha256": evidence.abort_guard_sha256,
+        "host_a_preflight_sha256": evidence.host_a_preflight_sha256,
+        "host_b_preflight_sha256": evidence.host_b_preflight_sha256,
+        "host_identities_distinct": True,
+        "host_architectures_equal": True,
+        "baseline_sha256": evidence.baseline_sha256,
+        "protected_artifacts_before_path": str(
+            (evidence.artifact_dir / "protected-artifacts-before.txt").resolve()
+        ),
+        "protected_artifacts_before_sha256": (evidence.protected_artifacts_before_sha256),
+        "coder_secret_inventory_sha256": evidence.coder_secret_inventory_sha256,
+        "legacy_workspace_managed_fingerprints_sha256": (
+            evidence.legacy_workspace_managed_fingerprints_sha256
+        ),
+    }
+
+
+def baseline_output_hashes(evidence: BaselineResultEvidence) -> dict[str, str]:
+    return {
+        "baseline.json": evidence.baseline_sha256,
+        "host-a-preflight.json": evidence.host_a_preflight_sha256,
+        "host-b-preflight.json": evidence.host_b_preflight_sha256,
+        "protected-artifacts-before.txt": evidence.protected_artifacts_before_sha256,
+    }
+
+
+def require_generated_bounds(payloads: Mapping[str, bytes], result: bytes) -> None:
+    if any(len(content) > _MAX_DATA_OUTPUT_BYTES for content in payloads.values()):
+        raise AbortGuardError("generated data output exceeds its bound")
+    if len(result) > _MAX_RESULT_BYTES:
+        raise AbortGuardError("generated result output exceeds its bound")
+
+
+def read_proof_bytes(path: Path, max_bytes: int, mode: int) -> bytes:
+    try:
+        return read_bounded_regular_bytes(path, max_bytes, mode)[0]
+    except (OSError, ValueError) as error:
+        raise AbortGuardError("proof file is not a stable bounded regular file") from error
+
+
+def protected_bytes(paths: ProofRecoveryPaths) -> bytes:
+    manifest_path = paths.artifact_dir / "protected-artifacts-before.txt"
+    receipt_path = paths.artifact_dir / "protected-artifacts-before.sha256"
+    try:
+        manifest = read_bounded_regular_bytes(
+            manifest_path,
+            _MAX_PROTECTED_MANIFEST_BYTES,
+            0o600,
+        )[0]
+        entries = validate_protected_manifest_bytes(manifest)
+        verify_protected_artifacts(paths.repository_root, entries)
+        receipt = read_bounded_regular_bytes(
+            receipt_path,
+            _MAX_PROTECTED_RECEIPT_BYTES,
+            0o600,
+        )[0]
+    except (CaptureSchemaError, OSError, ValueError) as error:
+        raise AbortGuardError("protected manifest contract is invalid") from error
+    fingerprint = hashlib.sha256(manifest).hexdigest()
+    expected = f"{fingerprint}  protected-artifacts-before.txt\n".encode()
+    if receipt != expected:
+        raise AbortGuardError("pre-existing protected manifest receipt is invalid")
+    return manifest
+
+
+def output_paths(paths: ProofRecoveryPaths) -> dict[str, Path]:
+    return {
+        "baseline.json": paths.artifact_dir / "baseline.json",
+        "host-a-preflight.json": paths.artifact_dir / "host-a-preflight.json",
+        "host-b-preflight.json": paths.artifact_dir / "host-b-preflight.json",
+    }
+
+
+def assert_no_generated_outputs(paths: ProofRecoveryPaths) -> None:
+    if any(os.path.lexists(path) for path in (*output_paths(paths).values(), paths.output)):
+        raise AbortGuardError("generated output exists without an authorizing attestation")
+
+
+def verify_attestation(
+    paths: ProofRecoveryPaths,
+    guard: AbortGuard,
+    *,
+    require_result: bool,
+) -> None:
+    attestation = guard.attestation
+    receipt = guard.env_receipt
+    if (
+        attestation is None
+        or receipt is None
+        or guard.phase not in {"finalize_intent", "complete"}
+        or attestation.guard_path != str(paths.guard_path.resolve())
+        or attestation.artifact_dir != str(paths.artifact_dir.resolve())
+        or attestation.result_path != str(paths.output.resolve())
+        or receipt.env_path != str(paths.env_file.resolve())
+        or receipt.backup_path != str(paths.backup_path.resolve())
+    ):
+        raise AbortGuardError("attestation paths do not bind the current recovery paths")
+    proof_mode = receipt.mode if receipt.original_sha256 == receipt.proof_sha256 else 0o600
+    if (
+        hashlib.sha256(read_proof_bytes(paths.env_file, 256 * 1024, proof_mode)).hexdigest()
+        != receipt.proof_sha256
+        or hashlib.sha256(read_proof_bytes(paths.backup_path, 256 * 1024, 0o600)).hexdigest()
+        != receipt.original_sha256
+    ):
+        raise AbortGuardError("proof env or backup drifted from its receipt")
+    manifest = protected_bytes(paths)
+    if (
+        attestation.output_sha256["protected-artifacts-before.txt"]
+        != hashlib.sha256(manifest).hexdigest()
+    ):
+        raise AbortGuardError("protected manifest drifted from attestation")
+    for name, path in output_paths(paths).items():
+        content = read_proof_bytes(path, _MAX_DATA_OUTPUT_BYTES, 0o600)
+        if hashlib.sha256(content).hexdigest() != attestation.output_sha256[name]:
+            raise AbortGuardError("attested output drifted")
+    expected_result = result_bytes_from_attestation(attestation)
+    require_generated_bounds({}, expected_result)
+    if require_result or os.path.lexists(paths.output):
+        try:
+            result = read_proof_bytes(paths.output, _MAX_RESULT_BYTES, 0o600)
+        except AbortGuardError as error:
+            raise AbortGuardError("result bytes do not match attestation") from error
+        if result != expected_result:
+            raise AbortGuardError("result bytes do not match attestation")
+
+
+def attestation_is_resumable(paths: ProofRecoveryPaths, guard: AbortGuard) -> bool:
+    try:
+        verify_attestation(paths, guard, require_result=False)
+    except (AbortGuardError, CaptureSchemaError, EnvPreparationError, OSError):
+        return False
+    return True
+
+
+def _require_result_hashes(values: Mapping[str, JsonValue]) -> None:
+    keys = (
+        "env_original_sha256",
+        "env_proof_sha256",
+        "abort_guard_sha256",
+        "host_a_preflight_sha256",
+        "host_b_preflight_sha256",
+        "baseline_sha256",
+        "protected_artifacts_before_sha256",
+        "coder_secret_inventory_sha256",
+        "legacy_workspace_managed_fingerprints_sha256",
+    )
+    for key in keys:
+        value = values[key]
+        if not isinstance(value, str) or not _SHA256.fullmatch(value) or value == "0" * 64:
+            raise ValueError("all capture hashes must be non-zero SHA-256 values")
+
+
+def _require_result_digests(values: Mapping[str, JsonValue]) -> None:
+    shared = values["shared_core_image_digests"]
+    if not isinstance(shared, dict) or set(shared) != {
+        "pgvector",
+        "redis",
+        "postfix",
+        "litellm",
+    }:
+        raise ValueError("shared core image digest manifest is invalid")
+    image_values = [
+        values["coder_image_digest"],
+        values["litellm_image_digest"],
+        *shared.values(),
+    ]
+    if any(
+        not isinstance(value, str) or not _RESULT_DIGEST.fullmatch(value) for value in image_values
+    ):
+        raise ValueError("all captured images must use repository@sha256 digests")
+    if shared["litellm"] != values["litellm_image_digest"]:
+        raise ValueError("LiteLLM image observations must agree across result planes")
+
+
+def _require_capture_values(values: Mapping[str, JsonValue]) -> None:
+    commits = (values["source_base_commit"], values["proof_commit"])
+    if any(not isinstance(value, str) or not _RESULT_COMMIT.fullmatch(value) for value in commits):
+        raise ValueError("proof commits must be exact SHA-1 values")
+    schema_version = values["schema_version"]
+    env_mode = values["env_mode"]
+    if (
+        isinstance(schema_version, bool)
+        or schema_version != 1
+        or isinstance(env_mode, bool)
+        or not isinstance(env_mode, int)
+        or not 1 <= env_mode <= 0o777
+    ):
+        raise ValueError("result schema version and proof env mode are invalid")
+    if (
+        values["host_identities_distinct"] is not True
+        or values["host_architectures_equal"] is not True
+    ):
+        raise ValueError("result requires distinct hosts with matching architectures")
+    for key in (
+        "external_backup_path",
+        "abort_guard_path",
+        "protected_artifacts_before_path",
+    ):
+        if not isinstance(values[key], str) or values[key] == "":
+            raise ValueError(f"{key} must be a non-empty protected path")

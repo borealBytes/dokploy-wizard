@@ -13,6 +13,7 @@ import pytest
 from dokploy_wizard.proof import (
     BaselineAttestation,
     EnvReceipt,
+    atomic_finalize,
     canonical_json_bytes,
     model_sync_artifacts,
     parse_baseline_attestation,
@@ -20,7 +21,6 @@ from dokploy_wizard.proof import (
 from dokploy_wizard.proof.model_sync_artifacts import JsonValue, write_protected_manifest
 from dokploy_wizard.proof.model_sync_results import (
     REQUIRED_RESULT_KEYS,
-    atomic_finalize,
     build_result,
     result_bytes_from_attestation,
     validate_attestation,
