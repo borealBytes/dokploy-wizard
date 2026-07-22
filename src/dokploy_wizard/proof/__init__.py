@@ -5,17 +5,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from ipaddress import ip_address
-from pathlib import PurePosixPath
-from typing import Final, NamedTuple, TypeAlias
+from pathlib import Path, PurePosixPath
+from typing import Final, Literal, NamedTuple, TypeAlias
 from urllib.parse import urlsplit
 
 from dokploy_wizard.verification import redact_text
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GUARD_FILE_MODE: Final = 0o600
+_MAX_GUARD_BYTES: Final = 256 * 1024
+_READ_CHUNK_BYTES: Final = 64 * 1024
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 ProtectedManifestEntry = NamedTuple(
@@ -64,6 +69,31 @@ _PROTECTED_FORBIDDEN: Final = (
     "/host-a-preflight.json",
     "/host-b-preflight.json",
 )
+REQUIRED_RESULT_KEYS: Final = frozenset(
+    {
+        "abort_guard_path",
+        "abort_guard_sha256",
+        "baseline_sha256",
+        "coder_image_digest",
+        "coder_secret_inventory_sha256",
+        "env_mode",
+        "env_original_sha256",
+        "env_proof_sha256",
+        "external_backup_path",
+        "host_a_preflight_sha256",
+        "host_architectures_equal",
+        "host_b_preflight_sha256",
+        "host_identities_distinct",
+        "legacy_workspace_managed_fingerprints_sha256",
+        "litellm_image_digest",
+        "proof_commit",
+        "protected_artifacts_before_path",
+        "protected_artifacts_before_sha256",
+        "schema_version",
+        "shared_core_image_digests",
+        "source_base_commit",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +102,10 @@ class CaptureSchemaError(RuntimeError):
 
     def __str__(self) -> str:
         return self.detail
+
+
+class AbortGuardError(RuntimeError):
+    """Raised when durable GuardV3 evidence is invalid or unauthorized."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +403,19 @@ def _unique_strings(values: list[JsonValue], label: str) -> list[str]:
     return result
 
 
+GuardState = Literal["armed", "disarmed"]
+GuardPhase = Literal[
+    "ready",
+    "claimed",
+    "env_intent",
+    "proof_active",
+    "finalize_intent",
+    "rollback",
+    "complete",
+]
+ClaimantKind = Literal["plan", "process"]
+
+
 @dataclass(frozen=True, slots=True)
 class EnvReceipt:
     env_path: str
@@ -378,7 +425,14 @@ class EnvReceipt:
     mode: int
 
     def to_payload(self) -> dict[str, str | int]:
-        return {"backup_path": self.backup_path, "env_path": self.env_path, "mode": self.mode, "original_sha256": self.original_sha256, "proof_sha256": self.proof_sha256, "schema_version": 1}
+        return {
+            "backup_path": self.backup_path,
+            "env_path": self.env_path,
+            "mode": self.mode,
+            "original_sha256": self.original_sha256,
+            "proof_sha256": self.proof_sha256,
+            "schema_version": 1,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,42 +446,340 @@ class BaselineAttestation:
     result_body: Mapping[str, JsonValue]
 
     def to_payload(self) -> dict[str, JsonValue]:
-        return {"artifact_dir": self.artifact_dir, "env_receipt": self.env_receipt.to_payload(), "guard_id": self.guard_id, "guard_path": self.guard_path, "kind": "task-1-baseline-finalization", "output_sha256": dict(self.output_sha256), "required_terminal": {"claimant_kind": "plan", "phase": "complete", "state": "armed"}, "result_body": dict(self.result_body), "result_path": self.result_path, "schema_version": 1}
+        return {
+            "artifact_dir": self.artifact_dir,
+            "env_receipt": self.env_receipt.to_payload(),
+            "guard_id": self.guard_id,
+            "guard_path": self.guard_path,
+            "kind": "task-1-baseline-finalization",
+            "output_sha256": dict(self.output_sha256),
+            "required_terminal": {
+                "claimant_kind": "plan",
+                "phase": "complete",
+                "state": "armed",
+            },
+            "result_body": dict(self.result_body),
+            "result_path": self.result_path,
+            "schema_version": 1,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AbortGuard:
+    guard_id: str
+    state: GuardState
+    phase: GuardPhase
+    claimant_kind: ClaimantKind
+    pid: int | None
+    start_time_ticks: str | None
+    claim_token: str | None
+    env_receipt: EnvReceipt | None
+    attestation: BaselineAttestation | None
 
 
 def canonical_json_bytes(value: JsonValue) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("utf-8")
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def read_guard_bytes(path: Path) -> bytes:
+    before = os.lstat(path)
+    if not _authorized_guard_metadata(before) or before.st_size > _MAX_GUARD_BYTES:
+        raise ValueError("abort guard must be a bounded mode-0600 regular file")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(descriptor)
+        if _guard_metadata(before) != _guard_metadata(opened):
+            raise ValueError("abort guard metadata changed before reading")
+        content = bytearray()
+        while len(content) <= opened.st_size:
+            request = min(_READ_CHUNK_BYTES, opened.st_size + 1 - len(content))
+            chunk = os.read(descriptor, request)
+            if not chunk:
+                break
+            content.extend(chunk)
+        after = os.fstat(descriptor)
+        pathname = os.lstat(path)
+        if (
+            len(content) != opened.st_size
+            or _guard_metadata(opened) != _guard_metadata(after)
+            or _guard_metadata(opened) != _guard_metadata(pathname)
+        ):
+            raise ValueError("abort guard changed while reading")
+        return bytes(content)
+    finally:
+        os.close(descriptor)
 
 
 def parse_env_receipt(value: JsonValue | None) -> EnvReceipt | None:
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) != {"backup_path", "env_path", "mode", "original_sha256", "proof_sha256", "schema_version"}:
+    expected = {
+        "backup_path",
+        "env_path",
+        "mode",
+        "original_sha256",
+        "proof_sha256",
+        "schema_version",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
         raise ValueError("abort guard env receipt is invalid")
-    backup, env, original, proof, mode = _path(value["backup_path"]), _path(value["env_path"]), _hash(value["original_sha256"]), _hash(value["proof_sha256"]), value["mode"]
-    if value["schema_version"] != 1 or isinstance(mode, bool) or not isinstance(mode, int) or not 1 <= mode <= 0o777:
+    mode = value["mode"]
+    version = value["schema_version"]
+    if (
+        isinstance(version, bool)
+        or version != 1
+        or isinstance(mode, bool)
+        or not isinstance(mode, int)
+        or not 1 <= mode <= 0o777
+    ):
         raise ValueError("abort guard env receipt is invalid")
-    return EnvReceipt(env, backup, original, proof, mode)
+    return EnvReceipt(
+        _path(value["env_path"]),
+        _path(value["backup_path"]),
+        _hash(value["original_sha256"]),
+        _hash(value["proof_sha256"]),
+        mode,
+    )
 
 
 def parse_baseline_attestation(value: JsonValue | None) -> BaselineAttestation | None:
     if value is None:
         return None
-    expected = {"schema_version", "kind", "guard_id", "guard_path", "artifact_dir", "result_path", "env_receipt", "required_terminal", "output_sha256", "result_body"}
-    if not isinstance(value, dict) or set(value) != expected or value["schema_version"] != 1 or value["kind"] != "task-1-baseline-finalization":
+    expected = {
+        "artifact_dir",
+        "env_receipt",
+        "guard_id",
+        "guard_path",
+        "kind",
+        "output_sha256",
+        "required_terminal",
+        "result_body",
+        "result_path",
+        "schema_version",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected
+        or isinstance(value["schema_version"], bool)
+        or value["schema_version"] != 1
+        or value["kind"] != "task-1-baseline-finalization"
+    ):
         raise ValueError("abort guard attestation is invalid")
-    guard_id, guard_path, artifact_dir, result_path = _hash(value["guard_id"]), _path(value["guard_path"]), _path(value["artifact_dir"]), _path(value["result_path"])
-    receipt, outputs, body = parse_env_receipt(value["env_receipt"]), value["output_sha256"], value["result_body"]
-    if receipt is None or result_path != f"{artifact_dir}/result.json" or value["required_terminal"] != {"state": "armed", "phase": "complete", "claimant_kind": "plan"} or not isinstance(outputs, dict) or not isinstance(body, dict):
+    receipt = parse_env_receipt(value["env_receipt"])
+    outputs = value["output_sha256"]
+    body = value["result_body"]
+    if (
+        receipt is None
+        or value["required_terminal"]
+        != {"state": "armed", "phase": "complete", "claimant_kind": "plan"}
+        or not isinstance(outputs, dict)
+        or not isinstance(body, dict)
+    ):
         raise ValueError("abort guard attestation is invalid")
-    output_sha256 = {key: _hash(item) for key, item in outputs.items() if isinstance(key, str)}
-    if len(output_sha256) != len(outputs) or set(output_sha256) != {"baseline.json", "host-a-preflight.json", "host-b-preflight.json", "protected-artifacts-before.txt"}:
-        raise ValueError("abort guard attestation is invalid")
-    return BaselineAttestation(guard_id, guard_path, artifact_dir, result_path, receipt, output_sha256, body)
+    attestation = BaselineAttestation(
+        _hash(value["guard_id"]),
+        _path(value["guard_path"]),
+        _path(value["artifact_dir"]),
+        _path(value["result_path"]),
+        receipt,
+        {key: _hash(item) for key, item in outputs.items()},
+        body,
+    )
+    validate_baseline_attestation_bindings(attestation)
+    return attestation
+
+
+def validate_baseline_attestation_bindings(attestation: BaselineAttestation) -> None:
+    _hash(attestation.guard_id)
+    guard_path = _path(attestation.guard_path)
+    artifact_dir = _path(attestation.artifact_dir)
+    result_path = _path(attestation.result_path)
+    receipt = parse_env_receipt(attestation.env_receipt.to_payload())
+    if receipt is None:
+        raise ValueError("abort guard attestation receipt is invalid")
+    expected_outputs = {
+        "baseline.json",
+        "host-a-preflight.json",
+        "host-b-preflight.json",
+        "protected-artifacts-before.txt",
+    }
+    if set(attestation.output_sha256) != expected_outputs:
+        raise ValueError("abort guard attestation outputs are invalid")
+    outputs = {
+        key: _hash(value)
+        for key, value in attestation.output_sha256.items()
+    }
+    body = attestation.result_body
+    if frozenset(body) != REQUIRED_RESULT_KEYS - frozenset({"abort_guard_sha256"}):
+        raise ValueError("abort guard attestation result keys are invalid")
+    expected_bindings: dict[str, JsonValue] = {
+        "abort_guard_path": guard_path,
+        "baseline_sha256": outputs["baseline.json"],
+        "env_mode": receipt.mode,
+        "env_original_sha256": receipt.original_sha256,
+        "env_proof_sha256": receipt.proof_sha256,
+        "external_backup_path": receipt.backup_path,
+        "host_a_preflight_sha256": outputs["host-a-preflight.json"],
+        "host_b_preflight_sha256": outputs["host-b-preflight.json"],
+        "protected_artifacts_before_path": f"{artifact_dir}/protected-artifacts-before.txt",
+        "protected_artifacts_before_sha256": outputs["protected-artifacts-before.txt"],
+    }
+    if (
+        result_path != f"{artifact_dir}/result.json"
+        or any(body[key] != value for key, value in expected_bindings.items())
+    ):
+        raise ValueError("abort guard attestation bindings are invalid")
+
+
+def parse_abort_guard(value: JsonValue) -> AbortGuard:
+    expected = {
+        "attestation",
+        "claim_token",
+        "claimant_kind",
+        "env_receipt",
+        "guard_id",
+        "phase",
+        "pid",
+        "schema_version",
+        "start_time_ticks",
+        "state",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected
+        or value["schema_version"] != 3
+    ):
+        raise ValueError("abort guard schema is invalid")
+    pid = value["pid"]
+    start_time = value["start_time_ticks"]
+    claim_token = value["claim_token"]
+    if (
+        (pid is not None and (isinstance(pid, bool) or not isinstance(pid, int)))
+        or (start_time is not None and not isinstance(start_time, str))
+        or (claim_token is not None and not isinstance(claim_token, str))
+    ):
+        raise ValueError("abort guard ownership fields are invalid")
+    guard = AbortGuard(
+        _hash(value["guard_id"]),
+        _guard_state(value["state"]),
+        _guard_phase(value["phase"]),
+        _claimant_kind(value["claimant_kind"]),
+        pid,
+        start_time,
+        claim_token,
+        parse_env_receipt(value["env_receipt"]),
+        parse_baseline_attestation(value["attestation"]),
+    )
+    validate_abort_guard(guard)
+    return guard
+
+
+def validate_abort_guard(guard: AbortGuard) -> None:
+    process_fields = (guard.pid, guard.start_time_ticks, guard.claim_token)
+    if guard.claimant_kind == "process":
+        if not valid_process_identity(*process_fields):
+            raise ValueError("abort guard process identity is invalid")
+    elif any(value is not None for value in process_fields):
+        raise ValueError("abort guard plan ownership fields are invalid")
+    has_receipt = guard.env_receipt is not None
+    has_attestation = guard.attestation is not None
+    combination = (
+        guard.state,
+        guard.phase,
+        guard.claimant_kind,
+        has_receipt,
+        has_attestation,
+    )
+    legal = {
+        ("armed", "ready", "plan", False, False),
+        ("armed", "claimed", "process", False, False),
+        ("armed", "env_intent", "process", True, False),
+        ("armed", "proof_active", "process", True, False),
+        ("armed", "finalize_intent", "process", True, True),
+        ("armed", "rollback", "plan", False, False),
+        ("armed", "rollback", "plan", True, False),
+        ("armed", "rollback", "plan", True, True),
+        ("armed", "rollback", "process", False, False),
+        ("armed", "rollback", "process", True, False),
+        ("armed", "rollback", "process", True, True),
+        ("armed", "complete", "plan", True, True),
+        ("disarmed", "complete", "plan", True, True),
+    }
+    if combination not in legal:
+        raise ValueError("abort guard phase combination is invalid")
+    if guard.attestation is not None and (
+        guard.env_receipt is None
+        or guard.attestation.guard_id != guard.guard_id
+        or receipt_identity(guard.attestation.env_receipt)
+        != receipt_identity(guard.env_receipt)
+    ):
+        raise ValueError("abort guard attestation binding is invalid")
+
+
+def abort_guard_payload(guard: AbortGuard) -> dict[str, JsonValue]:
+    return {
+        "attestation": None if guard.attestation is None else guard.attestation.to_payload(),
+        "claim_token": guard.claim_token,
+        "claimant_kind": guard.claimant_kind,
+        "env_receipt": receipt_payload(guard.env_receipt),
+        "guard_id": guard.guard_id,
+        "phase": guard.phase,
+        "pid": guard.pid,
+        "schema_version": 3,
+        "start_time_ticks": guard.start_time_ticks,
+        "state": guard.state,
+    }
+
+
+def process_start_time_ticks(stat_text: str) -> str:
+    closing = stat_text.rfind(")")
+    fields = stat_text[closing + 2 :].split() if closing >= 0 else []
+    if len(fields) <= 19:
+        raise AbortGuardError("proc stat is malformed")
+    return fields[19]
+
+
+def process_identity_matches(pid: int, start_time_ticks: str) -> bool:
+    try:
+        actual = process_start_time_ticks(
+            Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        )
+    except OSError:
+        return False
+    return actual == start_time_ticks
+
+
+def valid_process_identity(
+    pid: int | None,
+    start_time_ticks: str | None,
+    claim_token: str | None,
+) -> bool:
+    return (
+        isinstance(pid, int)
+        and not isinstance(pid, bool)
+        and pid > 0
+        and isinstance(start_time_ticks, str)
+        and start_time_ticks.isdecimal()
+        and isinstance(claim_token, str)
+        and len(claim_token) == 32
+        and all(character.isalnum() or character in "_-" for character in claim_token)
+    )
 
 
 def receipt_identity(receipt: EnvReceipt) -> tuple[str, str, str, str, int]:
-    return (receipt.env_path, receipt.backup_path, receipt.original_sha256, receipt.proof_sha256, receipt.mode)
+    return (
+        receipt.env_path,
+        receipt.backup_path,
+        receipt.original_sha256,
+        receipt.proof_sha256,
+        receipt.mode,
+    )
 
 
 def receipt_payload(receipt: EnvReceipt | None) -> dict[str, str | int] | None:
@@ -438,13 +790,79 @@ def abort_guard_sha256(attestation: BaselineAttestation) -> str:
     return hashlib.sha256(canonical_json_bytes(attestation.to_payload())).hexdigest()
 
 
+def _guard_state(value: JsonValue) -> GuardState:
+    match value:
+        case "armed":
+            return "armed"
+        case "disarmed":
+            return "disarmed"
+        case _:
+            raise ValueError("abort guard state is invalid")
+
+
+def _guard_phase(value: JsonValue) -> GuardPhase:
+    match value:
+        case (
+            "ready"
+            | "claimed"
+            | "env_intent"
+            | "proof_active"
+            | "finalize_intent"
+            | "rollback"
+            | "complete"
+        ) as phase:
+            return phase
+        case _:
+            raise ValueError("abort guard phase is invalid")
+
+
+def _claimant_kind(value: JsonValue) -> ClaimantKind:
+    match value:
+        case "plan":
+            return "plan"
+        case "process":
+            return "process"
+        case _:
+            raise ValueError("abort guard claimant is invalid")
+
+
 def _path(value: JsonValue) -> str:
-    if not isinstance(value, str) or not value.isascii() or not value.startswith("/") or value != PurePosixPath(value).as_posix() or "//" in value or "/../" in value or "/./" in value:
+    if (
+        not isinstance(value, str)
+        or not value.isascii()
+        or not value.startswith("/")
+        or value != PurePosixPath(value).as_posix()
+        or "//" in value
+        or "/../" in value
+        or "/./" in value
+    ):
         raise ValueError("abort guard path is invalid")
     return value
 
 
 def _hash(value: JsonValue) -> str:
-    if not isinstance(value, str) or _SHA256.fullmatch(value) is None or value == "0" * 64:
+    if (
+        not isinstance(value, str)
+        or _SHA256.fullmatch(value) is None
+        or value == "0" * 64
+    ):
         raise ValueError("abort guard hash is invalid")
     return value
+
+
+def _authorized_guard_metadata(metadata: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and stat.S_IMODE(metadata.st_mode) == _GUARD_FILE_MODE
+    )
+
+
+def _guard_metadata(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
