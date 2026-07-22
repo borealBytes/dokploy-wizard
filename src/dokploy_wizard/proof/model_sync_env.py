@@ -16,6 +16,7 @@ from dokploy_wizard.proof import (
     ProofNamespace,
     read_bounded_regular_bytes,
 )
+from dokploy_wizard.proof.model_sync_namespace import build_proof_namespace
 from dokploy_wizard.proof.model_sync_results import ProofTransport
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuardError,
@@ -101,39 +102,7 @@ def resolve_proof_namespace(env_file: Path) -> ProofNamespace:
         desired = resolve_desired_state(raw_env)
     except StateValidationError as error:
         raise EnvPreparationError("proof env cannot resolve its resource namespace") from error
-    stack = desired.stack_name
-    shared = desired.shared_core
-    docker = [stack, f"{stack}-coder", f"{stack}-cloudflared", shared.network_name]
-    docker.extend(
-        service.service_name
-        for service in (shared.litellm, shared.postgres, shared.redis, shared.mail_relay)
-        if service is not None
-    )
-    templates = (
-        "ubuntu-vscode",
-        "ubuntu-vscode-opencode-web",
-        "ubuntu-vscode-openwork",
-        "ubuntu-vscode-kdense-byok",
-        "ubuntu-vscode-hermes",
-        "ubuntu-vscode-pi-web",
-    )
-    return ProofNamespace(
-        stack_name=stack,
-        docker=tuple(sorted(set(docker))),
-        dokploy=tuple(sorted({stack, f"{stack}-coder", f"{stack}-shared"})),
-        cloudflare=tuple(
-            sorted(
-                {
-                    stack,
-                    f"{stack}-cloudflared",
-                    raw_env.values.get("CLOUDFLARE_TUNNEL_NAME", f"{stack}-tunnel"),
-                    *desired.hostnames.values(),
-                }
-            )
-        ),
-        tailscale=() if desired.tailscale_hostname is None else (desired.tailscale_hostname,),
-        coder_templates=templates,
-    )
+    return build_proof_namespace(raw_env.values, desired)
 
 
 def restore_proof_env(

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dokploy_wizard import proof
 from dokploy_wizard.proof import model_sync_artifacts as artifacts
-from dokploy_wizard.proof import model_sync_identity as identity
+from dokploy_wizard.proof import model_sync_preflight_evidence as identity
 from dokploy_wizard.proof.model_sync_identity import RemoteProbe
 from dokploy_wizard.proof.model_sync_lifecycle_schema import (
     SingleHostLifecycleReceipt,

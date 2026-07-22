@@ -9,8 +9,8 @@ from typing import assert_never
 
 from dokploy_wizard import proof
 from dokploy_wizard.proof import model_sync_artifacts as artifacts
-from dokploy_wizard.proof import model_sync_identity as identity
 from dokploy_wizard.proof import model_sync_lifecycle as lifecycle
+from dokploy_wizard.proof import model_sync_preflight_evidence as identity
 from dokploy_wizard.proof import model_sync_state as state
 from dokploy_wizard.proof.model_sync_baseline import CapturedBaseline
 from dokploy_wizard.proof.model_sync_env import PreparedEnv
