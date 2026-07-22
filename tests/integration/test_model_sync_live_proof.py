@@ -18,6 +18,7 @@ import pytest
 from dokploy_wizard.dokploy import coder as coder_module
 from dokploy_wizard.dokploy.coder import _litellm_workspace_fallback_models_json
 from dokploy_wizard.proof import (
+    canonical_json_bytes,
     model_sync_artifacts,
     model_sync_baseline,
     model_sync_cli,
@@ -2804,7 +2805,7 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     result = json.loads((artifact_dir / "result.json").read_text(encoding="utf-8"))
     baseline = json.loads((artifact_dir / "baseline.json").read_text(encoding="utf-8"))
     manifest = (artifact_dir / "protected-artifacts-before.txt").read_text(encoding="utf-8")
-    guard_sha256 = hashlib.sha256((tmp_path / "abort-guard.json").read_bytes()).hexdigest()
+    guard = read_abort_guard(tmp_path / "abort-guard.json")
     assert exit_code == 0
     assert [template["name"] for template in baseline["templates"]] == [
         "ubuntu-vscode",
@@ -2817,7 +2818,10 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     assert result["coder_image_digest"] == "ghcr.io/coder/coder@sha256:" + _sha("1")
     assert result["coder_secret_inventory_sha256"] != "0" * 64
     assert result["legacy_workspace_managed_fingerprints_sha256"] != "0" * 64
-    assert result["abort_guard_sha256"] == guard_sha256
+    assert guard.attestation is not None
+    assert result["abort_guard_sha256"] == hashlib.sha256(
+        canonical_json_bytes(guard.attestation.to_payload())
+    ).hexdigest()
     assert ".omo/evidence/unrelated.txt" in manifest
     assert "abort-guard.json" not in manifest
     assert "baseline.json" not in manifest
@@ -3086,29 +3090,27 @@ def test_baseline_host_a_rejects_incomplete_fixture_without_finalized_outputs(
     assert (artifact_dir / "protected-artifacts-before.sha256").exists()
 
 
-def test_capture_finalization_rolls_back_outputs_when_system_exit_interrupts_second_write(
+def test_exact_output_writer_never_removes_prior_authorized_output_when_later_write_exits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dokploy_wizard.proof import model_sync_artifacts
 
     first = tmp_path / "first.json"
     second = tmp_path / "second.json"
-    writes = 0
     original = model_sync_artifacts.atomic_write_bytes
 
     def write(path: Path, content: bytes) -> None:
-        nonlocal writes
-        writes += 1
-        if writes == 2:
+        if path == second:
             raise SystemExit(1)
         original(path, content)
 
     monkeypatch.setattr(model_sync_artifacts, "atomic_write_bytes", write)
+    model_sync_artifacts.write_or_verify_exact_bytes(first, b"one")
 
     with pytest.raises(SystemExit):
-        model_sync_artifacts.finalize_capture_outputs({first: b"one", second: b"two"})
+        model_sync_artifacts.write_or_verify_exact_bytes(second, b"two")
 
-    assert not first.exists()
+    assert first.read_bytes() == b"one"
     assert not second.exists()
 
 
@@ -3295,7 +3297,8 @@ model_sync_cli._baseline_host_a(args)
         status = read_abort_guard(guard)
         assert status.state == "armed"
         assert status.claimant_kind == "plan"
-        assert status.env_receipt is not None and status.env_receipt.complete
+        assert status.phase == "complete"
+        assert status.attestation is not None
 
         actual_hashes = {
             name: hashlib.sha256(path.read_bytes()).hexdigest()
@@ -3305,7 +3308,9 @@ model_sync_cli._baseline_host_a(args)
             json.loads(task_outputs["result.json"].read_text(encoding="utf-8")),
             "result",
         )
-        assert result["abort_guard_sha256"] == actual_hashes["abort-guard.json"]
+        assert result["abort_guard_sha256"] == hashlib.sha256(
+            canonical_json_bytes(status.attestation.to_payload())
+        ).hexdigest()
         assert result["baseline_sha256"] == actual_hashes["baseline.json"]
         assert result["host_a_preflight_sha256"] == actual_hashes["host-a-preflight.json"]
         assert result["host_b_preflight_sha256"] == actual_hashes["host-b-preflight.json"]
@@ -3340,8 +3345,8 @@ model_sync_cli._baseline_host_a(args)
             "abort status",
         )
         assert abort_status == {
-            "claim_token": "<REDACTED>",
             "claimant_kind": "plan",
+            "phase": "complete",
             "pid": None,
             "start_time_ticks": None,
             "state": "armed",
@@ -3357,7 +3362,14 @@ model_sync_cli._baseline_host_a(args)
     elif boundary == "before-handler":
         assert process.returncode == -signum
         recovery = begin_proof_recovery(
-            paths=ProofRecoveryPaths(env_file, backup, guard),
+            paths=ProofRecoveryPaths(
+                env_file,
+                backup,
+                guard,
+                tmp_path,
+                tmp_path / "result.json",
+                tmp_path / "repository",
+            ),
             pid=os.getpid(),
             start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
         )
@@ -3366,15 +3378,16 @@ model_sync_cli._baseline_host_a(args)
         assert process.returncode == 128 + signum
         result = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
         manifest = (tmp_path / "protected-artifacts-before.txt").read_text(encoding="utf-8")
-        guard_bytes = guard.read_bytes()
-        guard_sha256 = hashlib.sha256(guard_bytes).hexdigest()
         status = read_abort_guard(guard)
         assert env_file.read_bytes() != original
         assert backup.read_bytes() == original
         assert status.state == "armed"
         assert status.claimant_kind == "plan"
-        assert status.env_receipt is not None and status.env_receipt.complete
-        assert result["abort_guard_sha256"] == guard_sha256
+        assert status.phase == "complete"
+        assert status.attestation is not None
+        assert result["abort_guard_sha256"] == hashlib.sha256(
+                canonical_json_bytes(status.attestation.to_payload())
+        ).hexdigest()
         assert ".omo/evidence/unrelated.txt" in manifest
     else:
         assert process.returncode == 128 + signum
@@ -3392,7 +3405,7 @@ def test_nested_signal_does_not_interrupt_active_recovery(
     tmp_path: Path, signals: tuple[signal.Signals, signal.Signals]
 ) -> None:
     env_file = tmp_path / "install.env"
-    original = b"ROOT_DOMAIN=proof.example.test\nLITELLM_NVIDIA_API_KEY=SECRET-NESTED\n"
+    original = b"ROOT_DOMAIN=proof.example.test\nPACKS=coder\nAI_DEFAULT_PROVIDER=openrouter\nAI_DEFAULT_MODEL=example/model\nLITELLM_NVIDIA_API_KEY=SECRET-NESTED\n"
     env_file.write_bytes(original)
     env_file.chmod(0o600)
     backup = tmp_path / "backup.env"
@@ -3400,12 +3413,19 @@ def test_nested_signal_does_not_interrupt_active_recovery(
     child = r'''
 import os, signal, sys
 from pathlib import Path
-from dokploy_wizard.proof import model_sync_cli
+from dokploy_wizard.proof import model_sync_artifacts, model_sync_cli
 from dokploy_wizard.proof.model_sync_env import prepare_proof_env
 from dokploy_wizard.proof.model_sync_host_a import ProofRecoveryPaths, begin_proof_recovery, recover_interrupted_proof
 
 env, backup, guard = map(Path, sys.argv[1:])
-recovery = begin_proof_recovery(paths=ProofRecoveryPaths(env, backup, guard), pid=os.getpid(), start_time_ticks=model_sync_cli._self_start_time_ticks())
+repository = env.parent / "repository"
+protected = repository / ".omo" / "evidence" / "unrelated.txt"
+protected.parent.mkdir(parents=True)
+protected.write_bytes(b"unrelated")
+manifest = model_sync_artifacts.protected_manifest_bytes({".omo/evidence/unrelated.txt": __import__("hashlib").sha256(b"unrelated").hexdigest()})
+model_sync_artifacts.atomic_write_bytes(env.parent / "protected-artifacts-before.txt", manifest)
+model_sync_artifacts.atomic_write_bytes(env.parent / "protected-artifacts-before.sha256", f"{__import__('hashlib').sha256(manifest).hexdigest()}  protected-artifacts-before.txt\n".encode())
+recovery = begin_proof_recovery(paths=ProofRecoveryPaths(env, backup, guard, env.parent, env.parent / "result.json", repository), pid=os.getpid(), start_time_ticks=model_sync_cli._self_start_time_ticks())
 prepare_proof_env(env_file=env, backup_path=backup, guard_path=guard, claim_token=recovery.claim.token)
 original = model_sync_cli.recover_interrupted_proof
 def paused(value):
@@ -3437,3 +3457,98 @@ signal.pause()
     assert read_abort_guard(guard).claimant_kind == "plan"
     assert not list(tmp_path.glob(".*.tmp"))
     assert b"SECRET-NESTED" not in (stdout + stderr).encode()
+
+
+@pytest.mark.parametrize("boundary", ["write", "file-fsync", "replace", "parent-fsync"])
+def test_sigkill_at_atomic_boundaries_recovers_from_disk_to_fresh_ready_guard(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    env_file = tmp_path / "install.env"
+    original = (
+        b"ROOT_DOMAIN=proof.example.test\nPACKS=coder\nAI_DEFAULT_PROVIDER=openrouter\n"
+        b"AI_DEFAULT_MODEL=example/model\nLITELLM_NVIDIA_API_KEY=SECRET-KILL\n"
+    )
+    env_file.write_bytes(original)
+    env_file.chmod(0o600)
+    backup = tmp_path / "backup.env"
+    guard = tmp_path / "abort-guard.json"
+    child = r'''
+import hashlib
+import os
+import sys
+from pathlib import Path
+from dokploy_wizard.proof import model_sync_artifacts, model_sync_state
+from dokploy_wizard.proof.model_sync_env import prepare_proof_env
+from dokploy_wizard.proof.model_sync_host_a import ProofRecoveryPaths, begin_proof_recovery
+
+boundary, env_name, backup_name, guard_name = sys.argv[1:]
+env, backup, guard = map(Path, (env_name, backup_name, guard_name))
+repository = env.parent / "repository"
+protected = repository / ".omo" / "evidence" / "unrelated.txt"
+protected.parent.mkdir(parents=True)
+protected.write_bytes(b"unrelated")
+manifest = model_sync_artifacts.protected_manifest_bytes(
+    {".omo/evidence/unrelated.txt": hashlib.sha256(b"unrelated").hexdigest()}
+)
+model_sync_artifacts.atomic_write_bytes(env.parent / "protected-artifacts-before.txt", manifest)
+model_sync_artifacts.atomic_write_bytes(
+    env.parent / "protected-artifacts-before.sha256",
+    f"{hashlib.sha256(manifest).hexdigest()}  protected-artifacts-before.txt\n".encode(),
+)
+paused = False
+def pause():
+    global paused
+    if not paused:
+        paused = True
+        print("READY", flush=True)
+        sys.stdin.buffer.read(1)
+original_write = model_sync_artifacts._write_all
+original_fsync = os.fsync
+original_replace = os.replace
+def write(fd, content):
+    if boundary == "write": pause()
+    original_write(fd, content)
+def fsync(fd):
+    original_fsync(fd)
+    if boundary == "file-fsync": pause()
+def replace(source, destination):
+    if boundary == "replace": pause()
+    original_replace(source, destination)
+model_sync_artifacts._write_all = write
+os.fsync = fsync
+os.replace = replace
+paths = ProofRecoveryPaths(env, backup, guard, env.parent, env.parent / "result.json", repository)
+recovery = begin_proof_recovery(paths=paths, pid=os.getpid(), start_time_ticks=model_sync_state.process_start_time_ticks(Path("/proc/self/stat").read_text()))
+if boundary == "parent-fsync": pause()
+prepare_proof_env(env_file=env, backup_path=backup, guard_path=guard, claim_token=recovery.claim.token)
+'''
+    process = subprocess.Popen(
+        [os.environ.get("PYTHON", "python"), "-c", child, boundary, str(env_file), str(backup), str(guard)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[2] / "src")},
+    )
+    assert process.stdout is not None
+    assert process.stdin is not None
+    assert process.stdout.readline().strip() == "READY"
+    process.send_signal(signal.SIGKILL)
+    _stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == -signal.SIGKILL, stderr
+
+    repository = tmp_path / "repository"
+    paths = ProofRecoveryPaths(env_file, backup, guard, tmp_path, tmp_path / "result.json", repository)
+    recovery = begin_proof_recovery(
+        paths=paths,
+        pid=os.getpid(),
+        start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
+    )
+    recover_interrupted_proof(recovery)
+
+    status = read_abort_guard(guard)
+    assert env_file.read_bytes() == original
+    assert not backup.exists()
+    assert (status.phase, status.claimant_kind) == ("ready", "plan")
+    assert not (tmp_path / "result.json").exists()

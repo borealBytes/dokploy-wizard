@@ -1,3 +1,4 @@
+# ruff: noqa: E501, I001
 """CLI commands for the Task 1 live-baseline safety envelope."""
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from dokploy_wizard.proof.model_sync_host_a import (
     ProofRecovery,
     ProofRecoveryPaths,
     begin_proof_recovery,
-    complete_resumable_step,
+    complete_resumable_finalization,
     finalize_baseline_artifacts,
     recover_interrupted_proof,
 )
@@ -96,45 +97,58 @@ def _build_parser() -> argparse.ArgumentParser:
 def _baseline_host_a(args: argparse.Namespace) -> None:
     host_a, password_a, host_b, password_b = _required_inputs(args)
     repository_root = _require_active_workspace_root(args.wrapper)
-    namespace = resolve_proof_namespace(args.env_file)
-    transport = resolve_proof_transport(args.env_file)
-    host_a_probe = probe_host(
-        host=host_a, password=password_a, namespace=namespace, proof_transport=transport
-    )
-    host_b_probe = probe_host(
-        host=host_b, password=password_b, namespace=namespace, proof_transport=transport
-    )
-    identity_a = HostIdentity(
-        host_a_probe.machine_sha256, host_a_probe.ssh_sha256, host_a_probe.architecture
-    )
-    identity_b = HostIdentity(
-        host_b_probe.machine_sha256, host_b_probe.ssh_sha256, host_b_probe.architecture
-    )
-    assert_namespace_identity(host_a=identity_a, host_b=identity_b)
-    if not host_a_probe.namespace_clean or not host_b_probe.namespace_clean:
-        raise RuntimeError("managed namespace residue blocks live baseline proof")
     recovery = begin_proof_recovery(
-        paths=ProofRecoveryPaths(args.env_file, args.external_backup, args.abort_guard),
+        paths=ProofRecoveryPaths(
+            args.env_file,
+            args.external_backup,
+            args.abort_guard,
+            args.artifact_dir,
+            args.output,
+            repository_root,
+        ),
         pid=os.getpid(),
         start_time_ticks=_self_start_time_ticks(),
     )
+    if recovery.terminal:
+        return
     signal_state = {"critical": False, "completed": False, "pending": 0}
     previous_handlers = _install_recovery_handlers(recovery, signal_state)
-    prepared = prepare_proof_env(
-        env_file=args.env_file,
-        backup_path=args.external_backup,
-        guard_path=args.abort_guard,
-        claim_token=recovery.claim.token,
-    )
     completed = False
     try:
+        if recovery.resumable:
+            signal_state["critical"] = True
+            complete_resumable_finalization(recovery)
+            completed = True
+            signal_state["completed"] = True
+            signal_state["critical"] = False
+            if signal_state["pending"]:
+                raise SystemExit(128 + signal_state["pending"])
+            return
+        if recovery.claim is None:
+            raise RuntimeError("nonterminal proof recovery has no claim")
+        prepared = prepare_proof_env(
+            env_file=args.env_file,
+            backup_path=args.external_backup,
+            guard_path=args.abort_guard,
+            claim_token=recovery.claim.token,
+        )
+        namespace = resolve_proof_namespace(args.env_file)
+        transport = resolve_proof_transport(args.env_file)
+        host_a_probe = probe_host(
+            host=host_a, password=password_a, namespace=namespace, proof_transport=transport
+        )
+        host_b_probe = probe_host(
+            host=host_b, password=password_b, namespace=namespace, proof_transport=transport
+        )
+        identity_a = HostIdentity(host_a_probe.machine_sha256, host_a_probe.ssh_sha256, host_a_probe.architecture)
+        identity_b = HostIdentity(host_b_probe.machine_sha256, host_b_probe.ssh_sha256, host_b_probe.architecture)
+        assert_namespace_identity(host_a=identity_a, host_b=identity_b)
+        if not host_a_probe.namespace_clean or not host_b_probe.namespace_clean:
+            raise RuntimeError("managed namespace residue blocks live baseline proof")
         _run_wrapper(args.wrapper, host_a, password_a, args.env_file)
         baseline = parse_captured_baseline(
             capture_host_a_snapshot(host=host_a, password=password_a),
             stack_name=namespace.stack_name,
-        )
-        complete_resumable_step(
-            prepared=prepared, guard_path=args.abort_guard, claim=recovery.claim
         )
         signal_state["critical"] = True
         finalize_baseline_artifacts(
@@ -146,6 +160,7 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
                 proof_commit=args.proof_commit,
                 prepared=prepared,
                 guard_path=args.abort_guard,
+                claim=recovery.claim,
                 host_a=host_a_probe,
                 host_b=host_b_probe,
                 baseline=baseline,
@@ -237,12 +252,12 @@ def _restore_recovery_handlers(
 
 
 def _status_payload(status: AbortGuard) -> dict[str, str | int | None]:
-    if status.env_receipt is not None and not status.env_receipt.complete:
+    if status.phase != "complete" or status.claimant_kind != "plan":
         raise AbortGuardError("abort guard has unresolved recovery state")
     return {
         "state": status.state,
+        "phase": status.phase,
         "claimant_kind": status.claimant_kind,
         "pid": status.pid,
         "start_time_ticks": status.start_time_ticks,
-        "claim_token": status.claim_token,
     }

@@ -14,38 +14,30 @@ from dokploy_wizard.proof.model_sync_env import (
     resolve_proof_transport,
     restore_proof_env,
 )
-from dokploy_wizard.proof.model_sync_host_a import (
-    ProofRecoveryPaths,
-    begin_proof_recovery,
-    claim_plan_guard,
-    recover_failed_proof,
-    recover_interrupted_proof,
-)
+from dokploy_wizard.proof.model_sync_host_a import claim_plan_guard
 from dokploy_wizard.proof.model_sync_state import (
-    AbortGuardError,
     arm_abort_guard,
+    begin_rollback,
     process_start_time_ticks,
     read_abort_guard,
+    record_env_intent,
+    reset_abort_guard,
+    transfer_abort_guard_to_plan,
 )
 
 
 def test_abort_status_rejects_incomplete_plan_owned_receipt(tmp_path: Path) -> None:
-    from dokploy_wizard.proof import model_sync_cli
-    from dokploy_wizard.proof.model_sync_results import EnvReceipt
-    from dokploy_wizard.proof.model_sync_state import (
-        record_env_receipt,
-        transfer_abort_guard_to_plan,
-    )
-
+    from dokploy_wizard.proof import EnvReceipt, model_sync_cli
     guard = tmp_path / "abort-guard.json"
     output = tmp_path / "status.json"
     arm_abort_guard(guard)
     claim = claim_plan_guard(guard_path=guard, pid=12, start_time_ticks="34")
-    record_env_receipt(
+    record_env_intent(
         guard,
         claim_token=claim.token,
-        receipt=EnvReceipt("/tmp/env", "/tmp/backup", "a" * 64, "b" * 64, 0o600, False),
+        receipt=EnvReceipt("/tmp/env", "/tmp/backup", "a" * 64, "b" * 64, 0o600),
     )
+    begin_rollback(guard, claim_token=claim.token)
     transfer_abort_guard_to_plan(guard, claim_token=claim.token)
 
     status = model_sync_cli.main(
@@ -98,6 +90,33 @@ def test_guard_armed_before_env_write(tmp_path: Path) -> None:
     assert "LITELLM_NVIDIA_" not in env_file.read_text(encoding="utf-8")
 
 
+def test_noop_proof_env_still_has_immutable_receipt_and_retained_backup(tmp_path: Path) -> None:
+    env_file = tmp_path / "install.env"
+    original = (
+        b"ROOT_DOMAIN=example.test\nPACKS=coder\nAI_DEFAULT_PROVIDER=openrouter\n"
+        b"AI_DEFAULT_MODEL=example/model\n"
+    )
+    env_file.write_bytes(original)
+    env_file.chmod(0o600)
+    backup = tmp_path / "secrets" / "install.env.backup"
+    guard = tmp_path / "abort-guard.json"
+    arm_abort_guard(guard)
+    claim = claim_plan_guard(guard_path=guard, pid=12, start_time_ticks="34")
+
+    prepared = prepare_proof_env(
+        env_file=env_file,
+        backup_path=backup,
+        guard_path=guard,
+        claim_token=claim.token,
+    )
+
+    status = read_abort_guard(guard)
+    assert prepared.original_sha256 == prepared.proof_sha256
+    assert backup.read_bytes() == original
+    assert status.phase == "proof_active"
+    assert status.env_receipt is not None
+
+
 def test_env_prepare_rejects_unknown_current_hash_without_restoring(tmp_path: Path) -> None:
     env_file = tmp_path / "install.env"
     original = _partial_nvidia_env(env_file)
@@ -128,7 +147,10 @@ def test_abort_signal_restore_restores_exact_env_and_plan_claim(tmp_path: Path) 
         env_file=env_file, backup_path=backup, guard_path=guard, claim_token=claim.token
     )
 
-    recover_failed_proof(prepared=prepared, guard_path=guard, claim=claim)
+    begin_rollback(guard, claim_token=claim.token)
+    restore_proof_env(prepared=prepared, guard_path=guard)
+    transfer_abort_guard_to_plan(guard, claim_token=claim.token)
+    reset_abort_guard(guard)
 
     status = read_abort_guard(guard)
     assert env_file.read_bytes() == original
@@ -149,24 +171,23 @@ def test_timeout_after_env_replacement_restores_and_repeated_recovery_is_idempot
         env_file=env_file, backup_path=backup, guard_path=guard, claim_token=claim.token
     )
 
-    recover_failed_proof(prepared=prepared, guard_path=guard, claim=claim)
-    recover_failed_proof(prepared=prepared, guard_path=guard, claim=claim)
+    begin_rollback(guard, claim_token=claim.token)
+    restore_proof_env(prepared=prepared, guard_path=guard)
+    transfer_abort_guard_to_plan(guard, claim_token=claim.token)
+    reset_abort_guard(guard)
 
     assert env_file.read_bytes() == original
     assert read_abort_guard(guard).claimant_kind == "plan"
 
 
-def test_dead_claim_resume_restores_receipted_original_before_a_second_prepare(
-    tmp_path: Path,
-) -> None:
+def test_rollback_restores_receipted_original_before_a_second_prepare(tmp_path: Path) -> None:
     env_file = tmp_path / "install.env"
     original = _partial_nvidia_env(env_file)
     env_file.chmod(0o640)
     backup = tmp_path / "secrets" / "install.env.backup"
     guard = tmp_path / "abort-guard.json"
-    paths = ProofRecoveryPaths(env_file, backup, guard)
     arm_abort_guard(guard)
-    dead_claim = claim_plan_guard(guard_path=guard, pid=999999, start_time_ticks="0")
+    dead_claim = claim_plan_guard(guard_path=guard, pid=12, start_time_ticks="34")
     first = prepare_proof_env(
         env_file=env_file,
         backup_path=backup,
@@ -174,18 +195,21 @@ def test_dead_claim_resume_restores_receipted_original_before_a_second_prepare(
         claim_token=dead_claim.token,
     )
 
-    resumed = begin_proof_recovery(
-        paths=paths,
-        pid=os.getpid(),
-        start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
-    )
+    begin_rollback(guard, claim_token=dead_claim.token)
+    restore_proof_env(prepared=first, guard_path=guard)
+    transfer_abort_guard_to_plan(guard, claim_token=dead_claim.token)
+    reset_abort_guard(guard)
+    resumed = claim_plan_guard(guard_path=guard, pid=12, start_time_ticks="34")
     second = prepare_proof_env(
         env_file=env_file,
         backup_path=backup,
         guard_path=guard,
-        claim_token=resumed.claim.token,
+        claim_token=resumed.token,
     )
-    recover_interrupted_proof(resumed)
+    begin_rollback(guard, claim_token=resumed.token)
+    restore_proof_env(prepared=second, guard_path=guard)
+    transfer_abort_guard_to_plan(guard, claim_token=resumed.token)
+    reset_abort_guard(guard)
 
     assert first.proof_sha256 != first.original_sha256
     assert second.original_sha256 == hashlib.sha256(original).hexdigest()
@@ -196,34 +220,30 @@ def test_dead_claim_resume_restores_receipted_original_before_a_second_prepare(
 
 
 @pytest.mark.parametrize("current", ["original", "proof"])
-def test_interrupted_receipt_recovers_recognized_current_hashes(
-    tmp_path: Path, current: str
-) -> None:
+def test_rollback_restores_recognized_current_hashes(tmp_path: Path, current: str) -> None:
     env_file = tmp_path / "install.env"
     original = _partial_nvidia_env(env_file)
     backup = tmp_path / "secrets" / "install.env.backup"
     guard = tmp_path / "abort-guard.json"
     arm_abort_guard(guard)
     claim = claim_plan_guard(guard_path=guard, pid=12, start_time_ticks="34")
-    prepare_proof_env(
+    prepared = prepare_proof_env(
         env_file=env_file, backup_path=backup, guard_path=guard, claim_token=claim.token
     )
     if current == "original":
         env_file.write_bytes(original)
 
-    recovery = begin_proof_recovery(
-        paths=ProofRecoveryPaths(env_file, backup, guard),
-        pid=os.getpid(),
-        start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
-    )
-    recover_interrupted_proof(recovery)
+    begin_rollback(guard, claim_token=claim.token)
+    restore_proof_env(prepared=prepared, guard_path=guard)
+    transfer_abort_guard_to_plan(guard, claim_token=claim.token)
+    reset_abort_guard(guard)
 
     assert env_file.read_bytes() == original
     assert not backup.exists()
     assert read_abort_guard(guard).claimant_kind == "plan"
 
 
-def test_interrupted_receipt_rejects_unknown_current_hash_without_transferring_claim(
+def test_restore_rejects_unknown_current_hash_without_transferring_claim(
     tmp_path: Path,
 ) -> None:
     env_file = tmp_path / "install.env"
@@ -232,23 +252,22 @@ def test_interrupted_receipt_rejects_unknown_current_hash_without_transferring_c
     guard = tmp_path / "abort-guard.json"
     arm_abort_guard(guard)
     claim = claim_plan_guard(guard_path=guard, pid=12, start_time_ticks="34")
-    prepare_proof_env(
+    prepared = prepare_proof_env(
         env_file=env_file, backup_path=backup, guard_path=guard, claim_token=claim.token
     )
     env_file.write_text("ROOT_DOMAIN=unknown.test\n", encoding="utf-8")
 
     with pytest.raises(EnvPreparationError):
-        begin_proof_recovery(
-            paths=ProofRecoveryPaths(env_file, backup, guard),
-            pid=os.getpid(),
-            start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
+        restore_proof_env(
+            prepared=prepared,
+            guard_path=guard,
         )
 
     assert read_abort_guard(guard).claimant_kind == "process"
     assert backup.exists()
 
 
-def test_interrupted_receipt_rejects_missing_backup_without_transferring_claim(
+def test_restore_rejects_missing_backup_without_transferring_claim(
     tmp_path: Path,
 ) -> None:
     env_file = tmp_path / "install.env"
@@ -257,37 +276,25 @@ def test_interrupted_receipt_rejects_missing_backup_without_transferring_claim(
     guard = tmp_path / "abort-guard.json"
     arm_abort_guard(guard)
     claim = claim_plan_guard(guard_path=guard, pid=12, start_time_ticks="34")
-    prepare_proof_env(
+    prepared = prepare_proof_env(
         env_file=env_file, backup_path=backup, guard_path=guard, claim_token=claim.token
     )
     backup.unlink()
 
     with pytest.raises(EnvPreparationError):
-        begin_proof_recovery(
-            paths=ProofRecoveryPaths(env_file, backup, guard),
-            pid=os.getpid(),
-            start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
-        )
+        restore_proof_env(prepared=prepared, guard_path=guard)
 
     assert read_abort_guard(guard).claimant_kind == "process"
 
 
-def test_live_claim_blocks_resume_without_mutating_guard(tmp_path: Path) -> None:
+def test_live_claim_preserves_guard_bytes_until_a_transition(tmp_path: Path) -> None:
     env_file = tmp_path / "install.env"
     _partial_nvidia_env(env_file)
-    backup = tmp_path / "secrets" / "install.env.backup"
     guard = tmp_path / "abort-guard.json"
     start_time_ticks = process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8"))
     arm_abort_guard(guard)
     claim_plan_guard(guard_path=guard, pid=os.getpid(), start_time_ticks=start_time_ticks)
     before = guard.read_bytes()
-
-    with pytest.raises(AbortGuardError, match="live process"):
-        begin_proof_recovery(
-            paths=ProofRecoveryPaths(env_file, backup, guard),
-            pid=os.getpid(),
-            start_time_ticks=start_time_ticks,
-        )
 
     assert guard.read_bytes() == before
 

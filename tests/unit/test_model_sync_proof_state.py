@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -12,11 +14,14 @@ from dokploy_wizard.proof.model_sync_results import atomic_finalize, build_resul
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuardError,
     arm_abort_guard,
+    begin_rollback,
     claim_abort_guard,
     disarm_abort_guard,
     process_identity_matches,
     process_start_time_ticks,
     read_abort_guard,
+    record_env_intent,
+    record_proof_active,
     recover_dead_abort_claim,
     transfer_abort_guard_to_plan,
 )
@@ -27,10 +32,20 @@ def test_guard_claim_transfer(tmp_path: Path) -> None:
     arm_abort_guard(guard)
 
     claim_abort_guard(guard, pid=1234, start_time_ticks="456", claim_token="a" * 32)
+    from dokploy_wizard.proof import EnvReceipt
+
+    record_env_intent(
+        guard,
+        claim_token="a" * 32,
+        receipt=EnvReceipt("/tmp/env", "/tmp/backup", "a" * 64, "b" * 64, 0o600),
+    )
+    record_proof_active(guard, claim_token="a" * 32)
+    begin_rollback(guard, claim_token="a" * 32)
     transfer_abort_guard_to_plan(guard, claim_token="a" * 32)
 
     status = read_abort_guard(guard)
     assert status.state == "armed"
+    assert status.phase == "rollback"
     assert status.claimant_kind == "plan"
     assert status.claim_token is None
 
@@ -119,7 +134,7 @@ def test_process_identity_parses_field_22_after_a_parenthesized_command(
     assert process_identity_matches(123, "22")
 
 
-def test_schema_v1_guard_without_receipt_remains_readable(tmp_path: Path) -> None:
+def test_schema_v1_guard_is_rejected_without_mutation(tmp_path: Path) -> None:
     guard = tmp_path / "abort-guard.json"
     guard.write_text(
         json.dumps(
@@ -136,21 +151,33 @@ def test_schema_v1_guard_without_receipt_remains_readable(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
-    status = read_abort_guard(guard)
-
-    assert status.claimant_kind == "plan"
-    assert status.env_receipt is None
+    with pytest.raises(AbortGuardError):
+        read_abort_guard(guard)
 
 
 def test_schema_v2_guard_rejects_boolean_receipt_mode_without_mutation(tmp_path: Path) -> None:
     guard = tmp_path / "abort-guard.json"
     payload = {
-        "claim_token": None, "claimant_kind": "plan", "pid": None, "schema_version": 2,
-        "start_time_ticks": None, "state": "armed",
-        "env_receipt": {"env_path": "/tmp/env", "backup_path": "/tmp/backup", "mode": True,
-                        "original_sha256": "a" * 64, "proof_sha256": "b" * 64, "complete": False},
+        "attestation": None,
+        "claim_token": "a" * 32,
+        "claimant_kind": "process",
+        "env_receipt": {
+            "backup_path": "/tmp/backup",
+            "env_path": "/tmp/env",
+            "mode": True,
+            "original_sha256": "a" * 64,
+            "proof_sha256": "b" * 64,
+            "schema_version": 1,
+        },
+        "guard_id": "c" * 64,
+        "phase": "env_intent",
+        "pid": 1234,
+        "schema_version": 3,
+        "start_time_ticks": "456",
+        "state": "armed",
     }
     guard.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    guard.chmod(0o600)
     before = guard.read_bytes()
 
     with pytest.raises(AbortGuardError):
@@ -159,7 +186,7 @@ def test_schema_v2_guard_rejects_boolean_receipt_mode_without_mutation(tmp_path:
     assert guard.read_bytes() == before
 
 
-def test_atomic_write_removes_sibling_temp_when_write_is_interrupted(
+def test_atomic_write_leaves_interrupted_temp_inert_for_fail_closed_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dokploy_wizard.proof import model_sync_artifacts
@@ -174,34 +201,26 @@ def test_atomic_write_removes_sibling_temp_when_write_is_interrupted(
     with pytest.raises(SystemExit):
         model_sync_artifacts.atomic_write_bytes(output, b"SECRET-NOT-PERSISTED")
 
-    assert not list(tmp_path.glob(".secret.env.*.tmp"))
+    temporary = tuple(tmp_path.glob(".secret.env.*.tmp"))
+    assert len(temporary) == 1
+    assert temporary[0].read_bytes() == b""
+    assert not output.exists()
 
 
 def test_disarm_rejects_plan_owned_unresolved_receipt(tmp_path: Path) -> None:
     guard = tmp_path / "abort-guard.json"
     arm_abort_guard(guard)
-    claim_abort_guard(guard, pid=1234, start_time_ticks="456", claim_token="a" * 32)
-    from dokploy_wizard.proof.model_sync_results import EnvReceipt
-    from dokploy_wizard.proof.model_sync_state import record_env_receipt
-
-    record_env_receipt(
-        guard,
-        claim_token="a" * 32,
-        receipt=EnvReceipt("/tmp/env", "/tmp/backup", "a" * 64, "b" * 64, 0o600, False),
-    )
-    transfer_abort_guard_to_plan(guard, claim_token="a" * 32)
 
     with pytest.raises(AbortGuardError):
         disarm_abort_guard(guard)
 
 
-def test_abort_disarm(tmp_path: Path) -> None:
+def test_abort_disarm_rejects_a_nonterminal_guard(tmp_path: Path) -> None:
     guard = tmp_path / "abort-guard.json"
     arm_abort_guard(guard)
 
-    disarm_abort_guard(guard)
-
-    assert read_abort_guard(guard).state == "disarmed"
+    with pytest.raises(AbortGuardError):
+        disarm_abort_guard(guard)
 
 
 def test_protected_manifest_redacts_and_fsyncs(tmp_path: Path) -> None:
@@ -447,3 +466,145 @@ def test_result_rejects_placeholder_and_zero_capture_values() -> None:
 
     with pytest.raises(ValueError):
         build_result(values)
+
+
+def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
+    tmp_path: Path,
+) -> None:
+    from dokploy_wizard.proof import (
+        BaselineAttestation,
+        EnvReceipt,
+        canonical_json_bytes,
+    )
+    from dokploy_wizard.proof.model_sync_results import derive_result_from_attestation
+    from dokploy_wizard.proof.model_sync_state import (
+        complete_abort_guard,
+        record_env_intent,
+        record_finalize_intent,
+        record_proof_active,
+    )
+
+    guard_path = tmp_path / "abort-guard.json"
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    guard = arm_abort_guard(guard_path)
+    claim_abort_guard(
+        guard_path,
+        pid=1234,
+        start_time_ticks="456",
+        claim_token="a" * 32,
+    )
+    receipt = EnvReceipt(
+        env_path=str((tmp_path / "install.env").resolve()),
+        backup_path=str((tmp_path / "install.env.backup").resolve()),
+        original_sha256="a" * 64,
+        proof_sha256="b" * 64,
+        mode=0o600,
+    )
+    record_env_intent(guard_path, claim_token="a" * 32, receipt=receipt)
+    record_proof_active(guard_path, claim_token="a" * 32)
+    result = build_result(
+        {
+            "schema_version": 1,
+            "source_base_commit": "a" * 40,
+            "proof_commit": "b" * 40,
+            "coder_image_digest": "ghcr.io/coder/coder@sha256:" + "1" * 64,
+            "litellm_image_digest": "ghcr.io/berriai/litellm@sha256:" + "2" * 64,
+            "shared_core_image_digests": {
+                "pgvector": "pgvector/pgvector@sha256:" + "3" * 64,
+                "redis": "redis@sha256:" + "4" * 64,
+                "postfix": "postfix@sha256:" + "5" * 64,
+                "litellm": "ghcr.io/berriai/litellm@sha256:" + "2" * 64,
+            },
+            "env_original_sha256": "a" * 64,
+            "env_proof_sha256": "b" * 64,
+            "env_mode": 0o600,
+            "external_backup_path": receipt.backup_path,
+            "abort_guard_path": str(guard_path.resolve()),
+            "abort_guard_sha256": "c" * 64,
+            "host_a_preflight_sha256": "d" * 64,
+            "host_b_preflight_sha256": "e" * 64,
+            "host_identities_distinct": True,
+            "host_architectures_equal": True,
+            "baseline_sha256": "f" * 64,
+            "protected_artifacts_before_path": str(
+                (artifact_dir / "protected-artifacts-before.txt").resolve()
+            ),
+            "protected_artifacts_before_sha256": "1" * 64,
+            "coder_secret_inventory_sha256": "2" * 64,
+            "legacy_workspace_managed_fingerprints_sha256": "3" * 64,
+        }
+    )
+    attestation = BaselineAttestation(
+        guard_id=guard.guard_id,
+        guard_path=str(guard_path.resolve()),
+        artifact_dir=str(artifact_dir.resolve()),
+        result_path=str((artifact_dir / "result.json").resolve()),
+        env_receipt=receipt,
+        output_sha256={
+            "baseline.json": "f" * 64,
+            "host-a-preflight.json": "d" * 64,
+            "host-b-preflight.json": "e" * 64,
+            "protected-artifacts-before.txt": "1" * 64,
+        },
+        result_body={key: value for key, value in result.items() if key != "abort_guard_sha256"},
+    )
+    record_finalize_intent(guard_path, claim_token="a" * 32, attestation=attestation)
+    before_completion = guard_path.read_bytes()
+
+    complete_abort_guard(guard_path, claim_token="a" * 32)
+    derived = derive_result_from_attestation(attestation)
+
+    assert guard_path.read_bytes() != before_completion
+    assert derived["abort_guard_sha256"] == hashlib.sha256(
+        canonical_json_bytes(attestation.to_payload())
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value.pop("schema_version"),
+        lambda value: value.update({"extra": 1}),
+        lambda value: value.update({"mode": True}),
+        lambda value: value.update({"env_path": "relative.env"}),
+        lambda value: value.update({"original_sha256": "A" * 64}),
+    ],
+)
+def test_env_receipt_v1_rejects_missing_extra_wrong_typed_and_noncanonical_fields(
+    mutate: Callable[[dict[str, JsonValue]], JsonValue | None],
+) -> None:
+    from dokploy_wizard.proof import parse_env_receipt
+
+    receipt: dict[str, JsonValue] = {
+        "schema_version": 1,
+        "env_path": "/tmp/env",
+        "backup_path": "/tmp/backup",
+        "original_sha256": "a" * 64,
+        "proof_sha256": "b" * 64,
+        "mode": 0o600,
+    }
+    mutate(receipt)
+
+    with pytest.raises(ValueError):
+        parse_env_receipt(receipt)
+
+
+def test_guard_v3_rejects_extra_key_without_mutating_bytes(tmp_path: Path) -> None:
+    guard = tmp_path / "abort-guard.json"
+    arm_abort_guard(guard)
+    payload = json.loads(guard.read_text(encoding="utf-8"))
+    payload["extra"] = "rejected"
+    guard.write_bytes(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        + b"\n"
+    )
+    guard.chmod(0o600)
+    before = guard.read_bytes()
+
+    with pytest.raises(AbortGuardError):
+        read_abort_guard(guard)
+
+    assert guard.read_bytes() == before
+    record_env_intent,
+    record_proof_active,
