@@ -11,6 +11,8 @@ from dokploy_wizard import proof
 from dokploy_wizard.proof.model_sync_baseline import CapturedBaseline
 from dokploy_wizard.proof.model_sync_remote import RemoteProbe
 
+complete_resumable_finalization = results.complete_resumable_finalization
+
 
 @dataclass(frozen=True, slots=True)
 class BaselineArtifactInputs:
@@ -93,7 +95,11 @@ def begin_proof_recovery(
     return proof.ProofRecovery(paths, claim, False, False)
 
 
-def recover_interrupted_proof(recovery: proof.ProofRecovery) -> None:
+def recover_interrupted_proof(
+    recovery: proof.ProofRecovery,
+    *,
+    boundary_hook: proof.BoundaryHook = proof.ignore_finalization_boundary,
+) -> None:
     """Converge a nonterminal guard to exact rollback or durable fail-closed evidence."""
     if recovery.claim is None:
         return
@@ -118,11 +124,14 @@ def recover_interrupted_proof(recovery: proof.ProofRecovery) -> None:
                     receipt.mode,
                 ),
                 guard_path=recovery.paths.guard_path,
+                boundary_hook=boundary_hook,
             )
         if current.attestation is None:
             proof.assert_no_generated_outputs(recovery.paths)
         else:
-            results.remove_authorized_outputs(recovery.paths, current.attestation)
+            results.remove_authorized_outputs(
+                recovery.paths, current.attestation, boundary_hook=boundary_hook
+            )
     except (proof.AbortGuardError, proof.CaptureSchemaError, env.EnvPreparationError, OSError):
         state.transfer_abort_guard_to_plan(
             recovery.paths.guard_path, claim_token=recovery.claim.token
@@ -130,23 +139,6 @@ def recover_interrupted_proof(recovery: proof.ProofRecovery) -> None:
         raise
     state.transfer_abort_guard_to_plan(recovery.paths.guard_path, claim_token=recovery.claim.token)
     state.reset_abort_guard(recovery.paths.guard_path)
-
-
-def complete_resumable_finalization(recovery: proof.ProofRecovery) -> None:
-    if recovery.claim is None or not recovery.resumable:
-        raise proof.AbortGuardError("no resumable finalization is active")
-    guard = state.read_abort_guard(recovery.paths.guard_path)
-    if guard.attestation is None:
-        raise proof.AbortGuardError("finalization intent has no attestation")
-    result = proof.result_bytes_from_attestation(guard.attestation)
-    proof.require_generated_bounds({}, result)
-    artifacts.write_or_verify_exact_bytes(recovery.paths.output, result)
-    proof.verify_attestation(
-        recovery.paths,
-        state.read_abort_guard(recovery.paths.guard_path),
-        require_result=True,
-    )
-    state.complete_abort_guard(recovery.paths.guard_path, claim_token=recovery.claim.token)
 
 
 def _recover_incomplete_guard(
@@ -185,7 +177,11 @@ def _recover_incomplete_guard(
     recover_interrupted_proof(recovery)
 
 
-def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
+def finalize_baseline_artifacts(
+    inputs: BaselineArtifactInputs,
+    *,
+    boundary_hook: proof.BoundaryHook = proof.ignore_finalization_boundary,
+) -> None:
     paths = proof.ProofRecoveryPaths(
         inputs.prepared.env_file,
         inputs.prepared.backup_path,
@@ -219,17 +215,8 @@ def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
         inputs.baseline.coder_secret_inventory_sha256,
         inputs.baseline.legacy_workspace_managed_fingerprints_sha256,
     )
-    body = proof.build_result(proof.baseline_result_values(evidence))
-    output_hashes = proof.baseline_output_hashes(evidence)
-    result_body = {key: value for key, value in body.items() if key != "abort_guard_sha256"}
-    attestation = proof.BaselineAttestation(
-        guard.guard_id,
-        str(inputs.guard_path.resolve()),
-        str(inputs.artifact_dir.resolve()),
-        str(inputs.output.resolve()),
-        guard.env_receipt,
-        output_hashes,
-        result_body,
+    attestation = proof.build_baseline_attestation(
+        evidence, guard_id=guard.guard_id, result_path=inputs.output
     )
     result = proof.result_bytes_from_attestation(attestation)
     proof.require_generated_bounds(payloads, result)
@@ -238,12 +225,16 @@ def finalize_baseline_artifacts(inputs: BaselineArtifactInputs) -> None:
         claim_token=inputs.claim.token,
         attestation=attestation,
     )
+    boundary_hook(proof.FinalizationBoundary.FINALIZE_INTENT)
     for name in sorted(payloads):
         artifacts.write_or_verify_exact_bytes(inputs.artifact_dir / name, payloads[name])
+        boundary_hook(proof.FINALIZATION_OUTPUT_BOUNDARIES[name])
     artifacts.write_or_verify_exact_bytes(inputs.output, result)
+    boundary_hook(proof.FinalizationBoundary.RESULT_PUBLISHED)
     proof.verify_attestation(
         paths,
         state.read_abort_guard(inputs.guard_path),
         require_result=True,
     )
     state.complete_abort_guard(inputs.guard_path, claim_token=inputs.claim.token)
+    boundary_hook(proof.FinalizationBoundary.COMPLETE_GUARD)
