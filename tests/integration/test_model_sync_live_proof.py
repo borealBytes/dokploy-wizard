@@ -15,6 +15,7 @@ from urllib import error
 
 import pytest
 
+import dokploy_wizard.proof as model_sync_proof
 from dokploy_wizard.dokploy import coder as coder_module
 from dokploy_wizard.dokploy.coder import _litellm_workspace_fallback_models_json
 from dokploy_wizard.proof import (
@@ -111,6 +112,8 @@ def test_baseline_host_a_requires_all_named_environment_inputs_without_artifact(
     exit_code = main(
         [
             "baseline-host-a",
+            "--active-root",
+            str(tmp_path / "repository"),
             "--wrapper",
             "/workspaces/model-sync/bin/dokploy-wizard-remote",
             "--env-file",
@@ -150,6 +153,8 @@ def test_model_sync_cli_import_and_parser_commands_remain_available() -> None:
         parser.parse_args(
             [
                 "baseline-host-a",
+                "--active-root",
+                "active-root",
                 "--wrapper",
                 "wrapper",
                 "--env-file",
@@ -181,6 +186,46 @@ def test_model_sync_cli_import_and_parser_commands_remain_available() -> None:
     assert commands == {"abort-status", "atomic-finalize", "baseline-host-a"}
 
 
+def test_baseline_parser_requires_explicit_active_root(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Given
+    parser = model_sync_cli._build_parser()
+
+    # When / Then
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "baseline-host-a",
+                "--wrapper",
+                "wrapper",
+                "--env-file",
+                "env",
+                "--external-backup",
+                "backup",
+                "--abort-guard",
+                "guard",
+                "--host-env",
+                "HOST_A",
+                "--password-env",
+                "PASSWORD_A",
+                "--host-b-env",
+                "HOST_B",
+                "--host-b-password-env",
+                "PASSWORD_B",
+                "--source-base-commit",
+                "a" * 40,
+                "--proof-commit",
+                "b" * 40,
+                "--artifact-dir",
+                "artifacts",
+                "--output",
+                "result",
+            ]
+        )
+    assert "--active-root" in capsys.readouterr().err
+
+
 def test_default_baseline_rejects_same_host_mapping_before_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -194,7 +239,9 @@ def test_default_baseline_rejects_same_host_mapping_before_recovery(
     monkeypatch.setattr(
         model_sync_cli,
         "_require_active_workspace_root",
-        lambda _wrapper: pytest.fail("default same-host mapping reached proof recovery"),
+        lambda _wrapper, _paths: pytest.fail(
+            "default same-host mapping reached proof recovery"
+        ),
     )
 
     # When
@@ -2828,6 +2875,8 @@ def _baseline_arguments(tmp_path: Path) -> list[str]:
     )
     return [
         "baseline-host-a",
+        "--active-root",
+        str(tmp_path / "repository"),
         "--wrapper",
         str(Path(__file__).parents[2] / "bin" / "dokploy-wizard-remote"),
         "--env-file",
@@ -2855,6 +2904,196 @@ def _baseline_arguments(tmp_path: Path) -> list[str]:
     ]
 
 
+def _active_root_fixture(tmp_path: Path, name: str) -> tuple[Path, ProofRecoveryPaths]:
+    root = tmp_path / name
+    wrapper = root / "bin" / "dokploy-wizard-remote"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    env_file = root / ".install-min.env"
+    env_file.write_text("ROOT_DOMAIN=proof.example.test\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    artifact_dir = root / ".omo" / "evidence" / "task-1"
+    artifact_dir.mkdir(parents=True)
+    return wrapper, ProofRecoveryPaths(
+        env_file,
+        tmp_path / f"{name}-secrets" / "install.env.backup",
+        artifact_dir / "abort-guard.json",
+        artifact_dir,
+        artifact_dir / "result.json",
+        root,
+    )
+
+
+def test_active_checkout_root_accepts_canonical_proof_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    wrapper, paths = _active_root_fixture(tmp_path, "active")
+    monkeypatch.setattr(model_sync_proof, "_ACTIVE_REPOSITORY_ROOT", paths.repository_root)
+
+    # When
+    root = model_sync_cli._require_active_workspace_root(wrapper, paths)
+
+    # Then
+    assert root == paths.repository_root
+    assert not paths.guard_path.exists()
+    assert not paths.output.exists()
+
+
+def test_active_checkout_root_rejects_unrelated_copy_without_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    _active_wrapper, active_paths = _active_root_fixture(tmp_path, "active")
+    copied_wrapper, copied_paths = _active_root_fixture(tmp_path, "copied")
+    monkeypatch.setattr(
+        model_sync_proof,
+        "_ACTIVE_REPOSITORY_ROOT",
+        active_paths.repository_root,
+    )
+
+    # When / Then
+    with pytest.raises(
+        RuntimeError,
+        match="active root does not match the running repository checkout",
+    ):
+        model_sync_cli._require_active_workspace_root(copied_wrapper, copied_paths)
+    assert not copied_paths.guard_path.exists()
+    assert not copied_paths.output.exists()
+
+
+def test_active_checkout_root_rejects_symlink_alias_without_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    _wrapper, paths = _active_root_fixture(tmp_path, "active")
+    alias = tmp_path / "active-alias"
+    alias.symlink_to(paths.repository_root, target_is_directory=True)
+    aliased_paths = ProofRecoveryPaths(
+        alias / ".install-min.env",
+        paths.backup_path,
+        alias / ".omo" / "evidence" / "task-1" / "abort-guard.json",
+        alias / ".omo" / "evidence" / "task-1",
+        alias / ".omo" / "evidence" / "task-1" / "result.json",
+        alias,
+    )
+    monkeypatch.setattr(model_sync_proof, "_ACTIVE_REPOSITORY_ROOT", paths.repository_root)
+
+    # When / Then
+    with pytest.raises(
+        RuntimeError,
+        match="active root must be an absolute canonical path without symlinks",
+    ):
+        model_sync_cli._require_active_workspace_root(
+            alias / "bin" / "dokploy-wizard-remote",
+            aliased_paths,
+        )
+    assert not aliased_paths.guard_path.exists()
+    assert not aliased_paths.output.exists()
+
+
+def test_active_checkout_root_rejects_wrapper_outside_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    _wrapper, paths = _active_root_fixture(tmp_path, "active")
+    outside_wrapper = tmp_path / "dokploy-wizard-remote"
+    outside_wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    outside_wrapper.chmod(0o755)
+    monkeypatch.setattr(model_sync_proof, "_ACTIVE_REPOSITORY_ROOT", paths.repository_root)
+
+    # When / Then
+    with pytest.raises(
+        RuntimeError,
+        match="wrapper must be the canonical active-root remote wrapper",
+    ):
+        model_sync_cli._require_active_workspace_root(outside_wrapper, paths)
+    assert not paths.guard_path.exists()
+    assert not paths.output.exists()
+
+
+def test_active_checkout_root_rejects_env_outside_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    wrapper, paths = _active_root_fixture(tmp_path, "active")
+    outside_env = tmp_path / ".install-min.env"
+    outside_env.write_text("ROOT_DOMAIN=proof.example.test\n", encoding="utf-8")
+    outside_env.chmod(0o600)
+    outside_paths = ProofRecoveryPaths(
+        outside_env,
+        paths.backup_path,
+        paths.guard_path,
+        paths.artifact_dir,
+        paths.output,
+        paths.repository_root,
+    )
+    monkeypatch.setattr(model_sync_proof, "_ACTIVE_REPOSITORY_ROOT", paths.repository_root)
+
+    # When / Then
+    with pytest.raises(
+        RuntimeError,
+        match="env file must be the canonical active-root .install-min.env",
+    ):
+        model_sync_cli._require_active_workspace_root(wrapper, outside_paths)
+    assert not paths.guard_path.exists()
+    assert not paths.output.exists()
+
+
+def test_active_checkout_root_rejects_traversed_artifact_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    wrapper, paths = _active_root_fixture(tmp_path, "active")
+    other = paths.repository_root / ".omo" / "evidence" / "other"
+    other.mkdir()
+    traversed = paths.artifact_dir / ".." / "other"
+    traversed_paths = ProofRecoveryPaths(
+        paths.env_file,
+        paths.backup_path,
+        traversed / "abort-guard.json",
+        traversed,
+        traversed / "result.json",
+        paths.repository_root,
+    )
+    monkeypatch.setattr(model_sync_proof, "_ACTIVE_REPOSITORY_ROOT", paths.repository_root)
+
+    # When / Then
+    with pytest.raises(
+        RuntimeError,
+        match="artifact directory must be an absolute canonical path without symlinks",
+    ):
+        model_sync_cli._require_active_workspace_root(wrapper, traversed_paths)
+    assert not traversed_paths.guard_path.exists()
+    assert not traversed_paths.output.exists()
+
+
+def test_cli_rejects_unrelated_active_root_before_guard_or_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Given
+    arguments = _baseline_arguments(tmp_path)
+    monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
+    monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
+    monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
+    monkeypatch.setenv("FIXTURE_PASSWORD_B", "password-b")
+
+    # When
+    exit_code = main(arguments)
+
+    # Then
+    assert exit_code == 1
+    assert (
+        "active root does not match the running repository checkout"
+        in capsys.readouterr().err
+    )
+    assert not (tmp_path / "abort-guard.json").exists()
+    assert not (tmp_path / "artifacts" / "result.json").exists()
+
+
 def _baseline_recovery_paths(arguments: list[str], tmp_path: Path) -> ProofRecoveryPaths:
     return ProofRecoveryPaths(
         Path(arguments[arguments.index("--env-file") + 1]),
@@ -2874,7 +3113,7 @@ def _run_baseline_fixture(
     monkeypatch.setattr(
         model_sync_cli,
         "_require_active_workspace_root",
-        lambda _wrapper: tmp_path / "repository",
+        lambda _wrapper, _paths: tmp_path / "repository",
     )
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
@@ -2894,7 +3133,7 @@ def test_explicit_single_host_baseline_uses_one_physical_preflight(
     monkeypatch.setattr(
         model_sync_cli,
         "_require_active_workspace_root",
-        lambda _wrapper: tmp_path / "repository",
+        lambda _wrapper, _paths: tmp_path / "repository",
     )
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
@@ -2945,7 +3184,7 @@ def test_single_host_baseline_requires_exact_password_mapping(
     monkeypatch.setattr(
         model_sync_cli,
         "_require_active_workspace_root",
-        lambda _wrapper: pytest.fail("credential mismatch reached proof recovery"),
+        lambda _wrapper, _paths: pytest.fail("credential mismatch reached proof recovery"),
     )
 
     # When
@@ -3023,7 +3262,11 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     arguments = _baseline_arguments(tmp_path)
     clients = _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
     monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
-    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: tmp_path / "repository")
+    monkeypatch.setattr(
+        model_sync_cli,
+        "_require_active_workspace_root",
+        lambda _wrapper, _paths: tmp_path / "repository",
+    )
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
     monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
@@ -3098,7 +3341,11 @@ def test_baseline_host_a_adopts_only_receipted_preexisting_protected_manifest(
     manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
     _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
     monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
-    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: tmp_path / "repository")
+    monkeypatch.setattr(
+        model_sync_cli,
+        "_require_active_workspace_root",
+        lambda _wrapper, _paths: tmp_path / "repository",
+    )
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
     monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
@@ -3127,7 +3374,11 @@ def test_baseline_host_a_rejects_unknown_preexisting_protected_manifest(
     receipt_path.unlink()
     _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
     monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
-    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: tmp_path / "repository")
+    monkeypatch.setattr(
+        model_sync_cli,
+        "_require_active_workspace_root",
+        lambda _wrapper, _paths: tmp_path / "repository",
+    )
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
     monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
@@ -3293,7 +3544,11 @@ def test_baseline_host_a_rejects_symlinked_protected_manifest_contract(
     protected_path.symlink_to(target.name)
     _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
     monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
-    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: tmp_path / "repository")
+    monkeypatch.setattr(
+        model_sync_cli,
+        "_require_active_workspace_root",
+        lambda _wrapper, _paths: tmp_path / "repository",
+    )
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
     monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
@@ -3758,7 +4013,11 @@ def test_baseline_host_a_rejects_incomplete_fixture_without_finalized_outputs(
     arguments = _baseline_arguments(tmp_path)
     _install_fixture_transport(monkeypatch, snapshot=snapshot)
     monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
-    monkeypatch.setattr(model_sync_cli, "_require_active_workspace_root", lambda _wrapper: tmp_path / "repository")
+    monkeypatch.setattr(
+        model_sync_cli,
+        "_require_active_workspace_root",
+        lambda _wrapper, _paths: tmp_path / "repository",
+    )
     monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
     monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
     monkeypatch.setenv("FIXTURE_HOST_B", "host-b")
@@ -3873,7 +4132,7 @@ def write(path: Path, content: bytes, *, mode: int = 0o600) -> None:
 
 model_sync_env.artifacts.atomic_write_bytes = write
 model_sync_cli.resolve_host_inputs = lambda *_args: ("host-a", "password-a", "host-b", "password-b")
-model_sync_cli._require_active_workspace_root = lambda _wrapper: repository
+model_sync_cli._require_active_workspace_root = lambda _wrapper, _paths: repository
 model_sync_cli.resolve_proof_namespace = lambda _env: SimpleNamespace(stack_name="proof-stack")
 model_sync_cli.resolve_proof_transport = lambda _env: None
 model_sync_cli.probe_host = lambda **_kwargs: SimpleNamespace(
@@ -3934,7 +4193,8 @@ if boundary == "between-restore":
         signal.signal(signal.SIGTERM, previous[1])
     model_sync_cli._restore_recovery_handlers = restore
 args = argparse.Namespace(
-    wrapper=Path("wrapper"), env_file=env_file, external_backup=backup, abort_guard=guard,
+    active_root=repository, wrapper=Path("wrapper"), env_file=env_file,
+    external_backup=backup, abort_guard=guard,
     host_env="unused", password_env="unused", host_b_env="unused", host_b_password_env="unused",
     single_host_sequential=False,
     source_base_commit="a" * 40, proof_commit="b" * 40, artifact_dir=env_file.parent,

@@ -78,16 +78,17 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         ),
         mode,
     )
-    repository_root = _require_active_workspace_root(args.wrapper)
+    paths = proof.ProofRecoveryPaths(
+        args.env_file,
+        args.external_backup,
+        args.abort_guard,
+        args.artifact_dir,
+        args.output,
+        args.active_root,
+    )
+    repository_root = _require_active_workspace_root(args.wrapper, paths)
     recovery = begin_proof_recovery(
-        paths=proof.ProofRecoveryPaths(
-            args.env_file,
-            args.external_backup,
-            args.abort_guard,
-            args.artifact_dir,
-            args.output,
-            repository_root,
-        ),
+        paths=paths,
         pid=os.getpid(),
         start_time_ticks=_self_start_time_ticks(),
     )
@@ -179,11 +180,8 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
             recover_interrupted_proof(recovery)
 
 
-def _require_active_workspace_root(wrapper: Path) -> Path:
-    expected = Path("/workspaces/model-sync").resolve()
-    if not expected.exists() or wrapper.resolve().parent != expected / "bin":
-        raise RuntimeError("/workspaces/model-sync does not resolve to the active proof root")
-    return expected
+def _require_active_workspace_root(wrapper: Path, paths: proof.ProofRecoveryPaths) -> Path:
+    return proof.require_active_repository_root(wrapper, paths)
 
 
 def _run_wrapper(wrapper: Path, host: str, password: str, env_file: Path) -> None:
