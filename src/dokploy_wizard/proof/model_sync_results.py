@@ -7,6 +7,7 @@ import os
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import assert_never
 
 import dokploy_wizard.proof.model_sync_state as state
 from dokploy_wizard import proof
@@ -79,16 +80,40 @@ def assert_namespace_identity(*, host_a: HostIdentity, host_b: HostIdentity) -> 
         raise ValueError("Host A and Host B architectures must match")
 
 
-def assert_followup_proof_contract(*, contract_name: str, receipts: tuple[str, ...]) -> None:
-    required = {
-        "upgrade_host_a_contract": "host-a-baseline",
-        "final_proof_contract": "host-a-destroyed",
-        "reseed_pair_contract": "host-b-clean",
-    }.get(contract_name)
+def assert_followup_proof_contract(
+    *,
+    contract_name: str,
+    receipts: tuple[str, ...],
+    host_identity_mode: proof.HostIdentityMode = "distinct",
+) -> None:
+    distinct = {
+        "upgrade_host_a_contract": frozenset({"host-a-baseline"}),
+        "final_proof_contract": frozenset({"host-a-destroyed"}),
+        "reseed_pair_contract": frozenset({"host-b-clean"}),
+    }
+    sequential = {
+        "upgrade_host_a_contract": frozenset({"single-host-lifecycle-baseline"}),
+        "final_proof_contract": frozenset(
+            {
+                "single-host-lifecycle-host-a",
+                "single-host-lifecycle-teardown",
+                "single-host-lifecycle-final",
+            }
+        ),
+    }
+    match host_identity_mode:
+        case "distinct":
+            contracts = distinct
+        case "single_sequential":
+            contracts = sequential
+        case unexpected:
+            assert_never(unexpected)
+    required = contracts.get(contract_name)
     if required is None:
-        raise ValueError("unknown followup proof contract")
-    if required not in receipts:
-        raise ValueError(f"{contract_name} requires receipt {required}")
+        raise ValueError("unknown or mode-incompatible followup proof contract")
+    missing = required - set(receipts)
+    if missing:
+        raise ValueError(f"{contract_name} requires receipts {sorted(missing)}")
 
 
 def remove_authorized_outputs(
@@ -97,7 +122,7 @@ def remove_authorized_outputs(
     *,
     boundary_hook: proof.BoundaryHook = proof.ignore_finalization_boundary,
 ) -> None:
-    for name, path in proof.output_paths(paths).items():
+    for name, path in proof.output_paths(paths, attestation.output_sha256).items():
         if not os.path.lexists(path):
             continue
         content = proof.read_proof_bytes(path, 16 * 1024 * 1024, 0o600)

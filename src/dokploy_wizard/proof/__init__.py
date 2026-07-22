@@ -13,12 +13,12 @@ import selectors
 import stat
 import subprocess
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from ipaddress import ip_address
 from pathlib import Path, PurePosixPath
-from typing import Final, Literal, NamedTuple, TypeAlias
+from typing import Final, Literal, NamedTuple, TypeAlias, assert_never
 from urllib.parse import urlsplit
 
 from dokploy_wizard.verification import redact_text
@@ -38,6 +38,7 @@ _RESULT_DIGEST = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _RESULT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
+HostIdentityMode = Literal["distinct", "single_sequential"]
 ProtectedManifestEntry = NamedTuple(
     "ProtectedManifestEntry",
     [("path", PurePosixPath), ("sha256", str)],
@@ -83,6 +84,7 @@ _PROTECTED_FORBIDDEN: Final = (
     "/abort-status.json",
     "/host-a-preflight.json",
     "/host-b-preflight.json",
+    "/single-host-lifecycle-baseline.json",
 )
 REQUIRED_RESULT_KEYS: Final = frozenset(
     {
@@ -98,6 +100,7 @@ REQUIRED_RESULT_KEYS: Final = frozenset(
         "host_a_preflight_sha256",
         "host_architectures_equal",
         "host_b_preflight_sha256",
+        "host_identity_mode",
         "host_identities_distinct",
         "legacy_workspace_managed_fingerprints_sha256",
         "litellm_image_digest",
@@ -106,7 +109,10 @@ REQUIRED_RESULT_KEYS: Final = frozenset(
         "protected_artifacts_before_sha256",
         "schema_version",
         "shared_core_image_digests",
+        "single_host_lifecycle_path",
+        "single_host_lifecycle_sha256",
         "source_base_commit",
+        "temporal_clean_epoch_evidence",
     }
 )
 
@@ -116,6 +122,7 @@ class FinalizationBoundary(StrEnum):
     BASELINE_PUBLISHED = "baseline-published"
     HOST_A_PREFLIGHT_PUBLISHED = "host-a-preflight-published"
     HOST_B_PREFLIGHT_PUBLISHED = "host-b-preflight-published"
+    SINGLE_HOST_LIFECYCLE_PUBLISHED = "single-host-lifecycle-published"
     RESULT_PUBLISHED = "result-published"
     COMPLETE_GUARD = "complete-guard"
     ROLLBACK_OUTPUT_UNLINKED = "rollback-output-unlinked"
@@ -128,6 +135,7 @@ FINALIZATION_OUTPUT_BOUNDARIES: Final = {
     "baseline.json": FinalizationBoundary.BASELINE_PUBLISHED,
     "host-a-preflight.json": FinalizationBoundary.HOST_A_PREFLIGHT_PUBLISHED,
     "host-b-preflight.json": FinalizationBoundary.HOST_B_PREFLIGHT_PUBLISHED,
+    "single-host-lifecycle-baseline.json": (FinalizationBoundary.SINGLE_HOST_LIFECYCLE_PUBLISHED),
 }
 
 
@@ -521,6 +529,7 @@ class BaselineAttestation:
     artifact_dir: str
     result_path: str
     env_receipt: EnvReceipt
+    host_identity_mode: HostIdentityMode
     output_sha256: Mapping[str, str]
     result_body: Mapping[str, JsonValue]
 
@@ -530,6 +539,7 @@ class BaselineAttestation:
             "env_receipt": self.env_receipt.to_payload(),
             "guard_id": self.guard_id,
             "guard_path": self.guard_path,
+            "host_identity_mode": self.host_identity_mode,
             "kind": "task-1-baseline-finalization",
             "output_sha256": dict(self.output_sha256),
             "required_terminal": {
@@ -539,7 +549,7 @@ class BaselineAttestation:
             },
             "result_body": dict(self.result_body),
             "result_path": self.result_path,
-            "schema_version": 1,
+            "schema_version": 2,
         }
 
 
@@ -815,6 +825,7 @@ def parse_baseline_attestation(value: JsonValue | None) -> BaselineAttestation |
         "env_receipt",
         "guard_id",
         "guard_path",
+        "host_identity_mode",
         "kind",
         "output_sha256",
         "required_terminal",
@@ -826,7 +837,7 @@ def parse_baseline_attestation(value: JsonValue | None) -> BaselineAttestation |
         not isinstance(value, dict)
         or set(value) != expected
         or isinstance(value["schema_version"], bool)
-        or value["schema_version"] != 1
+        or value["schema_version"] != 2
         or value["kind"] != "task-1-baseline-finalization"
     ):
         raise ValueError("abort guard attestation is invalid")
@@ -847,6 +858,7 @@ def parse_baseline_attestation(value: JsonValue | None) -> BaselineAttestation |
         _path(value["artifact_dir"]),
         _path(value["result_path"]),
         receipt,
+        _host_identity_mode(value["host_identity_mode"]),
         {key: _hash(item) for key, item in outputs.items()},
         body,
     )
@@ -862,12 +874,23 @@ def validate_baseline_attestation_bindings(attestation: BaselineAttestation) -> 
     receipt = parse_env_receipt(attestation.env_receipt.to_payload())
     if receipt is None:
         raise ValueError("abort guard attestation receipt is invalid")
-    expected_outputs = {
-        "baseline.json",
-        "host-a-preflight.json",
-        "host-b-preflight.json",
-        "protected-artifacts-before.txt",
-    }
+    match attestation.host_identity_mode:
+        case "distinct":
+            expected_outputs = {
+                "baseline.json",
+                "host-a-preflight.json",
+                "host-b-preflight.json",
+                "protected-artifacts-before.txt",
+            }
+        case "single_sequential":
+            expected_outputs = {
+                "baseline.json",
+                "host-a-preflight.json",
+                "protected-artifacts-before.txt",
+                "single-host-lifecycle-baseline.json",
+            }
+        case unexpected:
+            assert_never(unexpected)
     if set(attestation.output_sha256) != expected_outputs:
         raise ValueError("abort guard attestation outputs are invalid")
     outputs = {key: _hash(value) for key, value in attestation.output_sha256.items()}
@@ -882,10 +905,31 @@ def validate_baseline_attestation_bindings(attestation: BaselineAttestation) -> 
         "env_proof_sha256": receipt.proof_sha256,
         "external_backup_path": receipt.backup_path,
         "host_a_preflight_sha256": outputs["host-a-preflight.json"],
-        "host_b_preflight_sha256": outputs["host-b-preflight.json"],
+        "host_identity_mode": attestation.host_identity_mode,
         "protected_artifacts_before_path": f"{artifact_dir}/protected-artifacts-before.txt",
         "protected_artifacts_before_sha256": outputs["protected-artifacts-before.txt"],
     }
+    match attestation.host_identity_mode:
+        case "distinct":
+            expected_bindings.update(
+                {
+                    "host_b_preflight_sha256": outputs["host-b-preflight.json"],
+                    "single_host_lifecycle_path": None,
+                    "single_host_lifecycle_sha256": None,
+                }
+            )
+        case "single_sequential":
+            expected_bindings.update(
+                {
+                    "host_b_preflight_sha256": None,
+                    "single_host_lifecycle_path": (
+                        f"{artifact_dir}/single-host-lifecycle-baseline.json"
+                    ),
+                    "single_host_lifecycle_sha256": outputs["single-host-lifecycle-baseline.json"],
+                }
+            )
+        case unexpected:
+            assert_never(unexpected)
     if result_path != f"{artifact_dir}/result.json" or any(
         body[key] != value for key, value in expected_bindings.items()
     ):
@@ -1076,6 +1120,16 @@ def _claimant_kind(value: JsonValue) -> ClaimantKind:
             raise ValueError("abort guard claimant is invalid")
 
 
+def _host_identity_mode(value: JsonValue) -> HostIdentityMode:
+    match value:
+        case "distinct":
+            return "distinct"
+        case "single_sequential":
+            return "single_sequential"
+        case _:
+            raise ValueError("host identity mode is invalid")
+
+
 def _path(value: JsonValue) -> str:
     if (
         not isinstance(value, str)
@@ -1154,6 +1208,7 @@ def build_model_sync_parser() -> argparse.ArgumentParser:
     baseline.add_argument("--password-env", required=True)
     baseline.add_argument("--host-b-env", required=True)
     baseline.add_argument("--host-b-password-env", required=True)
+    baseline.add_argument("--single-host-sequential", action="store_true")
     baseline.add_argument("--source-base-commit", required=True)
     baseline.add_argument("--proof-commit", required=True)
     baseline.add_argument("--artifact-dir", type=Path, required=True)
@@ -1165,15 +1220,21 @@ def self_start_time_ticks() -> str:
     return process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8"))
 
 
-def abort_status_payload(status: AbortGuard) -> dict[str, str | int | None]:
-    if status.phase != "complete" or status.claimant_kind != "plan":
+def abort_status_payload(status: AbortGuard) -> dict[str, JsonScalar]:
+    if status.phase != "complete" or status.claimant_kind != "plan" or status.attestation is None:
         raise AbortGuardError("abort guard has unresolved recovery state")
+    temporal = status.attestation.result_body["temporal_clean_epoch_evidence"]
+    if not isinstance(temporal, bool):
+        raise AbortGuardError("abort guard host provenance is invalid")
     return {
         "state": status.state,
         "phase": status.phase,
         "claimant_kind": status.claimant_kind,
+        "host_identity_mode": status.attestation.host_identity_mode,
+        "host_identities_distinct": status.attestation.host_identity_mode == "distinct",
         "pid": status.pid,
         "start_time_ticks": status.start_time_ticks,
+        "temporal_clean_epoch_evidence": temporal,
     }
 
 
@@ -1181,13 +1242,15 @@ def abort_status_payload(status: AbortGuard) -> dict[str, str | int | None]:
 class BaselineResultEvidence:
     source_base_commit: str
     proof_commit: str
+    host_identity_mode: HostIdentityMode
     images: Mapping[str, str]
     env_receipt: EnvReceipt
     guard_path: Path
     artifact_dir: Path
     abort_guard_sha256: str
     host_a_preflight_sha256: str
-    host_b_preflight_sha256: str
+    host_b_preflight_sha256: str | None
+    single_host_lifecycle_sha256: str | None
     baseline_sha256: str
     protected_artifacts_before_sha256: str
     coder_secret_inventory_sha256: str
@@ -1346,9 +1409,10 @@ def verify_result_bytes(attestation: BaselineAttestation, value: bytes) -> None:
 
 def baseline_result_values(evidence: BaselineResultEvidence) -> dict[str, JsonValue]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_base_commit": evidence.source_base_commit,
         "proof_commit": evidence.proof_commit,
+        "host_identity_mode": evidence.host_identity_mode,
         "coder_image_digest": evidence.images["coder"],
         "litellm_image_digest": evidence.images["litellm"],
         "shared_core_image_digests": {
@@ -1365,8 +1429,15 @@ def baseline_result_values(evidence: BaselineResultEvidence) -> dict[str, JsonVa
         "abort_guard_sha256": evidence.abort_guard_sha256,
         "host_a_preflight_sha256": evidence.host_a_preflight_sha256,
         "host_b_preflight_sha256": evidence.host_b_preflight_sha256,
-        "host_identities_distinct": True,
-        "host_architectures_equal": True,
+        "host_identities_distinct": evidence.host_identity_mode == "distinct",
+        "host_architectures_equal": (True if evidence.host_identity_mode == "distinct" else None),
+        "single_host_lifecycle_path": (
+            str((evidence.artifact_dir / "single-host-lifecycle-baseline.json").resolve())
+            if evidence.single_host_lifecycle_sha256 is not None
+            else None
+        ),
+        "single_host_lifecycle_sha256": evidence.single_host_lifecycle_sha256,
+        "temporal_clean_epoch_evidence": False,
         "baseline_sha256": evidence.baseline_sha256,
         "protected_artifacts_before_path": str(
             (evidence.artifact_dir / "protected-artifacts-before.txt").resolve()
@@ -1380,12 +1451,16 @@ def baseline_result_values(evidence: BaselineResultEvidence) -> dict[str, JsonVa
 
 
 def baseline_output_hashes(evidence: BaselineResultEvidence) -> dict[str, str]:
-    return {
+    outputs = {
         "baseline.json": evidence.baseline_sha256,
         "host-a-preflight.json": evidence.host_a_preflight_sha256,
-        "host-b-preflight.json": evidence.host_b_preflight_sha256,
         "protected-artifacts-before.txt": evidence.protected_artifacts_before_sha256,
     }
+    if evidence.host_b_preflight_sha256 is not None:
+        outputs["host-b-preflight.json"] = evidence.host_b_preflight_sha256
+    if evidence.single_host_lifecycle_sha256 is not None:
+        outputs["single-host-lifecycle-baseline.json"] = evidence.single_host_lifecycle_sha256
+    return outputs
 
 
 def build_baseline_attestation(
@@ -1401,6 +1476,7 @@ def build_baseline_attestation(
         str(evidence.artifact_dir.resolve()),
         str(result_path.resolve()),
         evidence.env_receipt,
+        evidence.host_identity_mode,
         baseline_output_hashes(evidence),
         {key: value for key, value in body.items() if key != "abort_guard_sha256"},
     )
@@ -1445,12 +1521,24 @@ def protected_bytes(paths: ProofRecoveryPaths) -> bytes:
     return manifest
 
 
-def output_paths(paths: ProofRecoveryPaths) -> dict[str, Path]:
-    return {
+def output_paths(
+    paths: ProofRecoveryPaths,
+    names: Iterable[str] | None = None,
+) -> dict[str, Path]:
+    available = {
         "baseline.json": paths.artifact_dir / "baseline.json",
         "host-a-preflight.json": paths.artifact_dir / "host-a-preflight.json",
         "host-b-preflight.json": paths.artifact_dir / "host-b-preflight.json",
+        "single-host-lifecycle-baseline.json": (
+            paths.artifact_dir / "single-host-lifecycle-baseline.json"
+        ),
     }
+    if names is None:
+        return available
+    requested = set(names) - {"protected-artifacts-before.txt"}
+    if not requested <= set(available):
+        raise AbortGuardError("attestation contains an unsupported output name")
+    return {name: available[name] for name in requested}
 
 
 def assert_no_generated_outputs(paths: ProofRecoveryPaths) -> None:
@@ -1491,7 +1579,7 @@ def verify_attestation(
         != hashlib.sha256(manifest).hexdigest()
     ):
         raise AbortGuardError("protected manifest drifted from attestation")
-    for name, path in output_paths(paths).items():
+    for name, path in output_paths(paths, attestation.output_sha256).items():
         content = read_proof_bytes(path, _MAX_DATA_OUTPUT_BYTES, 0o600)
         if hashlib.sha256(content).hexdigest() != attestation.output_sha256[name]:
             raise AbortGuardError("attested output drifted")
@@ -1520,7 +1608,6 @@ def _require_result_hashes(values: Mapping[str, JsonValue]) -> None:
         "env_proof_sha256",
         "abort_guard_sha256",
         "host_a_preflight_sha256",
-        "host_b_preflight_sha256",
         "baseline_sha256",
         "protected_artifacts_before_sha256",
         "coder_secret_inventory_sha256",
@@ -1530,6 +1617,20 @@ def _require_result_hashes(values: Mapping[str, JsonValue]) -> None:
         value = values[key]
         if not isinstance(value, str) or not _SHA256.fullmatch(value) or value == "0" * 64:
             raise ValueError("all capture hashes must be non-zero SHA-256 values")
+    mode = _host_identity_mode(values["host_identity_mode"])
+    match mode:
+        case "distinct":
+            required = values["host_b_preflight_sha256"]
+            if values["single_host_lifecycle_sha256"] is not None:
+                raise ValueError("distinct-host result cannot bind a single-host lifecycle")
+        case "single_sequential":
+            required = values["single_host_lifecycle_sha256"]
+            if values["host_b_preflight_sha256"] is not None:
+                raise ValueError("single-host result cannot bind a Host B preflight")
+        case unexpected:
+            assert_never(unexpected)
+    if not isinstance(required, str) or not _SHA256.fullmatch(required) or required == "0" * 64:
+        raise ValueError("mode-specific capture hash must be a non-zero SHA-256 value")
 
 
 def _require_result_digests(values: Mapping[str, JsonValue]) -> None:
@@ -1562,17 +1663,33 @@ def _require_capture_values(values: Mapping[str, JsonValue]) -> None:
     env_mode = values["env_mode"]
     if (
         isinstance(schema_version, bool)
-        or schema_version != 1
+        or schema_version != 2
         or isinstance(env_mode, bool)
         or not isinstance(env_mode, int)
         or not 1 <= env_mode <= 0o777
     ):
         raise ValueError("result schema version and proof env mode are invalid")
-    if (
-        values["host_identities_distinct"] is not True
-        or values["host_architectures_equal"] is not True
-    ):
-        raise ValueError("result requires distinct hosts with matching architectures")
+    mode = _host_identity_mode(values["host_identity_mode"])
+    match mode:
+        case "distinct":
+            mode_fields_valid = (
+                values["host_identities_distinct"] is True
+                and values["host_architectures_equal"] is True
+                and values["temporal_clean_epoch_evidence"] is False
+                and values["single_host_lifecycle_path"] is None
+            )
+        case "single_sequential":
+            mode_fields_valid = (
+                values["host_identities_distinct"] is False
+                and values["host_architectures_equal"] is None
+                and values["temporal_clean_epoch_evidence"] is False
+                and isinstance(values["single_host_lifecycle_path"], str)
+                and values["single_host_lifecycle_path"] != ""
+            )
+        case unexpected:
+            assert_never(unexpected)
+    if not mode_fields_valid:
+        raise ValueError("result host identity provenance is inconsistent")
     for key in (
         "external_backup_path",
         "abort_guard_path",

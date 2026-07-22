@@ -1,32 +1,19 @@
 import os
 import secrets
-from dataclasses import dataclass
 from pathlib import Path
 
-import dokploy_wizard.proof.model_sync_artifacts as artifacts
-import dokploy_wizard.proof.model_sync_env as env
-import dokploy_wizard.proof.model_sync_results as results
-import dokploy_wizard.proof.model_sync_state as state
 from dokploy_wizard import proof
-from dokploy_wizard.proof.model_sync_baseline import CapturedBaseline
-from dokploy_wizard.proof.model_sync_remote import RemoteProbe
+from dokploy_wizard.proof import model_sync_env as env
+from dokploy_wizard.proof import model_sync_results as results
+from dokploy_wizard.proof import model_sync_state as state
+from dokploy_wizard.proof.model_sync_finalization import (
+    BaselineArtifactInputs as BaselineArtifactInputs,
+)
+from dokploy_wizard.proof.model_sync_finalization import (
+    finalize_baseline_artifacts as finalize_baseline_artifacts,
+)
 
 complete_resumable_finalization = results.complete_resumable_finalization
-
-
-@dataclass(frozen=True, slots=True)
-class BaselineArtifactInputs:
-    repository_root: Path
-    artifact_dir: Path
-    output: Path
-    source_base_commit: str
-    proof_commit: str
-    prepared: env.PreparedEnv
-    guard_path: Path
-    claim: proof.GuardClaim
-    host_a: RemoteProbe
-    host_b: RemoteProbe
-    baseline: CapturedBaseline
 
 
 def claim_plan_guard(*, guard_path: Path, pid: int, start_time_ticks: str) -> proof.GuardClaim:
@@ -175,66 +162,3 @@ def _recover_incomplete_guard(
         False,
     )
     recover_interrupted_proof(recovery)
-
-
-def finalize_baseline_artifacts(
-    inputs: BaselineArtifactInputs,
-    *,
-    boundary_hook: proof.BoundaryHook = proof.ignore_finalization_boundary,
-) -> None:
-    paths = proof.ProofRecoveryPaths(
-        inputs.prepared.env_file,
-        inputs.prepared.backup_path,
-        inputs.guard_path,
-        inputs.artifact_dir,
-        inputs.output,
-        inputs.repository_root,
-    )
-    proof.assert_no_generated_outputs(paths)
-    manifest = proof.protected_bytes(paths)
-    payloads = {
-        "baseline.json": proof.canonical_json_bytes(inputs.baseline.payload) + b"\n",
-        "host-a-preflight.json": proof.canonical_json_bytes(inputs.host_a.to_dict()) + b"\n",
-        "host-b-preflight.json": proof.canonical_json_bytes(inputs.host_b.to_dict()) + b"\n",
-    }
-    guard = state.read_abort_guard(inputs.guard_path)
-    if guard.env_receipt is None:
-        raise proof.AbortGuardError("proof-active guard lacks env receipt")
-    evidence = proof.BaselineResultEvidence(
-        inputs.source_base_commit,
-        inputs.proof_commit,
-        inputs.baseline.images,
-        guard.env_receipt,
-        inputs.guard_path,
-        inputs.artifact_dir,
-        "f" * 64,
-        artifacts.sha256_bytes(payloads["host-a-preflight.json"]),
-        artifacts.sha256_bytes(payloads["host-b-preflight.json"]),
-        artifacts.sha256_bytes(payloads["baseline.json"]),
-        artifacts.sha256_bytes(manifest),
-        inputs.baseline.coder_secret_inventory_sha256,
-        inputs.baseline.legacy_workspace_managed_fingerprints_sha256,
-    )
-    attestation = proof.build_baseline_attestation(
-        evidence, guard_id=guard.guard_id, result_path=inputs.output
-    )
-    result = proof.result_bytes_from_attestation(attestation)
-    proof.require_generated_bounds(payloads, result)
-    state.record_finalize_intent(
-        inputs.guard_path,
-        claim_token=inputs.claim.token,
-        attestation=attestation,
-    )
-    boundary_hook(proof.FinalizationBoundary.FINALIZE_INTENT)
-    for name in sorted(payloads):
-        artifacts.write_or_verify_exact_bytes(inputs.artifact_dir / name, payloads[name])
-        boundary_hook(proof.FINALIZATION_OUTPUT_BOUNDARIES[name])
-    artifacts.write_or_verify_exact_bytes(inputs.output, result)
-    boundary_hook(proof.FinalizationBoundary.RESULT_PUBLISHED)
-    proof.verify_attestation(
-        paths,
-        state.read_abort_guard(inputs.guard_path),
-        require_result=True,
-    )
-    state.complete_abort_guard(inputs.guard_path, claim_token=inputs.claim.token)
-    boundary_hook(proof.FinalizationBoundary.COMPLETE_GUARD)

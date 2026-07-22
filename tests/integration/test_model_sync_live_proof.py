@@ -75,6 +75,34 @@ def test_followup_proof_contract_rejects_missing_required_receipt(contract_name:
         assert_followup_proof_contract(contract_name=contract_name, receipts=())
 
 
+def test_single_host_followup_contract_requires_complete_receipt_chain() -> None:
+    # Given
+    complete = (
+        "single-host-lifecycle-host-a",
+        "single-host-lifecycle-teardown",
+        "single-host-lifecycle-final",
+    )
+
+    # When / Then
+    assert_followup_proof_contract(
+        contract_name="final_proof_contract",
+        receipts=complete,
+        host_identity_mode="single_sequential",
+    )
+    with pytest.raises(ValueError):
+        assert_followup_proof_contract(
+            contract_name="final_proof_contract",
+            receipts=complete[:-1],
+            host_identity_mode="single_sequential",
+        )
+    with pytest.raises(ValueError):
+        assert_followup_proof_contract(
+            contract_name="reseed_pair_contract",
+            receipts=complete,
+            host_identity_mode="single_sequential",
+        )
+
+
 def test_baseline_host_a_requires_all_named_environment_inputs_without_artifact(
     tmp_path: Path,
 ) -> None:
@@ -153,6 +181,31 @@ def test_model_sync_cli_import_and_parser_commands_remain_available() -> None:
     assert commands == {"abort-status", "atomic-finalize", "baseline-host-a"}
 
 
+def test_default_baseline_rejects_same_host_mapping_before_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    arguments = _baseline_arguments(tmp_path)
+    monkeypatch.setenv("FIXTURE_HOST_A", "one-vps")
+    monkeypatch.setenv("FIXTURE_PASSWORD_A", "one-password")
+    monkeypatch.setenv("FIXTURE_HOST_B", "one-vps")
+    monkeypatch.setenv("FIXTURE_PASSWORD_B", "one-password")
+    monkeypatch.setattr(
+        model_sync_cli,
+        "_require_active_workspace_root",
+        lambda _wrapper: pytest.fail("default same-host mapping reached proof recovery"),
+    )
+
+    # When
+    exit_code = main(arguments)
+
+    # Then
+    assert exit_code == 1
+    assert not (tmp_path / "abort-guard.json").exists()
+    assert not (tmp_path / "artifacts" / "result.json").exists()
+
+
 def _sha(character: str) -> str:
     return character * 64
 
@@ -205,7 +258,12 @@ def test_preflight_rejects_docker_as_each_resource_plane() -> None:
     )
 
     with pytest.raises(model_sync_remote.RemoteProofError, match="resource objects"):
-        model_sync_remote._parse_preflight(wire, namespace, "ssh-a")
+        model_sync_remote.parse_preflight(
+            wire,
+            namespace,
+            ssh_key="ssh-a",
+            boot_id="11111111-1111-1111-1111-111111111111",
+        )
 
 
 class _WireResponse:
@@ -535,7 +593,12 @@ def test_authoritative_collectors_report_matching_and_nonmatching_resources() ->
         coder_templates=("ubuntu-vscode",),
     )
 
-    result = model_sync_remote._parse_preflight(wire, namespace, "ssh-a")
+    result = model_sync_remote.parse_preflight(
+        wire,
+        namespace,
+        ssh_key="ssh-a",
+        boot_id="11111111-1111-1111-1111-111111111111",
+    )
 
     assert result.namespace_clean is False
     assert {resource.kind for resource in result.inventory["cloudflare"]} == {
@@ -643,7 +706,12 @@ def test_preflight_parser_rejects_error_state_and_duplicate_ids() -> None:
     payload["planes"]["cloudflare"] = {"resources": [], "state": "error"}
     namespace = ProofNamespace("proof-stack", (), (), (), (), ())
     with pytest.raises(model_sync_remote.RemoteProofError, match="cloudflare plane collection failed"):
-        model_sync_remote._parse_preflight(json.dumps(payload), namespace, "ssh-a")
+        model_sync_remote.parse_preflight(
+            json.dumps(payload),
+            namespace,
+            ssh_key="ssh-a",
+            boot_id="11111111-1111-1111-1111-111111111111",
+        )
 
     payload["planes"]["cloudflare"] = {
         "resources": [
@@ -653,7 +721,12 @@ def test_preflight_parser_rejects_error_state_and_duplicate_ids() -> None:
         "state": "present",
     }
     with pytest.raises(model_sync_remote.RemoteProofError, match="IDs must be unique"):
-        model_sync_remote._parse_preflight(json.dumps(payload), namespace, "ssh-a")
+        model_sync_remote.parse_preflight(
+            json.dumps(payload),
+            namespace,
+            ssh_key="ssh-a",
+            boot_id="11111111-1111-1111-1111-111111111111",
+        )
 
 
 def test_coder_workspace_pagination_accepts_authoritative_empty_response() -> None:
@@ -807,7 +880,7 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
             return json.dumps({"target": "/home/coder/.config/opencode/opencode.json", "pointer": "/provider/litellm", "mode": "0644", "shape": "json-pointer", "base_url": renderer.base_url, "credential_value_sha256": hashlib.sha256(credential.encode()).hexdigest(), "pointer_sha256": pointer_sha, "scope": "pointer"}).encode()
         return json.dumps([{"id": "openrouter/example/model"}]).encode()
 
-    probe = model_sync_remote.RemoteProbe("a" * 64, "b" * 64, "amd64", False, {"cloudflare": (), "tailscale": (), "coder": (), "docker": (), "dokploy": ()}, {plane: "absent" for plane in ("cloudflare", "tailscale", "coder", "docker", "dokploy")})
+    probe = model_sync_remote.RemoteProbe("a" * 64, "b" * 64, "c" * 64, "amd64", False, {"cloudflare": (), "tailscale": (), "coder": (), "docker": (), "dokploy": ()}, {plane: "absent" for plane in ("cloudflare", "tailscale", "coder", "docker", "dokploy")})
     monkeypatch.setattr(model_sync_host_b, "_api", api)
     monkeypatch.setattr(model_sync_host_b, "_coder_login", lambda *_args: "session")
     monkeypatch.setattr(model_sync_host_b, "_coder_container_name", lambda *_args: "coder")
@@ -2640,8 +2713,16 @@ class _FixtureTransportHandle:
 
 
 class _FixtureRemoteClient:
-    def __init__(self, *, machine_id: str, fingerprint: bytes, snapshot: str) -> None:
+    def __init__(
+        self,
+        *,
+        machine_id: str,
+        boot_id: str,
+        fingerprint: bytes,
+        snapshot: str,
+    ) -> None:
         self._machine_id = machine_id
+        self._boot_id = boot_id
         self._fingerprint = fingerprint
         self._snapshot = snapshot
         self.commands: list[str] = []
@@ -2649,7 +2730,12 @@ class _FixtureRemoteClient:
 
     def exec_command(self, command: str, *, timeout: int) -> tuple[_FixtureStdin, _FixtureStream, _FixtureStream]:
         del timeout
-        payload = self._snapshot if "model-sync-snapshot" in command else _preflight_wire(self._machine_id)
+        if "model-sync-snapshot" in command:
+            payload = self._snapshot
+        elif "model-sync-boot-id" in command:
+            payload = self._boot_id
+        else:
+            payload = _preflight_wire(self._machine_id)
         stdin = _FixtureStdin()
         self.commands.append(command)
         self.stdins.append(stdin)
@@ -2681,9 +2767,19 @@ def _install_fixture_transport(
         host = kwargs["hostname"]
         match host:
             case "host-a":
-                client = _FixtureRemoteClient(machine_id="machine-a", fingerprint=b"ssh-a", snapshot=snapshot)
+                client = _FixtureRemoteClient(
+                    machine_id="machine-a",
+                    boot_id="11111111-1111-1111-1111-111111111111",
+                    fingerprint=b"ssh-a",
+                    snapshot=snapshot,
+                )
             case "host-b":
-                client = _FixtureRemoteClient(machine_id="machine-b", fingerprint=b"ssh-b", snapshot=snapshot)
+                client = _FixtureRemoteClient(
+                    machine_id="machine-b",
+                    boot_id="22222222-2222-2222-2222-222222222222",
+                    fingerprint=b"ssh-b",
+                    snapshot=snapshot,
+                )
             case unexpected:
                 raise AssertionError(f"unexpected fixture host {unexpected}")
         clients.append(client)
@@ -2787,6 +2883,79 @@ def _run_baseline_fixture(
     return main(arguments)
 
 
+def test_explicit_single_host_baseline_uses_one_physical_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    arguments = [*_baseline_arguments(tmp_path), "--single-host-sequential"]
+    clients = _install_fixture_transport(monkeypatch, snapshot=_snapshot_wire())
+    monkeypatch.setattr(model_sync_cli, "_run_wrapper", lambda *_args: None)
+    monkeypatch.setattr(
+        model_sync_cli,
+        "_require_active_workspace_root",
+        lambda _wrapper: tmp_path / "repository",
+    )
+    monkeypatch.setenv("FIXTURE_HOST_A", "host-a")
+    monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
+    monkeypatch.setenv("FIXTURE_HOST_B", "host-a")
+    monkeypatch.setenv("FIXTURE_PASSWORD_B", "password-a")
+
+    # When
+    exit_code = main(arguments)
+
+    # Then
+    artifact_dir = tmp_path / "artifacts"
+    result = json.loads((artifact_dir / "result.json").read_text(encoding="utf-8"))
+    preflight = json.loads(
+        (artifact_dir / "host-a-preflight.json").read_text(encoding="utf-8")
+    )
+    lifecycle_receipt = json.loads(
+        (artifact_dir / "single-host-lifecycle-baseline.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert exit_code == 0
+    assert sum(
+        "model-sync-preflight" in command
+        for client in clients
+        for command in client.commands
+    ) == 1
+    assert not (artifact_dir / "host-b-preflight.json").exists()
+    assert (artifact_dir / "single-host-lifecycle-baseline.json").exists()
+    assert result["host_identity_mode"] == "single_sequential"
+    assert result["host_identities_distinct"] is False
+    assert result["temporal_clean_epoch_evidence"] is False
+    assert result["host_b_preflight_sha256"] is None
+    assert lifecycle_receipt["evidence_sha256"] == result["host_a_preflight_sha256"]
+    assert preflight["host_identity_mode"] == "single_sequential"
+    assert preflight["provenance_role"] == "host_a"
+
+
+def test_single_host_baseline_requires_exact_password_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    arguments = [*_baseline_arguments(tmp_path), "--single-host-sequential"]
+    monkeypatch.setenv("FIXTURE_HOST_A", "one-vps")
+    monkeypatch.setenv("FIXTURE_PASSWORD_A", "password-a")
+    monkeypatch.setenv("FIXTURE_HOST_B", "one-vps")
+    monkeypatch.setenv("FIXTURE_PASSWORD_B", "password-b")
+    monkeypatch.setattr(
+        model_sync_cli,
+        "_require_active_workspace_root",
+        lambda _wrapper: pytest.fail("credential mismatch reached proof recovery"),
+    )
+
+    # When
+    exit_code = main(arguments)
+
+    # Then
+    assert exit_code == 1
+    assert not (tmp_path / "abort-guard.json").exists()
+
+
 def test_post_install_snapshot_uses_authoritative_cloudflare_and_tailscale_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2809,6 +2978,7 @@ def test_post_install_snapshot_uses_authoritative_cloudflare_and_tailscale_ids(
     probe = model_sync_remote.RemoteProbe(
         machine_sha256="a" * 64,
         ssh_sha256="b" * 64,
+        boot_sha256="c" * 64,
         architecture="amd64",
         namespace_clean=False,
         inventory=observed,
@@ -2864,6 +3034,12 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     artifact_dir = tmp_path / "artifacts"
     result = json.loads((artifact_dir / "result.json").read_text(encoding="utf-8"))
     baseline = json.loads((artifact_dir / "baseline.json").read_text(encoding="utf-8"))
+    host_a_preflight = json.loads(
+        (artifact_dir / "host-a-preflight.json").read_text(encoding="utf-8")
+    )
+    host_b_preflight = json.loads(
+        (artifact_dir / "host-b-preflight.json").read_text(encoding="utf-8")
+    )
     manifest = (artifact_dir / "protected-artifacts-before.txt").read_text(encoding="utf-8")
     guard = read_abort_guard(tmp_path / "abort-guard.json")
     assert exit_code == 0
@@ -2878,6 +3054,14 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     assert result["coder_image_digest"] == "ghcr.io/coder/coder@sha256:" + _sha("1")
     assert result["coder_secret_inventory_sha256"] != "0" * 64
     assert result["legacy_workspace_managed_fingerprints_sha256"] != "0" * 64
+    assert result["host_identity_mode"] == "distinct"
+    assert result["host_identities_distinct"] is True
+    assert result["temporal_clean_epoch_evidence"] is False
+    assert result["single_host_lifecycle_sha256"] is None
+    assert host_a_preflight["host_identity_mode"] == "distinct"
+    assert host_a_preflight["provenance_role"] == "host_a"
+    assert host_b_preflight["host_identity_mode"] == "distinct"
+    assert host_b_preflight["provenance_role"] == "host_b"
     assert guard.attestation is not None
     assert result["abort_guard_sha256"] == hashlib.sha256(
         canonical_json_bytes(guard.attestation.to_payload())
@@ -3688,12 +3872,13 @@ def write(path: Path, content: bytes, *, mode: int = 0o600) -> None:
         pause()
 
 model_sync_env.artifacts.atomic_write_bytes = write
-model_sync_cli._required_inputs = lambda _args: ("host-a", "password-a", "host-b", "password-b")
+model_sync_cli.resolve_host_inputs = lambda *_args: ("host-a", "password-a", "host-b", "password-b")
 model_sync_cli._require_active_workspace_root = lambda _wrapper: repository
 model_sync_cli.resolve_proof_namespace = lambda _env: SimpleNamespace(stack_name="proof-stack")
 model_sync_cli.resolve_proof_transport = lambda _env: None
 model_sync_cli.probe_host = lambda **_kwargs: SimpleNamespace(
-    machine_sha256="a" * 64, ssh_sha256="b" * 64, architecture="amd64", namespace_clean=True,
+    machine_sha256="a" * 64, ssh_sha256="b" * 64, boot_sha256="c" * 64,
+    architecture="amd64", namespace_clean=True,
     to_dict=lambda: {},
 )
 model_sync_cli.assert_namespace_identity = lambda **_kwargs: None
@@ -3751,6 +3936,7 @@ if boundary == "between-restore":
 args = argparse.Namespace(
     wrapper=Path("wrapper"), env_file=env_file, external_backup=backup, abort_guard=guard,
     host_env="unused", password_env="unused", host_b_env="unused", host_b_password_env="unused",
+    single_host_sequential=False,
     source_base_commit="a" * 40, proof_commit="b" * 40, artifact_dir=env_file.parent,
     output=env_file.parent / "result.json",
 )
@@ -3846,10 +4032,13 @@ model_sync_cli._baseline_host_a(args)
         )
         assert abort_status == {
             "claimant_kind": "plan",
+            "host_identities_distinct": True,
+            "host_identity_mode": "distinct",
             "phase": "complete",
             "pid": None,
             "start_time_ticks": None,
             "state": "armed",
+            "temporal_clean_epoch_evidence": False,
         }
         mode_paths = (*task_outputs.values(), env_file, backup, abort_status_output)
         assert all(path.stat().st_mode & 0o777 == 0o600 for path in mode_paths)
@@ -4037,8 +4226,8 @@ prepared = prepare_proof_env(
     claim_token=recovery.claim.token,
 )
 planes = ("cloudflare", "coder", "docker", "dokploy", "tailscale")
-host_a = RemoteProbe("a" * 64, "b" * 64, "amd64", True, {name: () for name in planes}, {name: "absent" for name in planes})
-host_b = RemoteProbe("c" * 64, "d" * 64, "amd64", True, {name: () for name in planes}, {name: "absent" for name in planes})
+host_a = RemoteProbe("a" * 64, "b" * 64, "e" * 64, "amd64", True, {name: () for name in planes}, {name: "absent" for name in planes})
+host_b = RemoteProbe("c" * 64, "d" * 64, "f" * 64, "amd64", True, {name: () for name in planes}, {name: "absent" for name in planes})
 baseline = CapturedBaseline(
     payload={"fixture": "baseline"},
     images={
@@ -4060,6 +4249,7 @@ inputs = BaselineArtifactInputs(
     prepared,
     guard,
     recovery.claim,
+    "distinct",
     host_a,
     host_b,
     baseline,
