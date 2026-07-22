@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final, Literal, assert_never
 
 from dokploy_wizard.proof import HostIdentityMode
@@ -25,12 +25,8 @@ _SUPPORTED_ARCHITECTURES: Final = frozenset({"amd64", "arm64"})
 _BOOT_ID: Final = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
-@dataclass(frozen=True, slots=True)
 class RemoteProofError(RuntimeError):
-    detail: str
-
-    def __str__(self) -> str:
-        return self.detail
+    """Raised when remote proof evidence violates its typed contract."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,18 +48,26 @@ class RemoteProbe:
     namespace_clean: bool
     inventory: dict[str, tuple[ObservedResource, ...]]
     plane_states: dict[str, str]
+    plane_provenance: dict[str, str] = field(
+        default_factory=lambda: {"docker": "docker_available_inventory"}
+    )
 
     def to_dict(self) -> dict[str, JsonValue]:
+        if "docker" not in self.plane_provenance:
+            raise RemoteProofError("docker plane provenance is required")
+        inventory: dict[str, JsonValue] = {
+            key: {
+                "resources": [resource.to_dict() for resource in value],
+                "state": self.plane_states[key],
+            }
+            for key, value in sorted(self.inventory.items())
+        }
+        docker = require_mapping(inventory["docker"], "docker plane inventory")
+        docker["provenance"] = self.plane_provenance["docker"]
         return {
             "architecture": self.architecture,
             "boot_sha256": self.boot_sha256,
-            "inventory": {
-                key: {
-                    "resources": [resource.to_dict() for resource in value],
-                    "state": self.plane_states[key],
-                }
-                for key, value in sorted(self.inventory.items())
-            },
+            "inventory": inventory,
             "machine_sha256": self.machine_sha256,
             "namespace_clean": self.namespace_clean,
             "ssh_sha256": self.ssh_sha256,
@@ -151,7 +155,7 @@ def parse_preflight(
             raise CaptureSchemaError("remote identity probe schema is unsupported")
         machine = require_text(payload["machine_id"], "remote machine identity")
         architecture = _architecture(payload["architecture"])
-        inventory, plane_states = _parse_planes(
+        inventory, plane_states, plane_provenance = _parse_planes(
             require_mapping(payload["planes"], "remote namespace planes")
         )
         normalized_boot = boot_id.strip()
@@ -172,6 +176,7 @@ def parse_preflight(
         namespace_clean=clean,
         inventory=inventory,
         plane_states=plane_states,
+        plane_provenance=plane_provenance,
     )
 
 
@@ -185,16 +190,29 @@ def _architecture(value: JsonValue) -> str:
 
 def _parse_planes(
     planes: dict[str, JsonValue],
-) -> tuple[dict[str, tuple[ObservedResource, ...]], dict[str, str]]:
+) -> tuple[dict[str, tuple[ObservedResource, ...]], dict[str, str], dict[str, str]]:
     names = ("docker", "dokploy", "cloudflare", "tailscale", "coder")
     if set(planes) != set(names):
         raise CaptureSchemaError("remote namespace planes are incomplete")
     inventory: dict[str, tuple[ObservedResource, ...]] = {}
     states: dict[str, str] = {}
+    provenance: dict[str, str] = {}
     for plane in names:
         source = require_mapping(planes[plane], f"{plane} resource objects")
-        require_keys(source, {"resources", "state"}, f"{plane} resource objects")
+        required = {"resources", "state"}
+        if plane == "docker":
+            required.add("provenance")
+        require_keys(source, required, f"{plane} resource objects")
         state = require_text(source["state"], f"{plane} plane state")
+        if plane == "docker":
+            marker = require_text(source["provenance"], "docker plane provenance")
+            if marker not in {"docker_absent_clean", "docker_available_inventory", "docker_error"}:
+                raise CaptureSchemaError("docker plane provenance is invalid")
+            if (state == "error") != (marker == "docker_error"):
+                raise CaptureSchemaError("docker plane provenance is inconsistent")
+            if state == "present" and marker != "docker_available_inventory":
+                raise CaptureSchemaError("docker plane provenance is inconsistent")
+            provenance[plane] = marker
         if state == "error":
             raise CaptureSchemaError(f"{plane} plane collection failed")
         if state not in {"absent", "present"}:
@@ -203,7 +221,7 @@ def _parse_planes(
         if (state == "absent") != (not resources):
             raise CaptureSchemaError(f"{plane} plane absence is inconsistent")
         inventory[plane], states[plane] = resources, state
-    return inventory, states
+    return inventory, states, provenance
 
 
 def _resources(values: list[JsonValue], plane: str) -> tuple[ObservedResource, ...]:
