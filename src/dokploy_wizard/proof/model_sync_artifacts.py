@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
 import hashlib
@@ -5,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -38,7 +40,6 @@ def atomic_write_bytes(path: Path, content: bytes, *, mode: int = 0o600) -> None
         os.replace(temporary, path)
         _fsync_directory(parent)
     except BaseException:
-        temporary.unlink(missing_ok=True)
         raise
 def _write_all(descriptor: int, content: bytes) -> None:
     view = memoryview(content)
@@ -204,18 +205,35 @@ def validate_protected_manifest_bytes(content: bytes) -> tuple[ProtectedManifest
         entries[normalized] = require_sha256(fingerprint, f"manifest fingerprint for {path}")
     if content != protected_manifest_bytes(entries): raise CaptureSchemaError("protected manifest bytes are not canonical")  # noqa: E501,E701
     return tuple(ProtectedManifestEntry(PurePosixPath(path), fingerprint) for path, fingerprint in entries.items())  # noqa: E501
-def finalize_capture_outputs(outputs: Mapping[Path, bytes]) -> None:
-    if not outputs:
-        raise CaptureSchemaError("capture outputs must not be empty")
-    if any(path.exists() for path in outputs):
-        raise CaptureSchemaError("capture output already exists")
+def read_exact_regular_bytes(path: Path, expected: bytes) -> bool:
+    """Return false for an absent path and reject every non-exact present pathname."""
+    if not os.path.lexists(path):
+        return False
     try:
-        for path, content in sorted(outputs.items(), key=lambda item: str(item[0])):
-            atomic_write_bytes(path, content)
-    except BaseException:
-        for path in outputs:
-            path.unlink(missing_ok=True)
-        raise
+        before = os.lstat(path)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise CaptureSchemaError("artifact output is unreadable") from error
+    try:
+        after = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_mode & 0o777 != 0o600 or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise CaptureSchemaError("artifact output must be a mode-0600 regular file")
+        if os.read(descriptor, len(expected) + 1) != expected:
+            raise CaptureSchemaError("artifact output bytes are not authorized")
+        return True
+    finally:
+        os.close(descriptor)
+
+
+def write_or_verify_exact_bytes(path: Path, expected: bytes) -> None:
+    if not read_exact_regular_bytes(path, expected):
+        atomic_write_bytes(path, expected)
+
+
+def unlink_exact_regular_bytes(path: Path, expected: bytes) -> None:
+    if read_exact_regular_bytes(path, expected):
+        os.unlink(path)
+        _fsync_directory(path.parent)
 def parse_resource_planes(snapshot: dict[str, JsonValue]) -> ResourcePlaneCapture:
     images: dict[str, str] = {}
     for value in require_list(snapshot["images"], "images"):

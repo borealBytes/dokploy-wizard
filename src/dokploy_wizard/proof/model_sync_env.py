@@ -1,19 +1,23 @@
+# ruff: noqa: E501, I001
 """Guarded preparation and restoration of the temporary model-sync env copy."""
 
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from dokploy_wizard.proof.model_sync_artifacts import atomic_write_bytes, sha256_bytes
-from dokploy_wizard.proof.model_sync_results import EnvReceipt, ProofTransport
+from dokploy_wizard.proof import EnvReceipt
+from dokploy_wizard.proof.model_sync_results import ProofTransport
 from dokploy_wizard.proof.model_sync_state import (
     AbortGuardError,
+    record_env_intent,
+    record_proof_active,
     read_abort_guard,
-    record_env_receipt,
 )
 from dokploy_wizard.state import StateValidationError, parse_env_file, resolve_desired_state
 
@@ -83,26 +87,26 @@ def prepare_proof_env(
     proof = _proof_bytes(original, env_file.parent)
     original_sha256 = sha256_bytes(original)
     proof_sha256 = sha256_bytes(proof)
-    if proof == original:
-        return PreparedEnv(env_file, backup_path, original_sha256, proof_sha256, mode)
-    record_env_receipt(
+    receipt = EnvReceipt(
+        str(env_file.resolve()),
+        str(backup_path.resolve()),
+        original_sha256,
+        proof_sha256,
+        mode,
+    )
+    record_env_intent(
         guard_path,
         claim_token=claim_token,
-        receipt=EnvReceipt(
-            str(env_file.resolve()),
-            str(backup_path.resolve()),
-            original_sha256,
-            proof_sha256,
-            mode,
-            False,
-        ),
+        receipt=receipt,
     )
     _validate_backup(env_file=env_file, backup_path=backup_path, original=original, proof=proof)
     if not backup_path.exists():
         backup_path.parent.mkdir(parents=True, exist_ok=True)
         backup_path.parent.chmod(_DIRECTORY_MODE)
         atomic_write_bytes(backup_path, original, mode=_FILE_MODE)
-    atomic_write_bytes(env_file, proof, mode=_FILE_MODE)
+    if proof != original:
+        atomic_write_bytes(env_file, proof, mode=_FILE_MODE)
+    record_proof_active(guard_path, claim_token=claim_token)
     return PreparedEnv(env_file, backup_path, original_sha256, proof_sha256, mode)
 def resolve_proof_namespace(env_file: Path) -> ProofNamespace:
     """Resolve exact proof namespaces without replacing or persisting the operator env."""
@@ -151,16 +155,16 @@ def restore_proof_env(*, prepared: PreparedEnv, guard_path: Path) -> None:
     current_sha256 = sha256_bytes(current)
     if current_sha256 not in {prepared.original_sha256, prepared.proof_sha256}:
         raise EnvPreparationError("proof env has an unknown current hash")
-    if not prepared.backup_path.exists():
+    if not os.path.lexists(prepared.backup_path):
         if current_sha256 != prepared.original_sha256:
             raise EnvPreparationError("proof env requires its original external backup")
         return
-    backup = _read_env_bytes(prepared.backup_path)
+    backup = _read_regular_bytes(prepared.backup_path, _FILE_MODE)
     if sha256_bytes(backup) != prepared.original_sha256:
         raise EnvPreparationError("external backup does not match the recorded original hash")
     atomic_write_bytes(prepared.env_file, backup, mode=prepared.mode)
-    prepared.backup_path.unlink()
-    _remove_empty_backup_parent(prepared.backup_path.parent)
+    os.unlink(prepared.backup_path)
+    _fsync_parent(prepared.backup_path.parent)
 def _proof_bytes(original: bytes, parent: Path) -> bytes:
     try:
         _validate_bytes(original, parent)
@@ -178,9 +182,9 @@ def _proof_bytes(original: bytes, parent: Path) -> bytes:
         return proof
     return original
 def _validate_backup(*, env_file: Path, backup_path: Path, original: bytes, proof: bytes) -> None:
-    if not backup_path.exists():
+    if not os.path.lexists(backup_path):
         return
-    backup = _read_env_bytes(backup_path)
+    backup = _read_regular_bytes(backup_path, _FILE_MODE)
     if backup != original:
         raise EnvPreparationError("existing external backup has an unknown hash")
     current = _read_env_bytes(env_file)
@@ -214,10 +218,24 @@ def _validate_bytes(content: bytes, parent: Path) -> None:
     finally:
         temporary.unlink(missing_ok=True)
 def _read_env_bytes(path: Path) -> bytes:
+    return _read_regular_bytes(path, None)
+
+
+def _read_regular_bytes(path: Path, mode: int | None) -> bytes:
     try:
-        return path.read_bytes()
+        metadata = os.lstat(path)
+        if not os.path.isfile(path) or stat.S_ISLNK(metadata.st_mode) or (mode is not None and metadata.st_mode & 0o777 != mode):
+            raise EnvPreparationError("proof env or backup is not a regular mode-0600 file")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError as error:
         raise EnvPreparationError("proof env or backup is unreadable") from error
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
+            raise EnvPreparationError("proof env or backup changed during inspection")
+        return os.read(descriptor, max(1, opened.st_size + 1))
+    finally:
+        os.close(descriptor)
 def _require_armed_guard(guard_path: Path) -> None:
     try:
         guard = read_abort_guard(guard_path)
@@ -229,8 +247,9 @@ def _write_all(descriptor: int, content: bytes) -> None:
     view = memoryview(content)
     while view:
         view = view[os.write(descriptor, view) :]
-def _remove_empty_backup_parent(parent: Path) -> None:
+def _fsync_parent(parent: Path) -> None:
+    descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        parent.rmdir()
-    except OSError:
-        return
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
