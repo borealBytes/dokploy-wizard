@@ -3100,7 +3100,7 @@ def test_exact_output_writer_never_removes_prior_authorized_output_when_later_wr
     original = model_sync_artifacts.atomic_write_bytes
 
     def write(path: Path, content: bytes) -> None:
-        if path == second:
+        if content == b"two":
             raise SystemExit(1)
         original(path, content)
 

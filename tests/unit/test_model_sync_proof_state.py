@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 
@@ -186,12 +187,12 @@ def test_schema_v2_guard_rejects_boolean_receipt_mode_without_mutation(tmp_path:
     assert guard.read_bytes() == before
 
 
-def test_atomic_write_leaves_interrupted_temp_inert_for_fail_closed_recovery(
+def test_atomic_write_removes_interrupted_temp_and_preserves_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dokploy_wizard.proof import model_sync_artifacts
-
     output = tmp_path / "secret.env"
+    output.write_bytes(b"ORIGINAL")
+    output.chmod(0o600)
 
     def interrupt(_descriptor: int, _content: bytes) -> None:
         raise SystemExit(1)
@@ -201,10 +202,395 @@ def test_atomic_write_leaves_interrupted_temp_inert_for_fail_closed_recovery(
     with pytest.raises(SystemExit):
         model_sync_artifacts.atomic_write_bytes(output, b"SECRET-NOT-PERSISTED")
 
-    temporary = tuple(tmp_path.glob(".secret.env.*.tmp"))
-    assert len(temporary) == 1
-    assert temporary[0].read_bytes() == b""
-    assert not output.exists()
+    assert output.read_bytes() == b"ORIGINAL"
+    assert not tuple(tmp_path.glob(".secret.env.*.tmp"))
+
+
+@pytest.mark.parametrize("boundary", ["fsync", "replace"])
+def test_atomic_write_removes_temp_for_catchable_commit_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    output = tmp_path / "artifact.json"
+    output.write_bytes(b"original")
+    output.chmod(0o600)
+
+    def interrupt_fsync(_descriptor: int) -> None:
+        raise SystemExit(73)
+
+    def interrupt_replace(_source: Path, _destination: Path) -> None:
+        raise SystemExit(73)
+
+    match boundary:
+        case "fsync":
+            monkeypatch.setattr(os, "fsync", interrupt_fsync)
+        case "replace":
+            monkeypatch.setattr(os, "replace", interrupt_replace)
+        case unexpected:
+            raise AssertionError(f"unexpected boundary {unexpected}")
+
+    with pytest.raises(SystemExit, match="73"):
+        model_sync_artifacts.atomic_write_bytes(output, b"replacement")
+
+    assert output.read_bytes() == b"original"
+    assert not tuple(tmp_path.glob(".artifact.json.*.tmp"))
+
+
+def test_atomic_write_cleanup_failure_does_not_mask_original_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "artifact.json"
+
+    def interrupt(_descriptor: int, _content: bytes) -> None:
+        raise SystemExit(29)
+
+    def reject_cleanup(_path: Path, *, missing_ok: bool = False) -> None:
+        del missing_ok
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(model_sync_artifacts, "_write_all", interrupt)
+    monkeypatch.setattr(Path, "unlink", reject_cleanup)
+
+    with pytest.raises(SystemExit, match="29"):
+        model_sync_artifacts.atomic_write_bytes(output, b"replacement")
+
+
+def test_atomic_write_fsyncs_file_before_replace_and_parent_afterward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "artifact.json"
+    events: list[str] = []
+    original_fsync = os.fsync
+    original_replace = os.replace
+
+    def record_fsync(descriptor: int) -> None:
+        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+        events.append(kind)
+        original_fsync(descriptor)
+
+    def record_replace(source: Path, destination: Path) -> None:
+        events.append("replace")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(os, "fsync", record_fsync)
+    monkeypatch.setattr(os, "replace", record_replace)
+
+    model_sync_artifacts.atomic_write_bytes(output, b"expected")
+
+    assert events == ["file", "replace", "directory"]
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+
+
+def test_exact_output_inspection_tolerates_short_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = b"short-read-safe"
+    output = tmp_path / "artifact.json"
+    output.write_bytes(expected)
+    output.chmod(0o600)
+    original_read = os.read
+    requests: list[int] = []
+
+    def short_read(descriptor: int, size: int) -> bytes:
+        requests.append(size)
+        return original_read(descriptor, min(size, 2))
+
+    monkeypatch.setattr(os, "read", short_read)
+
+    assert model_sync_artifacts.read_exact_regular_bytes(output, expected)
+    assert len(requests) > 2
+    assert max(requests) <= len(expected) + 1
+
+
+def test_exact_output_inspection_rejects_trailing_bytes(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "artifact.json"
+    output.write_bytes(b"expected-trailing")
+    output.chmod(0o600)
+
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.read_exact_regular_bytes(output, b"expected")
+
+
+def test_exact_output_inspection_bounds_oversize_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = b"ok"
+    output = tmp_path / "artifact.json"
+    with output.open("wb") as stream:
+        stream.write(expected)
+        stream.truncate(1024 * 1024)
+    output.chmod(0o600)
+    original_read = os.read
+    requests: list[int] = []
+
+    def bounded_read(descriptor: int, size: int) -> bytes:
+        requests.append(size)
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(os, "read", bounded_read)
+
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.read_exact_regular_bytes(output, expected)
+
+    assert not requests or max(requests) <= len(expected) + 1
+
+
+def test_exact_output_inspection_rejects_path_replacement_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = b"expected"
+    output = tmp_path / "artifact.json"
+    replacement = tmp_path / "replacement.json"
+    output.write_bytes(expected)
+    output.chmod(0o600)
+    replacement.write_bytes(expected)
+    replacement.chmod(0o600)
+    original_read = os.read
+    replaced = False
+
+    def replace_path(descriptor: int, size: int) -> bytes:
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            os.replace(replacement, output)
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(os, "read", replace_path)
+
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.read_exact_regular_bytes(output, expected)
+
+    assert output.read_bytes() == expected
+
+
+def test_exact_output_inspection_rejects_metadata_change_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = b"expected"
+    output = tmp_path / "artifact.json"
+    output.write_bytes(expected)
+    output.chmod(0o600)
+    original_read = os.read
+    changed = False
+
+    def change_metadata(descriptor: int, size: int) -> bytes:
+        nonlocal changed
+        content = original_read(descriptor, size)
+        if not changed:
+            changed = True
+            metadata = output.stat()
+            os.utime(output, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000))
+        return content
+
+    monkeypatch.setattr(os, "read", change_metadata)
+
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.read_exact_regular_bytes(output, expected)
+
+
+def test_exact_output_inspection_rejects_growth_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = b"expected"
+    output = tmp_path / "artifact.json"
+    output.write_bytes(expected)
+    output.chmod(0o600)
+    original_read = os.read
+    grown = False
+
+    def grow_after_read(descriptor: int, size: int) -> bytes:
+        nonlocal grown
+        content = original_read(descriptor, size)
+        if not grown:
+            grown = True
+            with output.open("ab") as stream:
+                stream.write(b"trailing")
+        return content
+
+    monkeypatch.setattr(os, "read", grow_after_read)
+
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.read_exact_regular_bytes(output, expected)
+
+
+@pytest.mark.parametrize("kind", ["mode", "special-mode", "symlink", "directory", "fifo"])
+def test_exact_output_inspection_rejects_unauthorized_file_kinds(
+    tmp_path: Path, kind: str
+) -> None:
+    output = tmp_path / "artifact.json"
+    match kind:
+        case "mode":
+            output.write_bytes(b"expected")
+            output.chmod(0o640)
+        case "special-mode":
+            output.write_bytes(b"expected")
+            output.chmod(0o4600)
+        case "symlink":
+            target = tmp_path / "target.json"
+            target.write_bytes(b"expected")
+            target.chmod(0o600)
+            output.symlink_to(target.name)
+        case "directory":
+            output.mkdir()
+            output.chmod(0o600)
+        case "fifo":
+            os.mkfifo(output, mode=0o600)
+        case unexpected:
+            raise AssertionError(f"unexpected kind {unexpected}")
+
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.read_exact_regular_bytes(output, b"expected")
+
+
+def test_exact_output_unlink_preserves_replacement_raced_after_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = b"expected"
+    unknown = b"unknown-replacement"
+    output = tmp_path / "artifact.json"
+    output.write_bytes(expected)
+    output.chmod(0o600)
+    original_unlink = os.unlink
+    replaced = False
+
+    def replace_before_unlink(
+        path: str | bytes | Path,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            output.write_bytes(unknown)
+            output.chmod(0o600)
+        if dir_fd is None:
+            original_unlink(path)
+        else:
+            original_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "unlink", replace_before_unlink)
+
+    model_sync_artifacts.unlink_exact_regular_bytes(output, expected)
+
+    assert output.read_bytes() == unknown
+
+
+def test_exact_output_unlink_restores_replacement_raced_before_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = b"expected"
+    unknown = b"unknown-replacement"
+    output = tmp_path / "artifact.json"
+    replacement = tmp_path / "replacement.json"
+    output.write_bytes(expected)
+    output.chmod(0o600)
+    replacement.write_bytes(unknown)
+    replacement.chmod(0o600)
+    original_rename = os.rename
+    replaced = False
+
+    def replace_before_rename(
+        source: str | bytes,
+        destination: str | bytes,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            os.replace(replacement, output)
+        original_rename(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    monkeypatch.setattr(os, "rename", replace_before_rename)
+
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.unlink_exact_regular_bytes(output, expected)
+
+    assert output.read_bytes() == unknown
+    assert not tuple(tmp_path.glob(".artifact.json.*.unlink"))
+
+
+def test_exact_output_helpers_preserve_unknown_bytes(tmp_path: Path) -> None:
+    output = tmp_path / "artifact.json"
+    output.write_bytes(b"unknown")
+    output.chmod(0o600)
+
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.write_or_verify_exact_bytes(output, b"expected")
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.unlink_exact_regular_bytes(output, b"expected")
+
+    assert output.read_bytes() == b"unknown"
+
+
+def test_exact_output_writer_preserves_unknown_bytes_raced_into_absent_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = b"expected"
+    unknown = b"unknown-replacement"
+    output = tmp_path / "artifact.json"
+    original_link = os.link
+    original_replace = os.replace
+    raced = False
+
+    def inject_unknown(destination: Path) -> None:
+        nonlocal raced
+        if not raced and Path(destination) == output:
+            raced = True
+            output.write_bytes(unknown)
+            output.chmod(0o600)
+
+    def race_replace(source: Path, destination: Path) -> None:
+        inject_unknown(destination)
+        original_replace(source, destination)
+
+    def race_link(
+        source: Path,
+        destination: Path,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        inject_unknown(destination)
+        original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(os, "replace", race_replace)
+    monkeypatch.setattr(os, "link", race_link)
+
+    with pytest.raises(model_sync_artifacts.CaptureSchemaError):
+        model_sync_artifacts.write_or_verify_exact_bytes(output, expected)
+
+    assert output.read_bytes() == unknown
+
+
+def test_exact_output_unlink_fsyncs_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "artifact.json"
+    output.write_bytes(b"expected")
+    output.chmod(0o600)
+    synced: list[int] = []
+    monkeypatch.setattr(os, "fsync", synced.append)
+
+    model_sync_artifacts.unlink_exact_regular_bytes(output, b"expected")
+
+    assert len(synced) == 1
 
 
 def test_disarm_rejects_plan_owned_unresolved_receipt(tmp_path: Path) -> None:
