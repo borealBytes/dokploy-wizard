@@ -185,8 +185,6 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         _restore_recovery_handlers(previous_handlers)
         if not completed:
             recover_interrupted_proof(recovery)
-
-
 def _require_active_workspace_root(wrapper: Path, paths: proof.ProofRecoveryPaths) -> Path:
     return proof.require_active_repository_root(wrapper, paths)
 

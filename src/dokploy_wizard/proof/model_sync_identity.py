@@ -6,9 +6,8 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Final, Literal, assert_never
+from typing import Final
 
-from dokploy_wizard.proof import HostIdentityMode
 from dokploy_wizard.proof.model_sync_artifacts import (
     CaptureSchemaError,
     JsonValue,
@@ -29,7 +28,6 @@ from dokploy_wizard.proof.model_sync_cloudflare_probe import (
 )
 from dokploy_wizard.proof.model_sync_env import ProofNamespace
 
-PreflightRole = Literal["host_a", "host_b"]
 _SUPPORTED_ARCHITECTURES: Final = frozenset({"amd64", "arm64"})
 _BOOT_ID: Final = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -117,31 +115,6 @@ class RemoteProbe:
             self.inventory["cloudflare"],
             post_install.inventory["cloudflare"],
         )
-
-
-def preflight_evidence(
-    probe: RemoteProbe,
-    *,
-    mode: HostIdentityMode,
-    role: PreflightRole,
-) -> dict[str, JsonValue]:
-    match mode:
-        case "distinct":
-            identities_distinct = True
-        case "single_sequential":
-            if role != "host_a":
-                raise ValueError("single-host preflight cannot claim Host B provenance")
-            identities_distinct = False
-        case unexpected:
-            assert_never(unexpected)
-    return {
-        **probe.to_dict(),
-        "host_identities_distinct": identities_distinct,
-        "host_identity_mode": mode,
-        "provenance_role": role,
-        "schema_version": 1,
-        "temporal_clean_epoch_evidence": False,
-    }
 
 
 def parse_preflight(

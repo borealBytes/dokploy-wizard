@@ -25,6 +25,7 @@ from dokploy_wizard.proof import (
     model_sync_baseline,
     model_sync_cli,
     model_sync_host_b,
+    model_sync_preflight_payload,
     model_sync_remote,
     model_sync_results,
     open_protected_directory,
@@ -650,10 +651,11 @@ def test_authoritative_collectors_accept_complete_docker_absence() -> None:
 
 
 def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> None:
+    payload_source = Path(model_sync_preflight_payload.__file__).read_text(encoding="utf-8")
     source = Path(model_sync_results.__file__).read_text(encoding="utf-8")
 
-    assert source.count("_PREFLIGHT_ENCODED =") == 1
-    assert "_PREFLIGHT_ENCODED_V2" not in source
+    assert payload_source.count("_PREFLIGHT_ENCODED =") == 1
+    assert "_PREFLIGHT_ENCODED_V2" not in payload_source
     assert "with_cloudflare_" + "fingerprints" not in source
     assert ".replace(" not in source
     assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
