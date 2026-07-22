@@ -73,6 +73,7 @@ def finalize_baseline_artifacts(
         artifacts.sha256_bytes(manifest),
         inputs.baseline.coder_secret_inventory_sha256,
         inputs.baseline.legacy_workspace_managed_fingerprints_sha256,
+        inputs.host_a.preexisting_cloudflare_sha256,
     )
     attestation = proof.build_baseline_attestation(
         evidence,
@@ -113,7 +114,17 @@ def _baseline_payloads(inputs: BaselineArtifactInputs) -> dict[str, bytes]:
         + b"\n"
     )
     payloads = {
-        "baseline.json": proof.canonical_json_bytes(inputs.baseline.payload) + b"\n",
+        "baseline.json": proof.canonical_json_bytes(
+            {
+                **inputs.baseline.payload,
+                "preexisting_cloudflare": [
+                    resource.to_dict()
+                    for resource in inputs.host_a.inventory["cloudflare"]
+                    if resource.provenance == "preexisting_unowned"
+                ],
+            }
+        )
+        + b"\n",
         "host-a-preflight.json": host_a,
     }
     match inputs.host_identity_mode:

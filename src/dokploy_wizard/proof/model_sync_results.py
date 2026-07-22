@@ -39,6 +39,7 @@ from dokploy_wizard.proof.model_sync_artifacts import (
     unlink_exact_regular_bytes,
     write_or_verify_exact_bytes,
 )
+from dokploy_wizard.proof.model_sync_preflight import with_cloudflare_fingerprints
 
 __all__ = ("REQUIRED_RESULT_KEYS",)
 
@@ -50,7 +51,9 @@ _PREFLIGHT_ENCODED = (
     "UEsfegEG9Q3I{xV0RIJ<&{;KkQo7NseJRsuyW>7pSp`U=U8w4cX;ihA)|IMe#n+;Hri`;VR8rN4)Gb$CgsO0|bE1CBud)pJIj+`2hC%mZduA}cM)>hB=#f4^%)G84+aaqMt3x%Nx~aNQYk@G$OlpRwr*-xKd^)EZ+M0TtSe`hS$Lw_c{>^UpTMZAWPJSeXGna!#dQv<djLF|03&$tgmKM?_r}el$G;7OJP0uW&>cr>PWes15=!bh-@xwSpZl)Df0V4G#c1ZH3xG&1jg^`@b%Q~(__ps2Uw<Z_s8Al;%%#Od#IKUt*6yf>QAIiL0JC^B?vrNz?$fLsH)VnR$S^?z&a@hDb7ZI2Zgcb-&zRps!T*6}P-!8SnqygF!DXsdc0i|tpRzc!?!j|(!kD|cDMbe=-**W{Rq5|u-WffOG7)8U1rNZ1I+*g@#kGM}OL$q8oA%omGQhx<;7VO|!S*Rk6H-iCbfnoxC*H|^j=iUEHuYB36Vw(F@TYyhSCl<^XJvpvLzO-^PDk#nwVy=1@9NjlUr4P>dkAjSTyW2YlLVZ;9H8VhCSu7I5R3)%uOn0lnWgomvfa7p#Xne~6a7QZ#4Gz1MG!U7)<<^2e_1bqDZQYY=vAl!E59*@qIk*On1~rpz0k`G7UqCwNLfvVTfJ{54H5@7|UQMi^p$9I=4ILD2^0=UznyS&=b!`3i#C>XeM_+}CDPHrSgC?JA2y7DS%O;hA`+Nys#!C@^i1{t7Wu{YC_MIZ$>L`{pq_#Kl1&<26xAc>hMQ@zTENul0m-H>8W+W-|96vTBI<n`p#g`5Aij)p0hCczoqx$Z>f45EF>mO)s5BuBmGxKWB+DwZ%h#Gmli(Z{3ycvddvA&zz?K=o)&nHc;FJVo!I>DsEXryodN4zVZQkD6Mj%ZVrrRA^n0f=oPDiqt%nS(Qog_w*iVIHmbsz(gxG;AN}Qx5f4=K{)}l$$0i>KF^yoU->kUf-tibk8R!p*>suF++JpxU;C5G-yHekJ-Pv"
     "mBo@lb5GhGeK)F7LMKFRzx$4trRoijqw27!Za$vIC$V9+FAgIe4IR3`89E%Olk@*I{r#u>j?Yz0DDQ(;a)UwlM>lQcqr{46R*Y|(<x*7YOWU7*{PFug_dk78AK7B(Psc+|XL<ELwN(u1-r3P_ZuOXToUAhX1_VDV4ph~T8!yQP(y2LQOfx-L3FU5AX|k%Ur~~I*KCS>!4eqC*Ri(dVA2WdfEs>ui3XJ@M21;7@rw2Sf-?UlB(F0^S>Pw|(JD5i3L=P*udM*X*x?)KA<t*?=xR9oxf@A(giQ}(9Z~3KsEE2qyvCOl(6=ttk4C1mlR<v_5<GBYT#0y|Fh1XQ&eES79!q37B+)hyZh$7m<M`TS=#G5^~t&9Hxj$YiV"
 )
-PREFLIGHT_SCRIPT = zlib.decompress(base64.b85decode(_PREFLIGHT_ENCODED)).decode("utf-8")
+PREFLIGHT_SCRIPT = with_cloudflare_fingerprints(
+    zlib.decompress(base64.b85decode(_PREFLIGHT_ENCODED)).decode("utf-8")
+)
 
 
 @dataclass(frozen=True, slots=True, repr=False)

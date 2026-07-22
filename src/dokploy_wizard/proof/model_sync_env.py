@@ -121,7 +121,16 @@ def resolve_proof_namespace(env_file: Path) -> ProofNamespace:
         stack_name=stack,
         docker=tuple(sorted(set(docker))),
         dokploy=tuple(sorted({stack, f"{stack}-coder", f"{stack}-shared"})),
-        cloudflare=tuple(sorted({stack, f"{stack}-cloudflared", *desired.hostnames.values()})),
+        cloudflare=tuple(
+            sorted(
+                {
+                    stack,
+                    f"{stack}-cloudflared",
+                    raw_env.values.get("CLOUDFLARE_TUNNEL_NAME", f"{stack}-tunnel"),
+                    *desired.hostnames.values(),
+                }
+            )
+        ),
         tailscale=() if desired.tailscale_hostname is None else (desired.tailscale_hostname,),
         coder_templates=templates,
     )

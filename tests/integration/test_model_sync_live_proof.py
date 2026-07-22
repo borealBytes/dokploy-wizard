@@ -445,32 +445,32 @@ def _wire_fixture(
         if "/cfd_tunnel?" in url:
             if failure == "cloudflare-malformed":
                 return _WireResponse({"success": True})
-            tunnels = [] if empty else [{"id": "tunnel-other", "name": "other-tunnel"}]
+            tunnels = [] if empty else [{"config_src": "cloudflare", "created_at": "2026-01-01T00:00:00Z", "deleted_at": None, "id": "tunnel-other", "name": "other-tunnel"}]
             if matching:
-                tunnels.append({"id": "tunnel-proof", "name": "proof-stack-cloudflared"})
+                tunnels.append({"config_src": "cloudflare", "created_at": "2026-01-01T00:00:00Z", "deleted_at": None, "id": "tunnel-proof", "name": "proof-stack-cloudflared"})
             if failure == "cloudflare-partial":
                 return _WireResponse(_cloudflare_list(tunnels, pages=2))
             return _WireResponse(_cloudflare_list(tunnels))
         if "/cfd_tunnel/" in url and url.endswith("/configurations"):
-            ingress = [{"hostname": "other.example.test", "service": "http://other"}]
-            if matching:
-                ingress.append({"hostname": "coder.example.test", "service": "http://coder"})
+            ingress = [{"hostname": "other.example.test", "originRequest": {}, "service": "http://other"}]
+            if matching and "/tunnel-proof/" in url:
+                ingress.append({"hostname": "coder.example.test", "originRequest": {}, "service": "http://coder"})
             return _WireResponse({"result": {"config": {"ingress": ingress}}, "success": True})
         if "/dns_records?" in url:
-            records = [] if empty else [{"id": "dns-other", "name": "other.example.test"}]
+            records: list[dict[str, Any]] = [] if empty else [{"comment": None, "content": "198.51.100.1", "id": "dns-other", "name": "other.example.test", "proxied": True, "tags": [], "ttl": 1, "type": "CNAME"}]
             if matching:
-                records.append({"id": "dns-proof", "name": "coder.example.test"})
+                records.append({"comment": None, "content": "198.51.100.2", "id": "dns-proof", "name": "coder.example.test", "proxied": True, "tags": [], "ttl": 1, "type": "CNAME"})
             return _WireResponse(_cloudflare_list(records))
         if "/access/apps?" in url:
-            apps = [] if empty else [{"domain": "other.example.test", "id": "app-other", "name": "Other"}]
+            apps = [] if empty else [{"allowed_identity_providers": [], "app_launcher_visible": True, "auto_redirect_to_identity": False, "domain": "other.example.test", "id": "app-other", "name": "Other", "session_duration": "24h", "type": "self_hosted"}]
             if matching:
-                apps.append({"domain": "coder.example.test", "id": "app-proof", "name": "Coder"})
+                apps.append({"allowed_identity_providers": [], "app_launcher_visible": True, "auto_redirect_to_identity": False, "domain": "coder.example.test", "id": "app-proof", "name": "Coder", "session_duration": "24h", "type": "self_hosted"})
             return _WireResponse(_cloudflare_list(apps))
         if "/access/apps/" in url and "/policies?" in url:
             policies = (
-                [{"id": "policy-proof", "name": "proof-stack-access"}]
+                [{"decision": "allow", "exclude": [], "id": "policy-proof", "include": [{"email": "redacted@example.test"}], "name": "Policy", "precedence": 1, "require": []}]
                 if matching and "/app-proof/" in url
-                else [{"id": "policy-other", "name": "Other policy"}]
+                else [{"decision": "allow", "exclude": [], "id": "policy-other", "include": [], "name": "Other policy", "precedence": 1, "require": []}]
             )
             return _WireResponse(_cloudflare_list(policies))
         if url.endswith("/api/project.all"):
@@ -654,9 +654,9 @@ def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> N
 
     assert source.count("_PREFLIGHT_ENCODED =") == 1
     assert "_PREFLIGHT_ENCODED_V2" not in source
-    assert ".replace(" not in source
+    assert "with_cloudflare_fingerprints" in source
     assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
-        "893de62a7d9a52b138d5bef8218734794bf6f989562a2eae3a97547428b57ea8"
+        "194a0c3b432f0cdf80c820ff9c41cc454f543092074d4a37eedea2916235a9f0"
     )
     assert "def _docker_absent_clean():" in model_sync_results.PREFLIGHT_SCRIPT
     assert '_which("dockerd") is None' in model_sync_results.PREFLIGHT_SCRIPT
@@ -924,12 +924,12 @@ def test_preflight_parser_rejects_error_state_and_duplicate_ids() -> None:
     payload = json.loads(_preflight_wire("machine-a"))
     payload["planes"]["cloudflare"] = {
         "resources": [
-            {"id": "duplicate", "kind": "tunnel", "name": "one"},
-            {"id": "duplicate", "kind": "dns_record", "name": "two"},
+                {"fingerprint_sha256": hashlib.sha256(b"duplicate-a").hexdigest(), "id": "duplicate", "kind": "tunnel", "name": "one"},
+                {"fingerprint_sha256": hashlib.sha256(b"duplicate-b").hexdigest(), "id": "duplicate", "kind": "dns_record", "name": "two"},
         ],
         "state": "present",
     }
-    with pytest.raises(model_sync_remote.RemoteProofError, match="IDs must be unique"):
+    with pytest.raises(model_sync_remote.RemoteProofError, match="duplicate identities"):
         model_sync_remote.parse_preflight(
             json.dumps(payload),
             namespace,
@@ -3321,7 +3321,7 @@ def test_explicit_single_host_baseline_uses_one_physical_preflight(
         "model-sync-preflight" in command
         for client in clients
         for command in client.commands
-    ) == 1
+    ) == 2
     assert not (artifact_dir / "host-b-preflight.json").exists()
     assert (artifact_dir / "single-host-lifecycle-baseline.json").exists()
     assert result["host_identity_mode"] == "single_sequential"
@@ -4300,6 +4300,8 @@ model_sync_cli.resolve_proof_transport = lambda _env: None
 model_sync_cli.probe_host = lambda **_kwargs: SimpleNamespace(
     machine_sha256="a" * 64, ssh_sha256="b" * 64, boot_sha256="c" * 64,
     architecture="amd64", namespace_clean=True,
+    inventory={"cloudflare": ()}, preexisting_cloudflare_sha256="8" * 64,
+    verify_preexisting_cloudflare_unchanged=lambda _post: None,
     to_dict=lambda: {},
 )
 model_sync_cli.assert_namespace_identity = lambda **_kwargs: None
