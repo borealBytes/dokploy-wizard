@@ -48,7 +48,6 @@ def root_install_env() -> RawEnvInput:
             "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
             "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
             "LITELLM_LOCAL_MODEL": "unsloth-active",
-            "LITELLM_LOCAL_API_KEY": "local-model-test-key",
             "LITELLM_ADMIN_SUBDOMAIN": "litellm",
             "OPENCODE_GO_BASE_URL": "https://opencode.ai/zen/go/v1",
             "OPENCODE_GO_API_KEY": "opencode-go-upstream-key",
