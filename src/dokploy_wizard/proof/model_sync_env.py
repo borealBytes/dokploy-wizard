@@ -45,18 +45,30 @@ def resolve_proof_transport(env_file: Path) -> ProofTransport:
     content, _mode = _read_regular_bytes(env_file, None)
     raw_env = _parse_bytes(content, env_file.parent, ".model-sync-transport-")
     values = raw_env.values
-    desired = resolve_desired_state(raw_env)
+    root_domain = values.get("ROOT_DOMAIN", "").strip()
+    if root_domain == "":
+        raise EnvPreparationError("proof transport requires ROOT_DOMAIN")
+    raw_tailscale = values.get("ENABLE_TAILSCALE", "false").lower()
+    if raw_tailscale in {"1", "true", "yes", "on"}:
+        tailscale_required = True
+    elif raw_tailscale in {"0", "false", "no", "off"}:
+        tailscale_required = False
+    else:
+        raise EnvPreparationError("proof transport ENABLE_TAILSCALE is invalid")
+    if tailscale_required and values.get("TAILSCALE_HOSTNAME", "").strip() == "":
+        raise EnvPreparationError("proof transport requires TAILSCALE_HOSTNAME when enabled")
+    coder_subdomain = values.get("CODER_SUBDOMAIN", "").strip() or "coder"
     return ProofTransport(
         cloudflare_account_id=values.get("CLOUDFLARE_ACCOUNT_ID") or None,
         cloudflare_zone_id=values.get("CLOUDFLARE_ZONE_ID") or None,
-        cloudflare_zone_name=desired.root_domain,
+        cloudflare_zone_name=root_domain,
         cloudflare_token=values.get("CLOUDFLARE_API_TOKEN") or None,
         dokploy_api_url=values.get("DOKPLOY_API_URL") or "http://127.0.0.1:3000",
         dokploy_api_key=values.get("DOKPLOY_API_KEY") or None,
         coder_email=values.get("DOKPLOY_ADMIN_EMAIL") or None,
-        coder_hostname=desired.hostnames.get("coder"),
+        coder_hostname=f"{coder_subdomain}.{root_domain}".lower(),
         coder_password=values.get("DOKPLOY_ADMIN_PASSWORD") or None,
-        tailscale_required=desired.tailscale_hostname is not None,
+        tailscale_required=tailscale_required,
         dokploy_admin_email=values.get("DOKPLOY_ADMIN_EMAIL") or None,
         dokploy_admin_password=values.get("DOKPLOY_ADMIN_PASSWORD") or None,
     )
