@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
 from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
@@ -3989,6 +3990,139 @@ class _FixtureParamikoTransport:
 
     def close(self) -> None:
         self.client.close()
+
+
+class _PayloadFixtureChannel:
+    def __init__(self) -> None:
+        self.status: int | None = None
+
+    def close(self) -> None:
+        return None
+
+    def exit_status_ready(self) -> bool:
+        return self.status is not None
+
+    def recv_exit_status(self) -> int:
+        if self.status is None:
+            raise AssertionError("payload fixture has not exited")
+        return self.status
+
+
+class _PayloadFixtureStream:
+    def __init__(self, channel: _PayloadFixtureChannel) -> None:
+        self.channel = channel
+        self.payload = b""
+
+    def read(self, size: int = -1) -> bytes:
+        return self.payload if size < 0 else self.payload[:size]
+
+
+class _PayloadFixtureStdin:
+    def __init__(self, complete: Callable[[bytes], None]) -> None:
+        self._complete = complete
+        self.payload = b""
+
+    def write(self, payload: bytes) -> int:
+        self.payload += payload
+        return len(payload)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self._complete(self.payload)
+
+
+class _PayloadFixtureRemoteClient:
+    def __init__(self) -> None:
+        self._fingerprint = b"ssh-payload"
+        self.preflight_stderr = b""
+        self.preflight_stdout = b""
+
+    def exec_command(
+        self, command: str, *, timeout: int
+    ) -> tuple[
+        _FixtureStdin | _PayloadFixtureStdin,
+        _FixtureStream | _PayloadFixtureStream,
+        _FixtureStream | _PayloadFixtureStream,
+    ]:
+        del timeout
+        if "model-sync-boot-id" in command:
+            return (
+                _FixtureStdin(),
+                _FixtureStream("33333333-3333-3333-3333-333333333333"),
+                _FixtureStream(""),
+            )
+        channel = _PayloadFixtureChannel()
+        stdout = _PayloadFixtureStream(channel)
+        stderr = _PayloadFixtureStream(channel)
+
+        def complete(payload: bytes) -> None:
+            result = subprocess.run(
+                [sys.executable, "-c", model_sync_results.PREFLIGHT_SCRIPT],
+                input=payload,
+                check=False,
+                capture_output=True,
+                timeout=5,
+            )
+            stdout.payload = result.stdout
+            stderr.payload = result.stderr
+            self.preflight_stdout = result.stdout
+            self.preflight_stderr = result.stderr
+            channel.status = result.returncode
+
+        return _PayloadFixtureStdin(complete), stdout, stderr
+
+    def get_transport(self) -> _FixtureTransportHandle:
+        return _FixtureTransportHandle(self._fingerprint)
+
+    def close(self) -> None:
+        return None
+
+
+class _PayloadFixtureParamikoTransport:
+    def __init__(self, client: _PayloadFixtureRemoteClient) -> None:
+        self.client = client
+
+    def close(self) -> None:
+        self.client.close()
+
+
+def test_remote_preflight_returns_typed_transport_error_for_encoded_payload_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    client = _PayloadFixtureRemoteClient()
+
+    def connect(**_kwargs: str | int | float | bool | None) -> _PayloadFixtureParamikoTransport:
+        return _PayloadFixtureParamikoTransport(client)
+
+    monkeypatch.setattr(model_sync_remote.ParamikoRemoteTransport, "connect", connect)
+    namespace = ProofNamespace("proof-stack", (), (), (), (), ())
+    transport = model_sync_results.ProofTransport(
+        None,
+        None,
+        "example.test",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        False,
+    )
+
+    # When / Then
+    with pytest.raises(model_sync_remote.RemoteProofError, match="remote preflight transport failed"):
+        model_sync_remote.probe_host(
+            host="fixture-host",
+            password="SECRET-PROOF-PASSWORD",
+            namespace=namespace,
+            proof_transport=transport,
+        )
+
+    assert client.preflight_stdout == b""
+    assert client.preflight_stderr == b"model-sync preflight input failed\n"
 
 
 def _install_fixture_transport(

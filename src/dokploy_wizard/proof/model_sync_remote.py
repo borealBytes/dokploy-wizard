@@ -63,12 +63,15 @@ def probe_host(
             "# model-sync-boot-id\ncat /proc/sys/kernel/random/boot_id",
             timeout_seconds=timeout_seconds,
         )
-        output = capture_remote_output(
-            transport,
-            _preflight_command(),
-            timeout_seconds=timeout_seconds,
-            stdin_bytes=_transport_bytes(proof_transport),
-        )
+        try:
+            output = capture_remote_output(
+                transport,
+                _preflight_command(),
+                timeout_seconds=timeout_seconds,
+                stdin_bytes=_transport_bytes(proof_transport),
+            )
+        except RuntimeError as error:
+            raise RemoteProofError("remote preflight transport failed") from error
     finally:
         transport.close()
     return parse_preflight(output, namespace, ssh_key=key, boot_id=boot_id)
