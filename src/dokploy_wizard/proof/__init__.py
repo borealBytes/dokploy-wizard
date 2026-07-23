@@ -109,6 +109,7 @@ REQUIRED_RESULT_KEYS: Final = frozenset(
         "protected_artifacts_before_path",
         "protected_artifacts_before_sha256",
         "preexisting_cloudflare_sha256",
+        "post_install_cloudflare_sha256",
         "schema_version",
         "shared_core_image_digests",
         "single_host_lifecycle_path",
@@ -117,6 +118,7 @@ REQUIRED_RESULT_KEYS: Final = frozenset(
         "temporal_clean_epoch_evidence",
     }
 )
+C1_UNBOUND_POST_INSTALL_CLOUDFLARE_SHA256: Final = "c" * 64
 
 
 class FinalizationBoundary(StrEnum):
@@ -532,6 +534,7 @@ class BaselineAttestation:
     result_path: str
     env_receipt: EnvReceipt
     host_identity_mode: HostIdentityMode
+    post_install_cloudflare_sha256: str
     output_sha256: Mapping[str, str]
     result_body: Mapping[str, JsonValue]
 
@@ -542,6 +545,7 @@ class BaselineAttestation:
             "guard_id": self.guard_id,
             "guard_path": self.guard_path,
             "host_identity_mode": self.host_identity_mode,
+            "post_install_cloudflare_sha256": self.post_install_cloudflare_sha256,
             "kind": "task-1-baseline-finalization",
             "output_sha256": dict(self.output_sha256),
             "required_terminal": {
@@ -828,6 +832,7 @@ def parse_baseline_attestation(value: JsonValue | None) -> BaselineAttestation |
         "guard_id",
         "guard_path",
         "host_identity_mode",
+        "post_install_cloudflare_sha256",
         "kind",
         "output_sha256",
         "required_terminal",
@@ -861,6 +866,7 @@ def parse_baseline_attestation(value: JsonValue | None) -> BaselineAttestation |
         _path(value["result_path"]),
         receipt,
         _host_identity_mode(value["host_identity_mode"]),
+        _hash(value["post_install_cloudflare_sha256"]),
         {key: _hash(item) for key, item in outputs.items()},
         body,
     )
@@ -910,6 +916,7 @@ def validate_baseline_attestation_bindings(attestation: BaselineAttestation) -> 
         "host_identity_mode": attestation.host_identity_mode,
         "protected_artifacts_before_path": f"{artifact_dir}/protected-artifacts-before.txt",
         "protected_artifacts_before_sha256": outputs["protected-artifacts-before.txt"],
+        "post_install_cloudflare_sha256": _hash(attestation.post_install_cloudflare_sha256),
     }
     match attestation.host_identity_mode:
         case "distinct":
@@ -1339,6 +1346,7 @@ class BaselineResultEvidence:
     coder_secret_inventory_sha256: str
     legacy_workspace_managed_fingerprints_sha256: str
     preexisting_cloudflare_sha256: str
+    post_install_cloudflare_sha256: str
 
 
 def run_bounded_process(
@@ -1532,6 +1540,7 @@ def baseline_result_values(evidence: BaselineResultEvidence) -> dict[str, JsonVa
             evidence.legacy_workspace_managed_fingerprints_sha256
         ),
         "preexisting_cloudflare_sha256": evidence.preexisting_cloudflare_sha256,
+        "post_install_cloudflare_sha256": evidence.post_install_cloudflare_sha256,
     }
 
 
@@ -1562,6 +1571,7 @@ def build_baseline_attestation(
         str(result_path.resolve()),
         evidence.env_receipt,
         evidence.host_identity_mode,
+        evidence.post_install_cloudflare_sha256,
         baseline_output_hashes(evidence),
         {key: value for key, value in body.items() if key != "abort_guard_sha256"},
     )
@@ -1698,6 +1708,7 @@ def _require_result_hashes(values: Mapping[str, JsonValue]) -> None:
         "coder_secret_inventory_sha256",
         "legacy_workspace_managed_fingerprints_sha256",
         "preexisting_cloudflare_sha256",
+        "post_install_cloudflare_sha256",
     )
     for key in keys:
         value = values[key]

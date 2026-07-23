@@ -80,6 +80,7 @@ def _valid_result_values(tmp_path: Path, receipt: EnvReceipt) -> dict[str, JsonV
         "coder_secret_inventory_sha256": "8" * 64,
         "legacy_workspace_managed_fingerprints_sha256": "9" * 64,
         "preexisting_cloudflare_sha256": "a" * 64,
+        "post_install_cloudflare_sha256": "b" * 64,
     }
 
 
@@ -100,6 +101,7 @@ def _valid_attestation(tmp_path: Path, guard_id: str = "c" * 64) -> BaselineAtte
         str((artifact_dir / "result.json").resolve()),
         receipt,
         "distinct",
+        "b" * 64,
         {
             "baseline.json": "f" * 64,
             "host-a-preflight.json": "d" * 64,
@@ -113,6 +115,29 @@ def _valid_attestation(tmp_path: Path, guard_id: str = "c" * 64) -> BaselineAtte
 def _write_guard_payload(path: Path, payload: dict[str, JsonValue]) -> None:
     path.write_bytes(canonical_json_bytes(payload) + b"\n")
     path.chmod(0o600)
+
+
+@pytest.mark.parametrize("post_hash", [None, "A" * 64, "not-a-sha256"])
+def test_result_rejects_missing_or_malformed_post_install_cloudflare_hash(
+    tmp_path: Path, post_hash: str | None
+) -> None:
+    # Given
+    receipt = EnvReceipt(
+        str((tmp_path / "install.env").resolve()),
+        str((tmp_path / "install.env.backup").resolve()),
+        "a" * 64,
+        "b" * 64,
+        0o600,
+    )
+    result = _valid_result_values(tmp_path, receipt)
+    if post_hash is None:
+        result.pop("post_install_cloudflare_sha256", None)
+    else:
+        result["post_install_cloudflare_sha256"] = post_hash
+
+    # When / Then
+    with pytest.raises(ValueError):
+        build_result(result)
 
 
 def _rollback_payload(
@@ -926,7 +951,8 @@ def test_result_accepts_non_placeholder_captured_values() -> None:
             "protected_artifacts_before_sha256": "0f" * 32,
             "coder_secret_inventory_sha256": "1" * 64,
             "legacy_workspace_managed_fingerprints_sha256": "2" * 64,
-            "preexisting_cloudflare_sha256": "3" * 64,
+                "preexisting_cloudflare_sha256": "3" * 64,
+                "post_install_cloudflare_sha256": "4" * 64,
         }
     )
 
@@ -1024,7 +1050,8 @@ def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
             "protected_artifacts_before_sha256": "1" * 64,
             "coder_secret_inventory_sha256": "2" * 64,
             "legacy_workspace_managed_fingerprints_sha256": "3" * 64,
-            "preexisting_cloudflare_sha256": "4" * 64,
+                "preexisting_cloudflare_sha256": "4" * 64,
+                "post_install_cloudflare_sha256": "5" * 64,
         }
     )
     attestation = BaselineAttestation(
@@ -1032,9 +1059,10 @@ def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
         guard_path=str(guard_path.resolve()),
         artifact_dir=str(artifact_dir.resolve()),
         result_path=str((artifact_dir / "result.json").resolve()),
-        env_receipt=receipt,
-        host_identity_mode="distinct",
-        output_sha256={
+            env_receipt=receipt,
+            host_identity_mode="distinct",
+            post_install_cloudflare_sha256="5" * 64,
+            output_sha256={
             "baseline.json": "f" * 64,
             "host-a-preflight.json": "d" * 64,
             "host-b-preflight.json": "e" * 64,
@@ -1505,6 +1533,7 @@ def test_result_and_attestation_reject_host_identity_mode_relabel(tmp_path: Path
         ("baseline_sha256", "5" * 64),
         ("protected_artifacts_before_sha256", "6" * 64),
         ("protected_artifacts_before_path", "/tmp/protected-artifacts-before.txt"),
+        ("post_install_cloudflare_sha256", "c" * 64),
         ("host_identity_mode", "single_sequential"),
     ],
 )

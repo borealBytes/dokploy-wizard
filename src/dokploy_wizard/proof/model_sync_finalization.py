@@ -31,6 +31,7 @@ class BaselineArtifactInputs:
     host_a: RemoteProbe
     host_b: RemoteProbe | None
     baseline: CapturedBaseline
+    post_install_cloudflare_sha256: str
 
 
 def finalize_baseline_artifacts(
@@ -74,6 +75,7 @@ def finalize_baseline_artifacts(
         inputs.baseline.coder_secret_inventory_sha256,
         inputs.baseline.legacy_workspace_managed_fingerprints_sha256,
         inputs.host_a.preexisting_cloudflare_sha256,
+        inputs.post_install_cloudflare_sha256,
     )
     attestation = proof.build_baseline_attestation(
         evidence,
