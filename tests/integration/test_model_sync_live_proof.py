@@ -825,6 +825,48 @@ def test_authoritative_collectors_report_successful_empty_planes() -> None:
     assert planes["tailscale"]["resources"] == []
 
 
+def test_dokploy_collector_skips_api_when_local_dokploy_is_absent() -> None:
+    # Given
+    scope: dict[str, Any] = {"__name__": "fixture"}
+    exec(model_sync_results.PREFLIGHT_SCRIPT, scope)
+    requests: list[str] = []
+    scope["_run_process"] = _command_fixture(empty=True)
+
+    def unavailable_request(url: str, **_kwargs: Any) -> _WireResponse:
+        requests.append(url)
+        raise error.URLError("unavailable")
+
+    scope["_open_request"] = unavailable_request
+
+    # When
+    absent = scope["_dokploy"](_transport_fixture(), [])
+
+    # Then
+    assert absent == []
+    assert requests == []
+
+
+def test_dokploy_collector_fails_when_local_dokploy_api_is_unavailable() -> None:
+    # Given
+    scope: dict[str, Any] = {"__name__": "fixture"}
+    exec(model_sync_results.PREFLIGHT_SCRIPT, scope)
+    requests: list[str] = []
+
+    def unavailable_request(url: str, **_kwargs: Any) -> _WireResponse:
+        requests.append(url)
+        raise error.URLError("unavailable")
+
+    scope["_open_request"] = unavailable_request
+
+    # When / Then
+    with pytest.raises(error.URLError):
+        scope["_dokploy"](
+            _transport_fixture(),
+            [{"image": "dokploy/dokploy:latest", "name": "dokploy"}],
+        )
+    assert requests
+
+
 def test_authoritative_collectors_accept_complete_docker_absence() -> None:
     planes = _collect_planes(
         empty=True,
@@ -848,7 +890,7 @@ def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> N
     assert "with_cloudflare_" + "fingerprints" not in source
     assert ".replace(" not in source
     assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
-        "b9156c788955fc85a0324e8ea2ac14c9069c076046c36d5cc0618a4a3f91b42a"
+        "78f7871aeea407b8a8fea1415577956cdf0ab1ed8a13c504ce0fa9c5304ea63c"
     )
     assert "def _docker_absent_clean():" in model_sync_results.PREFLIGHT_SCRIPT
     assert '_which("dockerd") is None' in model_sync_results.PREFLIGHT_SCRIPT
