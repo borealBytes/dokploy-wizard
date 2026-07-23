@@ -348,9 +348,7 @@ _SERVICE_LIST_COMMAND = (
     "docker",
     "service",
     "ls",
-    "--no-trunc",
-    "--format",
-    "{{.ID}}",
+    "-q",
 )
 _SERVICE_NAME_FIELD = "{{.Spec.Name}}"
 _SERVICE_IMAGE_FIELD = "{{.Spec.TaskTemplate.ContainerSpec.Image}}"
@@ -850,7 +848,7 @@ def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> N
     assert "with_cloudflare_" + "fingerprints" not in source
     assert ".replace(" not in source
     assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
-        "9549a7aaed00bd7aa54b272bbaa02bd71ab0be8af7b6e4eca37bb9993b9258ce"
+        "b9156c788955fc85a0324e8ea2ac14c9069c076046c36d5cc0618a4a3f91b42a"
     )
     assert "def _docker_absent_clean():" in model_sync_results.PREFLIGHT_SCRIPT
     assert '_which("dockerd") is None' in model_sync_results.PREFLIGHT_SCRIPT
@@ -1022,24 +1020,24 @@ def test_active_swarm_inventory_reads_each_service_by_opaque_id() -> None:
     ] == expected_service_commands
 
 
-def test_active_swarm_inventory_never_uses_combined_service_list_fields() -> None:
+def test_active_swarm_inventory_never_uses_service_list_format() -> None:
     # Given
     commands: list[tuple[str, ...]] = []
-    old_command = (
-        "docker",
-        "service",
-        "ls",
-        "--no-trunc",
-        "--format",
-        "{{.ID}}\t{{.Name}}\t{{.Image}}",
-    )
 
     # When
     _collect_planes(commands=commands)
 
     # Then
-    assert old_command not in commands
-    assert '"{{.ID}}\\t{{.Name}}\\t{{.Image}}"' not in model_sync_results.PREFLIGHT_SCRIPT
+    assert _SERVICE_LIST_COMMAND in commands
+    assert not [
+        command
+        for command in commands
+        if command[:3] == ("docker", "service", "ls") and "--format" in command
+    ]
+    assert (
+        '["docker", "service", "ls", "--no-trunc", "--format"'
+        not in model_sync_results.PREFLIGHT_SCRIPT
+    )
 
 
 @pytest.mark.parametrize(
