@@ -8,6 +8,8 @@ from dokploy_wizard.proof.model_sync_artifacts import CaptureSchemaError, JsonVa
 from dokploy_wizard.proof.model_sync_cloudflare import (
     classify_cloudflare_post_install,
     classify_cloudflare_preflight,
+    cloudflare_evidence_payload,
+    cloudflare_snapshot_sha256,
     preexisting_cloudflare_sha256,
 )
 
@@ -140,3 +142,31 @@ def test_post_install_keeps_preexisting_unowned_and_marks_only_new_exact_as_cand
         "created_candidate",
     ]
     assert preexisting_cloudflare_sha256(observed) == preexisting_cloudflare_sha256(before)
+
+
+def test_complete_post_snapshot_is_stable_redacted_and_sensitive_to_new_records() -> None:
+    # Given
+    names = {"coder.example.test", "tunnel-name"}
+    before = classify_cloudflare_preflight([_record()], names, "proof-stack")
+    post = classify_cloudflare_post_install(
+        [_record(), _record(resource_id="tunnel-id", name="tunnel-name", kind="tunnel")],
+        names,
+        "proof-stack",
+        before,
+    )
+
+    # When
+    payload = cloudflare_evidence_payload(post)
+    reordered = cloudflare_snapshot_sha256(tuple(reversed(post)))
+
+    # Then
+    assert cloudflare_snapshot_sha256(post) == reordered
+    assert cloudflare_snapshot_sha256(post) != cloudflare_snapshot_sha256(before)
+    assert payload[1] == {
+        "fingerprint_sha256": _fingerprint("tunnel-id"),
+        "id": "tunnel-id",
+        "kind": "tunnel",
+        "match": "exact",
+        "provenance": "created_candidate",
+    }
+    assert "tunnel-name" not in str(payload)

@@ -149,6 +149,11 @@ def cloudflare_evidence_payload(resources: tuple[CloudflareResource, ...]) -> li
     ]
 
 
+def cloudflare_snapshot_sha256(resources: tuple[CloudflareResource, ...]) -> str:
+    """Hash every canonical redacted Cloudflare record, regardless of provenance."""
+    return hashlib.sha256(canonical_json_bytes(cloudflare_evidence_payload(resources))).hexdigest()
+
+
 def _parse_resources(
     values: Sequence[JsonValue], deterministic_names: set[str], stack_name: str
 ) -> tuple[CloudflareResource, ...]:
