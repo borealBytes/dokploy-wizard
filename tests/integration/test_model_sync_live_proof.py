@@ -344,15 +344,46 @@ def _transport_fixture(*, tailscale_required: bool = False) -> dict[str, Any]:
     }
 
 
+_SERVICE_LIST_COMMAND = (
+    "docker",
+    "service",
+    "ls",
+    "--no-trunc",
+    "--format",
+    "{{.ID}}",
+)
+_SERVICE_NAME_FIELD = "{{.Spec.Name}}"
+_SERVICE_IMAGE_FIELD = "{{.Spec.TaskTemplate.ContainerSpec.Image}}"
+
+
+def _service_inspect_command(field: str, service_id: str) -> tuple[str, ...]:
+    return "docker", "service", "inspect", "--format", field, service_id
+
+
 def _command_fixture(
     *,
     empty: bool = False,
     matching: bool = False,
     missing_tailscale: bool = False,
     failure: str | None = None,
+    commands: list[tuple[str, ...]] | None = None,
 ) -> Any:
+    service_records = {
+        "service-other": ("other-service", "busybox:latest"),
+    }
+    if matching:
+        service_records.update(
+            {
+                "service-dokploy": ("dokploy", "dokploy/dokploy:latest"),
+                "service-coder": ("proof-stack-coder", "ghcr.io/coder/coder:latest"),
+            }
+        )
+    service_ids = [] if empty else list(service_records)
+
     def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         key = tuple(command)
+        if commands is not None:
+            commands.append(key)
         if key[:2] == ("docker", "ps"):
             if failure == "docker-timeout":
                 raise subprocess.TimeoutExpired(command, 20)
@@ -377,20 +408,51 @@ def _command_fixture(
             )
         if key[:2] == ("docker", "info"):
             return subprocess.CompletedProcess(command, 0, b"active\n", b"")
-        if key[:3] == ("docker", "service", "ls"):
+        if key == _SERVICE_LIST_COMMAND:
             if failure == "docker-service-unreadable":
                 return subprocess.CompletedProcess(
                     command, 125, b"", b"service inventory unavailable"
                 )
-            service_rows = [] if empty else ["service-other\tother-service\tbusybox:latest"]
-            if matching:
-                service_rows.extend(
-                    (
-                        "service-dokploy\tdokploy\tdokploy/dokploy:latest",
-                        "service-coder\tproof-stack-coder\tghcr.io/coder/coder:latest",
-                    )
+            if failure == "docker-service-duplicate-id":
+                return subprocess.CompletedProcess(
+                    command, 0, b"service-other\nservice-other\n", b""
                 )
-            return subprocess.CompletedProcess(command, 0, "\n".join(service_rows).encode(), b"")
+            if failure == "docker-service-malformed-id":
+                return subprocess.CompletedProcess(
+                    command, 0, b"service-other\tcontaminated\n", b""
+                )
+            if failure == "docker-service-empty-id-line":
+                return subprocess.CompletedProcess(
+                    command, 0, b"service-other\n\nservice-dokploy\n", b""
+                )
+            service_output = "\n".join(service_ids)
+            if service_output:
+                service_output += "\n"
+            return subprocess.CompletedProcess(command, 0, service_output.encode(), b"")
+        if key[:4] == ("docker", "service", "inspect", "--format") and len(key) == 6:
+            field, service_id = key[4:]
+            if failure == "docker-service-inspect-failure" and field == _SERVICE_NAME_FIELD:
+                return subprocess.CompletedProcess(command, 125, b"", b"inspect unavailable")
+            if failure == "docker-service-disappeared" and field == _SERVICE_IMAGE_FIELD:
+                return subprocess.CompletedProcess(command, 1, b"", b"no such service")
+            record = service_records.get(service_id)
+            if record is None:
+                return subprocess.CompletedProcess(command, 1, b"", b"no such service")
+            values = {
+                _SERVICE_NAME_FIELD: record[0],
+                _SERVICE_IMAGE_FIELD: record[1],
+            }
+            if field not in values:
+                raise AssertionError(command)
+            if failure == "docker-service-malformed-name" and field == _SERVICE_NAME_FIELD:
+                return subprocess.CompletedProcess(command, 0, b"other-service\nunexpected\n", b"")
+            if failure == "docker-service-empty-name" and field == _SERVICE_NAME_FIELD:
+                return subprocess.CompletedProcess(command, 0, b"\n", b"")
+            if failure == "docker-service-malformed-image" and field == _SERVICE_IMAGE_FIELD:
+                return subprocess.CompletedProcess(
+                    command, 0, b"busybox:latest\tcontaminated\n", b""
+                )
+            return subprocess.CompletedProcess(command, 0, f"{values[field]}\n".encode(), b"")
         if key[:3] == ("docker", "network", "ls"):
             output = b"" if empty else b"network-other\tother-network\n"
             return subprocess.CompletedProcess(command, 0, output, b"")
@@ -710,6 +772,7 @@ def _collect_planes(
     template_malformed: bool = False,
     template_requests: list[str] | None = None,
     access_fixture: dict[str, Any] | None = None,
+    commands: list[tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     scope: dict[str, Any] = {"__name__": "fixture"}
     exec(model_sync_results.PREFLIGHT_SCRIPT, scope)
@@ -718,6 +781,7 @@ def _collect_planes(
         matching=matching,
         missing_tailscale=missing_tailscale,
         failure=failure,
+        commands=commands,
     )
     scope["_open_request"] = _wire_fixture(
         empty=empty,
@@ -786,7 +850,7 @@ def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> N
     assert "with_cloudflare_" + "fingerprints" not in source
     assert ".replace(" not in source
     assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
-        "39c4f91528ec383ce76c697cdf9f8194d3a7847b853009a773fcfd7ab3188da4"
+        "9549a7aaed00bd7aa54b272bbaa02bd71ab0be8af7b6e4eca37bb9993b9258ce"
     )
     assert "def _docker_absent_clean():" in model_sync_results.PREFLIGHT_SCRIPT
     assert '_which("dockerd") is None' in model_sync_results.PREFLIGHT_SCRIPT
@@ -911,6 +975,157 @@ def test_authoritative_collectors_report_matching_and_nonmatching_resources() ->
     }
     assert result.plane_provenance["docker"] == "docker_available_inventory"
     assert any(resource.name == "proof-stack-coder" for resource in result.inventory["docker"])
+
+
+def test_active_swarm_inventory_reads_each_service_by_opaque_id() -> None:
+    # Given
+    commands: list[tuple[str, ...]] = []
+    scope: dict[str, Any] = {"__name__": "fixture"}
+    exec(model_sync_results.PREFLIGHT_SCRIPT, scope)
+    scope["_run_process"] = _command_fixture(matching=True, commands=commands)
+    scope["_which"] = lambda command: command
+    scope["_path_exists"] = lambda path: path == "/var/run/docker.sock"
+
+    # When
+    resources, services, provenance = scope["_docker"]()
+
+    # Then
+    assert services == [
+        {"id": "service-other", "image": "busybox:latest", "name": "other-service"},
+        {
+            "id": "service-dokploy",
+            "image": "dokploy/dokploy:latest",
+            "name": "dokploy",
+        },
+        {
+            "id": "service-coder",
+            "image": "ghcr.io/coder/coder:latest",
+            "name": "proof-stack-coder",
+        },
+    ]
+    assert [item for item in resources if item["kind"] == "service"] == [
+        {"id": "service-other", "kind": "service", "name": "other-service"},
+        {"id": "service-dokploy", "kind": "service", "name": "dokploy"},
+        {"id": "service-coder", "kind": "service", "name": "proof-stack-coder"},
+    ]
+    assert provenance == "docker_available_inventory"
+    expected_service_commands: list[tuple[str, ...]] = [_SERVICE_LIST_COMMAND]
+    for service_id in ("service-other", "service-dokploy", "service-coder"):
+        expected_service_commands.extend(
+            (
+                _service_inspect_command(_SERVICE_NAME_FIELD, service_id),
+                _service_inspect_command(_SERVICE_IMAGE_FIELD, service_id),
+            )
+        )
+    assert [
+        command for command in commands if command[:2] == ("docker", "service")
+    ] == expected_service_commands
+
+
+def test_active_swarm_inventory_never_uses_combined_service_list_fields() -> None:
+    # Given
+    commands: list[tuple[str, ...]] = []
+    old_command = (
+        "docker",
+        "service",
+        "ls",
+        "--no-trunc",
+        "--format",
+        "{{.ID}}\t{{.Name}}\t{{.Image}}",
+    )
+
+    # When
+    _collect_planes(commands=commands)
+
+    # Then
+    assert old_command not in commands
+    assert '"{{.ID}}\\t{{.Name}}\\t{{.Image}}"' not in model_sync_results.PREFLIGHT_SCRIPT
+
+
+@pytest.mark.parametrize(
+    ("failure", "failed_field"),
+    [
+        ("docker-service-inspect-failure", _SERVICE_NAME_FIELD),
+        ("docker-service-disappeared", _SERVICE_IMAGE_FIELD),
+    ],
+)
+def test_active_swarm_inventory_fails_closed_when_service_inspect_fails(
+    failure: str,
+    failed_field: str,
+) -> None:
+    # Given
+    commands: list[tuple[str, ...]] = []
+
+    # When
+    planes = _collect_planes(failure=failure, commands=commands)
+
+    # Then
+    assert planes["docker"] == {
+        "provenance": "docker_error",
+        "resources": [],
+        "state": "error",
+    }
+    assert _service_inspect_command(failed_field, "service-other") in commands
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_command"),
+    [
+        (
+            "docker-service-malformed-id",
+            _SERVICE_LIST_COMMAND,
+        ),
+        (
+            "docker-service-empty-id-line",
+            _SERVICE_LIST_COMMAND,
+        ),
+        (
+            "docker-service-malformed-name",
+            _service_inspect_command(_SERVICE_NAME_FIELD, "service-other"),
+        ),
+        (
+            "docker-service-empty-name",
+            _service_inspect_command(_SERVICE_NAME_FIELD, "service-other"),
+        ),
+        (
+            "docker-service-malformed-image",
+            _service_inspect_command(_SERVICE_IMAGE_FIELD, "service-other"),
+        ),
+    ],
+)
+def test_active_swarm_inventory_rejects_malformed_service_scalars(
+    failure: str,
+    expected_command: tuple[str, ...],
+) -> None:
+    # Given
+    commands: list[tuple[str, ...]] = []
+
+    # When
+    planes = _collect_planes(failure=failure, commands=commands)
+
+    # Then
+    assert planes["docker"] == {
+        "provenance": "docker_error",
+        "resources": [],
+        "state": "error",
+    }
+    assert expected_command in commands
+
+
+def test_active_swarm_inventory_rejects_duplicate_service_ids() -> None:
+    # Given
+    commands: list[tuple[str, ...]] = []
+
+    # When
+    planes = _collect_planes(failure="docker-service-duplicate-id", commands=commands)
+
+    # Then
+    assert planes["docker"] == {
+        "provenance": "docker_error",
+        "resources": [],
+        "state": "error",
+    }
+    assert _SERVICE_LIST_COMMAND in commands
 
 
 def _access_policy_fingerprint(access_fixture: dict[str, Any]) -> tuple[str, dict[str, Any]]:
