@@ -123,6 +123,20 @@ def test_preflight_rejects_duplicate_cloudflare_identity(
         classify_cloudflare_preflight(records, names, "proof-stack")
 
 
+@pytest.mark.parametrize("kind", ["access_policy", "hostname_route"])
+def test_preflight_allows_distinct_scoped_exact_resources_with_shared_name(kind: str) -> None:
+    name = "coder.example.test"
+    observed = classify_cloudflare_preflight(
+        [
+            _record(resource_id="first", name=name, kind=kind),
+            _record(resource_id="second", name=name, kind=kind),
+        ],
+        {name},
+        "proof-stack",
+    )
+    assert [item.provenance for item in observed] == ["preexisting_unowned", "preexisting_unowned"]
+
+
 def test_post_install_keeps_preexisting_unowned_and_marks_only_new_exact_as_candidate() -> None:
     # Given
     names = {"coder.example.test", "tunnel-name"}
@@ -179,20 +193,26 @@ def test_adapter_classifies_transient_observed_resources_without_serializing_nam
     namespace = ProofNamespace("proof-stack", (), (), ("coder.example.test",), (), ())
     before = (
         ObservedResource(
-            "dns-id", "coder.example.test", "dns_record", _fingerprint("before"),
-            "exact", "preexisting_unowned"
+            "dns-id",
+            "coder.example.test",
+            "dns_record",
+            _fingerprint("before"),
+            "exact",
+            "preexisting_unowned",
         ),
     )
     after = before + (
         ObservedResource(
-            "foreign-id", "foreign.example.test", "dns_record", _fingerprint("foreign"),
-            "foreign", "foreign"
+            "foreign-id",
+            "foreign.example.test",
+            "dns_record",
+            _fingerprint("foreign"),
+            "foreign",
+            "foreign",
         ),
     )
 
-    observed = classify_post_install_resources(
-        before, after, namespace, ObservedResource
-    )
+    observed = classify_post_install_resources(before, after, namespace, ObservedResource)
 
     assert [item.provenance for item in observed] == ["preexisting_unowned", "foreign"]
     assert "coder.example.test" not in str(observed[0].to_dict())
