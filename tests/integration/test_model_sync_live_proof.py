@@ -659,7 +659,7 @@ def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> N
     assert "with_cloudflare_" + "fingerprints" not in source
     assert ".replace(" not in source
     assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
-        "194a0c3b432f0cdf80c820ff9c41cc454f543092074d4a37eedea2916235a9f0"
+        "f707056ee06c19af238c9cf0b53313cc72cf67130f3ec89fc12fe3b98fe9f86e"
     )
     assert "def _docker_absent_clean():" in model_sync_results.PREFLIGHT_SCRIPT
     assert '_which("dockerd") is None' in model_sync_results.PREFLIGHT_SCRIPT
@@ -762,6 +762,14 @@ def test_authoritative_collectors_report_matching_and_nonmatching_resources() ->
         "hostname_route",
         "tunnel",
     }
+    policy = next(
+        resource
+        for resource in result.inventory["cloudflare"]
+        if resource.resource_id == "policy-proof"
+    )
+    assert policy.match == "exact"
+    assert policy.provenance == "preexisting_unowned"
+    assert "Policy" not in str(policy.to_dict())
     assert {resource.kind for resource in result.inventory["dokploy"]} == {
         "application",
         "compose",
