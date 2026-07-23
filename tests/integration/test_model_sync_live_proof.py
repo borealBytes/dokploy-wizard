@@ -4678,9 +4678,10 @@ inputs = BaselineArtifactInputs(
     recovery.claim,
     "distinct",
     host_a,
-    host_b,
-    baseline,
-)
+        host_b,
+        baseline,
+        "8" * 64,
+    )
 
 def boundary_name(value):
     return value.value

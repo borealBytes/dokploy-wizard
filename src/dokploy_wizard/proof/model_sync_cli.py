@@ -37,7 +37,6 @@ SignalHandler = Callable[[int, FrameType | None], object] | int | None
 _build_parser = proof.build_model_sync_parser
 _self_start_time_ticks = proof.self_start_time_ticks
 
-
 def main(argv: Sequence[str] | None = None) -> int:
     """Run a proof command without emitting supplied secret values."""
     parser = _build_parser()
@@ -174,6 +173,7 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
                 host_a=host_a_probe,
                 host_b=host_b_probe,
                 baseline=baseline,
+                post_install_cloudflare_sha256=proof.C1_UNBOUND_POST_INSTALL_CLOUDFLARE_SHA256,
             )
         )
         completed = True
