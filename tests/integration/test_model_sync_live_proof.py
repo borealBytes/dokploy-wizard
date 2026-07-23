@@ -437,6 +437,7 @@ def _wire_fixture(
     template_count: int | None = None,
     template_malformed: bool = False,
     template_requests: list[str] | None = None,
+    access_fixture: dict[str, Any] | None = None,
 ) -> Any:
     def open_request(request: Any, *, timeout: int) -> _WireResponse:
         assert timeout <= 30
@@ -465,10 +466,10 @@ def _wire_fixture(
         if "/access/apps?" in url:
             apps = [] if empty else [{"allowed_identity_providers": [], "app_launcher_visible": True, "auto_redirect_to_identity": False, "domain": "other.example.test", "id": "app-other", "name": "Other", "session_duration": "24h", "type": "self_hosted"}]
             if matching:
-                apps.append({"allowed_identity_providers": [], "app_launcher_visible": True, "auto_redirect_to_identity": False, "domain": "coder.example.test", "id": "app-proof", "name": "Coder", "session_duration": "24h", "type": "self_hosted"})
+                apps.append(access_fixture["app"] if access_fixture else {"allowed_identity_providers": [], "app_launcher_visible": True, "auto_redirect_to_identity": False, "domain": "coder.example.test", "id": "app-proof", "name": "Coder", "session_duration": "24h", "type": "self_hosted"})
             return _WireResponse(_cloudflare_list(apps))
         if "/access/apps/" in url and "/policies?" in url:
-            policies = (
+            policies = access_fixture["policy"] if access_fixture and "/policies?" in url else (
                 [{"decision": "allow", "exclude": [], "id": "policy-proof", "include": [{"email": "redacted@example.test"}], "name": "Policy", "precedence": 1, "require": []}]
                 if matching and "/app-proof/" in url
                 else [{"decision": "allow", "exclude": [], "id": "policy-other", "include": [], "name": "Other policy", "precedence": 1, "require": []}]
@@ -584,6 +585,7 @@ def _collect_planes(
     template_count: int | None = None,
     template_malformed: bool = False,
     template_requests: list[str] | None = None,
+    access_fixture: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scope: dict[str, Any] = {"__name__": "fixture"}
     exec(model_sync_results.PREFLIGHT_SCRIPT, scope)
@@ -601,6 +603,7 @@ def _collect_planes(
         template_count=template_count,
         template_malformed=template_malformed,
         template_requests=template_requests,
+        access_fixture=access_fixture,
     )
 
     def which(command: str) -> str | None:
@@ -785,6 +788,55 @@ def test_authoritative_collectors_report_matching_and_nonmatching_resources() ->
     assert any(
         resource.name == "proof-stack-coder" for resource in result.inventory["docker"]
     )
+
+
+def _access_policy_fingerprint(access_fixture: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    planes = _collect_planes(empty=True, matching=True, access_fixture=access_fixture)
+    policy = next(item for item in planes["cloudflare"]["resources"] if item["kind"] == "access_policy")
+    return policy["fingerprint_sha256"], policy
+
+
+def _access_fixture(*, app_id: str = "app-proof", domain: str = "coder.example.test", policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "app": {"allowed_identity_providers": [], "app_launcher_visible": True, "auto_redirect_to_identity": False, "domain": domain, "id": app_id, "name": "Coder", "session_duration": "24h", "type": "self_hosted"},
+        "policy": [policy or {"decision": "allow", "exclude": [], "id": "policy-proof", "include": [{"email": "operator@example.test"}], "name": "Unrelated display name", "precedence": 1, "require": []}],
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"decision": "deny"},
+        {"precedence": 2},
+        {"include": [{"email": "other@example.test"}]},
+        {"exclude": [{"email": "blocked@example.test"}]},
+        {"require": [{"email_domain": {"domain": "example.test"}}]},
+        {"name": "Different unrelated display name"},
+    ],
+)
+def test_access_policy_fingerprint_binds_each_policy_clause(mutation: dict[str, Any]) -> None:
+    baseline = _access_fixture()
+    base_fingerprint, _ = _access_policy_fingerprint(baseline)
+    changed_policy = {**baseline["policy"][0], **mutation}
+
+    changed_fingerprint, _ = _access_policy_fingerprint(_access_fixture(policy=changed_policy))
+
+    assert changed_fingerprint != base_fingerprint
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        _access_fixture(app_id="app-rebound"),
+        _access_fixture(domain="other.example.test"),
+    ],
+)
+def test_access_policy_fingerprint_binds_parent_identity(fixture: dict[str, Any]) -> None:
+    base_fingerprint, evidence = _access_policy_fingerprint(_access_fixture())
+    changed_fingerprint, changed = _access_policy_fingerprint(fixture)
+
+    assert changed_fingerprint != base_fingerprint
+    assert changed["id"] == evidence["id"]
 
 
 def test_coder_preflight_collects_all_identifiers_beyond_first_page() -> None:
