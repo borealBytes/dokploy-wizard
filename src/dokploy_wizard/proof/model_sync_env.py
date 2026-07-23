@@ -51,12 +51,14 @@ def resolve_proof_transport(env_file: Path) -> ProofTransport:
         cloudflare_zone_id=values.get("CLOUDFLARE_ZONE_ID") or None,
         cloudflare_zone_name=desired.root_domain,
         cloudflare_token=values.get("CLOUDFLARE_API_TOKEN") or None,
-        dokploy_api_url=values.get("DOKPLOY_API_URL") or None,
+        dokploy_api_url=values.get("DOKPLOY_API_URL") or "http://127.0.0.1:3000",
         dokploy_api_key=values.get("DOKPLOY_API_KEY") or None,
         coder_email=values.get("DOKPLOY_ADMIN_EMAIL") or None,
         coder_hostname=desired.hostnames.get("coder"),
         coder_password=values.get("DOKPLOY_ADMIN_PASSWORD") or None,
         tailscale_required=desired.tailscale_hostname is not None,
+        dokploy_admin_email=values.get("DOKPLOY_ADMIN_EMAIL") or None,
+        dokploy_admin_password=values.get("DOKPLOY_ADMIN_PASSWORD") or None,
     )
 
 
