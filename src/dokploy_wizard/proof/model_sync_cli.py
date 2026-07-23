@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import FrameType
-from typing import Sequence, assert_never
+from typing import Sequence
 
 from dokploy_wizard import proof
 from dokploy_wizard.proof.model_sync_artifacts import write_protected_manifest
@@ -27,15 +27,16 @@ from dokploy_wizard.proof.model_sync_host_a import (
     finalize_baseline_artifacts,
     recover_interrupted_proof,
 )
-from dokploy_wizard.proof.model_sync_host_b import HostIdentity, assert_namespace_identity
 from dokploy_wizard.proof.model_sync_host_inputs import HostInputNames, resolve_host_inputs
-from dokploy_wizard.proof.model_sync_remote import RemoteProbe, capture_host_a_snapshot, probe_host
+from dokploy_wizard.proof.model_sync_host_probes import probe_baseline_hosts
+from dokploy_wizard.proof.model_sync_remote import capture_host_a_snapshot, probe_host
 from dokploy_wizard.proof.model_sync_results import run_bounded_process
 from dokploy_wizard.proof.model_sync_state import AbortGuardError, read_abort_guard
 
 SignalHandler = Callable[[int, FrameType | None], object] | int | None
 _build_parser = proof.build_model_sync_parser
 _self_start_time_ticks = proof.self_start_time_ticks
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run a proof command without emitting supplied secret values."""
@@ -115,37 +116,15 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         )
         namespace = resolve_proof_namespace(args.env_file)
         transport = resolve_proof_transport(args.env_file)
-        host_a_probe = probe_host(
-            host=host_a, password=password_a, namespace=namespace, proof_transport=transport
+        host_a_probe, host_b_probe = probe_baseline_hosts(
+            host_a=host_a,
+            password_a=password_a,
+            host_b=host_b,
+            password_b=password_b,
+            mode=mode,
+            namespace=namespace,
+            transport=transport,
         )
-        identity_a = HostIdentity(
-            host_a_probe.machine_sha256,
-            host_a_probe.ssh_sha256,
-            host_a_probe.architecture,
-        )
-        match mode:
-            case "distinct":
-                distinct_host_b = probe_host(
-                    host=host_b,
-                    password=password_b,
-                    namespace=namespace,
-                    proof_transport=transport,
-                )
-                identity_b = HostIdentity(
-                    distinct_host_b.machine_sha256,
-                    distinct_host_b.ssh_sha256,
-                    distinct_host_b.architecture,
-                )
-                assert_namespace_identity(host_a=identity_a, host_b=identity_b)
-                host_b_probe: RemoteProbe | None = distinct_host_b
-            case "single_sequential":
-                host_b_probe = None
-            case unexpected:
-                assert_never(unexpected)
-        if not host_a_probe.namespace_clean or (
-            host_b_probe is not None and not host_b_probe.namespace_clean
-        ):
-            raise RuntimeError("managed namespace residue blocks live baseline proof")
         _run_wrapper(args.wrapper, host_a, password_a, args.env_file)
         post_install_probe = probe_host(
             host=host_a,
@@ -185,6 +164,8 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
         _restore_recovery_handlers(previous_handlers)
         if not completed:
             recover_interrupted_proof(recovery)
+
+
 def _require_active_workspace_root(wrapper: Path, paths: proof.ProofRecoveryPaths) -> Path:
     return proof.require_active_repository_root(wrapper, paths)
 
