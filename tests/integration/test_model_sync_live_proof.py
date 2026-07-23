@@ -786,7 +786,7 @@ def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> N
     assert "with_cloudflare_" + "fingerprints" not in source
     assert ".replace(" not in source
     assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
-        "f707056ee06c19af238c9cf0b53313cc72cf67130f3ec89fc12fe3b98fe9f86e"
+        "39c4f91528ec383ce76c697cdf9f8194d3a7847b853009a773fcfd7ab3188da4"
     )
     assert "def _docker_absent_clean():" in model_sync_results.PREFLIGHT_SCRIPT
     assert '_which("dockerd") is None' in model_sync_results.PREFLIGHT_SCRIPT
@@ -951,6 +951,27 @@ def _access_fixture(
             }
         ],
     }
+
+
+def test_access_app_omitted_provider_list_matches_explicit_empty_list() -> None:
+    explicit = _access_fixture()
+    omitted = _access_fixture()
+    omitted["app"].pop("allowed_identity_providers")
+
+    explicit_planes = _collect_planes(empty=True, matching=True, access_fixture=explicit)
+    omitted_planes = _collect_planes(empty=True, matching=True, access_fixture=omitted)
+
+    explicit_fingerprint = next(
+        item["fingerprint_sha256"]
+        for item in explicit_planes["cloudflare"]["resources"]
+        if item["kind"] == "access_application"
+    )
+    omitted_fingerprint = next(
+        item["fingerprint_sha256"]
+        for item in omitted_planes["cloudflare"]["resources"]
+        if item["kind"] == "access_application"
+    )
+    assert omitted_fingerprint == explicit_fingerprint
 
 
 @pytest.mark.parametrize(
