@@ -13,7 +13,9 @@ from dokploy_wizard.proof import model_sync_lifecycle as lifecycle
 from dokploy_wizard.proof import model_sync_preflight_evidence as identity
 from dokploy_wizard.proof import model_sync_state as state
 from dokploy_wizard.proof.model_sync_baseline import CapturedBaseline
+from dokploy_wizard.proof.model_sync_cloudflare_probe import cloudflare_snapshot_sha256_for_evidence
 from dokploy_wizard.proof.model_sync_env import PreparedEnv
+from dokploy_wizard.proof.model_sync_identity import ObservedResource
 from dokploy_wizard.proof.model_sync_remote import RemoteProbe
 
 
@@ -31,7 +33,7 @@ class BaselineArtifactInputs:
     host_a: RemoteProbe
     host_b: RemoteProbe | None
     baseline: CapturedBaseline
-    post_install_cloudflare_sha256: str
+    post_install_cloudflare: tuple[ObservedResource, ...]
 
 
 def finalize_baseline_artifacts(
@@ -75,7 +77,7 @@ def finalize_baseline_artifacts(
         inputs.baseline.coder_secret_inventory_sha256,
         inputs.baseline.legacy_workspace_managed_fingerprints_sha256,
         inputs.host_a.preexisting_cloudflare_sha256,
-        inputs.post_install_cloudflare_sha256,
+        cloudflare_snapshot_sha256_for_evidence(inputs.post_install_cloudflare),
     )
     attestation = proof.build_baseline_attestation(
         evidence,
@@ -123,6 +125,9 @@ def _baseline_payloads(inputs: BaselineArtifactInputs) -> dict[str, bytes]:
                     resource.to_dict()
                     for resource in inputs.host_a.inventory["cloudflare"]
                     if resource.provenance == "preexisting_unowned"
+                ],
+                "post_install_cloudflare": [
+                    resource.to_dict() for resource in inputs.post_install_cloudflare
                 ],
             }
         )

@@ -3526,6 +3526,20 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     assert result["host_identities_distinct"] is True
     assert result["temporal_clean_epoch_evidence"] is False
     assert result["single_host_lifecycle_sha256"] is None
+    post_install_cloudflare = baseline["post_install_cloudflare"]
+    assert isinstance(post_install_cloudflare, list)
+    assert result["post_install_cloudflare_sha256"] == hashlib.sha256(
+        canonical_json_bytes(post_install_cloudflare)
+    ).hexdigest()
+    assert all(
+        set(record) == {"fingerprint_sha256", "id", "kind", "match", "provenance"}
+        for record in post_install_cloudflare
+    )
+    assert {record["provenance"] for record in post_install_cloudflare} <= {
+        "preexisting_unowned",
+        "created_candidate",
+        "foreign",
+    }
     assert host_a_preflight["host_identity_mode"] == "distinct"
     assert host_a_preflight["provenance_role"] == "host_a"
     assert host_b_preflight["host_identity_mode"] == "distinct"
@@ -4358,7 +4372,7 @@ def write(path: Path, content: bytes, *, mode: int = 0o600) -> None:
 model_sync_env.artifacts.atomic_write_bytes = write
 model_sync_cli.resolve_host_inputs = lambda *_args: ("host-a", "password-a", "host-b", "password-b")
 model_sync_cli._require_active_workspace_root = lambda _wrapper, _paths: repository
-model_sync_cli.resolve_proof_namespace = lambda _env: SimpleNamespace(stack_name="proof-stack")
+model_sync_cli.resolve_proof_namespace = lambda _env: SimpleNamespace(stack_name="proof-stack", cloudflare=())
 model_sync_cli.resolve_proof_transport = lambda _env: None
 synthetic_probe = SimpleNamespace(
     machine_sha256="a" * 64, ssh_sha256="b" * 64, boot_sha256="c" * 64,
@@ -4741,7 +4755,7 @@ inputs = BaselineArtifactInputs(
     host_a,
         host_b,
         baseline,
-        "8" * 64,
+        (),
     )
 
 def boundary_name(value):
