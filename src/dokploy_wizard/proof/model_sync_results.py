@@ -56,6 +56,8 @@ class ProofTransport:
     coder_hostname: str | None
     coder_password: str | None
     tailscale_required: bool
+    dokploy_admin_email: str | None = None
+    dokploy_admin_password: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

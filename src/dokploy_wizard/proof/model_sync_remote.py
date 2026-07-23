@@ -133,6 +133,8 @@ def _transport_bytes(transport: ProofTransport) -> bytes:
             "coder_password": transport.coder_password,
             "dokploy_api_key": transport.dokploy_api_key,
             "dokploy_api_url": transport.dokploy_api_url,
+            "dokploy_admin_email": transport.dokploy_admin_email,
+            "dokploy_admin_password": transport.dokploy_admin_password,
             "tailscale_required": transport.tailscale_required,
         },
         separators=(",", ":"),

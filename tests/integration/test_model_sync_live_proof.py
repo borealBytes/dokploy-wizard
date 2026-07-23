@@ -338,6 +338,8 @@ def _transport_fixture(*, tailscale_required: bool = False) -> dict[str, Any]:
         "coder_email": "operator@example.test",
         "coder_hostname": "coder.example.test",
         "coder_password": "SECRET-CODER-PASSWORD",
+        "dokploy_admin_email": None,
+        "dokploy_admin_password": None,
         "dokploy_api_key": "SECRET-DOKPLOY-KEY",
         "dokploy_api_url": "https://dokploy.example.test",
         "tailscale_required": tailscale_required,
@@ -867,6 +869,41 @@ def test_dokploy_collector_fails_when_local_dokploy_api_is_unavailable() -> None
     assert requests
 
 
+def test_dokploy_collector_uses_session_after_api_key_unauthorized() -> None:
+    # Given
+    scope: dict[str, Any] = {"__name__": "fixture"}
+    exec(model_sync_results.PREFLIGHT_SCRIPT, scope)
+    requests: list[tuple[str, str]] = []
+
+    def api_key_request(request_value: Any, **_kwargs: Any) -> _WireResponse:
+        requests.append((request_value.get_method(), request_value.full_url))
+        raise error.HTTPError(request_value.full_url, 401, "unauthorized", Message(), None)
+
+    def session_request(request_value: Any, **_kwargs: Any) -> _WireResponse:
+        requests.append((request_value.get_method(), request_value.full_url))
+        if request_value.full_url.endswith("/api/project.all"):
+            return _WireResponse([])
+        return _WireResponse({})
+
+    transport = {
+        **_transport_fixture(),
+        "dokploy_admin_email": "operator@example.test",
+        "dokploy_admin_password": "SECRET-DOKPLOY-PASSWORD",
+    }
+    scope["_open_request"] = api_key_request
+    scope["_build_session_opener"] = lambda: session_request
+
+    # When
+    resources = scope["_dokploy"](
+        transport,
+        [{"image": "dokploy/dokploy:latest", "name": "dokploy"}],
+    )
+
+    # Then
+    assert resources == []
+    assert [method for method, _url in requests] == ["GET", "POST", "GET", "GET"]
+
+
 def test_authoritative_collectors_accept_complete_docker_absence() -> None:
     planes = _collect_planes(
         empty=True,
@@ -890,7 +927,7 @@ def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> N
     assert "with_cloudflare_" + "fingerprints" not in source
     assert ".replace(" not in source
     assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
-        "78f7871aeea407b8a8fea1415577956cdf0ab1ed8a13c504ce0fa9c5304ea63c"
+        "b90e7e9b1af84dbe29fd25043940884df3abe60f200811d21c80f95f5f3cf1b0"
     )
     assert "def _docker_absent_clean():" in model_sync_results.PREFLIGHT_SCRIPT
     assert '_which("dockerd") is None' in model_sync_results.PREFLIGHT_SCRIPT
