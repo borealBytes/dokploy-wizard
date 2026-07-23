@@ -10,6 +10,7 @@ from dokploy_wizard.proof.model_sync_cloudflare import (
     CloudflareMatch,
     CloudflareProvenance,
     CloudflareResource,
+    classify_cloudflare_post_install,
     classify_cloudflare_preflight,
     verify_preexisting_cloudflare,
 )
@@ -22,6 +23,9 @@ class CloudflareResourceEvidence(Protocol):
 
     @property
     def kind(self) -> str: ...
+
+    @property
+    def name(self) -> str: ...
 
     @property
     def fingerprint_sha256(self) -> str | None: ...
@@ -69,6 +73,30 @@ def verify_cloudflare_resources(
     verify_preexisting_cloudflare(_evidence(before), _evidence(after))
 
 
+def classify_post_install_resources(
+    before: tuple[CloudflareResourceEvidence, ...],
+    after: tuple[CloudflareResourceEvidence, ...],
+    namespace: ProofNamespace,
+    factory: Callable[[str, str, str, str, CloudflareMatch, CloudflareProvenance], Resource],
+) -> tuple[Resource, ...]:
+    """Classify transient post-install names into redacted evidence records."""
+    classified = classify_cloudflare_post_install(
+        _raw_resources(after), set(namespace.cloudflare), namespace.stack_name, _evidence(before)
+    )
+    names = _cloudflare_names(_raw_resources(after))
+    return tuple(
+        factory(
+            item.resource_id,
+            names[(item.kind, item.resource_id)],
+            item.kind,
+            item.fingerprint_sha256,
+            item.match,
+            item.provenance,
+        )
+        for item in classified
+    )
+
+
 def _cloudflare_names(values: list[JsonValue]) -> dict[tuple[str, str], str]:
     names: dict[tuple[str, str], str] = {}
     for value in values:
@@ -96,3 +124,15 @@ def _evidence(
             )
         )
     return tuple(values)
+
+
+def _raw_resources(resources: tuple[CloudflareResourceEvidence, ...]) -> list[JsonValue]:
+    values: list[JsonValue] = []
+    for item in resources:
+        if item.fingerprint_sha256 is None or item.match is None or item.provenance is None:
+            raise ValueError("Cloudflare resource evidence is incomplete")
+        values.append(
+            {"fingerprint_sha256": item.fingerprint_sha256, "id": item.resource_id,
+             "kind": item.kind, "name": item.name}
+        )
+    return values
