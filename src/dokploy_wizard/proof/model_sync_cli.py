@@ -15,6 +15,7 @@ from typing import Sequence
 from dokploy_wizard import proof
 from dokploy_wizard.proof.model_sync_artifacts import write_protected_manifest
 from dokploy_wizard.proof.model_sync_baseline import parse_captured_baseline
+from dokploy_wizard.proof.model_sync_cloudflare_probe import classify_post_install_resources
 from dokploy_wizard.proof.model_sync_env import (
     prepare_proof_env,
     resolve_proof_namespace,
@@ -29,6 +30,7 @@ from dokploy_wizard.proof.model_sync_host_a import (
 )
 from dokploy_wizard.proof.model_sync_host_inputs import HostInputNames, resolve_host_inputs
 from dokploy_wizard.proof.model_sync_host_probes import probe_baseline_hosts
+from dokploy_wizard.proof.model_sync_identity import ObservedResource
 from dokploy_wizard.proof.model_sync_remote import capture_host_a_snapshot, probe_host
 from dokploy_wizard.proof.model_sync_results import run_bounded_process
 from dokploy_wizard.proof.model_sync_state import AbortGuardError, read_abort_guard
@@ -132,7 +134,12 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
             namespace=namespace,
             proof_transport=transport,
         )
-        host_a_probe.verify_preexisting_cloudflare_unchanged(post_install_probe)
+        post_install_cloudflare = classify_post_install_resources(
+            host_a_probe.inventory["cloudflare"],
+            post_install_probe.inventory["cloudflare"],
+            namespace,
+            ObservedResource,
+        )
         baseline = parse_captured_baseline(
             capture_host_a_snapshot(host=host_a, password=password_a),
             stack_name=namespace.stack_name,
@@ -152,7 +159,7 @@ def _baseline_host_a(args: argparse.Namespace) -> None:
                 host_a=host_a_probe,
                 host_b=host_b_probe,
                 baseline=baseline,
-                post_install_cloudflare_sha256=proof.C1_UNBOUND_POST_INSTALL_CLOUDFLARE_SHA256,
+                post_install_cloudflare=post_install_cloudflare,
             )
         )
         completed = True

@@ -118,7 +118,6 @@ REQUIRED_RESULT_KEYS: Final = frozenset(
         "temporal_clean_epoch_evidence",
     }
 )
-C1_UNBOUND_POST_INSTALL_CLOUDFLARE_SHA256: Final = "c" * 64
 
 
 class FinalizationBoundary(StrEnum):

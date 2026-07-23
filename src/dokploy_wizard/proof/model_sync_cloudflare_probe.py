@@ -12,6 +12,7 @@ from dokploy_wizard.proof.model_sync_cloudflare import (
     CloudflareResource,
     classify_cloudflare_post_install,
     classify_cloudflare_preflight,
+    cloudflare_snapshot_sha256,
     verify_preexisting_cloudflare,
 )
 from dokploy_wizard.proof.model_sync_env import ProofNamespace
@@ -71,6 +72,12 @@ def verify_cloudflare_resources(
 ) -> None:
     """Reject a post-install change to a preserve-only Cloudflare object."""
     verify_preexisting_cloudflare(_evidence(before), _evidence(after))
+
+
+def cloudflare_snapshot_sha256_for_evidence(
+    resources: tuple[CloudflareResourceEvidence, ...],
+) -> str:
+    return cloudflare_snapshot_sha256(_evidence(resources))
 
 
 def classify_post_install_resources(
