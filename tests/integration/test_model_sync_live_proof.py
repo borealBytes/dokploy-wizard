@@ -4360,14 +4360,15 @@ model_sync_cli.resolve_host_inputs = lambda *_args: ("host-a", "password-a", "ho
 model_sync_cli._require_active_workspace_root = lambda _wrapper, _paths: repository
 model_sync_cli.resolve_proof_namespace = lambda _env: SimpleNamespace(stack_name="proof-stack")
 model_sync_cli.resolve_proof_transport = lambda _env: None
-model_sync_cli.probe_host = lambda **_kwargs: SimpleNamespace(
+synthetic_probe = SimpleNamespace(
     machine_sha256="a" * 64, ssh_sha256="b" * 64, boot_sha256="c" * 64,
     architecture="amd64", namespace_clean=True,
     inventory={"cloudflare": ()}, preexisting_cloudflare_sha256="8" * 64,
     verify_preexisting_cloudflare_unchanged=lambda _post: None,
     to_dict=lambda: {},
 )
-model_sync_cli.assert_namespace_identity = lambda **_kwargs: None
+model_sync_cli.probe_baseline_hosts = lambda **_kwargs: (synthetic_probe, synthetic_probe)
+model_sync_cli.probe_host = lambda **_kwargs: synthetic_probe
 model_sync_cli._run_wrapper = lambda *_args: None
 model_sync_cli.capture_host_a_snapshot = lambda **_kwargs: None
 model_sync_cli.parse_captured_baseline = lambda *_args, **_kwargs: SimpleNamespace(
