@@ -12,6 +12,9 @@ from dokploy_wizard.proof.model_sync_cloudflare import (
     cloudflare_snapshot_sha256,
     preexisting_cloudflare_sha256,
 )
+from dokploy_wizard.proof.model_sync_cloudflare_probe import classify_post_install_resources
+from dokploy_wizard.proof.model_sync_env import ProofNamespace
+from dokploy_wizard.proof.model_sync_identity import ObservedResource
 
 
 def _fingerprint(seed: str) -> str:
@@ -170,3 +173,26 @@ def test_complete_post_snapshot_is_stable_redacted_and_sensitive_to_new_records(
         "provenance": "created_candidate",
     }
     assert "tunnel-name" not in str(payload)
+
+
+def test_adapter_classifies_transient_observed_resources_without_serializing_names() -> None:
+    namespace = ProofNamespace("proof-stack", (), (), ("coder.example.test",), (), ())
+    before = (
+        ObservedResource(
+            "dns-id", "coder.example.test", "dns_record", _fingerprint("before"),
+            "exact", "preexisting_unowned"
+        ),
+    )
+    after = before + (
+        ObservedResource(
+            "foreign-id", "foreign.example.test", "dns_record", _fingerprint("foreign"),
+            "foreign", "foreign"
+        ),
+    )
+
+    observed = classify_post_install_resources(
+        before, after, namespace, ObservedResource
+    )
+
+    assert [item.provenance for item in observed] == ["preexisting_unowned", "foreign"]
+    assert "coder.example.test" not in str(observed[0].to_dict())
