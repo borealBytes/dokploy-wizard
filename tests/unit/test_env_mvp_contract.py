@@ -80,25 +80,30 @@ def _repo_root():
     return Path(__file__).resolve().parents[2]
 
 
-def _load_install_min_env_shape() -> tuple[
+def _minimized_remote_proof_env_shape() -> tuple[
     frozenset[str], dict[str, tuple[bool, bool]], dict[str, str]
 ]:
-    active_keys: set[str] = set()
-    model_shape: dict[str, tuple[bool, bool]] = {}
-    safe_values: dict[str, str] = {}
-    safe_value_keys = {"PACKS", "AI_DEFAULT_PROVIDER", "AI_DEFAULT_MODEL"}
-    for raw_line in (_repo_root() / ".install-min.env").read_text(encoding="utf-8").splitlines():
-        stripped = raw_line.strip()
-        if stripped == "" or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        key = key.strip()
-        active_keys.add(key)
-        if key in safe_value_keys:
-            safe_values[key] = value.strip()
-        if key == "LITELLM_OPENROUTER_MODELS":
-            model_shape[key] = ("/" in value, ":" in value)
-    return frozenset(active_keys), model_shape, safe_values
+    values = {
+        "AI_DEFAULT_MODEL": _DEFAULT_AI_MODEL,
+        "AI_DEFAULT_PROVIDER": _DEFAULT_AI_PROVIDER,
+        "CLOUDFLARE_ACCOUNT_ID": "account-test",
+        "CLOUDFLARE_API_TOKEN": "token-test",
+        "CLOUDFLARE_ZONE_ID": "zone-test",
+        "DOKPLOY_ADMIN_EMAIL": "operator@example.test",
+        "DOKPLOY_ADMIN_PASSWORD": "password-test",
+        "LITELLM_OPENROUTER_MODELS": "openrouter/example=provider/model:free",
+        "PACKS": "seaweedfs,coder",
+        "ROOT_DOMAIN": "example.test",
+    }
+    model_value = values["LITELLM_OPENROUTER_MODELS"]
+    return (
+        frozenset(values),
+        {"LITELLM_OPENROUTER_MODELS": ("/" in model_value, ":" in model_value)},
+        {
+            key: values[key]
+            for key in ("PACKS", "AI_DEFAULT_PROVIDER", "AI_DEFAULT_MODEL")
+        },
+    )
 
 
 def _load_active_env_keys(relative_path: str) -> frozenset[str]:
@@ -145,7 +150,7 @@ def _farm_litellm_env(**overrides: str) -> RawEnvInput:
 
 
 def test_minimal_env_contract_key_categories_are_explicit_and_secret_free() -> None:
-    install_min_keys, model_shape, _safe_values = _load_install_min_env_shape()
+    install_min_keys, model_shape, _safe_values = _minimized_remote_proof_env_shape()
     categorized_keys = (
         _ALWAYS_REQUIRED_KEYS
         | _LIVE_BOOTSTRAP_REQUIRED_KEYS
@@ -175,14 +180,12 @@ def test_minimal_env_contract_key_categories_are_explicit_and_secret_free() -> N
 
 
 def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> None:
-    install_min_keys, model_shape, safe_values = _load_install_min_env_shape()
+    install_min_keys, model_shape, safe_values = _minimized_remote_proof_env_shape()
     active_packs = safe_values["PACKS"].split(",")
-    required_proof_packs = ["nextcloud", "my-farm-advisor", "seaweedfs", "coder"]
-    optional_proof_packs = {"surfsense"}
+    required_proof_packs = ["seaweedfs", "coder"]
 
-    assert active_packs[: len(required_proof_packs)] == required_proof_packs
+    assert active_packs == required_proof_packs
     assert len(active_packs) == len(set(active_packs))
-    assert set(active_packs).issubset(set(required_proof_packs) | optional_proof_packs)
     assert safe_values["AI_DEFAULT_PROVIDER"] == _DEFAULT_AI_PROVIDER
     assert safe_values["AI_DEFAULT_MODEL"] == _DEFAULT_AI_MODEL
     assert model_shape["LITELLM_OPENROUTER_MODELS"] == (True, True)
@@ -402,6 +405,14 @@ def test_litellm_canonical_env_validates_without_direct_consumer_provider_keys()
     )
 
     assert "my-farm-advisor" in desired_state.enabled_packs
+
+
+def test_litellm_local_env_requires_api_key_when_local_base_url_is_configured() -> None:
+    with pytest.raises(
+        StateValidationError,
+        match="Missing: LITELLM_LOCAL_API_KEY",
+    ):
+        resolve_desired_state(_farm_litellm_env(LITELLM_LOCAL_API_KEY=""))
 
 
 def test_my_farm_advisor_can_be_enabled_by_packs_without_duplicate_flag() -> None:
