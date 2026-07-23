@@ -26,7 +26,7 @@ from dokploy_wizard.proof.model_sync_state import (
     reset_abort_guard,
     transfer_abort_guard_to_plan,
 )
-from dokploy_wizard.state import StateValidationError
+from dokploy_wizard.state import RawEnvInput, StateValidationError, resolve_desired_state
 
 _MAX_ENV_BYTES = 256 * 1024
 
@@ -350,6 +350,39 @@ def test_proof_transport_secrets_are_required_but_never_repr_or_namespace_serial
 
     assert secret not in repr(transport)
     assert secret not in json.dumps(namespace.to_dict())
+
+
+def test_proof_transport_ignores_unrelated_partial_nvidia_configuration(tmp_path: Path) -> None:
+    env_file = tmp_path / "install.env"
+    _partial_nvidia_env(env_file)
+
+    transport = resolve_proof_transport(env_file)
+
+    assert transport.coder_hostname == "coder.example.test"
+    assert transport.tailscale_required is False
+
+
+def test_proof_transport_rejects_blank_root_domain(tmp_path: Path) -> None:
+    env_file = tmp_path / "install.env"
+    env_file.write_text("ROOT_DOMAIN=\n", encoding="utf-8")
+    env_file.chmod(0o600)
+
+    with pytest.raises(EnvPreparationError, match="ROOT_DOMAIN"):
+        resolve_proof_transport(env_file)
+
+
+def test_full_state_validation_requires_local_litellm_api_key() -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "ROOT_DOMAIN": "example.test",
+            "LITELLM_LOCAL_BASE_URL": "http://local-model.example.test/v1",
+            "LITELLM_LOCAL_MODEL": "example-model",
+        },
+    )
+
+    with pytest.raises(StateValidationError, match="Missing: LITELLM_LOCAL_API_KEY"):
+        resolve_desired_state(raw_env)
 
 
 def test_prepare_tolerates_short_reads_of_current_env(
