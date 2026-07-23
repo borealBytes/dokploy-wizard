@@ -240,9 +240,7 @@ def test_default_baseline_rejects_same_host_mapping_before_recovery(
     monkeypatch.setattr(
         model_sync_cli,
         "_require_active_workspace_root",
-        lambda _wrapper, _paths: pytest.fail(
-            "default same-host mapping reached proof recovery"
-        ),
+        lambda _wrapper, _paths: pytest.fail("default same-host mapping reached proof recovery"),
     )
 
     # When
@@ -362,20 +360,28 @@ def _command_fixture(
                 return subprocess.CompletedProcess(command, 1, b"", b"permission denied")
             if failure == "docker-malformed":
                 return subprocess.CompletedProcess(command, 0, b"{", b"")
-            rows = [] if empty else [
-                {
-                    "ID": "container-other",
-                    "Image": "busybox:latest",
-                    "Labels": "",
-                    "Names": "other-container",
-                }
-            ]
-            return subprocess.CompletedProcess(command, 0, "\n".join(map(json.dumps, rows)).encode(), b"")
+            rows = (
+                []
+                if empty
+                else [
+                    {
+                        "ID": "container-other",
+                        "Image": "busybox:latest",
+                        "Labels": "",
+                        "Names": "other-container",
+                    }
+                ]
+            )
+            return subprocess.CompletedProcess(
+                command, 0, "\n".join(map(json.dumps, rows)).encode(), b""
+            )
         if key[:2] == ("docker", "info"):
             return subprocess.CompletedProcess(command, 0, b"active\n", b"")
         if key[:3] == ("docker", "service", "ls"):
             if failure == "docker-service-unreadable":
-                return subprocess.CompletedProcess(command, 125, b"", b"service inventory unavailable")
+                return subprocess.CompletedProcess(
+                    command, 125, b"", b"service inventory unavailable"
+                )
             service_rows = [] if empty else ["service-other\tother-service\tbusybox:latest"]
             if matching:
                 service_rows.extend(
@@ -414,7 +420,9 @@ def _command_fixture(
     return run
 
 
-def _cloudflare_list(items: list[dict[str, Any]], *, page: int = 1, pages: int = 1) -> dict[str, Any]:
+def _cloudflare_list(
+    items: list[dict[str, Any]], *, page: int = 1, pages: int = 1
+) -> dict[str, Any]:
     total_count = len(items) if pages == 1 else 101
     return {
         "result": items,
@@ -447,32 +455,138 @@ def _wire_fixture(
         if "/cfd_tunnel?" in url:
             if failure == "cloudflare-malformed":
                 return _WireResponse({"success": True})
-            tunnels = [] if empty else [{"config_src": "cloudflare", "created_at": "2026-01-01T00:00:00Z", "deleted_at": None, "id": "tunnel-other", "name": "other-tunnel"}]
+            tunnels = (
+                []
+                if empty
+                else [
+                    {
+                        "config_src": "cloudflare",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "deleted_at": None,
+                        "id": "tunnel-other",
+                        "name": "other-tunnel",
+                    }
+                ]
+            )
             if matching:
-                tunnels.append({"config_src": "cloudflare", "created_at": "2026-01-01T00:00:00Z", "deleted_at": None, "id": "tunnel-proof", "name": "proof-stack-cloudflared"})
+                tunnels.append(
+                    {
+                        "config_src": "cloudflare",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "deleted_at": None,
+                        "id": "tunnel-proof",
+                        "name": "proof-stack-cloudflared",
+                    }
+                )
             if failure == "cloudflare-partial":
                 return _WireResponse(_cloudflare_list(tunnels, pages=2))
             return _WireResponse(_cloudflare_list(tunnels))
         if "/cfd_tunnel/" in url and url.endswith("/configurations"):
-            ingress = [{"hostname": "other.example.test", "originRequest": {}, "service": "http://other"}]
+            ingress = [
+                {"hostname": "other.example.test", "originRequest": {}, "service": "http://other"}
+            ]
             if matching and "/tunnel-proof/" in url:
-                ingress.append({"hostname": "coder.example.test", "originRequest": {}, "service": "http://coder"})
+                ingress.append(
+                    {
+                        "hostname": "coder.example.test",
+                        "originRequest": {},
+                        "service": "http://coder",
+                    }
+                )
             return _WireResponse({"result": {"config": {"ingress": ingress}}, "success": True})
         if "/dns_records?" in url:
-            records: list[dict[str, Any]] = [] if empty else [{"comment": None, "content": "198.51.100.1", "id": "dns-other", "name": "other.example.test", "proxied": True, "tags": [], "ttl": 1, "type": "CNAME"}]
+            records: list[dict[str, Any]] = (
+                []
+                if empty
+                else [
+                    {
+                        "comment": None,
+                        "content": "198.51.100.1",
+                        "id": "dns-other",
+                        "name": "other.example.test",
+                        "proxied": True,
+                        "tags": [],
+                        "ttl": 1,
+                        "type": "CNAME",
+                    }
+                ]
+            )
             if matching:
-                records.append({"comment": None, "content": "198.51.100.2", "id": "dns-proof", "name": "coder.example.test", "proxied": True, "tags": [], "ttl": 1, "type": "CNAME"})
+                records.append(
+                    {
+                        "comment": None,
+                        "content": "198.51.100.2",
+                        "id": "dns-proof",
+                        "name": "coder.example.test",
+                        "proxied": True,
+                        "tags": [],
+                        "ttl": 1,
+                        "type": "CNAME",
+                    }
+                )
             return _WireResponse(_cloudflare_list(records))
         if "/access/apps?" in url:
-            apps = [] if empty else [{"allowed_identity_providers": [], "app_launcher_visible": True, "auto_redirect_to_identity": False, "domain": "other.example.test", "id": "app-other", "name": "Other", "session_duration": "24h", "type": "self_hosted"}]
+            apps = (
+                []
+                if empty
+                else [
+                    {
+                        "allowed_identity_providers": [],
+                        "app_launcher_visible": True,
+                        "auto_redirect_to_identity": False,
+                        "domain": "other.example.test",
+                        "id": "app-other",
+                        "name": "Other",
+                        "session_duration": "24h",
+                        "type": "self_hosted",
+                    }
+                ]
+            )
             if matching:
-                apps.append(access_fixture["app"] if access_fixture else {"allowed_identity_providers": [], "app_launcher_visible": True, "auto_redirect_to_identity": False, "domain": "coder.example.test", "id": "app-proof", "name": "Coder", "session_duration": "24h", "type": "self_hosted"})
+                apps.append(
+                    access_fixture["app"]
+                    if access_fixture
+                    else {
+                        "allowed_identity_providers": [],
+                        "app_launcher_visible": True,
+                        "auto_redirect_to_identity": False,
+                        "domain": "coder.example.test",
+                        "id": "app-proof",
+                        "name": "Coder",
+                        "session_duration": "24h",
+                        "type": "self_hosted",
+                    }
+                )
             return _WireResponse(_cloudflare_list(apps))
         if "/access/apps/" in url and "/policies?" in url:
-            policies = access_fixture["policy"] if access_fixture and "/policies?" in url else (
-                [{"decision": "allow", "exclude": [], "id": "policy-proof", "include": [{"email": "redacted@example.test"}], "name": "Policy", "precedence": 1, "require": []}]
-                if matching and "/app-proof/" in url
-                else [{"decision": "allow", "exclude": [], "id": "policy-other", "include": [], "name": "Other policy", "precedence": 1, "require": []}]
+            policies = (
+                access_fixture["policy"]
+                if access_fixture and "/policies?" in url
+                else (
+                    [
+                        {
+                            "decision": "allow",
+                            "exclude": [],
+                            "id": "policy-proof",
+                            "include": [{"email": "redacted@example.test"}],
+                            "name": "Policy",
+                            "precedence": 1,
+                            "require": [],
+                        }
+                    ]
+                    if matching and "/app-proof/" in url
+                    else [
+                        {
+                            "decision": "allow",
+                            "exclude": [],
+                            "id": "policy-other",
+                            "include": [],
+                            "name": "Other policy",
+                            "precedence": 1,
+                            "require": [],
+                        }
+                    ]
+                )
             )
             return _WireResponse(_cloudflare_list(policies))
         if url.endswith("/api/project.all"):
@@ -480,18 +594,25 @@ def _wire_fixture(
                 raise error.HTTPError(url, 401, "unauthorized", Message(), None)
             if failure == "dokploy-malformed":
                 return _WireResponse({"data": {}})
-            projects: list[dict[str, Any]] = [] if empty else [
-                {"environments": [], "name": "other-project", "projectId": "project-other"}
-            ]
+            projects: list[dict[str, Any]] = (
+                []
+                if empty
+                else [{"environments": [], "name": "other-project", "projectId": "project-other"}]
+            )
             if matching:
                 projects.append(
                     {
                         "environments": [
                             {
                                 "applications": [
-                                    {"applicationId": "application-proof", "name": "proof-stack-app"}
+                                    {
+                                        "applicationId": "application-proof",
+                                        "name": "proof-stack-app",
+                                    }
                                 ],
-                                "compose": [{"composeId": "compose-proof", "name": "proof-stack-coder"}],
+                                "compose": [
+                                    {"composeId": "compose-proof", "name": "proof-stack-coder"}
+                                ],
                             }
                         ],
                         "name": "proof-stack",
@@ -528,7 +649,10 @@ def _wire_fixture(
                 )
             if failure == "coder-partial" and "offset=0" in url:
                 return _WireResponse(
-                    [{"id": f"template-{index}", "name": f"template-{index}"} for index in range(100)]
+                    [
+                        {"id": f"template-{index}", "name": f"template-{index}"}
+                        for index in range(100)
+                    ]
                 )
             if failure == "coder-partial":
                 raise error.URLError("second page unavailable")
@@ -680,10 +804,11 @@ def test_programmatic_probe_rejects_missing_docker_provenance() -> None:
         boot_sha256="c" * 64,
         architecture="amd64",
         namespace_clean=True,
-        inventory={plane: () for plane in ("cloudflare", "coder", "docker", "dokploy", "tailscale")},
+        inventory={
+            plane: () for plane in ("cloudflare", "coder", "docker", "dokploy", "tailscale")
+        },
         plane_states={
-            plane: "absent"
-            for plane in ("cloudflare", "coder", "docker", "dokploy", "tailscale")
+            plane: "absent" for plane in ("cloudflare", "coder", "docker", "dokploy", "tailscale")
         },
         plane_provenance={},
     )
@@ -785,21 +910,46 @@ def test_authoritative_collectors_report_matching_and_nonmatching_resources() ->
         "workspace",
     }
     assert result.plane_provenance["docker"] == "docker_available_inventory"
-    assert any(
-        resource.name == "proof-stack-coder" for resource in result.inventory["docker"]
-    )
+    assert any(resource.name == "proof-stack-coder" for resource in result.inventory["docker"])
 
 
 def _access_policy_fingerprint(access_fixture: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     planes = _collect_planes(empty=True, matching=True, access_fixture=access_fixture)
-    policy = next(item for item in planes["cloudflare"]["resources"] if item["kind"] == "access_policy")
+    policy = next(
+        item for item in planes["cloudflare"]["resources"] if item["kind"] == "access_policy"
+    )
     return policy["fingerprint_sha256"], policy
 
 
-def _access_fixture(*, app_id: str = "app-proof", domain: str = "coder.example.test", policy: dict[str, Any] | None = None) -> dict[str, Any]:
+def _access_fixture(
+    *,
+    app_id: str = "app-proof",
+    domain: str = "coder.example.test",
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
-        "app": {"allowed_identity_providers": [], "app_launcher_visible": True, "auto_redirect_to_identity": False, "domain": domain, "id": app_id, "name": "Coder", "session_duration": "24h", "type": "self_hosted"},
-        "policy": [policy or {"decision": "allow", "exclude": [], "id": "policy-proof", "include": [{"email": "operator@example.test"}], "name": "Unrelated display name", "precedence": 1, "require": []}],
+        "app": {
+            "allowed_identity_providers": [],
+            "app_launcher_visible": True,
+            "auto_redirect_to_identity": False,
+            "domain": domain,
+            "id": app_id,
+            "name": "Coder",
+            "session_duration": "24h",
+            "type": "self_hosted",
+        },
+        "policy": [
+            policy
+            or {
+                "decision": "allow",
+                "exclude": [],
+                "id": "policy-proof",
+                "include": [{"email": "operator@example.test"}],
+                "name": "Unrelated display name",
+                "precedence": 1,
+                "require": [],
+            }
+        ],
     }
 
 
@@ -938,12 +1088,16 @@ def test_preflight_parser_rejects_inconsistent_docker_provenance(
     payload = json.loads(_preflight_wire("machine-a"))
     payload["planes"]["docker"] = {
         "provenance": provenance,
-        "resources": [] if state != "present" else [{"id": "docker", "kind": "container", "name": "docker"}],
+        "resources": []
+        if state != "present"
+        else [{"id": "docker", "kind": "container", "name": "docker"}],
         "state": state,
     }
     namespace = ProofNamespace("proof-stack", (), (), (), (), ())
 
-    with pytest.raises(model_sync_remote.RemoteProofError, match="docker plane provenance is inconsistent"):
+    with pytest.raises(
+        model_sync_remote.RemoteProofError, match="docker plane provenance is inconsistent"
+    ):
         model_sync_remote.parse_preflight(
             json.dumps(payload),
             namespace,
@@ -956,7 +1110,9 @@ def test_preflight_parser_rejects_error_state_and_duplicate_ids() -> None:
     payload = json.loads(_preflight_wire("machine-a"))
     payload["planes"]["cloudflare"] = {"resources": [], "state": "error"}
     namespace = ProofNamespace("proof-stack", (), (), (), (), ())
-    with pytest.raises(model_sync_remote.RemoteProofError, match="cloudflare plane collection failed"):
+    with pytest.raises(
+        model_sync_remote.RemoteProofError, match="cloudflare plane collection failed"
+    ):
         model_sync_remote.parse_preflight(
             json.dumps(payload),
             namespace,
@@ -976,7 +1132,9 @@ def test_preflight_parser_rejects_error_state_and_duplicate_ids() -> None:
 
     payload = json.loads(_preflight_wire("machine-a"))
     payload["planes"]["docker"]["provenance"] = "docker_error"
-    with pytest.raises(model_sync_remote.RemoteProofError, match="docker plane provenance is inconsistent"):
+    with pytest.raises(
+        model_sync_remote.RemoteProofError, match="docker plane provenance is inconsistent"
+    ):
         model_sync_remote.parse_preflight(
             json.dumps(payload),
             namespace,
@@ -987,8 +1145,18 @@ def test_preflight_parser_rejects_error_state_and_duplicate_ids() -> None:
     payload = json.loads(_preflight_wire("machine-a"))
     payload["planes"]["cloudflare"] = {
         "resources": [
-                {"fingerprint_sha256": hashlib.sha256(b"duplicate-a").hexdigest(), "id": "duplicate", "kind": "tunnel", "name": "one"},
-                {"fingerprint_sha256": hashlib.sha256(b"duplicate-b").hexdigest(), "id": "duplicate", "kind": "dns_record", "name": "two"},
+            {
+                "fingerprint_sha256": hashlib.sha256(b"duplicate-a").hexdigest(),
+                "id": "duplicate",
+                "kind": "tunnel",
+                "name": "one",
+            },
+            {
+                "fingerprint_sha256": hashlib.sha256(b"duplicate-b").hexdigest(),
+                "id": "duplicate",
+                "kind": "dns_record",
+                "name": "two",
+            },
         ],
         "state": "present",
     }
@@ -1002,9 +1170,12 @@ def test_preflight_parser_rejects_error_state_and_duplicate_ids() -> None:
 
 
 def test_coder_workspace_pagination_accepts_authoritative_empty_response() -> None:
-    assert model_sync_results.collect_coder_workspace_pages(
-        lambda _path: {"count": 0, "workspaces": []}
-    ) == []
+    assert (
+        model_sync_results.collect_coder_workspace_pages(
+            lambda _path: {"count": 0, "workspaces": []}
+        )
+        == []
+    )
 
 
 def test_remote_wrapper_password_is_sent_only_through_stdin(
@@ -1041,8 +1212,18 @@ def test_coder_pointer_session_token_is_sent_only_through_stdin(
     monkeypatch.setattr(model_sync_host_b, "run_bounded_process", run)
 
     model_sync_host_b._primary_pointer(
-        "coder-container", secret, "workspace", "ubuntu-vscode", "version-1",
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "key", "openrouter/example", (), ("openrouter/example",)),
+        "coder-container",
+        secret,
+        "workspace",
+        "ubuntu-vscode",
+        "version-1",
+        model_sync_host_b.LegacyRenderer(
+            "http://proof-stack-shared-litellm:4000",
+            "key",
+            "openrouter/example",
+            (),
+            ("openrouter/example",),
+        ),
     )
 
     assert secret not in " ".join(captured["command"])
@@ -1052,11 +1233,20 @@ def test_coder_pointer_session_token_is_sent_only_through_stdin(
 def test_legacy_renderer_hash_is_independent_from_observed_pointer_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://proof-stack-shared-litellm:4000", "apiKey": "SECRET-LEGACY-KEY"}, "models": {"openrouter/example": {}}}
+    original = {
+        "npm": "@ai-sdk/openai-compatible",
+        "options": {
+            "baseURL": "http://proof-stack-shared-litellm:4000",
+            "apiKey": "SECRET-LEGACY-KEY",
+        },
+        "models": {"openrouter/example": {}},
+    }
     drifted = {**original, "models": {"openrouter/changed": {}}}
 
     def captured_pointer(value: dict[str, Any]) -> str:
-        digest = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        digest = hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         return json.dumps(
             {
                 "target": "/home/coder/.config/opencode/opencode.json",
@@ -1064,7 +1254,9 @@ def test_legacy_renderer_hash_is_independent_from_observed_pointer_mutation(
                 "mode": "0644",
                 "shape": "json-pointer",
                 "base_url": value["options"]["baseURL"],
-                "credential_value_sha256": hashlib.sha256(value["options"]["apiKey"].encode()).hexdigest(),
+                "credential_value_sha256": hashlib.sha256(
+                    value["options"]["apiKey"].encode()
+                ).hexdigest(),
                 "pointer_sha256": digest,
                 "scope": "pointer",
             }
@@ -1078,12 +1270,32 @@ def test_legacy_renderer_hash_is_independent_from_observed_pointer_mutation(
     )
 
     first = model_sync_host_b._primary_pointer(
-        "coder-container", "session", "workspace", "ubuntu-vscode", "version-1",
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "SECRET-LEGACY-KEY", "openrouter/example", (), ("openrouter/example",)),
+        "coder-container",
+        "session",
+        "workspace",
+        "ubuntu-vscode",
+        "version-1",
+        model_sync_host_b.LegacyRenderer(
+            "http://proof-stack-shared-litellm:4000",
+            "SECRET-LEGACY-KEY",
+            "openrouter/example",
+            (),
+            ("openrouter/example",),
+        ),
     )
     second = model_sync_host_b._primary_pointer(
-        "coder-container", "session", "workspace", "ubuntu-vscode", "version-1",
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "SECRET-LEGACY-KEY", "openrouter/example", (), ("openrouter/example",)),
+        "coder-container",
+        "session",
+        "workspace",
+        "ubuntu-vscode",
+        "version-1",
+        model_sync_host_b.LegacyRenderer(
+            "http://proof-stack-shared-litellm:4000",
+            "SECRET-LEGACY-KEY",
+            "openrouter/example",
+            (),
+            ("openrouter/example",),
+        ),
     )
 
     assert first["pointer_sha256"] != second["pointer_sha256"]
@@ -1093,23 +1305,77 @@ def test_legacy_renderer_hash_is_independent_from_observed_pointer_mutation(
 @pytest.mark.parametrize(
     "changed",
     [
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "changed-key", "openrouter/example", (), ("openrouter/example",)),
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "expected-key", "openrouter/changed", (), ("openrouter/example",)),
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "expected-key", "openrouter/example", ("openrouter/fallback",), ("openrouter/example",)),
-        model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "expected-key", "openrouter/example", (), ("openrouter/changed",)),
+        model_sync_host_b.LegacyRenderer(
+            "http://proof-stack-shared-litellm:4000",
+            "changed-key",
+            "openrouter/example",
+            (),
+            ("openrouter/example",),
+        ),
+        model_sync_host_b.LegacyRenderer(
+            "http://proof-stack-shared-litellm:4000",
+            "expected-key",
+            "openrouter/changed",
+            (),
+            ("openrouter/example",),
+        ),
+        model_sync_host_b.LegacyRenderer(
+            "http://proof-stack-shared-litellm:4000",
+            "expected-key",
+            "openrouter/example",
+            ("openrouter/fallback",),
+            ("openrouter/example",),
+        ),
+        model_sync_host_b.LegacyRenderer(
+            "http://proof-stack-shared-litellm:4000",
+            "expected-key",
+            "openrouter/example",
+            (),
+            ("openrouter/changed",),
+        ),
     ],
 )
 def test_observed_pointer_hash_is_independent_from_renderer_input_mutation(
-    changed: model_sync_host_b.LegacyRenderer, monkeypatch: pytest.MonkeyPatch,
+    changed: model_sync_host_b.LegacyRenderer,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://proof-stack-shared-litellm:4000", "apiKey": "observed-key"}, "models": {"openrouter/example": {}}}
-    observed_sha = hashlib.sha256(json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    captured = json.dumps({"target": "/home/coder/.config/opencode/opencode.json", "pointer": "/provider/litellm", "mode": "0644", "shape": "json-pointer", "base_url": "http://proof-stack-shared-litellm:4000", "credential_value_sha256": hashlib.sha256(b"observed-key").hexdigest(), "pointer_sha256": observed_sha, "scope": "pointer"})
-    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", lambda _command, **_kwargs: captured.encode())
-    original = model_sync_host_b.LegacyRenderer("http://proof-stack-shared-litellm:4000", "expected-key", "openrouter/example", (), ("openrouter/example",))
+    observed = {
+        "npm": "@ai-sdk/openai-compatible",
+        "options": {"baseURL": "http://proof-stack-shared-litellm:4000", "apiKey": "observed-key"},
+        "models": {"openrouter/example": {}},
+    }
+    observed_sha = hashlib.sha256(
+        json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    captured = json.dumps(
+        {
+            "target": "/home/coder/.config/opencode/opencode.json",
+            "pointer": "/provider/litellm",
+            "mode": "0644",
+            "shape": "json-pointer",
+            "base_url": "http://proof-stack-shared-litellm:4000",
+            "credential_value_sha256": hashlib.sha256(b"observed-key").hexdigest(),
+            "pointer_sha256": observed_sha,
+            "scope": "pointer",
+        }
+    )
+    monkeypatch.setattr(
+        model_sync_host_b, "run_bounded_process", lambda _command, **_kwargs: captured.encode()
+    )
+    original = model_sync_host_b.LegacyRenderer(
+        "http://proof-stack-shared-litellm:4000",
+        "expected-key",
+        "openrouter/example",
+        (),
+        ("openrouter/example",),
+    )
 
-    first = model_sync_host_b._primary_pointer("coder", "session", "workspace", "ubuntu-vscode", "version", original)
-    second = model_sync_host_b._primary_pointer("coder", "session", "workspace", "ubuntu-vscode", "version", changed)
+    first = model_sync_host_b._primary_pointer(
+        "coder", "session", "workspace", "ubuntu-vscode", "version", original
+    )
+    second = model_sync_host_b._primary_pointer(
+        "coder", "session", "workspace", "ubuntu-vscode", "version", changed
+    )
 
     assert first["pointer_sha256"] == second["pointer_sha256"]
     assert first["independent_renderer_sha256"] != second["independent_renderer_sha256"]
@@ -1124,42 +1390,105 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
         encoding="utf-8",
     )
     credential = "SECRET-CODER-HERMES-KEY"
-    fallbacks = tuple(json.loads(_litellm_workspace_fallback_models_json(default_alias="openrouter/example/model")))
+    fallbacks = tuple(
+        json.loads(
+            _litellm_workspace_fallback_models_json(default_alias="openrouter/example/model")
+        )
+    )
     renderer = model_sync_host_b.LegacyRenderer(
-        "http://proof-stack-shared-litellm:4000", credential, "openrouter/example/model", fallbacks, ("openrouter/example/model",)
+        "http://proof-stack-shared-litellm:4000",
+        credential,
+        "openrouter/example/model",
+        fallbacks,
+        ("openrouter/example/model",),
     )
     observed = model_sync_host_b._render_legacy_pointer(renderer)
-    pointer_sha = hashlib.sha256(json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    pointer_sha = hashlib.sha256(
+        json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     calls: list[tuple[list[str], bytes | None]] = []
 
-    def api(_hostname: str, _token: str | None, path: str, _body: dict[str, str] | None = None) -> Any:
+    def api(
+        _hostname: str, _token: str | None, path: str, _body: dict[str, str] | None = None
+    ) -> Any:
         if path == "/api/v2/users/me":
             return {"id": "user-proof"}
         if path == "/api/v2/templates":
-            return [{"id": "template-proof", "name": "ubuntu-vscode", "active_version_id": "version-proof", "active_version_name": "proof"}]
+            return [
+                {
+                    "id": "template-proof",
+                    "name": "ubuntu-vscode",
+                    "active_version_id": "version-proof",
+                    "active_version_name": "proof",
+                }
+            ]
         if path.startswith("/api/v2/workspaces?"):
-            return {"count": 1, "workspaces": [{"id": "workspace-proof", "name": "primary", "template_id": "template-proof", "template_version_id": "version-proof"}]}
+            return {
+                "count": 1,
+                "workspaces": [
+                    {
+                        "id": "workspace-proof",
+                        "name": "primary",
+                        "template_id": "template-proof",
+                        "template_version_id": "version-proof",
+                    }
+                ],
+            }
         if "/builds?" in path:
-            return [{"id": "build-proof", "build_number": 1, "status": "stopped", "transition": "stop"}]
+            return [
+                {"id": "build-proof", "build_number": 1, "status": "stopped", "transition": "stop"}
+            ]
         if "/secrets?" in path:
-            return [{"id": "secret-proof", "name": "secret", "env_name": "OPENAI_API_KEY", "description": "credential"}]
+            return [
+                {
+                    "id": "secret-proof",
+                    "name": "secret",
+                    "env_name": "OPENAI_API_KEY",
+                    "description": "credential",
+                }
+            ]
         raise AssertionError(path)
 
     def run(command: list[str], **kwargs: Any) -> bytes:
         calls.append((command, kwargs.get("stdin")))
         assert kwargs["timeout_seconds"] <= 30
         if kwargs.get("stdin") == b"session\n":
-            return json.dumps({"target": "/home/coder/.config/opencode/opencode.json", "pointer": "/provider/litellm", "mode": "0644", "shape": "json-pointer", "base_url": renderer.base_url, "credential_value_sha256": hashlib.sha256(credential.encode()).hexdigest(), "pointer_sha256": pointer_sha, "scope": "pointer"}).encode()
+            return json.dumps(
+                {
+                    "target": "/home/coder/.config/opencode/opencode.json",
+                    "pointer": "/provider/litellm",
+                    "mode": "0644",
+                    "shape": "json-pointer",
+                    "base_url": renderer.base_url,
+                    "credential_value_sha256": hashlib.sha256(credential.encode()).hexdigest(),
+                    "pointer_sha256": pointer_sha,
+                    "scope": "pointer",
+                }
+            ).encode()
         return json.dumps([{"id": "openrouter/example/model"}]).encode()
 
-    probe = model_sync_remote.RemoteProbe("a" * 64, "b" * 64, "c" * 64, "amd64", False, {"cloudflare": (), "tailscale": (), "coder": (), "docker": (), "dokploy": ()}, {plane: "absent" for plane in ("cloudflare", "tailscale", "coder", "docker", "dokploy")})
+    probe = model_sync_remote.RemoteProbe(
+        "a" * 64,
+        "b" * 64,
+        "c" * 64,
+        "amd64",
+        False,
+        {"cloudflare": (), "tailscale": (), "coder": (), "docker": (), "dokploy": ()},
+        {plane: "absent" for plane in ("cloudflare", "tailscale", "coder", "docker", "dokploy")},
+    )
     monkeypatch.setattr(model_sync_host_b, "_api", api)
     monkeypatch.setattr(model_sync_host_b, "_coder_login", lambda *_args: "session")
     monkeypatch.setattr(model_sync_host_b, "_coder_container_name", lambda *_args: "coder")
     monkeypatch.setattr(model_sync_host_b, "_image_inventory", lambda _stack_name: [])
     monkeypatch.setattr(model_sync_host_b, "_state_inventory", lambda _state_dir: {})
-    monkeypatch.setattr(model_sync_host_b, "capture_local_authoritative_inventory", lambda *_args: probe)
-    monkeypatch.setattr(model_sync_host_b, "load_litellm_generated_keys", lambda _state_dir: SimpleNamespace(virtual_keys={"coder-hermes": credential}))
+    monkeypatch.setattr(
+        model_sync_host_b, "capture_local_authoritative_inventory", lambda *_args: probe
+    )
+    monkeypatch.setattr(
+        model_sync_host_b,
+        "load_litellm_generated_keys",
+        lambda _state_dir: SimpleNamespace(virtual_keys={"coder-hermes": credential}),
+    )
     monkeypatch.setattr(model_sync_host_b, "run_bounded_process", run)
 
     snapshot = model_sync_host_b._snapshot(env_file, tmp_path)
@@ -1175,15 +1504,22 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
     assert pointer["pointer_sha256"] == pointer["independent_renderer_sha256"]
     assert credential not in json.dumps(snapshot)
     assert all(credential not in " ".join(command) for command, _input_value in calls)
-    assert [input_value for command, input_value in calls if "ssh" in command] == [("session\n" + credential).encode(), b"session\n"]
-    assert [input_value for _command, input_value in calls if input_value != b"session\n"] == [("session\n" + credential).encode()]
+    assert [input_value for command, input_value in calls if "ssh" in command] == [
+        ("session\n" + credential).encode(),
+        b"session\n",
+    ]
+    assert [input_value for _command, input_value in calls if input_value != b"session\n"] == [
+        ("session\n" + credential).encode()
+    ]
     captured = capsys.readouterr()
     assert credential not in captured.out + captured.err
 
 
 def test_legacy_baseline_hashes_are_canonical_and_drift_sensitive() -> None:
     snapshot = json.loads(_snapshot_wire())
-    captured = model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    captured = model_sync_baseline.parse_captured_baseline(
+        json.dumps(snapshot), stack_name="proof-stack"
+    )
     legacy = model_sync_artifacts.require_list(
         captured.payload["legacy_workspace_managed_fingerprints"], "captured legacy fingerprints"
     )
@@ -1194,10 +1530,19 @@ def test_legacy_baseline_hashes_are_canonical_and_drift_sensitive() -> None:
         if (item := model_sync_artifacts.require_mapping(value, "captured legacy fingerprint"))
     }
     assert exact_by_scope == {"pointer": True, "target-and-symlink": False}
-    assert captured.legacy_workspace_managed_fingerprints_sha256 == model_sync_baseline.canonical_sha256(legacy)
-    assert model_sync_host_b._sha(json.loads('{"b":2, "a":1}')) == model_sync_host_b._sha(json.loads('{ "a" : 1, "b" : 2 }'))
-    snapshot["coder"]["workspaces"]["pages"][0]["items"][0]["legacy_pointers"][0]["independent_renderer_sha256"] = _sha("f")
-    changed = model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    assert (
+        captured.legacy_workspace_managed_fingerprints_sha256
+        == model_sync_baseline.canonical_sha256(legacy)
+    )
+    assert model_sync_host_b._sha(json.loads('{"b":2, "a":1}')) == model_sync_host_b._sha(
+        json.loads('{ "a" : 1, "b" : 2 }')
+    )
+    snapshot["coder"]["workspaces"]["pages"][0]["items"][0]["legacy_pointers"][0][
+        "independent_renderer_sha256"
+    ] = _sha("f")
+    changed = model_sync_baseline.parse_captured_baseline(
+        json.dumps(snapshot), stack_name="proof-stack"
+    )
 
     changed_legacy = model_sync_artifacts.require_list(
         changed.payload["legacy_workspace_managed_fingerprints"], "changed legacy fingerprints"
@@ -1205,18 +1550,28 @@ def test_legacy_baseline_hashes_are_canonical_and_drift_sensitive() -> None:
     primary = next(
         fingerprint
         for item in changed_legacy
-        if (fingerprint := model_sync_artifacts.require_mapping(item, "changed legacy fingerprint"))[
-            "target"
-        ]
+        if (
+            fingerprint := model_sync_artifacts.require_mapping(item, "changed legacy fingerprint")
+        )["target"]
         == "/home/coder/.config/opencode/opencode.json"
     )
     assert primary["legacy_exact"] is False
-    assert changed.legacy_workspace_managed_fingerprints_sha256 != captured.legacy_workspace_managed_fingerprints_sha256
+    assert (
+        changed.legacy_workspace_managed_fingerprints_sha256
+        != captured.legacy_workspace_managed_fingerprints_sha256
+    )
     observed_snapshot = json.loads(_snapshot_wire())
-    observed_snapshot["coder"]["workspaces"]["pages"][0]["items"][0]["legacy_pointers"][0]["pointer_sha256"] = _sha("e")
-    observed_changed = model_sync_baseline.parse_captured_baseline(json.dumps(observed_snapshot), stack_name="proof-stack")
+    observed_snapshot["coder"]["workspaces"]["pages"][0]["items"][0]["legacy_pointers"][0][
+        "pointer_sha256"
+    ] = _sha("e")
+    observed_changed = model_sync_baseline.parse_captured_baseline(
+        json.dumps(observed_snapshot), stack_name="proof-stack"
+    )
 
-    assert observed_changed.legacy_workspace_managed_fingerprints_sha256 != captured.legacy_workspace_managed_fingerprints_sha256
+    assert (
+        observed_changed.legacy_workspace_managed_fingerprints_sha256
+        != captured.legacy_workspace_managed_fingerprints_sha256
+    )
 
 
 def test_legacy_value_drift_is_nonexact_without_rejecting_valid_metadata() -> None:
@@ -1225,14 +1580,17 @@ def test_legacy_value_drift_is_nonexact_without_rejecting_valid_metadata() -> No
     pointer["credential_value_sha256"] = "d" * 64
     pointer["pointer_sha256"] = "e" * 64
 
-    captured = model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    captured = model_sync_baseline.parse_captured_baseline(
+        json.dumps(snapshot), stack_name="proof-stack"
+    )
     legacy = model_sync_artifacts.require_list(
         captured.payload["legacy_workspace_managed_fingerprints"], "drifted legacy fingerprints"
     )
     first = next(
         item
         for value in legacy
-        if (item := model_sync_artifacts.require_mapping(value, "legacy fingerprint"))["scope"] == "pointer"
+        if (item := model_sync_artifacts.require_mapping(value, "legacy fingerprint"))["scope"]
+        == "pointer"
     )
 
     assert first["legacy_exact"] is False
@@ -1241,9 +1599,9 @@ def test_legacy_value_drift_is_nonexact_without_rejecting_valid_metadata() -> No
 
 def test_legacy_observed_safe_base_url_drift_is_nonexact() -> None:
     snapshot = json.loads(_snapshot_wire())
-    snapshot["coder"]["workspaces"]["pages"][0]["items"][0]["legacy_pointers"][0][
-        "base_url"
-    ] = "https://observed.example.invalid/v1"
+    snapshot["coder"]["workspaces"]["pages"][0]["items"][0]["legacy_pointers"][0]["base_url"] = (
+        "https://observed.example.invalid/v1"
+    )
     snapshot["coder"]["workspaces"]["pages"][0]["items"][0]["legacy_pointers"][0][
         "pointer_sha256"
     ] = _sha("d")
@@ -1421,7 +1779,9 @@ def test_model_inventory_normalizes_like_legacy_template(
 
     monkeypatch.setattr(model_sync_host_b, "run_bounded_process", run)
 
-    models = model_sync_host_b._model_inventory("coder", "session", "workspace", credential, "proof-stack")
+    models = model_sync_host_b._model_inventory(
+        "coder", "session", "workspace", credential, "proof-stack"
+    )
 
     assert models == ("openrouter/one", "opencode-go/two")
     assert credential not in " ".join(captured["command"])
@@ -1444,7 +1804,9 @@ def test_renderer_inputs_fail_closed_without_secret_output(
     )
 
     with pytest.raises(ValueError) as inventory_error:
-        model_sync_host_b._legacy_renderer({}, tmp_path, "coder", "session", "workspace", "proof-stack", "ubuntu-vscode")
+        model_sync_host_b._legacy_renderer(
+            {}, tmp_path, "coder", "session", "workspace", "proof-stack", "ubuntu-vscode"
+        )
 
     captured = capsys.readouterr()
     assert credential not in str(inventory_error.value) + captured.out + captured.err
@@ -1461,7 +1823,8 @@ def test_renderer_rejects_missing_base_url() -> None:
 
 
 def test_legacy_renderer_uses_authoritative_internal_base_without_v1(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         model_sync_host_b,
@@ -1489,23 +1852,26 @@ def test_real_templates_preserve_authoritative_base_url_contracts() -> None:
     )
     for template in primary_templates:
         source = (root / f"templates/coder/{template}/main.tf").read_text(encoding="utf-8")
-        assert '__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__' in source
+        assert "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__" in source
         assert 'base_url = os.environ["AI_DEFAULT_BASE_URL"].rstrip("/")' in source
         assert 'f"{base_url}/v1/models"' in source
-    kdense = (
-        root / "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
-    ).read_text(encoding="utf-8")
+    kdense = (root / "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
+        encoding="utf-8"
+    )
     assert 'default      = "https://opencode.ai/zen/go/v1"' in kdense
-    assert 'KDENSE_OPENCODE_GO_BASE_URL=${data.coder_parameter.kdense_opencode_go_base_url.value}' in kdense
+    assert (
+        "KDENSE_OPENCODE_GO_BASE_URL=${data.coder_parameter.kdense_opencode_go_base_url.value}"
+        in kdense
+    )
 
 
 def test_model_inventory_rejects_empty_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        model_sync_host_b, "run_bounded_process", lambda _command, **_kwargs: b"[]"
-    )
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", lambda _command, **_kwargs: b"[]")
 
     with pytest.raises(ValueError):
-        model_sync_host_b._model_inventory("coder", "session", "workspace", "credential", "proof-stack")
+        model_sync_host_b._model_inventory(
+            "coder", "session", "workspace", "credential", "proof-stack"
+        )
 
 
 @pytest.mark.parametrize("extra_byte", [False, True])
@@ -1515,6 +1881,7 @@ def test_workspace_pointer_stdout_has_exact_byte_limit(
     limit = 2 * 1024 * 1024
     payload = '{"scope":"pointer"}'
     stdout = payload + " " * (limit - len(payload) + int(extra_byte))
+
     def run(_command: list[str], **kwargs: Any) -> bytes:
         if len(stdout.encode()) > kwargs["output_limit"]:
             raise RuntimeError("legacy pointer exceeded output limit")
@@ -1547,6 +1914,7 @@ def test_model_inventory_stdout_has_exact_byte_limit(
     limit = 2 * 1024 * 1024
     payload = '[{"id":"openrouter/example"}]'
     stdout = payload + " " * (limit - len(payload) + int(extra_byte))
+
     def run(_command: list[str], **kwargs: Any) -> bytes:
         if len(stdout.encode()) > kwargs["output_limit"]:
             raise RuntimeError("model inventory exceeded output limit")
@@ -1556,11 +1924,13 @@ def test_model_inventory_stdout_has_exact_byte_limit(
 
     if extra_byte:
         with pytest.raises(ValueError):
-            model_sync_host_b._model_inventory("coder", "session", "workspace", "credential", "proof-stack")
+            model_sync_host_b._model_inventory(
+                "coder", "session", "workspace", "credential", "proof-stack"
+            )
     else:
-        assert model_sync_host_b._model_inventory("coder", "session", "workspace", "credential", "proof-stack") == (
-            "openrouter/example",
-        )
+        assert model_sync_host_b._model_inventory(
+            "coder", "session", "workspace", "credential", "proof-stack"
+        ) == ("openrouter/example",)
 
 
 @pytest.mark.parametrize("extra_record", [False, True])
@@ -1575,9 +1945,18 @@ def test_model_inventory_has_exact_record_limit(
 
     if extra_record:
         with pytest.raises(ValueError):
-            model_sync_host_b._model_inventory("coder", "session", "workspace", "credential", "proof-stack")
+            model_sync_host_b._model_inventory(
+                "coder", "session", "workspace", "credential", "proof-stack"
+            )
     else:
-        assert len(model_sync_host_b._model_inventory("coder", "session", "workspace", "credential", "proof-stack")) == count
+        assert (
+            len(
+                model_sync_host_b._model_inventory(
+                    "coder", "session", "workspace", "credential", "proof-stack"
+                )
+            )
+            == count
+        )
 
 
 def test_model_inventory_uses_workspace_python_runtime(
@@ -1600,9 +1979,13 @@ def test_model_inventory_uses_workspace_python_runtime(
     assert captured["command"][node_index : node_index + 2] == ["node", "-e"]
 
 
-@pytest.mark.parametrize(("stream", "extra_byte"), [("stdout", False), ("stdout", True), ("stderr", False), ("stderr", True)])
+@pytest.mark.parametrize(
+    ("stream", "extra_byte"),
+    [("stdout", False), ("stdout", True), ("stderr", False), ("stderr", True)],
+)
 def test_bounded_process_enforces_real_stdout_and_stderr_limits(
-    stream: str, extra_byte: bool,
+    stream: str,
+    extra_byte: bool,
 ) -> None:
     limit = 65_536
     descriptor = 1 if stream == "stdout" else 2
@@ -1646,7 +2029,11 @@ def test_bounded_process_child_failure_redacts_stderr_and_stdin() -> None:
     secret = b"SECRET-BOUNDED-PAYLOAD"
     with pytest.raises(RuntimeError, match="failure fixture failed") as error:
         model_sync_results.run_bounded_process(
-            [sys.executable, "-c", "import os,sys;data=sys.stdin.buffer.read();os.write(2,data);raise SystemExit(7)"],
+            [
+                sys.executable,
+                "-c",
+                "import os,sys;data=sys.stdin.buffer.read();os.write(2,data);raise SystemExit(7)",
+            ],
             stdin=secret,
             output_limit=1024,
             timeout_seconds=5,
@@ -1676,12 +2063,22 @@ def test_bounded_process_kills_and_reaps_failed_children(tmp_path: Path, mode: s
 
 
 def test_local_authoritative_inventory_uses_bounded_binary_transport(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     secret = "SECRET-LOCAL-INVENTORY"
     captured: dict[str, Any] = {}
     transport = model_sync_results.ProofTransport(
-        None, None, "example.test", None, None, None, "operator@example.test", "coder.example.test", secret, False
+        None,
+        None,
+        "example.test",
+        None,
+        None,
+        None,
+        "operator@example.test",
+        "coder.example.test",
+        secret,
+        False,
     )
 
     def run(command: list[str], **kwargs: Any) -> bytes:
@@ -1725,10 +2122,16 @@ _IMAGE_REPOSITORIES = {
     "redis": "docker.io/library/redis",
     "postfix": "docker.io/boky/postfix",
 }
+
+
 def _single_manifest_raw(marker: str) -> bytes:
     return json.dumps(
         {
-            "config": {"digest": f"sha256:{marker * 64}", "mediaType": "application/vnd.oci.image.config.v1+json", "size": 1},
+            "config": {
+                "digest": f"sha256:{marker * 64}",
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "size": 1,
+            },
             "layers": [],
             "mediaType": "application/vnd.oci.image.manifest.v1+json",
             "schemaVersion": 2,
@@ -1759,11 +2162,13 @@ def _index_raw(platforms: list[dict[str, str]]) -> bytes:
 
 
 _IMAGE_RAW = {
-    name: _single_manifest_raw(marker)
-    for name, marker in zip(_IMAGE_LOGICAL, "abcde", strict=True)
+    name: _single_manifest_raw(marker) for name, marker in zip(_IMAGE_LOGICAL, "abcde", strict=True)
 }
 _IMAGE_RAW["coder"] = _index_raw(
-    [{"architecture": "amd64", "os": "linux"}, {"architecture": "arm64", "os": "linux", "variant": "v8"}]
+    [
+        {"architecture": "amd64", "os": "linux"},
+        {"architecture": "arm64", "os": "linux", "variant": "v8"},
+    ]
 )
 _IMAGE_DIGESTS = {
     name: f"sha256:{hashlib.sha256(raw).hexdigest()}" for name, raw in _IMAGE_RAW.items()
@@ -1776,7 +2181,10 @@ def _image_inventory_runner(
     values = {} if overrides is None else overrides
     calls: list[list[str]] = []
     ids = {name: character * 64 for name, character in zip(_IMAGE_LOGICAL, "abcde", strict=True)}
-    image_ids = {name: f"sha256:{character * 64}" for name, character in zip(_IMAGE_LOGICAL, "12345", strict=True)}
+    image_ids = {
+        name: f"sha256:{character * 64}"
+        for name, character in zip(_IMAGE_LOGICAL, "12345", strict=True)
+    }
     service_names = {service: name for name, service in _IMAGE_SERVICES.items()}
     container_ids = {identifier: name for name, identifier in ids.items()}
     local_ids = {identifier: name for name, identifier in image_ids.items()}
@@ -1791,7 +2199,11 @@ def _image_inventory_runner(
         if values.get("failure_kind") in command:
             raise RuntimeError(str(values["failure_message"]))
         if command[1] == "ps":
-            service = next(item.removeprefix("label=com.docker.compose.service=") for item in command if item.startswith("label=com.docker.compose.service="))
+            service = next(
+                item.removeprefix("label=com.docker.compose.service=")
+                for item in command
+                if item.startswith("label=com.docker.compose.service=")
+            )
             logical_name = service_names[service]
             if values.get("missing") == logical_name:
                 return b""
@@ -1801,16 +2213,32 @@ def _image_inventory_runner(
             return (output + "\n").encode()
         if command[1:4] == ["inspect", "--type", "container"]:
             logical_name = container_ids[command[-1]]
-            return json.dumps([{"Config": {"Image": references[logical_name]}, "Image": image_ids[logical_name]}]).encode()
+            return json.dumps(
+                [{"Config": {"Image": references[logical_name]}, "Image": image_ids[logical_name]}]
+            ).encode()
         if command[1:3] == ["image", "inspect"]:
             logical_name = local_ids[command[-1]]
             local_digest = values.get("local_digests", {}).get(
                 logical_name, f"sha256:{hashlib.sha256(registry_raw[logical_name]).hexdigest()}"
             )
-            local_evidence = values.get("local_evidence", {}).get(logical_name, f"{repositories[logical_name]}@{local_digest}")
-            return json.dumps([{"RepoDigests": values.get("repo_digests", {}).get(logical_name, [local_evidence])}]).encode()
+            local_evidence = values.get("local_evidence", {}).get(
+                logical_name, f"{repositories[logical_name]}@{local_digest}"
+            )
+            return json.dumps(
+                [
+                    {
+                        "RepoDigests": values.get("repo_digests", {}).get(
+                            logical_name, [local_evidence]
+                        )
+                    }
+                ]
+            ).encode()
         if command[1:4] == ["buildx", "imagetools", "inspect"]:
-            logical_name = next(name for name, repository in repositories.items() if command[-1].startswith(f"{repository}@"))
+            logical_name = next(
+                name
+                for name, repository in repositories.items()
+                if command[-1].startswith(f"{repository}@")
+            )
             raw = registry_raw[logical_name]
             assert isinstance(raw, bytes)
             return raw
@@ -1848,7 +2276,9 @@ def test_image_inventory_binds_five_running_services_to_independent_registry_dig
         if command[1] == "ps"
     } == {f"label=com.docker.compose.service={service}" for service in _IMAGE_SERVICES.values()}
     assert sum(command[1:3] == ["image", "inspect"] for command in calls) == 5
-    registry_calls = [command for command in calls if command[1:4] == ["buildx", "imagetools", "inspect"]]
+    registry_calls = [
+        command for command in calls if command[1:4] == ["buildx", "imagetools", "inspect"]
+    ]
     assert len(registry_calls) == 5
     assert [command[-1] for command in registry_calls] == [
         f"{_IMAGE_REPOSITORIES[name]}@{_IMAGE_DIGESTS[name]}" for name in _IMAGE_LOGICAL
@@ -1856,9 +2286,17 @@ def test_image_inventory_binds_five_running_services_to_independent_registry_dig
     assert all(command[-2] == "--raw" for command in registry_calls)
 
 
-@pytest.mark.parametrize(("condition", "message"), [("missing", "running container must resolve exactly once"), ("duplicate", "running container must resolve exactly once")])
+@pytest.mark.parametrize(
+    ("condition", "message"),
+    [
+        ("missing", "running container must resolve exactly once"),
+        ("duplicate", "running container must resolve exactly once"),
+    ],
+)
 def test_image_inventory_rejects_missing_or_duplicate_service(
-    condition: str, message: str, monkeypatch: pytest.MonkeyPatch,
+    condition: str,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner, _calls = _image_inventory_runner({condition: "coder"})
     monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
@@ -1871,16 +2309,33 @@ def test_image_inventory_rejects_missing_or_duplicate_service(
     ("overrides", "message"),
     [
         ({"local_digests": {"coder": "sha256:INVALID"}}, "local image digest is invalid"),
-        ({"local_evidence": {"coder": "ghcr.io/coder/coder:latest"}}, "local image digest is invalid"),
-        ({"local_evidence": {"coder": f"ghcr.io/other/coder@{_IMAGE_DIGESTS['coder']}"}}, "local image digest is missing or ambiguous"),
-        ({"repo_digests": {"coder": [f"ghcr.io/coder/coder@{_IMAGE_DIGESTS['coder']}"] * 2}}, "local image digest is missing or ambiguous"),
-        ({"local_digests": {"coder": "sha256:" + "f" * 64}}, "container and registry image digests disagree"),
+        (
+            {"local_evidence": {"coder": "ghcr.io/coder/coder:latest"}},
+            "local image digest is invalid",
+        ),
+        (
+            {"local_evidence": {"coder": f"ghcr.io/other/coder@{_IMAGE_DIGESTS['coder']}"}},
+            "local image digest is missing or ambiguous",
+        ),
+        (
+            {"repo_digests": {"coder": [f"ghcr.io/coder/coder@{_IMAGE_DIGESTS['coder']}"] * 2}},
+            "local image digest is missing or ambiguous",
+        ),
+        (
+            {"local_digests": {"coder": "sha256:" + "f" * 64}},
+            "container and registry image digests disagree",
+        ),
         ({"registry_raw": {"coder": b"{"}}, "registry manifest returned invalid JSON"),
-        ({"registry_raw": {"coder": b'{"mediaType":"application/example","schemaVersion":2}'}}, "registry manifest media type is unsupported"),
+        (
+            {"registry_raw": {"coder": b'{"mediaType":"application/example","schemaVersion":2}'}},
+            "registry manifest media type is unsupported",
+        ),
     ],
 )
 def test_image_inventory_rejects_malformed_or_mismatched_digests(
-    overrides: dict[str, Any], message: str, monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, Any],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner, _calls = _image_inventory_runner(overrides)
     monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
@@ -1892,25 +2347,62 @@ def test_image_inventory_rejects_malformed_or_mismatched_digests(
 @pytest.mark.parametrize(
     "payload",
     [
-        {"config": {"digest": "sha256:" + "a" * 64, "mediaType": "application/vnd.oci.image.config.v1+json"}, "layers": [], "mediaType": "application/vnd.oci.image.manifest.v1+json", "schemaVersion": 2},
-        {"config": {"digest": "sha256:" + "a" * 64, "mediaType": "application/vnd.oci.image.config.v1+json", "size": 1}, "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "size": 1}], "mediaType": "application/vnd.oci.image.manifest.v1+json", "schemaVersion": 2},
-        {"manifests": [{"digest": "sha256:" + "a" * 64, "mediaType": "application/vnd.oci.image.manifest.v1+json", "platform": {"architecture": "amd64", "os": "linux"}}], "mediaType": "application/vnd.oci.image.index.v1+json", "schemaVersion": 2},
+        {
+            "config": {
+                "digest": "sha256:" + "a" * 64,
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+            },
+            "layers": [],
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "schemaVersion": 2,
+        },
+        {
+            "config": {
+                "digest": "sha256:" + "a" * 64,
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "size": 1,
+            },
+            "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "size": 1}],
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "schemaVersion": 2,
+        },
+        {
+            "manifests": [
+                {
+                    "digest": "sha256:" + "a" * 64,
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "platform": {"architecture": "amd64", "os": "linux"},
+                }
+            ],
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "schemaVersion": 2,
+        },
     ],
 )
 def test_image_inventory_rejects_incomplete_registry_descriptors(
-    payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     runner, _calls = _image_inventory_runner({"registry_raw": {"coder": raw}})
     monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
 
-    with pytest.raises(model_sync_artifacts.CaptureSchemaError, match="registry manifest descriptor"):
+    with pytest.raises(
+        model_sync_artifacts.CaptureSchemaError, match="registry manifest descriptor"
+    ):
         model_sync_host_b._image_inventory("proof-stack")
 
 
-@pytest.mark.parametrize("platforms", [[{"architecture": "amd64", "os": "linux"}, {"architecture": "amd64", "os": "linux"}], [{"architecture": "amd64"}]])
+@pytest.mark.parametrize(
+    "platforms",
+    [
+        [{"architecture": "amd64", "os": "linux"}, {"architecture": "amd64", "os": "linux"}],
+        [{"architecture": "amd64"}],
+    ],
+)
 def test_image_inventory_index_digest_does_not_project_platform_metadata(
-    platforms: list[dict[str, str]], monkeypatch: pytest.MonkeyPatch,
+    platforms: list[dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner, _calls = _image_inventory_runner({"registry_raw": {"coder": _index_raw(platforms)}})
     monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
@@ -1924,10 +2416,12 @@ def test_image_inventory_normalizes_docker_hub_and_registry_port(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = "registry.example.test:5000/team/coder"
-    runner, _calls = _image_inventory_runner({
-        "references": {"coder": f"{repository}:release"},
-        "repositories": {"coder": repository},
-    })
+    runner, _calls = _image_inventory_runner(
+        {
+            "references": {"coder": f"{repository}:release"},
+            "repositories": {"coder": repository},
+        }
+    )
     monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
 
     images = model_sync_host_b._image_inventory("proof-stack")
@@ -1963,12 +2457,15 @@ def test_image_inventory_compares_multi_platform_index_digest_not_child_digest(
 
 @pytest.mark.parametrize("failure", ["timed out", "exceeded output limit"])
 def test_image_inventory_propagates_bounded_command_failures(
-    failure: str, monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runner, _calls = _image_inventory_runner({
-        "failure_kind": "buildx",
-        "failure_message": f"coder registry image {failure}",
-    })
+    runner, _calls = _image_inventory_runner(
+        {
+            "failure_kind": "buildx",
+            "failure_message": f"coder registry image {failure}",
+        }
+    )
     monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
 
     with pytest.raises(RuntimeError, match=failure):
@@ -1995,18 +2492,24 @@ _KDENSE_CATALOG = (
     ("MiniMax M2.5 (free)", "openrouter/minimax/minimax-m2.5:free"),
     ("Kimi K2.5", "openrouter/moonshotai/kimi-k2.5"),
     ("Nemotron 3 Super", "openrouter/nvidia/nemotron-3-super-120b-a12b"),
-    ("Nemotron 3 Nano Omni (free)", "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"),
+    (
+        "Nemotron 3 Nano Omni (free)",
+        "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    ),
 )
 
 
 def test_kdense_renderer_catalog_matches_terraform_static_options() -> None:
     terraform = (
-        Path(__file__).parents[2]
-        / "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
+        Path(__file__).parents[2] / "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
     ).read_text(encoding="utf-8")
     block = terraform.split("kdense_model_options = [", 1)[1].split("\n  ]", 1)[0]
-    names = [line.split('"', 2)[1] for line in block.splitlines() if line.strip().startswith("name  =")]
-    values = [line.split('"', 2)[1] for line in block.splitlines() if line.strip().startswith("value =")]
+    names = [
+        line.split('"', 2)[1] for line in block.splitlines() if line.strip().startswith("name  =")
+    ]
+    values = [
+        line.split('"', 2)[1] for line in block.splitlines() if line.strip().startswith("value =")
+    ]
     authoritative = tuple(zip(names, values, strict=True))
 
     assert authoritative == _KDENSE_CATALOG == model_sync_host_b._KDENSE_CATALOG
@@ -2037,7 +2540,9 @@ def _terraform_kdense_models(
         model["label"] = label
         model["provider"] = "OpenCode Go"
         description = str(model.get("description", "")).strip()
-        model["description"] = (description + "\n\n" if description else "") + "Available through the central LiteLLM OpenCode Go-compatible gateway."
+        model["description"] = (
+            description + "\n\n" if description else ""
+        ) + "Available through the central LiteLLM OpenCode Go-compatible gateway."
         merged.append(model)
     deduped = list({str(model["id"]): model for model in reversed(merged)}.values())[::-1]
     for model in deduped:
@@ -2048,7 +2553,9 @@ def _terraform_kdense_models(
     if not any(model.get("default") for model in deduped):
         deduped[0]["default"] = True
     if not any(model.get("expertDefault") for model in deduped):
-        next((model for model in deduped if model.get("default")), deduped[0])["expertDefault"] = True
+        next((model for model in deduped if model.get("default")), deduped[0])["expertDefault"] = (
+            True
+        )
     return deduped
 
 
@@ -2089,9 +2596,22 @@ def _commit_kdense_source(tmp_path: Path, source_models: list[dict[str, Any]]) -
     target.parent.mkdir(parents=True)
     target.write_text(json.dumps(source_models, indent=2) + "\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "fixture@example.test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "fixture@example.test"], check=True
+    )
     subprocess.run(["git", "-C", str(repo), "config", "user.name", "Fixture"], check=True)
-    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/K-Dense-AI/k-dense-byok.git"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/K-Dense-AI/k-dense-byok.git",
+        ],
+        check=True,
+    )
     subprocess.run(["git", "-C", str(repo), "add", "web/src/data/models.json"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
     revision = subprocess.run(
@@ -2106,13 +2626,20 @@ def _commit_kdense_source(tmp_path: Path, source_models: list[dict[str, Any]]) -
     return repo, revision
 
 
-def _kdense_observed(renderer: model_sync_host_b.LegacyRenderer, target: list[dict[str, Any]]) -> dict[str, Any]:
+def _kdense_observed(
+    renderer: model_sync_host_b.LegacyRenderer, target: list[dict[str, Any]]
+) -> dict[str, Any]:
     target_path = "/home/coder/.cache/kdense-byok-src/web/src/data/models.json"
     target_sha = model_sync_host_b._sha(target)
     symlink_sha = model_sync_host_b._sha(target_path.encode())
     credential_sha = model_sync_host_b._sha(renderer.credential.encode())
     aggregate_sha = model_sync_host_b._sha(
-        {"base_url": renderer.base_url, "credential_value_sha256": credential_sha, "symlink_sha256": symlink_sha, "target_sha256": target_sha}
+        {
+            "base_url": renderer.base_url,
+            "credential_value_sha256": credential_sha,
+            "symlink_sha256": symlink_sha,
+            "target_sha256": target_sha,
+        }
     )
     return {
         "base_url": renderer.base_url,
@@ -2209,7 +2736,8 @@ def test_kdense_renderer_reconstructs_terraform_catalog_from_git_preimage(
 
 
 def test_kdense_renderer_fails_closed_without_git_preimage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = tmp_path / "kdense-archive"
     repo.mkdir()
@@ -2257,7 +2785,8 @@ def test_kdense_renderer_fails_closed_without_git_preimage(
 
 
 def test_kdense_renderer_rejects_local_head_not_bound_to_origin_main(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_models = _kdense_source_fixture()
     repo, _revision = _commit_kdense_source(tmp_path, source_models)
@@ -2325,7 +2854,12 @@ def test_kdense_capture_binds_whole_target_and_current_symlink(
     target_sha = model_sync_host_b._sha(_terraform_kdense_models(_kdense_source_fixture()))
     symlink_sha = model_sync_host_b._sha(symlink_target.encode())
     aggregate_sha = model_sync_host_b._sha(
-        {"base_url": renderer.base_url, "credential_value_sha256": model_sync_host_b._sha(renderer.credential.encode()), "symlink_sha256": symlink_sha, "target_sha256": target_sha}
+        {
+            "base_url": renderer.base_url,
+            "credential_value_sha256": model_sync_host_b._sha(renderer.credential.encode()),
+            "symlink_sha256": symlink_sha,
+            "target_sha256": target_sha,
+        }
     )
     observed = {
         "base_url": renderer.base_url,
@@ -2362,22 +2896,34 @@ def test_kdense_capture_binds_whole_target_and_current_symlink(
     assert pointer["symlink_sha256"] == symlink_sha
 
 
-def test_renderer_rejects_missing_generated_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_renderer_rejects_missing_generated_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(model_sync_host_b, "load_litellm_generated_keys", lambda _state_dir: None)
 
     with pytest.raises(ValueError):
-        model_sync_host_b._legacy_renderer({}, tmp_path, "coder", "session", "workspace", "proof-stack", "ubuntu-vscode")
+        model_sync_host_b._legacy_renderer(
+            {}, tmp_path, "coder", "session", "workspace", "proof-stack", "ubuntu-vscode"
+        )
 
 
 @pytest.mark.parametrize("template", ["ubuntu-vscode-hermes", "ubuntu-vscode-pi-web"])
 def test_workspace_templates_without_exact_legacy_renderer_fail_closed(
     template: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", lambda *_args, **_kwargs: pytest.fail("unsupported template executed"))
+    monkeypatch.setattr(
+        model_sync_host_b,
+        "run_bounded_process",
+        lambda *_args, **_kwargs: pytest.fail("unsupported template executed"),
+    )
 
     with pytest.raises(ValueError):
         model_sync_host_b._primary_pointer(
-            "coder", "session", "workspace", template, "version",
+            "coder",
+            "session",
+            "workspace",
+            template,
+            "version",
             model_sync_host_b.LegacyRenderer(
                 "http://proof-stack-shared-litellm:4000",
                 "credential",
@@ -2409,7 +2955,11 @@ def test_workspace_inventory_fails_closed_before_pointer_capture(
         "workspaces": [workspace],
     }
     monkeypatch.setattr(model_sync_host_b, "_api", lambda *_args: response)
-    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", lambda *_args, **_kwargs: pytest.fail("pointer capture executed"))
+    monkeypatch.setattr(
+        model_sync_host_b,
+        "run_bounded_process",
+        lambda *_args, **_kwargs: pytest.fail("pointer capture executed"),
+    )
 
     with pytest.raises(ValueError):
         model_sync_host_b._workspaces(
@@ -2434,12 +2984,14 @@ def test_historical_workspace_version_remains_bound_without_active_version_equal
     }
     response = {
         "count": 1,
-        "workspaces": [{
-            "id": "workspace-proof",
-            "name": "primary",
-            "template_id": "template-proof",
-            "template_version_id": "historical-version",
-        }],
+        "workspaces": [
+            {
+                "id": "workspace-proof",
+                "name": "primary",
+                "template_id": "template-proof",
+                "template_version_id": "historical-version",
+            }
+        ],
     }
     monkeypatch.setattr(model_sync_host_b, "_api", lambda *_args: response)
     monkeypatch.setattr(
@@ -2474,9 +3026,13 @@ def test_historical_workspace_version_remains_bound_without_active_version_equal
 
 def test_historical_workspace_version_is_preserved_in_baseline() -> None:
     snapshot = json.loads(_snapshot_wire())
-    snapshot["coder"]["templates"]["pages"][0]["items"][0]["active_version_id"] = "new-active-version"
+    snapshot["coder"]["templates"]["pages"][0]["items"][0]["active_version_id"] = (
+        "new-active-version"
+    )
 
-    captured = model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    captured = model_sync_baseline.parse_captured_baseline(
+        json.dumps(snapshot), stack_name="proof-stack"
+    )
     workspaces = model_sync_artifacts.require_list(captured.payload["workspaces"], "workspaces")
     primary = next(
         item
@@ -2494,10 +3050,17 @@ def test_kdense_absent_current_symlink_cannot_be_exact() -> None:
     pointer["symlink_target"] = None
     pointer["symlink_sha256"] = None
     pointer["pointer_sha256"] = model_sync_host_b._sha(
-        {"base_url": pointer["base_url"], "credential_value_sha256": pointer["credential_value_sha256"], "symlink_sha256": None, "target_sha256": pointer["target_sha256"]}
+        {
+            "base_url": pointer["base_url"],
+            "credential_value_sha256": pointer["credential_value_sha256"],
+            "symlink_sha256": None,
+            "target_sha256": pointer["target_sha256"],
+        }
     )
 
-    captured = model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    captured = model_sync_baseline.parse_captured_baseline(
+        json.dumps(snapshot), stack_name="proof-stack"
+    )
     legacy = model_sync_artifacts.require_list(
         captured.payload["legacy_workspace_managed_fingerprints"], "legacy fingerprints"
     )
@@ -2516,14 +3079,18 @@ def test_kdense_truthful_parameter_base_url_drift_is_preserved_as_nonexact() -> 
     snapshot = json.loads(_snapshot_wire())
     pointer = snapshot["coder"]["workspaces"]["pages"][0]["items"][1]["legacy_pointers"][0]
     pointer["base_url"] = "https://opencode.ai/zen/go/v1"
-    pointer["pointer_sha256"] = model_sync_host_b._sha({
-        "base_url": pointer["base_url"],
-        "credential_value_sha256": pointer["credential_value_sha256"],
-        "symlink_sha256": pointer["symlink_sha256"],
-        "target_sha256": pointer["target_sha256"],
-    })
+    pointer["pointer_sha256"] = model_sync_host_b._sha(
+        {
+            "base_url": pointer["base_url"],
+            "credential_value_sha256": pointer["credential_value_sha256"],
+            "symlink_sha256": pointer["symlink_sha256"],
+            "target_sha256": pointer["target_sha256"],
+        }
+    )
 
-    captured = model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    captured = model_sync_baseline.parse_captured_baseline(
+        json.dumps(snapshot), stack_name="proof-stack"
+    )
     legacy = model_sync_artifacts.require_list(
         captured.payload["legacy_workspace_managed_fingerprints"], "legacy fingerprints"
     )
@@ -2543,14 +3110,18 @@ def test_kdense_target_symlink_and_credential_drift_are_nonexact(field: str) -> 
     snapshot = json.loads(_snapshot_wire())
     pointer = snapshot["coder"]["workspaces"]["pages"][0]["items"][1]["legacy_pointers"][0]
     pointer[field] = "9" * 64
-    pointer["pointer_sha256"] = model_sync_host_b._sha({
-        "base_url": pointer["base_url"],
-        "credential_value_sha256": pointer["credential_value_sha256"],
-        "symlink_sha256": pointer["symlink_sha256"],
-        "target_sha256": pointer["target_sha256"],
-    })
+    pointer["pointer_sha256"] = model_sync_host_b._sha(
+        {
+            "base_url": pointer["base_url"],
+            "credential_value_sha256": pointer["credential_value_sha256"],
+            "symlink_sha256": pointer["symlink_sha256"],
+            "target_sha256": pointer["target_sha256"],
+        }
+    )
 
-    captured = model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    captured = model_sync_baseline.parse_captured_baseline(
+        json.dumps(snapshot), stack_name="proof-stack"
+    )
     legacy = model_sync_artifacts.require_list(
         captured.payload["legacy_workspace_managed_fingerprints"], "legacy fingerprints"
     )
@@ -2580,14 +3151,18 @@ def test_kdense_terraform_target_semantic_drift_is_nonexact(mutation: str) -> No
     else:
         target.reverse()
     pointer["target_sha256"] = model_sync_host_b._sha(target)
-    pointer["pointer_sha256"] = model_sync_host_b._sha({
-        "base_url": pointer["base_url"],
-        "credential_value_sha256": pointer["credential_value_sha256"],
-        "symlink_sha256": pointer["symlink_sha256"],
-        "target_sha256": pointer["target_sha256"],
-    })
+    pointer["pointer_sha256"] = model_sync_host_b._sha(
+        {
+            "base_url": pointer["base_url"],
+            "credential_value_sha256": pointer["credential_value_sha256"],
+            "symlink_sha256": pointer["symlink_sha256"],
+            "target_sha256": pointer["target_sha256"],
+        }
+    )
 
-    captured = model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    captured = model_sync_baseline.parse_captured_baseline(
+        json.dumps(snapshot), stack_name="proof-stack"
+    )
     legacy = model_sync_artifacts.require_list(
         captured.payload["legacy_workspace_managed_fingerprints"], "legacy fingerprints"
     )
@@ -2606,13 +3181,34 @@ def test_zero_workspace_baseline_has_no_adoption_candidates() -> None:
     snapshot["coder"]["workspaces"] = {"pages": [{"items": [], "offset": 0}], "total": 0}
     snapshot["coder"]["builds"] = []
 
-    captured = model_sync_baseline.parse_captured_baseline(json.dumps(snapshot), stack_name="proof-stack")
+    captured = model_sync_baseline.parse_captured_baseline(
+        json.dumps(snapshot), stack_name="proof-stack"
+    )
 
     assert captured.payload["workspaces"] == []
     assert captured.payload["legacy_workspace_managed_fingerprints"] == []
 
 
-@pytest.mark.parametrize("mutation", ["empty", "duplicate", "mode", "shape", "scope", "target", "path", "base", "version", "unsupported", "hash", "credential_hash", "renderer_hash", "renderer_source_revision", "renderer_source_path"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "empty",
+        "duplicate",
+        "mode",
+        "shape",
+        "scope",
+        "target",
+        "path",
+        "base",
+        "version",
+        "unsupported",
+        "hash",
+        "credential_hash",
+        "renderer_hash",
+        "renderer_source_revision",
+        "renderer_source_path",
+    ],
+)
 def test_legacy_baseline_rejects_missing_or_malformed_renderer_evidence(mutation: str) -> None:
     snapshot = json.loads(_snapshot_wire())
     primary = snapshot["coder"]["workspaces"]["pages"][0]["items"][0]
@@ -2717,7 +3313,9 @@ def test_coder_inventory_paginates_workspace_build_and_secret_identifiers(
 
     template_requests: list[str] = []
 
-    def api(_hostname: str, _token: str | None, path: str, _body: dict[str, str] | None = None) -> Any:
+    def api(
+        _hostname: str, _token: str | None, path: str, _body: dict[str, str] | None = None
+    ) -> Any:
         offset = 100 if "offset=100" in path else 0
         if path.startswith("/api/v2/templates"):
             template_requests.append(path)
@@ -2742,24 +3340,38 @@ def test_coder_inventory_paginates_workspace_build_and_secret_identifiers(
         model_sync_host_b,
         "_legacy_renderer",
         lambda *_args: model_sync_host_b.LegacyRenderer(
-            "http://proof-stack-shared-litellm:4000", "key", "openrouter/example", (), ("openrouter/example",)
+            "http://proof-stack-shared-litellm:4000",
+            "key",
+            "openrouter/example",
+            (),
+            ("openrouter/example",),
         ),
     )
 
     captured_templates = model_sync_host_b._templates("coder.example.test", "session")
     captured_workspaces = model_sync_host_b._workspaces(
-        "coder.example.test", "session", "coder-container", captured_templates, {}, Path("."), "proof-stack",
+        "coder.example.test",
+        "session",
+        "coder-container",
+        captured_templates,
+        {},
+        Path("."),
+        "proof-stack",
     )
-    captured_builds: Any = model_sync_host_b._builds("coder.example.test", "session", captured_workspaces)
+    captured_builds: Any = model_sync_host_b._builds(
+        "coder.example.test", "session", captured_workspaces
+    )
     captured_secrets = model_sync_host_b._secrets("coder.example.test", "session", "user-1")
 
-    assert {item["id"] for item in captured_templates} == {f"template-{index}" for index in range(101)}
-    assert {item["id"] for item in captured_workspaces} == {f"workspace-{index}" for index in range(101)}
-    assert {
-        item["id"]
-        for page in captured_builds[0]["pages"]
-        for item in page["items"]
-    } == {f"build-{index}" for index in range(101)}
+    assert {item["id"] for item in captured_templates} == {
+        f"template-{index}" for index in range(101)
+    }
+    assert {item["id"] for item in captured_workspaces} == {
+        f"workspace-{index}" for index in range(101)
+    }
+    assert {item["id"] for page in captured_builds[0]["pages"] for item in page["items"]} == {
+        f"build-{index}" for index in range(101)
+    }
     assert {item["id"] for item in captured_secrets} == {f"secret-{index}" for index in range(101)}
     assert template_requests == ["/api/v2/templates"]
 
@@ -2792,8 +3404,22 @@ def _snapshot_wire(*, omit_template: bool = False, malformed_build: bool = False
     kdense_pointer = "/home/coder/.local/state/dokploy-wizard/model-sync/current"
     kdense_target_sha = model_sync_host_b._sha(_terraform_kdense_models(_kdense_source_fixture()))
     kdense_symlink_sha = model_sync_host_b._sha(kdense_target.encode())
-    kdense_expected_sha = model_sync_host_b._sha({"base_url": "http://proof-stack-shared-litellm:4000", "credential_value_sha256": _sha("c"), "symlink_sha256": kdense_symlink_sha, "target_sha256": kdense_target_sha})
-    kdense_observed_sha = model_sync_host_b._sha({"base_url": "https://opencode.ai/zen/go/v1", "credential_value_sha256": _sha("c"), "symlink_sha256": kdense_symlink_sha, "target_sha256": kdense_target_sha})
+    kdense_expected_sha = model_sync_host_b._sha(
+        {
+            "base_url": "http://proof-stack-shared-litellm:4000",
+            "credential_value_sha256": _sha("c"),
+            "symlink_sha256": kdense_symlink_sha,
+            "target_sha256": kdense_target_sha,
+        }
+    )
+    kdense_observed_sha = model_sync_host_b._sha(
+        {
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "credential_value_sha256": _sha("c"),
+            "symlink_sha256": kdense_symlink_sha,
+            "target_sha256": kdense_target_sha,
+        }
+    )
     return json.dumps(
         {
             "cloudflare": {
@@ -2810,7 +3436,9 @@ def _snapshot_wire(*, omit_template: bool = False, malformed_build: bool = False
                                     {
                                         "build_number": 1,
                                         "id": "build-primary",
-                                        "status": "not-a-coder-status" if malformed_build else "stopped",
+                                        "status": "not-a-coder-status"
+                                        if malformed_build
+                                        else "stopped",
                                         "transition": "stop",
                                     }
                                 ],
@@ -2916,11 +3544,31 @@ def _snapshot_wire(*, omit_template: bool = False, malformed_build: bool = False
                 },
             },
             "images": [
-                {"container_image": _image_ref("ghcr.io/coder/coder", "1"), "logical_name": "coder", "registry_image": _image_ref("ghcr.io/coder/coder", "1")},
-                {"container_image": _image_ref("ghcr.io/berriai/litellm", "2"), "logical_name": "litellm", "registry_image": _image_ref("ghcr.io/berriai/litellm", "2")},
-                {"container_image": _image_ref("pgvector/pgvector", "3"), "logical_name": "pgvector", "registry_image": _image_ref("pgvector/pgvector", "3")},
-                {"container_image": _image_ref("redis", "4"), "logical_name": "redis", "registry_image": _image_ref("redis", "4")},
-                {"container_image": _image_ref("boky/postfix", "5"), "logical_name": "postfix", "registry_image": _image_ref("boky/postfix", "5")},
+                {
+                    "container_image": _image_ref("ghcr.io/coder/coder", "1"),
+                    "logical_name": "coder",
+                    "registry_image": _image_ref("ghcr.io/coder/coder", "1"),
+                },
+                {
+                    "container_image": _image_ref("ghcr.io/berriai/litellm", "2"),
+                    "logical_name": "litellm",
+                    "registry_image": _image_ref("ghcr.io/berriai/litellm", "2"),
+                },
+                {
+                    "container_image": _image_ref("pgvector/pgvector", "3"),
+                    "logical_name": "pgvector",
+                    "registry_image": _image_ref("pgvector/pgvector", "3"),
+                },
+                {
+                    "container_image": _image_ref("redis", "4"),
+                    "logical_name": "redis",
+                    "registry_image": _image_ref("redis", "4"),
+                },
+                {
+                    "container_image": _image_ref("boky/postfix", "5"),
+                    "logical_name": "postfix",
+                    "registry_image": _image_ref("boky/postfix", "5"),
+                },
             ],
             "schema_version": 1,
             "tailscale": {"identifiers": ["proof-stack-tailnet"]},
@@ -3000,7 +3648,9 @@ class _FixtureRemoteClient:
         self.commands: list[str] = []
         self.stdins: list[_FixtureStdin] = []
 
-    def exec_command(self, command: str, *, timeout: int) -> tuple[_FixtureStdin, _FixtureStream, _FixtureStream]:
+    def exec_command(
+        self, command: str, *, timeout: int
+    ) -> tuple[_FixtureStdin, _FixtureStream, _FixtureStream]:
         del timeout
         if "model-sync-snapshot" in command:
             payload = self._snapshot
@@ -3311,10 +3961,7 @@ def test_cli_rejects_unrelated_active_root_before_guard_or_result(
 
     # Then
     assert exit_code == 1
-    assert (
-        "active root does not match the running repository checkout"
-        in capsys.readouterr().err
-    )
+    assert "active root does not match the running repository checkout" in capsys.readouterr().err
     assert not (tmp_path / "abort-guard.json").exists()
     assert not (tmp_path / "artifacts" / "result.json").exists()
 
@@ -3371,20 +4018,15 @@ def test_explicit_single_host_baseline_uses_one_physical_preflight(
     # Then
     artifact_dir = tmp_path / "artifacts"
     result = json.loads((artifact_dir / "result.json").read_text(encoding="utf-8"))
-    preflight = json.loads(
-        (artifact_dir / "host-a-preflight.json").read_text(encoding="utf-8")
-    )
+    preflight = json.loads((artifact_dir / "host-a-preflight.json").read_text(encoding="utf-8"))
     lifecycle_receipt = json.loads(
-        (artifact_dir / "single-host-lifecycle-baseline.json").read_text(
-            encoding="utf-8"
-        )
+        (artifact_dir / "single-host-lifecycle-baseline.json").read_text(encoding="utf-8")
     )
     assert exit_code == 0
-    assert sum(
-        "model-sync-preflight" in command
-        for client in clients
-        for command in client.commands
-    ) == 2
+    assert (
+        sum("model-sync-preflight" in command for client in clients for command in client.commands)
+        == 2
+    )
     assert not (artifact_dir / "host-b-preflight.json").exists()
     assert (artifact_dir / "single-host-lifecycle-baseline.json").exists()
     assert result["host_identity_mode"] == "single_sequential"
@@ -3430,7 +4072,9 @@ def test_post_install_snapshot_uses_authoritative_cloudflare_and_tailscale_ids(
         "cloudflare": (
             model_sync_remote.ObservedResource("tunnel-proof", "proof-stack-cloudflared", "tunnel"),
             model_sync_remote.ObservedResource("dns-proof", "coder.example.test", "dns_record"),
-            model_sync_remote.ObservedResource("app-proof", "coder.example.test", "access_application"),
+            model_sync_remote.ObservedResource(
+                "app-proof", "coder.example.test", "access_application"
+            ),
         ),
         "tailscale": (
             model_sync_remote.ObservedResource("stable-node-proof", "proof-tailnet-node", "node"),
@@ -3448,7 +4092,9 @@ def test_post_install_snapshot_uses_authoritative_cloudflare_and_tailscale_ids(
         inventory=observed,
         plane_states={plane: "present" for plane in observed},
     )
-    monkeypatch.setattr(model_sync_host_b, "capture_local_authoritative_inventory", lambda *_args: probe)
+    monkeypatch.setattr(
+        model_sync_host_b, "capture_local_authoritative_inventory", lambda *_args: probe
+    )
     monkeypatch.setattr(model_sync_host_b, "_image_inventory", lambda _stack_name: [])
     monkeypatch.setattr(model_sync_host_b, "_coder_login", lambda *_args: "session")
     monkeypatch.setattr(model_sync_host_b, "_coder_container_name", lambda *_args: "coder")
@@ -3528,9 +4174,10 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     assert result["single_host_lifecycle_sha256"] is None
     post_install_cloudflare = baseline["post_install_cloudflare"]
     assert isinstance(post_install_cloudflare, list)
-    assert result["post_install_cloudflare_sha256"] == hashlib.sha256(
-        canonical_json_bytes(post_install_cloudflare)
-    ).hexdigest()
+    assert (
+        result["post_install_cloudflare_sha256"]
+        == hashlib.sha256(canonical_json_bytes(post_install_cloudflare)).hexdigest()
+    )
     assert all(
         set(record) == {"fingerprint_sha256", "id", "kind", "match", "provenance"}
         for record in post_install_cloudflare
@@ -3545,9 +4192,10 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
     assert host_b_preflight["host_identity_mode"] == "distinct"
     assert host_b_preflight["provenance_role"] == "host_b"
     assert guard.attestation is not None
-    assert result["abort_guard_sha256"] == hashlib.sha256(
-        canonical_json_bytes(guard.attestation.to_payload())
-    ).hexdigest()
+    assert (
+        result["abort_guard_sha256"]
+        == hashlib.sha256(canonical_json_bytes(guard.attestation.to_payload())).hexdigest()
+    )
     assert ".omo/evidence/unrelated.txt" in manifest
     assert "abort-guard.json" not in manifest
     assert "baseline.json" not in manifest
@@ -3557,7 +4205,12 @@ def test_baseline_host_a_collects_complete_fixture_inventory_via_argparse(
         "SECRET-DOKPLOY-KEY",
         "SECRET-CODER-PASSWORD",
     )
-    assert all(secret not in command for client in clients for command in client.commands for secret in sentinels)
+    assert all(
+        secret not in command
+        for client in clients
+        for command in client.commands
+        for secret in sentinels
+    )
     assert all(
         secret not in path.read_text(encoding="utf-8")
         for path in artifact_dir.iterdir()
@@ -3633,7 +4286,16 @@ def test_baseline_host_a_rejects_unknown_preexisting_protected_manifest(
 
 @pytest.mark.parametrize(
     "invalid_kind",
-    ["missing", "digest", "symlink", "intermediate-symlink", "directory", "fifo", "oversized", "entry-count"],
+    [
+        "missing",
+        "digest",
+        "symlink",
+        "intermediate-symlink",
+        "directory",
+        "fifo",
+        "oversized",
+        "entry-count",
+    ],
 )
 def test_baseline_host_a_rejects_unverified_protected_artifact(
     tmp_path: Path,
@@ -3826,7 +4488,9 @@ def test_protected_contract_reads_tolerate_arbitrary_short_reads(
     assert protected_bytes(paths) == expected
 
 
-@pytest.mark.parametrize("name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"])
+@pytest.mark.parametrize(
+    "name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"]
+)
 @pytest.mark.parametrize("kind", ["symlink", "directory", "fifo", "mode"])
 def test_protected_contract_rejects_unauthorized_file_kinds_before_read(
     tmp_path: Path,
@@ -3869,7 +4533,9 @@ def test_protected_contract_rejects_unauthorized_file_kinds_before_read(
         protected_bytes(paths)
 
 
-@pytest.mark.parametrize("name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"])
+@pytest.mark.parametrize(
+    "name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"]
+)
 def test_protected_contract_rejects_oversize_before_content_or_repository_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3910,7 +4576,9 @@ def test_protected_contract_rejects_trailing_bytes(tmp_path: Path, name: str) ->
         protected_bytes(paths)
 
 
-@pytest.mark.parametrize("name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"])
+@pytest.mark.parametrize(
+    "name", ["protected-artifacts-before.txt", "protected-artifacts-before.sha256"]
+)
 @pytest.mark.parametrize("mutation", ["growth", "replacement", "metadata"])
 def test_protected_contract_rejects_post_read_drift(
     tmp_path: Path,
@@ -4324,7 +4992,7 @@ def test_baseline_host_a_recovers_exact_env_for_each_signal_boundary(
     env_file.chmod(0o600)
     backup = tmp_path / "secrets" / "install.env.backup"
     guard = tmp_path / "abort-guard.json"
-    child = r'''
+    child = r"""
 from __future__ import annotations
 import argparse
 import hashlib
@@ -4443,7 +5111,7 @@ args = argparse.Namespace(
     output=env_file.parent / "result.json",
 )
 model_sync_cli._baseline_host_a(args)
-'''
+"""
     process = subprocess.Popen(
         [
             os.environ.get("PYTHON", "python"),
@@ -4496,22 +5164,24 @@ model_sync_cli._baseline_host_a(args)
             json.loads(task_outputs["result.json"].read_text(encoding="utf-8")),
             "result",
         )
-        assert result["abort_guard_sha256"] == hashlib.sha256(
-            canonical_json_bytes(status.attestation.to_payload())
-        ).hexdigest()
+        assert (
+            result["abort_guard_sha256"]
+            == hashlib.sha256(canonical_json_bytes(status.attestation.to_payload())).hexdigest()
+        )
         assert result["baseline_sha256"] == actual_hashes["baseline.json"]
         assert result["host_a_preflight_sha256"] == actual_hashes["host-a-preflight.json"]
         assert result["host_b_preflight_sha256"] == actual_hashes["host-b-preflight.json"]
-        assert result["protected_artifacts_before_sha256"] == actual_hashes[
-            "protected-artifacts-before.txt"
-        ]
+        assert (
+            result["protected_artifacts_before_sha256"]
+            == actual_hashes["protected-artifacts-before.txt"]
+        )
         assert result["env_original_sha256"] == hashlib.sha256(original).hexdigest()
         assert result["env_proof_sha256"] == hashlib.sha256(proof).hexdigest()
 
         manifest_hashes: dict[str, str] = {}
-        for line in task_outputs["protected-artifacts-before.txt"].read_text(
-            encoding="utf-8"
-        ).splitlines():
+        for line in (
+            task_outputs["protected-artifacts-before.txt"].read_text(encoding="utf-8").splitlines()
+        ):
             fingerprint, name = line.split("  ", 1)
             manifest_hashes[name] = fingerprint
         assert manifest_hashes == {
@@ -4519,15 +5189,18 @@ model_sync_cli._baseline_host_a(args)
         }
 
         abort_status_output = tmp_path / "status" / "abort-status.json"
-        assert main(
-            [
-                "abort-status",
-                "--guard",
-                str(guard),
-                "--output",
-                str(abort_status_output),
-            ]
-        ) == 0
+        assert (
+            main(
+                [
+                    "abort-status",
+                    "--guard",
+                    str(guard),
+                    "--output",
+                    str(abort_status_output),
+                ]
+            )
+            == 0
+        )
         abort_status = model_sync_artifacts.require_mapping(
             json.loads(abort_status_output.read_text(encoding="utf-8")),
             "abort status",
@@ -4563,7 +5236,9 @@ model_sync_cli._baseline_host_a(args)
                 tmp_path / "repository",
             ),
             pid=os.getpid(),
-            start_time_ticks=process_start_time_ticks(Path("/proc/self/stat").read_text(encoding="utf-8")),
+            start_time_ticks=process_start_time_ticks(
+                Path("/proc/self/stat").read_text(encoding="utf-8")
+            ),
         )
         recover_interrupted_proof(recovery)
     elif boundary == "after-finalize":
@@ -4577,9 +5252,10 @@ model_sync_cli._baseline_host_a(args)
         assert status.claimant_kind == "plan"
         assert status.phase == "complete"
         assert status.attestation is not None
-        assert result["abort_guard_sha256"] == hashlib.sha256(
-                canonical_json_bytes(status.attestation.to_payload())
-        ).hexdigest()
+        assert (
+            result["abort_guard_sha256"]
+            == hashlib.sha256(canonical_json_bytes(status.attestation.to_payload())).hexdigest()
+        )
         assert ".omo/evidence/unrelated.txt" in manifest
         assert "RECOVERY" in stdout
     else:
@@ -4593,7 +5269,9 @@ model_sync_cli._baseline_host_a(args)
     assert b"SECRET-SIGNAL-SENTINEL" not in (stdout + stderr).encode()
 
 
-@pytest.mark.parametrize("signals", [(signal.SIGINT, signal.SIGTERM), (signal.SIGTERM, signal.SIGINT)])
+@pytest.mark.parametrize(
+    "signals", [(signal.SIGINT, signal.SIGTERM), (signal.SIGTERM, signal.SIGINT)]
+)
 def test_nested_signal_does_not_interrupt_active_recovery(
     tmp_path: Path, signals: tuple[signal.Signals, signal.Signals]
 ) -> None:
@@ -4603,7 +5281,7 @@ def test_nested_signal_does_not_interrupt_active_recovery(
     env_file.chmod(0o600)
     backup = tmp_path / "backup.env"
     guard = tmp_path / "abort-guard.json"
-    child = r'''
+    child = r"""
 import os, signal, sys
 from pathlib import Path
 from dokploy_wizard.proof import ProofRecoveryPaths, model_sync_artifacts, model_sync_cli
@@ -4629,10 +5307,13 @@ model_sync_cli.recover_interrupted_proof = paused
 model_sync_cli._install_recovery_handlers(recovery)
 print("ARMED", flush=True)
 signal.pause()
-'''
+"""
     process = subprocess.Popen(
         [os.environ.get("PYTHON", "python"), "-c", child, str(env_file), str(backup), str(guard)],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
         env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[2] / "src")},
     )
     assert process.stdout is not None and process.stdin is not None
@@ -4697,7 +5378,7 @@ def test_sigkill_after_named_finalization_boundary_converges_from_disk(
         f"{hashlib.sha256(manifest).hexdigest()}  protected-artifacts-before.txt\n".encode(),
     )
     marker = tmp_path / "boundary.marker"
-    child = r'''
+    child = r"""
 import os
 import sys
 from pathlib import Path
@@ -4780,7 +5461,7 @@ if boundary.startswith("rollback-"):
     recover_interrupted_proof(recovery, boundary_hook=pause_at_target)
 else:
     finalize_baseline_artifacts(inputs, boundary_hook=pause_at_target)
-'''
+"""
     process = subprocess.Popen(
         [
             os.environ.get("PYTHON", "python"),

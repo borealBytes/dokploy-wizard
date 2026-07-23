@@ -139,7 +139,11 @@ def _raw_resources(resources: tuple[CloudflareResourceEvidence, ...]) -> list[Js
         if item.fingerprint_sha256 is None or item.match is None or item.provenance is None:
             raise ValueError("Cloudflare resource evidence is incomplete")
         values.append(
-            {"fingerprint_sha256": item.fingerprint_sha256, "id": item.resource_id,
-             "kind": item.kind, "name": item.name}
+            {
+                "fingerprint_sha256": item.fingerprint_sha256,
+                "id": item.resource_id,
+                "kind": item.kind,
+                "name": item.name,
+            }
         )
     return values
