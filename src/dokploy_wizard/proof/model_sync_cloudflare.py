@@ -22,6 +22,7 @@ CloudflareMatch = Literal["exact", "foreign"]
 _SUPPORTED_KINDS = frozenset(
     {"dns_record", "tunnel", "hostname_route", "access_application", "access_policy"}
 )
+_PARENT_SCOPED_MULTI_INSTANCE_KINDS = frozenset({"access_policy", "hostname_route"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +183,7 @@ def _parse_resources(
             if kind not in _SUPPORTED_KINDS:
                 raise CaptureSchemaError("Cloudflare exact resource kind is unsupported")
             exact_identity = (kind, name)
-            if exact_identity in exact_names:
+            if exact_identity in exact_names and kind not in _PARENT_SCOPED_MULTI_INSTANCE_KINDS:
                 raise CaptureSchemaError("Cloudflare exact deterministic resource is duplicated")
             exact_names.add(exact_identity)
         resources.append(CloudflareResource(resource_id, kind, fingerprint, match, "foreign"))
