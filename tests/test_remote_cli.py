@@ -169,6 +169,37 @@ class _FakeRemoteTransport:
         if self.output_callback is not None:
             self.output_callback(subcommand, "stdout", f"{subcommand} streamed")
 
+    def capture(self, _subcommand: str, _command: str, _limits: Any) -> Any:
+        raise AssertionError("capture should not run for ordinary remote commands")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _Task1CleanupTransport:
+    def __init__(self, cleanup_stdout: bytes) -> None:
+        self.cleanup_stdout = cleanup_stdout
+        self.closed = False
+        self.capture_calls: list[tuple[str, str]] = []
+
+    def ensure_dir(self, _remote_path: str) -> None:
+        return None
+
+    def upload(self, _local_path: Path, _remote_path: str) -> None:
+        return None
+
+    def chmod(self, _remote_path: str, _mode: int) -> None:
+        return None
+
+    def run(self, _subcommand: str, _command: str) -> None:
+        return None
+
+    def capture(self, subcommand: str, command: str, _limits: Any) -> Any:
+        self.capture_calls.append((subcommand, command))
+        from dokploy_wizard.remote_transport import RemoteCommandOutput
+
+        return RemoteCommandOutput(stdout=self.cleanup_stdout, stderr=b"cleanup progress\n")
+
     def close(self) -> None:
         self.closed = True
 
@@ -247,6 +278,27 @@ def test_remote_parser_defaults_match_contract() -> None:
     assert proof_args.verbose is True
     assert proof_args.strict_idempotency is False
     assert strict_proof_args.strict_idempotency is True
+
+
+def test_remote_task1_context_is_explicit_and_forwarded_to_remote_commands() -> None:
+    from dokploy_wizard.remote_transport import RemoteTransportSession
+
+    remote_cli = import_remote_cli_module()
+    context = Path("/tmp/task1-proof-context.json")
+    args = remote_cli.build_parser().parse_args(
+        ["proof", "--host", "example.com", "--task1-proof-context", str(context)]
+    )
+    session = RemoteTransportSession(
+        _FakeRemoteTransport(output_callback=None),
+        "/root/dokploy-wizard",
+        task1_proof_context=context,
+    )
+
+    command = remote_cli._build_install_command(session)
+
+    assert args.task1_proof_context == context
+    assert "--task1-proof-context" in command
+    assert "/root/dokploy-wizard/task1-proof-context.json" in command
 
 
 @pytest.mark.parametrize(
@@ -661,73 +713,168 @@ def test_missing_env_file_verbose_fails_cleanly_without_traceback_or_password() 
     assert password not in result.stderr
 
 
-def test_create_repo_archive_excludes_local_env_backups(tmp_path: Path) -> None:
-    remote_cli = import_remote_cli_module()
+def _create_committed_archive_fixture(tmp_path: Path) -> Path:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    (repo_root / "keep.txt").write_text("safe\n", encoding="utf-8")
-    (repo_root / ".install.env.example").write_text("safe-example\n", encoding="utf-8")
-    (repo_root / ".install.env.bak").write_text("secret\n", encoding="utf-8")
-    (repo_root / ".install.env.swp").write_text("secret\n", encoding="utf-8")
-    (repo_root / ".fresh-vps-validation.env.backup").write_text("secret\n", encoding="utf-8")
+    (repo_root / "src" / "dokploy_wizard").mkdir(parents=True)
+    (repo_root / "bin").mkdir()
+    (repo_root / "templates").mkdir()
+    (repo_root / "src" / "dokploy_wizard" / "__init__.py").write_text("\n", encoding="utf-8")
+    (repo_root / "bin" / "dokploy-wizard").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (repo_root / "templates" / "deploy.yaml").write_text("services: {}\n", encoding="utf-8")
+    (repo_root / ".install.env.example").write_text("ROOT_DOMAIN=example.com\n", encoding="utf-8")
+    (repo_root / ".gitignore").write_text(
+        ".*.env\n.playwright-mcp/\n.omo/\n.codegraph/\n",
+        encoding="utf-8",
+    )
 
-    archive_path = tmp_path / "repo.tar.gz"
-    remote_cli._create_repo_archive(repo_root=repo_root, destination=archive_path)
+    init = subprocess.run(
+        ["git", "-C", str(repo_root), "init"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert init.returncode == 0, init.stderr
+    add = subprocess.run(
+        ["git", "-C", str(repo_root), "add", "."],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert add.returncode == 0, add.stderr
+    commit = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "-c",
+            "user.name=Archive Test",
+            "-c",
+            "user.email=archive-test@example.invalid",
+            "commit",
+            "-m",
+            "archive fixture",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert commit.returncode == 0, commit.stderr
+    return repo_root
 
-    with tarfile.open(archive_path, "r:gz") as archive:
-        members = set(archive.getnames())
 
-    assert "keep.txt" in members
-    assert ".install.env.example" in members
-    assert ".install.env.bak" not in members
-    assert ".install.env.swp" not in members
-    assert ".fresh-vps-validation.env.backup" not in members
-
-
-def test_create_repo_archive_characterizes_safe_env_and_regular_source_handling(
+def test_task1_cleanup_cli_writes_only_exact_remote_json_to_stdout(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsysbinary: pytest.CaptureFixture[bytes],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    (repo_root / "src").mkdir()
-    (repo_root / "src" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (repo_root / ".install.env").write_text("TOP_SECRET=value\n", encoding="utf-8")
-    (repo_root / ".install.env.example").write_text("TOP_SECRET=example\n", encoding="utf-8")
+    cleanup_json = b'{"status":"complete","schema_version":1}\n'
+    transport = _Task1CleanupTransport(cleanup_json)
+    env_file = _write_remote_env(tmp_path, packs="nextcloud")
+
+    monkeypatch.setattr(
+        remote_cli.ParamikoRemoteTransport,
+        "connect",
+        lambda **_kwargs: transport,
+    )
+    monkeypatch.setattr(remote_cli, "_validate_task1_proof_context", lambda _args: None)
+
+    exit_code = remote_cli.main(
+        [
+            "task1-cleanup",
+            "--host",
+            "cleanup.example.test",
+            "--password",
+            "cleanup-password-sentinel",
+            "--env-file",
+            str(env_file),
+            "--task1-proof-context",
+            str(tmp_path / "task1-proof-context.json"),
+        ]
+    )
+
+    captured = capsysbinary.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == cleanup_json
+    assert json.loads(captured.out) == {"status": "complete", "schema_version": 1}
+    assert b"[remote" not in captured.out
+    assert b"cleanup.example.test" not in captured.out
+    assert b"cleanup-password-sentinel" not in captured.out
+    assert b"[remote] starting remote task1-cleanup" in captured.err
+    assert len(transport.capture_calls) == 1
+    assert transport.capture_calls[0][0] == "task1-cloudflare-cleanup"
+
+
+def test_create_repo_archive_includes_only_committed_tree_members(tmp_path: Path) -> None:
+    remote_cli = import_remote_cli_module()
+    repo_root = _create_committed_archive_fixture(tmp_path)
+    untracked_paths = (
+        ".install.env",
+        ".install-min.env",
+        ".install.env.backup",
+        ".playwright-mcp/session.json",
+        ".omo/plan.json",
+        ".codegraph/index.sqlite",
+        "untracked-sentinel.txt",
+    )
+    for relative_path in untracked_paths:
+        path = repo_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("untracked sentinel\n", encoding="utf-8")
 
     archive_path = tmp_path / "repo.tar.gz"
-
     remote_cli._create_repo_archive(repo_root=repo_root, destination=archive_path)
 
     with tarfile.open(archive_path, "r:gz") as archive:
-        members = set(archive.getnames())
+        members = archive.getnames()
 
-    assert "src/module.py" in members
-    assert ".install.env.example" in members
-    assert ".install.env" not in members
+    for committed_path in (
+        "src/dokploy_wizard/__init__.py",
+        "bin/dokploy-wizard",
+        "templates/deploy.yaml",
+        ".install.env.example",
+    ):
+        assert members.count(committed_path) == 1
+    for untracked_path in untracked_paths:
+        assert untracked_path not in members
 
 
-def test_create_repo_archive_excludes_task_one_untracked_proof_drift(tmp_path: Path) -> None:
+def test_create_repo_archive_requires_a_committed_head(tmp_path: Path) -> None:
     remote_cli = import_remote_cli_module()
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    (repo_root / ".codegraph").mkdir()
-    (repo_root / ".codegraph" / "index.sqlite").write_text("drift\n", encoding="utf-8")
-    (repo_root / ".omo").mkdir()
-    (repo_root / ".omo" / "plan.json").write_text("drift\n", encoding="utf-8")
-    (repo_root / "uv.lock").write_text("drift\n", encoding="utf-8")
-    (repo_root / "src.py").write_text("safe\n", encoding="utf-8")
+    init = subprocess.run(
+        ["git", "-C", str(repo_root), "init"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert init.returncode == 0, init.stderr
 
     archive_path = tmp_path / "repo.tar.gz"
-    remote_cli._create_repo_archive(repo_root=repo_root, destination=archive_path)
 
-    with tarfile.open(archive_path, "r:gz") as archive:
-        members = set(archive.getnames())
+    with pytest.raises(RuntimeError):
+        remote_cli._create_repo_archive(repo_root=repo_root, destination=archive_path)
 
-    assert "src.py" in members
-    assert ".codegraph/index.sqlite" not in members
-    assert ".omo/plan.json" not in members
-    assert "uv.lock" not in members
+
+def test_create_repo_archive_fails_closed_when_git_archive_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_cli = import_remote_cli_module()
+    repo_root = _create_committed_archive_fixture(tmp_path)
+    responses = iter(
+        (
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="git failure"),
+        )
+    )
+    monkeypatch.setattr(remote_cli.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+
+    with pytest.raises(remote_cli.RepositoryArchiveError, match="git archive failed"):
+        remote_cli._create_repo_archive(repo_root=repo_root, destination=tmp_path / "repo.tar.gz")
 
 
 def test_remote_runtime_hydrates_connection_from_selected_env_file_unchanged(

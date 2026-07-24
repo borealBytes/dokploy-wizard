@@ -18,10 +18,18 @@ from dataclasses import dataclass
 from enum import StrEnum
 from ipaddress import ip_address
 from pathlib import Path, PurePosixPath
-from typing import Final, Literal, NamedTuple, TypeAlias, assert_never
+from typing import TYPE_CHECKING, Final, Literal, NamedTuple, TypeAlias, assert_never
 from urllib.parse import urlsplit
 
+from dokploy_wizard.proof.model_sync_task1_evidence_schema import (
+    Task1ProofContextEvidenceV1,
+)
 from dokploy_wizard.verification import redact_text
+
+if TYPE_CHECKING:
+    from dokploy_wizard.proof.model_sync_task1_cloudflare_snapshot_evidence_schema import (
+        Task1CloudflareSnapshotEvidenceV1,
+    )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ACTIVE_REPOSITORY_ROOT: Final = Path(__file__).parents[3]
@@ -118,6 +126,12 @@ REQUIRED_RESULT_KEYS: Final = frozenset(
         "temporal_clean_epoch_evidence",
     }
 )
+CONTEXT_RESULT_KEY: Final = "task1_context_evidence"
+CLOUDFLARE_SNAPSHOT_RESULT_KEY: Final = "task1_cloudflare_snapshot_evidence"
+REQUIRED_CONTEXT_RESULT_KEYS: Final = REQUIRED_RESULT_KEYS | {
+    CONTEXT_RESULT_KEY,
+    CLOUDFLARE_SNAPSHOT_RESULT_KEY,
+}
 
 
 class FinalizationBoundary(StrEnum):
@@ -173,6 +187,7 @@ class PreparedEnv:
     original_sha256: str
     proof_sha256: str
     mode: int
+    restore_before_finalization: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,6 +514,7 @@ GuardPhase = Literal[
     "claimed",
     "env_intent",
     "proof_active",
+    "env_restored",
     "finalize_intent",
     "rollback",
     "complete",
@@ -513,15 +529,23 @@ class EnvReceipt:
     original_sha256: str
     proof_sha256: str
     mode: int
+    context_evidence: Task1ProofContextEvidenceV1 | None = None
 
-    def to_payload(self) -> dict[str, str | int]:
-        return {
+    def to_payload(self) -> dict[str, JsonValue]:
+        payload: dict[str, JsonValue] = {
             "backup_path": self.backup_path,
             "env_path": self.env_path,
             "mode": self.mode,
             "original_sha256": self.original_sha256,
             "proof_sha256": self.proof_sha256,
             "schema_version": 1,
+        }
+        if self.context_evidence is None:
+            return payload
+        return {
+            **payload,
+            "context_evidence": self.context_evidence.to_payload(),
+            "schema_version": 2,
         }
 
 
@@ -536,9 +560,11 @@ class BaselineAttestation:
     post_install_cloudflare_sha256: str
     output_sha256: Mapping[str, str]
     result_body: Mapping[str, JsonValue]
+    context_evidence: Task1ProofContextEvidenceV1 | None = None
+    cloudflare_snapshot_evidence: Task1CloudflareSnapshotEvidenceV1 | None = None
 
     def to_payload(self) -> dict[str, JsonValue]:
-        return {
+        payload: dict[str, JsonValue] = {
             "artifact_dir": self.artifact_dir,
             "env_receipt": self.env_receipt.to_payload(),
             "guard_id": self.guard_id,
@@ -555,6 +581,18 @@ class BaselineAttestation:
             "result_body": dict(self.result_body),
             "result_path": self.result_path,
             "schema_version": 2,
+        }
+        if self.context_evidence is None:
+            if self.cloudflare_snapshot_evidence is not None:
+                raise ValueError("legacy attestation cannot contain snapshot evidence")
+            return payload
+        if self.cloudflare_snapshot_evidence is None:
+            raise ValueError("context-active attestation requires snapshot evidence")
+        return {
+            **payload,
+            "context_evidence": self.context_evidence.to_payload(),
+            "cloudflare_snapshot_evidence": self.cloudflare_snapshot_evidence.to_payload(),
+            "schema_version": 3,
         }
 
 
@@ -793,7 +831,7 @@ def verify_protected_artifacts(
 def parse_env_receipt(value: JsonValue | None) -> EnvReceipt | None:
     if value is None:
         return None
-    expected = {
+    legacy = {
         "backup_path",
         "env_path",
         "mode",
@@ -801,17 +839,24 @@ def parse_env_receipt(value: JsonValue | None) -> EnvReceipt | None:
         "proof_sha256",
         "schema_version",
     }
-    if not isinstance(value, dict) or set(value) != expected:
+    active = legacy | {"context_evidence"}
+    if not isinstance(value, dict) or (set(value) != legacy and set(value) != active):
         raise ValueError("abort guard env receipt is invalid")
     mode = value["mode"]
     version = value["schema_version"]
     if (
         isinstance(version, bool)
-        or version != 1
         or isinstance(mode, bool)
         or not isinstance(mode, int)
         or not 1 <= mode <= 0o777
     ):
+        raise ValueError("abort guard env receipt is invalid")
+    context_evidence: Task1ProofContextEvidenceV1 | None
+    if version == 1 and set(value) == legacy:
+        context_evidence = None
+    elif version == 2 and set(value) == active and isinstance(value["context_evidence"], dict):
+        context_evidence = Task1ProofContextEvidenceV1.from_payload(value["context_evidence"])
+    else:
         raise ValueError("abort guard env receipt is invalid")
     return EnvReceipt(
         _path(value["env_path"]),
@@ -819,13 +864,14 @@ def parse_env_receipt(value: JsonValue | None) -> EnvReceipt | None:
         _hash(value["original_sha256"]),
         _hash(value["proof_sha256"]),
         mode,
+        context_evidence,
     )
 
 
 def parse_baseline_attestation(value: JsonValue | None) -> BaselineAttestation | None:
     if value is None:
         return None
-    expected = {
+    legacy = {
         "artifact_dir",
         "env_receipt",
         "guard_id",
@@ -839,17 +885,34 @@ def parse_baseline_attestation(value: JsonValue | None) -> BaselineAttestation |
         "result_path",
         "schema_version",
     }
+    active = legacy | {"context_evidence", "cloudflare_snapshot_evidence"}
     if (
         not isinstance(value, dict)
-        or set(value) != expected
+        or (set(value) != legacy and set(value) != active)
         or isinstance(value["schema_version"], bool)
-        or value["schema_version"] != 2
         or value["kind"] != "task-1-baseline-finalization"
     ):
         raise ValueError("abort guard attestation is invalid")
     receipt = parse_env_receipt(value["env_receipt"])
     outputs = value["output_sha256"]
     body = value["result_body"]
+    context_evidence: Task1ProofContextEvidenceV1 | None
+    cloudflare_snapshot_evidence: Task1CloudflareSnapshotEvidenceV1 | None
+    if value["schema_version"] == 2 and set(value) == legacy:
+        context_evidence = None
+        cloudflare_snapshot_evidence = None
+    elif (
+        value["schema_version"] == 3
+        and set(value) == active
+        and isinstance(value["context_evidence"], dict)
+        and isinstance(value["cloudflare_snapshot_evidence"], dict)
+    ):
+        context_evidence = Task1ProofContextEvidenceV1.from_payload(value["context_evidence"])
+        cloudflare_snapshot_evidence = _parse_cloudflare_snapshot_evidence(
+            value["cloudflare_snapshot_evidence"]
+        )
+    else:
+        raise ValueError("abort guard attestation is invalid")
     if (
         receipt is None
         or value["required_terminal"]
@@ -868,9 +931,31 @@ def parse_baseline_attestation(value: JsonValue | None) -> BaselineAttestation |
         _hash(value["post_install_cloudflare_sha256"]),
         {key: _hash(item) for key, item in outputs.items()},
         body,
+        context_evidence,
+        cloudflare_snapshot_evidence,
     )
     validate_baseline_attestation_bindings(attestation)
     return attestation
+
+
+def _parse_cloudflare_snapshot_evidence(
+    value: Mapping[str, JsonValue],
+) -> Task1CloudflareSnapshotEvidenceV1:
+    from dokploy_wizard.proof.model_sync_task1_cloudflare_snapshot_evidence_schema import (
+        Task1CloudflareSnapshotEvidenceV1,
+    )
+
+    return Task1CloudflareSnapshotEvidenceV1.from_payload(value)
+
+
+def _validate_cloudflare_snapshot_evidence(
+    evidence: Task1CloudflareSnapshotEvidenceV1,
+) -> None:
+    from dokploy_wizard.proof.model_sync_task1_cloudflare_snapshot_evidence_schema import (
+        validate_task1_cloudflare_snapshot_evidence,
+    )
+
+    validate_task1_cloudflare_snapshot_evidence(evidence)
 
 
 def validate_baseline_attestation_bindings(attestation: BaselineAttestation) -> None:
@@ -881,6 +966,23 @@ def validate_baseline_attestation_bindings(attestation: BaselineAttestation) -> 
     receipt = parse_env_receipt(attestation.env_receipt.to_payload())
     if receipt is None:
         raise ValueError("abort guard attestation receipt is invalid")
+    context_evidence = attestation.context_evidence
+    if context_evidence != receipt.context_evidence:
+        raise ValueError("abort guard attestation context evidence is invalid")
+    snapshot_evidence = attestation.cloudflare_snapshot_evidence
+    if context_evidence is None:
+        if snapshot_evidence is not None:
+            raise ValueError("abort guard attestation snapshot evidence is invalid")
+    else:
+        if snapshot_evidence is None:
+            raise ValueError("abort guard attestation snapshot evidence is invalid")
+        _validate_cloudflare_snapshot_evidence(snapshot_evidence)
+        if (
+            snapshot_evidence.context_sha256 != context_evidence.context_sha256
+            or snapshot_evidence.post_install_snapshot_sha256
+            != attestation.post_install_cloudflare_sha256
+        ):
+            raise ValueError("abort guard attestation snapshot evidence bindings are invalid")
     match attestation.host_identity_mode:
         case "distinct":
             expected_outputs = {
@@ -902,7 +1004,10 @@ def validate_baseline_attestation_bindings(attestation: BaselineAttestation) -> 
         raise ValueError("abort guard attestation outputs are invalid")
     outputs = {key: _hash(value) for key, value in attestation.output_sha256.items()}
     body = attestation.result_body
-    if frozenset(body) != REQUIRED_RESULT_KEYS - frozenset({"abort_guard_sha256"}):
+    required_keys = (
+        REQUIRED_CONTEXT_RESULT_KEYS if context_evidence is not None else REQUIRED_RESULT_KEYS
+    )
+    if frozenset(body) != required_keys - frozenset({"abort_guard_sha256"}):
         raise ValueError("abort guard attestation result keys are invalid")
     expected_bindings: dict[str, JsonValue] = {
         "abort_guard_path": guard_path,
@@ -917,6 +1022,18 @@ def validate_baseline_attestation_bindings(attestation: BaselineAttestation) -> 
         "protected_artifacts_before_sha256": outputs["protected-artifacts-before.txt"],
         "post_install_cloudflare_sha256": _hash(attestation.post_install_cloudflare_sha256),
     }
+    if context_evidence is None:
+        expected_bindings["schema_version"] = 2
+    else:
+        if snapshot_evidence is None:
+            raise ValueError("abort guard attestation snapshot evidence is invalid")
+        expected_bindings.update(
+            {
+                "schema_version": 3,
+                CONTEXT_RESULT_KEY: context_evidence.to_payload(),
+                CLOUDFLARE_SNAPSHOT_RESULT_KEY: snapshot_evidence.to_payload(),
+            }
+        )
     match attestation.host_identity_mode:
         case "distinct":
             expected_bindings.update(
@@ -942,6 +1059,21 @@ def validate_baseline_attestation_bindings(attestation: BaselineAttestation) -> 
         body[key] != value for key, value in expected_bindings.items()
     ):
         raise ValueError("abort guard attestation bindings are invalid")
+
+
+def _verify_baseline_snapshot_evidence(
+    content: bytes,
+    evidence: Task1CloudflareSnapshotEvidenceV1,
+) -> None:
+    from dokploy_wizard.proof.model_sync_task1_cloudflare_snapshot_evidence_schema import (
+        validate_baseline_snapshot_evidence_payload,
+    )
+
+    try:
+        value = require_mapping(json.loads(content), "baseline snapshot evidence")
+        validate_baseline_snapshot_evidence_payload(value, evidence)
+    except (CaptureSchemaError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise AbortGuardError("baseline snapshot evidence does not bind attestation") from error
 
 
 def parse_abort_guard(value: JsonValue) -> AbortGuard:
@@ -1004,6 +1136,7 @@ def validate_abort_guard(guard: AbortGuard) -> None:
         ("armed", "claimed", "process", False, False),
         ("armed", "env_intent", "process", True, False),
         ("armed", "proof_active", "process", True, False),
+        ("armed", "env_restored", "process", True, False),
         ("armed", "finalize_intent", "process", True, True),
         ("armed", "rollback", "plan", False, False),
         ("armed", "rollback", "plan", True, False),
@@ -1016,12 +1149,19 @@ def validate_abort_guard(guard: AbortGuard) -> None:
     }
     if combination not in legal:
         raise ValueError("abort guard phase combination is invalid")
-    if guard.attestation is not None and (
-        guard.env_receipt is None
-        or guard.attestation.guard_id != guard.guard_id
-        or receipt_identity(guard.attestation.env_receipt) != receipt_identity(guard.env_receipt)
-    ):
-        raise ValueError("abort guard attestation binding is invalid")
+    if guard.attestation is not None:
+        try:
+            validate_attestation(guard.attestation)
+        except ValueError as error:
+            raise ValueError("abort guard attestation binding is invalid") from error
+        if (
+            guard.env_receipt is None
+            or guard.attestation.guard_id != guard.guard_id
+            or receipt_identity(guard.attestation.env_receipt)
+            != receipt_identity(guard.env_receipt)
+            or guard.attestation.context_evidence != guard.env_receipt.context_evidence
+        ):
+            raise ValueError("abort guard attestation binding is invalid")
 
 
 def abort_guard_payload(guard: AbortGuard) -> dict[str, JsonValue]:
@@ -1082,7 +1222,7 @@ def receipt_identity(receipt: EnvReceipt) -> tuple[str, str, str, str, int]:
     )
 
 
-def receipt_payload(receipt: EnvReceipt | None) -> dict[str, str | int] | None:
+def receipt_payload(receipt: EnvReceipt | None) -> dict[str, JsonValue] | None:
     return None if receipt is None else receipt.to_payload()
 
 
@@ -1108,6 +1248,7 @@ def _guard_phase(value: JsonValue) -> GuardPhase:
                 | "claimed"
                 | "env_intent"
                 | "proof_active"
+                | "env_restored"
                 | "finalize_intent"
                 | "rollback"
                 | "complete"
@@ -1298,6 +1439,7 @@ def build_model_sync_parser() -> argparse.ArgumentParser:
     baseline.add_argument("--host-b-env", required=True)
     baseline.add_argument("--host-b-password-env", required=True)
     baseline.add_argument("--single-host-sequential", action="store_true")
+    baseline.add_argument("--task1-proof-context", action="store_true")
     baseline.add_argument("--source-base-commit", required=True)
     baseline.add_argument("--proof-commit", required=True)
     baseline.add_argument("--artifact-dir", type=Path, required=True)
@@ -1346,6 +1488,7 @@ class BaselineResultEvidence:
     legacy_workspace_managed_fingerprints_sha256: str
     preexisting_cloudflare_sha256: str
     post_install_cloudflare_sha256: str
+    cloudflare_snapshot_evidence: Task1CloudflareSnapshotEvidenceV1 | None = None
 
 
 def run_bounded_process(
@@ -1463,7 +1606,9 @@ def atomic_finalize(*, temp: Path, output: Path) -> None:
 
 
 def build_result(values: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
-    if frozenset(values) != REQUIRED_RESULT_KEYS:
+    schema_version = values.get("schema_version")
+    required_keys = REQUIRED_CONTEXT_RESULT_KEYS if schema_version == 3 else REQUIRED_RESULT_KEYS
+    if frozenset(values) != required_keys:
         raise ValueError("Task 1 result keys do not match the proof contract")
     _require_result_hashes(values)
     _require_result_digests(values)
@@ -1499,7 +1644,7 @@ def verify_result_bytes(attestation: BaselineAttestation, value: bytes) -> None:
 
 
 def baseline_result_values(evidence: BaselineResultEvidence) -> dict[str, JsonValue]:
-    return {
+    values: dict[str, JsonValue] = {
         "schema_version": 2,
         "source_base_commit": evidence.source_base_commit,
         "proof_commit": evidence.proof_commit,
@@ -1541,6 +1686,20 @@ def baseline_result_values(evidence: BaselineResultEvidence) -> dict[str, JsonVa
         "preexisting_cloudflare_sha256": evidence.preexisting_cloudflare_sha256,
         "post_install_cloudflare_sha256": evidence.post_install_cloudflare_sha256,
     }
+    context_evidence = evidence.env_receipt.context_evidence
+    snapshot_evidence = evidence.cloudflare_snapshot_evidence
+    if context_evidence is None:
+        if snapshot_evidence is not None:
+            raise ValueError("legacy result evidence cannot contain snapshot evidence")
+        return values
+    if snapshot_evidence is None:
+        raise ValueError("context-active result evidence requires snapshot evidence")
+    return {
+        **values,
+        "schema_version": 3,
+        CONTEXT_RESULT_KEY: context_evidence.to_payload(),
+        CLOUDFLARE_SNAPSHOT_RESULT_KEY: snapshot_evidence.to_payload(),
+    }
 
 
 def baseline_output_hashes(evidence: BaselineResultEvidence) -> dict[str, str]:
@@ -1573,6 +1732,8 @@ def build_baseline_attestation(
         evidence.post_install_cloudflare_sha256,
         baseline_output_hashes(evidence),
         {key: value for key, value in body.items() if key != "abort_guard_sha256"},
+        evidence.env_receipt.context_evidence,
+        evidence.cloudflare_snapshot_evidence,
     )
 
 
@@ -1659,24 +1820,54 @@ def verify_attestation(
         or receipt.backup_path != str(paths.backup_path.resolve())
     ):
         raise AbortGuardError("attestation paths do not bind the current recovery paths")
-    proof_mode = receipt.mode if receipt.original_sha256 == receipt.proof_sha256 else 0o600
-    if (
-        hashlib.sha256(read_proof_bytes(paths.env_file, 256 * 1024, proof_mode)).hexdigest()
-        != receipt.proof_sha256
-        or hashlib.sha256(read_proof_bytes(paths.backup_path, 256 * 1024, 0o600)).hexdigest()
-        != receipt.original_sha256
+    if receipt.context_evidence is not None:
+        if attestation.context_evidence != receipt.context_evidence:
+            raise AbortGuardError("attestation context evidence does not bind the guard receipt")
+        try:
+            from dokploy_wizard.proof.model_sync_task1_evidence import (
+                verify_task1_finalized_evidence,
+            )
+
+            verify_task1_finalized_evidence(
+                evidence=receipt.context_evidence,
+                source_path=paths.env_file,
+                backup_path=paths.backup_path,
+            )
+        except (OSError, ValueError) as error:
+            raise AbortGuardError("Task 1 context finalization evidence is invalid") from error
+    elif os.path.lexists(paths.backup_path):
+        proof_mode = receipt.mode if receipt.original_sha256 == receipt.proof_sha256 else 0o600
+        if (
+            hashlib.sha256(read_proof_bytes(paths.env_file, 256 * 1024, proof_mode)).hexdigest()
+            != receipt.proof_sha256
+            or hashlib.sha256(read_proof_bytes(paths.backup_path, 256 * 1024, 0o600)).hexdigest()
+            != receipt.original_sha256
+        ):
+            raise AbortGuardError("proof env or backup drifted from its receipt")
+    elif hashlib.sha256(read_proof_bytes(paths.env_file, 256 * 1024, receipt.mode)).hexdigest() != (
+        receipt.original_sha256
     ):
-        raise AbortGuardError("proof env or backup drifted from its receipt")
+        raise AbortGuardError("restored proof env drifted from its receipt")
     manifest = protected_bytes(paths)
     if (
         attestation.output_sha256["protected-artifacts-before.txt"]
         != hashlib.sha256(manifest).hexdigest()
     ):
         raise AbortGuardError("protected manifest drifted from attestation")
+    baseline_content: bytes | None = None
     for name, path in output_paths(paths, attestation.output_sha256).items():
         content = read_proof_bytes(path, _MAX_DATA_OUTPUT_BYTES, 0o600)
         if hashlib.sha256(content).hexdigest() != attestation.output_sha256[name]:
             raise AbortGuardError("attested output drifted")
+        if name == "baseline.json":
+            baseline_content = content
+    if attestation.cloudflare_snapshot_evidence is not None:
+        if baseline_content is None:
+            raise AbortGuardError("attested baseline lacks snapshot evidence")
+        _verify_baseline_snapshot_evidence(
+            baseline_content,
+            attestation.cloudflare_snapshot_evidence,
+        )
     expected_result = result_bytes_from_attestation(attestation)
     require_generated_bounds({}, expected_result)
     if require_result or os.path.lexists(paths.output):
@@ -1759,12 +1950,25 @@ def _require_capture_values(values: Mapping[str, JsonValue]) -> None:
     env_mode = values["env_mode"]
     if (
         isinstance(schema_version, bool)
-        or schema_version != 2
+        or schema_version not in {2, 3}
         or isinstance(env_mode, bool)
         or not isinstance(env_mode, int)
         or not 1 <= env_mode <= 0o777
     ):
         raise ValueError("result schema version and proof env mode are invalid")
+    if schema_version == 3:
+        context_evidence = values[CONTEXT_RESULT_KEY]
+        snapshot_evidence = values[CLOUDFLARE_SNAPSHOT_RESULT_KEY]
+        if not isinstance(context_evidence, dict) or not isinstance(snapshot_evidence, dict):
+            raise ValueError("result context evidence is invalid")
+        parsed_context = Task1ProofContextEvidenceV1.from_payload(context_evidence)
+        parsed_snapshot = _parse_cloudflare_snapshot_evidence(snapshot_evidence)
+        if (
+            parsed_snapshot.context_sha256 != parsed_context.context_sha256
+            or parsed_snapshot.post_install_snapshot_sha256
+            != values["post_install_cloudflare_sha256"]
+        ):
+            raise ValueError("result snapshot evidence bindings are invalid")
     mode = _host_identity_mode(values["host_identity_mode"])
     match mode:
         case "distinct":

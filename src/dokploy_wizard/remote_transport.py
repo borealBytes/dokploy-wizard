@@ -4,8 +4,9 @@ import posixpath
 import shlex
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 from dokploy_wizard.verification import redact_text
 
@@ -16,6 +17,26 @@ if TYPE_CHECKING:
 ProgressCallback = Callable[[str], None]
 RemoteOutputCallback = Callable[[str, str, str], None]
 REMOTE_OUTPUT_HEARTBEAT_INTERVAL_SECONDS = 30.0
+REMOTE_CAPTURE_READ_SIZE: Final[int] = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteCommandCaptureLimits:
+    timeout_seconds: float
+    max_stdout_bytes: int
+    max_stderr_bytes: int
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0:
+            raise ValueError("remote capture timeout must be positive")
+        if self.max_stdout_bytes <= 0 or self.max_stderr_bytes <= 0:
+            raise ValueError("remote capture output limits must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteCommandOutput:
+    stdout: bytes
+    stderr: bytes
 
 
 def _redact_secret(value: str, password: str | None) -> str:
@@ -39,6 +60,33 @@ class RemoteCommandFailure(RuntimeError):
         self.subcommand = subcommand
 
 
+class RemoteCapturedCommandFailure(RemoteCommandFailure):
+    """Raised when a bounded captured command cannot return a complete result."""
+
+    def __init__(
+        self,
+        *,
+        subcommand: str,
+        reason: Literal[
+            "timed out",
+            "stdout limit exceeded",
+            "stderr limit exceeded",
+            "nonzero status",
+            "invalid stream data",
+        ],
+        stderr: bytes,
+        exit_status: int | None = None,
+    ) -> None:
+        self.subcommand = subcommand
+        self.reason = reason
+        self.stderr = stderr
+        self.exit_status = exit_status
+        RuntimeError.__init__(
+            self,
+            f"remote captured command failed for {subcommand}: {reason}",
+        )
+
+
 class RemoteTransport(Protocol):
     def ensure_dir(self, remote_path: str) -> None: ...
 
@@ -48,6 +96,13 @@ class RemoteTransport(Protocol):
 
     def run(self, subcommand: str, command: str) -> None: ...
 
+    def capture(
+        self,
+        subcommand: str,
+        command: str,
+        limits: RemoteCommandCaptureLimits,
+    ) -> RemoteCommandOutput: ...
+
 
 class RemoteTransportSession:
     def __init__(
@@ -55,20 +110,36 @@ class RemoteTransportSession:
         transport: RemoteTransport,
         remote_root: str,
         *,
+        task1_proof_context: Path | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> None:
         self.transport = transport
         self.remote_root = remote_root.rstrip("/") or "/"
         self.remote_archive_path = posixpath.join(self.remote_root, "repo.tar.gz")
         self.remote_install_env_path = posixpath.join(self.remote_root, ".install.env")
+        self.remote_task1_proof_context_path = (
+            None
+            if task1_proof_context is None
+            else posixpath.join(self.remote_root, "task1-proof-context.json")
+        )
         self.remote_state_dir = posixpath.join(self.remote_root, "state")
         self.progress_callback = progress_callback
 
-    def upload_bundle(self, repo_archive: Path, install_env_file: Path) -> None:
+    def upload_bundle(
+        self,
+        repo_archive: Path,
+        install_env_file: Path,
+        task1_proof_context: Path | None = None,
+    ) -> None:
         self.transport.ensure_dir(self.remote_root)
         self.transport.upload(repo_archive, self.remote_archive_path)
         self.transport.upload(install_env_file, self.remote_install_env_path)
         self.transport.chmod(self.remote_install_env_path, 0o600)
+        if task1_proof_context is not None:
+            if self.remote_task1_proof_context_path is None:
+                raise ValueError("Task 1 proof context upload was not configured for this session")
+            self.transport.upload(task1_proof_context, self.remote_task1_proof_context_path)
+            self.transport.chmod(self.remote_task1_proof_context_path, 0o600)
 
     def run_proof(
         self,
@@ -131,26 +202,85 @@ class RemoteTransportSession:
         elapsed = time.monotonic() - started
         self._emit_progress(f"completed remote command: {subcommand} ({elapsed:.1f}s)")
 
+    def capture_command(
+        self,
+        *,
+        subcommand: str,
+        command: str,
+        limits: RemoteCommandCaptureLimits,
+        password: str | None = None,
+    ) -> RemoteCommandOutput:
+        self._emit_progress(f"starting remote command: {subcommand}")
+        started = time.monotonic()
+        try:
+            output = self.transport.capture(subcommand, command, limits)
+        except RemoteCommandFailure:
+            elapsed = time.monotonic() - started
+            self._emit_progress(f"failed remote command: {subcommand} ({elapsed:.1f}s)")
+            raise
+        except Exception as error:
+            elapsed = time.monotonic() - started
+            self._emit_progress(f"failed remote command: {subcommand} ({elapsed:.1f}s)")
+            raise RemoteCommandFailure(
+                subcommand=subcommand,
+                error=error,
+                password=password,
+            ) from error
+        elapsed = time.monotonic() - started
+        self._emit_progress(f"completed remote command: {subcommand} ({elapsed:.1f}s)")
+        return output
+
     def _emit_progress(self, message: str) -> None:
         if self.progress_callback is not None:
             self.progress_callback(message)
 
     def _build_install_command(self) -> str:
-        return self._with_unbuffered_python(
-            self._shell_join(
-                [
-                    "./bin/dokploy-wizard",
-                    "install",
-                    "--env-file",
-                    self.remote_install_env_path,
-                    "--state-dir",
-                    self.remote_state_dir,
-                    "--non-interactive",
-                ]
-            )
-        )
+        arguments = [
+            "./bin/dokploy-wizard",
+            "install",
+            "--env-file",
+            self.remote_install_env_path,
+            "--state-dir",
+            self.remote_state_dir,
+            "--non-interactive",
+        ]
+        arguments.extend(self._task1_proof_context_arguments())
+        return self._with_unbuffered_python(self._shell_join(arguments))
 
     def _build_verify_services_command(self) -> str:
+        arguments = [
+            "python3",
+            "-m",
+            "dokploy_wizard.service_verification_runner",
+            "--env-file",
+            self.remote_install_env_path,
+            "--state-dir",
+            self.remote_state_dir,
+        ]
+        arguments.extend(self._task1_proof_context_arguments())
+        return " ".join(
+            [
+                "PYTHONUNBUFFERED=1",
+                "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}",
+                self._shell_join(arguments),
+            ]
+        )
+
+    def _build_inspect_state_command(self) -> str:
+        arguments = [
+            "./bin/dokploy-wizard",
+            "inspect-state",
+            "--env-file",
+            self.remote_install_env_path,
+            "--state-dir",
+            self.remote_state_dir,
+        ]
+        arguments.extend(self._task1_proof_context_arguments())
+        return self._with_unbuffered_python(self._shell_join(arguments))
+
+    def build_task1_cloudflare_cleanup_command(self) -> str:
+        if self.remote_task1_proof_context_path is None:
+            raise ValueError("Task 1 Cloudflare cleanup requires a proof context")
         return " ".join(
             [
                 "PYTHONUNBUFFERED=1",
@@ -159,29 +289,22 @@ class RemoteTransportSession:
                     [
                         "python3",
                         "-m",
-                        "dokploy_wizard.service_verification_runner",
+                        "dokploy_wizard.proof.model_sync_task1_cloudflare_journal",
                         "--env-file",
                         self.remote_install_env_path,
                         "--state-dir",
                         self.remote_state_dir,
+                        "--task1-proof-context",
+                        self.remote_task1_proof_context_path,
                     ]
                 ),
             ]
         )
 
-    def _build_inspect_state_command(self) -> str:
-        return self._with_unbuffered_python(
-            self._shell_join(
-                [
-                    "./bin/dokploy-wizard",
-                    "inspect-state",
-                    "--env-file",
-                    self.remote_install_env_path,
-                    "--state-dir",
-                    self.remote_state_dir,
-                ]
-            )
-        )
+    def _task1_proof_context_arguments(self) -> list[str]:
+        if self.remote_task1_proof_context_path is None:
+            return []
+        return ["--task1-proof-context", self.remote_task1_proof_context_path]
 
     def _build_uninstall_destroy_command(self, remote_confirm_path: str) -> str:
         return self._with_unbuffered_python(
@@ -296,6 +419,87 @@ class ParamikoRemoteTransport:
 
     def run(self, subcommand: str, command: str) -> None:
         self._exec(command, in_remote_root=True, subcommand=subcommand)
+
+    def capture(
+        self,
+        subcommand: str,
+        command: str,
+        limits: RemoteCommandCaptureLimits,
+    ) -> RemoteCommandOutput:
+        remote_command = f"cd {shlex.quote(self.remote_root)} && {command}"
+        _stdin, stdout, _stderr = self.client.exec_command(
+            remote_command,
+            timeout=limits.timeout_seconds,
+        )
+        stdout_bytes = bytearray()
+        stderr_bytes = bytearray()
+        started = time.monotonic()
+
+        def drain_available() -> bool:
+            drained = False
+            while stdout.channel.recv_ready():
+                data = stdout.channel.recv(REMOTE_CAPTURE_READ_SIZE)
+                if not data:
+                    break
+                if not isinstance(data, bytes):
+                    stdout.channel.close()
+                    raise RemoteCapturedCommandFailure(
+                        subcommand=subcommand,
+                        reason="invalid stream data",
+                        stderr=bytes(stderr_bytes),
+                    )
+                if len(stdout_bytes) + len(data) > limits.max_stdout_bytes:
+                    stdout.channel.close()
+                    raise RemoteCapturedCommandFailure(
+                        subcommand=subcommand,
+                        reason="stdout limit exceeded",
+                        stderr=bytes(stderr_bytes),
+                    )
+                stdout_bytes.extend(data)
+                drained = True
+            while stdout.channel.recv_stderr_ready():
+                data = stdout.channel.recv_stderr(REMOTE_CAPTURE_READ_SIZE)
+                if not data:
+                    break
+                if not isinstance(data, bytes):
+                    stdout.channel.close()
+                    raise RemoteCapturedCommandFailure(
+                        subcommand=subcommand,
+                        reason="invalid stream data",
+                        stderr=bytes(stderr_bytes),
+                    )
+                if len(stderr_bytes) + len(data) > limits.max_stderr_bytes:
+                    stdout.channel.close()
+                    raise RemoteCapturedCommandFailure(
+                        subcommand=subcommand,
+                        reason="stderr limit exceeded",
+                        stderr=bytes(stderr_bytes),
+                    )
+                stderr_bytes.extend(data)
+                drained = True
+            return drained
+
+        while not stdout.channel.exit_status_ready():
+            drained = drain_available()
+            if time.monotonic() - started > limits.timeout_seconds:
+                stdout.channel.close()
+                raise RemoteCapturedCommandFailure(
+                    subcommand=subcommand,
+                    reason="timed out",
+                    stderr=bytes(stderr_bytes),
+                )
+            if not drained:
+                time.sleep(0.05)
+        drain_available()
+        exit_status = stdout.channel.recv_exit_status()
+        if exit_status != 0:
+            raise RemoteCapturedCommandFailure(
+                subcommand=subcommand,
+                reason="nonzero status",
+                stderr=bytes(stderr_bytes),
+                exit_status=exit_status,
+            )
+        return RemoteCommandOutput(stdout=bytes(stdout_bytes), stderr=bytes(stderr_bytes))
 
     def close(self) -> None:
         self.client.close()

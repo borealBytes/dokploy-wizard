@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -52,6 +53,12 @@ class FakeCloudflareBackend:
             return self.existing_tunnel
         return None
 
+    def list_tunnels_by_name(
+        self, account_id: str, tunnel_name: str
+    ) -> tuple[CloudflareTunnel, ...]:
+        tunnel = self.find_tunnel_by_name(account_id, tunnel_name)
+        return () if tunnel is None else (tunnel,)
+
     def create_tunnel(self, account_id: str, tunnel_name: str) -> CloudflareTunnel:
         del account_id
         tunnel = CloudflareTunnel(tunnel_id="created-tunnel", name=tunnel_name)
@@ -101,6 +108,10 @@ class FakeCloudflareBackend:
             proxied=proxied,
         )
 
+    def get_dns_record(self, zone_id: str, record_id: str) -> CloudflareDnsRecord | None:
+        del zone_id, record_id
+        return None
+
     def update_dns_record(
         self,
         zone_id: str,
@@ -145,6 +156,12 @@ class FakeCloudflareBackend:
             return self.access_provider
         return None
 
+    def list_access_identity_providers(
+        self, account_id: str
+    ) -> tuple[CloudflareAccessIdentityProvider, ...]:
+        del account_id
+        return () if self.access_provider is None else (self.access_provider,)
+
     def create_access_identity_provider(
         self, account_id: str, name: str
     ) -> CloudflareAccessIdentityProvider:
@@ -167,6 +184,12 @@ class FakeCloudflareBackend:
     ) -> CloudflareAccessApplication | None:
         del account_id
         return self.access_apps.get(domain)
+
+    def list_access_applications_by_domain(
+        self, account_id: str, domain: str
+    ) -> tuple[CloudflareAccessApplication, ...]:
+        application = self.find_access_application_by_domain(account_id, domain)
+        return () if application is None else (application,)
 
     def create_access_application(
         self,
@@ -198,6 +221,12 @@ class FakeCloudflareBackend:
     ) -> CloudflareAccessPolicy | None:
         del account_id, name
         return self.access_policies.get(app_id)
+
+    def list_access_policies_by_name(
+        self, account_id: str, app_id: str, name: str
+    ) -> tuple[CloudflareAccessPolicy, ...]:
+        policy = self.find_access_policy_by_name(account_id, app_id, name)
+        return () if policy is None else (policy,)
 
     def create_access_policy(
         self,
@@ -271,6 +300,71 @@ def test_litellm_admin_access_uses_configured_subdomain() -> None:
     assert any("https://ai-admin.example.com" in note for note in phase.result.notes)
 
 
+def test_task1_context_uses_external_otp_and_creates_access_before_unique_dns(
+    tmp_path: Path,
+) -> None:
+    from dokploy_wizard.proof.model_sync_task1_context import (
+        activate_task1_proof_context,
+        derive_task1_proof_context,
+    )
+    from dokploy_wizard.state import resolve_desired_state
+
+    source_values = {
+        "ROOT_DOMAIN": "example.com",
+        "PACKS": "seaweedfs,coder",
+        "AI_DEFAULT_PROVIDER": "openrouter",
+        "AI_DEFAULT_MODEL": "example/model",
+        "CLOUDFLARE_ACCOUNT_ID": "account-123",
+        "CLOUDFLARE_ZONE_ID": "zone-123",
+        "CLOUDFLARE_API_TOKEN": "test-token",
+        "DOKPLOY_ADMIN_EMAIL": "owner@example.com",
+    }
+    source_bytes = "".join(f"{key}={value}\n" for key, value in source_values.items()).encode()
+    prepared = derive_task1_proof_context(
+        source_values=source_values,
+        source_bytes=source_bytes,
+        source_path=tmp_path / ".install-min.env",
+        proof_directory=tmp_path / "proof",
+        attempt_token="0123456789abcdef0123456789abcdef",
+    )
+    backend = FakeCloudflareBackend(
+        access_provider=CloudflareAccessIdentityProvider(
+            provider_id="otp-provider-1",
+            name="One-time PIN login",
+            provider_type="onetimepin",
+        )
+    )
+    raw_env = RawEnvInput(format_version=1, values=prepared.uploaded_values)
+
+    with activate_task1_proof_context(prepared.context):
+        desired = resolve_desired_state(raw_env)
+        access = reconcile_cloudflare_access(
+            dry_run=True,
+            raw_env=raw_env,
+            desired_state=desired,
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=backend,
+        )
+        networking = reconcile_networking(
+            dry_run=True,
+            raw_env=raw_env,
+            desired_state=desired,
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            backend=backend,
+        )
+
+    assert access.provider_resource_id is None
+    assert access.result.otp_provider is not None
+    assert access.result.otp_provider.action == "reuse_external"
+    assert {item.action for item in access.result.applications} == {"create"}
+    assert {item.action for item in access.result.policies} == {"create"}
+    assert {item.action for item in networking.result.dns_records} == {"create"}
+    assert "coder-wildcard" not in desired.hostnames
+    assert desired.hostnames["litellm-admin"] in {
+        item.hostname for item in networking.result.dns_records
+    }
+
+
 def test_litellm_admin_access_falls_back_to_dokploy_admin_email() -> None:
     backend = FakeCloudflareBackend()
 
@@ -328,7 +422,9 @@ def _raw_env(overrides: dict[str, str] | None = None) -> RawEnvInput:
     )
 
 
-def _desired_state(*, cloudflare_access_otp_emails: tuple[str, ...] = ("owner@example.com",)) -> DesiredState:
+def _desired_state(
+    *, cloudflare_access_otp_emails: tuple[str, ...] = ("owner@example.com",)
+) -> DesiredState:
     return DesiredState(
         format_version=1,
         stack_name="wizard-stack",

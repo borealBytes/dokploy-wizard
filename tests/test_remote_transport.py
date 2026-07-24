@@ -32,6 +32,9 @@ class FakeTransport:
         if failure is not None:
             raise RuntimeError(failure)
 
+    def capture(self, _subcommand: str, _command: str, _limits: Any) -> Any:
+        raise AssertionError("capture should not run for ordinary remote commands")
+
 
 class SilentChannel:
     def __init__(self, *, running_polls: int = 3) -> None:
@@ -50,6 +53,67 @@ class SilentChannel:
 
     def recv_exit_status(self) -> int:
         return 0
+
+
+class CaptureChannel:
+    def __init__(
+        self,
+        *,
+        stdout: bytes,
+        stderr: bytes,
+        exit_status: int = 0,
+        ready: bool = True,
+    ) -> None:
+        self._stdout = bytearray(stdout)
+        self._stderr = bytearray(stderr)
+        self.exit_status = exit_status
+        self.ready = ready
+        self.closed = False
+
+    def exit_status_ready(self) -> bool:
+        return self.ready and not self._stdout and not self._stderr
+
+    def recv_ready(self) -> bool:
+        return bool(self._stdout)
+
+    def recv_stderr_ready(self) -> bool:
+        return bool(self._stderr)
+
+    def recv(self, size: int) -> bytes:
+        chunk = bytes(self._stdout[:size])
+        del self._stdout[:size]
+        return chunk
+
+    def recv_stderr(self, size: int) -> bytes:
+        chunk = bytes(self._stderr[:size])
+        del self._stderr[:size]
+        return chunk
+
+    def recv_exit_status(self) -> int:
+        return self.exit_status
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class CaptureStream:
+    def __init__(self, channel: CaptureChannel) -> None:
+        self.channel = channel
+
+
+class CaptureClient:
+    def __init__(self, channel: CaptureChannel) -> None:
+        self.channel = channel
+        self.command = ""
+        self.timeout = 0.0
+
+    def exec_command(
+        self, command: str, *, timeout: float
+    ) -> tuple[None, CaptureStream, CaptureStream]:
+        self.command = command
+        self.timeout = timeout
+        stream = CaptureStream(self.channel)
+        return None, stream, stream
 
 
 @pytest.fixture
@@ -116,6 +180,134 @@ def test_upload_records_remote_path_and_env_chmod(
         (str(install_env_file), "/root/dokploy-wizard/.install.env"),
     ]
     assert transport.chmod_calls == [("/root/dokploy-wizard/.install.env", 0o600)]
+
+
+def test_capture_returns_bounded_stdout_and_separate_stderr(
+    remote_transport_subject: ModuleType,
+) -> None:
+    output_events: list[tuple[str, str, str]] = []
+    client = CaptureClient(CaptureChannel(stdout=b'{"status":"complete"}\n', stderr=b"debug\n"))
+    transport = remote_transport_subject.ParamikoRemoteTransport(
+        client=client,
+        remote_root="/root/dokploy-wizard",
+        verbose=True,
+        output_callback=lambda subcommand, stream_name, line: output_events.append(
+            (subcommand, stream_name, line)
+        ),
+    )
+    limits = remote_transport_subject.RemoteCommandCaptureLimits(
+        timeout_seconds=1.0,
+        max_stdout_bytes=1024,
+        max_stderr_bytes=1024,
+    )
+
+    result = transport.capture("task1-cloudflare-cleanup", "cleanup-command", limits)
+
+    assert result.stdout == b'{"status":"complete"}\n'
+    assert result.stderr == b"debug\n"
+    assert client.command == "cd /root/dokploy-wizard && cleanup-command"
+    assert client.timeout == 1.0
+    assert output_events == []
+
+
+def test_capture_rejects_nonzero_status_without_exposing_stderr(
+    remote_transport_subject: ModuleType,
+) -> None:
+    secret = "capture-secret-sentinel"
+    client = CaptureClient(CaptureChannel(stdout=b"", stderr=secret.encode(), exit_status=1))
+    transport = remote_transport_subject.ParamikoRemoteTransport(
+        client=client,
+        remote_root="/root/dokploy-wizard",
+    )
+    limits = remote_transport_subject.RemoteCommandCaptureLimits(
+        timeout_seconds=1.0,
+        max_stdout_bytes=1024,
+        max_stderr_bytes=1024,
+    )
+
+    with pytest.raises(remote_transport_subject.RemoteCapturedCommandFailure) as caught:
+        transport.capture("task1-cloudflare-cleanup", "cleanup-command", limits)
+
+    assert secret not in str(caught.value)
+    assert caught.value.stderr == secret.encode()
+
+
+def test_capture_rejects_stdout_overflow_with_typed_failure(
+    remote_transport_subject: ModuleType,
+) -> None:
+    channel = CaptureChannel(stdout=b"12345", stderr=b"")
+    transport = remote_transport_subject.ParamikoRemoteTransport(
+        client=CaptureClient(channel),
+        remote_root="/root/dokploy-wizard",
+    )
+    limits = remote_transport_subject.RemoteCommandCaptureLimits(
+        timeout_seconds=1.0,
+        max_stdout_bytes=4,
+        max_stderr_bytes=1024,
+    )
+
+    with pytest.raises(remote_transport_subject.RemoteCapturedCommandFailure) as caught:
+        transport.capture("task1-cloudflare-cleanup", "cleanup-command", limits)
+
+    assert "stdout limit" in str(caught.value)
+    assert channel.closed is True
+
+
+def test_capture_rejects_timeout_with_typed_failure(
+    remote_transport_subject: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = CaptureChannel(stdout=b"", stderr=b"", ready=False)
+    transport = remote_transport_subject.ParamikoRemoteTransport(
+        client=CaptureClient(channel),
+        remote_root="/root/dokploy-wizard",
+    )
+    limits = remote_transport_subject.RemoteCommandCaptureLimits(
+        timeout_seconds=1.0,
+        max_stdout_bytes=1024,
+        max_stderr_bytes=1024,
+    )
+    monotonic_values = iter((0.0, 2.0))
+    monkeypatch.setattr(remote_transport_subject.time, "monotonic", lambda: next(monotonic_values))
+
+    with pytest.raises(remote_transport_subject.RemoteCapturedCommandFailure) as caught:
+        transport.capture("task1-cloudflare-cleanup", "cleanup-command", limits)
+
+    assert "timed out" in str(caught.value)
+    assert channel.closed is True
+
+
+def test_upload_bundle_preserves_explicit_env_and_context_file_modes(
+    remote_transport_subject: ModuleType,
+    make_fake_transport: Any,
+    repo_archive: Path,
+    install_env_file: Path,
+    tmp_path: Path,
+) -> None:
+    task1_context = tmp_path / "task1-proof-context.json"
+    task1_context.write_text('{"schema_version":1}\n', encoding="utf-8")
+    transport = make_fake_transport()
+    session = remote_transport_subject.RemoteTransportSession(
+        transport=transport,
+        remote_root="/root/dokploy-wizard",
+        task1_proof_context=task1_context,
+    )
+
+    session.upload_bundle(
+        repo_archive=repo_archive,
+        install_env_file=install_env_file,
+        task1_proof_context=task1_context,
+    )
+
+    assert transport.uploads == [
+        (str(repo_archive), "/root/dokploy-wizard/repo.tar.gz"),
+        (str(install_env_file), "/root/dokploy-wizard/.install.env"),
+        (str(task1_context), "/root/dokploy-wizard/task1-proof-context.json"),
+    ]
+    assert transport.chmod_calls == [
+        ("/root/dokploy-wizard/.install.env", 0o600),
+        ("/root/dokploy-wizard/task1-proof-context.json", 0o600),
+    ]
 
 
 def test_paramiko_ssh_exception_is_wrapped_redacted_and_closes_client(
@@ -372,8 +564,7 @@ def test_proof_lifecycle_commands_run_python_unbuffered(
     session.run_proof(strict_idempotency=True)
 
     assert all(
-        command.startswith("PYTHONUNBUFFERED=1 ")
-        for _subcommand, command in transport.commands
+        command.startswith("PYTHONUNBUFFERED=1 ") for _subcommand, command in transport.commands
     )
 
 

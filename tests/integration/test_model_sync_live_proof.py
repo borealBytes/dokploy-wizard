@@ -4113,7 +4113,9 @@ def test_remote_preflight_returns_typed_transport_error_for_encoded_payload_fail
     )
 
     # When / Then
-    with pytest.raises(model_sync_remote.RemoteProofError, match="remote preflight transport failed"):
+    with pytest.raises(
+        model_sync_remote.RemoteProofError, match="remote preflight transport failed"
+    ):
         model_sync_remote.probe_host(
             host="fixture-host",
             password="SECRET-PROOF-PASSWORD",
@@ -5523,8 +5525,8 @@ original_install = model_sync_cli._install_recovery_handlers
 original_finalize = model_sync_cli.finalize_baseline_artifacts
 original_restore = model_sync_cli._restore_recovery_handlers
 if boundary == "after-finalize":
-    def finalize(inputs):
-        original_finalize(inputs)
+    def finalize(inputs, *, artifact_payloads=None):
+        original_finalize(inputs, artifact_payloads=artifact_payloads)
         pause()
     model_sync_cli.finalize_baseline_artifacts = finalize
 if boundary == "before-handler":

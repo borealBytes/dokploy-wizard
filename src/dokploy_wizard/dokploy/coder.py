@@ -87,7 +87,6 @@ _COPILOT_BYOK_CHAT_ONLY_LIMITATION = (
 _CODER_STATE_REQUIRED_FOR_MODIFY = frozenset({"applied-state.json", "ownership-ledger.json"})
 
 
-
 class DokployCoderBackend:
     def __init__(
         self,
@@ -96,7 +95,7 @@ class DokployCoderBackend:
         api_key: str,
         stack_name: str,
         hostname: str,
-        wildcard_hostname: str,
+        wildcard_hostname: str | None,
         admin_email: str,
         admin_password: str,
         postgres_service_name: str,
@@ -157,7 +156,7 @@ class DokployCoderBackend:
     def create_service(self, **kwargs: object) -> CoderResourceRecord:
         resource_name = str(kwargs["resource_name"])
         hostname = str(kwargs["hostname"])
-        wildcard_hostname = str(kwargs["wildcard_hostname"])
+        wildcard_hostname = kwargs["wildcard_hostname"]
         postgres_service_name = str(kwargs["postgres_service_name"])
         postgres = kwargs["postgres"]
         data_resource_name = str(kwargs["data_resource_name"])
@@ -771,15 +770,25 @@ def _render_compose_file(
     *,
     stack_name: str,
     hostname: str,
-    wildcard_hostname: str,
+    wildcard_hostname: str | None,
     postgres_service_name: str,
     postgres: SharedPostgresAllocation,
 ) -> RenderedCompose:
     service_name = _service_name(stack_name)
     data_name = _data_name(stack_name)
     shared_network = _shared_network_name(stack_name)
-    wildcard_suffix = _wildcard_suffix(wildcard_hostname)
-    wildcard_host_pattern = re.escape(wildcard_suffix).replace("\\", "\\\\")
+    wildcard_env = ""
+    wildcard_router = ""
+    if wildcard_hostname is not None:
+        wildcard_suffix = _wildcard_suffix(wildcard_hostname)
+        wildcard_host_pattern = re.escape(wildcard_suffix).replace("\\", "\\\\")
+        wildcard_env = f"      CODER_WILDCARD_ACCESS_URL: {_yaml_quote(wildcard_hostname)}\n"
+        wildcard_router = (
+            f'      traefik.http.routers.{service_name}-wildcard.entrypoints: "websecure"\n'
+            f'      traefik.http.routers.{service_name}-wildcard.rule: "HostRegexp(`(?i)^[a-z0-9-]+(?:--[a-z0-9-]+){{2,}}\\\\.{wildcard_host_pattern}$`)"\n'
+            f'      traefik.http.routers.{service_name}-wildcard.middlewares: "{service_name}-forwarded-https"\n'
+            f'      traefik.http.routers.{service_name}-wildcard.tls: "true"\n'
+        )
     pg_url_env = "CODER_PG_CONNECTION_URL"
     pg_url = (
         f"postgres://{postgres.user_name}:change-me@{postgres_service_name}:5432/"
@@ -794,8 +803,8 @@ def _render_compose_file(
         "    environment:\n"
         "      CODER_HTTP_ADDRESS: 0.0.0.0:3000\n"
         f"      CODER_ACCESS_URL: {_yaml_quote(f'https://{hostname}/')}\n"
-        f"      CODER_WILDCARD_ACCESS_URL: {_yaml_quote(wildcard_hostname)}\n"
-        f"      CODER_PG_CONNECTION_URL: \"{_required_placeholder(pg_url_env)}\"\n"
+        f"{wildcard_env}"
+        f'      CODER_PG_CONNECTION_URL: "{_required_placeholder(pg_url_env)}"\n'
         '      CODER_DERP_FORCE_WEBSOCKETS: "true"\n'
         f"      CODER_PROXY_TRUSTED_HEADERS: {_yaml_quote('X-Forwarded-For')}\n"
         f"      CODER_PROXY_TRUSTED_ORIGINS: {_yaml_quote('10.0.0.0/8,172.16.0.0/12,192.168.0.0/16')}\n"
@@ -806,10 +815,7 @@ def _render_compose_file(
         f'      traefik.http.routers.{service_name}.rule: "Host(`{hostname}`)"\n'
         f'      traefik.http.routers.{service_name}.middlewares: "{service_name}-forwarded-https,{service_name}-forwarded-host"\n'
         f'      traefik.http.routers.{service_name}.tls: "true"\n'
-        f'      traefik.http.routers.{service_name}-wildcard.entrypoints: "websecure"\n'
-        f'      traefik.http.routers.{service_name}-wildcard.rule: "HostRegexp(`(?i)^[a-z0-9-]+(?:--[a-z0-9-]+){{2,}}\\\\.{wildcard_host_pattern}$`)"\n'
-        f'      traefik.http.routers.{service_name}-wildcard.middlewares: "{service_name}-forwarded-https"\n'
-        f'      traefik.http.routers.{service_name}-wildcard.tls: "true"\n'
+        f"{wildcard_router}"
         f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Proto: "https"\n'
         f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Port: "443"\n'
         f'      traefik.http.middlewares.{service_name}-forwarded-host.headers.customrequestheaders.X-Forwarded-Host: "{hostname}"\n'
@@ -1217,7 +1223,9 @@ def _safe_progress_reason(reason: str, *, limit: int = 360) -> str:
 
 def _template_version_name(*, template_dir: Path, replacements: dict[str, str] | None) -> str:
     digest = hashlib.sha256()
-    with _rendered_template_dir(template_dir=template_dir, replacements=replacements) as rendered_dir:
+    with _rendered_template_dir(
+        template_dir=template_dir, replacements=replacements
+    ) as rendered_dir:
         for path in sorted(path for path in rendered_dir.rglob("*") if path.is_file()):
             digest.update(path.relative_to(rendered_dir).as_posix().encode("utf-8"))
             digest.update(b"\0")
@@ -1239,7 +1247,9 @@ def _copy_template_into_container(
         capture_output=True,
         text=True,
     )
-    with _rendered_template_dir(template_dir=template_dir, replacements=replacements) as copy_source:
+    with _rendered_template_dir(
+        template_dir=template_dir, replacements=replacements
+    ) as copy_source:
         _docker_copy_template_dir(
             container_name=container_name,
             template_name=template_name,
@@ -1330,9 +1340,7 @@ def _push_default_template(
             template_version_name=template_version_name,
         ):
             return
-        raise CoderError(
-            f"Unable to push default Coder template '{template_name}': {output}"
-        )
+        raise CoderError(f"Unable to push default Coder template '{template_name}': {output}")
 
 
 def _is_duplicate_template_version_error(*, output: str, template_version_name: str) -> bool:
@@ -1343,10 +1351,7 @@ def _is_duplicate_template_version_error(*, output: str, template_version_name: 
         return False
     if "template version" not in normalized_output:
         return False
-    return (
-        "already exists" in normalized_output
-        or "already in use" in normalized_output
-    )
+    return "already exists" in normalized_output or "already in use" in normalized_output
 
 
 def _sync_hermes_workspace_secrets(
@@ -1476,7 +1481,9 @@ def _shell_double_quote_escape(value: str) -> str:
 
 def _litellm_workspace_fallback_models_json(*, default_alias: str) -> str:
     model_ids = [default_alias]
-    model_ids.extend(f"opencode-go/{model_id}" for model_id in verified_opencode_go_chat_model_ids())
+    model_ids.extend(
+        f"opencode-go/{model_id}" for model_id in verified_opencode_go_chat_model_ids()
+    )
     model_ids.append(_DEFAULT_CODER_OPENROUTER_ALIAS_SAMPLE)
     return json.dumps(list(dict.fromkeys(model_ids)))
 
@@ -1739,7 +1746,9 @@ def _list_template_versions(
     try:
         payload = json.loads(result.stdout or "[]")
     except json.JSONDecodeError as exc:
-        raise CoderError(f"Coder template version list for '{template_name}' returned invalid JSON.") from exc
+        raise CoderError(
+            f"Coder template version list for '{template_name}' returned invalid JSON."
+        ) from exc
     versions: list[dict[str, object]]
     if isinstance(payload, list):
         versions = [item for item in payload if isinstance(item, dict)]

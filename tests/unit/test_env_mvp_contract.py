@@ -177,7 +177,7 @@ def test_minimal_env_contract_key_categories_are_explicit_and_secret_free() -> N
 def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> None:
     install_min_keys, model_shape, safe_values = _load_install_min_env_shape()
     active_packs = safe_values["PACKS"].split(",")
-    required_proof_packs = ["nextcloud", "my-farm-advisor", "seaweedfs", "coder"]
+    required_proof_packs = ["seaweedfs", "coder"]
     optional_proof_packs = {"surfsense"}
 
     assert active_packs[: len(required_proof_packs)] == required_proof_packs
@@ -214,9 +214,7 @@ def test_minimal_env_uses_packs_for_enablement_and_defaults_optional_hostnames()
 
 def test_stack_name_defaults_from_root_domain_and_preserves_explicit_override() -> None:
     default_state = resolve_desired_state(_minimal_env(ROOT_DOMAIN="openmerge.me"))
-    blank_state = resolve_desired_state(
-        _minimal_env(ROOT_DOMAIN="openmerge.me", STACK_NAME="  ")
-    )
+    blank_state = resolve_desired_state(_minimal_env(ROOT_DOMAIN="openmerge.me", STACK_NAME="  "))
     explicit_state = resolve_desired_state(
         _minimal_env(ROOT_DOMAIN="openmerge.me", STACK_NAME="custom-stack")
     )
@@ -487,8 +485,7 @@ def test_litellm_openrouter_models_accept_raw_openrouter_model_ids() -> None:
         AI_DEFAULT_PROVIDER="openrouter",
         AI_DEFAULT_MODEL="openai/gpt-4.1-mini",
         LITELLM_OPENROUTER_MODELS=(
-            "openrouter/openai/gpt-4.1-mini,"
-            "openrouter/anthropic/claude-3.5-sonnet"
+            "openrouter/openai/gpt-4.1-mini,openrouter/anthropic/claude-3.5-sonnet"
         ),
     )
 

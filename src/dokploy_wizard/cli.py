@@ -126,6 +126,11 @@ from dokploy_wizard.preflight import (
     collect_host_facts,
     run_preflight,
 )
+from dokploy_wizard.proof.model_sync_task1_context import (
+    activate_task1_proof_context,
+    active_task1_proof_context,
+    validate_task1_proof_context_argument,
+)
 from dokploy_wizard.state import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
@@ -149,6 +154,13 @@ from dokploy_wizard.state import (
     write_applied_checkpoint,
     write_inspection_snapshot,
     write_target_state,
+)
+from dokploy_wizard.state.dokploy_runtime_auth import (
+    DokployRuntimeAuth,
+    load_dokploy_runtime_auth,
+    merge_dokploy_runtime_auth,
+    merge_dokploy_runtime_auth_desired_state,
+    persist_dokploy_runtime_auth,
 )
 from dokploy_wizard.state.inspection import build_live_drift_report
 from dokploy_wizard.tailscale import ShellTailscaleBackend, TailscaleBackend, TailscaleError
@@ -246,6 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="persist generated secrets without printing them to stdout",
     )
+    install_parser.add_argument("--task1-proof-context", type=Path, help=argparse.SUPPRESS)
     install_parser.set_defaults(handler=_handle_install)
 
     modify_parser = subparsers.add_parser("modify", help="modify supported wizard settings")
@@ -271,6 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable interactive pack-selection prompts",
     )
+    modify_parser.add_argument("--task1-proof-context", type=Path, help=argparse.SUPPRESS)
     modify_parser.set_defaults(handler=_handle_modify)
 
     uninstall_parser = subparsers.add_parser(
@@ -332,6 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the resolved desired state without writing files",
     )
+    inspect_state_parser.add_argument("--task1-proof-context", type=Path, help=argparse.SUPPRESS)
     inspect_state_parser.set_defaults(handler=_handle_inspect_state)
 
     return parser
@@ -352,15 +367,19 @@ def _handle_install(args: argparse.Namespace) -> int:
             non_interactive=args.non_interactive,
             dry_run=args.dry_run,
         )
-        summary = run_install_flow(
-            env_file=env_file,
-            state_dir=resolved_state_dir,
-            dry_run=args.dry_run,
-            raw_env=raw_env,
-            allow_memory_shortfall=getattr(args, "allow_memory_shortfall", False),
-            prompt_for_memory_shortfall=not args.non_interactive and _stdin_is_interactive(),
-            enforce_live_run_contamination_check=True,
+        context = validate_task1_proof_context_argument(
+            raw_env, getattr(args, "task1_proof_context", None)
         )
+        with activate_task1_proof_context(context):
+            summary = run_install_flow(
+                env_file=env_file,
+                state_dir=resolved_state_dir,
+                dry_run=args.dry_run,
+                raw_env=raw_env,
+                allow_memory_shortfall=getattr(args, "allow_memory_shortfall", False),
+                prompt_for_memory_shortfall=not args.non_interactive and _stdin_is_interactive(),
+                enforce_live_run_contamination_check=True,
+            )
     except (
         OSError,
         StateValidationError,
@@ -583,13 +602,17 @@ def _handle_modify(args: argparse.Namespace) -> int:
             non_interactive=args.non_interactive,
             warn_on_broad_permissions=not args.dry_run,
         )
-        summary = run_modify_flow(
-            env_file=args.env_file,
-            state_dir=args.state_dir,
-            dry_run=args.dry_run,
-            raw_env=raw_env,
-            enforce_live_run_contamination_check=True,
+        context = validate_task1_proof_context_argument(
+            raw_env, getattr(args, "task1_proof_context", None)
         )
+        with activate_task1_proof_context(context):
+            summary = run_modify_flow(
+                env_file=args.env_file,
+                state_dir=args.state_dir,
+                dry_run=args.dry_run,
+                raw_env=raw_env,
+                enforce_live_run_contamination_check=True,
+            )
     except (
         OSError,
         StateValidationError,
@@ -638,7 +661,18 @@ def _handle_inspect_state(args: argparse.Namespace) -> int:
     try:
         loaded_state = load_state_dir(args.state_dir)
         raw_env = parse_env_file(args.env_file)
-        desired_state = resolve_desired_state(raw_env)
+        context = validate_task1_proof_context_argument(
+            raw_env, getattr(args, "task1_proof_context", None)
+        )
+        with activate_task1_proof_context(context):
+            desired_state = resolve_desired_state(raw_env)
+        if context is not None:
+            runtime_auth = load_dokploy_runtime_auth(args.state_dir)
+            raw_env = merge_dokploy_runtime_auth(raw_env, runtime_auth)
+            desired_state = merge_dokploy_runtime_auth_desired_state(
+                desired_state,
+                runtime_auth,
+            )
         snapshot = _build_public_inspection_snapshot(
             raw_env=raw_env,
             desired_state=desired_state,
@@ -804,7 +838,9 @@ def _build_surfsense_inspection_status(
         "zero_admin_password",
         "searxng_secret",
     )
-    present_secret_names = set(generated_secrets.secrets) if generated_secrets is not None else set()
+    present_secret_names = (
+        set(generated_secrets.secrets) if generated_secrets is not None else set()
+    )
     return {
         "display_name": "SurfSense",
         "enabled": enabled,
@@ -837,7 +873,9 @@ def _build_surfsense_inspection_status(
             {
                 "name": name,
                 "present": name in present_secret_names,
-                "source": "surfsense-generated-secrets.json" if name in present_secret_names else None,
+                "source": "surfsense-generated-secrets.json"
+                if name in present_secret_names
+                else None,
             }
             for name in generated_secret_names
         ],
@@ -960,9 +998,7 @@ def _docker_login_if_configured(credentials: tuple[str, str] | None) -> None:
     )
 
 
-def _docker_login_failure_detail(
-    completed: subprocess.CompletedProcess[str], pat: str
-) -> str:
+def _docker_login_failure_detail(completed: subprocess.CompletedProcess[str], pat: str) -> str:
     parts: list[str] = []
     stdout = _redact_docker_login_text(completed.stdout or "", pat).strip()
     stderr = _redact_docker_login_text(completed.stderr or "", pat).strip()
@@ -1291,6 +1327,13 @@ def _run_lifecycle_flow(
     persistable_raw_env = _state_persistable_raw_env_input(raw_env)
     if not dry_run and not existing_state:
         persist_install_scaffold(state_dir, persistable_raw_env, desired_state)
+    if active_task1_proof_context() is not None:
+        runtime_auth = load_dokploy_runtime_auth(state_dir)
+        raw_env = merge_dokploy_runtime_auth(raw_env, runtime_auth)
+        desired_state = merge_dokploy_runtime_auth_desired_state(
+            desired_state,
+            runtime_auth,
+        )
     litellm_generated_keys = load_litellm_generated_keys(state_dir)
     if not dry_run:
         ensure_litellm_generated_keys(state_dir)
@@ -1309,13 +1352,20 @@ def _run_lifecycle_flow(
     if lifecycle_plan.mode != "noop":
         raw_env = _ensure_dokploy_api_auth(
             env_file=env_file,
+            state_dir=state_dir,
             raw_env=raw_env,
             desired_state=desired_state,
             bootstrap_backend=backend,
             dry_run=dry_run,
             require_real_dokploy_auth=require_real_dokploy_auth,
         )
-        desired_state = resolve_desired_state(raw_env)
+        if active_task1_proof_context() is None:
+            desired_state = resolve_desired_state(raw_env)
+        else:
+            desired_state = merge_dokploy_runtime_auth_desired_state(
+                desired_state,
+                load_dokploy_runtime_auth(state_dir),
+            )
         _qualify_dokploy_mutation_auth(
             raw_env=raw_env,
             desired_state=desired_state,
@@ -2282,14 +2332,17 @@ def _build_coder_backend(
         (item for item in desired_state.shared_core.allocations if item.pack_name == "coder"),
         None,
     )
-    if hostname is None or wildcard_hostname is None or allocation is None:
+    if hostname is None or allocation is None:
         return ShellCoderBackend()
     if allocation.postgres is None or desired_state.shared_core.postgres is None:
         return ShellCoderBackend()
     litellm_generated_keys = ensure_litellm_generated_keys(state_dir)
     ai_default_provider = _shared_ai_default_provider(raw_env)
     ai_default_model = _shared_ai_default_model(raw_env)
-    hermes_model = raw_env.values.get("HERMES_MODEL", "").strip() or f"{ai_default_provider}/{ai_default_model}"
+    hermes_model = (
+        raw_env.values.get("HERMES_MODEL", "").strip()
+        or f"{ai_default_provider}/{ai_default_model}"
+    )
     return DokployCoderBackend(
         api_url=api_url,
         api_key=api_key,
@@ -2302,7 +2355,9 @@ def _build_coder_backend(
         postgres=allocation.postgres,
         ai_default_provider=ai_default_provider,
         ai_default_model=ai_default_model,
-        hermes_inference_provider=raw_env.values.get("HERMES_INFERENCE_PROVIDER", "dokploy-litellm"),
+        hermes_inference_provider=raw_env.values.get(
+            "HERMES_INFERENCE_PROVIDER", "dokploy-litellm"
+        ),
         hermes_model=hermes_model,
         ai_default_base_url=_shared_ai_default_base_url(raw_env),
         ai_default_api_key=litellm_generated_keys.virtual_keys["coder-hermes"],
@@ -2953,6 +3008,7 @@ def _resolve_dokploy_admin_auth(values: dict[str, str]) -> tuple[str | None, str
 def _ensure_dokploy_api_auth(
     *,
     env_file: Path,
+    state_dir: Path | None = None,
     raw_env: RawEnvInput,
     desired_state: DesiredState,
     bootstrap_backend: DokployBootstrapBackend,
@@ -2968,7 +3024,7 @@ def _ensure_dokploy_api_auth(
         values["DOKPLOY_API_KEY"] = values["DOKPLOY_BOOTSTRAP_MOCK_API_KEY"]
         values["DOKPLOY_MOCK_API_MODE"] = "true"
         updated = RawEnvInput(format_version=raw_env.format_version, values=values)
-        _write_reusable_env_file(env_file, updated)
+        _persist_dokploy_api_auth(env_file, state_dir, updated)
         return updated
     if values.get("DOKPLOY_API_KEY"):
         values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
@@ -2979,7 +3035,7 @@ def _ensure_dokploy_api_auth(
             require_real_dokploy_auth=require_real_dokploy_auth,
         ):
             if not dry_run:
-                _write_reusable_env_file(env_file, updated)
+                _persist_dokploy_api_auth(env_file, state_dir, updated)
             return updated
     if dry_run or not require_real_dokploy_auth:
         return raw_env
@@ -2998,8 +3054,22 @@ def _ensure_dokploy_api_auth(
     values["DOKPLOY_API_URL"] = LOCAL_HEALTH_URL
     values["DOKPLOY_API_KEY"] = result.api_key
     updated = RawEnvInput(format_version=raw_env.format_version, values=values)
-    _write_reusable_env_file(env_file, updated)
+    _persist_dokploy_api_auth(env_file, state_dir, updated)
     return updated
+
+
+def _persist_dokploy_api_auth(env_file: Path, state_dir: Path | None, raw_env: RawEnvInput) -> None:
+    """Keep Task 1's hash-bound upload immutable while persisting generated API auth."""
+    if active_task1_proof_context() is None:
+        _write_reusable_env_file(env_file, raw_env)
+        return
+    if state_dir is None:
+        raise StateValidationError("Task 1 Dokploy auth requires a state directory")
+    api_url = raw_env.values.get("DOKPLOY_API_URL")
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    if api_url is None or api_key is None:
+        raise StateValidationError("Task 1 Dokploy auth persistence is incomplete")
+    persist_dokploy_runtime_auth(state_dir, DokployRuntimeAuth(api_url, api_key))
 
 
 def _can_reuse_existing_dokploy_api_key(

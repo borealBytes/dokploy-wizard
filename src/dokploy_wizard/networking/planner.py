@@ -29,6 +29,28 @@ from dokploy_wizard.networking.models import (
     PlannedTunnel,
     PlannedTunnelConnector,
 )
+from dokploy_wizard.proof.model_sync_task1_cloudflare_configuration import (
+    Task1TunnelConfigurationBackend,
+    Task1TunnelConfigurationRequest,
+    reconcile_task1_tunnel_configuration,
+)
+from dokploy_wizard.proof.model_sync_task1_cloudflare_fingerprints import (
+    application_fingerprint,
+    dns_fingerprint,
+    policy_fingerprint,
+    snapshot_value_hash,
+    tunnel_fingerprint,
+)
+from dokploy_wizard.proof.model_sync_task1_cloudflare_journal import (
+    JournalOperationKind,
+    Task1CloudflareJournal,
+)
+from dokploy_wizard.proof.model_sync_task1_cloudflare_resource_reconciliation import (
+    Task1ProofResourceRequest,
+    resolve_task1_proof_resource,
+)
+from dokploy_wizard.proof.model_sync_task1_context import active_task1_proof_context
+from dokploy_wizard.proof.model_sync_task1_context_schema import Task1ProofContextError
 from dokploy_wizard.state import (
     DesiredState,
     OwnedResource,
@@ -67,7 +89,9 @@ def reconcile_networking(
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
     connector_backend: Any | None = None,
+    task1_journal: Task1CloudflareJournal | None = None,
 ) -> NetworkingPhase:
+    proof_context = active_task1_proof_context()
     credentials = _resolve_credentials(raw_env, desired_state, backend)
     backend.validate_account_access(credentials.account_id)
     backend.validate_zone_access(credentials.zone_id)
@@ -82,6 +106,8 @@ def reconcile_networking(
     ]
 
     nested_coder_wildcard = _nested_coder_wildcard_hostname(desired_state)
+    if proof_context is not None and nested_coder_wildcard is not None:
+        raise CloudflareError("Task 1 proof context forbids Cloudflare certificate-pack queries")
     if nested_coder_wildcard is not None:
         notes.extend(
             _resolve_nested_coder_wildcard_certificate(
@@ -100,6 +126,8 @@ def reconcile_networking(
         tunnel_name=credentials.tunnel_name,
         ownership_ledger=ownership_ledger,
         backend=backend,
+        create_only=proof_context is not None,
+        journal=task1_journal,
     )
     dns_target = f"{tunnel.tunnel_id}.cfargotunnel.com"
     planned_tunnel = PlannedTunnel(
@@ -111,12 +139,15 @@ def reconcile_networking(
 
     dns_records, dns_resource_ids, dns_notes = _resolve_dns_records(
         dry_run=dry_run,
+        account_id=credentials.account_id,
         zone_id=credentials.zone_id,
         dns_target=dns_target,
         hostnames=tuple(sorted(_public_hostnames(desired_state).values())),
         degradable_conflict_hostnames=_degradable_dns_conflict_hostnames(desired_state),
         ownership_ledger=ownership_ledger,
         backend=backend,
+        create_only=proof_context is not None,
+        journal=task1_journal,
     )
     notes.extend(dns_notes)
 
@@ -127,11 +158,20 @@ def reconcile_networking(
         "with a terminal 404 fallback."
     )
     if not dry_run:
-        backend.update_tunnel_configuration(
-            credentials.account_id,
-            tunnel.tunnel_id,
-            ingress_rules,
-        )
+        if proof_context is None:
+            backend.update_tunnel_configuration(
+                credentials.account_id,
+                tunnel.tunnel_id,
+                ingress_rules,
+            )
+        else:
+            _reconcile_task1_tunnel_configuration(
+                journal=_require_task1_journal(task1_journal),
+                backend=backend,
+                account_id=credentials.account_id,
+                tunnel_id=tunnel.tunnel_id,
+                ingress=ingress_rules,
+            )
 
     connector = _resolve_connector(
         dry_run=dry_run,
@@ -205,7 +245,9 @@ def reconcile_cloudflare_access(
     desired_state: DesiredState,
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
+    task1_journal: Task1CloudflareJournal | None = None,
 ) -> AccessPhase:
+    proof_context = active_task1_proof_context()
     credentials = _resolve_credentials(raw_env, desired_state, backend)
     emails = _access_target_emails(raw_env=raw_env, desired_state=desired_state)
     target_hostnames = _access_target_hostnames(raw_env=raw_env, desired_state=desired_state)
@@ -229,6 +271,7 @@ def reconcile_cloudflare_access(
         account_id=credentials.account_id,
         ownership_ledger=ownership_ledger,
         backend=backend,
+        reuse_external_only=proof_context is not None,
     )
     apps: list[PlannedAccessApplication] = []
     app_ids: dict[str, str] = {}
@@ -243,6 +286,8 @@ def reconcile_cloudflare_access(
             provider_id=provider.provider_id,
             ownership_ledger=ownership_ledger,
             backend=backend,
+            create_only=proof_context is not None,
+            journal=task1_journal,
         )
         apps.append(
             PlannedAccessApplication(action=app_action, hostname=hostname, app_id=app.app_id)
@@ -258,6 +303,8 @@ def reconcile_cloudflare_access(
             emails=emails,
             ownership_ledger=ownership_ledger,
             backend=backend,
+            create_only=proof_context is not None,
+            journal=task1_journal,
         )
         policies.append(
             PlannedAccessPolicy(
@@ -295,7 +342,7 @@ def reconcile_cloudflare_access(
             policies=tuple(policies),
             notes=tuple(notes),
         ),
-        provider_resource_id=None if dry_run else provider.provider_id,
+        provider_resource_id=None if dry_run or proof_context is not None else provider.provider_id,
         application_resource_ids=app_ids,
         policy_resource_ids=policy_ids,
     )
@@ -372,25 +419,57 @@ def _resolve_tunnel(
     tunnel_name: str,
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
+    create_only: bool = False,
+    journal: Task1CloudflareJournal | None = None,
 ) -> tuple[CloudflareTunnel, str]:
+    if create_only:
+        if _find_owned_tunnel(ownership_ledger, account_id) is not None:
+            raise CloudflareError("Task 1 proof context cannot reuse an owned Cloudflare tunnel")
+        if dry_run:
+            if backend.find_tunnel_by_name(account_id, tunnel_name) is not None:
+                raise CloudflareError("Task 1 proof context requires an absent Cloudflare tunnel")
+            return CloudflareTunnel(tunnel_id="planned-tunnel", name=tunnel_name), "create"
+        task1_journal = _require_task1_journal(journal)
+        desired = tunnel_fingerprint(CloudflareTunnel(tunnel_id="planned-tunnel", name=tunnel_name))
+        recovered = resolve_task1_proof_resource(
+            journal=task1_journal,
+            request=Task1ProofResourceRequest(
+                kind=JournalOperationKind.TUNNEL,
+                account_id=account_id,
+                zone_id=None,
+                parent_id=None,
+                scope={"account_id": account_id, "name": tunnel_name},
+                expected_name_sha256=snapshot_value_hash(tunnel_name),
+                expected_domain_sha256=None,
+                desired_fingerprint=desired,
+                resource_label="tunnel",
+                matches=lambda: backend.list_tunnels_by_name(account_id, tunnel_name),
+                create=lambda: backend.create_tunnel(account_id, tunnel_name),
+                resource_id=lambda tunnel: tunnel.tunnel_id,
+                fingerprint=tunnel_fingerprint,
+                observe=lambda identifier: backend.get_tunnel(account_id, identifier),
+                error_type=CloudflareError,
+            ),
+        )
+        return recovered, "create"
     ledger_tunnel = _find_owned_tunnel(ownership_ledger, account_id)
     if ledger_tunnel is not None:
-        tunnel = backend.get_tunnel(account_id, ledger_tunnel.resource_id)
-        if tunnel is None:
+        owned_tunnel = backend.get_tunnel(account_id, ledger_tunnel.resource_id)
+        if owned_tunnel is None:
             raise CloudflareError(
                 "Ownership ledger says the Cloudflare tunnel exists, but the account-scoped "
                 "validation endpoint did not find it."
             )
-        if tunnel.name != tunnel_name:
+        if owned_tunnel.name != tunnel_name:
             raise CloudflareError(
                 "Ownership ledger tunnel exists, but its name no longer matches the desired "
                 "Cloudflare tunnel intent."
             )
-        return tunnel, "reuse_owned"
+        return owned_tunnel, "reuse_owned"
 
-    tunnel = backend.find_tunnel_by_name(account_id, tunnel_name)
-    if tunnel is not None:
-        return tunnel, "reuse_existing"
+    existing_tunnel = backend.find_tunnel_by_name(account_id, tunnel_name)
+    if existing_tunnel is not None:
+        return existing_tunnel, "reuse_existing"
     if dry_run:
         return CloudflareTunnel(tunnel_id="planned-tunnel", name=tunnel_name), "create"
     return backend.create_tunnel(account_id, tunnel_name), "create"
@@ -402,8 +481,20 @@ def _resolve_access_identity_provider(
     account_id: str,
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
+    reuse_external_only: bool = False,
 ) -> tuple[CloudflareAccessIdentityProvider, str]:
     provider_name = "One-time PIN login"
+    if reuse_external_only:
+        named = tuple(
+            provider
+            for provider in backend.list_access_identity_providers(account_id)
+            if provider.name == provider_name
+        )
+        if len(named) != 1 or named[0].provider_type != "onetimepin":
+            raise CloudflareError(
+                "Task 1 proof context requires exactly one compatible external OTP provider"
+            )
+        return named[0], "reuse_external"
     owned_provider = _find_owned_access_resource(
         ownership_ledger,
         resource_type=ACCESS_OTP_PROVIDER_RESOURCE_TYPE,
@@ -449,8 +540,71 @@ def _resolve_access_application(
     provider_id: str,
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
+    create_only: bool = False,
+    journal: Task1CloudflareJournal | None = None,
 ) -> tuple[CloudflareAccessApplication, str]:
     app_name = f"{_access_display_name(pack_name)} protected"
+    if create_only:
+        if (
+            _find_owned_access_resource(
+                ownership_ledger,
+                resource_type=ACCESS_APPLICATION_RESOURCE_TYPE,
+                scope=_access_application_scope(account_id, hostname),
+            )
+            is not None
+        ):
+            raise CloudflareError("Task 1 proof context requires an absent Cloudflare Access app")
+        if dry_run:
+            if backend.find_access_application_by_domain(account_id, hostname) is not None:
+                raise CloudflareError(
+                    "Task 1 proof context requires an absent Cloudflare Access app"
+                )
+            return (
+                CloudflareAccessApplication(
+                    app_id=f"planned-access-app-{hostname}",
+                    name=app_name,
+                    domain=hostname,
+                    app_type="self_hosted",
+                    allowed_identity_provider_ids=(provider_id,),
+                ),
+                "create",
+            )
+        task1_journal = _require_task1_journal(journal)
+        desired = application_fingerprint(
+            CloudflareAccessApplication(
+                app_id="planned-access-app",
+                name=app_name,
+                domain=hostname,
+                app_type="self_hosted",
+                allowed_identity_provider_ids=(provider_id,),
+            )
+        )
+        recovered = resolve_task1_proof_resource(
+            journal=task1_journal,
+            request=Task1ProofResourceRequest(
+                kind=JournalOperationKind.ACCESS_APPLICATION,
+                account_id=account_id,
+                zone_id=None,
+                parent_id=None,
+                scope={"account_id": account_id, "hostname": hostname},
+                expected_name_sha256=snapshot_value_hash(app_name),
+                expected_domain_sha256=snapshot_value_hash(hostname),
+                desired_fingerprint=desired,
+                resource_label="Access app",
+                matches=lambda: backend.list_access_applications_by_domain(account_id, hostname),
+                create=lambda: backend.create_access_application(
+                    account_id,
+                    name=app_name,
+                    domain=hostname,
+                    allowed_identity_provider_ids=(provider_id,),
+                ),
+                resource_id=lambda application: application.app_id,
+                fingerprint=application_fingerprint,
+                observe=lambda identifier: backend.get_access_application(account_id, identifier),
+                error_type=CloudflareError,
+            ),
+        )
+        return recovered, "create"
     owned_app = _find_owned_access_resource(
         ownership_ledger,
         resource_type=ACCESS_APPLICATION_RESOURCE_TYPE,
@@ -510,31 +664,100 @@ def _resolve_access_policy(
     emails: tuple[str, ...],
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
+    create_only: bool = False,
+    journal: Task1CloudflareJournal | None = None,
 ) -> tuple[CloudflareAccessPolicy, str]:
     policy_name = f"Allow {_access_display_name(pack_name)}"
+    if create_only:
+        if (
+            _find_owned_access_resource(
+                ownership_ledger,
+                resource_type=ACCESS_POLICY_RESOURCE_TYPE,
+                scope=_access_policy_scope(account_id, hostname),
+            )
+            is not None
+        ):
+            raise CloudflareError(
+                "Task 1 proof context requires an absent Cloudflare Access policy"
+            )
+        if dry_run:
+            if backend.find_access_policy_by_name(account_id, app_id, policy_name) is not None:
+                raise CloudflareError(
+                    "Task 1 proof context requires an absent Cloudflare Access policy"
+                )
+            return (
+                CloudflareAccessPolicy(
+                    policy_id=f"planned-access-policy-{hostname}",
+                    app_id=app_id,
+                    name=policy_name,
+                    decision="allow",
+                    emails=emails,
+                ),
+                "create",
+            )
+        task1_journal = _require_task1_journal(journal)
+        desired = policy_fingerprint(
+            CloudflareAccessPolicy(
+                policy_id="planned-access-policy",
+                app_id=app_id,
+                name=policy_name,
+                decision="allow",
+                emails=emails,
+            )
+        )
+        recovered = resolve_task1_proof_resource(
+            journal=task1_journal,
+            request=Task1ProofResourceRequest(
+                kind=JournalOperationKind.ACCESS_POLICY,
+                account_id=account_id,
+                zone_id=None,
+                parent_id=app_id,
+                scope={"account_id": account_id, "app_id": app_id, "hostname": hostname},
+                expected_name_sha256=snapshot_value_hash(policy_name),
+                expected_domain_sha256=snapshot_value_hash(hostname),
+                desired_fingerprint=desired,
+                resource_label="Access policy",
+                matches=lambda: backend.list_access_policies_by_name(
+                    account_id, app_id, policy_name
+                ),
+                create=lambda: backend.create_access_policy(
+                    account_id,
+                    app_id=app_id,
+                    name=policy_name,
+                    emails=emails,
+                ),
+                resource_id=lambda policy: policy.policy_id,
+                fingerprint=policy_fingerprint,
+                observe=lambda identifier: backend.get_access_policy(
+                    account_id, app_id, identifier
+                ),
+                error_type=CloudflareError,
+            ),
+        )
+        return recovered, "create"
     owned_policy = _find_owned_access_resource(
         ownership_ledger,
         resource_type=ACCESS_POLICY_RESOURCE_TYPE,
         scope=_access_policy_scope(account_id, hostname),
     )
     if owned_policy is not None:
-        policy = backend.get_access_policy(account_id, app_id, owned_policy.resource_id)
-        if policy is None:
+        owned_policy_value = backend.get_access_policy(account_id, app_id, owned_policy.resource_id)
+        if owned_policy_value is None:
             raise CloudflareError(
                 f"Ownership ledger says the Access policy for '{hostname}' exists, "
                 "but Cloudflare did not find it."
             )
-        if policy.decision != "allow" or policy.emails != emails:
+        if owned_policy_value.decision != "allow" or owned_policy_value.emails != emails:
             raise CloudflareError(
                 f"Ownership ledger Access policy for '{hostname}' no longer matches "
                 "the desired email allowlist."
             )
-        return policy, "reuse_owned"
-    policy = backend.find_access_policy_by_name(account_id, app_id, policy_name)
-    if policy is not None:
-        if policy.decision != "allow" or policy.emails != emails:
+        return owned_policy_value, "reuse_owned"
+    existing_policy = backend.find_access_policy_by_name(account_id, app_id, policy_name)
+    if existing_policy is not None:
+        if existing_policy.decision != "allow" or existing_policy.emails != emails:
             raise CloudflareError(f"Cloudflare Access policy collision detected for '{hostname}'.")
-        return policy, "reuse_existing"
+        return existing_policy, "reuse_existing"
     if dry_run:
         return (
             CloudflareAccessPolicy(
@@ -586,7 +809,9 @@ def _access_target_hostnames(
     return tuple(target_hostnames)
 
 
-def resolve_litellm_admin_hostname(*, raw_env: RawEnvInput, desired_state: DesiredState) -> str | None:
+def resolve_litellm_admin_hostname(
+    *, raw_env: RawEnvInput, desired_state: DesiredState
+) -> str | None:
     if desired_state.shared_core.litellm is None:
         return None
     return _shared_service_admin_hostname(raw_env=raw_env, desired_state=desired_state)
@@ -605,7 +830,10 @@ def _shared_service_admin_hostname(*, raw_env: RawEnvInput, desired_state: Desir
             f"{_LITELLM_ADMIN_SUBDOMAIN_ENV_KEY} must be a single DNS label containing only lowercase letters, digits, or hyphens."
         )
     hostname = f"{subdomain}.{desired_state.root_domain}"
-    if hostname in set(desired_state.hostnames.values()):
+    proof_context = active_task1_proof_context()
+    if hostname in set(desired_state.hostnames.values()) and (
+        proof_context is None or desired_state.hostnames.get("litellm-admin") != hostname
+    ):
         raise CloudflareError(
             f"LiteLLM admin hostname '{hostname}' collides with an existing desired hostname. Choose a different {_LITELLM_ADMIN_SUBDOMAIN_ENV_KEY}."
         )
@@ -641,18 +869,84 @@ def _litellm_access_notes(*, desired_state: DesiredState, hostname: str) -> tupl
 def _resolve_dns_records(
     *,
     dry_run: bool,
+    account_id: str,
     zone_id: str,
     dns_target: str,
     hostnames: tuple[str, ...],
     degradable_conflict_hostnames: set[str],
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
+    create_only: bool = False,
+    journal: Task1CloudflareJournal | None = None,
 ) -> tuple[tuple[PlannedDnsRecord, ...], dict[str, str], tuple[str, ...]]:
     planned_records: list[PlannedDnsRecord] = []
     resource_ids: dict[str, str] = {}
     notes: list[str] = []
 
     for hostname in hostnames:
+        if create_only:
+            if _find_owned_dns_record(ownership_ledger, zone_id, hostname) is not None:
+                raise CloudflareError("Task 1 proof context cannot reuse owned Cloudflare DNS")
+            if dry_run:
+                if backend.list_dns_records(
+                    zone_id, hostname=hostname, record_type=None, content=None
+                ):
+                    raise CloudflareError("Task 1 proof context requires absent Cloudflare DNS")
+                planned_records.append(
+                    PlannedDnsRecord(
+                        action="create",
+                        hostname=hostname,
+                        record_id=f"planned-{hostname}",
+                        content=dns_target,
+                        proxied=True,
+                    )
+                )
+                continue
+            task1_journal = _require_task1_journal(journal)
+            desired = dns_fingerprint(
+                CloudflareDnsRecord(
+                    record_id="planned-dns-record",
+                    name=hostname,
+                    record_type="CNAME",
+                    content=dns_target,
+                    proxied=True,
+                )
+            )
+            created_record = resolve_task1_proof_resource(
+                journal=task1_journal,
+                request=Task1ProofResourceRequest(
+                    kind=JournalOperationKind.DNS_RECORD,
+                    account_id=account_id,
+                    zone_id=zone_id,
+                    parent_id=None,
+                    scope={"account_id": account_id, "hostname": hostname, "zone_id": zone_id},
+                    expected_name_sha256=snapshot_value_hash(hostname),
+                    expected_domain_sha256=snapshot_value_hash(hostname),
+                    desired_fingerprint=desired,
+                    resource_label="DNS",
+                    matches=lambda: backend.list_dns_records(
+                        zone_id, hostname=hostname, record_type=None, content=None
+                    ),
+                    create=lambda: backend.create_dns_record(
+                        zone_id, hostname=hostname, content=dns_target, proxied=True
+                    ),
+                    resource_id=lambda record: record.record_id,
+                    fingerprint=dns_fingerprint,
+                    observe=lambda identifier: backend.get_dns_record(zone_id, identifier),
+                    error_type=CloudflareError,
+                ),
+            )
+            planned_records.append(
+                PlannedDnsRecord(
+                    action="create",
+                    hostname=hostname,
+                    record_id=created_record.record_id,
+                    content=created_record.content,
+                    proxied=created_record.proxied,
+                )
+            )
+            resource_ids[hostname] = created_record.record_id
+            continue
         owned_record = _find_owned_dns_record(ownership_ledger, zone_id, hostname)
         if owned_record is not None:
             exact_records = backend.list_dns_records(
@@ -800,6 +1094,32 @@ def _derive_outcome(tunnel_action: str, dns_records: tuple[PlannedDnsRecord, ...
     return "already_present"
 
 
+def _reconcile_task1_tunnel_configuration(
+    *,
+    journal: Task1CloudflareJournal,
+    backend: Task1TunnelConfigurationBackend,
+    account_id: str,
+    tunnel_id: str,
+    ingress: tuple[dict[str, object], ...],
+) -> None:
+    reconcile_task1_tunnel_configuration(
+        journal=journal,
+        backend=backend,
+        request=Task1TunnelConfigurationRequest(
+            account_id=account_id,
+            tunnel_id=tunnel_id,
+            ingress=ingress,
+        ),
+        error_type=CloudflareError,
+    )
+
+
+def _require_task1_journal(journal: Task1CloudflareJournal | None) -> Task1CloudflareJournal:
+    if journal is None:
+        raise Task1ProofContextError("Task 1 proof context Cloudflare write requires a journal")
+    return journal
+
+
 def _build_tunnel_ingress(desired_state: DesiredState) -> tuple[dict[str, object], ...]:
     public_hostnames = _public_hostnames(desired_state)
     ingress: list[dict[str, object]] = [
@@ -882,9 +1202,7 @@ def _resolve_nested_coder_wildcard_certificate(
             f"'{wildcard_hostname}'.",
         )
     if dry_run:
-        return (
-            f"Would order a Cloudflare advanced edge certificate for '{wildcard_hostname}'.",
-        )
+        return (f"Would order a Cloudflare advanced edge certificate for '{wildcard_hostname}'.",)
     try:
         created_pack = backend.order_advanced_certificate_pack(
             zone_id,
