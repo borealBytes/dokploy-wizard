@@ -104,6 +104,12 @@ class FakeCloudflareBackend:
             return self.existing_tunnel
         return None
 
+    def list_tunnels_by_name(
+        self, account_id: str, tunnel_name: str
+    ) -> tuple[CloudflareTunnel, ...]:
+        tunnel = self.find_tunnel_by_name(account_id, tunnel_name)
+        return () if tunnel is None else (tunnel,)
+
     def create_tunnel(self, account_id: str, tunnel_name: str) -> CloudflareTunnel:
         return CloudflareTunnel(tunnel_id="created-tunnel", name=tunnel_name)
 
@@ -150,6 +156,18 @@ class FakeCloudflareBackend:
             record_type="CNAME",
             content=content,
             proxied=proxied,
+        )
+
+    def get_dns_record(self, zone_id: str, record_id: str) -> CloudflareDnsRecord | None:
+        del zone_id
+        return next(
+            (
+                record
+                for records in self.dns_records.values()
+                for record in records
+                if record.record_id == record_id
+            ),
+            None,
         )
 
     def update_dns_record(
@@ -199,6 +217,12 @@ class FakeCloudflareBackend:
             return self.access_provider
         return None
 
+    def list_access_identity_providers(
+        self, account_id: str
+    ) -> tuple[CloudflareAccessIdentityProvider, ...]:
+        del account_id
+        return () if self.access_provider is None else (self.access_provider,)
+
     def find_access_identity_provider_by_name(
         self, account_id: str, name: str
     ) -> CloudflareAccessIdentityProvider | None:
@@ -225,6 +249,12 @@ class FakeCloudflareBackend:
         self, account_id: str, domain: str
     ) -> CloudflareAccessApplication | None:
         return self.access_apps.get(domain)
+
+    def list_access_applications_by_domain(
+        self, account_id: str, domain: str
+    ) -> tuple[CloudflareAccessApplication, ...]:
+        application = self.find_access_application_by_domain(account_id, domain)
+        return () if application is None else (application,)
 
     def create_access_application(
         self,
@@ -256,6 +286,12 @@ class FakeCloudflareBackend:
         if policy is not None and policy.name == name:
             return policy
         return None
+
+    def list_access_policies_by_name(
+        self, account_id: str, app_id: str, name: str
+    ) -> tuple[CloudflareAccessPolicy, ...]:
+        policy = self.find_access_policy_by_name(account_id, app_id, name)
+        return () if policy is None else (policy,)
 
     def create_access_policy(
         self,
@@ -410,8 +446,7 @@ def test_networking_reuses_compatible_unowned_coder_wildcard_dns() -> None:
 
     assert phase.result.tunnel.action == "reuse_existing"
     assert {
-        (record.hostname, record.action, record.record_id)
-        for record in phase.result.dns_records
+        (record.hostname, record.action, record.record_id) for record in phase.result.dns_records
     } >= {("*.example.com", "reuse_existing", "dns-wildcard")}
 
 
@@ -468,8 +503,7 @@ def test_networking_degrades_conflicting_unowned_coder_wildcard_dns() -> None:
     )
 
     planned = {
-        (record.hostname, record.action, record.record_id)
-        for record in phase.result.dns_records
+        (record.hostname, record.action, record.record_id) for record in phase.result.dns_records
     }
     assert ("dokploy.example.com", "reuse_existing", "dns-dokploy") in planned
     assert ("coder.example.com", "reuse_existing", "dns-coder") in planned
@@ -538,8 +572,7 @@ def test_networking_retargets_stale_coder_control_dns_and_degrades_wildcard_dns(
     )
 
     planned = {
-        (record.hostname, record.action, record.record_id)
-        for record in phase.result.dns_records
+        (record.hostname, record.action, record.record_id) for record in phase.result.dns_records
     }
     assert ("dokploy.example.com", "reuse_existing", "dns-dokploy") in planned
     assert ("coder.example.com", "update_existing", "dns-coder") in planned
@@ -617,9 +650,7 @@ def test_networking_degrades_stale_nested_coder_wildcard_dns() -> None:
         backend=backend,
     )
 
-    assert not any(
-        record.hostname == "*.coder.example.com" for record in phase.result.dns_records
-    )
+    assert not any(record.hostname == "*.coder.example.com" for record in phase.result.dns_records)
     assert backend.dns_record_updates == []
     assert "*.coder.example.com" not in phase.dns_resource_ids
     assert any(
@@ -1031,7 +1062,7 @@ def test_access_rerun_reuses_owned_resources() -> None:
                 domain="litellm.example.com",
                 app_type="self_hosted",
                 allowed_identity_provider_ids=("otp-provider-1",),
-            )
+            ),
         },
         access_policies={
             "app-openclaw": CloudflareAccessPolicy(
@@ -1047,7 +1078,7 @@ def test_access_rerun_reuses_owned_resources() -> None:
                 name="Allow LiteLLM Admin",
                 decision="allow",
                 emails=("owner@example.com",),
-            )
+            ),
         },
     )
 

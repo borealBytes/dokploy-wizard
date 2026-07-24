@@ -37,6 +37,7 @@ from dokploy_wizard.proof.model_sync_state import (
     process_start_time_ticks,
     read_abort_guard,
     record_env_intent,
+    record_env_restored,
     record_finalize_intent,
     record_proof_active,
     recover_dead_abort_claim,
@@ -951,8 +952,8 @@ def test_result_accepts_non_placeholder_captured_values() -> None:
             "protected_artifacts_before_sha256": "0f" * 32,
             "coder_secret_inventory_sha256": "1" * 64,
             "legacy_workspace_managed_fingerprints_sha256": "2" * 64,
-                "preexisting_cloudflare_sha256": "3" * 64,
-                "post_install_cloudflare_sha256": "4" * 64,
+            "preexisting_cloudflare_sha256": "3" * 64,
+            "post_install_cloudflare_sha256": "4" * 64,
         }
     )
 
@@ -1016,6 +1017,7 @@ def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
     )
     record_env_intent(guard_path, claim_token="a" * 32, receipt=receipt)
     record_proof_active(guard_path, claim_token="a" * 32)
+    record_env_restored(guard_path, claim_token="a" * 32)
     result = build_result(
         {
             "schema_version": 2,
@@ -1050,8 +1052,8 @@ def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
             "protected_artifacts_before_sha256": "1" * 64,
             "coder_secret_inventory_sha256": "2" * 64,
             "legacy_workspace_managed_fingerprints_sha256": "3" * 64,
-                "preexisting_cloudflare_sha256": "4" * 64,
-                "post_install_cloudflare_sha256": "5" * 64,
+            "preexisting_cloudflare_sha256": "4" * 64,
+            "post_install_cloudflare_sha256": "5" * 64,
         }
     )
     attestation = BaselineAttestation(
@@ -1059,10 +1061,10 @@ def test_abort_guard_hash_binds_immutable_attestation_not_lifecycle_bytes(
         guard_path=str(guard_path.resolve()),
         artifact_dir=str(artifact_dir.resolve()),
         result_path=str((artifact_dir / "result.json").resolve()),
-            env_receipt=receipt,
-            host_identity_mode="distinct",
-            post_install_cloudflare_sha256="5" * 64,
-            output_sha256={
+        env_receipt=receipt,
+        host_identity_mode="distinct",
+        post_install_cloudflare_sha256="5" * 64,
+        output_sha256={
             "baseline.json": "f" * 64,
             "host-a-preflight.json": "d" * 64,
             "host-b-preflight.json": "e" * 64,
@@ -1412,6 +1414,7 @@ def test_finalize_intent_and_terminal_guard_remain_valid(tmp_path: Path) -> None
         receipt=attestation.env_receipt,
     )
     record_proof_active(guard_path, claim_token="t" * 32)
+    record_env_restored(guard_path, claim_token="t" * 32)
     record_finalize_intent(
         guard_path,
         claim_token="t" * 32,

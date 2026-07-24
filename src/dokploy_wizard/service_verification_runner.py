@@ -11,12 +11,21 @@ from dokploy_wizard import cli
 from dokploy_wizard.bootstrap import LOCAL_HEALTH_URL
 from dokploy_wizard.dokploy import openclaw as openclaw_module
 from dokploy_wizard.packs.surfsense import SurfSenseResourceRecord
+from dokploy_wizard.proof.model_sync_task1_context import (
+    activate_task1_proof_context,
+    validate_task1_proof_context_argument,
+)
 from dokploy_wizard.state import (
     RawEnvInput,
     load_litellm_generated_keys,
     load_state_dir,
     parse_env_file,
     resolve_desired_state,
+)
+from dokploy_wizard.state.dokploy_runtime_auth import (
+    load_dokploy_runtime_auth,
+    merge_dokploy_runtime_auth,
+    merge_dokploy_runtime_auth_desired_state,
 )
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
@@ -38,20 +47,39 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path(".dokploy-wizard-state"),
         help="directory containing persisted wizard state documents",
     )
+    parser.add_argument("--task1-proof-context", type=Path, help=argparse.SUPPRESS)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    payload = run_service_verification(env_file=args.env_file, state_dir=args.state_dir)
+    payload = run_service_verification(
+        env_file=args.env_file,
+        state_dir=args.state_dir,
+        task1_proof_context=args.task1_proof_context,
+    )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if payload["passed"] else 1
 
 
-def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, Any]:
+def run_service_verification(
+    *, env_file: Path, state_dir: Path, task1_proof_context: Path | None = None
+) -> dict[str, Any]:
     loaded_state = load_state_dir(state_dir)
-    raw_env = _merge_persisted_retry_keys(parse_env_file(env_file), loaded_state.raw_input)
-    desired_state = resolve_desired_state(raw_env)
+    source_env = parse_env_file(env_file)
+    context = validate_task1_proof_context_argument(source_env, task1_proof_context)
+    raw_env = _merge_persisted_retry_keys(source_env, loaded_state.raw_input)
+    if context is None:
+        desired_state = resolve_desired_state(raw_env)
+    else:
+        with activate_task1_proof_context(context):
+            desired_state = resolve_desired_state(source_env)
+        runtime_auth = load_dokploy_runtime_auth(state_dir)
+        raw_env = merge_dokploy_runtime_auth(raw_env, runtime_auth)
+        desired_state = merge_dokploy_runtime_auth_desired_state(
+            desired_state,
+            runtime_auth,
+        )
     litellm_generated_keys = load_litellm_generated_keys(state_dir)
     dokploy_session_client = cli._build_dokploy_session_client(
         raw_env=raw_env,

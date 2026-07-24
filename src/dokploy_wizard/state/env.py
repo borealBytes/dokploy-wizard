@@ -148,7 +148,7 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
     _validate_my_farm_advisor_env(values, enabled_packs=pack_selection.enabled_packs)
     hostnames.update(pack_selection.hostnames)
 
-    return DesiredState(
+    desired_state = DesiredState(
         format_version=1,
         stack_name=stack_name,
         root_domain=root_domain,
@@ -186,6 +186,13 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
         ),
         shared_core=build_shared_core_plan(stack_name, pack_selection.enabled_packs, values),
     )
+    from dokploy_wizard.proof.model_sync_task1_context import (
+        project_task1_desired_state,
+        require_task1_proof_context,
+    )
+
+    require_task1_proof_context(raw_env)
+    return project_task1_desired_state(desired_state)
 
 
 def _join_hostname(subdomain: str, root_domain: str) -> str:
@@ -327,7 +334,8 @@ def _validate_litellm_nvidia_env(values: dict[str, str]) -> None:
     }
     default_provider = _get_configured_value(values, "AI_DEFAULT_PROVIDER")
     default_selects_nvidia = (
-        default_provider is not None and _canonical_ai_default_provider(default_provider) == "nvidia"
+        default_provider is not None
+        and _canonical_ai_default_provider(default_provider) == "nvidia"
     )
     if not configured_keys and not default_selects_nvidia:
         return
@@ -424,7 +432,6 @@ def _resolve_tailscale_enabled(values: dict[str, str]) -> bool:
 def _resolve_tailscale_hostname(values: dict[str, str]) -> str | None:
     if not _resolve_tailscale_enabled(values):
         return None
-
 
     return _require_value(values, "TAILSCALE_HOSTNAME")
 
@@ -565,12 +572,12 @@ def _resolve_openclaw_gateway_token(
     return raw_value
 
 
-def _validate_openclaw_nexa_env(
-    values: dict[str, str], *, enabled_packs: tuple[str, ...]
-) -> None:
+def _validate_openclaw_nexa_env(values: dict[str, str], *, enabled_packs: tuple[str, ...]) -> None:
     if "openclaw" in enabled_packs:
         return
-    unexpected = sorted(key for key in _OPENCLAW_NEXA_ENV_KEYS if _has_configured_value(values, key))
+    unexpected = sorted(
+        key for key in _OPENCLAW_NEXA_ENV_KEYS if _has_configured_value(values, key)
+    )
     if unexpected:
         raise StateValidationError(f"{unexpected} require the 'openclaw' pack.")
 

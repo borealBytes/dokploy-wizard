@@ -38,7 +38,7 @@ class CoderBackend(Protocol):
         *,
         resource_name: str,
         hostname: str,
-        wildcard_hostname: str,
+        wildcard_hostname: str | None,
         postgres_service_name: str,
         postgres: SharedPostgresAllocation,
         data_resource_name: str,
@@ -50,7 +50,7 @@ class CoderBackend(Protocol):
         resource_id: str,
         resource_name: str,
         hostname: str,
-        wildcard_hostname: str,
+        wildcard_hostname: str | None,
         postgres_service_name: str,
         postgres: SharedPostgresAllocation,
         data_resource_name: str,
@@ -87,7 +87,7 @@ class ShellCoderBackend:
         *,
         resource_name: str,
         hostname: str,
-        wildcard_hostname: str,
+        wildcard_hostname: str | None,
         postgres_service_name: str,
         postgres: SharedPostgresAllocation,
         data_resource_name: str,
@@ -102,7 +102,7 @@ class ShellCoderBackend:
         resource_id: str,
         resource_name: str,
         hostname: str,
-        wildcard_hostname: str,
+        wildcard_hostname: str | None,
         postgres_service_name: str,
         postgres: SharedPostgresAllocation,
         data_resource_name: str,
@@ -165,8 +165,13 @@ def reconcile_coder(
 
     hostname = desired_state.hostnames.get("coder")
     wildcard_hostname = desired_state.hostnames.get("coder-wildcard")
-    if hostname is None or wildcard_hostname is None:
-        raise CoderError("Desired state is missing the canonical Coder hostnames.")
+    if hostname is None:
+        raise CoderError("Desired state is missing the Coder control hostname.")
+    if wildcard_hostname is None:
+        from dokploy_wizard.proof.model_sync_task1_context import active_task1_proof_context
+
+        if active_task1_proof_context() is None:
+            raise CoderError("Desired state is missing the canonical Coder wildcard hostname.")
     allocation = next(
         (item for item in desired_state.shared_core.allocations if item.pack_name == "coder"),
         None,
@@ -232,7 +237,11 @@ def reconcile_coder(
                 config=config,
                 notes=(
                     f"Coder service '{service_name}' will be exposed at '{hostname}'.",
-                    f"Wildcard workspace routing will use '{wildcard_hostname}'.",
+                    *(
+                        ()
+                        if wildcard_hostname is None
+                        else (f"Wildcard workspace routing will use '{wildcard_hostname}'.",)
+                    ),
                     "Coder success in non-dry-run mode is gated on the /healthz endpoint.",
                 ),
             ),
@@ -254,7 +263,11 @@ def reconcile_coder(
     notes.extend(
         (
             f"Coder service '{service_name}' is reconciled and healthy.",
-            f"Wildcard workspace routing uses '{wildcard_hostname}'.",
+            *(
+                ()
+                if wildcard_hostname is None
+                else (f"Wildcard workspace routing uses '{wildcard_hostname}'.",)
+            ),
         )
     )
 
@@ -393,7 +406,7 @@ def _resolve_service(
     dry_run: bool,
     service_name: str,
     hostname: str,
-    wildcard_hostname: str,
+    wildcard_hostname: str | None,
     postgres_service_name: str,
     postgres: SharedPostgresAllocation,
     data_name: str,

@@ -7,21 +7,36 @@ from __future__ import annotations
 import argparse
 import posixpath
 import shlex
+import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TextIO
+from typing import Final, TextIO
 
+from dokploy_wizard.proof.model_sync_task1_context import (
+    Task1ProofContextError,
+    validate_task1_proof_context_argument,
+)
 from dokploy_wizard.remote_transport import (
     ParamikoRemoteTransport,
+    RemoteCommandCaptureLimits,
     RemoteCommandFailure,
     RemoteTransportSession,
 )
 from dokploy_wizard.state import StateValidationError, parse_env_file, resolve_desired_state
 from dokploy_wizard.verification import redact_text
+
+TASK1_CLEANUP_CAPTURE_LIMITS: Final[RemoteCommandCaptureLimits] = RemoteCommandCaptureLimits(
+    timeout_seconds=120.0,
+    max_stdout_bytes=2 * 1024 * 1024,
+    max_stderr_bytes=2 * 1024 * 1024,
+)
+
+
+class RepositoryArchiveError(RuntimeError):
+    """Raised when the committed repository tree cannot be archived safely."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -122,6 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    cleanup_parser = subparsers.add_parser(
+        "task1-cleanup", help=argparse.SUPPRESS, description=argparse.SUPPRESS
+    )
+    _add_remote_common_arguments(cleanup_parser)
+
     parser.epilog = (
         "Lifecycle commands: install, modify, uninstall, inspect-state, proof. "
         "Remote defaults: /root/dokploy-wizard and .install.env."
@@ -144,17 +164,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     reporter.progress(f"starting remote {args.command}")
 
     try:
-        if args.command in {"install", "modify", "uninstall", "proof"}:
+        if args.command in {"install", "modify", "uninstall", "proof", "task1-cleanup"}:
             _require_local_env_file(args.env_file)
-    except (OSError, ValueError) as error:
+        _validate_task1_proof_context(args)
+    except (OSError, Task1ProofContextError, ValueError) as error:
         print(_redact_runtime_message(str(error), password=args.password), file=sys.stderr)
         reporter.finish(args.command, exit_code=1, started=started)
         return 1
 
     try:
-        reporter.progress(
-            f"connecting to {args.user}@{args.host}:22 path={args.remote_path}"
-        )
+        reporter.progress(f"connecting to {args.user}@{args.host}:22 path={args.remote_path}")
         connect_started = time.monotonic()
         transport = ParamikoRemoteTransport.connect(
             hostname=args.host,
@@ -174,6 +193,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     session = RemoteTransportSession(
         transport=transport,
         remote_root=str(args.remote_path),
+        task1_proof_context=args.task1_proof_context,
         progress_callback=reporter.progress,
     )
     exit_code = 1
@@ -268,6 +288,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             exit_code = 0
             return exit_code
 
+        if args.command == "task1-cleanup":
+            cleanup_stdout = _run_task1_cleanup(
+                session=session,
+                password=args.password,
+            )
+            sys.stdout.buffer.write(cleanup_stdout)
+            exit_code = 0
+            return exit_code
+
         assert args.command == "proof"
         if args.fresh:
             _upload_confirm_file(
@@ -344,6 +373,11 @@ def _add_remote_common_arguments(parser: argparse.ArgumentParser) -> None:
         action=_EnvFileAction,
         help="install env file relative to the repo root (default: .install.env)",
     )
+    parser.add_argument(
+        "--task1-proof-context",
+        type=Path,
+        help="validated external Task 1 proof context paired with the upload-only env file",
+    )
     parser.set_defaults(_env_file_flag_provided=False)
 
 
@@ -377,6 +411,20 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             parser.error(
                 "uninstall requires --confirm-file for non-interactive remote confirmation."
             )
+
+
+def _validate_task1_proof_context(args: argparse.Namespace) -> None:
+    command = args.command
+    if command not in {"install", "modify", "proof", "inspect-state", "task1-cleanup"}:
+        return
+    if (
+        command == "inspect-state"
+        and args.task1_proof_context is None
+        and not args.env_file.exists()
+    ):
+        return
+    raw_env = parse_env_file(args.env_file)
+    validate_task1_proof_context_argument(raw_env, args.task1_proof_context)
 
 
 def _validate_runtime_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
@@ -494,7 +542,11 @@ def _upload_remote_bundle(
             "uploading repo archive and install env file "
             f"to {session.remote_root} (env contents redacted)"
         )
-        session.upload_bundle(repo_archive=archive_path, install_env_file=args.env_file)
+        session.upload_bundle(
+            repo_archive=archive_path,
+            install_env_file=args.env_file,
+            task1_proof_context=args.task1_proof_context,
+        )
     elapsed = time.monotonic() - started
     reporter.progress(f"uploaded remote bundle ({elapsed:.1f}s)")
 
@@ -542,35 +594,31 @@ def _build_extract_command(session: RemoteTransportSession) -> str:
 
 
 def _build_install_command(session: RemoteTransportSession) -> str:
-    return _with_unbuffered_python(
-        _shell_join(
-            [
-                "./bin/dokploy-wizard",
-                "install",
-                "--env-file",
-                session.remote_install_env_path,
-                "--state-dir",
-                session.remote_state_dir,
-                "--non-interactive",
-            ]
-        )
-    )
+    arguments = [
+        "./bin/dokploy-wizard",
+        "install",
+        "--env-file",
+        session.remote_install_env_path,
+        "--state-dir",
+        session.remote_state_dir,
+        "--non-interactive",
+    ]
+    arguments.extend(_task1_proof_context_arguments(session))
+    return _with_unbuffered_python(_shell_join(arguments))
 
 
 def _build_modify_command(session: RemoteTransportSession) -> str:
-    return _with_unbuffered_python(
-        _shell_join(
-            [
-                "./bin/dokploy-wizard",
-                "modify",
-                "--env-file",
-                session.remote_install_env_path,
-                "--state-dir",
-                session.remote_state_dir,
-                "--non-interactive",
-            ]
-        )
-    )
+    arguments = [
+        "./bin/dokploy-wizard",
+        "modify",
+        "--env-file",
+        session.remote_install_env_path,
+        "--state-dir",
+        session.remote_state_dir,
+        "--non-interactive",
+    ]
+    arguments.extend(_task1_proof_context_arguments(session))
+    return _with_unbuffered_python(_shell_join(arguments))
 
 
 def _build_uninstall_command(
@@ -593,18 +641,22 @@ def _build_uninstall_command(
 
 
 def _build_inspect_state_command(session: RemoteTransportSession) -> str:
-    return _with_unbuffered_python(
-        _shell_join(
-            [
-                "./bin/dokploy-wizard",
-                "inspect-state",
-                "--env-file",
-                session.remote_install_env_path,
-                "--state-dir",
-                session.remote_state_dir,
-            ]
-        )
-    )
+    arguments = [
+        "./bin/dokploy-wizard",
+        "inspect-state",
+        "--env-file",
+        session.remote_install_env_path,
+        "--state-dir",
+        session.remote_state_dir,
+    ]
+    arguments.extend(_task1_proof_context_arguments(session))
+    return _with_unbuffered_python(_shell_join(arguments))
+
+
+def _task1_proof_context_arguments(session: RemoteTransportSession) -> list[str]:
+    if session.remote_task1_proof_context_path is None:
+        return []
+    return ["--task1-proof-context", session.remote_task1_proof_context_path]
 
 
 def _run_remote_command(
@@ -615,6 +667,16 @@ def _run_remote_command(
     password: str | None,
 ) -> None:
     session.run_command(subcommand=subcommand, command=command, password=password)
+
+
+def _run_task1_cleanup(*, session: RemoteTransportSession, password: str) -> bytes:
+    output = session.capture_command(
+        subcommand="task1-cloudflare-cleanup",
+        command=session.build_task1_cloudflare_cleanup_command(),
+        limits=TASK1_CLEANUP_CAPTURE_LIMITS,
+        password=password,
+    )
+    return output.stdout
 
 
 def capture_remote_output(
@@ -758,54 +820,34 @@ def _looks_like_env_assignment(line: str) -> bool:
 
 
 def _create_repo_archive(*, repo_root: Path, destination: Path) -> None:
-    with tarfile.open(destination, "w:gz") as archive:
-        for path in sorted(repo_root.rglob("*")):
-            relative = path.relative_to(repo_root)
-            if _should_skip(relative):
-                continue
-            archive.add(path, arcname=relative.as_posix(), recursive=False)
-
-
-def _should_skip(relative: Path) -> bool:
-    parts = relative.parts
-    if not parts:
-        return False
-    if parts[0] in {
-        ".codegraph",
-        ".git",
-        ".omo",
-        ".venv",
-        "venv",
-        "env",
-        "build",
-        "dist",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".dokploy-wizard-state",
-    }:
-        return True
-    if relative == Path("uv.lock"):
-        return True
-    if parts[0] == ".sisyphus" and len(parts) > 1 and parts[1] == "evidence":
-        return True
-    if _is_secret_env_artifact(relative.name):
-        return True
-    if relative.suffix == ".swp":
-        return True
-    return any(part == "__pycache__" for part in parts)
-
-
-def _is_secret_env_artifact(name: str) -> bool:
-    sensitive_env_files = {".install.env", ".fresh-vps-validation.env"}
-    if name in sensitive_env_files:
-        return True
-    backup_suffixes = {"bak", "backup", "old", "orig", "save", "tmp"}
-    return any(
-        name == f"{env_name}.{suffix}"
-        for env_name in sensitive_env_files
-        for suffix in backup_suffixes
-    )
+    archive_destination = destination.resolve()
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--verify", "HEAD^{commit}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if head.returncode != 0:
+            raise RepositoryArchiveError("repository HEAD is not a commit")
+        archive = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "archive",
+                "--format=tar.gz",
+                f"--output={archive_destination}",
+                "HEAD",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise RepositoryArchiveError("git archive is unavailable") from error
+    if archive.returncode != 0:
+        raise RepositoryArchiveError("git archive failed")
 
 
 if __name__ == "__main__":  # pragma: no cover

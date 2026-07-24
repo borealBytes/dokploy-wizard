@@ -38,6 +38,10 @@ from dokploy_wizard.proof.model_sync_artifacts import (
     write_or_verify_exact_bytes,
 )
 from dokploy_wizard.proof.model_sync_preflight_payload import PREFLIGHT_SCRIPT
+from dokploy_wizard.proof.model_sync_task1_finalization_bundle import (
+    clear_finalization_bundle,
+    load_finalization_bundle,
+)
 
 __all__ = ("PREFLIGHT_SCRIPT", "REQUIRED_RESULT_KEYS")
 
@@ -149,8 +153,13 @@ def complete_resumable_finalization(
     guard = state.read_abort_guard(recovery.paths.guard_path)
     if guard.attestation is None:
         raise proof.AbortGuardError("finalization intent has no attestation")
+    bundle = load_finalization_bundle(recovery.paths.guard_path)
+    if bundle is not None:
+        for name in sorted(bundle.payloads):
+            write_or_verify_exact_bytes(recovery.paths.artifact_dir / name, bundle.payloads[name])
+            boundary_hook(proof.FINALIZATION_OUTPUT_BOUNDARIES[name])
     result = proof.result_bytes_from_attestation(guard.attestation)
-    proof.require_generated_bounds({}, result)
+    proof.require_generated_bounds({} if bundle is None else bundle.payloads, result)
     write_or_verify_exact_bytes(recovery.paths.output, result)
     boundary_hook(proof.FinalizationBoundary.RESULT_PUBLISHED)
     proof.verify_attestation(
@@ -159,6 +168,8 @@ def complete_resumable_finalization(
         require_result=True,
     )
     state.complete_abort_guard(recovery.paths.guard_path, claim_token=recovery.claim.token)
+    if bundle is not None:
+        clear_finalization_bundle(recovery.paths.guard_path)
     boundary_hook(proof.FinalizationBoundary.COMPLETE_GUARD)
 
 

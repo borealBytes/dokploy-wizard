@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +58,21 @@ from dokploy_wizard.packs.surfsense import (
     reconcile_surfsense,
 )
 from dokploy_wizard.preflight import PreflightReport
+from dokploy_wizard.proof.model_sync_task1_cloudflare_journal import Task1CloudflareJournal
+from dokploy_wizard.proof.model_sync_task1_cloudflare_snapshot_api import (
+    CloudflareSnapshotApiBackend,
+)
+from dokploy_wizard.proof.model_sync_task1_cloudflare_snapshot_backend import (
+    CloudflareSnapshotScope,
+)
+from dokploy_wizard.proof.model_sync_task1_cloudflare_snapshot_collection import (
+    capture_cloudflare_snapshot,
+)
+from dokploy_wizard.proof.model_sync_task1_cloudflare_snapshot_evidence import (
+    load_or_capture_snapshot,
+)
+from dokploy_wizard.proof.model_sync_task1_context import active_task1_proof_context
+from dokploy_wizard.proof.model_sync_task1_context_schema import Task1ProofContextV1
 from dokploy_wizard.state import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
@@ -105,6 +121,19 @@ def execute_lifecycle_plan(
         _write_checkpoint(state_dir, desired_state, applicable_phases, valid_phases)
     phase_results: dict[str, dict[str, Any]] = {}
     current_ledger = ownership_ledger
+    proof_context = active_task1_proof_context()
+    task1_cloudflare_journal = _task1_cloudflare_journal_for_lifecycle(
+        state_dir=state_dir,
+        dry_run=dry_run,
+        lifecycle_plan=lifecycle_plan,
+        proof_context=proof_context,
+    )
+    if proof_context is not None and _task1_preinstall_snapshot_capture_required(
+        task1_cloudflare_journal
+    ):
+        _capture_task1_preinstall_cloudflare_snapshot(
+            state_dir, raw_env, desired_state, backends.networking, proof_context
+        )
     nextcloud_refresh_phase = _nextcloud_refresh_phase(
         phases_to_run=lifecycle_plan.phases_to_run,
         enabled_packs=desired_state.enabled_packs,
@@ -135,7 +164,17 @@ def execute_lifecycle_plan(
             state_status="existing",
         )
 
-    for phase in applicable_phases[1:]:
+    phases = applicable_phases[1:]
+    if active_task1_proof_context() is not None and "cloudflare_access" in phases:
+        access_index = phases.index("cloudflare_access")
+        networking_index = phases.index("networking")
+        phases = (
+            *phases[:networking_index],
+            phases[access_index],
+            *phases[networking_index:access_index],
+            *phases[access_index + 1 :],
+        )
+    for phase in phases:
         if phase not in lifecycle_plan.phases_to_run:
             if phase in lifecycle_plan.preserved_phases:
                 phase_results[phase] = _preserved_result(
@@ -174,6 +213,7 @@ def execute_lifecycle_plan(
                 ownership_ledger=current_ledger,
                 backend=backends.networking,
                 connector_backend=backends.cloudflared,
+                task1_journal=task1_cloudflare_journal,
             )
             phase_results[phase] = networking.result.to_dict()
             if (
@@ -182,7 +222,7 @@ def execute_lifecycle_plan(
                 and networking.result.connector.passed
             ):
                 _emit_dokploy_ready_hint(networking.result.connector.public_url)
-            if not dry_run:
+            if not dry_run and proof_context is None:
                 if networking.tunnel_resource_id is None:
                     raise RuntimeError("Networking reconciliation did not return a tunnel id.")
                 current_ledger = build_networking_ledger(
@@ -382,9 +422,10 @@ def execute_lifecycle_plan(
                 desired_state=desired_state,
                 ownership_ledger=current_ledger,
                 backend=backends.networking,
+                task1_journal=task1_cloudflare_journal,
             )
             phase_results[phase] = access.result.to_dict()
-            if not dry_run:
+            if not dry_run and proof_context is None:
                 current_ledger = build_access_ledger(
                     existing_ledger=current_ledger,
                     account_id=access.result.account_id,
@@ -412,6 +453,55 @@ def execute_lifecycle_plan(
         dry_run=dry_run,
         phase_results=phase_results,
         state_status="existing" if lifecycle_plan.mode != "install" else "fresh",
+    )
+
+
+def _task1_cloudflare_journal_for_lifecycle(
+    *,
+    state_dir: Path,
+    dry_run: bool,
+    lifecycle_plan: LifecyclePlan,
+    proof_context: Task1ProofContextV1 | None,
+) -> Task1CloudflareJournal | None:
+    if (
+        proof_context is None
+        or dry_run
+        or lifecycle_plan.mode == "noop"
+        or not {"networking", "cloudflare_access"} & set(lifecycle_plan.phases_to_run)
+    ):
+        return None
+    return Task1CloudflareJournal.for_context(state_dir=state_dir, context=proof_context)
+
+
+def _task1_preinstall_snapshot_capture_required(
+    journal: Task1CloudflareJournal | None,
+) -> bool:
+    return journal is not None
+
+
+def _capture_task1_preinstall_cloudflare_snapshot(
+    state_dir: Path,
+    raw_env: RawEnvInput,
+    desired_state: DesiredState,
+    backend: CloudflareBackend,
+    context: Task1ProofContextV1,
+) -> None:
+    account_id = raw_env.values.get("CLOUDFLARE_ACCOUNT_ID", "")
+    zone_id = raw_env.values.get("CLOUDFLARE_ZONE_ID") or backend.resolve_zone_id(
+        account_id, desired_state.root_domain
+    )
+    if account_id == "" or zone_id is None:
+        raise RuntimeError("Task 1 Cloudflare snapshot scope is unavailable")
+    scope = CloudflareSnapshotScope(
+        context_sha256=hashlib.sha256(context.to_bytes()).hexdigest(),
+        account_id=account_id,
+        zone_id=zone_id,
+    )
+    snapshot_backend = CloudflareSnapshotApiBackend(raw_env)
+    load_or_capture_snapshot(
+        state_dir / "task1-cloudflare-pre-install.snapshot.json",
+        scope,
+        lambda: capture_cloudflare_snapshot(snapshot_backend, scope),
     )
 
 

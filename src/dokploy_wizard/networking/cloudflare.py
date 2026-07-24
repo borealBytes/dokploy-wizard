@@ -22,6 +22,8 @@ class CloudflareError(RuntimeError):
 class CloudflareTunnel:
     tunnel_id: str
     name: str
+    config_src: str | None = None
+    status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,10 @@ class CloudflareBackend(Protocol):
 
     def find_tunnel_by_name(self, account_id: str, tunnel_name: str) -> CloudflareTunnel | None: ...
 
+    def list_tunnels_by_name(
+        self, account_id: str, tunnel_name: str
+    ) -> tuple[CloudflareTunnel, ...]: ...
+
     def create_tunnel(self, account_id: str, tunnel_name: str) -> CloudflareTunnel: ...
 
     def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str: ...
@@ -97,6 +103,8 @@ class CloudflareBackend(Protocol):
         record_type: str | None,
         content: str | None,
     ) -> tuple[CloudflareDnsRecord, ...]: ...
+
+    def get_dns_record(self, zone_id: str, record_id: str) -> CloudflareDnsRecord | None: ...
 
     def create_dns_record(
         self,
@@ -127,6 +135,10 @@ class CloudflareBackend(Protocol):
         self, account_id: str, provider_id: str
     ) -> CloudflareAccessIdentityProvider | None: ...
 
+    def list_access_identity_providers(
+        self, account_id: str
+    ) -> tuple[CloudflareAccessIdentityProvider, ...]: ...
+
     def find_access_identity_provider_by_name(
         self, account_id: str, name: str
     ) -> CloudflareAccessIdentityProvider | None: ...
@@ -142,6 +154,10 @@ class CloudflareBackend(Protocol):
     def find_access_application_by_domain(
         self, account_id: str, domain: str
     ) -> CloudflareAccessApplication | None: ...
+
+    def list_access_applications_by_domain(
+        self, account_id: str, domain: str
+    ) -> tuple[CloudflareAccessApplication, ...]: ...
 
     def create_access_application(
         self,
@@ -159,6 +175,10 @@ class CloudflareBackend(Protocol):
     def find_access_policy_by_name(
         self, account_id: str, app_id: str, name: str
     ) -> CloudflareAccessPolicy | None: ...
+
+    def list_access_policies_by_name(
+        self, account_id: str, app_id: str, name: str
+    ) -> tuple[CloudflareAccessPolicy, ...]: ...
 
     def create_access_policy(
         self,
@@ -263,10 +283,16 @@ class CloudflareApiBackend:
         return _parse_tunnel(payload)
 
     def find_tunnel_by_name(self, account_id: str, tunnel_name: str) -> CloudflareTunnel | None:
+        matches = self.list_tunnels_by_name(account_id, tunnel_name)
+        return matches[0] if matches else None
+
+    def list_tunnels_by_name(
+        self, account_id: str, tunnel_name: str
+    ) -> tuple[CloudflareTunnel, ...]:
         if self._mock_account_ok is not None:
             if self._mock_existing_tunnel_id is None:
-                return None
-            return CloudflareTunnel(tunnel_id=self._mock_existing_tunnel_id, name=tunnel_name)
+                return ()
+            return (CloudflareTunnel(tunnel_id=self._mock_existing_tunnel_id, name=tunnel_name),)
 
         payload = self._request_json(
             method="GET",
@@ -276,10 +302,11 @@ class CloudflareApiBackend:
         tunnels = payload.get("result")
         if not isinstance(tunnels, list):
             raise CloudflareError("Cloudflare returned an invalid tunnel list response.")
-        for item in tunnels:
-            if isinstance(item, dict) and item.get("name") == tunnel_name:
-                return _parse_tunnel(item)
-        return None
+        return tuple(
+            _parse_tunnel(item)
+            for item in tunnels
+            if isinstance(item, dict) and item.get("name") == tunnel_name
+        )
 
     def create_tunnel(self, account_id: str, tunnel_name: str) -> CloudflareTunnel:
         if self._mock_account_ok is not None:
@@ -296,6 +323,13 @@ class CloudflareApiBackend:
             },
         )
         return _parse_tunnel(payload)
+
+    def delete_tunnel(self, account_id: str, tunnel_id: str) -> None:
+        if self._mock_account_ok is not None:
+            if self._mock_existing_tunnel_id == tunnel_id:
+                self._mock_existing_tunnel_id = None
+            return
+        self._request_json(method="DELETE", path=f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}")
 
     def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
         if self._mock_account_ok is not None:
@@ -422,6 +456,24 @@ class CloudflareApiBackend:
         )
         return _parse_dns_record(payload)
 
+    def get_dns_record(self, zone_id: str, record_id: str) -> CloudflareDnsRecord | None:
+        if self._mock_zone_ok is not None:
+            return None
+        try:
+            payload = self._request_json(
+                method="GET", path=f"/zones/{zone_id}/dns_records/{record_id}"
+            )
+        except CloudflareError as error_value:
+            if "HTTP 404" in str(error_value):
+                return None
+            raise
+        return _parse_dns_record(payload)
+
+    def delete_dns_record(self, zone_id: str, record_id: str) -> None:
+        if self._mock_zone_ok is not None:
+            return
+        self._request_json(method="DELETE", path=f"/zones/{zone_id}/dns_records/{record_id}")
+
     def update_dns_record(
         self,
         zone_id: str,
@@ -521,11 +573,25 @@ class CloudflareApiBackend:
     def find_access_identity_provider_by_name(
         self, account_id: str, name: str
     ) -> CloudflareAccessIdentityProvider | None:
+        return next(
+            (
+                provider
+                for provider in self.list_access_identity_providers(account_id)
+                if provider.name == name and provider.provider_type == "onetimepin"
+            ),
+            None,
+        )
+
+    def list_access_identity_providers(
+        self, account_id: str
+    ) -> tuple[CloudflareAccessIdentityProvider, ...]:
         if self._mock_account_ok is not None:
-            return CloudflareAccessIdentityProvider(
-                provider_id=_mock_access_provider_id(),
-                name=name,
-                provider_type="onetimepin",
+            return (
+                CloudflareAccessIdentityProvider(
+                    provider_id=_mock_access_provider_id(),
+                    name="One-time PIN login",
+                    provider_type="onetimepin",
+                ),
             )
         payload = self._request_json(
             method="GET",
@@ -534,11 +600,7 @@ class CloudflareApiBackend:
         providers = payload.get("result")
         if not isinstance(providers, list):
             raise CloudflareError("Cloudflare returned an invalid Access identity-provider list.")
-        for item in providers:
-            provider = _parse_access_identity_provider(item)
-            if provider.name == name and provider.provider_type == "onetimepin":
-                return provider
-        return None
+        return tuple(_parse_access_identity_provider(item) for item in providers)
 
     def create_access_identity_provider(
         self, account_id: str, name: str
@@ -586,26 +648,32 @@ class CloudflareApiBackend:
     def find_access_application_by_domain(
         self, account_id: str, domain: str
     ) -> CloudflareAccessApplication | None:
+        matches = self.list_access_applications_by_domain(account_id, domain)
+        return matches[0] if matches else None
+
+    def list_access_applications_by_domain(
+        self, account_id: str, domain: str
+    ) -> tuple[CloudflareAccessApplication, ...]:
         if self._mock_account_ok is not None:
             app_id = self._mock_access_app_ids.get(domain)
             if app_id is None:
-                return None
-            return CloudflareAccessApplication(
-                app_id=app_id,
-                name=f"{domain} protected",
-                domain=domain,
-                app_type="self_hosted",
-                allowed_identity_provider_ids=(_mock_access_provider_id(),),
+                return ()
+            return (
+                CloudflareAccessApplication(
+                    app_id=app_id,
+                    name=f"{domain} protected",
+                    domain=domain,
+                    app_type="self_hosted",
+                    allowed_identity_provider_ids=(_mock_access_provider_id(),),
+                ),
             )
         payload = self._request_json(method="GET", path=f"/accounts/{account_id}/access/apps")
         apps = payload.get("result")
         if not isinstance(apps, list):
             raise CloudflareError("Cloudflare returned an invalid Access application list.")
-        for item in apps:
-            app = _parse_access_application(item)
-            if app.domain == domain and app.app_type == "self_hosted":
-                return app
-        return None
+        return tuple(
+            app for item in apps if (app := _parse_access_application(item)).domain == domain
+        )
 
     def create_access_application(
         self,
@@ -637,6 +705,16 @@ class CloudflareApiBackend:
         )
         return _parse_access_application(payload)
 
+    def delete_access_application(self, account_id: str, app_id: str) -> None:
+        if self._mock_account_ok is not None:
+            self._mock_access_app_ids = {
+                domain: candidate
+                for domain, candidate in self._mock_access_app_ids.items()
+                if candidate != app_id
+            }
+            return
+        self._request_json(method="DELETE", path=f"/accounts/{account_id}/access/apps/{app_id}")
+
     def get_access_policy(
         self, account_id: str, app_id: str, policy_id: str
     ) -> CloudflareAccessPolicy | None:
@@ -659,11 +737,17 @@ class CloudflareApiBackend:
     def find_access_policy_by_name(
         self, account_id: str, app_id: str, name: str
     ) -> CloudflareAccessPolicy | None:
+        matches = self.list_access_policies_by_name(account_id, app_id, name)
+        return matches[0] if matches else None
+
+    def list_access_policies_by_name(
+        self, account_id: str, app_id: str, name: str
+    ) -> tuple[CloudflareAccessPolicy, ...]:
         if self._mock_account_ok is not None:
             policy = self._mock_access_policies.get(app_id)
             if policy is not None and policy.name == name:
-                return policy
-            return None
+                return (policy,)
+            return ()
         payload = self._request_json(
             method="GET",
             path=f"/accounts/{account_id}/access/apps/{app_id}/policies",
@@ -671,11 +755,11 @@ class CloudflareApiBackend:
         policies = payload.get("result")
         if not isinstance(policies, list):
             raise CloudflareError("Cloudflare returned an invalid Access policy list.")
-        for item in policies:
-            policy = _parse_access_policy(item, app_id=app_id)
-            if policy.name == name and policy.decision == "allow":
-                return policy
-        return None
+        return tuple(
+            policy
+            for item in policies
+            if (policy := _parse_access_policy(item, app_id=app_id)).name == name
+        )
 
     def create_access_policy(
         self,
@@ -705,6 +789,17 @@ class CloudflareApiBackend:
             },
         )
         return _parse_access_policy(payload, app_id=app_id)
+
+    def delete_access_policy(self, account_id: str, app_id: str, policy_id: str) -> None:
+        if self._mock_account_ok is not None:
+            policy = self._mock_access_policies.get(app_id)
+            if policy is not None and policy.policy_id == policy_id:
+                del self._mock_access_policies[app_id]
+            return
+        self._request_json(
+            method="DELETE",
+            path=f"/accounts/{account_id}/access/apps/{app_id}/policies/{policy_id}",
+        )
 
     def _request_json(
         self,
@@ -764,7 +859,13 @@ def _parse_tunnel(payload: dict[str, Any]) -> CloudflareTunnel:
         raise CloudflareError("Cloudflare tunnel payload is missing a valid id.")
     if not isinstance(name, str) or name == "":
         raise CloudflareError("Cloudflare tunnel payload is missing a valid name.")
-    return CloudflareTunnel(tunnel_id=tunnel_id, name=name)
+    config_src = result.get("config_src")
+    status = result.get("status")
+    if config_src is not None and config_src not in {"cloudflare", "local"}:
+        raise CloudflareError("Cloudflare tunnel payload has an unsupported config source.")
+    if status is not None and status not in {"inactive", "degraded", "healthy", "down"}:
+        raise CloudflareError("Cloudflare tunnel payload has an unsupported status.")
+    return CloudflareTunnel(tunnel_id=tunnel_id, name=name, config_src=config_src, status=status)
 
 
 def _parse_dns_record(payload: dict[str, Any]) -> CloudflareDnsRecord:

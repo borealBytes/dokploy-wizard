@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from dokploy_wizard.proof import (
     AbortGuard,
     AbortGuardError,
-    BaselineAttestation,
     EnvReceipt,
     GuardPhase,
     abort_guard_payload,
@@ -29,8 +28,17 @@ from dokploy_wizard.proof.model_sync_artifacts import atomic_write_bytes
 __all__ = (
     "AbortGuard",
     "AbortGuardError",
+    "begin_rollback",
+    "complete_abort_guard",
+    "disarm_abort_guard",
     "process_identity_matches",
     "process_start_time_ticks",
+    "reclaim_task1_finalization",
+    "reclaim_finalize_intent",
+    "record_finalize_intent",
+    "recover_dead_abort_claim",
+    "reset_abort_guard",
+    "transfer_abort_guard_to_plan",
 )
 
 
@@ -75,8 +83,15 @@ def claim_abort_guard(
     if not valid_process_identity(pid, start_time_ticks, claim_token):
         raise AbortGuardError("abort guard process identity is invalid")
     claimed = AbortGuard(
-        guard.guard_id, "armed", "claimed", "process",
-        pid, start_time_ticks, claim_token, None, None,
+        guard.guard_id,
+        "armed",
+        "claimed",
+        "process",
+        pid,
+        start_time_ticks,
+        claim_token,
+        None,
+        None,
     )
     return _write_guard(path, claimed)
 
@@ -90,43 +105,31 @@ def claim_rollback_guard(
     if not valid_process_identity(pid, start_time_ticks, claim_token):
         raise AbortGuardError("abort guard process identity is invalid")
     claimed = AbortGuard(
-        guard.guard_id, "armed", "rollback", "process",
-        pid, start_time_ticks, claim_token, guard.env_receipt, guard.attestation,
+        guard.guard_id,
+        "armed",
+        "rollback",
+        "process",
+        pid,
+        start_time_ticks,
+        claim_token,
+        guard.env_receipt,
+        guard.attestation,
     )
     return _write_guard(path, claimed)
-
-
-def reclaim_finalize_intent(
-    path: Path,
-    *,
-    pid: int,
-    start_time_ticks: str,
-    claim_token: str,
-    process_identity: Callable[[int, str], bool],
-) -> AbortGuard:
-    guard = read_abort_guard(path)
-    if (
-        guard.phase != "finalize_intent"
-        or guard.claimant_kind != "process"
-        or guard.pid is None
-        or guard.start_time_ticks is None
-        or process_identity(guard.pid, guard.start_time_ticks)
-    ):
-        raise AbortGuardError("finalization guard is not reclaimable")
-    if not valid_process_identity(pid, start_time_ticks, claim_token):
-        raise AbortGuardError("abort guard process identity is invalid")
-    reclaimed = AbortGuard(
-        guard.guard_id, "armed", guard.phase, "process",
-        pid, start_time_ticks, claim_token, guard.env_receipt, guard.attestation,
-    )
-    return _write_guard(path, reclaimed)
 
 
 def record_env_intent(path: Path, *, claim_token: str, receipt: EnvReceipt) -> AbortGuard:
     guard = _claimed_guard(path, claim_token, "claimed")
     intended = AbortGuard(
-        guard.guard_id, "armed", "env_intent", "process",
-        guard.pid, guard.start_time_ticks, claim_token, receipt, None,
+        guard.guard_id,
+        "armed",
+        "env_intent",
+        "process",
+        guard.pid,
+        guard.start_time_ticks,
+        claim_token,
+        receipt,
+        None,
     )
     return _write_guard(path, intended)
 
@@ -134,105 +137,59 @@ def record_env_intent(path: Path, *, claim_token: str, receipt: EnvReceipt) -> A
 def record_proof_active(path: Path, *, claim_token: str) -> AbortGuard:
     guard = _claimed_guard(path, claim_token, "env_intent")
     active = AbortGuard(
-        guard.guard_id, "armed", "proof_active", "process",
-        guard.pid, guard.start_time_ticks, claim_token, guard.env_receipt, None,
+        guard.guard_id,
+        "armed",
+        "proof_active",
+        "process",
+        guard.pid,
+        guard.start_time_ticks,
+        claim_token,
+        guard.env_receipt,
+        None,
     )
     return _write_guard(path, active)
 
 
-def record_finalize_intent(
-    path: Path, *, claim_token: str, attestation: BaselineAttestation
+def record_env_restored(
+    path: Path, *, claim_token: str, receipt: EnvReceipt | None = None
 ) -> AbortGuard:
+    """Persist exact restoration before allowing result finalization."""
     guard = _claimed_guard(path, claim_token, "proof_active")
-    if (
-        guard.env_receipt is None
-        or guard.guard_id != attestation.guard_id
-        or receipt_identity(guard.env_receipt) != receipt_identity(attestation.env_receipt)
+    if guard.env_receipt is None:
+        raise AbortGuardError("proof-active guard lacks env receipt")
+    restored_receipt = guard.env_receipt if receipt is None else receipt
+    if receipt is not None and (
+        receipt_identity(receipt) != receipt_identity(guard.env_receipt)
+        or receipt.context_evidence is None
+        or receipt.context_evidence.observed_restored_source_sha256 is None
+        or replace(
+            receipt.context_evidence,
+            observed_restored_source_sha256=None,
+            observed_restored_source_mode=None,
+        )
+        != guard.env_receipt.context_evidence
     ):
-        raise AbortGuardError("attestation does not bind the active guard receipt")
-    intent = AbortGuard(
-        guard.guard_id, "armed", "finalize_intent", "process",
-        guard.pid, guard.start_time_ticks, claim_token, guard.env_receipt, attestation,
+        raise AbortGuardError("restored context receipt does not bind the active guard")
+    restored = AbortGuard(
+        guard.guard_id,
+        "armed",
+        "env_restored",
+        "process",
+        guard.pid,
+        guard.start_time_ticks,
+        claim_token,
+        restored_receipt,
+        None,
     )
-    return _write_guard(path, intent)
+    return _write_guard(path, restored)
 
 
-def complete_abort_guard(path: Path, *, claim_token: str) -> AbortGuard:
-    guard = _claimed_guard(path, claim_token, "finalize_intent")
-    complete = AbortGuard(
-        guard.guard_id, "armed", "complete", "plan",
-        None, None, None, guard.env_receipt, guard.attestation,
-    )
-    return _write_guard(path, complete)
-
-
-def begin_rollback(path: Path, *, claim_token: str) -> AbortGuard:
+def _claimed_guard(
+    path: Path, claim_token: str, phase: GuardPhase | tuple[GuardPhase, ...]
+) -> AbortGuard:
     guard = read_abort_guard(path)
     if (
-        guard.claimant_kind != "process"
-        or guard.claim_token != claim_token
-        or guard.phase == "complete"
-    ):
-        raise AbortGuardError("abort guard claim token does not authorize rollback")
-    rollback = AbortGuard(
-        guard.guard_id, "armed", "rollback", "process",
-        guard.pid, guard.start_time_ticks, claim_token, guard.env_receipt, guard.attestation,
-    )
-    return _write_guard(path, rollback)
-
-
-def transfer_abort_guard_to_plan(path: Path, *, claim_token: str) -> AbortGuard:
-    guard = _claimed_guard(path, claim_token, "rollback")
-    plan = AbortGuard(
-        guard.guard_id, "armed", "rollback", "plan",
-        None, None, None, guard.env_receipt, guard.attestation,
-    )
-    return _write_guard(path, plan)
-
-
-def reset_abort_guard(path: Path) -> AbortGuard:
-    guard = read_abort_guard(path)
-    if guard.phase != "rollback" or guard.claimant_kind != "plan":
-        raise AbortGuardError("only a plan-owned rollback guard may be reset")
-    fresh = AbortGuard(
-        secrets.token_hex(32), "armed", "ready", "plan", None, None, None, None, None
-    )
-    return _write_guard(path, fresh)
-
-
-def recover_dead_abort_claim(
-    path: Path, *, process_identity: Callable[[int, str], bool]
-) -> bool:
-    guard = read_abort_guard(path)
-    if guard.claimant_kind == "plan":
-        return False
-    if guard.pid is None or guard.start_time_ticks is None:
-        raise AbortGuardError("process abort guard lacks process identity")
-    if process_identity(guard.pid, guard.start_time_ticks):
-        return False
-    recovered = AbortGuard(
-        guard.guard_id, "armed", "rollback", "plan",
-        None, None, None, guard.env_receipt, guard.attestation,
-    )
-    _write_guard(path, recovered)
-    return True
-
-
-def disarm_abort_guard(path: Path) -> AbortGuard:
-    guard = read_abort_guard(path)
-    if guard.phase != "complete" or guard.claimant_kind != "plan":
-        raise AbortGuardError("only a complete plan guard may be disarmed")
-    disarmed = AbortGuard(
-        guard.guard_id, "disarmed", "complete", "plan",
-        None, None, None, guard.env_receipt, guard.attestation,
-    )
-    return _write_guard(path, disarmed)
-
-
-def _claimed_guard(path: Path, claim_token: str, phase: GuardPhase) -> AbortGuard:
-    guard = read_abort_guard(path)
-    if (
-        guard.phase != phase
+        guard.phase not in (phase if isinstance(phase, tuple) else (phase,))
         or guard.claimant_kind != "process"
         or guard.claim_token != claim_token
     ):
@@ -247,3 +204,16 @@ def _write_guard(path: Path, guard: AbortGuard) -> AbortGuard:
         mode=0o600,
     )
     return guard
+
+
+from dokploy_wizard.proof.model_sync_state_recovery import (  # noqa: E402
+    begin_rollback,
+    complete_abort_guard,
+    disarm_abort_guard,
+    reclaim_finalize_intent,
+    reclaim_task1_finalization,
+    record_finalize_intent,
+    recover_dead_abort_claim,
+    reset_abort_guard,
+    transfer_abort_guard_to_plan,
+)

@@ -46,7 +46,7 @@ class CoderPostgresBinding:
 @dataclass(frozen=True)
 class CoderServiceConfig:
     access_url: str
-    wildcard_access_url: str
+    wildcard_access_url: str | None
     postgres: CoderPostgresBinding
 
     def to_dict(self) -> dict[str, Any]:
