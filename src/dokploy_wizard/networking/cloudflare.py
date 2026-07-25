@@ -358,7 +358,13 @@ class CloudflareApiBackend:
             raise CloudflareError(
                 "Cloudflare tunnel configuration response must include a result object."
             )
-        config = result.get("config")
+        if "config" not in result:
+            raise CloudflareError(
+                "Cloudflare tunnel configuration response must include a config object."
+            )
+        config = result["config"]
+        if config is None:
+            return ()
         if not isinstance(config, dict):
             raise CloudflareError(
                 "Cloudflare tunnel configuration response must include a config object."

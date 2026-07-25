@@ -1125,6 +1125,21 @@ def test_access_rerun_reuses_owned_resources() -> None:
     assert {item.action for item in phase.result.policies} == {"reuse_owned"}
 
 
+def test_cloudflare_api_backend_treats_null_tunnel_config_as_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = CloudflareApiBackend(
+        RawEnvInput(format_version=1, values={"CLOUDFLARE_API_TOKEN": "token-123"})
+    )
+    monkeypatch.setattr(
+        backend,
+        "_request_json",
+        lambda **_: {"result": {"config": None}},
+    )
+
+    assert backend.get_tunnel_configuration("account-123", "tunnel-123") == ()
+
+
 def test_cloudflare_policy_list_parsing_uses_caller_app_id_when_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
