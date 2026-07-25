@@ -1374,6 +1374,16 @@ def _run_lifecycle_flow(
         )
     if not dry_run and lifecycle_plan.mode != "noop":
         write_target_state(state_dir, persistable_raw_env, desired_state)
+        if not existing_state:
+            write_applied_checkpoint(
+                state_dir,
+                AppliedStateCheckpoint(
+                    format_version=desired_state.format_version,
+                    desired_state_fingerprint=desired_state.fingerprint(),
+                    completed_steps=(),
+                    lifecycle_checkpoint_contract_version=LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+                ),
+            )
     tailscale_phase_backend = tailscale_backend or ShellTailscaleBackend(raw_env)
     cloudflare_backend = networking_backend or CloudflareApiBackend(raw_env)
     dokploy_session_client = _build_dokploy_session_client(
@@ -1551,9 +1561,14 @@ def _run_lifecycle_flow(
         backends=lifecycle_backends,
     )
     if not dry_run and lifecycle_plan.mode != "noop":
+        persisted_raw_env = (
+            persistable_raw_env
+            if active_task1_proof_context() is not None
+            else _state_persistable_raw_env_input(raw_env)
+        )
         write_target_state(
             state_dir,
-            _state_persistable_raw_env_input(raw_env),
+            persisted_raw_env,
             desired_state,
         )
     if allow_modify and disable_plan is not None:

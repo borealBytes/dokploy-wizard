@@ -578,6 +578,10 @@ def test_install_auth_success_refreshes_persisted_target_state_before_execution(
     assert loaded_state.raw_input.values["DOKPLOY_API_URL"] == "http://127.0.0.1:3000"
     assert loaded_state.desired_state.dokploy_api_url == "http://127.0.0.1:3000"
     assert loaded_state.applied_state.completed_steps == ()
+    assert (
+        loaded_state.applied_state.desired_state_fingerprint
+        == loaded_state.desired_state.fingerprint()
+    )
     assert persisted_raw_input["values"]["DOKPLOY_API_KEY"] == "dokp-key-123"
     assert "DOKPLOY_API_KEY=dokp-key-123" in env_file.read_text(encoding="utf-8")
 
