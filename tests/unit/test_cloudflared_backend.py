@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from dokploy_wizard.dokploy import DokployCloudflaredBackend
-from dokploy_wizard.dokploy.cloudflared import _render_compose_file
+from dokploy_wizard.dokploy import DokployApiError, DokployCloudflaredBackend
+from dokploy_wizard.dokploy.cloudflared import CloudflaredConnectorError, _render_compose_file
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     ComposeArtifactHashState,
@@ -24,8 +24,7 @@ def test_cloudflared_compose_uses_host_networking() -> None:
     assert "network_mode: host" in compose
     assert "command: ['tunnel', '--no-autoupdate', 'run']" in compose
     assert (
-        'TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}"'
-        in compose
+        'TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}"' in compose
     )
     assert rendered.env_specs[0].value == "token-123"
 
@@ -36,9 +35,7 @@ def test_dokploy_cloudflared_backend_skips_redeploy_when_hash_matches_and_contai
     service_name = "wizard-stack-cloudflared"
     rendered_compose = _render_compose_file(service_name, tunnel_token="token-123")
     compose_file = rendered_compose.compose_file
-    _write_hash_checkpoint(
-        tmp_path, service_name=service_name, rendered_compose=rendered_compose
-    )
+    _write_hash_checkpoint(tmp_path, service_name=service_name, rendered_compose=rendered_compose)
     client = FakeDokployApiClient()
     client.seed_existing_service(
         service_name=service_name,
@@ -63,6 +60,33 @@ def test_dokploy_cloudflared_backend_skips_redeploy_when_hash_matches_and_contai
 
     assert record.resource_id == "dokploy-compose:cmp-cloudflared:cloudflared"
     client.assert_unchanged_service(service_name)
+
+
+def test_dokploy_cloudflared_backend_categorizes_deploy_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = FakeDokployApiClient()
+    backend = DokployCloudflaredBackend(
+        api_url="https://dokploy.example.com",
+        api_key="dokp-key-123",
+        state_dir=tmp_path,
+        stack_name="wizard-stack",
+        public_url="https://dokploy.example.com",
+        client=client,
+    )
+
+    def fail_deploy(**_kwargs: object) -> None:
+        raise DokployApiError("SECRET deploy response")
+
+    monkeypatch.setattr(client, "deploy_compose", fail_deploy)
+
+    with pytest.raises(CloudflaredConnectorError) as caught:
+        backend.create_service(
+            resource_name="wizard-stack-cloudflared",
+            tunnel_token="token-123",
+        )
+
+    assert caught.value.task1_category == "cloudflared.deploy_compose"
 
 
 def _write_hash_checkpoint(state_dir: Path, *, service_name: str, rendered_compose: object) -> None:

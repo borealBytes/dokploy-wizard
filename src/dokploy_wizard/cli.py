@@ -50,6 +50,7 @@ from dokploy_wizard.dokploy import (
     DokploySurfSenseBackend,
     build_litellm_consumer_model_allowlists,
 )
+from dokploy_wizard.dokploy.cloudflared import CloudflaredConnectorError
 from dokploy_wizard.host_prereqs import (
     DOCKER_APT_PACKAGES,
     UbuntuAptHostPrerequisiteBackend,
@@ -127,6 +128,7 @@ from dokploy_wizard.preflight import (
     run_preflight,
 )
 from dokploy_wizard.proof.model_sync_task1_context import (
+    Task1ProofContextV1,
     activate_task1_proof_context,
     active_task1_proof_context,
     validate_task1_proof_context_argument,
@@ -360,6 +362,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _handle_install(args: argparse.Namespace) -> int:
+    context: Task1ProofContextV1 | None = None
     try:
         env_file, raw_env, resolved_state_dir, generated_secrets = _resolve_install_input(
             env_file=args.env_file,
@@ -396,8 +399,11 @@ def _handle_install(args: argparse.Namespace) -> int:
         NextcloudError,
         OpenClawError,
         SeaweedFsError,
+        CloudflaredConnectorError,
     ) as error:
-        raise SystemExit(_redacted_cli_error(error)) from error
+        raise SystemExit(
+            _task1_install_error_message(error, task1_context_enabled=context is not None)
+        ) from error
 
     print(json.dumps(summary, indent=2, sort_keys=True))
     if not getattr(args, "no_print_secrets", False):
@@ -946,6 +952,12 @@ def _state_persistable_raw_env_input(raw_env: RawEnvInput) -> RawEnvInput:
 
 def _redacted_cli_error(error: BaseException) -> str:
     return redact_text(str(error))
+
+
+def _task1_install_error_message(error: BaseException, *, task1_context_enabled: bool) -> str:
+    if task1_context_enabled and isinstance(error, CloudflaredConnectorError):
+        return f"TASK1_REMOTE_ERROR_CATEGORY={error.task1_category}"
+    return _redacted_cli_error(error)
 
 
 def _docker_hub_credentials_from_env(raw_env: RawEnvInput) -> tuple[str, str] | None:

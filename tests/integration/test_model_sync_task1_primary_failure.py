@@ -6,6 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from dokploy_wizard.cli import _task1_install_error_message
+from dokploy_wizard.dokploy.cloudflared import (
+    CloudflaredConnectorError,
+    CloudflaredFailureCategory,
+)
 from dokploy_wizard.proof import model_sync_task1_baseline_runner as baseline_runner
 from dokploy_wizard.proof.model_sync_cli_wrapper import _classify_task1_nonzero
 from dokploy_wizard.proof.model_sync_task1_remote_abort import clear_remote_abort_record
@@ -55,6 +60,20 @@ def test_task1_nonzero_classification_retains_only_value_free_cause(
 
     assert str(error) == expected
     assert "SECRET" not in str(error)
+
+
+def test_task1_connector_category_crosses_cli_and_wrapper_without_message() -> None:
+    source = CloudflaredConnectorError(
+        "SECRET https://host.example.test",
+        category=CloudflaredFailureCategory.DEPLOY_COMPOSE,
+    )
+    marker = _task1_install_error_message(source, task1_context_enabled=True)
+
+    error = _classify_task1_nonzero(f"prefix {marker} suffix SECRET".encode())
+
+    assert str(error) == "Task 1 remote failure category: cloudflared.deploy_compose"
+    assert "SECRET" not in str(error)
+    assert "host.example.test" not in str(error)
 
 
 def test_wrapper_failure_is_not_masked_when_remote_cleanup_succeeds(
