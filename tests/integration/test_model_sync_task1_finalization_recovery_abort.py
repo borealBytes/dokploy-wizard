@@ -30,6 +30,9 @@ from tests.integration._model_sync_task1_finalization_recovery_support import (
     task1_recovery_fixture,
 )
 
+ProofWrapperArgument = Path | str | None
+ProofWrapperCall = tuple[ProofWrapperArgument, ...]
+
 
 def _configure_pre_plan_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -37,7 +40,7 @@ def _configure_pre_plan_failure(
     stage: str,
     cleanup_status: str,
     cleanup_calls: list[str],
-    wrapper_calls: list[tuple[object, ...]],
+    wrapper_calls: list[ProofWrapperCall],
 ) -> None:
     receipt = read_abort_guard(fixture.paths.guard_path).env_receipt
     assert receipt is not None
@@ -82,7 +85,7 @@ def _configure_pre_plan_failure(
     monkeypatch.setattr(model_sync_cli, "resolve_proof_transport", lambda *_args: None)
     monkeypatch.setattr(model_sync_cli, "probe_baseline_hosts", lambda **_kwargs: (probe, probe))
 
-    def run_wrapper(*args: object) -> None:
+    def run_wrapper(*args: ProofWrapperArgument) -> None:
         wrapper_calls.append(args)
         if stage == "wrapper":
             raise RuntimeError("wrapper failed")
@@ -276,7 +279,7 @@ def test_failure_before_finalization_plan_cleans_once_without_reinstall(
     clear_remote_abort_record(fixture.paths.guard_path, fixture.host)
     source = fixture.paths.env_file.read_bytes()
     cleanup_calls: list[str] = []
-    wrapper_calls: list[tuple[object, ...]] = []
+    wrapper_calls: list[ProofWrapperCall] = []
     _configure_pre_plan_failure(
         monkeypatch, fixture, stage, cleanup_status, cleanup_calls, wrapper_calls
     )
