@@ -230,16 +230,17 @@ def test_snapshot_list_rejects_malformed_result_and_result_info(
 def test_snapshot_request_redacts_transport_failure_details(
     monkeypatch: pytest.MonkeyPatch, failure: OSError
 ) -> None:
-    # Given
     monkeypatch.setattr(urllib_request, "urlopen", FailingUrlOpen(failure))
-
-    # When
     with pytest.raises(CloudflareError) as caught:
         _backend()._request("/accounts/account/cfd_tunnel", {"query": "query-secret"})
-
-    # Then
     message = str(caught.value)
     assert "token-secret" not in message
     assert "query-secret" not in message
     assert "raw-body-secret" not in message
     assert "https://" not in message
+
+
+def test_null_tunnel_config_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _backend()
+    monkeypatch.setattr(backend, "_request", lambda _path, _query: {"result": {"config": None}})
+    assert backend.get_tunnel_configuration("account", "tunnel") == ()

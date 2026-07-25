@@ -545,6 +545,8 @@ def _wire_fixture(
                 return _WireResponse(_cloudflare_list(tunnels, pages=2))
             return _WireResponse(_cloudflare_list(tunnels))
         if "/cfd_tunnel/" in url and url.endswith("/configurations"):
+            if failure == "cloudflare-null-config":
+                return _WireResponse({"result": {"config": None}, "success": True})
             ingress = [
                 {"hostname": "other.example.test", "originRequest": {}, "service": "http://other"}
             ]
@@ -828,6 +830,15 @@ def test_authoritative_collectors_report_successful_empty_planes() -> None:
     assert planes["tailscale"]["resources"] == []
 
 
+def test_authoritative_cloudflare_collector_accepts_unconfigured_tunnel() -> None:
+    cloudflare = _collect_planes(failure="cloudflare-null-config")["cloudflare"]
+    kinds = [resource["kind"] for resource in cloudflare["resources"]]
+
+    assert cloudflare["state"] == "present"
+    assert kinds.count("tunnel") == 1
+    assert "hostname_route" not in kinds
+
+
 def test_dokploy_collector_skips_api_when_local_dokploy_is_absent() -> None:
     # Given
     scope: dict[str, Any] = {"__name__": "fixture"}
@@ -928,7 +939,7 @@ def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> N
     assert "with_cloudflare_" + "fingerprints" not in source
     assert ".replace(" not in source
     assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
-        "b90e7e9b1af84dbe29fd25043940884df3abe60f200811d21c80f95f5f3cf1b0"
+        "c9b66a986edb8dde8b0b4ae946ca5047106bd1bdd61b95e02976d07f6ebbe92d"
     )
     assert "def _docker_absent_clean():" in model_sync_results.PREFLIGHT_SCRIPT
     assert '_which("dockerd") is None' in model_sync_results.PREFLIGHT_SCRIPT
