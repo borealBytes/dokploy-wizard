@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import time
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, cast
 from urllib import error, request
@@ -27,8 +28,22 @@ from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, Rende
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 
+class CloudflaredFailureCategory(StrEnum):
+    VALIDATE_SERVICE_NAME = "cloudflared.validate_service_name"
+    LIST_PROJECTS = "cloudflared.list_projects"
+    APPLY_EXISTING_COMPOSE = "cloudflared.apply_existing_compose"
+    CREATE_PROJECT = "cloudflared.create_project"
+    CREATE_COMPOSE = "cloudflared.create_compose"
+    APPLY_CREATED_COMPOSE = "cloudflared.apply_created_compose"
+    DEPLOY_COMPOSE = "cloudflared.deploy_compose"
+
+
 class CloudflaredConnectorError(RuntimeError):
     """Raised when the managed Cloudflare connector cannot be reconciled."""
+
+    def __init__(self, message: str, *, category: CloudflaredFailureCategory) -> None:
+        super().__init__(message)
+        self.task1_category = str(category)
 
 
 @dataclass(frozen=True)
@@ -110,7 +125,8 @@ class DokployCloudflaredBackend:
     ) -> CloudflaredConnectorRecord:
         if resource_name != self._service_name:
             raise CloudflaredConnectorError(
-                "Cloudflare connector service name does not match the active Dokploy plan."
+                "Cloudflare connector service name does not match the active Dokploy plan.",
+                category=CloudflaredFailureCategory.VALIDATE_SERVICE_NAME,
             )
         locator = self._ensure_compose_applied(tunnel_token=tunnel_token)
         return CloudflaredConnectorRecord(
@@ -128,7 +144,9 @@ class DokployCloudflaredBackend:
         try:
             projects = self._client.list_projects()
         except DokployApiError as error_value:
-            raise CloudflaredConnectorError(str(error_value)) from error_value
+            raise CloudflaredConnectorError(
+                str(error_value), category=CloudflaredFailureCategory.LIST_PROJECTS
+            ) from error_value
         for project in projects:
             if project.name != self._stack_name:
                 continue
@@ -148,6 +166,7 @@ class DokployCloudflaredBackend:
 
     def _ensure_compose_applied(self, *, tunnel_token: str) -> _ComposeLocator:
         rendered_compose = _render_compose_file(self._service_name, tunnel_token=tunnel_token)
+        operation = CloudflaredFailureCategory.LIST_PROJECTS
         try:
             projects = self._client.list_projects()
             for project in projects:
@@ -163,6 +182,7 @@ class DokployCloudflaredBackend:
                             environment_id=environment.environment_id,
                             compose_id=compose.compose_id,
                         )
+                        operation = CloudflaredFailureCategory.APPLY_EXISTING_COMPOSE
                         applied = apply_compose_noop_guard(
                             rendered_compose=rendered_compose,
                             service_key=self._service_name,
@@ -182,17 +202,20 @@ class DokployCloudflaredBackend:
                         self._applied_locator = applied.locator
                         return applied.locator
 
+                operation = CloudflaredFailureCategory.CREATE_COMPOSE
                 created = self._client.create_compose(
                     name=self._service_name,
                     environment_id=environment.environment_id,
                     compose_file="services: {}\n",
                     app_name=self._service_name,
                 )
+                operation = CloudflaredFailureCategory.APPLY_CREATED_COMPOSE
                 updated = apply_rendered_compose_to_existing(
                     client=self._client,
                     compose_id=created.compose_id,
                     rendered_compose=rendered_compose,
                 )
+                operation = CloudflaredFailureCategory.DEPLOY_COMPOSE
                 self._client.deploy_compose(
                     compose_id=updated.compose_id,
                     title="dokploy-wizard cloudflared reconcile",
@@ -211,22 +234,26 @@ class DokployCloudflaredBackend:
                 self._applied_locator = locator
                 return locator
 
+            operation = CloudflaredFailureCategory.CREATE_PROJECT
             created_project = self._client.create_project(
                 name=self._stack_name,
                 description="Managed by dokploy-wizard",
                 env=None,
             )
+            operation = CloudflaredFailureCategory.CREATE_COMPOSE
             created = self._client.create_compose(
                 name=self._service_name,
                 environment_id=created_project.environment_id,
                 compose_file="services: {}\n",
                 app_name=self._service_name,
             )
+            operation = CloudflaredFailureCategory.APPLY_CREATED_COMPOSE
             updated = apply_rendered_compose_to_existing(
                 client=self._client,
                 compose_id=created.compose_id,
                 rendered_compose=rendered_compose,
             )
+            operation = CloudflaredFailureCategory.DEPLOY_COMPOSE
             self._client.deploy_compose(
                 compose_id=updated.compose_id,
                 title="dokploy-wizard cloudflared reconcile",
@@ -245,7 +272,7 @@ class DokployCloudflaredBackend:
             self._applied_locator = locator
             return locator
         except DokployApiError as error_value:
-            raise CloudflaredConnectorError(str(error_value)) from error_value
+            raise CloudflaredConnectorError(str(error_value), category=operation) from error_value
 
     def _verify_current_service(self) -> ServiceVerificationResult:
         is_up = _docker_container_is_up(self._service_name)
@@ -295,7 +322,7 @@ def _render_compose_file(service_name: str, *, tunnel_token: str) -> RenderedCom
         "    network_mode: host\n"
         "    command: ['tunnel', '--no-autoupdate', 'run']\n"
         "    environment:\n"
-        f"      TUNNEL_TOKEN: \"{_required_placeholder(tunnel_token_env)}\"\n"
+        f'      TUNNEL_TOKEN: "{_required_placeholder(tunnel_token_env)}"\n'
     )
     return RenderedCompose(
         compose_file=compose_file,

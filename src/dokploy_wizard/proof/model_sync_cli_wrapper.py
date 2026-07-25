@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from dokploy_wizard.dokploy.cloudflared import CloudflaredFailureCategory
 from dokploy_wizard.proof.model_sync_task1_remote_receipt_schema_types import (
     Task1RemoteProofExpectation,
     Task1RemoteReceiptError,
@@ -76,6 +77,14 @@ def run_proof_wrapper(
 
 
 def _classify_task1_nonzero(stderr: bytes) -> RuntimeError:
+    category_matches = {
+        match.decode("ascii")
+        for match in re.findall(rb"TASK1_REMOTE_ERROR_CATEGORY=([a-z_]+\.[a-z_]+)", stderr)
+    }
+    allowed_categories = {str(category) for category in CloudflaredFailureCategory}
+    if len(category_matches) == 1 and category_matches <= allowed_categories:
+        category = category_matches.pop()
+        return Task1RemoteReceiptError(f"Task 1 remote failure category: {category}")
     status = re.search(rb"Dokploy API request failed with status ([1-5][0-9]{2}):", stderr)
     if status is not None:
         field = re.search(rb"invalid field: ([A-Za-z][A-Za-z0-9_]*)", stderr)
