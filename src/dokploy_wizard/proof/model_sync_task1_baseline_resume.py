@@ -67,7 +67,11 @@ def resume_completed_cleanup(inputs: Task1ResumeInputs) -> bool:
                 case FinalizationBundlePhase.READY:
                     bind_validated_remote_cleanup(inputs.paths.guard_path, inputs.host, None)
         else:
-            parse_restoration_report(_cleanup_from_receipt(inputs))
+            try:
+                cleanup_bytes = _cleanup_from_receipt(inputs)
+            except task1_flow.Task1CloudflareJournalAbsentError:
+                _abort_prejournal_cleanup(inputs)
+            parse_restoration_report(cleanup_bytes)
             _abort_restored_cleanup(inputs, clear_bundle=False)
     return resume_remote_cleanup_finalization(
         inputs.paths,
@@ -93,6 +97,14 @@ def _cleanup_from_receipt(inputs: Task1ResumeInputs) -> bytes:
 def _abort_restored_cleanup(inputs: Task1ResumeInputs, *, clear_bundle: bool) -> None:
     recovery = reclaim_task1_recovery(inputs.paths, os.getpid(), proof.self_start_time_ticks())
     abort_validated_remote_restoration(recovery, inputs.host, clear_bundle=clear_bundle)
+    raise AbortGuardError(
+        "Task 1 previous attempt was safely aborted; recreate or clean the host before retrying"
+    )
+
+
+def _abort_prejournal_cleanup(inputs: Task1ResumeInputs) -> None:
+    recovery = reclaim_task1_recovery(inputs.paths, os.getpid(), proof.self_start_time_ticks())
+    abort_validated_remote_restoration(recovery, inputs.host, clear_bundle=False)
     raise AbortGuardError(
         "Task 1 previous attempt was safely aborted; recreate or clean the host before retrying"
     )
