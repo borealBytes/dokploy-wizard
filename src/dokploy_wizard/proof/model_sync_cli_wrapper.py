@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
@@ -75,6 +76,16 @@ def run_proof_wrapper(
 
 
 def _classify_task1_nonzero(stderr: bytes) -> RuntimeError:
+    status = re.search(rb"Dokploy API request failed with status ([1-5][0-9]{2}):", stderr)
+    if status is not None:
+        field = re.search(rb"invalid field: ([A-Za-z][A-Za-z0-9_]*)", stderr)
+        code = status.group(1).decode("ascii")
+        if field is not None:
+            name = field.group(1).decode("ascii")
+            return Task1RemoteReceiptError(f"Dokploy API status {code} rejected field {name}")
+        return Task1RemoteReceiptError(f"Dokploy API request failed with status {code}")
+    if b"Dokploy public URL did not become reachable" in stderr:
+        return Task1RemoteReceiptError("Cloudflare connector health check failed")
     fixed_markers = (
         "Task 1 remote proof archive is absent or unsafe",
         "Task 1 remote proof upload environment is absent or unsafe",
@@ -83,6 +94,11 @@ def _classify_task1_nonzero(stderr: bytes) -> RuntimeError:
         "Task 1 remote proof upload hash mismatched after upload",
         "Task 1 remote proof receipt replay is not allowed",
         "Task 1 remote proof commit is invalid",
+        "Dokploy compose.deploy response must be true or an object.",
+        "Dokploy compose.deploy response must include boolean success.",
+        "Dokploy compose.deploy response message must be a string.",
+        "Dokploy compose.deploy response composeId must be a string.",
+        "Cloudflare connector service name does not match the active Dokploy plan.",
     )
     stage_markers = tuple(
         marker

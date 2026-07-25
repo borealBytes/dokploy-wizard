@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from dokploy_wizard.proof import model_sync_task1_baseline_runner as baseline_runner
+from dokploy_wizard.proof.model_sync_cli_wrapper import _classify_task1_nonzero
 from dokploy_wizard.proof.model_sync_task1_remote_abort import clear_remote_abort_record
 from tests.integration._model_sync_task1_finalization_recovery_support import (
     runner_args,
@@ -20,6 +21,32 @@ from tests.integration.test_model_sync_task1_finalization_recovery_abort import 
 
 class CleanupFailure(RuntimeError):
     """Raised when the fake remote cleanup fails after the primary error."""
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        (
+            b"Dokploy API request failed with status 400: invalid field: composeFile SECRET",
+            "Dokploy API status 400 rejected field composeFile",
+        ),
+        (
+            b"Dokploy compose.deploy response must include boolean success. SECRET",
+            "Dokploy compose.deploy response must include boolean success.",
+        ),
+        (
+            b"Dokploy public URL did not become reachable: https://SECRET.example.test",
+            "Cloudflare connector health check failed",
+        ),
+    ],
+)
+def test_task1_nonzero_classification_retains_only_value_free_cause(
+    stderr: bytes, expected: str
+) -> None:
+    error = _classify_task1_nonzero(stderr)
+
+    assert str(error) == expected
+    assert "SECRET" not in str(error)
 
 
 def test_wrapper_failure_is_not_masked_when_remote_cleanup_succeeds(
