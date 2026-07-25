@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import TypeVar
 
@@ -28,6 +29,7 @@ T = TypeVar("T")
 class _SnapshotBackend:
     duplicate_tunnel: bool = False
     changing_total: bool = False
+    certificate_hosts: tuple[str, ...] = ("label-host",)
 
     def list_tunnels_page(
         self, account_id: str, page: int, per_page: int
@@ -87,7 +89,7 @@ class _SnapshotBackend:
     ) -> CloudflareSnapshotPage[CloudflareCertificatePack]:
         del zone_id, per_page
         return _page(
-            page, CloudflareCertificatePack("cert-a", "advanced", "active", ("label-host",))
+            page, CloudflareCertificatePack("cert-a", "advanced", "active", self.certificate_hosts)
         )
 
 
@@ -136,3 +138,15 @@ def test_capture_rejects_incomplete_or_changing_tunnel_pagination_when_observed(
     # When / Then: no partial inventory is emitted.
     with pytest.raises(CloudflareSnapshotCollectionError):
         capture_cloudflare_snapshot(backend, _scope())
+
+
+def test_capture_canonicalizes_certificate_hashes_after_host_projection() -> None:
+    backend = _SnapshotBackend(certificate_hosts=("z.example", "a.example"))
+
+    snapshot = capture_cloudflare_snapshot(backend, _scope())
+
+    certificate = next(item for item in snapshot.resources if item.kind == "certificate_pack")
+    expected = sorted(
+        {hashlib.sha256(value.encode()).hexdigest() for value in backend.certificate_hosts}
+    )
+    assert certificate.payload["host_sha256"] == expected

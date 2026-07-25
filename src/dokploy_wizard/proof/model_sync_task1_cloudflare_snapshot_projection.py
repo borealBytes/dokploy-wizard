@@ -179,7 +179,7 @@ def _certificate(item: CloudflareCertificatePack) -> CloudflareSnapshotResourceV
         "certificate_pack",
         item.pack_id,
         {
-            "host_sha256": [_hash(value) for value in sorted(item.hosts)],
+            "host_sha256": sorted({_hash(value) for value in item.hosts}),
             "pack_type": item.pack_type,
             "spec_sha256": opaque_hash(
                 {"hosts": sorted(item.hosts), "pack_type": item.pack_type, "status": item.status}
