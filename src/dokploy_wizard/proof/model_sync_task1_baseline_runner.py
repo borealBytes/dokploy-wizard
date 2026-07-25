@@ -113,7 +113,14 @@ def run_baseline_host_a(args: argparse.Namespace) -> None:
             signal_state["critical"] = True
             record_remote_mutation_possible(args.abort_guard, host_a)
             remote_cleanup_pending = True
-        cli._run_wrapper(args.wrapper, host_a, password_a, remote_env_file, remote_context)
+        cli._run_wrapper(
+            args.wrapper,
+            host_a,
+            password_a,
+            remote_env_file,
+            remote_context,
+            args.proof_commit if task1_context_enabled else None,
+        )
         post_install_probe = cli.probe_host(
             host=host_a,
             password=password_a,

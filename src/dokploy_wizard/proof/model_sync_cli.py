@@ -33,6 +33,14 @@ from dokploy_wizard.proof.model_sync_host_probes import probe_baseline_hosts
 from dokploy_wizard.proof.model_sync_remote import capture_host_a_snapshot, probe_host
 from dokploy_wizard.proof.model_sync_results import run_bounded_process
 from dokploy_wizard.proof.model_sync_signal_recovery import SignalHandler
+from dokploy_wizard.proof.model_sync_task1_context_schema import (
+    Task1ProofContextError,
+    Task1ProofContextV1,
+    sha256,
+)
+from dokploy_wizard.proof.model_sync_task1_remote_receipt_schema_types import (
+    Task1RemoteProofExpectation,
+)
 
 __all__ = (
     "_require_active_workspace_root",
@@ -80,10 +88,29 @@ def _run_wrapper(
     password: str,
     env_file: Path,
     task1_proof_context: Path | None = None,
+    proof_commit: str | None = None,
 ) -> None:
     """Run the remote wrapper through the CLI-patchable bounded process seam."""
+    expectation = None
+    if task1_proof_context is not None:
+        if proof_commit is None:
+            raise Task1ProofContextError("Task 1 remote proof requires its proof commit")
+        content, _mode = proof.read_bounded_regular_bytes(task1_proof_context, 256 * 1024, 0o600)
+        context = Task1ProofContextV1.from_bytes(content)
+        expectation = Task1RemoteProofExpectation(
+            proof_commit=proof_commit,
+            context_sha256=sha256(content),
+            uploaded_env_sha256=context.uploaded_env_sha256,
+        )
     run_proof_wrapper(
-        ProofWrapperInvocation(wrapper, host, password, env_file, task1_proof_context),
+        ProofWrapperInvocation(
+            wrapper,
+            host,
+            password,
+            env_file,
+            task1_proof_context,
+            expectation,
+        ),
         run_bounded_process,
     )
 

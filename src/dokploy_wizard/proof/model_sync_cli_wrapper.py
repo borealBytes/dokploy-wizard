@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
+
+from dokploy_wizard.proof.model_sync_task1_remote_receipt_schema_types import (
+    Task1RemoteProofExpectation,
+    Task1RemoteReceiptError,
+)
+from dokploy_wizard.proof.model_sync_task1_remote_receipt_validation import (
+    require_terminal_receipt,
+)
 
 
 class BoundedProcessRunner(Protocol):
@@ -18,6 +26,7 @@ class BoundedProcessRunner(Protocol):
         output_limit: int,
         timeout_seconds: int,
         label: str,
+        nonzero_error_factory: Callable[[bytes], RuntimeError] | None = None,
     ) -> bytes: ...
 
 
@@ -30,6 +39,7 @@ class ProofWrapperInvocation:
     password: str
     env_file: Path
     task1_proof_context: Path | None
+    task1_expectation: Task1RemoteProofExpectation | None = None
 
 
 def run_proof_wrapper(
@@ -48,10 +58,43 @@ def run_proof_wrapper(
     ]
     if invocation.task1_proof_context is not None:
         command.extend(["--task1-proof-context", str(invocation.task1_proof_context)])
-    runner(
+    if (invocation.task1_proof_context is None) != (invocation.task1_expectation is None):
+        raise Task1RemoteReceiptError("Task 1 remote proof expectation is missing")
+    output = runner(
         command,
         stdin=(invocation.password + "\n").encode(),
         output_limit=2 * 1024 * 1024,
         timeout_seconds=3600,
         label="remote proof wrapper",
+        nonzero_error_factory=(
+            None if invocation.task1_expectation is None else _classify_task1_nonzero
+        ),
     )
+    if invocation.task1_expectation is not None:
+        require_terminal_receipt(output, invocation.task1_expectation)
+
+
+def _classify_task1_nonzero(stderr: bytes) -> RuntimeError:
+    fixed_markers = (
+        "Task 1 remote proof archive is absent or unsafe",
+        "Task 1 remote proof upload environment is absent or unsafe",
+        "Task 1 remote proof context is absent or unsafe",
+        "Task 1 remote proof archive hash mismatched after upload",
+        "Task 1 remote proof upload hash mismatched after upload",
+        "Task 1 remote proof receipt replay is not allowed",
+        "Task 1 remote proof commit is invalid",
+    )
+    stage_markers = tuple(
+        marker
+        for stage in ("install", "verify", "inspect", "collect")
+        for marker in (
+            f"Task 1 remote proof state after {stage} is absent or unsafe",
+            f"Task 1 remote proof state is invalid after {stage}",
+            f"Task 1 remote proof Cloudflare journal after {stage} is absent or unsafe",
+            f"Task 1 remote proof Cloudflare journal context mismatched after {stage}",
+        )
+    )
+    for marker in (*fixed_markers, *stage_markers):
+        if marker.encode() in stderr:
+            return Task1RemoteReceiptError(marker)
+    return Task1RemoteReceiptError("Task 1 remote proof wrapper failed before terminal receipt")
