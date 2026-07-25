@@ -807,6 +807,40 @@ def test_task1_cleanup_cli_writes_only_exact_remote_json_to_stdout(
     assert transport.capture_calls[0][0] == "task1-cloudflare-cleanup"
 
 
+def test_task1_cleanup_classifies_absent_journal_without_remote_stderr(
+    tmp_path: Path,
+) -> None:
+    remote_cli = import_remote_cli_module()
+    from dokploy_wizard.remote_transport import (
+        RemoteCapturedCommandFailure,
+        RemoteTransportSession,
+    )
+
+    class JournalAbsentTransport(_Task1CleanupTransport):
+        def capture(self, subcommand: str, command: str, _limits: Any) -> Any:
+            self.capture_calls.append((subcommand, command))
+            raise RemoteCapturedCommandFailure(
+                subcommand=subcommand,
+                reason="nonzero status",
+                stderr=(
+                    b"Task 1 Cloudflare cleanup failed: "
+                    b"Task 1 Cloudflare cleanup journal is absent\n"
+                ),
+                exit_status=1,
+            )
+
+    session = RemoteTransportSession(
+        JournalAbsentTransport(b""),
+        "/root/dokploy-wizard",
+        task1_proof_context=tmp_path / "task1-proof-context.json",
+    )
+
+    with pytest.raises(RuntimeError, match="Task 1 Cloudflare cleanup journal is absent") as error:
+        remote_cli._run_task1_cleanup(session=session, password="password-sentinel")
+
+    assert "password-sentinel" not in str(error.value)
+
+
 def test_create_repo_archive_includes_only_committed_tree_members(tmp_path: Path) -> None:
     remote_cli = import_remote_cli_module()
     repo_root = _create_committed_archive_fixture(tmp_path)
