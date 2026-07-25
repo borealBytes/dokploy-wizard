@@ -38,6 +38,14 @@ class CleanupFailure(RuntimeError):
             b"Dokploy public URL did not become reachable: https://SECRET.example.test",
             "Cloudflare connector health check failed",
         ),
+        (
+            b"Dokploy compose.update serviceName must be a string or null. SECRET",
+            "Dokploy compose.update serviceName must be a string or null.",
+        ),
+        (
+            b"Dokploy API request failed: SECRET.example.test unavailable.",
+            "Dokploy API transport failed",
+        ),
     ],
 )
 def test_task1_nonzero_classification_retains_only_value_free_cause(

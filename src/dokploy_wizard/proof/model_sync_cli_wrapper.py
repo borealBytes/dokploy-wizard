@@ -86,6 +86,8 @@ def _classify_task1_nonzero(stderr: bytes) -> RuntimeError:
         return Task1RemoteReceiptError(f"Dokploy API request failed with status {code}")
     if b"Dokploy public URL did not become reachable" in stderr:
         return Task1RemoteReceiptError("Cloudflare connector health check failed")
+    if b"Dokploy API request failed:" in stderr:
+        return Task1RemoteReceiptError("Dokploy API transport failed")
     fixed_markers = (
         "Task 1 remote proof archive is absent or unsafe",
         "Task 1 remote proof upload environment is absent or unsafe",
@@ -94,10 +96,32 @@ def _classify_task1_nonzero(stderr: bytes) -> RuntimeError:
         "Task 1 remote proof upload hash mismatched after upload",
         "Task 1 remote proof receipt replay is not allowed",
         "Task 1 remote proof commit is invalid",
+        "Dokploy project.all response must be a list.",
+        "Dokploy project.create response must be an object.",
+        "Dokploy project.create response must contain project and environment objects.",
+        "Dokploy project summary must be an object.",
+        "Dokploy project summary environments must be a list.",
+        "Dokploy environment summary must be an object.",
+        "Dokploy environment compose list must be a list.",
+        "Dokploy environment isDefault must be a boolean.",
+        "Dokploy compose summary must be an object.",
+        "Dokploy compose status must be a string or null.",
+        "Dokploy compose.create response must be an object.",
+        "Dokploy compose.create serviceName must be a string or null.",
+        "Dokploy compose.create timezone must be a string or null.",
+        "Dokploy compose.create enabled must be a boolean.",
+        "Dokploy compose.update response must be an object.",
+        "Dokploy compose.update serviceName must be a string or null.",
+        "Dokploy compose.update timezone must be a string or null.",
+        "Dokploy compose.update enabled must be a boolean.",
         "Dokploy compose.deploy response must be true or an object.",
         "Dokploy compose.deploy response must include boolean success.",
         "Dokploy compose.deploy response message must be a string.",
         "Dokploy compose.deploy response composeId must be a string.",
+        "Dokploy API response must decode to a JSON object or array.",
+        "Dokploy API field 'projectId' must be a non-empty string.",
+        "Dokploy API field 'environmentId' must be a non-empty string.",
+        "Dokploy API field 'composeId' must be a non-empty string.",
         "Cloudflare connector service name does not match the active Dokploy plan.",
     )
     stage_markers = tuple(
