@@ -901,7 +901,7 @@ def test_create_repo_archive_fails_closed_when_git_archive_fails(
     repo_root = _create_committed_archive_fixture(tmp_path)
     responses = iter(
         (
-            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="1" * 40 + "\n", stderr=""),
             subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="git failure"),
         )
     )

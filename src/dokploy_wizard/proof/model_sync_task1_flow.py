@@ -10,6 +10,10 @@ from typing import Final
 
 from dokploy_wizard import proof
 from dokploy_wizard.proof import model_sync_artifacts as artifacts
+from dokploy_wizard.proof.model_sync_cli_wrapper import (
+    ProofWrapperInvocation,
+    run_proof_wrapper,
+)
 from dokploy_wizard.proof.model_sync_env import (
     EnvPreparationError,
     _parse_bytes,
@@ -37,6 +41,9 @@ from dokploy_wizard.proof.model_sync_task1_materialization import (
 )
 from dokploy_wizard.proof.model_sync_task1_partial_cleanup import (
     cleanup_task1_partial_materialization,
+)
+from dokploy_wizard.proof.model_sync_task1_remote_receipt_schema_types import (
+    Task1RemoteProofExpectation,
 )
 from dokploy_wizard.state import resolve_desired_state
 
@@ -145,26 +152,29 @@ def resolve_task1_proof_namespace(preparation: Task1ProofPreparation) -> proof.P
 
 
 def run_task1_proof_wrapper(
-    *, wrapper: Path, host: str, password: str, preparation: Task1ProofPreparation
+    *,
+    wrapper: Path,
+    host: str,
+    password: str,
+    preparation: Task1ProofPreparation,
+    proof_commit: str,
 ) -> None:
     """Run the remote wrapper with the external environment and exact context binding."""
     external = preparation.external
-    run_bounded_process(
-        [
-            str(wrapper),
-            "proof",
-            "--host",
-            host,
-            "--password-stdin",
-            "--env-file",
-            str(external.uploaded_env_file),
-            "--task1-proof-context",
-            str(external.context_file),
-        ],
-        stdin=(password + "\n").encode(),
-        output_limit=2 * 1024 * 1024,
-        timeout_seconds=3600,
-        label="remote proof wrapper",
+    run_proof_wrapper(
+        ProofWrapperInvocation(
+            wrapper=wrapper,
+            host=host,
+            password=password,
+            env_file=external.uploaded_env_file,
+            task1_proof_context=external.context_file,
+            task1_expectation=Task1RemoteProofExpectation(
+                proof_commit=proof_commit,
+                context_sha256=hashlib.sha256(external.context.to_bytes()).hexdigest(),
+                uploaded_env_sha256=external.context.uploaded_env_sha256,
+            ),
+        ),
+        run_bounded_process,
     )
 
 

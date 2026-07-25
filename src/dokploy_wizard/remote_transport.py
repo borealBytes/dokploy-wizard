@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
+from dokploy_wizard.proof.model_sync_task1_remote_receipt_schema_types import (
+    Task1RemoteProofBinding,
+    Task1RemoteProofStage,
+)
 from dokploy_wizard.verification import redact_text
 
 if TYPE_CHECKING:
@@ -31,6 +35,13 @@ class RemoteCommandCaptureLimits:
             raise ValueError("remote capture timeout must be positive")
         if self.max_stdout_bytes <= 0 or self.max_stderr_bytes <= 0:
             raise ValueError("remote capture output limits must be positive")
+
+
+TASK1_RECEIPT_CAPTURE_LIMITS: Final = RemoteCommandCaptureLimits(
+    timeout_seconds=30.0,
+    max_stdout_bytes=64 * 1024,
+    max_stderr_bytes=16 * 1024,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +159,10 @@ class RemoteTransportSession:
         fresh: bool = False,
         confirm_file: Path | None = None,
         strict_idempotency: bool = False,
-    ) -> None:
+        task1_binding: Task1RemoteProofBinding | None = None,
+    ) -> bytes | None:
+        if task1_binding is not None and strict_idempotency:
+            raise ValueError("Task 1 remote receipts do not support strict idempotency")
         commands: list[tuple[str, str]] = []
         if fresh:
             if confirm_file is None:
@@ -173,8 +187,56 @@ class RemoteTransportSession:
 
         commands.append(("inspect-state", self._build_inspect_state_command()))
 
+        task1_stages = {
+            "mutate-install": Task1RemoteProofStage.INSTALL,
+            "verify-services": Task1RemoteProofStage.VERIFY,
+            "inspect-state": Task1RemoteProofStage.INSPECT,
+        }
         for subcommand, command in commands:
+            if task1_binding is not None and subcommand in task1_stages:
+                command = self._with_receipt_advance(
+                    command, task1_binding.context_sha256, task1_stages[subcommand]
+                )
             self.run_command(subcommand=subcommand, command=command, password=password)
+        if task1_binding is None:
+            return None
+        output = self.capture_command(
+            subcommand="collect-task1-receipt",
+            command=self._build_receipt_collect_command(task1_binding.context_sha256),
+            limits=TASK1_RECEIPT_CAPTURE_LIMITS,
+            password=password,
+        )
+        return output.stdout
+
+    def initialize_task1_receipt(
+        self, binding: Task1RemoteProofBinding, password: str | None = None
+    ) -> None:
+        """Create the remote archive/upload receipt before lifecycle mutation."""
+        if self.remote_task1_proof_context_path is None:
+            raise ValueError("Task 1 remote receipt requires a proof context")
+        arguments = [
+            "python3",
+            "-m",
+            "dokploy_wizard.proof.model_sync_task1_remote_receipt",
+            "begin",
+            "--state-dir",
+            self.remote_state_dir,
+            "--archive",
+            self.remote_archive_path,
+            "--env-file",
+            self.remote_install_env_path,
+            "--context",
+            self.remote_task1_proof_context_path,
+            "--proof-commit",
+            binding.proof_commit,
+            "--archive-sha256",
+            binding.archive_sha256,
+        ]
+        self.run_command(
+            subcommand="initialize-task1-receipt",
+            command=self._python_module_command(arguments),
+            password=password,
+        )
 
     def run_command(
         self,
@@ -298,6 +360,48 @@ class RemoteTransportSession:
                         self.remote_task1_proof_context_path,
                     ]
                 ),
+            ]
+        )
+
+    def _with_receipt_advance(
+        self, command: str, context_sha256: str, stage: Task1RemoteProofStage
+    ) -> str:
+        advance = self._python_module_command(
+            [
+                "python3",
+                "-m",
+                "dokploy_wizard.proof.model_sync_task1_remote_receipt",
+                "advance",
+                "--state-dir",
+                self.remote_state_dir,
+                "--context-sha256",
+                context_sha256,
+                "--stage",
+                str(stage),
+            ]
+        )
+        return f"{command} && {advance}"
+
+    def _build_receipt_collect_command(self, context_sha256: str) -> str:
+        return self._python_module_command(
+            [
+                "python3",
+                "-m",
+                "dokploy_wizard.proof.model_sync_task1_remote_receipt",
+                "collect",
+                "--state-dir",
+                self.remote_state_dir,
+                "--context-sha256",
+                context_sha256,
+            ]
+        )
+
+    def _python_module_command(self, arguments: list[str]) -> str:
+        return " ".join(
+            [
+                "PYTHONUNBUFFERED=1",
+                "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}",
+                self._shell_join(arguments),
             ]
         )
 

@@ -5,19 +5,27 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import posixpath
+import re
 import shlex
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, TextIO
 
+from dokploy_wizard.proof import read_bounded_regular_bytes
 from dokploy_wizard.proof.model_sync_task1_context import (
     Task1ProofContextError,
+    Task1ProofContextV1,
     validate_task1_proof_context_argument,
+)
+from dokploy_wizard.proof.model_sync_task1_remote_receipt_schema_types import (
+    Task1RemoteProofBinding,
 )
 from dokploy_wizard.remote_transport import (
     ParamikoRemoteTransport,
@@ -39,6 +47,14 @@ _TASK1_CLEANUP_JOURNAL_ABSENT: Final = b"Task 1 Cloudflare cleanup journal is ab
 
 class RepositoryArchiveError(RuntimeError):
     """Raised when the committed repository tree cannot be archived safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryArchiveEvidence:
+    """Value-free identity of the exact committed archive uploaded remotely."""
+
+    commit_sha: str
+    archive_sha256: str
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -165,10 +181,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     started = time.monotonic()
     reporter.progress(f"starting remote {args.command}")
 
+    task1_context: Task1ProofContextV1 | None = None
     try:
         if args.command in {"install", "modify", "uninstall", "proof", "task1-cleanup"}:
             _require_local_env_file(args.env_file)
-        _validate_task1_proof_context(args)
+        task1_context = _validate_task1_proof_context(args)
     except (OSError, Task1ProofContextError, ValueError) as error:
         print(_redact_runtime_message(str(error), password=args.password), file=sys.stderr)
         reporter.finish(args.command, exit_code=1, started=started)
@@ -200,9 +217,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     exit_code = 1
 
+    archive_evidence: RepositoryArchiveEvidence | None = None
     try:
         if args.command in {"install", "modify", "uninstall", "proof"}:
-            _upload_remote_bundle(args=args, session=session, reporter=reporter)
+            archive_evidence = _upload_remote_bundle(args=args, session=session, reporter=reporter)
             _extract_remote_bundle(session=session, password=args.password)
         if args.command == "install":
             if args.fresh:
@@ -310,12 +328,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             reporter,
             _resolve_expected_service_url_links(args.env_file),
         )
-        session.run_proof(
+        task1_binding = None
+        if task1_context is not None:
+            if archive_evidence is None:
+                raise RepositoryArchiveError("Task 1 remote proof archive evidence is absent")
+            task1_binding = Task1RemoteProofBinding(
+                proof_commit=archive_evidence.commit_sha,
+                context_sha256=hashlib.sha256(task1_context.to_bytes()).hexdigest(),
+                uploaded_env_sha256=task1_context.uploaded_env_sha256,
+                archive_sha256=archive_evidence.archive_sha256,
+            )
+            session.initialize_task1_receipt(task1_binding, password=args.password)
+        receipt_bytes = session.run_proof(
             password=args.password,
             fresh=args.fresh,
             confirm_file=args.confirm_file,
             strict_idempotency=args.strict_idempotency,
+            task1_binding=task1_binding,
         )
+        if receipt_bytes is not None:
+            sys.stdout.buffer.write(receipt_bytes)
         exit_code = 0
         return exit_code
     except (OSError, RemoteCommandFailure, RuntimeError, StateValidationError, ValueError) as error:
@@ -415,18 +447,20 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             )
 
 
-def _validate_task1_proof_context(args: argparse.Namespace) -> None:
+def _validate_task1_proof_context(
+    args: argparse.Namespace,
+) -> Task1ProofContextV1 | None:
     command = args.command
     if command not in {"install", "modify", "proof", "inspect-state", "task1-cleanup"}:
-        return
+        return None
     if (
         command == "inspect-state"
         and args.task1_proof_context is None
         and not args.env_file.exists()
     ):
-        return
+        return None
     raw_env = parse_env_file(args.env_file)
-    validate_task1_proof_context_argument(raw_env, args.task1_proof_context)
+    return validate_task1_proof_context_argument(raw_env, args.task1_proof_context)
 
 
 def _validate_runtime_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
@@ -534,12 +568,12 @@ def _upload_remote_bundle(
     args: argparse.Namespace,
     session: RemoteTransportSession,
     reporter: "_RemoteProgressReporter",
-) -> None:
+) -> RepositoryArchiveEvidence:
     started = time.monotonic()
     reporter.progress("creating repo archive for upload")
     with tempfile.TemporaryDirectory(prefix="dokploy-wizard-remote-") as temp_dir:
         archive_path = Path(temp_dir) / "repo.tar.gz"
-        _create_repo_archive(repo_root=_repo_root(), destination=archive_path)
+        evidence = _create_repo_archive(repo_root=_repo_root(), destination=archive_path)
         reporter.progress(
             "uploading repo archive and install env file "
             f"to {session.remote_root} (env contents redacted)"
@@ -551,6 +585,7 @@ def _upload_remote_bundle(
         )
     elapsed = time.monotonic() - started
     reporter.progress(f"uploaded remote bundle ({elapsed:.1f}s)")
+    return evidence
 
 
 def _extract_remote_bundle(*, session: RemoteTransportSession, password: str | None) -> None:
@@ -826,7 +861,7 @@ def _looks_like_env_assignment(line: str) -> bool:
     return bool(separator and key and key.replace("_", "").isalnum())
 
 
-def _create_repo_archive(*, repo_root: Path, destination: Path) -> None:
+def _create_repo_archive(*, repo_root: Path, destination: Path) -> RepositoryArchiveEvidence:
     archive_destination = destination.resolve()
     try:
         head = subprocess.run(
@@ -837,6 +872,9 @@ def _create_repo_archive(*, repo_root: Path, destination: Path) -> None:
         )
         if head.returncode != 0:
             raise RepositoryArchiveError("repository HEAD is not a commit")
+        commit_sha = head.stdout.strip()
+        if re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", commit_sha) is None:
+            raise RepositoryArchiveError("repository HEAD identity is invalid")
         archive = subprocess.run(
             [
                 "git",
@@ -855,6 +893,16 @@ def _create_repo_archive(*, repo_root: Path, destination: Path) -> None:
         raise RepositoryArchiveError("git archive is unavailable") from error
     if archive.returncode != 0:
         raise RepositoryArchiveError("git archive failed")
+    try:
+        archive_bytes, _mode = read_bounded_regular_bytes(
+            archive_destination, 64 * 1024 * 1024, None
+        )
+    except (OSError, ValueError) as error:
+        raise RepositoryArchiveError("repository archive is unreadable") from error
+    return RepositoryArchiveEvidence(
+        commit_sha=commit_sha,
+        archive_sha256=hashlib.sha256(archive_bytes).hexdigest(),
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
