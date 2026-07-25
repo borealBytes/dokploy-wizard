@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -163,6 +164,67 @@ def test_no_bundle_cleanup_restores_local_source_without_running_install(
     assert not fixture.paths.backup_path.exists()
     assert not finalization_bundle_path(fixture.paths.guard_path).exists()
     assert not remote_abort_path(fixture.paths.guard_path).exists()
+
+
+def test_no_bundle_absent_journal_restores_local_source_without_running_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = task1_recovery_fixture(tmp_path, persist_plan=False)
+    source = fixture.paths.env_file.read_bytes()
+    wrapper_calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(model_sync_state, "process_identity_matches", lambda *_args: False)
+
+    def cleanup(**_kwargs: object) -> bytes:
+        raise task1_flow.Task1CloudflareJournalAbsentError()
+
+    def run_wrapper(*args: str) -> None:
+        wrapper_calls.append(args)
+
+    monkeypatch.setattr(task1_flow, "cleanup_task1_cloudflare_external", cleanup)
+    monkeypatch.setattr(
+        model_sync_cli,
+        "resolve_host_inputs",
+        lambda *_args: (fixture.host, "pw", fixture.host, "pw"),
+    )
+    monkeypatch.setattr(
+        model_sync_cli,
+        "_require_active_workspace_root",
+        lambda *_args: fixture.paths.repository_root,
+    )
+    monkeypatch.setattr(model_sync_cli, "_run_wrapper", run_wrapper)
+
+    with pytest.raises(AbortGuardError, match="safely aborted"):
+        baseline_runner.run_baseline_host_a(runner_args(fixture.paths))
+
+    assert wrapper_calls == []
+    assert fixture.paths.env_file.read_bytes() == source
+    assert read_abort_guard(fixture.paths.guard_path).phase == "ready"
+    assert not fixture.paths.backup_path.exists()
+    assert not finalization_bundle_path(fixture.paths.guard_path).exists()
+    assert not remote_abort_path(fixture.paths.guard_path).exists()
+
+
+def test_task1_cleanup_maps_absent_journal_without_exposing_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def run(
+        _command: list[str],
+        *,
+        nonzero_error_factory: Callable[[bytes], RuntimeError],
+        **_kwargs: object,
+    ) -> bytes:
+        raise nonzero_error_factory(b"Task 1 Cloudflare cleanup journal is absent")
+
+    monkeypatch.setattr(task1_flow, "run_bounded_process", run)
+
+    with pytest.raises(task1_flow.Task1CloudflareJournalAbsentError):
+        task1_flow.cleanup_task1_cloudflare_external(
+            wrapper=tmp_path / "dokploy-wizard-remote",
+            host="host",
+            password="password",
+            uploaded_env_file=tmp_path / "upload.env",
+            context_file=tmp_path / "context.json",
+        )
 
 
 def test_no_bundle_cleanup_failure_preserves_recovery_for_one_safe_retry(

@@ -6,6 +6,7 @@ import hashlib
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from dokploy_wizard import proof
 from dokploy_wizard.proof import model_sync_artifacts as artifacts
@@ -38,6 +39,12 @@ from dokploy_wizard.proof.model_sync_task1_partial_cleanup import (
     cleanup_task1_partial_materialization,
 )
 from dokploy_wizard.state import resolve_desired_state
+
+_JOURNAL_ABSENT_MARKER: Final = b"Task 1 Cloudflare cleanup journal is absent"
+
+
+class Task1CloudflareJournalAbsentError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,7 +202,14 @@ def cleanup_task1_cloudflare_external(
         output_limit=2 * 1024 * 1024,
         timeout_seconds=900,
         label="Task 1 Cloudflare cleanup",
+        nonzero_error_factory=_cleanup_nonzero_error,
     )
+
+
+def _cleanup_nonzero_error(stderr: bytes) -> RuntimeError:
+    if _JOURNAL_ABSENT_MARKER in stderr:
+        return Task1CloudflareJournalAbsentError()
+    return RuntimeError("Task 1 Cloudflare cleanup failed")
 
 
 def verify_task1_source_restored(preparation: Task1ProofPreparation) -> None:
