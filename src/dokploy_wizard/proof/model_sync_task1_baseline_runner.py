@@ -230,7 +230,7 @@ def run_baseline_host_a(args: argparse.Namespace) -> None:
             cli.signal_recovery.replay_pending_signal(
                 recovery, signal_state, cli.recover_interrupted_proof
             )
-        if safely_aborted:
+        if safely_aborted and primary_error is None:
             raise AbortGuardError(
                 "Task 1 previous attempt was safely aborted; "
                 "recreate or clean the host before retrying"
