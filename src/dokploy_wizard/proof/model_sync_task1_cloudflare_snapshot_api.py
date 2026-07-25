@@ -58,9 +58,14 @@ class CloudflareSnapshotApiBackend:
     ) -> tuple[dict[str, Any], ...]:
         payload = self._request(f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations", {})
         result = payload.get("result")
-        if not isinstance(result, dict) or not isinstance(result.get("config"), dict):
+        if not isinstance(result, dict) or "config" not in result:
             raise CloudflareError("Cloudflare snapshot tunnel configuration is invalid")
-        ingress = result["config"].get("ingress")
+        config = result["config"]
+        if config is None:
+            return ()
+        if not isinstance(config, dict):
+            raise CloudflareError("Cloudflare snapshot tunnel configuration is invalid")
+        ingress = config.get("ingress")
         if not isinstance(ingress, list) or not all(isinstance(item, dict) for item in ingress):
             raise CloudflareError("Cloudflare snapshot tunnel configuration is invalid")
         return tuple(ingress)
