@@ -1498,6 +1498,7 @@ def run_bounded_process(
     output_limit: int,
     timeout_seconds: float,
     label: str,
+    nonzero_error_factory: Callable[[bytes], RuntimeError] | None = None,
 ) -> bytes:
     if output_limit < 1 or timeout_seconds <= 0 or not label:
         raise ValueError("bounded process limits are invalid")
@@ -1512,7 +1513,7 @@ def run_bounded_process(
     assert process.stderr is not None
     selector = selectors.DefaultSelector()
     stdout = bytearray()
-    stderr_size = 0
+    stderr = bytearray()
     pending = memoryview(stdin)
     deadline = time.monotonic() + timeout_seconds
     failure: str | None = None
@@ -1550,8 +1551,8 @@ def run_bounded_process(
                     stdout.extend(chunk)
                     size = len(stdout)
                 else:
-                    stderr_size += len(chunk)
-                    size = stderr_size
+                    stderr.extend(chunk)
+                    size = len(stderr)
                 if size > output_limit:
                     failure = "exceeded output limit"
                     break
@@ -1570,6 +1571,8 @@ def run_bounded_process(
     if failure is not None:
         raise RuntimeError(f"{label} {failure}")
     if returncode != 0:
+        if nonzero_error_factory is not None:
+            raise nonzero_error_factory(bytes(stderr))
         raise RuntimeError(f"{label} failed")
     return bytes(stdout)
 

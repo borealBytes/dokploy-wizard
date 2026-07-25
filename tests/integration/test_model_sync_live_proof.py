@@ -2357,6 +2357,30 @@ def test_bounded_process_child_failure_redacts_stderr_and_stdin() -> None:
     assert secret.decode() not in str(error.value)
 
 
+def test_bounded_process_classifies_nonzero_stderr_without_exposing_it() -> None:
+    # Given
+    marker = b"Task 1 Cloudflare cleanup journal is absent"
+
+    def classify(stderr: bytes) -> RuntimeError:
+        assert stderr == marker
+        return RuntimeError("recognized cleanup pre-journal state")
+
+    # When / Then
+    with pytest.raises(RuntimeError, match="recognized cleanup pre-journal state"):
+        model_sync_results.run_bounded_process(
+            [
+                sys.executable,
+                "-c",
+                "import os;os.write(2,b'Task 1 Cloudflare cleanup journal is absent');raise SystemExit(7)",
+            ],
+            stdin=b"",
+            output_limit=1024,
+            timeout_seconds=5,
+            label="cleanup fixture",
+            nonzero_error_factory=classify,
+        )
+
+
 @pytest.mark.parametrize("mode", ["overflow", "timeout"])
 def test_bounded_process_kills_and_reaps_failed_children(tmp_path: Path, mode: str) -> None:
     pid_file = tmp_path / "child.pid"
