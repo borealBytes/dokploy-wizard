@@ -716,9 +716,7 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
     )
     loaded_state = load_state_dir(state_dir)
     assert loaded_state.applied_state is not None
-    assert set(loaded_state.applied_state.compose_artifact_hashes) >= set(
-        service_names.values()
-    )
+    assert set(loaded_state.applied_state.compose_artifact_hashes) >= set(service_names.values())
     _rewind_applied_steps(
         state_dir,
         completed_steps=("preflight", "dokploy_bootstrap", "networking"),
@@ -1216,15 +1214,19 @@ def _build_full_stack_backends(
     )
     monkeypatch.setattr(openclaw_backend, "check_health", lambda *, service, url: True)
 
-    return clients, _FullStackBackends(
-        shared_core=shared_core_backend,
-        nextcloud=nextcloud_backend,
-        moodle=moodle_backend,
-        docuseal=docuseal_backend,
-        seaweedfs=seaweedfs_backend,
-        coder=coder_backend,
-        openclaw=openclaw_backend,
-    ), service_names
+    return (
+        clients,
+        _FullStackBackends(
+            shared_core=shared_core_backend,
+            nextcloud=nextcloud_backend,
+            moodle=moodle_backend,
+            docuseal=docuseal_backend,
+            seaweedfs=seaweedfs_backend,
+            coder=coder_backend,
+            openclaw=openclaw_backend,
+        ),
+        service_names,
+    )
 
 
 def _shared_allocation(*, desired_state: Any, pack_name: str) -> Any:
@@ -1271,8 +1273,7 @@ def _persist_missing_compose_hashes(
             clients.moodle.last_create_compose_file or clients.moodle.last_update_compose_file
         ),
         service_names["docuseal"]: (
-            clients.docuseal.last_create_compose_file
-            or clients.docuseal.last_update_compose_file
+            clients.docuseal.last_create_compose_file or clients.docuseal.last_update_compose_file
         ),
         service_names["seaweedfs"]: clients.seaweedfs.compose_files_by_name[
             service_names["seaweedfs"]
