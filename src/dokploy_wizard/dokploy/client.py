@@ -1,5 +1,6 @@
 # mypy: ignore-errors
 # pyright: reportCallIssue=false
+# allow: SIZE_OK - Cohesive Dokploy API adapter methods share one transport contract.
 """Minimal Dokploy API client for compose-backed shared-core deployment."""
 
 from __future__ import annotations
@@ -9,6 +10,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib import error, request
+
+from dokploy_wizard.dokploy.names import canonical_compose_app_name
 
 RequestFn = Callable[[request.Request], Any]
 ListProjectsSessionFallbackFn = Callable[[], Any]
@@ -204,6 +207,7 @@ class DokployApiClient:
         app_name: str,
         env: str | None = None,
     ) -> DokployComposeRecord:
+        canonical_app_name = canonical_compose_app_name(app_name)
         try:
             payload = self._request_json(
                 "POST",
@@ -212,7 +216,7 @@ class DokployApiClient:
                     "name": name,
                     "environmentId": environment_id,
                     "composeType": "docker-compose",
-                    "appName": app_name,
+                    "appName": canonical_app_name,
                 },
             )
         except DokployApiError as error:
@@ -220,11 +224,11 @@ class DokployApiClient:
                 raise
             if env is None:
                 payload = self._compose_create_session_fallback(
-                    name, environment_id, compose_file, app_name
+                    name, environment_id, compose_file, canonical_app_name
                 )
             else:
                 payload = self._compose_create_session_fallback(
-                    name, environment_id, compose_file, app_name, env
+                    name, environment_id, compose_file, canonical_app_name, env
                 )
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
@@ -442,9 +446,7 @@ class DokployApiClient:
         try:
             payload = self._request_json("GET", "/api/ai.getAll")
         except DokployApiError as error:
-            if self._ai_providers_all_session_fallback is None or not _is_unauthorized_error(
-                error
-            ):
+            if self._ai_providers_all_session_fallback is None or not _is_unauthorized_error(error):
                 raise
             payload = self._ai_providers_all_session_fallback()
             if isinstance(payload, dict):
@@ -534,7 +536,6 @@ class DokployApiClient:
             raise DokployApiError("Dokploy ai.update response must be an object.")
         return _parse_ai_provider(payload)
 
-
     def ai_provider_test_connection(
         self,
         *,
@@ -543,9 +544,7 @@ class DokployApiClient:
         model: str,
     ) -> DokployAiProviderTestConnectionResult:
         if self._ai_provider_test_connection_session_fallback is None:
-            raise DokployApiError(
-                "Dokploy ai.testConnection requires a session fallback client."
-            )
+            raise DokployApiError("Dokploy ai.testConnection requires a session fallback client.")
         payload = self._ai_provider_test_connection_session_fallback(api_url, api_key, model)
         if isinstance(payload, dict):
             payload = payload.get("data", payload)
