@@ -137,6 +137,26 @@ def test_snapshot_request_accepts_missing_content_length_after_bounded_read(
     assert payload["success"] is True
 
 
+def test_snapshot_list_derives_total_pages_when_tunnel_result_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result_info = {
+        "count": 4,
+        "page": 1,
+        "per_page": 100,
+        "total_count": 4,
+    }
+    monkeypatch.setattr(
+        urllib_request,
+        "urlopen",
+        FakeUrlOpen(FakeResponse(_success_body(result=[], result_info=result_info), {})),
+    )
+
+    page = _backend().list_tunnels_page("account", 1, 100)
+
+    assert page.total_pages == 1
+
+
 def test_snapshot_request_rejects_invalid_content_length(monkeypatch: pytest.MonkeyPatch) -> None:
     # Given
     monkeypatch.setattr(
