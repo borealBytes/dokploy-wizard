@@ -22,6 +22,7 @@ from dokploy_wizard.proof import read_bounded_regular_bytes
 from dokploy_wizard.proof.model_sync_task1_context import (
     Task1ProofContextError,
     Task1ProofContextV1,
+    activate_task1_proof_context,
     validate_task1_proof_context_argument,
 )
 from dokploy_wizard.proof.model_sync_task1_remote_receipt_schema_types import (
@@ -239,10 +240,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     password=args.password,
                 )
-            _print_expected_service_urls(
-                reporter,
-                _resolve_expected_service_url_links(args.env_file),
-            )
+            with activate_task1_proof_context(task1_context):
+                _print_expected_service_urls(
+                    reporter,
+                    _resolve_expected_service_url_links(args.env_file),
+                )
             _run_remote_command(
                 session=session,
                 subcommand="install",
@@ -268,10 +270,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     password=args.password,
                 )
-            _print_expected_service_urls(
-                reporter,
-                _resolve_expected_service_url_links(args.env_file),
-            )
+            with activate_task1_proof_context(task1_context):
+                _print_expected_service_urls(
+                    reporter,
+                    _resolve_expected_service_url_links(args.env_file),
+                )
             _run_remote_command(
                 session=session,
                 subcommand="modify",
@@ -324,10 +327,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 confirm_file=args.confirm_file,
                 reporter=reporter,
             )
-        _print_expected_service_urls(
-            reporter,
-            _resolve_expected_service_url_links(args.env_file),
-        )
+        with activate_task1_proof_context(task1_context):
+            _print_expected_service_urls(
+                reporter,
+                _resolve_expected_service_url_links(args.env_file),
+            )
         task1_binding = None
         if task1_context is not None:
             if archive_evidence is None:
