@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
+from typing import assert_never
 
 from dokploy_wizard import proof
 from dokploy_wizard.proof.model_sync_finalization import (
@@ -176,6 +178,8 @@ def run_baseline_host_a(args: argparse.Namespace) -> None:
                             recovery, host_a, clear_bundle=finalization_bundle_published
                         )
                         safely_aborted = True
+                    case unexpected:
+                        assert_never(unexpected)
         else:
             signal_state["critical"] = True
             cli.finalize_baseline_artifacts(inputs)
@@ -189,6 +193,7 @@ def run_baseline_host_a(args: argparse.Namespace) -> None:
                 recovery, signal_state, cli.recover_interrupted_proof
             )
     finally:
+        primary_error = sys.exception()
         if remote_cleanup_pending and preparation is not None:
             try:
                 cleanup_bytes = _cleanup_report(args, host_a, password_a, preparation)
@@ -212,6 +217,8 @@ def run_baseline_host_a(args: argparse.Namespace) -> None:
                             recovery, host_a, clear_bundle=finalization_bundle_published
                         )
                         safely_aborted = True
+                    case unexpected:
+                        assert_never(unexpected)
         if cleanup_recovered:
             complete_task1_finalization(recovery)
             completed = True
@@ -228,7 +235,7 @@ def run_baseline_host_a(args: argparse.Namespace) -> None:
                 "Task 1 previous attempt was safely aborted; "
                 "recreate or clean the host before retrying"
             )
-        if not completed:
+        if not completed and primary_error is None:
             if remote_cleanup_error is not None:
                 raise AbortGuardError(
                     "Task 1 remote cleanup failed; recovery state is preserved"
