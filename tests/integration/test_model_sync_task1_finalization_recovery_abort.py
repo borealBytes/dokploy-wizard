@@ -285,7 +285,7 @@ def test_failure_before_finalization_plan_cleans_once_without_reinstall(
     )
 
     # When / Then
-    with pytest.raises(AbortGuardError, match="safely aborted"):
+    with pytest.raises(RuntimeError, match=f"{stage} failed"):
         baseline_runner.run_baseline_host_a(runner_args(fixture.paths))
     assert cleanup_calls == [stage]
     assert len(wrapper_calls) == 1
