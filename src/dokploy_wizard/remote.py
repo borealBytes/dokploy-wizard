@@ -21,6 +21,7 @@ from dokploy_wizard.proof.model_sync_task1_context import (
 )
 from dokploy_wizard.remote_transport import (
     ParamikoRemoteTransport,
+    RemoteCapturedCommandFailure,
     RemoteCommandCaptureLimits,
     RemoteCommandFailure,
     RemoteTransportSession,
@@ -33,6 +34,7 @@ TASK1_CLEANUP_CAPTURE_LIMITS: Final[RemoteCommandCaptureLimits] = RemoteCommandC
     max_stdout_bytes=2 * 1024 * 1024,
     max_stderr_bytes=2 * 1024 * 1024,
 )
+_TASK1_CLEANUP_JOURNAL_ABSENT: Final = b"Task 1 Cloudflare cleanup journal is absent"
 
 
 class RepositoryArchiveError(RuntimeError):
@@ -670,12 +672,17 @@ def _run_remote_command(
 
 
 def _run_task1_cleanup(*, session: RemoteTransportSession, password: str) -> bytes:
-    output = session.capture_command(
-        subcommand="task1-cloudflare-cleanup",
-        command=session.build_task1_cloudflare_cleanup_command(),
-        limits=TASK1_CLEANUP_CAPTURE_LIMITS,
-        password=password,
-    )
+    try:
+        output = session.capture_command(
+            subcommand="task1-cloudflare-cleanup",
+            command=session.build_task1_cloudflare_cleanup_command(),
+            limits=TASK1_CLEANUP_CAPTURE_LIMITS,
+            password=password,
+        )
+    except RemoteCapturedCommandFailure as error:
+        if error.reason == "nonzero status" and _TASK1_CLEANUP_JOURNAL_ABSENT in error.stderr:
+            raise RuntimeError("Task 1 Cloudflare cleanup journal is absent") from None
+        raise
     return output.stdout
 
 
