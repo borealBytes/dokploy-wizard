@@ -128,7 +128,12 @@ class CloudflareSnapshotApiBackend:
         page_value = _page_number(page_info.get("page"))
         per_page_value = _page_number(page_info.get("per_page"))
         total_count = _page_number(page_info.get("total_count"))
-        total_pages = _page_number(page_info.get("total_pages"))
+        if "total_pages" in page_info:
+            total_pages = _page_number(page_info["total_pages"])
+        else:
+            if per_page_value < 1:
+                raise CloudflareError("Cloudflare snapshot result_info is invalid")
+            total_pages = max(1, (total_count + per_page_value - 1) // per_page_value)
         return CloudflareSnapshotPage(
             page_value,
             per_page_value,
