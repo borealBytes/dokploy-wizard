@@ -2112,6 +2112,7 @@ def test_model_inventory_normalizes_like_legacy_template(
 
     assert models == ("openrouter/one", "opencode-go/two")
     assert credential not in " ".join(captured["command"])
+    assert captured["command"][3:5] == ["-e", "CODER_DISABLE_DIRECT_CONNECTIONS=true"]
     assert captured["input"] == ("session\n" + credential).encode()
 
 
