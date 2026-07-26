@@ -336,6 +336,11 @@ class CloudflareApiBackend:
             if self._mock_existing_tunnel_id == tunnel_id:
                 self._mock_existing_tunnel_id = None
             return
+        self._request_json(
+            method="DELETE",
+            path=f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/connections",
+            allow_empty=True,
+        )
         self._request_json(method="DELETE", path=f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}")
 
     def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
@@ -821,6 +826,7 @@ class CloudflareApiBackend:
         path: str,
         params: dict[str, str] | None = None,
         body: dict[str, Any] | None = None,
+        allow_empty: bool = False,
     ) -> dict[str, Any]:
         query = f"?{parse.urlencode(params)}" if params else ""
         data = None if body is None else json.dumps(body).encode("utf-8")
@@ -836,7 +842,10 @@ class CloudflareApiBackend:
         )
         try:
             with request.urlopen(request_object) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                response_bytes = response.read()
+                if allow_empty and not response_bytes:
+                    return {}
+                payload = json.loads(response_bytes.decode("utf-8"))
         except error.HTTPError as exc:
             response_body = exc.read().decode("utf-8", errors="replace").strip()
             msg = f"Cloudflare API request failed with HTTP {exc.code}."
