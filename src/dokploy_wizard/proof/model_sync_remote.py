@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import shlex
 import sys
+import time
 from pathlib import Path
 
 from dokploy_wizard.proof.model_sync_env import ProofNamespace, resolve_proof_transport
@@ -97,11 +98,19 @@ def capture_host_a_snapshot(
         command = "cd /root/dokploy-wizard && PYTHONPATH=./src python3 -m dokploy_wizard.proof.model_sync_host_b model-sync-snapshot --env-file .install.env --state-dir state"
         if task1_context:
             command += " --task1-proof-context task1-proof-context.json"
-        return capture_remote_output(
-            transport,
-            command,
-            timeout_seconds=capture_timeout_seconds,
-        )
+        attempts = 3 if task1_context else 1
+        for attempt in range(attempts):
+            try:
+                return capture_remote_output(
+                    transport,
+                    command,
+                    timeout_seconds=capture_timeout_seconds,
+                )
+            except RuntimeError:
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(10.0)
+        raise AssertionError("snapshot capture attempts were exhausted")
     finally:
         transport.close()
 

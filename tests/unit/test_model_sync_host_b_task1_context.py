@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -103,6 +104,45 @@ def test_host_a_snapshot_passes_remote_task1_context_argument(
         "dokploy_wizard.proof.model_sync_host_b model-sync-snapshot --env-file .install.env "
         "--state-dir state --task1-proof-context task1-proof-context.json"
     ]
+
+
+def test_task1_snapshot_retries_transient_remote_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = SnapshotTransport()
+    attempts = 0
+    delays: list[float] = []
+    monkeypatch.setattr(
+        model_sync_remote.ParamikoRemoteTransport,
+        "connect",
+        lambda **_kwargs: transport,
+    )
+
+    def capture(
+        _transport: SnapshotTransport,
+        _command: str,
+        *,
+        timeout_seconds: int,
+    ) -> str:
+        nonlocal attempts
+        assert timeout_seconds == 600
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient workspace agent connection")
+        return "{}"
+
+    monkeypatch.setattr(model_sync_remote, "capture_remote_output", capture)
+    monkeypatch.setattr(time, "sleep", delays.append)
+
+    result = model_sync_remote.capture_host_a_snapshot(
+        host="fixture-host",
+        password="fixture-password",
+        task1_context=True,
+    )
+
+    assert result == "{}"
+    assert attempts == 2
+    assert delays == [10.0]
 
 
 def test_host_a_snapshot_preserves_legacy_remote_command(
