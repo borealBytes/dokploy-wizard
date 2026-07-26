@@ -7,7 +7,7 @@ from urllib import request
 
 import pytest
 
-from dokploy_wizard.proof import model_sync_coder_api
+from dokploy_wizard.proof import model_sync_coder_api, model_sync_host_b
 from dokploy_wizard.proof.model_sync_artifacts import JsonValue
 from dokploy_wizard.proof.model_sync_task1_context_schema import Task1ProofContextV1
 
@@ -132,3 +132,34 @@ def test_api_rejects_missing_task1_shared_network_before_request(
         model_sync_coder_api.api("coder-proof.example.test", None, "/api/v2/users/me")
 
     assert captured == []
+
+
+def test_templates_resolve_active_version_name_from_version_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    def fetch(
+        _hostname: str,
+        _token: str | None,
+        path: str,
+        _body: dict[str, str] | None = None,
+    ) -> JsonValue:
+        paths.append(path)
+        if path == "/api/v2/templates":
+            return [
+                {
+                    "id": "template-id",
+                    "name": "template-name",
+                    "active_version_id": "version-id",
+                }
+            ]
+        assert path == "/api/v2/templateversions/version-id"
+        return {"name": "version-name"}
+
+    monkeypatch.setattr(model_sync_host_b, "_api", fetch)
+
+    templates = model_sync_host_b._templates("coder.example.test", "session")
+
+    assert templates[0]["active_version_name"] == "version-name"
+    assert paths == ["/api/v2/templates", "/api/v2/templateversions/version-id"]

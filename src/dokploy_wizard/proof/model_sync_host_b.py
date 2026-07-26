@@ -64,7 +64,24 @@ def _templates(hostname: str, token: str) -> list[dict[str, JsonValue]]:
     raw = _api(hostname, token, "/api/v2/templates")
     if not isinstance(raw, list):
         raise ValueError("Coder template API returned an invalid response")
-    return [{"id": _field(item, "id"), "name": _field(item, "name"), "active_version_id": _field(item, "active_version_id"), "active_version_name": _field(item, "active_version_name"), "rendered_source_sha256": _sha(item)} for item in raw]
+    templates: list[dict[str, JsonValue]] = []
+    for item in raw:
+        template_id = _field(item, "id")
+        version_id = _field(item, "active_version_id")
+        version = _api(hostname, token, f"/api/v2/templateversions/{version_id}")
+        version_name = _field(version, "name")
+        templates.append(
+            {
+                "id": template_id,
+                "name": _field(item, "name"),
+                "active_version_id": version_id,
+                "active_version_name": version_name,
+                "rendered_source_sha256": _sha(
+                    {**require_mapping(item, "Coder template"), "active_version_name": version_name}
+                ),
+            }
+        )
+    return templates
 def _workspaces(hostname: str, token: str, container: str, templates: list[dict[str, JsonValue]], raw_env: dict[str, str], state_dir: Path, stack_name: str) -> list[dict[str, JsonValue]]:
     template_records = {require_text(item["id"], "template id"): item for item in templates}
     records: list[dict[str, JsonValue]] = []
