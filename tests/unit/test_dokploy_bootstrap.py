@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from subprocess import CompletedProcess
 
 import pytest
 
@@ -88,3 +89,32 @@ def test_ensure_public_route_raises_when_assign_domain_server_auth_fails(
 
     with pytest.raises(DokployBootstrapError, match="Invalid origin bootstrap auth failed"):
         backend.ensure_public_route()
+
+
+def test_install_accepts_nonzero_installer_when_dokploy_becomes_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = ShellDokployBootstrapBackend(_raw_env_with_admin_creds())
+    monkeypatch.setattr(
+        bootstrap.subprocess,
+        "run",
+        lambda *_args, **_kwargs: CompletedProcess([], 1, "", "service did not converge"),
+    )
+    monkeypatch.setattr(bootstrap, "_wait_for_health", lambda _backend: True)
+
+    backend.install()
+
+
+def test_install_preserves_nonzero_installer_failure_when_dokploy_stays_unhealthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = ShellDokployBootstrapBackend(_raw_env_with_admin_creds())
+    monkeypatch.setattr(
+        bootstrap.subprocess,
+        "run",
+        lambda *_args, **_kwargs: CompletedProcess([], 1, "", "service did not converge"),
+    )
+    monkeypatch.setattr(bootstrap, "_wait_for_health", lambda _backend: False)
+
+    with pytest.raises(DokployBootstrapError, match="service did not converge"):
+        backend.install()
