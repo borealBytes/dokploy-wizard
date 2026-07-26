@@ -956,10 +956,9 @@ def _redacted_cli_error(error: BaseException) -> str:
 
 
 def _task1_install_error_message(error: BaseException, *, task1_context_enabled: bool) -> str:
-    if task1_context_enabled and isinstance(
-        error, (CloudflaredConnectorError, DokployBootstrapError)
-    ) and error.task1_category is not None:
-        return f"TASK1_REMOTE_ERROR_CATEGORY={error.task1_category}"
+    task1_category = getattr(error, "task1_category", None)
+    if task1_context_enabled and isinstance(task1_category, str):
+        return f"TASK1_REMOTE_ERROR_CATEGORY={task1_category}"
     if task1_context_enabled:
         categories: tuple[tuple[type[BaseException], Task1InstallFailureCategory], ...] = (
             (OSError, Task1InstallFailureCategory.IO),

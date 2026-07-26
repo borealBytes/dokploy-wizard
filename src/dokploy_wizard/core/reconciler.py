@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from enum import StrEnum
 from typing import Protocol
 
 from dokploy_wizard.core.models import (
@@ -23,8 +24,25 @@ SHARED_MAIL_RELAY_RESOURCE_TYPE = "shared_core_mail_relay"
 SHARED_LITELLM_RESOURCE_TYPE = "shared_core_litellm"
 
 
+class SharedCoreFailureCategory(StrEnum):
+    LIST_PROJECTS = "shared_core.list_projects"
+    CREATE_PROJECT = "shared_core.create_project"
+    CREATE_COMPOSE = "shared_core.create_compose"
+    APPLY_COMPOSE = "shared_core.apply_compose"
+    DEPLOY_COMPOSE = "shared_core.deploy_compose"
+
+
 class SharedCoreError(RuntimeError):
     """Raised when shared-core reconciliation fails or detects drift."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: SharedCoreFailureCategory | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.task1_category = None if category is None else str(category)
 
 
 class SharedCoreBackend(Protocol):
