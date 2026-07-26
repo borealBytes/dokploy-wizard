@@ -77,7 +77,13 @@ def probe_host(
     return parse_preflight(output, namespace, ssh_key=key, boot_id=boot_id)
 
 
-def capture_host_a_snapshot(*, host: str, password: str, timeout_seconds: int = 120) -> str:
+def capture_host_a_snapshot(
+    *,
+    host: str,
+    password: str,
+    timeout_seconds: int = 120,
+    task1_context: bool = False,
+) -> str:
     """Collect the remote value-free Coder/resource snapshot after wrapper success."""
     transport = ParamikoRemoteTransport.connect(
         hostname=host,
@@ -87,9 +93,12 @@ def capture_host_a_snapshot(*, host: str, password: str, timeout_seconds: int = 
         timeout=timeout_seconds,
     )
     try:
+        command = "cd /root/dokploy-wizard && PYTHONPATH=./src python3 -m dokploy_wizard.proof.model_sync_host_b model-sync-snapshot --env-file .install.env --state-dir state"
+        if task1_context:
+            command += " --task1-proof-context task1-proof-context.json"
         return capture_remote_output(
             transport,
-            "cd /root/dokploy-wizard && PYTHONPATH=./src python3 -m dokploy_wizard.proof.model_sync_host_b model-sync-snapshot --env-file .install.env --state-dir state",
+            command,
             timeout_seconds=timeout_seconds,
         )
     finally:
