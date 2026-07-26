@@ -150,7 +150,7 @@ def _render_legacy_pointer(renderer: LegacyRenderer) -> dict[str, JsonValue]:
         models.insert(0, renderer.default_alias)
     return {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": renderer.base_url, "apiKey": renderer.credential}, "models": {model: {} for model in models}}
 def _workspace_json(container: str, token: str, workspace: str, script: str, payload: str, args: tuple[str, ...], label: str) -> JsonValue:
-    command = ["docker", "exec", "-i", "-e", "CODER_DISABLE_DIRECT_CONNECTIONS=true", container, "sh", "-c", "IFS= read -r CODER_SESSION_TOKEN; export CODER_SESSION_TOKEN; exec /opt/coder \"$@\"", "sh", "ssh", workspace, "--", "node", "-e", script, *args]
+    command = ["docker", "exec", "-i", container, "sh", "-c", "IFS= read -r CODER_SESSION_TOKEN; export CODER_SESSION_TOKEN; exec /opt/coder \"$@\"", "sh", "ssh", "--disable-autostart", "--no-wait", workspace, "--", "node", "-e", script, *args]
     try:
         raw = json.loads(run_bounded_process(command, stdin=(token + "\n" + payload).encode(), output_limit=_OUTPUT_LIMIT, timeout_seconds=30, label=f"retained workspace {label}"))
     except (RuntimeError, ValueError) as error:

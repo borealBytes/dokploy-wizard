@@ -2112,7 +2112,14 @@ def test_model_inventory_normalizes_like_legacy_template(
 
     assert models == ("openrouter/one", "opencode-go/two")
     assert credential not in " ".join(captured["command"])
-    assert captured["command"][3:5] == ["-e", "CODER_DISABLE_DIRECT_CONNECTIONS=true"]
+    ssh_index = captured["command"].index("ssh")
+    assert captured["command"][ssh_index : ssh_index + 4] == [
+        "ssh",
+        "--disable-autostart",
+        "--no-wait",
+        "workspace",
+    ]
+    assert "CODER_DISABLE_DIRECT_CONNECTIONS=true" not in captured["command"]
     assert captured["input"] == ("session\n" + credential).encode()
 
 
