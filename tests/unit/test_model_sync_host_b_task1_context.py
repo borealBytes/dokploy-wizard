@@ -7,13 +7,27 @@ import pytest
 
 import dokploy_wizard.proof.model_sync_host_b as model_sync_host_b
 import dokploy_wizard.proof.model_sync_remote as model_sync_remote
-from dokploy_wizard.proof.model_sync_task1_context import active_task1_proof_context
+from dokploy_wizard.proof import CaptureSchemaError
+from dokploy_wizard.proof.model_sync_task1_context import (
+    activate_task1_proof_context,
+    active_task1_proof_context,
+)
 from tests.helpers.task1_runtime_auth import prepare_task1_runtime_auth_fixture
 
 
 class SnapshotTransport:
     def close(self) -> None:
         return None
+
+
+def test_task1_context_preserves_capture_schema_error(
+    tmp_path: Path,
+) -> None:
+    fixture = prepare_task1_runtime_auth_fixture(tmp_path)
+
+    with pytest.raises(CaptureSchemaError, match="snapshot schema mismatch"):
+        with activate_task1_proof_context(fixture.preparation.context):
+            raise CaptureSchemaError("snapshot schema mismatch")
 
 
 def test_snapshot_cli_activates_validated_task1_context(
