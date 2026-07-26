@@ -106,7 +106,13 @@ def _journal_additions(
 def _validate_operation_states(journal: Task1CloudflareJournalDocument) -> None:
     match journal.status:
         case JournalStatus.ACTIVE:
-            allowed = frozenset({JournalOperationState.CREATED, JournalOperationState.ABORTED})
+            allowed = frozenset(
+                {
+                    JournalOperationState.CREATED,
+                    JournalOperationState.CLEANED,
+                    JournalOperationState.ABORTED,
+                }
+            )
         case JournalStatus.CLEANED:
             allowed = frozenset({JournalOperationState.CLEANED})
         case JournalStatus.RESTORED:
