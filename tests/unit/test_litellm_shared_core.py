@@ -1609,6 +1609,30 @@ def test_litellm_runtime_surfaces_dokploy_ai_provider_seed_failures() -> None:
         backend.reconcile_litellm_runtime()
 
 
+def test_litellm_runtime_types_readiness_failure_for_task1() -> None:
+    from dokploy_wizard.core import SharedCoreError, SharedCoreFailureCategory
+
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("openclaw",))
+    backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="wizard-stack",
+        plan=plan,
+        client=FakeDokployApiClient(),
+        litellm_generated_keys=_generated_keys(),
+        litellm_consumer_model_allowlists={
+            "openclaw": ("local-model.internal/unsloth-active",),
+        },
+        litellm_admin_api=_FakeLiteLLMAdminApi({"status": "disconnected"}),
+        sleep_fn=lambda _seconds: None,
+    )
+
+    with pytest.raises(SharedCoreError) as raised:
+        backend.reconcile_litellm_runtime()
+
+    assert raised.value.task1_category == str(SharedCoreFailureCategory.LITELLM_READINESS)
+
+
 def test_verify_dokploy_ai_provider_reports_only_redacted_key_metadata() -> None:
     from dokploy_wizard.dokploy.client import DokployAiProvider
     from dokploy_wizard.dokploy.shared_core import verify_dokploy_ai_provider

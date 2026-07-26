@@ -44,7 +44,9 @@ from dokploy_wizard.dokploy.env_spec import (
 )
 from dokploy_wizard.litellm import (
     LiteLLMAdminApi,
+    LiteLLMAdminError,
     LiteLLMGatewayManager,
+    LiteLLMReadinessError,
     build_litellm_config,
     render_litellm_config_yaml,
 )
@@ -553,6 +555,16 @@ class DokploySharedCoreBackend:
                 generated_keys=self._litellm_generated_keys.virtual_keys,
                 consumer_model_allowlists=self._litellm_consumer_model_allowlists,
             )
+        except LiteLLMReadinessError as error:
+            raise SharedCoreError(
+                str(error),
+                category=SharedCoreFailureCategory.LITELLM_READINESS,
+            ) from error
+        except LiteLLMAdminError as error:
+            raise SharedCoreError(
+                str(error),
+                category=SharedCoreFailureCategory.LITELLM_ADMIN,
+            ) from error
         except Exception as error:
             raise SharedCoreError(
                 str(error),
