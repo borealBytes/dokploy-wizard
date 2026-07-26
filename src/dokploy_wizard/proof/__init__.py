@@ -160,7 +160,7 @@ def ignore_finalization_boundary(_boundary: FinalizationBoundary) -> None:
     """Keep boundary injection inert outside deterministic crash tests."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class CaptureSchemaError(RuntimeError):
     detail: str
 
