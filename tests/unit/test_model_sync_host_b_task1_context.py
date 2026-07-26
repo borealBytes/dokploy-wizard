@@ -69,6 +69,7 @@ def test_host_a_snapshot_passes_remote_task1_context_argument(
     # Given
     transport = SnapshotTransport()
     commands: list[str] = []
+    timeouts: list[int] = []
     monkeypatch.setattr(
         model_sync_remote.ParamikoRemoteTransport,
         "connect",
@@ -81,7 +82,7 @@ def test_host_a_snapshot_passes_remote_task1_context_argument(
         *,
         timeout_seconds: int,
     ) -> str:
-        del timeout_seconds
+        timeouts.append(timeout_seconds)
         commands.append(command)
         return "{}"
 
@@ -96,6 +97,7 @@ def test_host_a_snapshot_passes_remote_task1_context_argument(
 
     # Then
     assert result == "{}"
+    assert timeouts == [300]
     assert commands == [
         "cd /root/dokploy-wizard && PYTHONPATH=./src python3 -m "
         "dokploy_wizard.proof.model_sync_host_b model-sync-snapshot --env-file .install.env "
@@ -109,6 +111,7 @@ def test_host_a_snapshot_preserves_legacy_remote_command(
     # Given
     transport = SnapshotTransport()
     commands: list[str] = []
+    timeouts: list[int] = []
     monkeypatch.setattr(
         model_sync_remote.ParamikoRemoteTransport,
         "connect",
@@ -121,7 +124,7 @@ def test_host_a_snapshot_preserves_legacy_remote_command(
         *,
         timeout_seconds: int,
     ) -> str:
-        del timeout_seconds
+        timeouts.append(timeout_seconds)
         commands.append(command)
         return "{}"
 
@@ -135,6 +138,7 @@ def test_host_a_snapshot_preserves_legacy_remote_command(
 
     # Then
     assert result == "{}"
+    assert timeouts == [120]
     assert commands == [
         "cd /root/dokploy-wizard && PYTHONPATH=./src python3 -m "
         "dokploy_wizard.proof.model_sync_host_b model-sync-snapshot --env-file .install.env "

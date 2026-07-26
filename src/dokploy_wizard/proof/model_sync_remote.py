@@ -85,12 +85,13 @@ def capture_host_a_snapshot(
     task1_context: bool = False,
 ) -> str:
     """Collect the remote value-free Coder/resource snapshot after wrapper success."""
+    capture_timeout_seconds = max(300, timeout_seconds) if task1_context else timeout_seconds
     transport = ParamikoRemoteTransport.connect(
         hostname=host,
         username="root",
         password=password,
         remote_root="/root/dokploy-wizard",
-        timeout=timeout_seconds,
+        timeout=capture_timeout_seconds,
     )
     try:
         command = "cd /root/dokploy-wizard && PYTHONPATH=./src python3 -m dokploy_wizard.proof.model_sync_host_b model-sync-snapshot --env-file .install.env --state-dir state"
@@ -99,7 +100,7 @@ def capture_host_a_snapshot(
         return capture_remote_output(
             transport,
             command,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=capture_timeout_seconds,
         )
     finally:
         transport.close()
