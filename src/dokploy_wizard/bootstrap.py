@@ -79,8 +79,6 @@ class ShellDokployBootstrapBackend:
             text=True,
         )
         if result.returncode != 0:
-            if _wait_for_health(self):
-                return
             stderr = result.stderr.strip()
             msg = "Dokploy bootstrap install command failed"
             if stderr:
