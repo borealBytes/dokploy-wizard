@@ -1745,9 +1745,10 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
                     "id": "template-proof",
                     "name": "ubuntu-vscode",
                     "active_version_id": "version-proof",
-                    "active_version_name": "proof",
                 }
             ]
+        if path == "/api/v2/templateversions/version-proof":
+            return {"name": "proof"}
         if path.startswith("/api/v2/workspaces?"):
             return {
                 "count": 1,
@@ -3647,7 +3648,6 @@ def test_coder_inventory_paginates_workspace_build_and_secret_identifiers(
     templates: list[dict[str, Any]] = [
         {
             "active_version_id": f"version-{index}",
-            "active_version_name": f"version-{index}",
             "id": f"template-{index}",
             "name": f"template-{index}",
         }
@@ -3692,6 +3692,8 @@ def test_coder_inventory_paginates_workspace_build_and_secret_identifiers(
             if path != "/api/v2/templates":
                 raise AssertionError(path)
             return templates
+        if path.startswith("/api/v2/templateversions/"):
+            return {"name": path.rsplit("/", 1)[1]}
         if path.startswith("/api/v2/workspaces?"):
             return {"count": len(workspaces), "workspaces": workspaces[offset : offset + 100]}
         if "/builds?" in path:
