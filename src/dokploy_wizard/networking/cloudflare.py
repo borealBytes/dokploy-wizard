@@ -280,6 +280,13 @@ class CloudflareApiBackend:
             if "HTTP 404" in str(error_value):
                 return None
             raise
+        result = payload.get("result")
+        if isinstance(result, dict):
+            deleted_at = result.get("deleted_at")
+            if isinstance(deleted_at, str) and deleted_at:
+                return None
+            if deleted_at is not None:
+                raise CloudflareError("Cloudflare tunnel deletion state was malformed.")
         return _parse_tunnel(payload)
 
     def find_tunnel_by_name(self, account_id: str, tunnel_name: str) -> CloudflareTunnel | None:
