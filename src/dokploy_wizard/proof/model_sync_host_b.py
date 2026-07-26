@@ -4,13 +4,12 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from http.client import HTTPMessage
 from pathlib import Path
-from typing import IO, Final, Sequence
-from urllib import request
+from typing import Final, Sequence
 from dokploy_wizard.core.models import SharedCorePlan
 from dokploy_wizard.dokploy.coder import _coder_container_name, _litellm_internal_base_url, _litellm_workspace_fallback_models_json
 from dokploy_wizard.proof.model_sync_artifacts import CaptureSchemaError, JsonValue, normalize_image_repository, registry_manifest_digest, require_digest, require_list, require_mapping, require_sha256, require_text
+from dokploy_wizard.proof.model_sync_coder_api import api as _api, coder_login as _coder_login
 from dokploy_wizard.proof.model_sync_env import resolve_proof_namespace
 from dokploy_wizard.proof.model_sync_remote import RemoteProbe, capture_local_authoritative_inventory
 from dokploy_wizard.proof.model_sync_results import HostIdentity as HostIdentity, assert_followup_proof_contract as assert_followup_proof_contract, assert_namespace_identity as assert_namespace_identity, collect_coder_array_pages, collect_coder_workspace_pages, run_bounded_process
@@ -61,27 +60,6 @@ def _snapshot(env_file: Path, state_dir: Path) -> dict[str, JsonValue]:
     }
 def _ids(probe: RemoteProbe, plane: str, kind: str) -> list[str]:
     return [item.resource_id for item in probe.inventory[plane] if item.kind == kind]
-def _coder_login(hostname: str, email: str, password: str) -> str:
-    response = _api(hostname, None, "/api/v2/users/login", {"email": email, "password": password})
-    return _field(response, "session_token")
-def _api(hostname: str, token: str | None, path: str, body: dict[str, str] | None = None) -> dict[str, JsonValue] | list[JsonValue]:
-    headers = {"Accept": "application/json", "Host": hostname, **({"Coder-Session-Token": token} if token is not None else {})}
-    data = None if body is None else json.dumps(body).encode()
-    if data is not None:
-        headers["Content-Type"] = "application/json"
-    request_value = request.Request(f"https://{hostname}{path}", data=data, headers=headers, method="POST" if body else "GET")
-    opener = request.build_opener(_NoRedirect())
-    with opener.open(request_value, timeout=30) as response:  # noqa: S310
-        encoded = response.read(2 * 1024 * 1024 + 1)
-    if len(encoded) > 2 * 1024 * 1024:
-        raise ValueError("Coder API response exceeds the capture limit")
-    raw = json.loads(encoded.decode("utf-8"))
-    if not isinstance(raw, (dict, list)):
-        raise ValueError("Coder API returned an unsupported JSON shape")
-    return raw
-class _NoRedirect(request.HTTPRedirectHandler):
-    def redirect_request(self, _req: request.Request, _fp: IO[bytes], _code: int, _msg: str, _headers: HTTPMessage, _new_url: str) -> None:
-        return None
 def _templates(hostname: str, token: str) -> list[dict[str, JsonValue]]:
     raw = _api(hostname, token, "/api/v2/templates")
     if not isinstance(raw, list):

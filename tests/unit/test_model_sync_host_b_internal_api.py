@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import json
+from types import TracebackType
+from typing import Self
+from urllib import request
+
+import pytest
+
+from dokploy_wizard.proof import model_sync_coder_api
+from dokploy_wizard.proof.model_sync_artifacts import JsonValue
+from dokploy_wizard.proof.model_sync_task1_context_schema import Task1ProofContextV1
+
+
+class _Response:
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        _exception_type: type[BaseException] | None,
+        _exception: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+    def read(self, _limit: int) -> bytes:
+        return json.dumps({"session_token": "session"}).encode()
+
+
+class _Opener:
+    def __init__(self, requests: list[request.Request]) -> None:
+        self._requests = requests
+
+    def open(self, value: request.Request, *, timeout: int) -> _Response:
+        assert timeout == 30
+        self._requests.append(value)
+        return _Response()
+
+
+def _context() -> Task1ProofContextV1:
+    digest = "a" * 64
+    return Task1ProofContextV1(
+        context_id="b" * 32,
+        source_env_sha256=digest,
+        normalized_env_sha256=digest,
+        overlay_env_sha256=digest,
+        uploaded_env_sha256=digest,
+        namespace_sha256=digest,
+        expected_restored_source_sha256=digest,
+        source_env_mode=0o600,
+        root_domain="example.test",
+        stack_name="proof-stack",
+        tunnel_name="proof-tunnel",
+        dokploy_subdomain="dokploy-proof",
+        coder_subdomain="coder-proof",
+        seaweedfs_subdomain="seaweedfs-proof",
+        litellm_admin_subdomain="litellm-proof",
+    )
+
+
+def _install_api_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: list[request.Request],
+    *,
+    networks: dict[str, JsonValue],
+) -> None:
+    monkeypatch.setattr(
+        model_sync_coder_api,
+        "active_task1_proof_context",
+        _context,
+    )
+    monkeypatch.setattr(
+        model_sync_coder_api,
+        "_coder_container_name",
+        lambda _service: "coder-container",
+    )
+    monkeypatch.setattr(
+        model_sync_coder_api,
+        "run_bounded_process",
+        lambda *_args, **_kwargs: json.dumps(
+            [{"NetworkSettings": {"Networks": networks}}]
+        ).encode(),
+    )
+    monkeypatch.setattr(request, "build_opener", lambda *_handlers: _Opener(captured))
+
+
+def test_api_uses_shared_internal_coder_route_when_task1_context_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[request.Request] = []
+    _install_api_fakes(
+        monkeypatch,
+        captured,
+        networks={"proof-stack-shared": {"IPAddress": "172.20.0.7"}},
+    )
+
+    token = model_sync_coder_api.coder_login("coder-proof.example.test", "admin", "secret")
+
+    assert token == "session"
+    assert captured[0].full_url == "http://172.20.0.7:3000/api/v2/users/login"
+    assert captured[0].get_header("Host") == "coder-proof.example.test"
+
+
+def test_api_preserves_public_route_without_task1_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[request.Request] = []
+    monkeypatch.setattr(
+        model_sync_coder_api,
+        "active_task1_proof_context",
+        lambda: None,
+    )
+    monkeypatch.setattr(request, "build_opener", lambda *_handlers: _Opener(captured))
+
+    model_sync_coder_api.api("coder.example.test", None, "/api/v2/users/me")
+
+    assert captured[0].full_url == "https://coder.example.test/api/v2/users/me"
+
+
+def test_api_rejects_missing_task1_shared_network_before_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[request.Request] = []
+    _install_api_fakes(
+        monkeypatch,
+        captured,
+        networks={"proof-stack-default": {"IPAddress": "172.19.0.3"}},
+    )
+
+    with pytest.raises(ValueError, match="shared network"):
+        model_sync_coder_api.api("coder-proof.example.test", None, "/api/v2/users/me")
+
+    assert captured == []
