@@ -955,7 +955,9 @@ def _redacted_cli_error(error: BaseException) -> str:
 
 
 def _task1_install_error_message(error: BaseException, *, task1_context_enabled: bool) -> str:
-    if task1_context_enabled and isinstance(error, CloudflaredConnectorError):
+    if task1_context_enabled and isinstance(
+        error, (CloudflaredConnectorError, DokployBootstrapError)
+    ) and error.task1_category is not None:
         return f"TASK1_REMOTE_ERROR_CATEGORY={error.task1_category}"
     return _redacted_cli_error(error)
 

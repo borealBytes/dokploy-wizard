@@ -6,6 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from dokploy_wizard.bootstrap import (
+    DokployBootstrapError,
+    DokployBootstrapFailureCategory,
+)
 from dokploy_wizard.cli import _task1_install_error_message
 from dokploy_wizard.dokploy.cloudflared import (
     CloudflaredConnectorError,
@@ -74,6 +78,19 @@ def test_task1_connector_category_crosses_cli_and_wrapper_without_message() -> N
     assert str(error) == "Task 1 remote failure category: cloudflared.deploy_compose"
     assert "SECRET" not in str(error)
     assert "host.example.test" not in str(error)
+
+
+def test_task1_bootstrap_category_crosses_cli_and_wrapper_without_message() -> None:
+    source = DokployBootstrapError(
+        "SECRET installer stderr",
+        category=DokployBootstrapFailureCategory.INSTALL_COMMAND,
+    )
+    marker = _task1_install_error_message(source, task1_context_enabled=True)
+
+    error = _classify_task1_nonzero(f"prefix {marker} suffix SECRET".encode())
+
+    assert str(error) == "Task 1 remote failure category: dokploy.bootstrap_install"
+    assert "SECRET" not in str(error)
 
 
 def test_wrapper_failure_is_not_masked_when_remote_cleanup_succeeds(

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
@@ -20,8 +21,23 @@ DOKPLOY_INSTALL_COMMAND = "curl -sSL https://dokploy.com/install.sh | sh"
 LOCAL_HEALTH_URL = "http://127.0.0.1:3000"
 
 
+class DokployBootstrapFailureCategory(StrEnum):
+    INSTALL_COMMAND = "dokploy.bootstrap_install"
+    HEALTH = "dokploy.bootstrap_health"
+    AUTH = "dokploy.bootstrap_auth"
+
+
 class DokployBootstrapError(RuntimeError):
     """Raised when Dokploy bootstrap cannot reach a locally healthy state."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: DokployBootstrapFailureCategory | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.task1_category = None if category is None else str(category)
 
 
 @dataclass(frozen=True)
@@ -67,7 +83,10 @@ class ShellDokployBootstrapBackend:
         if self._forced_install_ok is not None:
             if not self._forced_install_ok:
                 msg = "Dokploy bootstrap install command failed."
-                raise DokployBootstrapError(msg)
+                raise DokployBootstrapError(
+                    msg,
+                    category=DokployBootstrapFailureCategory.INSTALL_COMMAND,
+                )
             if self._forced_health_after_install is not None:
                 self._forced_health = self._forced_health_after_install
             return
@@ -83,7 +102,10 @@ class ShellDokployBootstrapBackend:
             msg = "Dokploy bootstrap install command failed"
             if stderr:
                 msg = f"{msg}: {stderr}"
-            raise DokployBootstrapError(msg)
+            raise DokployBootstrapError(
+                msg,
+                category=DokployBootstrapFailureCategory.INSTALL_COMMAND,
+            )
 
     def ensure_public_route(self) -> None:
         values = self._raw_env.values
@@ -114,7 +136,10 @@ class ShellDokployBootstrapBackend:
                 https=True,
             )
         except DokployBootstrapAuthError as error:
-            raise DokployBootstrapError(str(error)) from error
+            raise DokployBootstrapError(
+                str(error),
+                category=DokployBootstrapFailureCategory.AUTH,
+            ) from error
 
 
 def reconcile_dokploy(
@@ -145,7 +170,10 @@ def reconcile_dokploy(
     backend.install()
     if not _wait_for_health(backend):
         msg = "Dokploy bootstrap did not become locally healthy on http://127.0.0.1:3000."
-        raise DokployBootstrapError(msg)
+        raise DokployBootstrapError(
+            msg,
+            category=DokployBootstrapFailureCategory.HEALTH,
+        )
 
     _maybe_ensure_public_route(backend)
 

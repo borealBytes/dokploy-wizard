@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from dokploy_wizard.bootstrap import DokployBootstrapFailureCategory
 from dokploy_wizard.dokploy.cloudflared import CloudflaredFailureCategory
 from dokploy_wizard.proof.model_sync_task1_remote_receipt_schema_types import (
     Task1RemoteProofExpectation,
@@ -81,7 +82,10 @@ def _classify_task1_nonzero(stderr: bytes) -> RuntimeError:
         match.decode("ascii")
         for match in re.findall(rb"TASK1_REMOTE_ERROR_CATEGORY=([a-z_]+\.[a-z_]+)", stderr)
     }
-    allowed_categories = {str(category) for category in CloudflaredFailureCategory}
+    allowed_categories = {
+        *(str(category) for category in CloudflaredFailureCategory),
+        *(str(category) for category in DokployBootstrapFailureCategory),
+    }
     if len(category_matches) == 1 and category_matches <= allowed_categories:
         category = category_matches.pop()
         return Task1RemoteReceiptError(f"Task 1 remote failure category: {category}")
