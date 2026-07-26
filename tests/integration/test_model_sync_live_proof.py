@@ -1757,7 +1757,7 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
                         "id": "workspace-proof",
                         "name": "primary",
                         "template_id": "template-proof",
-                        "template_version_id": "version-proof",
+                        "latest_build": {"template_version_id": "version-proof"},
                     }
                 ],
             }
@@ -3360,7 +3360,7 @@ def test_historical_workspace_version_remains_bound_without_active_version_equal
                 "id": "workspace-proof",
                 "name": "primary",
                 "template_id": "template-proof",
-                "template_version_id": "historical-version",
+                "latest_build": {"template_version_id": "historical-version"},
             }
         ],
     }
@@ -3658,7 +3658,7 @@ def test_coder_inventory_paginates_workspace_build_and_secret_identifiers(
             "id": f"workspace-{index}",
             "name": f"workspace-{index}",
             "template_id": f"template-{index}",
-            "template_version_id": f"version-{index}",
+            "latest_build": {"template_version_id": f"version-{index}"},
         }
         for index in range(101)
     ]

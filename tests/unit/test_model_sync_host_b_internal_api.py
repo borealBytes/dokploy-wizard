@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import TracebackType
 from typing import Self
 from urllib import request
@@ -163,3 +164,54 @@ def test_templates_resolve_active_version_name_from_version_detail(
 
     assert templates[0]["active_version_name"] == "version-name"
     assert paths == ["/api/v2/templates", "/api/v2/templateversions/version-id"]
+
+
+def test_workspaces_resolve_template_version_from_latest_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fetch(
+        _hostname: str,
+        _token: str | None,
+        path: str,
+        _body: dict[str, str] | None = None,
+    ) -> JsonValue:
+        assert path == "/api/v2/workspaces?q=&limit=100&offset=0"
+        return {
+            "count": 1,
+            "workspaces": [
+                {
+                    "id": "workspace-id",
+                    "name": "workspace-name",
+                    "template_id": "template-id",
+                    "latest_build": {"template_version_id": "version-id"},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(model_sync_host_b, "_api", fetch)
+    monkeypatch.setattr(
+        model_sync_host_b,
+        "_legacy_renderer",
+        lambda *_args: model_sync_host_b.LegacyRenderer("base", "key", "alias", (), ("model",)),
+    )
+    monkeypatch.setattr(model_sync_host_b, "_primary_pointer", lambda *_args: {})
+
+    workspaces = model_sync_host_b._workspaces(
+        "coder.example.test",
+        "session",
+        "coder-container",
+        [
+            {
+                "id": "template-id",
+                "name": "ubuntu-vscode",
+                "active_version_id": "version-id",
+                "active_version_name": "version-name",
+                "rendered_source_sha256": "a" * 64,
+            }
+        ],
+        {},
+        Path("."),
+        "proof-stack",
+    )
+
+    assert workspaces[0]["template_version_id"] == "version-id"
