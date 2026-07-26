@@ -59,4 +59,4 @@ def test_capture_post_install_probe_preserves_terminal_collector_failure() -> No
     # When / Then
     with pytest.raises(RemoteProofError, match="remote preflight transport failed"):
         post_install_probe.capture_post_install_probe(capture, sleep)
-    assert attempts == 6
+    assert attempts == 24
