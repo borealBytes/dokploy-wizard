@@ -8,6 +8,7 @@ import sys
 from typing import assert_never
 
 from dokploy_wizard import proof
+from dokploy_wizard.proof import model_sync_task1_post_install_probe as post_install
 from dokploy_wizard.proof.model_sync_finalization import (
     BaselineArtifactInputs,
     build_task1_finalization_plan,
@@ -123,11 +124,13 @@ def run_baseline_host_a(args: argparse.Namespace) -> None:
             remote_context,
             args.proof_commit if task1_context_enabled else None,
         )
-        post_install_probe = cli.probe_host(
-            host=host_a,
-            password=password_a,
-            namespace=namespace,
-            proof_transport=transport,
+        post_install_probe = post_install.capture_post_install_probe(
+            lambda: cli.probe_host(
+                host=host_a,
+                password=password_a,
+                namespace=namespace,
+                proof_transport=transport,
+            )
         )
         post_install_cloudflare = cli.classify_post_install_resources(
             host_a_probe.inventory["cloudflare"],
