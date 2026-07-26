@@ -30,6 +30,14 @@ class SharedCoreFailureCategory(StrEnum):
     CREATE_COMPOSE = "shared_core.create_compose"
     APPLY_COMPOSE = "shared_core.apply_compose"
     DEPLOY_COMPOSE = "shared_core.deploy_compose"
+    PLAN_MISMATCH = "shared_core.plan_mismatch"
+    LEDGER_DRIFT = "shared_core.ledger_drift"
+    POSTGRES_CONTAINER = "shared_core.postgres_container"
+    POSTGRES_READY = "shared_core.postgres_ready"
+    POSTGRES_PROVISION = "shared_core.postgres_provision"
+    LITELLM_RUNTIME = "shared_core.litellm_runtime"
+    AI_PROVIDER = "shared_core.ai_provider"
+    GENERATED_KEYS = "shared_core.generated_keys"
 
 
 class SharedCoreError(RuntimeError):
@@ -405,7 +413,8 @@ def _resolve_resource(
         if existing is None:
             raise SharedCoreError(
                 f"Ownership ledger says shared-core resource '{resource_type}' exists, "
-                "but the backend could not find it."
+                "but the backend could not find it.",
+                category=SharedCoreFailureCategory.LEDGER_DRIFT,
             )
         if existing.resource_name != service_name:
             desired_existing = find_by_name(service_name)
@@ -420,7 +429,8 @@ def _resolve_resource(
                 )
             raise SharedCoreError(
                 f"Ownership ledger resource '{resource_type}' no longer matches the desired "
-                "shared-core naming convention."
+                "shared-core naming convention.",
+                category=SharedCoreFailureCategory.LEDGER_DRIFT,
             )
         return (
             SharedCoreManagedResource(
@@ -481,7 +491,8 @@ def _find_owned_resource(
     ]
     if len(matches) > 1:
         raise SharedCoreError(
-            f"Ownership ledger contains multiple '{resource_type}' resources for scope '{scope}'."
+            f"Ownership ledger contains multiple '{resource_type}' resources for scope '{scope}'.",
+            category=SharedCoreFailureCategory.LEDGER_DRIFT,
         )
     return matches[0] if matches else None
 
