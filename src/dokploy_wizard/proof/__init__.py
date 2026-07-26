@@ -463,8 +463,15 @@ def parse_resource_planes(snapshot: dict[str, JsonValue]) -> ResourcePlaneCaptur
         if name in images:
             raise CaptureSchemaError("captured image logical names must be unique")
         images[name] = container
-    if set(images) != {"coder", "litellm", "pgvector", "redis", "postfix"}:
-        raise CaptureSchemaError("all required Coder and Shared Core images must be captured")
+    image_names = set(images)
+    if not {"coder", "litellm", "pgvector"} <= image_names or not image_names <= {
+        "coder",
+        "litellm",
+        "pgvector",
+        "redis",
+        "postfix",
+    }:
+        raise CaptureSchemaError("required and planned Coder and Shared Core images must be captured")
     state = require_mapping(snapshot["wizard_state"], "wizard state")
     require_keys(state, {"state_sha256", "ledger_sha256", "resources"}, "wizard state")
     resources = _unique_strings(

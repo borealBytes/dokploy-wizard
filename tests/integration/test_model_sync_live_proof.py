@@ -17,6 +17,7 @@ from urllib import error
 import pytest
 
 import dokploy_wizard.proof as model_sync_proof
+from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.dokploy import coder as coder_module
 from dokploy_wizard.dokploy.coder import _litellm_workspace_fallback_models_json
 from dokploy_wizard.proof import (
@@ -1804,7 +1805,7 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
     monkeypatch.setattr(model_sync_host_b, "_api", api)
     monkeypatch.setattr(model_sync_host_b, "_coder_login", lambda *_args: "session")
     monkeypatch.setattr(model_sync_host_b, "_coder_container_name", lambda *_args: "coder")
-    monkeypatch.setattr(model_sync_host_b, "_image_inventory", lambda _stack_name: [])
+    monkeypatch.setattr(model_sync_host_b, "_image_inventory", lambda _stack_name, _specs: [])
     monkeypatch.setattr(model_sync_host_b, "_state_inventory", lambda _state_dir: {})
     monkeypatch.setattr(
         model_sync_host_b, "capture_local_authoritative_inventory", lambda *_args: probe
@@ -2633,6 +2634,26 @@ def test_image_inventory_binds_five_running_services_to_independent_registry_dig
         f"{_IMAGE_REPOSITORIES[name]}@{_IMAGE_DIGESTS[name]}" for name in _IMAGE_LOGICAL
     ]
     assert all(command[-2] == "--raw" for command in registry_calls)
+
+
+def test_image_inventory_requires_only_planned_optional_shared_core_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    plan = build_shared_core_plan("proof-stack", ("coder", "seaweedfs"))
+    runner, calls = _image_inventory_runner()
+    monkeypatch.setattr(model_sync_host_b, "run_bounded_process", runner)
+
+    # When
+    images = model_sync_host_b._image_inventory(
+        "proof-stack", model_sync_host_b._planned_image_specs(plan)
+    )
+    parsed = model_sync_artifacts.parse_resource_planes(_resource_plane_snapshot(images))
+
+    # Then
+    assert tuple(item["logical_name"] for item in images) == ("coder", "litellm", "pgvector")
+    assert tuple(parsed.images) == ("coder", "litellm", "pgvector")
+    assert sum(command[1] == "ps" for command in calls) == 3
 
 
 @pytest.mark.parametrize(
@@ -4579,7 +4600,7 @@ def test_post_install_snapshot_uses_authoritative_cloudflare_and_tailscale_ids(
     monkeypatch.setattr(
         model_sync_host_b, "capture_local_authoritative_inventory", lambda *_args: probe
     )
-    monkeypatch.setattr(model_sync_host_b, "_image_inventory", lambda _stack_name: [])
+    monkeypatch.setattr(model_sync_host_b, "_image_inventory", lambda _stack_name, _specs: [])
     monkeypatch.setattr(model_sync_host_b, "_coder_login", lambda *_args: "session")
     monkeypatch.setattr(model_sync_host_b, "_coder_container_name", lambda *_args: "coder")
     monkeypatch.setattr(model_sync_host_b, "_api", lambda *_args: {"id": "user-proof"})
