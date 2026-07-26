@@ -15,6 +15,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from dokploy_wizard.core import (
     SharedCoreError,
+    SharedCoreFailureCategory,
     SharedCorePlan,
     SharedCoreResourceRecord,
     SharedPostgresAllocation,
@@ -375,9 +376,10 @@ class DokploySharedCoreBackend:
         if self._applied_locator is not None:
             return self._applied_locator
         try:
+            operation = SharedCoreFailureCategory.LIST_PROJECTS
             projects = self._client.list_projects()
         except DokployApiError as error:
-            raise SharedCoreError(str(error)) from error
+            raise SharedCoreError(str(error), category=operation) from error
         for project in projects:
             if project.name != self._stack_name:
                 continue
@@ -403,6 +405,7 @@ class DokploySharedCoreBackend:
             self._litellm_generated_keys,
         )
         reconcile_title = "dokploy-wizard shared core reconcile"
+        operation = SharedCoreFailureCategory.LIST_PROJECTS
         try:
             projects = self._client.list_projects()
             for project in projects:
@@ -413,6 +416,7 @@ class DokploySharedCoreBackend:
                     break
                 for compose in environment.composes:
                     if compose.name == self._compose_name:
+                        operation = SharedCoreFailureCategory.APPLY_COMPOSE
                         locator = _ComposeLocator(
                             project_id=project.project_id,
                             environment_id=environment.environment_id,
@@ -437,17 +441,20 @@ class DokploySharedCoreBackend:
                         self._applied_locator = result.locator
                         self._created_in_process = result.status == "applied"
                         return result.locator
+                operation = SharedCoreFailureCategory.CREATE_COMPOSE
                 created = self._client.create_compose(
                     name=self._compose_name,
                     environment_id=environment.environment_id,
                     compose_file="services: {}\n",
                     app_name=self._compose_name,
                 )
+                operation = SharedCoreFailureCategory.APPLY_COMPOSE
                 updated = _apply_rendered_compose_to_existing(
                     client=self._client,
                     compose_id=created.compose_id,
                     rendered_compose=rendered_compose,
                 )
+                operation = SharedCoreFailureCategory.DEPLOY_COMPOSE
                 deployment = self._client.deploy_compose(
                     compose_id=updated.compose_id,
                     title=reconcile_title,
@@ -455,7 +462,8 @@ class DokploySharedCoreBackend:
                 )
                 if not deployment.success:
                     raise SharedCoreError(
-                        "Dokploy deploy for shared core compose app did not report success."
+                        "Dokploy deploy for shared core compose app did not report success.",
+                        category=SharedCoreFailureCategory.DEPLOY_COMPOSE,
                     )
                 persist_compose_artifact_hash(
                     state_dir=self._state_dir,
@@ -471,22 +479,26 @@ class DokploySharedCoreBackend:
                 self._created_in_process = True
                 return locator
 
+            operation = SharedCoreFailureCategory.CREATE_PROJECT
             created_project = self._client.create_project(
                 name=self._stack_name,
                 description="Managed by dokploy-wizard",
                 env=None,
             )
+            operation = SharedCoreFailureCategory.CREATE_COMPOSE
             created_compose = self._client.create_compose(
                 name=self._compose_name,
                 environment_id=created_project.environment_id,
                 compose_file="services: {}\n",
                 app_name=self._compose_name,
             )
+            operation = SharedCoreFailureCategory.APPLY_COMPOSE
             updated_compose = _apply_rendered_compose_to_existing(
                 client=self._client,
                 compose_id=created_compose.compose_id,
                 rendered_compose=rendered_compose,
             )
+            operation = SharedCoreFailureCategory.DEPLOY_COMPOSE
             deployment = self._client.deploy_compose(
                 compose_id=updated_compose.compose_id,
                 title=reconcile_title,
@@ -494,7 +506,8 @@ class DokploySharedCoreBackend:
             )
             if not deployment.success:
                 raise SharedCoreError(
-                    "Dokploy deploy for shared core compose app did not report success."
+                    "Dokploy deploy for shared core compose app did not report success.",
+                    category=SharedCoreFailureCategory.DEPLOY_COMPOSE,
                 )
             persist_compose_artifact_hash(
                 state_dir=self._state_dir,
@@ -502,7 +515,7 @@ class DokploySharedCoreBackend:
                 rendered_compose=rendered_compose,
             )
         except DokployApiError as error:
-            raise SharedCoreError(str(error)) from error
+            raise SharedCoreError(str(error), category=operation) from error
         locator = _ComposeLocator(
             project_id=created_project.project_id,
             environment_id=created_project.environment_id,

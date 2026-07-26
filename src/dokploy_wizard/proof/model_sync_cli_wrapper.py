@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from dokploy_wizard.bootstrap import DokployBootstrapFailureCategory
+from dokploy_wizard.core import SharedCoreFailureCategory
 from dokploy_wizard.dokploy.cloudflared import CloudflaredFailureCategory
 from dokploy_wizard.proof.model_sync_task1_remote_receipt_schema_types import (
     Task1RemoteProofExpectation,
@@ -104,6 +105,7 @@ def _classify_task1_nonzero(stderr: bytes) -> RuntimeError:
         *(str(category) for category in CloudflaredFailureCategory),
         *(str(category) for category in DokployBootstrapFailureCategory),
         *(str(category) for category in Task1InstallFailureCategory),
+        *(str(category) for category in SharedCoreFailureCategory),
     }
     if len(category_matches) == 1 and category_matches <= allowed_categories:
         category = category_matches.pop()

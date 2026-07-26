@@ -11,6 +11,7 @@ from dokploy_wizard.bootstrap import (
     DokployBootstrapFailureCategory,
 )
 from dokploy_wizard.cli import _task1_install_error_message
+from dokploy_wizard.core import SharedCoreError, SharedCoreFailureCategory
 from dokploy_wizard.dokploy.cloudflared import (
     CloudflaredConnectorError,
     CloudflaredFailureCategory,
@@ -107,6 +108,21 @@ def test_task1_install_category_crosses_cli_and_wrapper_without_message() -> Non
 
     assert marker == f"TASK1_REMOTE_ERROR_CATEGORY={Task1InstallFailureCategory.STATE_VALIDATION}"
     assert str(error) == "Task 1 remote failure category: install.state_validation"
+    assert "SECRET" not in str(error)
+
+
+def test_task1_shared_core_category_crosses_cli_and_wrapper_without_message() -> None:
+    marker = _task1_install_error_message(
+        SharedCoreError(
+            "SECRET API detail",
+            category=SharedCoreFailureCategory.CREATE_COMPOSE,
+        ),
+        task1_context_enabled=True,
+    )
+
+    error = _classify_task1_nonzero(f"prefix {marker} suffix SECRET".encode())
+
+    assert str(error) == "Task 1 remote failure category: shared_core.create_compose"
     assert "SECRET" not in str(error)
 
 
