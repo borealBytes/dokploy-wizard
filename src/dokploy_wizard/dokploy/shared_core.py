@@ -172,7 +172,10 @@ class DokploySharedCoreBackend:
 
     def create_network(self, resource_name: str) -> SharedCoreResourceRecord:
         if resource_name != self._plan.network_name:
-            raise SharedCoreError("Shared-core network name does not match the active plan.")
+            raise SharedCoreError(
+                "Shared-core network name does not match the active plan.",
+                category=SharedCoreFailureCategory.PLAN_MISMATCH,
+            )
         locator = self._ensure_compose_applied()
         return SharedCoreResourceRecord(
             resource_id=_resource_id(locator.compose_id, "network"),
@@ -200,7 +203,10 @@ class DokploySharedCoreBackend:
 
     def create_postgres_service(self, resource_name: str) -> SharedCoreResourceRecord:
         if self._plan.postgres is None or resource_name != self._plan.postgres.service_name:
-            raise SharedCoreError("Shared-core Postgres name does not match the active plan.")
+            raise SharedCoreError(
+                "Shared-core Postgres name does not match the active plan.",
+                category=SharedCoreFailureCategory.PLAN_MISMATCH,
+            )
         locator = self._ensure_compose_applied()
         return SharedCoreResourceRecord(
             resource_id=_resource_id(locator.compose_id, "postgres"),
@@ -219,7 +225,8 @@ class DokploySharedCoreBackend:
         if container_name is None:
             raise SharedCoreError(
                 "Shared-core Postgres container is not running; "
-                "cannot provision per-pack databases."
+                "cannot provision per-pack databases.",
+                category=SharedCoreFailureCategory.POSTGRES_CONTAINER,
             )
         _wait_for_postgres_ready(container_name)
         for allocation in allocations:
@@ -272,7 +279,10 @@ class DokploySharedCoreBackend:
 
     def create_redis_service(self, resource_name: str) -> SharedCoreResourceRecord:
         if self._plan.redis is None or resource_name != self._plan.redis.service_name:
-            raise SharedCoreError("Shared-core Redis name does not match the active plan.")
+            raise SharedCoreError(
+                "Shared-core Redis name does not match the active plan.",
+                category=SharedCoreFailureCategory.PLAN_MISMATCH,
+            )
         locator = self._ensure_compose_applied()
         return SharedCoreResourceRecord(
             resource_id=_resource_id(locator.compose_id, "redis"),
@@ -304,7 +314,10 @@ class DokploySharedCoreBackend:
 
     def create_mail_relay_service(self, resource_name: str) -> SharedCoreResourceRecord:
         if self._plan.mail_relay is None or resource_name != self._plan.mail_relay.service_name:
-            raise SharedCoreError("Shared-core mail relay name does not match the active plan.")
+            raise SharedCoreError(
+                "Shared-core mail relay name does not match the active plan.",
+                category=SharedCoreFailureCategory.PLAN_MISMATCH,
+            )
         locator = self._ensure_compose_applied()
         return SharedCoreResourceRecord(
             resource_id=_resource_id(locator.compose_id, "postfix"),
@@ -332,7 +345,10 @@ class DokploySharedCoreBackend:
 
     def create_litellm_service(self, resource_name: str) -> SharedCoreResourceRecord:
         if self._plan.litellm is None or resource_name != self._plan.litellm.service_name:
-            raise SharedCoreError("Shared-core LiteLLM name does not match the active plan.")
+            raise SharedCoreError(
+                "Shared-core LiteLLM name does not match the active plan.",
+                category=SharedCoreFailureCategory.PLAN_MISMATCH,
+            )
         locator = self._ensure_compose_applied()
         return SharedCoreResourceRecord(
             resource_id=_resource_id(locator.compose_id, "litellm"),
@@ -538,7 +554,10 @@ class DokploySharedCoreBackend:
                 consumer_model_allowlists=self._litellm_consumer_model_allowlists,
             )
         except Exception as error:
-            raise SharedCoreError(str(error)) from error
+            raise SharedCoreError(
+                str(error),
+                category=SharedCoreFailureCategory.LITELLM_RUNTIME,
+            ) from error
         updated_virtual_keys = dict(self._litellm_generated_keys.virtual_keys)
         changed = False
         for consumer, record in reconciled.items():
@@ -562,7 +581,10 @@ class DokploySharedCoreBackend:
                     litellm_env=self._litellm_env,
                 )
             except DokployApiError as error:
-                raise SharedCoreError(str(error)) from error
+                raise SharedCoreError(
+                    str(error),
+                    category=SharedCoreFailureCategory.AI_PROVIDER,
+                ) from error
 
     def _shared_core_runtime_ready_for_noop(self) -> bool:
         postgres_allocations = [
@@ -677,7 +699,8 @@ def _apply_rendered_compose_noop_guard(
     )
     if not deployment.success:
         raise SharedCoreError(
-            f"Dokploy deploy for compose service '{service_key}' did not report success."
+            f"Dokploy deploy for compose service '{service_key}' did not report success.",
+            category=SharedCoreFailureCategory.DEPLOY_COMPOSE,
         )
     persist_compose_artifact_hash(
         state_dir=state_dir,
@@ -940,7 +963,8 @@ def _ensure_dokploy_ai_provider(
         api_key = generated_keys.virtual_keys["dokploy-ai"]
     except KeyError as error:
         raise SharedCoreError(
-            "LiteLLM generated keys are missing the required 'dokploy-ai' virtual key."
+            "LiteLLM generated keys are missing the required 'dokploy-ai' virtual key.",
+            category=SharedCoreFailureCategory.GENERATED_KEYS,
         ) from error
     existing = client.ai_providers_all()
     wizard_provider = None
@@ -1856,7 +1880,8 @@ def _wait_for_postgres_ready(
     detail = (result.stderr or result.stdout).strip()
     raise SharedCoreError(
         "Shared-core Postgres did not become ready for allocation provisioning: "
-        f"{detail or 'unknown error'}"
+        f"{detail or 'unknown error'}",
+        category=SharedCoreFailureCategory.POSTGRES_READY,
     )
 
 
@@ -1975,7 +2000,8 @@ def _run_psql(
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise SharedCoreError(
-            f"Shared-core Postgres provisioning failed: {detail or 'unknown error'}"
+            f"Shared-core Postgres provisioning failed: {detail or 'unknown error'}",
+            category=SharedCoreFailureCategory.POSTGRES_PROVISION,
         )
     return result
 
