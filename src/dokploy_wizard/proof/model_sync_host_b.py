@@ -154,7 +154,7 @@ def _workspace_json(container: str, token: str, workspace: str, script: str, pay
     remote_command = shlex.join(["node", "-e", script, *args])
     command = ["docker", "exec", "-i", "-e", "CODER_URL=http://127.0.0.1:3000", container, "sh", "-c", "IFS= read -r CODER_SESSION_TOKEN; export CODER_SESSION_TOKEN; exec /opt/coder \"$@\"", "sh", "ssh", "--disable-autostart", workspace, "--", remote_command]
     try:
-        raw = json.loads(run_bounded_process(command, stdin=(token + "\n" + payload).encode(), output_limit=_OUTPUT_LIMIT, timeout_seconds=180, label=f"retained workspace {label}"))
+        raw = json.loads(run_bounded_process(command, stdin=(token + "\n" + payload).encode(), output_limit=_OUTPUT_LIMIT, timeout_seconds=420, label=f"retained workspace {label}"))
     except (RuntimeError, ValueError) as error:
         raise ValueError(f"unable to capture retained workspace {label}") from error
     if not isinstance(raw, (dict, list)):

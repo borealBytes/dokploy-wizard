@@ -97,7 +97,7 @@ def test_host_a_snapshot_passes_remote_task1_context_argument(
 
     # Then
     assert result == "{}"
-    assert timeouts == [300]
+    assert timeouts == [600]
     assert commands == [
         "cd /root/dokploy-wizard && PYTHONPATH=./src python3 -m "
         "dokploy_wizard.proof.model_sync_host_b model-sync-snapshot --env-file .install.env "

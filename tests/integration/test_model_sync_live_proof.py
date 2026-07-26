@@ -1779,7 +1779,7 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
 
     def run(command: list[str], **kwargs: Any) -> bytes:
         calls.append((command, kwargs.get("stdin")))
-        assert kwargs["timeout_seconds"] == 180
+        assert kwargs["timeout_seconds"] == 420
         if kwargs.get("stdin") == b"session\n":
             return json.dumps(
                 {
@@ -2132,7 +2132,7 @@ def test_model_inventory_normalizes_like_legacy_template(
         str(2 * 1024 * 1024),
         "1000",
     ]
-    assert captured["timeout_seconds"] == 180
+    assert captured["timeout_seconds"] == 420
     assert captured["input"] == ("session\n" + credential).encode()
 
 
