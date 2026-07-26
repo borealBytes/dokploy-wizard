@@ -6,7 +6,7 @@ from typing import Final
 
 from dokploy_wizard.proof.model_sync_identity import RemoteProbe, RemoteProofError
 
-_ATTEMPTS: Final = 6
+_ATTEMPTS: Final = 24
 _DELAY_SECONDS: Final = 10.0
 
 
