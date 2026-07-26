@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -31,6 +32,23 @@ class BoundedProcessRunner(Protocol):
         label: str,
         nonzero_error_factory: Callable[[bytes], RuntimeError] | None = None,
     ) -> bytes: ...
+
+
+class Task1InstallFailureCategory(StrEnum):
+    IO = "install.io"
+    STATE_VALIDATION = "install.state_validation"
+    PREFLIGHT = "install.preflight"
+    CLOUDFLARE = "install.cloudflare"
+    SHARED_CORE = "install.shared_core"
+    TAILSCALE = "install.tailscale"
+    HEADSCALE = "install.headscale"
+    CODER = "install.coder"
+    DOKPLOY_AUTH = "install.dokploy_auth"
+    LIFECYCLE_DRIFT = "install.lifecycle_drift"
+    MATRIX = "install.matrix"
+    NEXTCLOUD = "install.nextcloud"
+    OPENCLAW = "install.openclaw"
+    SEAWEEDFS = "install.seaweedfs"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +103,7 @@ def _classify_task1_nonzero(stderr: bytes) -> RuntimeError:
     allowed_categories = {
         *(str(category) for category in CloudflaredFailureCategory),
         *(str(category) for category in DokployBootstrapFailureCategory),
+        *(str(category) for category in Task1InstallFailureCategory),
     }
     if len(category_matches) == 1 and category_matches <= allowed_categories:
         category = category_matches.pop()

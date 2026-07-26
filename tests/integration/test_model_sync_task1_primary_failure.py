@@ -16,8 +16,12 @@ from dokploy_wizard.dokploy.cloudflared import (
     CloudflaredFailureCategory,
 )
 from dokploy_wizard.proof import model_sync_task1_baseline_runner as baseline_runner
-from dokploy_wizard.proof.model_sync_cli_wrapper import _classify_task1_nonzero
+from dokploy_wizard.proof.model_sync_cli_wrapper import (
+    Task1InstallFailureCategory,
+    _classify_task1_nonzero,
+)
 from dokploy_wizard.proof.model_sync_task1_remote_abort import clear_remote_abort_record
+from dokploy_wizard.state import StateValidationError
 from tests.integration._model_sync_task1_finalization_recovery_support import (
     runner_args,
     task1_recovery_fixture,
@@ -90,6 +94,19 @@ def test_task1_bootstrap_category_crosses_cli_and_wrapper_without_message() -> N
     error = _classify_task1_nonzero(f"prefix {marker} suffix SECRET".encode())
 
     assert str(error) == "Task 1 remote failure category: dokploy.bootstrap_install"
+    assert "SECRET" not in str(error)
+
+
+def test_task1_install_category_crosses_cli_and_wrapper_without_message() -> None:
+    marker = _task1_install_error_message(
+        StateValidationError("SECRET state detail"),
+        task1_context_enabled=True,
+    )
+
+    error = _classify_task1_nonzero(f"prefix {marker} suffix SECRET".encode())
+
+    assert marker == f"TASK1_REMOTE_ERROR_CATEGORY={Task1InstallFailureCategory.STATE_VALIDATION}"
+    assert str(error) == "Task 1 remote failure category: install.state_validation"
     assert "SECRET" not in str(error)
 
 

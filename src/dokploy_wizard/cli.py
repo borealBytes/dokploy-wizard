@@ -127,6 +127,7 @@ from dokploy_wizard.preflight import (
     collect_host_facts,
     run_preflight,
 )
+from dokploy_wizard.proof.model_sync_cli_wrapper import Task1InstallFailureCategory
 from dokploy_wizard.proof.model_sync_task1_context import (
     Task1ProofContextV1,
     activate_task1_proof_context,
@@ -959,6 +960,26 @@ def _task1_install_error_message(error: BaseException, *, task1_context_enabled:
         error, (CloudflaredConnectorError, DokployBootstrapError)
     ) and error.task1_category is not None:
         return f"TASK1_REMOTE_ERROR_CATEGORY={error.task1_category}"
+    if task1_context_enabled:
+        categories: tuple[tuple[type[BaseException], Task1InstallFailureCategory], ...] = (
+            (OSError, Task1InstallFailureCategory.IO),
+            (StateValidationError, Task1InstallFailureCategory.STATE_VALIDATION),
+            (PreflightError, Task1InstallFailureCategory.PREFLIGHT),
+            (CloudflareError, Task1InstallFailureCategory.CLOUDFLARE),
+            (SharedCoreError, Task1InstallFailureCategory.SHARED_CORE),
+            (TailscaleError, Task1InstallFailureCategory.TAILSCALE),
+            (HeadscaleError, Task1InstallFailureCategory.HEADSCALE),
+            (CoderError, Task1InstallFailureCategory.CODER),
+            (DokployBootstrapAuthError, Task1InstallFailureCategory.DOKPLOY_AUTH),
+            (LifecycleDriftError, Task1InstallFailureCategory.LIFECYCLE_DRIFT),
+            (MatrixError, Task1InstallFailureCategory.MATRIX),
+            (NextcloudError, Task1InstallFailureCategory.NEXTCLOUD),
+            (OpenClawError, Task1InstallFailureCategory.OPENCLAW),
+            (SeaweedFsError, Task1InstallFailureCategory.SEAWEEDFS),
+        )
+        for error_type, category in categories:
+            if isinstance(error, error_type):
+                return f"TASK1_REMOTE_ERROR_CATEGORY={category}"
     return _redacted_cli_error(error)
 
 
