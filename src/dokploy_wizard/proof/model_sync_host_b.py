@@ -8,6 +8,7 @@ from http.client import HTTPMessage
 from pathlib import Path
 from typing import IO, Final, Sequence
 from urllib import request
+from dokploy_wizard.core.models import SharedCorePlan
 from dokploy_wizard.dokploy.coder import _coder_container_name, _litellm_internal_base_url, _litellm_workspace_fallback_models_json
 from dokploy_wizard.proof.model_sync_artifacts import CaptureSchemaError, JsonValue, normalize_image_repository, registry_manifest_digest, require_digest, require_list, require_mapping, require_sha256, require_text
 from dokploy_wizard.proof.model_sync_env import resolve_proof_namespace
@@ -36,7 +37,7 @@ def _snapshot(env_file: Path, state_dir: Path) -> dict[str, JsonValue]:
     desired = resolve_desired_state(parse_env_file(env_file))
     namespace = resolve_proof_namespace(env_file)
     observed = capture_local_authoritative_inventory(env_file, namespace)
-    images = _image_inventory(desired.stack_name)
+    images = _image_inventory(desired.stack_name, _planned_image_specs(desired.shared_core))
     raw_env = parse_env_file(env_file).values
     email = _env(raw_env, "DOKPLOY_ADMIN_EMAIL")
     password = _env(raw_env, "DOKPLOY_ADMIN_PASSWORD")
@@ -178,9 +179,11 @@ def _builds(hostname: str, token: str, workspaces: list[dict[str, JsonValue]]) -
 def _secrets(hostname: str, token: str, user_id: str) -> list[dict[str, JsonValue]]:
     path = f"/api/v2/users/{user_id}/secrets?limit=100&offset={{offset}}"
     return [{"id": _field(item, "id"), "name": _field(item, "name"), "environment_variable": _field(item, "env_name"), "description": _field(item, "description")} for _, page in collect_coder_array_pages(lambda path: _api(hostname, token, path), path, "secret") for item in page]
-def _image_inventory(stack_name: str) -> list[dict[str, JsonValue]]:
+def _planned_image_specs(plan: SharedCorePlan) -> tuple[tuple[str, str], ...]:
+    return tuple(spec for spec in _IMAGE_SPECS if (spec[0] != "redis" or plan.redis is not None) and (spec[0] != "postfix" or plan.mail_relay is not None))
+def _image_inventory(stack_name: str, specs: tuple[tuple[str, str], ...] = _IMAGE_SPECS) -> list[dict[str, JsonValue]]:
     records: list[dict[str, JsonValue]] = []
-    for logical_name, suffix in _IMAGE_SPECS:
+    for logical_name, suffix in specs:
         label = f"{logical_name} running container"
         raw_id = run_bounded_process(["docker", "ps", "--filter", f"label=com.docker.compose.service={stack_name}{suffix}", "--filter", "status=running", "--format", "{{.ID}}"], stdin=b"", output_limit=_OUTPUT_LIMIT, timeout_seconds=60, label=label)
         identifiers = raw_id.decode("utf-8").splitlines()
