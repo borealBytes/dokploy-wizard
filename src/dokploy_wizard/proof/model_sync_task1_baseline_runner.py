@@ -138,8 +138,9 @@ def run_baseline_host_a(args: argparse.Namespace) -> None:
             namespace,
             ObservedResource,
         )
+        capture_snapshot = cli.capture_host_a_snapshot
         baseline = cli.parse_captured_baseline(
-            cli.capture_host_a_snapshot(host=host_a, password=password_a),
+            capture_snapshot(host=host_a, password=password_a, task1_context=task1_context_enabled),
             stack_name=namespace.stack_name,
         )
         inputs = BaselineArtifactInputs(

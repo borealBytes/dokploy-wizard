@@ -1,10 +1,8 @@
 # ruff: noqa: E501, I001
 from __future__ import annotations
-import argparse
 import hashlib
 import json
 import re
-import sys
 from dataclasses import dataclass
 from http.client import HTTPMessage
 from pathlib import Path
@@ -32,17 +30,8 @@ class LegacyRenderer:
     model_inventory: tuple[str, ...]
 def main(argv: Sequence[str] | None = None) -> int:
     """Emit a value-free remote snapshot when invoked through the bounded SSH transport."""
-    parser = argparse.ArgumentParser(prog="model-sync-snapshot")
-    parser.add_argument("command", choices=("model-sync-snapshot",))
-    parser.add_argument("--env-file", type=Path, required=True)
-    parser.add_argument("--state-dir", type=Path, required=True)
-    args = parser.parse_args(argv)
-    try:
-        print(json.dumps(_snapshot(args.env_file, args.state_dir), sort_keys=True, separators=(",", ":")))
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
-        print(f"model-sync snapshot failed: {error}", file=sys.stderr)
-        return 1
-    return 0
+    from dokploy_wizard.proof.model_sync_host_b_cli import run_snapshot_cli
+    return run_snapshot_cli(argv)
 def _snapshot(env_file: Path, state_dir: Path) -> dict[str, JsonValue]:
     desired = resolve_desired_state(parse_env_file(env_file))
     namespace = resolve_proof_namespace(env_file)
