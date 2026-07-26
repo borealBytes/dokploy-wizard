@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -2122,6 +2123,15 @@ def test_model_inventory_normalizes_like_legacy_template(
     ]
     assert "--no-wait" not in captured["command"]
     assert "CODER_DISABLE_DIRECT_CONNECTIONS=true" not in captured["command"]
+    separator_index = captured["command"].index("--")
+    assert len(captured["command"]) == separator_index + 2
+    remote_command = shlex.split(captured["command"][separator_index + 1])
+    assert remote_command[:2] == ["node", "-e"]
+    assert remote_command[-3:] == [
+        "http://proof-stack-shared-litellm:4000/v1/models",
+        str(2 * 1024 * 1024),
+        "1000",
+    ]
     assert captured["timeout_seconds"] == 180
     assert captured["input"] == ("session\n" + credential).encode()
 
@@ -2313,8 +2323,9 @@ def test_model_inventory_uses_workspace_python_runtime(
 
     assert "ssh" in captured["command"]
     assert "python3" not in captured["command"]
-    node_index = captured["command"].index("node")
-    assert captured["command"][node_index : node_index + 2] == ["node", "-e"]
+    separator_index = captured["command"].index("--")
+    remote_command = shlex.split(captured["command"][separator_index + 1])
+    assert remote_command[:2] == ["node", "-e"]
 
 
 @pytest.mark.parametrize(
