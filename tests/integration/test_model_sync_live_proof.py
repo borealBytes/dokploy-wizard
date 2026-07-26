@@ -1778,7 +1778,7 @@ def test_snapshot_uses_independent_renderer_inputs_without_persisting_credential
 
     def run(command: list[str], **kwargs: Any) -> bytes:
         calls.append((command, kwargs.get("stdin")))
-        assert kwargs["timeout_seconds"] <= 30
+        assert kwargs["timeout_seconds"] == 180
         if kwargs.get("stdin") == b"session\n":
             return json.dumps(
                 {
@@ -2102,6 +2102,7 @@ def test_model_inventory_normalizes_like_legacy_template(
     def run(command: list[str], **kwargs: Any) -> bytes:
         captured["command"] = command
         captured["input"] = kwargs.get("stdin")
+        captured["timeout_seconds"] = kwargs.get("timeout_seconds")
         return json.dumps(payload["data"]).encode()
 
     monkeypatch.setattr(model_sync_host_b, "run_bounded_process", run)
@@ -2113,13 +2114,14 @@ def test_model_inventory_normalizes_like_legacy_template(
     assert models == ("openrouter/one", "opencode-go/two")
     assert credential not in " ".join(captured["command"])
     ssh_index = captured["command"].index("ssh")
-    assert captured["command"][ssh_index : ssh_index + 4] == [
+    assert captured["command"][ssh_index : ssh_index + 3] == [
         "ssh",
         "--disable-autostart",
-        "--no-wait",
         "workspace",
     ]
+    assert "--no-wait" not in captured["command"]
     assert "CODER_DISABLE_DIRECT_CONNECTIONS=true" not in captured["command"]
+    assert captured["timeout_seconds"] == 180
     assert captured["input"] == ("session\n" + credential).encode()
 
 
