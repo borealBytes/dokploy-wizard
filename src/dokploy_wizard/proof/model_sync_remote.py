@@ -85,7 +85,7 @@ def capture_host_a_snapshot(
     task1_context: bool = False,
 ) -> str:
     """Collect the remote value-free Coder/resource snapshot after wrapper success."""
-    capture_timeout_seconds = max(300, timeout_seconds) if task1_context else timeout_seconds
+    capture_timeout_seconds = max(600, timeout_seconds) if task1_context else timeout_seconds
     transport = ParamikoRemoteTransport.connect(
         hostname=host,
         username="root",
