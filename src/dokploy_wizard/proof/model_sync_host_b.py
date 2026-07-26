@@ -91,7 +91,7 @@ def _workspaces(hostname: str, token: str, container: str, templates: list[dict[
         if template is None:
             raise ValueError("workspace references an unlisted template")
         workspace_name = _field(item, "name")
-        version_id = _field(item, "template_version_id")
+        version_id = _field(require_mapping(item, "Coder workspace").get("latest_build"), "template_version_id")
         template_name = require_text(template["name"], "template name")
         renderer = _legacy_renderer(raw_env, state_dir, container, token, workspace_name, stack_name, template_name)
         records.append({"id": _field(item, "id"), "name": workspace_name, "template_id": template_id, "template_version_id": version_id, "legacy_pointers": [_primary_pointer(container, token, workspace_name, template_name, version_id, renderer)]})
