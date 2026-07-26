@@ -36,6 +36,8 @@ class SharedCoreFailureCategory(StrEnum):
     POSTGRES_READY = "shared_core.postgres_ready"
     POSTGRES_PROVISION = "shared_core.postgres_provision"
     LITELLM_RUNTIME = "shared_core.litellm_runtime"
+    LITELLM_READINESS = "shared_core.litellm_readiness"
+    LITELLM_ADMIN = "shared_core.litellm_admin"
     AI_PROVIDER = "shared_core.ai_provider"
     GENERATED_KEYS = "shared_core.generated_keys"
 
