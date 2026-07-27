@@ -71,6 +71,40 @@ def test_pending_bundle_binds_recovery_identity_before_remote_cleanup() -> None:
     assert b'"phase":"pending_cleanup"' in content
 
 
+def test_pending_bundle_accepts_required_images_when_optional_services_are_disabled() -> None:
+    bundle = Task1FinalizationBundle(
+        guard_id="a" * 64,
+        context_sha256="b" * 64,
+        uploaded_env_sha256="c" * 64,
+        host_sha256="d" * 64,
+        source_base_commit="e" * 40,
+        proof_commit="f" * 40,
+        host_identity_mode="single_sequential",
+        phase=FinalizationBundlePhase.PENDING_CLEANUP,
+        payloads={
+            "baseline.json": b"{}\n",
+            "host-a-preflight.json": b"{}\n",
+            "single-host-lifecycle-baseline.json": b"{}\n",
+        },
+        images={
+            "coder": "coder@sha256:" + "1" * 64,
+            "litellm": "litellm@sha256:" + "2" * 64,
+            "pgvector": "pgvector@sha256:" + "3" * 64,
+        },
+        coder_secret_inventory_sha256="6" * 64,
+        legacy_workspace_managed_fingerprints_sha256="7" * 64,
+        preexisting_cloudflare_sha256="8" * 64,
+        post_install_cloudflare_sha256=None,
+        snapshot_evidence=None,
+    )
+
+    content = bundle.to_bytes()
+
+    assert b'"coder"' in content
+    assert b'"redis"' not in content
+    assert b'"postfix"' not in content
+
+
 def test_completed_remote_cleanup_resumes_from_proof_active_without_remote_work(
     tmp_path: Path,
 ) -> None:
