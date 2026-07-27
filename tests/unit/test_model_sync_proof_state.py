@@ -113,6 +113,29 @@ def _valid_attestation(tmp_path: Path, guard_id: str = "c" * 64) -> BaselineAtte
     )
 
 
+def test_result_accepts_required_images_when_optional_services_are_disabled(
+    tmp_path: Path,
+) -> None:
+    receipt = EnvReceipt(
+        str((tmp_path / "install.env").resolve()),
+        str((tmp_path / "install.env.backup").resolve()),
+        "a" * 64,
+        "b" * 64,
+        0o600,
+    )
+    values = _valid_result_values(tmp_path, receipt)
+    shared = values["shared_core_image_digests"]
+    assert isinstance(shared, dict)
+    del shared["redis"]
+    del shared["postfix"]
+
+    result = build_result(values)
+
+    manifest = result["shared_core_image_digests"]
+    assert isinstance(manifest, dict)
+    assert set(manifest) == {"litellm", "pgvector"}
+
+
 def _write_guard_payload(path: Path, payload: dict[str, JsonValue]) -> None:
     path.write_bytes(canonical_json_bytes(payload) + b"\n")
     path.chmod(0o600)
