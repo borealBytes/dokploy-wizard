@@ -28,6 +28,7 @@ _PAYLOAD_NAMES: Final = frozenset(
     }
 )
 _IMAGE_NAMES: Final = frozenset({"coder", "litellm", "pgvector", "postfix", "redis"})
+_REQUIRED_IMAGE_NAMES: Final = frozenset({"coder", "litellm", "pgvector"})
 _HASH = re.compile(r"[a-f0-9]{64}")
 _COMMIT = re.compile(r"[a-f0-9]{40}")
 
@@ -162,7 +163,8 @@ def _validate_bundle(bundle: Task1FinalizationBundle) -> None:
         _COMMIT.fullmatch(bundle.source_base_commit) and _COMMIT.fullmatch(bundle.proof_commit)
     ):
         raise AbortGuardError("Task 1 finalization bundle commits are invalid")
-    if frozenset(bundle.images) != _IMAGE_NAMES or any(
+    image_names = frozenset(bundle.images)
+    if not _REQUIRED_IMAGE_NAMES <= image_names <= _IMAGE_NAMES or any(
         not value for value in bundle.images.values()
     ):
         raise AbortGuardError("Task 1 finalization bundle images are invalid")
