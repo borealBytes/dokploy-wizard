@@ -1654,6 +1654,11 @@ def verify_result_bytes(attestation: BaselineAttestation, value: bytes) -> None:
 
 
 def baseline_result_values(evidence: BaselineResultEvidence) -> dict[str, JsonValue]:
+    shared_core_image_digests = {
+        name: evidence.images[name]
+        for name in ("pgvector", "redis", "postfix", "litellm")
+        if name in evidence.images
+    }
     values: dict[str, JsonValue] = {
         "schema_version": 2,
         "source_base_commit": evidence.source_base_commit,
@@ -1661,12 +1666,7 @@ def baseline_result_values(evidence: BaselineResultEvidence) -> dict[str, JsonVa
         "host_identity_mode": evidence.host_identity_mode,
         "coder_image_digest": evidence.images["coder"],
         "litellm_image_digest": evidence.images["litellm"],
-        "shared_core_image_digests": {
-            "pgvector": evidence.images["pgvector"],
-            "redis": evidence.images["redis"],
-            "postfix": evidence.images["postfix"],
-            "litellm": evidence.images["litellm"],
-        },
+        "shared_core_image_digests": shared_core_image_digests,
         "env_original_sha256": evidence.env_receipt.original_sha256,
         "env_proof_sha256": evidence.env_receipt.proof_sha256,
         "env_mode": evidence.env_receipt.mode,
@@ -1932,7 +1932,10 @@ def _require_result_hashes(values: Mapping[str, JsonValue]) -> None:
 
 def _require_result_digests(values: Mapping[str, JsonValue]) -> None:
     shared = values["shared_core_image_digests"]
-    if not isinstance(shared, dict) or set(shared) != {
+    if not isinstance(shared, dict):
+        raise ValueError("shared core image digest manifest is invalid")
+    shared_names = set(shared)
+    if not {"pgvector", "litellm"} <= shared_names <= {
         "pgvector",
         "redis",
         "postfix",
