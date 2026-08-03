@@ -145,7 +145,7 @@ class CoderMigrationApi:
             builds.extend(records)
             if len(records) < _PAGE_SIZE:
                 _unique_builds(builds)
-                return tuple(builds)
+                return tuple(sorted(builds, key=lambda build: build.build_number))
         raise CoderProtocolError("workspace build pagination exceeded its bound")
 
     def rename_template(self, template_id: str, name: str) -> CoderTemplate:
