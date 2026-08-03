@@ -10,10 +10,8 @@ from pathlib import Path
 from dokploy_wizard import proof
 from dokploy_wizard.dokploy.coder_migration_api import (
     CoderMigrationApi,
-    UrllibCoderTransport,
 )
 from dokploy_wizard.proof.model_sync_artifacts import sha256_bytes
-from dokploy_wizard.proof.model_sync_coder_api import coder_login
 from dokploy_wizard.proof.model_sync_env import (
     resolve_proof_namespace,
     resolve_proof_transport,
@@ -23,7 +21,10 @@ from dokploy_wizard.proof.model_sync_upgrade_host_a_production import (
     ProductionUpgradeConfig,
     ProductionUpgradeHostAOperations,
 )
-from dokploy_wizard.proof.model_sync_upgrade_host_a_remote import RemoteWorkspaceTester
+from dokploy_wizard.proof.model_sync_upgrade_host_a_remote import (
+    RemoteCoderTransport,
+    RemoteWorkspaceTester,
+)
 from dokploy_wizard.proof.model_sync_upgrade_host_a_types import (
     UpgradeHostABinding,
     UpgradeHostAError,
@@ -47,6 +48,7 @@ def build_production_operations(
     password = os.environ.get(args.password_env, "")
     if not host or not password:
         raise UpgradeHostAError("Host A external credentials are unavailable")
+    namespace = resolve_proof_namespace(env_file)
     transport = resolve_proof_transport(env_file)
     if (
         transport.coder_hostname is None
@@ -54,16 +56,15 @@ def build_production_operations(
         or transport.coder_password is None
     ):
         raise UpgradeHostAError("Coder proof transport credentials are incomplete")
-    token = coder_login(
-        transport.coder_hostname,
+    coder_transport = RemoteCoderTransport(host, password, namespace.stack_name)
+    token = coder_transport.login(
         transport.coder_email,
         transport.coder_password,
     )
     api = CoderMigrationApi(
-        transport=UrllibCoderTransport(f"https://{transport.coder_hostname}"),
+        transport=coder_transport,
         session_token=token,
     )
-    namespace = resolve_proof_namespace(env_file)
     coder = CoderUpgradeClient(
         api,
         api.default_organization_id(),

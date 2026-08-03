@@ -2,16 +2,57 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import shlex
 import time
 from dataclasses import dataclass
+from typing import Final
 
-from dokploy_wizard.proof.model_sync_artifacts import require_mapping
+from dokploy_wizard.dokploy.coder_migration_api import (
+    CoderHttpRequest,
+    CoderHttpResponse,
+    CoderTransportError,
+)
+from dokploy_wizard.dokploy.coder_migration_types import CoderProtocolError
+from dokploy_wizard.proof.model_sync_artifacts import require_mapping, require_text
 from dokploy_wizard.proof.model_sync_upgrade_host_a_types import UpgradeHostAError
 from dokploy_wizard.remote import capture_remote_output
 from dokploy_wizard.remote_transport import ParamikoRemoteTransport
 
+_REMOTE_CODER_RESPONSE_LIMIT: Final = 1024 * 1024
+_REMOTE_CODER_API_SCRIPT: Final = r"""
+import base64,ipaddress,json,subprocess,sys,urllib.error,urllib.request
+network,service,limit=sys.argv[1],sys.argv[2],int(sys.argv[3])
+payload=json.load(sys.stdin)
+containers=subprocess.run(
+    ['docker','ps','--filter',f'label=com.docker.compose.service={service}',
+     '--filter','status=running','--format','{{.ID}}'],
+    check=True,capture_output=True,text=True,
+).stdout.splitlines()
+if len(containers)!=1: raise RuntimeError('coder container')
+inspected=json.loads(subprocess.check_output(['docker','inspect',containers[0]]))
+address=inspected[0]['NetworkSettings']['Networks'][network]['IPAddress']
+parsed=ipaddress.ip_address(address)
+if not parsed.is_private: raise RuntimeError('coder address')
+authority=f'[{address}]' if parsed.version==6 else address
+body=payload.get('body')
+data=None if body is None else base64.b64decode(body,validate=True)
+request=urllib.request.Request(
+    f"http://{authority}:3000{payload['path']}",data=data,
+    headers=dict(payload['headers']),method=payload['method'],
+)
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*_args,**_kwargs): return None
+try:
+    response=urllib.request.build_opener(NoRedirect()).open(request,timeout=30)
+except urllib.error.HTTPError as error:
+    response=error
+raw=response.read(limit+1)
+if len(raw)>limit: raise RuntimeError('coder response')
+json.dump({'status':response.status,'body':base64.b64encode(raw).decode('ascii')},sys.stdout)
+sys.stdout.write('\n')
+"""
 _WORKSPACE_TEST_SCRIPT = r"""
 const fs=require('fs'),http=require('http'),https=require('https');
 const kind=process.argv[1];
@@ -60,6 +101,87 @@ const invoke=()=>new Promise((ok,no)=>{
 });
 Promise.all(health.map(get)).then(invoke).then(()=>process.stdout.write('{"ok":true}\n')).catch(()=>process.exit(3));
 """
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class RemoteCoderTransport:
+    """Carry Coder API requests over SSH to the private shared network."""
+
+    host: str
+    password: str
+    stack_name: str
+
+    def send(self, request: CoderHttpRequest) -> CoderHttpResponse:
+        payload = json.dumps(
+            {
+                "body": None if request.body is None else base64.b64encode(request.body).decode(),
+                "headers": request.headers,
+                "method": request.method,
+                "path": request.path,
+            },
+            separators=(",", ":"),
+        ).encode()
+        transport = ParamikoRemoteTransport.connect(
+            hostname=self.host,
+            username="root",
+            password=self.password,
+            remote_root="/root/dokploy-wizard",
+            timeout=30,
+        )
+        try:
+            output = capture_remote_output(
+                transport,
+                shlex.join(
+                    [
+                        "python3",
+                        "-c",
+                        _REMOTE_CODER_API_SCRIPT,
+                        f"{self.stack_name}-shared",
+                        f"{self.stack_name}-coder",
+                        str(_REMOTE_CODER_RESPONSE_LIMIT),
+                    ]
+                ),
+                timeout_seconds=60,
+                stdin_bytes=payload,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            raise CoderTransportError("Remote Coder transport failed") from error
+        finally:
+            transport.close()
+        try:
+            response = require_mapping(json.loads(output), "remote Coder response")
+            status = response.get("status")
+            if not isinstance(status, int) or isinstance(status, bool):
+                raise CoderTransportError("Remote Coder response status is invalid")
+            body = base64.b64decode(
+                require_text(response.get("body"), "remote Coder response body"),
+                validate=True,
+            )
+        except (ValueError, json.JSONDecodeError) as error:
+            raise CoderTransportError("Remote Coder response is invalid") from error
+        return CoderHttpResponse(status, body)
+
+    def login(self, email: str, password: str) -> str:
+        response = self.send(
+            CoderHttpRequest(
+                method="POST",
+                path="/api/v2/users/login",
+                body=json.dumps(
+                    {"email": email, "password": password}, separators=(",", ":")
+                ).encode(),
+                headers=(
+                    ("Accept", "application/json"),
+                    ("Content-Type", "application/json"),
+                ),
+            )
+        )
+        if response.status not in {200, 201}:
+            raise CoderProtocolError("Coder login failed")
+        try:
+            payload = require_mapping(json.loads(response.body), "Coder login response")
+            return require_text(payload.get("session_token"), "Coder login session token")
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise CoderProtocolError("Coder login response is invalid") from error
 
 
 @dataclass(frozen=True, slots=True, repr=False)
