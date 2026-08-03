@@ -1414,7 +1414,11 @@ def _run_lifecycle_flow(
             requested_raw=classification_requested_raw,
             requested_desired=classification_requested_desired,
         )
-        lifecycle_plan = apply_modify_upgrade_intent(lifecycle_plan, modify_upgrade_intent)
+        lifecycle_plan = apply_modify_upgrade_intent(
+            lifecycle_plan,
+            modify_upgrade_intent,
+            loaded_state.applied_state,
+        )
         disable_plan = build_pack_disable_plan(
             existing_desired=loaded_state.desired_state,
             requested_desired=desired_state,

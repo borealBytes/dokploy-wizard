@@ -4,7 +4,7 @@ from enum import StrEnum
 from typing import Final, assert_never
 
 from dokploy_wizard.lifecycle.changes import LifecyclePlan
-from dokploy_wizard.state import StateValidationError
+from dokploy_wizard.state import AppliedStateCheckpoint, StateValidationError
 
 
 class ModifyUpgradeIntent(StrEnum):
@@ -18,12 +18,18 @@ _TASK18_PHASES: Final = ("shared_core", "coder")
 def apply_modify_upgrade_intent(
     plan: LifecyclePlan,
     intent: ModifyUpgradeIntent,
+    applied: AppliedStateCheckpoint,
 ) -> LifecyclePlan:
     match intent:
         case ModifyUpgradeIntent.OPERATOR:
             return plan
         case ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC:
-            if plan.mode != "noop" or not plan.raw_equivalent or not plan.desired_equivalent:
+            target_is_complete = plan.mode == "noop" or (
+                plan.mode == "resume"
+                and applied.runtime_images is None
+                and applied.completed_steps == plan.applicable_phases
+            )
+            if not target_is_complete or not plan.raw_equivalent or not plan.desired_equivalent:
                 raise StateValidationError(
                     "Task 18 Host A model-sync upgrade requires an unchanged completed target."
                 )
