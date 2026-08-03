@@ -17,6 +17,9 @@ from dokploy_wizard.proof.model_sync_lifecycle_schema import (
 from dokploy_wizard.proof.model_sync_lifecycle_schema import (
     parse_lifecycle_receipt,
 )
+from dokploy_wizard.proof.model_sync_task1_bound_namespace import (
+    resolve_bound_task1_namespace,
+)
 from dokploy_wizard.proof.model_sync_upgrade_host_a_production_factory import (
     build_production_operations,
 )
@@ -68,6 +71,7 @@ def load_upgrade_binding(args: argparse.Namespace) -> UpgradeHostABinding:
         raise UpgradeHostAError("Host A upgrade final commit is invalid")
     baseline_bytes = _read(args.baseline, "Task 1 baseline")
     result_bytes = _read(args.baseline_result, "Task 1 result")
+    baseline = require_mapping(_json(baseline_bytes, "Task 1 baseline"), "Task 1 baseline")
     result = require_mapping(_json(result_bytes, "Task 1 result"), "Task 1 result")
     baseline_sha256 = hashlib.sha256(baseline_bytes).hexdigest()
     if result.get("baseline_sha256") != baseline_sha256:
@@ -122,6 +126,12 @@ def load_upgrade_binding(args: argparse.Namespace) -> UpgradeHostABinding:
         )
     except proof.AbortGuardError as error:
         raise UpgradeHostAError("Task 1 attestation is no longer valid") from error
+    context_evidence = guard.attestation.context_evidence
+    if context_evidence is None:
+        raise UpgradeHostAError("Task 1 attestation has no proof namespace evidence")
+    namespace = resolve_bound_task1_namespace(context_evidence)
+    if baseline.get("stack_name") != namespace.stack_name:
+        raise UpgradeHostAError("Task 1 baseline stack does not match its proof namespace")
     require_sha256(result.get("abort_guard_sha256"), "Task 1 abort guard")
     env_sha256 = require_sha256(result.get("env_proof_sha256"), "Task 1 proof env")
     env_mode = result.get("env_mode")
@@ -135,6 +145,7 @@ def load_upgrade_binding(args: argparse.Namespace) -> UpgradeHostABinding:
         env_sha256=env_sha256,
         env_mode=env_mode,
         final_commit=args.final_commit,
+        namespace=namespace,
     )
 
 

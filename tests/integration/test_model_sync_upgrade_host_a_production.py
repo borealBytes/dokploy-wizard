@@ -116,6 +116,7 @@ def _config(tmp_path: Path) -> ProductionUpgradeConfig:
             "9" * 64,
             0o600,
             "a" * 40,
+            proof.ProofNamespace("stack", (), (), (), (), ()),
         ),
         namespace=proof.ProofNamespace("stack", (), (), (), (), ()),
         transport=ProofTransport(
