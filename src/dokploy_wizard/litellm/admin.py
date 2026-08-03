@@ -313,93 +313,75 @@ class LiteLLMGatewayManager:
         generated_keys: Mapping[str, str],
         consumer_model_allowlists: Mapping[str, tuple[str, ...]],
     ) -> dict[str, LiteLLMVirtualKeyRecord]:
-        existing_teams = {team.team_alias: team for team in self._api.list_teams()}
-        existing_keys = {record.key_alias: record for record in self._api.list_keys()}
-        reconciled: dict[str, LiteLLMVirtualKeyRecord] = {}
-        for consumer, generated_key in generated_keys.items():
-            expected_models = _expected_models_for_consumer(
-                consumer,
+        from dokploy_wizard.litellm.coder_key_scope import (
+            ALL_PROXY_MODELS,
+            CODER_CONSUMERS,
+            reconcile_existing_coder_key_scopes,
+            require_exact_coder_scope_request,
+        )
+        from dokploy_wizard.litellm.virtual_key_reconciler import (
+            ManagedKeyReconciliationRequest,
+            expected_models_for_consumer,
+            read_virtual_key_inventory,
+            reconcile_managed_virtual_keys,
+        )
+
+        requested_consumers = tuple(generated_keys)
+        initial_inventory = read_virtual_key_inventory(self._api)
+        coder_scope_requested = any(
+            consumer in generated_keys
+            and expected_models_for_consumer(consumer, consumer_model_allowlists)
+            == ALL_PROXY_MODELS
+            for consumer in CODER_CONSUMERS
+        )
+        if not coder_scope_requested:
+            return reconcile_managed_virtual_keys(
+                self._api,
+                ManagedKeyReconciliationRequest(
+                    generated_keys=generated_keys,
+                    consumer_model_allowlists=consumer_model_allowlists,
+                    consumers=requested_consumers,
+                    inventory=initial_inventory,
+                ),
+            )
+        require_exact_coder_scope_request(generated_keys, consumer_model_allowlists)
+        if initial_inventory.is_empty():
+            reconciled = reconcile_managed_virtual_keys(
+                self._api,
+                ManagedKeyReconciliationRequest(
+                    generated_keys=generated_keys,
+                    consumer_model_allowlists=consumer_model_allowlists,
+                    consumers=requested_consumers,
+                    inventory=initial_inventory,
+                ),
+            )
+            coder_result = reconcile_existing_coder_key_scopes(
+                self._api,
+                generated_keys,
                 consumer_model_allowlists,
             )
-            managed_metadata = _managed_metadata_for_consumer(consumer)
-            team = existing_teams.get(consumer)
-            if team is None:
-                team = self._api.create_team(
-                    team_alias=consumer,
-                    models=expected_models,
-                    metadata=managed_metadata,
-                )
-                existing_teams[consumer] = team
-            elif team.models != expected_models:
-                _ensure_record_is_wizard_managed(
-                    record_kind="team",
-                    consumer=consumer,
-                    metadata=team.metadata,
-                )
-                team = self._api.update_team(
-                    team_id=team.team_id,
-                    team_alias=consumer,
-                    models=expected_models,
-                    metadata=managed_metadata,
-                )
-                existing_teams[consumer] = team
-
-            existing_key = existing_keys.get(consumer)
-            if existing_key is None:
-                existing_key = self._api.create_key(
-                    key=generated_key,
-                    key_alias=consumer,
-                    team_id=team.team_id,
-                    models=expected_models,
-                    metadata=managed_metadata,
-                )
-                existing_keys[consumer] = existing_key
-            else:
-                key_value_drifted = existing_key.key != generated_key
-                key_scope_drifted = (
-                    existing_key.models != expected_models or existing_key.team_id != team.team_id
-                )
-
-                if key_value_drifted or key_scope_drifted:
-                    _ensure_record_is_wizard_managed(
-                        record_kind="key",
-                        consumer=consumer,
-                        metadata=existing_key.metadata,
-                    )
-
-                if key_value_drifted:
-                    # LiteLLM's key-list payload does not prove reusable raw token material.
-                    # For wizard-managed aliases, value drift means the DB record must be
-                    # replaced with the generated raw key instead of adopted back into state.
-                    self._api.delete_key(key_alias=consumer)
-                    existing_key = self._api.create_key(
-                        key=generated_key,
-                        key_alias=consumer,
-                        team_id=team.team_id,
-                        models=expected_models,
-                        metadata=managed_metadata,
-                    )
-                    existing_keys[consumer] = existing_key
-                elif key_scope_drifted:
-                    # LiteLLM OSS /key/update updates settings for an existing token; use it
-                    # only when the accepted raw token value already matches wizard state.
-                    existing_key = self._api.update_key(
-                        key_alias=consumer,
-                        key=generated_key,
-                        team_id=team.team_id,
-                        models=expected_models,
-                        metadata=managed_metadata,
-                    )
-                    existing_keys[consumer] = existing_key
-            reconciled[consumer] = existing_key
-        return reconciled
-
-
-def _expected_models_for_consumer(
-    consumer: str,
-    consumer_model_allowlists: Mapping[str, tuple[str, ...]],
-) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(consumer_model_allowlists.get(consumer, ())))
+        else:
+            coder_result = reconcile_existing_coder_key_scopes(
+                self._api,
+                generated_keys,
+                consumer_model_allowlists,
+            )
+            non_coder_consumers = tuple(
+                consumer for consumer in requested_consumers if consumer not in CODER_CONSUMERS
+            )
+            reconciled = reconcile_managed_virtual_keys(
+                self._api,
+                ManagedKeyReconciliationRequest(
+                    generated_keys=generated_keys,
+                    consumer_model_allowlists=consumer_model_allowlists,
+                    consumers=non_coder_consumers,
+                    inventory=read_virtual_key_inventory(self._api),
+                ),
+            )
+        for record in coder_result.key_records:
+            if record.key_alias in CODER_CONSUMERS:
+                reconciled[record.key_alias] = record
+        return {consumer: reconciled[consumer] for consumer in requested_consumers}
 
 
 def _readiness_is_healthy(snapshot: Mapping[str, Any]) -> bool:
@@ -447,7 +429,7 @@ def _parse_key(
 ) -> LiteLLMVirtualKeyRecord:
     if not isinstance(payload, dict):
         raise LiteLLMAdminError("LiteLLM key record must be an object.")
-    key = _first_string(payload, "key", "token", "api_key", default=fallback_key)
+    key = _first_string(payload, "token", "key", "api_key", default=fallback_key)
     key_alias = _first_string(payload, "key_alias", "key_name", "alias", default=fallback_alias)
     team_id = _optional_string(payload, "team_id", "teamId") or fallback_team_id
     return LiteLLMVirtualKeyRecord(
@@ -534,29 +516,6 @@ def _metadata_mapping(value: Any) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         return {}
     return {str(key): nested for key, nested in value.items()}
-
-
-def _managed_metadata_for_consumer(consumer: str) -> dict[str, object]:
-    return {"consumer": consumer, "managed_by": "dokploy-wizard"}
-
-
-def _ensure_record_is_wizard_managed(
-    *,
-    record_kind: str,
-    consumer: str,
-    metadata: Mapping[str, object],
-) -> None:
-    if metadata.get("managed_by") != "dokploy-wizard":
-        raise LiteLLMAdminError(
-            f"LiteLLM {record_kind} '{consumer}' drifted but is not wizard-managed. "
-            "Refusing to mutate it silently."
-        )
-    metadata_consumer = metadata.get("consumer")
-    if metadata_consumer != consumer:
-        raise LiteLLMAdminError(
-            f"LiteLLM {record_kind} '{consumer}' drifted but metadata belongs to consumer {metadata_consumer!r}. "
-            "Refusing to mutate it silently."
-        )
 
 
 def _default_request(req: request.Request) -> Any:

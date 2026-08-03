@@ -125,8 +125,10 @@ def _farm_litellm_env(**overrides: str) -> RawEnvInput:
     values = {
         "ROOT_DOMAIN": "example.com",
         "PACKS": "my-farm-advisor",
-        "LITELLM_IMAGE": "ghcr.io/berriai/litellm",
-        "LITELLM_IMAGE_TAG": "main-v1.40.14-stable",
+        "LITELLM_IMAGE": (
+            "ghcr.io/berriai/litellm@sha256:"
+            "c81eb79cd4333c6cfe374c0ec929110fd23f0ee5f7fd198855a6fbddc77b83ba"
+        ),
         "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
         "LITELLM_LOCAL_MODEL": "unsloth-active",
         "LITELLM_LOCAL_API_KEY": "sk-no-key-required",

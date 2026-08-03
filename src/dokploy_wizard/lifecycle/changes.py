@@ -587,6 +587,24 @@ def _classify_same_target(
 ) -> LifecyclePlan:
     applicable_phases = applicable_phases_for(desired_state)
     validate_checkpoint_contract(existing_applied, applicable_phases)
+    if existing_applied.runtime_images is None:
+        start_index = applicable_phases.index("shared_core")
+        preserved_phases = applicable_phases[:start_index]
+        phases_to_run = applicable_phases[start_index:]
+        return LifecyclePlan(
+            mode="resume",
+            reasons=(
+                "Completed legacy state lacks immutable runtime image bindings; "
+                "reconciling Shared Core and dependent phases.",
+            ),
+            applicable_phases=applicable_phases,
+            phases_to_run=phases_to_run,
+            preserved_phases=preserved_phases,
+            initial_completed_steps=preserved_phases,
+            start_phase=phases_to_run[0],
+            raw_equivalent=raw_equivalent,
+            desired_equivalent=desired_equivalent,
+        )
     if (
         existing_applied.completed_steps != applicable_phases
         and existing_applied.desired_state_fingerprint != desired_state.fingerprint()

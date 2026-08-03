@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import time
@@ -11,9 +12,14 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 from dokploy_wizard.core import (
+    SHARED_LITELLM_RESOURCE_TYPE,
+    SHARED_MAIL_RELAY_RESOURCE_TYPE,
+    SHARED_NETWORK_RESOURCE_TYPE,
+    SHARED_POSTGRES_RESOURCE_TYPE,
+    SHARED_REDIS_RESOURCE_TYPE,
     SharedCoreError,
     SharedCoreFailureCategory,
     SharedCorePlan,
@@ -42,6 +48,15 @@ from dokploy_wizard.dokploy.env_spec import (
     DokployEnvVar,
     RenderedCompose,
 )
+from dokploy_wizard.dokploy.shared_core_cutover import SharedCoreCutoverDeployment
+from dokploy_wizard.dokploy.shared_core_schedule import SharedCoreScheduleClient
+from dokploy_wizard.dokploy.shared_core_sync_runtime import (
+    SyncScheduleContext,
+    SyncScheduleOutcome,
+)
+from dokploy_wizard.dokploy.shared_core_sync_runtime import (
+    reconcile_sync_schedule as reconcile_sync_schedule_runtime,
+)
 from dokploy_wizard.litellm import (
     LiteLLMAdminApi,
     LiteLLMAdminError,
@@ -50,6 +65,7 @@ from dokploy_wizard.litellm import (
     build_litellm_config,
     render_litellm_config_yaml,
 )
+from dokploy_wizard.litellm.model_admin_types import LiteLLMModelAdminApi
 from dokploy_wizard.litellm.model_catalog import (
     DEFAULT_LOCAL_CANONICAL_ALIAS,
     DEFAULT_LOCAL_UPSTREAM_TARGET,
@@ -57,11 +73,26 @@ from dokploy_wizard.litellm.model_catalog import (
     ModelCostMetadata,
     build_model_catalog,
 )
-from dokploy_wizard.state import write_litellm_generated_keys
+from dokploy_wizard.litellm.opencode_go_cutover import OpenCodeGoCutoverCoordinator
+from dokploy_wizard.litellm.opencode_go_cutover_types import (
+    CutoverContext,
+    CutoverImage,
+)
+from dokploy_wizard.litellm.opencode_go_plan import OpenCodeGoReconciliationInput
 from dokploy_wizard.state.models import (
     LITELLM_CONSUMER_VIRTUAL_KEY_NAMES,
     ComposeArtifactHashState,
     LiteLLMGeneratedKeys,
+    OwnedResource,
+)
+from dokploy_wizard.state.runtime_images import RuntimeImages, resolve_runtime_images
+from dokploy_wizard.state.shared_core_sync import AppliedSyncState, SyncOwnershipMetadata
+from dokploy_wizard.state.uninstall_authority import UninstallAuthorityStore
+from dokploy_wizard.state.uninstall_targets import (
+    DockerNetworkRecord,
+    DokployComposeDeletionRecord,
+    docker_network_fingerprint,
+    dokploy_compose_fingerprint,
 )
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
@@ -85,6 +116,10 @@ class DokploySharedCoreApi(Protocol):
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
     ) -> DokployDeployResult: ...
+
+
+class DockerNetworkAuthorityClient(Protocol):
+    def get_network(self, network_id: str) -> DockerNetworkRecord | None: ...
 
 
 @runtime_checkable
@@ -136,8 +171,14 @@ class DokploySharedCoreBackend:
         litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
         litellm_consumer_model_allowlists: dict[str, tuple[str, ...]] | None = None,
         litellm_admin_api: LiteLLMAdminApi | None = None,
+        litellm_model_admin_api: LiteLLMModelAdminApi | None = None,
+        opencode_go_cutover_input: OpenCodeGoReconciliationInput | None = None,
+        opencode_go_cutover_state_root: Path | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
         state_dir: Path = Path(".dokploy-wizard-state"),
+        runtime_images: RuntimeImages | None = None,
+        immediate_sync_runner: Callable[[SyncScheduleOutcome], object] | None = None,
+        authority_docker_client: DockerNetworkAuthorityClient | None = None,
     ) -> None:
         self._stack_name = stack_name
         self._plan = plan
@@ -147,12 +188,19 @@ class DokploySharedCoreBackend:
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
+        self._compose_created = False
         self._allocation_provisioner = allocation_provisioner
         self._litellm_generated_keys = litellm_generated_keys
         self._litellm_consumer_model_allowlists = litellm_consumer_model_allowlists or {}
         self._litellm_admin_api = litellm_admin_api
+        self._litellm_model_admin_api = litellm_model_admin_api
+        self._opencode_go_cutover_input = opencode_go_cutover_input
+        self._opencode_go_cutover_state_root = opencode_go_cutover_state_root
         self._sleep_fn = sleep_fn
         self._state_dir = state_dir
+        self._runtime_images = runtime_images or resolve_runtime_images({})
+        self._immediate_sync_runner = immediate_sync_runner
+        self._authority_docker_client = authority_docker_client
 
     def get_network(self, resource_id: str) -> SharedCoreResourceRecord | None:
         if self._lookup_locator(resource_id, "network") is None:
@@ -364,6 +412,178 @@ class DokploySharedCoreBackend:
     def reconcile_litellm_runtime(self) -> None:
         self._ensure_litellm_runtime_ready_and_reconciled()
 
+    def reconcile_sync_schedule(
+        self,
+        *,
+        existing_applied: AppliedSyncState | None,
+        existing_metadata: SyncOwnershipMetadata | None,
+    ) -> SyncScheduleOutcome | None:
+        if self._plan.litellm is None:
+            return None
+        enabled = bool(
+            self._litellm_env.get("LITELLM_OPENCODE_GO_API_KEY", "").strip()
+            or self._litellm_env.get("OPENCODE_GO_API_KEY", "").strip()
+        )
+        if not enabled and existing_applied is None:
+            return None
+        if not isinstance(self._client, SharedCoreScheduleClient):
+            if self._immediate_sync_runner is None:
+                return None
+            raise SharedCoreError(
+                "Dokploy client does not expose the required schedule API.",
+                category=SharedCoreFailureCategory.PLAN_MISMATCH,
+            )
+        schedule_client = self._client
+        locator = self._ensure_compose_applied()
+        rendered = _render_compose_file(
+            self._plan,
+            self._mail_relay_config,
+            self._litellm_env,
+            self._litellm_generated_keys,
+            runtime_images=self._runtime_images,
+        )
+        outcome = reconcile_sync_schedule_runtime(
+            schedule_client,
+            SyncScheduleContext(
+                stack_name=self._stack_name,
+                compose_id=locator.compose_id,
+                state_dir=self._state_dir,
+                config_sha256=sha256(rendered.compose_file.encode("utf-8")).hexdigest(),
+                litellm_image_digest=self._runtime_images.litellm,
+                metadata_volume=f"{self._plan.litellm.service_name}-data",
+                enabled=enabled,
+            ),
+            existing_applied=existing_applied,
+            existing_metadata=existing_metadata,
+        )
+        if enabled and self._immediate_sync_runner is not None:
+            self._immediate_sync_runner(outcome)
+        return outcome
+
+    def record_created_uninstall_authorities(
+        self,
+        authority_store: UninstallAuthorityStore,
+        resources: tuple[OwnedResource, ...],
+    ) -> None:
+        """Persist only the re-read targets created by this backend instance."""
+
+        if not self._compose_created:
+            return
+        locator = self._applied_locator
+        if locator is None:
+            raise SharedCoreError(
+                "Created shared-core compose has no locator for authority publication.",
+                category=SharedCoreFailureCategory.CREATE_COMPOSE,
+            )
+        compose = self._re_read_created_compose(locator)
+        compose_target = DokployComposeDeletionRecord(
+            compose_id=compose.compose_id,
+            project_id=locator.project_id,
+            name=compose.name,
+        )
+        network = self._re_read_created_network()
+        owner_id = f"stack:{self._stack_name}"
+        compose_resource_types = {
+            SHARED_LITELLM_RESOURCE_TYPE,
+            SHARED_MAIL_RELAY_RESOURCE_TYPE,
+            SHARED_POSTGRES_RESOURCE_TYPE,
+            SHARED_REDIS_RESOURCE_TYPE,
+        }
+        resource_prefix = f"dokploy-compose:{locator.compose_id}:"
+        for resource in resources:
+            if not resource.resource_id.startswith(resource_prefix):
+                continue
+            if resource.resource_type == SHARED_NETWORK_RESOURCE_TYPE:
+                authority_store.record_created(
+                    resource=resource,
+                    owner_id=owner_id,
+                    provider="docker_network",
+                    physical_target_id=network.network_id,
+                    parent_target_id=self._stack_name,
+                    expected_fingerprint=docker_network_fingerprint(network),
+                )
+                continue
+            if resource.resource_type in compose_resource_types:
+                authority_store.record_created(
+                    resource=resource,
+                    owner_id=owner_id,
+                    provider="dokploy_compose",
+                    physical_target_id=compose_target.compose_id,
+                    parent_target_id=compose_target.project_id,
+                    expected_fingerprint=dokploy_compose_fingerprint(compose_target),
+                )
+
+    def _re_read_created_compose(self, locator: _ComposeLocator) -> DokployComposeRecord:
+        try:
+            projects = self._client.list_projects()
+        except DokployApiError as error:
+            raise SharedCoreError(
+                str(error), category=SharedCoreFailureCategory.LIST_PROJECTS
+            ) from error
+        project = next((item for item in projects if item.project_id == locator.project_id), None)
+        if project is None:
+            raise SharedCoreError(
+                "Created shared-core project was absent during authority re-read.",
+                category=SharedCoreFailureCategory.CREATE_COMPOSE,
+            )
+        environment = next(
+            (item for item in project.environments if item.environment_id == locator.environment_id),
+            None,
+        )
+        if environment is None:
+            raise SharedCoreError(
+                "Created shared-core environment was absent during authority re-read.",
+                category=SharedCoreFailureCategory.CREATE_COMPOSE,
+            )
+        compose = next(
+            (item for item in environment.composes if item.compose_id == locator.compose_id),
+            None,
+        )
+        if compose is None or compose.name != self._compose_name:
+            raise SharedCoreError(
+                "Created shared-core compose changed before authority publication.",
+                category=SharedCoreFailureCategory.CREATE_COMPOSE,
+            )
+        return DokployComposeRecord(compose_id=compose.compose_id, name=compose.name)
+
+    def _re_read_created_network(self) -> DockerNetworkRecord:
+        client = self._authority_docker_client
+        if client is not None:
+            network = client.get_network(self._plan.network_name)
+            if network is None:
+                raise SharedCoreError(
+                    "Created shared-core network was absent during authority re-read.",
+                    category=SharedCoreFailureCategory.CREATE_COMPOSE,
+                )
+            return network
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "network",
+                    "inspect",
+                    self._plan.network_name,
+                    "--format",
+                    "{{.Name}}",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except OSError as error:
+            raise SharedCoreError(
+                "Could not inspect the created shared-core Docker network.",
+                category=SharedCoreFailureCategory.CREATE_COMPOSE,
+            ) from error
+        name = result.stdout.strip()
+        if result.returncode != 0 or name != self._plan.network_name:
+            raise SharedCoreError(
+                "Created shared-core network changed before authority publication.",
+                category=SharedCoreFailureCategory.CREATE_COMPOSE,
+            )
+        return DockerNetworkRecord(network_id=name, name=name)
+
     def _wait_for_shared_core_containers(
         self, *, attempts: int = 30, delay_seconds: float = 2.0
     ) -> None:
@@ -421,6 +641,7 @@ class DokploySharedCoreBackend:
             self._mail_relay_config,
             self._litellm_env,
             self._litellm_generated_keys,
+            runtime_images=self._runtime_images,
         )
         reconcile_title = "dokploy-wizard shared core reconcile"
         operation = SharedCoreFailureCategory.LIST_PROJECTS
@@ -495,6 +716,7 @@ class DokploySharedCoreBackend:
                 )
                 self._applied_locator = locator
                 self._created_in_process = True
+                self._compose_created = True
                 return locator
 
             operation = SharedCoreFailureCategory.CREATE_PROJECT
@@ -541,6 +763,7 @@ class DokploySharedCoreBackend:
         )
         self._applied_locator = locator
         self._created_in_process = True
+        self._compose_created = True
         return locator
 
     def _ensure_litellm_runtime_ready_and_reconciled(self) -> None:
@@ -551,7 +774,7 @@ class DokploySharedCoreBackend:
         manager = LiteLLMGatewayManager(api=self._litellm_admin_api, sleep_fn=self._sleep_fn)
         try:
             manager.wait_until_ready()
-            reconciled = manager.reconcile_virtual_keys(
+            manager.reconcile_virtual_keys(
                 generated_keys=self._litellm_generated_keys.virtual_keys,
                 consumer_model_allowlists=self._litellm_consumer_model_allowlists,
             )
@@ -570,20 +793,7 @@ class DokploySharedCoreBackend:
                 str(error),
                 category=SharedCoreFailureCategory.LITELLM_RUNTIME,
             ) from error
-        updated_virtual_keys = dict(self._litellm_generated_keys.virtual_keys)
-        changed = False
-        for consumer, record in reconciled.items():
-            if updated_virtual_keys.get(consumer) != record.key:
-                updated_virtual_keys[consumer] = record.key
-                changed = True
-        if changed:
-            self._litellm_generated_keys = LiteLLMGeneratedKeys(
-                format_version=self._litellm_generated_keys.format_version,
-                master_key=self._litellm_generated_keys.master_key,
-                salt_key=self._litellm_generated_keys.salt_key,
-                virtual_keys=updated_virtual_keys,
-            )
-            write_litellm_generated_keys(self._state_dir, self._litellm_generated_keys)
+        self._run_opencode_go_cutover()
         if isinstance(self._client, DokployAiProviderApi):
             try:
                 _ensure_dokploy_ai_provider(
@@ -597,6 +807,102 @@ class DokploySharedCoreBackend:
                     str(error),
                     category=SharedCoreFailureCategory.AI_PROVIDER,
                 ) from error
+
+    def _run_opencode_go_cutover(self) -> None:
+        if (
+            self._plan.litellm is None
+            or self._litellm_model_admin_api is None
+            or self._opencode_go_cutover_input is None
+            or self._opencode_go_cutover_state_root is None
+        ):
+            return
+        locator = self._ensure_compose_applied()
+        transitional = _render_compose_file(
+            self._plan,
+            self._mail_relay_config,
+            self._litellm_env,
+            self._litellm_generated_keys,
+            runtime_images=self._runtime_images,
+            opencode_go_mode="static",
+        )
+        dynamic = _render_compose_file(
+            self._plan,
+            self._mail_relay_config,
+            self._litellm_env,
+            self._litellm_generated_keys,
+            runtime_images=self._runtime_images,
+            opencode_go_mode="dynamic",
+        )
+        static_aliases = _opencode_go_aliases(transitional.compose_file)
+        dynamic_aliases = tuple(
+            f"opencode-go/{model.source_id}"
+            for model in self._opencode_go_cutover_input.models
+        )
+        deployment = SharedCoreCutoverDeployment(
+            transitional=transitional,
+            dynamic=dynamic,
+            apply=lambda rendered: self._apply_cutover_compose(locator, rendered),
+            verify=self._verify_cutover_runtime,
+        )
+        receipt = OpenCodeGoCutoverCoordinator(
+            api=self._litellm_model_admin_api,
+            state_root=self._opencode_go_cutover_state_root,
+            deployment=deployment,
+        ).run(
+            self._opencode_go_cutover_input,
+            CutoverContext(
+                owner_id=_cutover_owner_id(self._stack_name),
+                catalog_id="opencode-go",
+                compose_id=locator.compose_id,
+                pre_image=_cutover_image(transitional, static_aliases),
+                transitional_image=_cutover_image(transitional, static_aliases),
+                dynamic_image=_cutover_image(dynamic, dynamic_aliases),
+                static_aliases=static_aliases,
+            ),
+        )
+        if receipt.status != "complete":
+            raise SharedCoreError(
+                "OpenCode Go cutover did not complete.",
+                category=SharedCoreFailureCategory.LITELLM_RUNTIME,
+            )
+        persist_compose_artifact_hash(
+            state_dir=self._state_dir,
+            service_key=self._compose_name,
+            rendered_compose=dynamic,
+        )
+
+    def _apply_cutover_compose(
+        self,
+        locator: _ComposeLocator,
+        rendered: RenderedCompose,
+    ) -> None:
+        updated = _apply_rendered_compose_to_existing(
+            client=self._client,
+            compose_id=locator.compose_id,
+            rendered_compose=rendered,
+        )
+        deployment = self._client.deploy_compose(
+            compose_id=updated.compose_id,
+            title="dokploy-wizard OpenCode Go cutover",
+            description="Apply LiteLLM OpenCode Go routing transition",
+        )
+        if not deployment.success:
+            raise SharedCoreError(
+                "Dokploy did not confirm the LiteLLM cutover compose deployment.",
+                category=SharedCoreFailureCategory.DEPLOY_COMPOSE,
+            )
+        self._applied_locator = _ComposeLocator(
+            project_id=locator.project_id,
+            environment_id=locator.environment_id,
+            compose_id=updated.compose_id,
+        )
+
+    def _verify_cutover_runtime(self) -> None:
+        if not self._litellm_runtime_ready_for_noop():
+            raise SharedCoreError(
+                "LiteLLM did not become ready during OpenCode Go cutover.",
+                category=SharedCoreFailureCategory.LITELLM_READINESS,
+            )
 
     def _shared_core_runtime_ready_for_noop(self) -> bool:
         postgres_allocations = [
@@ -639,7 +945,8 @@ class DokploySharedCoreBackend:
             return False
         for consumer, expected_key in self._litellm_generated_keys.virtual_keys.items():
             record = records.get(consumer)
-            if record is None or record.key != expected_key:
+            expected_key_id = sha256(expected_key.encode()).hexdigest()
+            if record is None or record.key != expected_key_id:
                 return False
             expected_models = tuple(
                 dict.fromkeys(self._litellm_consumer_model_allowlists.get(consumer, ()))
@@ -669,6 +976,34 @@ def _parse_resource_id(resource_id: str, kind: str) -> str | None:
         return None
     compose_id = resource_id.removeprefix(prefix).removesuffix(suffix)
     return compose_id or None
+
+
+def _opencode_go_aliases(compose_file: str) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            set(
+                re.findall(
+                    r'^\s*- model_name: "(opencode-go/[^"\n]+)"$',
+                    compose_file,
+                    flags=re.MULTILINE,
+                )
+            )
+        )
+    )
+
+
+def _cutover_owner_id(stack_name: str) -> str:
+    return sha256(f"dokploy-wizard:{stack_name}:opencode-go".encode()).hexdigest()
+
+
+def _cutover_image(rendered: RenderedCompose, aliases: tuple[str, ...]) -> CutoverImage:
+    compose_sha256 = sha256(rendered.compose_file.encode()).hexdigest()
+    model_set_sha256 = sha256("\n".join(aliases).encode()).hexdigest()
+    return CutoverImage(
+        compose_sha256=compose_sha256,
+        config_sha256=compose_sha256,
+        model_set_sha256=model_set_sha256,
+    )
 
 
 @dataclass(frozen=True)
@@ -1015,8 +1350,12 @@ def _render_compose_file(
     mail_relay_config: dict[str, str],
     litellm_env: dict[str, str] | None = None,
     litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
+    *,
+    runtime_images: RuntimeImages | None = None,
+    opencode_go_mode: Literal["static", "dynamic"] = "static",
 ) -> RenderedCompose:
     litellm_env = litellm_env or {}
+    runtime_images = runtime_images or resolve_runtime_images(litellm_env)
     env_specs: list[DokployEnvSpec] = []
     postgres_block = ""
     volume_block = ""
@@ -1070,7 +1409,7 @@ def _render_compose_file(
             )
         postgres_block = (
             f"  {plan.postgres.service_name}:\n"
-            "    image: pgvector/pgvector:pg16\n"
+            f"    image: {runtime_images.pgvector}\n"
             "    restart: unless-stopped\n"
             "    command: [\"postgres\", \"-c\", \"wal_level=logical\", \"-c\", \"max_replication_slots=10\", \"-c\", \"max_wal_senders=10\"]\n"
             "    environment:\n"
@@ -1098,7 +1437,7 @@ def _render_compose_file(
         )
         redis_block = (
             f"  {plan.redis.service_name}:\n"
-            "    image: redis:7-alpine\n"
+            f"    image: {runtime_images.redis}\n"
             "    restart: unless-stopped\n"
             "    command: redis-server --appendonly yes "
             f"--requirepass \"{_required_placeholder(redis_password_env)}\"\n"
@@ -1136,7 +1475,7 @@ def _render_compose_file(
         )
         mail_block = (
             f"  {plan.mail_relay.service_name}:\n"
-            "    image: boky/postfix:latest\n"
+            f"    image: {runtime_images.postfix}\n"
             "    restart: unless-stopped\n"
             "    user: '0:0'\n"
             "    environment:\n"
@@ -1152,10 +1491,13 @@ def _render_compose_file(
         volume_block += f"  {mail_volume}:\n"
     litellm_block = ""
     if plan.litellm is not None:
-        litellm_image = litellm_env.get("LITELLM_IMAGE", "ghcr.io/berriai/litellm").strip() or "ghcr.io/berriai/litellm"
-        litellm_tag = litellm_env.get("LITELLM_IMAGE_TAG", "v1.83.14-stable").strip() or "v1.83.14-stable"
+        litellm_metadata_volume = f"{plan.litellm.service_name}-data"
         upstream_creds = _build_litellm_upstream_creds(litellm_env)
-        litellm_config_payload = build_litellm_config(litellm_env, upstream_creds)
+        litellm_config_payload = build_litellm_config(
+            litellm_env,
+            upstream_creds,
+            include_opencode_go_models=opencode_go_mode == "static",
+        )
         _use_litellm_env_refs(litellm_config_payload, litellm_env)
         _configure_local_litellm_chat_template_compatibility(litellm_config_payload)
         litellm_config = render_litellm_config_yaml(litellm_config_payload)
@@ -1192,11 +1534,14 @@ def _render_compose_file(
         )
         litellm_block = (
             f"  {plan.litellm.service_name}:\n"
-            f"    image: {litellm_image}:{litellm_tag}\n"
+            f"    image: {runtime_images.litellm}\n"
             "    restart: unless-stopped\n"
+            "    deploy:\n"
+            "      replicas: 1\n"
             "    command: [\"--config\", \"/app/config.yaml\", \"--port\", \"4000\"]\n"
             "    environment:\n"
             f'      DATABASE_URL: "postgresql://{plan.litellm.postgres.user_name}:{_required_placeholder(postgres_password_env)}@{postgres_service_name}:5432/{plan.litellm.postgres.database_name}"\n'
+            '      LITELLM_USE_DB: "true"\n'
             '      ENFORCE_PRISMA_MIGRATION_CHECK: "true"\n'
             f"{local_api_key_lines}"
             f"{provider_env_lines}"
@@ -1220,11 +1565,18 @@ def _render_compose_file(
             "      dokploy-network:\n"
             "        aliases:\n"
             f"          - {plan.litellm.service_name}\n"
+            "    volumes:\n"
+            f"      - {litellm_metadata_volume}:/var/lib/dokploy-wizard/opencode-go\n"
         )
         config_entries.append(
             f"  {config_name}:\n"
             "    content: |\n"
             f"{_indent_block(litellm_config, 6)}"
+        )
+        volume_block += (
+            f"  {litellm_metadata_volume}:\n"
+            "    labels:\n"
+            '      dokploy-wizard.owner: "opencode-go"\n'
         )
     config_block = f"configs:\n{''.join(config_entries)}" if config_entries else ""
     compose_file = (
@@ -1509,7 +1861,11 @@ def build_litellm_consumer_model_allowlists(
         plan=plan,
     )
     return {
-        consumer: projection_catalog.fallback_alias_order_for(consumer)
+        consumer: (
+            ("all-proxy-models",)
+            if consumer in {"coder-hermes", "coder-kdense"}
+            else projection_catalog.fallback_alias_order_for(consumer)
+        )
         for consumer in _litellm_consumers()
     }
 

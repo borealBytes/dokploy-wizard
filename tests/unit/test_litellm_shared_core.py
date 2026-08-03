@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 from collections.abc import Mapping
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -316,8 +317,10 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
         plan,
         {},
         {
-            "LITELLM_IMAGE": "ghcr.io/berriai/litellm",
-            "LITELLM_IMAGE_TAG": "main-v1.40.14-stable",
+            "LITELLM_IMAGE": (
+                "ghcr.io/berriai/litellm@sha256:"
+                "c81eb79cd4333c6cfe374c0ec929110fd23f0ee5f7fd198855a6fbddc77b83ba"
+            ),
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
             "LITELLM_LOCAL_MODEL": "unsloth-active",
             "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
@@ -334,8 +337,11 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
 
     assert isinstance(rendered, RenderedCompose)
     assert "  wizard-stack-shared-litellm:\n" in compose
-    assert "image: ghcr.io/berriai/litellm:main-v1.40.14-stable" in compose
-    assert "image: ghcr.io/berriai/litellm:latest" not in compose
+    assert (
+        "image: ghcr.io/berriai/litellm@sha256:c81eb79cd4333c6cfe374c0ec929110fd23f0ee5f7fd198855a6fbddc77b83ba"
+        in compose
+    )
+    assert "image: ghcr.io/berriai/litellm:main-v1.40.14-stable" not in compose
     assert 'DATABASE_URL: "postgresql://wizard_stack_litellm:${WIZARD_STACK_LITELLM_POSTGRES_PASSWORD:?WIZARD_STACK_LITELLM_POSTGRES_PASSWORD is required}@wizard-stack-shared-postgres:5432/wizard_stack_litellm"' in compose
     assert 'ENFORCE_PRISMA_MIGRATION_CHECK: "true"' in compose
     assert "ENFORCE_PRISMA_MIGRATION_CHECK" not in env_specs
@@ -404,13 +410,40 @@ def test_rendered_litellm_local_model_disables_system_role_for_vllm_templates() 
     assert "SECRET" not in compose
 
 
+def test_runtime_package_dynamic_config_removes_opencode_go_static_aliases() -> None:
+    # Given
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+    env = {
+        "LITELLM_OPENCODE_GO_API_KEY": "opencode-go-upstream-key",
+        "LITELLM_OPENROUTER_API_KEY": "openrouter-upstream-key",
+        "LITELLM_OPENROUTER_MODELS": "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini",
+    }
+
+    # When
+    dynamic = _render_compose_file(plan, {}, env, opencode_go_mode="dynamic")
+
+    # Then
+    assert "opencode-go/deepseek-v4-flash" not in dynamic.compose_file
+    assert 'model_name: "openrouter/hunter-alpha"' in dynamic.compose_file
+    assert (
+        "wizard-stack-shared-litellm-data:/var/lib/dokploy-wizard/opencode-go"
+        in dynamic.compose_file
+    )
+    assert 'LITELLM_USE_DB: "true"' in dynamic.compose_file
+    assert "replicas: 1" in dynamic.compose_file
+    assert 'dokploy-wizard.owner: "opencode-go"' in dynamic.compose_file
+
+
 def test_rendered_shared_postgres_supports_surfsense_migration_requirements() -> None:
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("surfsense",))
 
     rendered = _render_compose_file(plan, {}, {})
     compose = rendered.compose_file
 
-    assert "image: pgvector/pgvector:pg16" in compose
+    assert (
+        "image: docker.io/pgvector/pgvector@sha256:"
+        "1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb"
+    ) in compose
     assert 'command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10"]' in compose
     assert 'run_sql "ALTER ROLE "wizard_stack_surfsense" WITH SUPERUSER;"' in compose
     assert 'psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "wizard_stack_surfsense" -c "CREATE EXTENSION IF NOT EXISTS vector;"' in compose
@@ -725,7 +758,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
     generated_keys = _generated_keys()
     matching_records = tuple(
         LiteLLMVirtualKeyRecord(
-            key=value,
+            key=sha256(value.encode()).hexdigest(),
             key_alias=consumer,
             team_id=f"team-{consumer}",
             models=("local-model.internal/unsloth-active",)

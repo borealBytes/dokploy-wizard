@@ -26,7 +26,8 @@ data "docker_network" "shared" {
 }
 
 locals {
-  username = data.coder_workspace_owner.me.name
+  username      = data.coder_workspace_owner.me.name
+  runtime_image = data.coder_provisioner.me.arch == "amd64" ? "__DOKPLOY_WIZARD_RUNTIME_IMAGE_AMD64__" : "__DOKPLOY_WIZARD_RUNTIME_IMAGE_ARM64__"
 }
 
 # Storage boundary for this default workspace template:
@@ -46,46 +47,16 @@ resource "coder_agent" "main" {
   startup_script = <<-EOT
     set -e
 
-    _SUDO=""
-    if command -v sudo >/dev/null 2>&1; then
-      _SUDO="sudo"
-    fi
+    for runtime_command in curl git wget btop python3 opencode zellij node; do
+      command -v "$runtime_command" >/dev/null 2>&1
+    done
 
-    $_SUDO apt-get update -q
-    $_SUDO apt-get install -y curl git ca-certificates wget btop
+    corepack enable
+    corepack prepare pnpm@10.27.0 --activate
 
-    # OpenCode, skip if already installed
-    if ! command -v opencode >/dev/null 2>&1; then
-      if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then
-        if [ ! -x /home/coder/.opencode/bin/opencode ]; then
-          echo "OpenCode installer did not produce a usable binary" >&2
-          exit 1
-        fi
-      fi
-    fi
-
-    if [ -x /home/coder/.opencode/bin/opencode ]; then
-      $_SUDO ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode
-    fi
-
-    # Zellij, skip if already installed
-    if ! command -v zellij >/dev/null 2>&1; then
-      ARCH=$(uname -m)
-      ZELLIJ_URL="https://github.com/zellij-org/zellij/releases/latest/download/zellij-$${ARCH}-unknown-linux-musl.tar.gz"
-      curl -fsSL "$${ZELLIJ_URL}" | $_SUDO tar -C /usr/local/bin -xz
-    fi
-
-    # Node.js, corepack, and pnpm are required to build the OpenWork web UI
-    if ! command -v node >/dev/null 2>&1; then
-      curl -fsSL https://deb.nodesource.com/setup_22.x | $_SUDO -E bash -
-      $_SUDO apt-get install -y nodejs
-    fi
-    $_SUDO corepack enable
-    $_SUDO corepack prepare pnpm@10.27.0 --activate
-
-    # OpenWork orchestrator, skip if already installed
+    # OpenWork remains a downstream application bootstrap until its source is pinned.
     if ! command -v openwork >/dev/null 2>&1; then
-      $_SUDO npm install -g openwork-orchestrator
+      npm install -g openwork-orchestrator
     fi
 
     # Shared LiteLLM defaults keep OpenWork's embedded OpenCode routes aligned with the wizard-managed gateway.
@@ -496,7 +467,7 @@ JS
 module "code-server" {
   count    = data.coder_workspace.me.start_count
   source   = "registry.coder.com/coder/code-server/coder"
-  version  = "~> 1.0"
+  version  = "1.5.2"
   agent_id = coder_agent.main.id
   folder   = "/home/coder"
   order    = 1
@@ -506,7 +477,6 @@ resource "coder_app" "openwork" {
   agent_id     = coder_agent.main.id
   slug         = "openwork"
   display_name = "OpenWork"
-  icon         = "https://raw.githubusercontent.com/different-ai/openwork/refs/heads/dev/apps/app/public/openwork-logo-square.svg"
   url          = "http://localhost:8788"
   share        = "owner"
   subdomain    = false
@@ -526,9 +496,13 @@ resource "docker_volume" "home_volume" {
   }
 }
 
+resource "docker_image" "workspace" {
+  name = local.runtime_image
+}
+
 resource "docker_container" "workspace" {
   count    = data.coder_workspace.me.start_count
-  image    = "codercom/enterprise-base:ubuntu"
+  image    = docker_image.workspace.image_id
   name     = "coder-${data.coder_workspace_owner.me.name}-${lower(data.coder_workspace.me.name)}"
   hostname = data.coder_workspace.me.name
 

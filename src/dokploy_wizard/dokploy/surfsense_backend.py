@@ -33,9 +33,19 @@ from dokploy_wizard.dokploy.surfsense import (
     render_surfsense_compose_for_state,
 )
 from dokploy_wizard.packs.surfsense import (
+    SURFSENSE_DATA_RESOURCE_TYPE,
+    SURFSENSE_SERVICE_RESOURCE_TYPE,
     SurfSenseBootstrapState,
     SurfSenseError,
     SurfSenseResourceRecord,
+)
+from dokploy_wizard.state.models import OwnedResource
+from dokploy_wizard.state.uninstall_authority import UninstallAuthorityStore
+from dokploy_wizard.state.uninstall_targets import (
+    DockerVolumeRecord,
+    DokployComposeDeletionRecord,
+    docker_volume_fingerprint,
+    dokploy_compose_fingerprint,
 )
 from dokploy_wizard.verification import make_verification_result
 
@@ -63,6 +73,10 @@ class DokploySurfSenseApi(Protocol):
     def deploy_compose(
         self, *, compose_id: str, title: str | None, description: str | None
     ) -> DokployDeployResult: ...
+
+
+class DockerVolumeAuthorityClient(Protocol):
+    def get_volume(self, volume_id: str) -> DockerVolumeRecord | None: ...
 
 
 @dataclass(frozen=True)
@@ -99,6 +113,7 @@ class DokploySurfSenseBackend:
         etl_service: str = "DOCLING",
         embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
         client: DokploySurfSenseApi | None = None,
+        authority_docker_client: DockerVolumeAuthorityClient | None = None,
     ) -> None:
         self._state_dir = state_dir
         self._stack_name = stack_name
@@ -124,6 +139,8 @@ class DokploySurfSenseBackend:
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
+        self._compose_created = False
+        self._authority_docker_client = authority_docker_client
 
     def get_service(self, resource_id: str) -> SurfSenseResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "service")
@@ -221,6 +238,91 @@ class DokploySurfSenseBackend:
             ),
             result.notes,
         )
+
+    def record_created_uninstall_authorities(
+        self,
+        authority_store: UninstallAuthorityStore,
+        resources: tuple[OwnedResource, ...],
+    ) -> None:
+        """Record exact SurfSense targets only for a compose created in this run."""
+
+        if not self._compose_created:
+            return
+        locator = self._applied_locator
+        if locator is None:
+            raise SurfSenseError("Created SurfSense compose has no authority locator.")
+        compose = self._re_read_created_compose(locator)
+        volume = self._re_read_created_data_volume()
+        owner_id = f"stack:{self._stack_name}"
+        prefix = f"dokploy-compose:{locator.compose_id}:"
+        for resource in resources:
+            if not resource.resource_id.startswith(prefix):
+                continue
+            if resource.resource_type == SURFSENSE_SERVICE_RESOURCE_TYPE:
+                authority_store.record_created(
+                    resource=resource,
+                    owner_id=owner_id,
+                    provider="dokploy_compose",
+                    physical_target_id=compose.compose_id,
+                    parent_target_id=compose.project_id,
+                    expected_fingerprint=dokploy_compose_fingerprint(compose),
+                )
+            elif resource.resource_type == SURFSENSE_DATA_RESOURCE_TYPE:
+                authority_store.record_created(
+                    resource=resource,
+                    owner_id=owner_id,
+                    provider="docker_volume",
+                    physical_target_id=volume.volume_id,
+                    parent_target_id="docker",
+                    expected_fingerprint=docker_volume_fingerprint(volume),
+                )
+
+    def _re_read_created_compose(self, locator: _ComposeLocator) -> DokployComposeDeletionRecord:
+        try:
+            projects = self._client.list_projects()
+        except DokployApiError as error:
+            raise SurfSenseError("Could not reread the created SurfSense compose.") from error
+        project = next((item for item in projects if item.project_id == locator.project_id), None)
+        if project is None:
+            raise SurfSenseError("Created SurfSense project was absent during authority reread.")
+        environment = next(
+            (item for item in project.environments if item.environment_id == locator.environment_id),
+            None,
+        )
+        if environment is None:
+            raise SurfSenseError("Created SurfSense environment was absent during authority reread.")
+        compose = next(
+            (item for item in environment.composes if item.compose_id == locator.compose_id), None
+        )
+        if compose is None or compose.name != self._compose_name:
+            raise SurfSenseError("Created SurfSense compose changed before authority publication.")
+        return DokployComposeDeletionRecord(
+            compose_id=compose.compose_id,
+            project_id=project.project_id,
+            name=compose.name,
+        )
+
+    def _re_read_created_data_volume(self) -> DockerVolumeRecord:
+        client = self._authority_docker_client
+        if client is not None:
+            volume = client.get_volume(_data_name(self._stack_name))
+            if volume is None:
+                raise SurfSenseError("Created SurfSense data volume was absent during authority reread.")
+            return volume
+        try:
+            result = subprocess.run(
+                ["docker", "volume", "inspect", _data_name(self._stack_name), "--format", "{{.Name}}"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except OSError as error:
+            raise SurfSenseError("Could not inspect the created SurfSense data volume.") from error
+        name = result.stdout.strip()
+        if result.returncode != 0 or name != _data_name(self._stack_name):
+            raise SurfSenseError("Created SurfSense data volume changed before authority publication.")
+        return DockerVolumeRecord(volume_id=name, name=name)
 
     def _validate_inputs(self, kwargs: dict[str, object]) -> None:
         if str(kwargs["frontend_hostname"]) != self._frontend_hostname:
@@ -324,6 +426,7 @@ class DokploySurfSenseBackend:
                 persist_compose_artifact_hash_if_checkpoint_present(state_dir=self._state_dir, service_key=self._compose_name, rendered_compose=compose_file)
                 locator = _ComposeLocator(project.project_id, environment.environment_id, created.compose_id)
                 self._created_in_process = True
+                self._compose_created = True
                 self._applied_locator = locator
                 return locator
             created_project = self._client.create_project(name=self._stack_name, description="Managed by dokploy-wizard", env=None)
@@ -341,6 +444,7 @@ class DokploySurfSenseBackend:
             raise SurfSenseError(str(error)) from error
         locator = _ComposeLocator(created_project.project_id, created_project.environment_id, created_compose.compose_id)
         self._created_in_process = True
+        self._compose_created = True
         self._applied_locator = locator
         return locator
 

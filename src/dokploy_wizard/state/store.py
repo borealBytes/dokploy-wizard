@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -752,6 +753,7 @@ def persist_install_scaffold(
             desired_state_fingerprint=desired_state.fingerprint(),
             completed_steps=(),
             lifecycle_checkpoint_contract_version=LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+            runtime_images=desired_state.runtime_images,
         ).to_dict(),
     )
     _write_document(
@@ -765,6 +767,13 @@ def write_applied_checkpoint(state_dir: Path, applied_state: AppliedStateCheckpo
 
     state_dir.mkdir(parents=True, exist_ok=True)
     _write_document(state_dir / APPLIED_STATE_FILE, applied_state.to_dict())
+
+
+def write_desired_state(state_dir: Path, desired_state: DesiredState) -> None:
+    """Persist only desired state during an in-flight lifecycle projection."""
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    _write_document(state_dir / DESIRED_STATE_FILE, desired_state.to_dict())
 
 
 def write_ownership_ledger(state_dir: Path, ownership_ledger: OwnershipLedger) -> None:
@@ -817,6 +826,11 @@ def clear_state_documents(state_dir: Path) -> None:
         document_path = state_dir / file_name
         if document_path.exists():
             document_path.unlink()
+    directory = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _load_optional_document(

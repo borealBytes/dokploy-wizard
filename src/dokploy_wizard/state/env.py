@@ -9,6 +9,7 @@ from urllib import parse
 
 from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.state.models import DesiredState, RawEnvInput, StateValidationError
+from dokploy_wizard.state.runtime_images import RuntimeImageError, resolve_runtime_images
 
 _ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _OPENCLAW_NEXA_ENV_KEYS = {
@@ -128,6 +129,10 @@ def parse_env_file(path: Path) -> RawEnvInput:
 
 def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
     values = raw_env.values
+    try:
+        runtime_images = resolve_runtime_images(values)
+    except RuntimeImageError as error:
+        raise StateValidationError(str(error)) from error
     root_domain = _require_value(values, "ROOT_DOMAIN")
     stack_name = _get_configured_value(values, "STACK_NAME") or derive_stack_name_from_root_domain(
         root_domain
@@ -184,6 +189,7 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
             key="MY_FARM_ADVISOR_REPLICAS",
             pack_name="my-farm-advisor",
         ),
+        runtime_images=runtime_images,
         shared_core=build_shared_core_plan(stack_name, pack_selection.enabled_packs, values),
     )
     from dokploy_wizard.proof.model_sync_task1_context import (

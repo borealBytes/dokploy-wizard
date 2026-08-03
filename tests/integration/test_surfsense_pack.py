@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from dokploy_wizard.cli import run_install_flow, run_modify_flow
 from dokploy_wizard.packs.surfsense import (
     SURFSENSE_DATA_RESOURCE_TYPE,
@@ -16,6 +18,7 @@ from dokploy_wizard.packs.surfsense import (
     SurfSenseResourceRecord,
 )
 from dokploy_wizard.state import RawEnvInput, load_state_dir
+from dokploy_wizard.uninstall.errors import UninstallExecutionError
 from tests.integration.test_openclaw_pack import (
     FakeCloudflareBackend,
     FakeDokployBackend,
@@ -36,6 +39,7 @@ class RecordingSurfSenseBackend:
     create_data_calls: list[str] = field(default_factory=list)
     health_urls: list[str] = field(default_factory=list)
     bootstrap_calls: int = 0
+    authority_resources: tuple[Any, ...] = ()
 
     def get_service(self, resource_id: str) -> SurfSenseResourceRecord | None:
         if self.existing_service is not None and self.existing_service.resource_id == resource_id:
@@ -98,6 +102,12 @@ class RecordingSurfSenseBackend:
         return SurfSenseBootstrapState(created=True, verified_existing=False), (
             "SurfSense bootstrap completed through fake integration backend.",
         )
+
+    def record_created_uninstall_authorities(
+        self, authority_store: Any, resources: tuple[Any, ...]
+    ) -> None:
+        del authority_store
+        self.authority_resources = resources
 
 
 def _surfsense_raw_env(**overrides: str) -> RawEnvInput:
@@ -165,6 +175,10 @@ def test_install_fresh_surfsense_persists_state_and_keeps_cloudflare_access_app_
     assert surfsense_backend.create_service_calls[0]["redis_service_name"] == "wizard-stack-shared-redis"
     assert surfsense_backend.health_urls == ["https://surfsense-api.example.com/ready"]
     assert surfsense_backend.bootstrap_calls == 1
+    assert {
+        SURFSENSE_SERVICE_RESOURCE_TYPE,
+        SURFSENSE_DATA_RESOURCE_TYPE,
+    } <= {resource.resource_type for resource in surfsense_backend.authority_resources}
 
     assert networking_backend.access_apps == {}
     assert not any("surfsense" in hostname for hostname in networking_backend.access_apps)
@@ -193,7 +207,7 @@ def test_install_fresh_surfsense_persists_state_and_keeps_cloudflare_access_app_
     }
 
 
-def test_modify_removing_surfsense_deletes_runtime_and_retains_data(
+def test_modify_removing_surfsense_requires_recorded_uninstall_authority(
     tmp_path: Path,
 ) -> None:
     state_dir = tmp_path / "state"
@@ -215,29 +229,25 @@ def test_modify_removing_surfsense_deletes_runtime_and_retains_data(
         surfsense_backend=surfsense_backend,
     )
 
-    summary = run_modify_flow(
-        env_file=env_file,
-        state_dir=state_dir,
-        dry_run=False,
-        raw_env=_surfsense_raw_env(PACKS=""),
-        bootstrap_backend=FakeDokployBackend(True, True),
-        networking_backend=networking_backend,
-        shared_core_backend=shared_core_backend,
-        headscale_backend=FakeHeadscaleBackend(),
-        matrix_backend=FakeMatrixBackend(),
-        surfsense_backend=surfsense_backend,
-    )
+    with pytest.raises(
+        UninstallExecutionError, match="Dokploy compose lacks recorded uninstall authority"
+    ):
+        run_modify_flow(
+            env_file=env_file,
+            state_dir=state_dir,
+            dry_run=False,
+            raw_env=_surfsense_raw_env(PACKS=""),
+            bootstrap_backend=FakeDokployBackend(True, True),
+            networking_backend=networking_backend,
+            shared_core_backend=shared_core_backend,
+            headscale_backend=FakeHeadscaleBackend(),
+            matrix_backend=FakeMatrixBackend(),
+            surfsense_backend=surfsense_backend,
+        )
     loaded_state = load_state_dir(state_dir)
-    deleted_types = {
-        item["resource_type"]
-        for item in summary["disable_teardown"]["executed"]["deleted_resources"]
-    }
 
-    assert summary["lifecycle"]["mode"] == "modify"
-    assert summary["lifecycle"]["phases_to_run"] == ["networking", "shared_core"]
-    assert deleted_types == {"cloudflare_dns_record", SURFSENSE_SERVICE_RESOURCE_TYPE}
     assert loaded_state.ownership_ledger is not None
-    assert not any(
+    assert any(
         resource.resource_type == SURFSENSE_SERVICE_RESOURCE_TYPE
         for resource in loaded_state.ownership_ledger.resources
     )

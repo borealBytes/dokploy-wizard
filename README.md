@@ -261,7 +261,7 @@ Model behavior inside SurfSense:
 
 ### Coder
 
-Coder gets a seeded Ubuntu + VS Code template and a first default workspace.
+Coder gets four retained workspace templates and a first default workspace.
 
 On first successful bootstrap the wizard:
 
@@ -270,14 +270,17 @@ On first successful bootstrap the wizard:
 
   | Template | What it provides |
   |---|---|
-  | `ubuntu-vscode` | Base Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `opencode`, `zellij`, `pi` CLI |
+  | `ubuntu-vscode-opencode-pi` | Base Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `opencode`, `zellij`, and Pi CLI |
   | `ubuntu-vscode-opencode-web` | OpenCode Web (browser-based IDE) |
-  | `ubuntu-vscode-openwork` | OpenWork (AI-assisted workspace) |
   | `ubuntu-vscode-kdense-byok` | K-Dense BYOK (Bring Your Own Key for local model inference) |
   | `ubuntu-vscode-hermes` | Hermes (on-device AI assistant) |
-  | `ubuntu-vscode-pi-web` | Pi CLI plus clickable Pi Web UI (Coder app, not a public Dokploy pack) |
 
 - creates a default workspace for the operator
+
+Existing installations migrate transactionally: the legacy `ubuntu-vscode` template is
+renamed to `ubuntu-vscode-opencode-pi` without changing its UUID, while the retired
+`ubuntu-vscode-openwork` and `ubuntu-vscode-pi-web` templates are deleted only after
+their stopped dependent workspaces are journaled and removed.
 
 That default template installs:
 
@@ -317,7 +320,7 @@ Future architecture options:
 
 Operational note:
 
-- Hermes, OpenCode Web, and OpenWork are already path-based Coder apps in this repo.
+- Hermes and OpenCode Web are already path-based Coder apps in this repo.
 - K-Dense BYOK is the current outlier that uses `subdomain = true` and benefits the most from proper wildcard app routing.
 
 ### SeaweedFS
@@ -603,6 +606,19 @@ For day-to-day clean VPS validation, prefer the remote wrapper because it packag
 
 ## Local validation
 
+### Commit-addressed remote releases and proof workspaces
+
+Remote lifecycle commands run from a content-addressed release activated at
+`/root/dokploy-wizard/current`. The remote helper packages an explicit Git
+commit only after rejecting tracked or untracked changes in deployable paths;
+it does not overlay a local checkout onto an existing remote release.
+
+Model-sync proof workspaces are receipt-backed. Each retained template is
+created, tested, stopped, and deleted with a mode-0600 receipt, so a retry
+resumes cleanup after an interrupted provider call. Strict proof mutation
+recording authorizes workspace mutations before dispatch and keeps strict
+control-plane and synchronizer totals at zero.
+
 Quick checks:
 
 ```bash
@@ -649,9 +665,9 @@ Primary consumers today are:
 - My Farm Advisor
 - SurfSense
 - Coder Hermes and Coder K-Dense
-- Coder OpenCode Web and OpenWork through generated template gateway defaults
+- Coder primary, OpenCode Web, Hermes, and K-Dense templates through generated gateway defaults
 
-Those services use internal gateway config or wizard-managed virtual keys. They should not receive raw OpenRouter, NVIDIA, OpenCode Go, local model, or other upstream provider keys directly when the wizard-managed LiteLLM path is in use. Pi Web UI remains the exception because its browser-local provider-key flow is intentionally unchanged and this repo does not control a Pi scoped-models endpoint.
+Those services use internal gateway config or wizard-managed virtual keys. They should not receive raw OpenRouter, NVIDIA, OpenCode Go, local model, or other upstream provider keys directly when the wizard-managed LiteLLM path is in use.
 
 ### Flat env inputs
 
@@ -697,7 +713,7 @@ The wizard auto-generates stable virtual keys for each consumer:
 - Coder Hermes
 - Coder K-Dense
 
-OpenCode Web and OpenWork inherit wizard-managed LiteLLM defaults through the shared Coder AI gateway env during template bootstrap rather than receiving their own dedicated LiteLLM virtual-key consumer records. Pi Web UI is still a browser-local surface and is not centrally model-restricted. Pi Web UI does not receive a wizard-managed virtual key.
+The primary and OpenCode Web templates inherit wizard-managed LiteLLM defaults through the shared Coder AI gateway env during template bootstrap rather than receiving their own dedicated LiteLLM virtual-key consumer records.
 
 These keys are generated once and reused across reruns and modify operations. They are stored in the wizard state directory, not written back into `.install.env`. If you need to rotate a key, that is a future operator action, not something that happens silently on reinstall.
 
@@ -740,7 +756,7 @@ This keeps admin verification aligned with the intended trust boundary: public a
 
 ### Migration from direct provider envs
 
-If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, wizard-managed server-side consumers receive LiteLLM virtual keys or inherited LiteLLM gateway defaults instead of raw upstream provider keys. SurfSense follows this model: it gets only its restricted LiteLLM virtual key and approved aliases. Upstream secrets terminate at the LiteLLM proxy. Pi Web UI remains the exception because its browser-local provider-key flow is intentionally unchanged.
+If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, wizard-managed server-side consumers receive LiteLLM virtual keys or inherited LiteLLM gateway defaults instead of raw upstream provider keys. SurfSense follows this model: it gets only its restricted LiteLLM virtual key and approved aliases. Upstream secrets terminate at the LiteLLM proxy.
 
 ### Validation
 

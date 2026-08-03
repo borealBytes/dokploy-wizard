@@ -126,6 +126,7 @@ def _classify_modify_plan(
             format_version=1,
             desired_state_fingerprint=existing_desired.fingerprint(),
             completed_steps=applicable_phases_for(existing_desired),
+            runtime_images=existing_desired.runtime_images,
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
         requested_raw=requested_raw,
@@ -309,18 +310,33 @@ def test_remote_upload_accepts_install_min_env_for_proof_without_remote_name_dri
     transport = _ProofTransport()
     session = RemoteTransportSession(transport=transport, remote_root="/root/dokploy-wizard")
     repo_archive = tmp_path / "repo.tar.gz"
+    release_manifest = tmp_path / "release-manifest.json"
+    activation_bootstrap = tmp_path / "release-activation-bootstrap.py"
     install_min_env = tmp_path / ".install-min.env"
     repo_archive.write_bytes(b"placeholder archive")
+    release_manifest.write_text('{"archive_sha256":"a"}\n', encoding="utf-8")
+    activation_bootstrap.write_text("# bootstrap\n", encoding="utf-8")
     install_min_env.write_text("STACK_NAME=wizard-stack\nROOT_DOMAIN=example.com\n", encoding="utf-8")
 
-    session.upload_bundle(repo_archive, install_min_env)
+    session.upload_bundle(
+        repo_archive,
+        release_manifest,
+        activation_bootstrap,
+        "a" * 64,
+        install_min_env,
+    )
 
     assert transport.ensured_dirs == ["/root/dokploy-wizard"]
     assert transport.uploads == [
         (repo_archive, "/root/dokploy-wizard/repo.tar.gz"),
+        (release_manifest, "/root/dokploy-wizard/release-manifest.json"),
+        (activation_bootstrap, "/root/dokploy-wizard/release-activation-bootstrap.py"),
         (install_min_env, "/root/dokploy-wizard/.install.env"),
     ]
-    assert transport.chmods == [("/root/dokploy-wizard/.install.env", 0o600)]
+    assert transport.chmods == [
+        ("/root/dokploy-wizard/release-activation-bootstrap.py", 0o700),
+        ("/root/dokploy-wizard/.install.env", 0o600),
+    ]
 
 
 def test_help_lists_expected_subcommands() -> None:
@@ -1921,7 +1937,7 @@ def test_guided_install_reuses_existing_seaweedfs_credentials(
     assert raw_env.values["SEAWEEDFS_SECRET_KEY"] == "seaweed-secret-existing"
 
 
-def test_build_coder_backend_uses_litellm_virtual_key_for_hermes(
+def test_build_coder_backend_uses_existing_coder_keys_and_visible_model_projection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     raw_env = RawEnvInput(
@@ -1936,6 +1952,7 @@ def test_build_coder_backend_uses_litellm_virtual_key_for_hermes(
             "DOKPLOY_ADMIN_PASSWORD": "ChangeMeSoon",
             "AI_DEFAULT_API_KEY": "upstream-shared-key",
             "AI_DEFAULT_BASE_URL": "https://upstream.example.invalid/v1",
+            "LITELLM_OPENCODE_GO_API_KEY": "upstream-opencode-go-key",
         },
     )
     desired_state = resolve_desired_state(raw_env)
@@ -1960,6 +1977,11 @@ def test_build_coder_backend_uses_litellm_virtual_key_for_hermes(
     assert backend is not None
     assert captured["ai_default_api_key"] == generated_keys.virtual_keys["coder-hermes"]
     assert captured["ai_default_api_key"] != raw_env.values["AI_DEFAULT_API_KEY"]
+    assert captured["coder_hermes_key"] == generated_keys.virtual_keys["coder-hermes"]
+    assert captured["coder_kdense_key"] == generated_keys.virtual_keys["coder-kdense"]
+    visible_aliases = captured["visible_litellm_aliases"]
+    assert isinstance(visible_aliases, tuple)
+    assert len(visible_aliases) > 1
     assert captured["client"] is sentinel_client
 
 
@@ -2136,6 +2158,7 @@ def test_install_retry_accepts_stale_state_when_only_dokploy_api_url_differs(
             format_version=existing_desired.format_version,
             desired_state_fingerprint=existing_desired.fingerprint(),
             completed_steps=applicable_phases_for(existing_desired),
+            runtime_images=existing_desired.runtime_images,
         ),
     )
     write_ownership_ledger(
@@ -2203,6 +2226,7 @@ def test_install_classification_ignores_remote_helper_key_differences() -> None:
             format_version=1,
             desired_state_fingerprint=existing_desired.fingerprint(),
             completed_steps=applicable_phases_for(existing_desired),
+            runtime_images=existing_desired.runtime_images,
         ),
         requested_raw=requested_raw,
         requested_desired=requested_desired,
@@ -2241,6 +2265,7 @@ def test_install_retry_sanitizes_legacy_disabled_openclaw_token_state(
             format_version=existing_desired.format_version,
             desired_state_fingerprint=existing_desired.fingerprint(),
             completed_steps=applicable_phases_for(existing_desired),
+            runtime_images=existing_desired.runtime_images,
         ),
     )
     write_ownership_ledger(

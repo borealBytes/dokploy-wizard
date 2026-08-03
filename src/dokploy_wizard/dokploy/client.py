@@ -84,6 +84,8 @@ class DokployScheduleRecord:
     shell_type: str
     command: str
     enabled: bool
+    compose_id: str | None = None
+    schedule_type: str = "compose"
 
 
 @dataclass(frozen=True)
@@ -189,6 +191,27 @@ class DokployApiClient:
         environment_id = _require_string(environment, "environmentId")
         return DokployCreatedProject(project_id=project_id, environment_id=environment_id)
 
+    def get_project(self, *, project_id: str) -> DokployProjectSummary | None:
+        return next(
+            (project for project in self.list_projects() if project.project_id == project_id), None
+        )
+
+    def get_compose(
+        self, *, project_id: str, compose_id: str
+    ) -> DokployComposeSummary | None:
+        project = self.get_project(project_id=project_id)
+        if project is None:
+            return None
+        return next(
+            (
+                compose
+                for environment in project.environments
+                for compose in environment.composes
+                if compose.compose_id == compose_id
+            ),
+            None,
+        )
+
     def delete_project(self, *, project_id: str) -> None:
         payload = self._request_json(
             "POST",
@@ -197,6 +220,11 @@ class DokployApiClient:
         )
         if not isinstance(payload, dict):
             raise DokployApiError("Dokploy project.remove response must be an object.")
+
+    def delete_compose(self, *, compose_id: str) -> None:
+        payload = self._request_json("POST", "/api/compose.remove", {"composeId": compose_id})
+        if payload is not True and not isinstance(payload, dict):
+            raise DokployApiError("Dokploy compose.remove response must be an object or true.")
 
     def create_compose(
         self,
@@ -333,7 +361,10 @@ class DokployApiClient:
                 payload = payload.get("data", payload)
         if not isinstance(payload, list):
             raise DokployApiError("Dokploy schedule.list response must be a list.")
-        return tuple(_parse_schedule_record(item, "schedule.list") for item in payload)
+        return tuple(
+            _parse_schedule_record(item, "schedule.list", expected_compose_id=compose_id)
+            for item in payload
+        )
 
     def create_schedule(
         self,
@@ -378,7 +409,11 @@ class DokployApiClient:
             )
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
-        return _parse_schedule_record(payload, "schedule.create")
+        return _parse_schedule_record(
+            payload,
+            "schedule.create",
+            expected_compose_id=compose_id,
+        )
 
     def update_schedule(
         self,
@@ -426,7 +461,11 @@ class DokployApiClient:
             )
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
-        return _parse_schedule_record(payload, "schedule.update")
+        return _parse_schedule_record(
+            payload,
+            "schedule.update",
+            expected_compose_id=compose_id,
+        )
 
     def delete_schedule(self, *, schedule_id: str) -> None:
         try:
@@ -638,7 +677,9 @@ def _parse_compose_record(payload: Any, operation: str) -> DokployComposeRecord:
     )
 
 
-def _parse_schedule_record(payload: Any, operation: str) -> DokployScheduleRecord:
+def _parse_schedule_record(
+    payload: Any, operation: str, *, expected_compose_id: str
+) -> DokployScheduleRecord:
     if not isinstance(payload, dict):
         raise DokployApiError(f"Dokploy {operation} response must be an object.")
     service_name = payload.get("serviceName")
@@ -650,6 +691,12 @@ def _parse_schedule_record(payload: Any, operation: str) -> DokployScheduleRecor
     enabled = payload.get("enabled")
     if not isinstance(enabled, bool):
         raise DokployApiError(f"Dokploy {operation} enabled must be a boolean.")
+    compose_id = _require_string(payload, "composeId")
+    schedule_type = _require_string(payload, "scheduleType")
+    if compose_id != expected_compose_id:
+        raise DokployApiError(f"Dokploy {operation} composeId does not match the request.")
+    if schedule_type != "compose":
+        raise DokployApiError(f"Dokploy {operation} scheduleType must be compose.")
     return DokployScheduleRecord(
         schedule_id=_require_string(payload, "scheduleId"),
         name=_require_string(payload, "name"),
@@ -659,6 +706,8 @@ def _parse_schedule_record(payload: Any, operation: str) -> DokployScheduleRecor
         shell_type=_require_string(payload, "shellType"),
         command=_require_string(payload, "command"),
         enabled=enabled,
+        compose_id=compose_id,
+        schedule_type=schedule_type,
     )
 
 

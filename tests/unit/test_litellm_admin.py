@@ -10,6 +10,38 @@ import pytest
 
 from dokploy_wizard.litellm.admin import LiteLLMAdminClient, LiteLLMAdminError
 
+from ._litellm_model_admin_cases import (
+    test_ambiguous_timeout_mismatch_fails_closed,
+    test_create_uses_exact_admin_transport_and_unmasked_three_key_payload,
+    test_deterministic_uuid_and_full_owned_projection,
+    test_foreign_alias_conflict_is_rejected_without_mutation,
+    test_legacy_post_update_rejected_by_exact_patch_route,
+    test_path_body_id_mismatch_is_rejected,
+)
+from ._litellm_model_admin_parser_cases import (
+    test_inventory_accepts_removed_api_key_without_reusing_it,
+    test_masked_parameter_is_rejected_from_inventory,
+    test_owned_delete_removes_only_verified_owned_record,
+    test_owned_delete_uses_exact_route_body_and_success_message,
+    test_top_level_blocked_rejected_from_inventory,
+    test_update_preserves_nonrouting_server_model_info_extras,
+)
+
+__all__ = (
+    "test_ambiguous_timeout_mismatch_fails_closed",
+    "test_create_uses_exact_admin_transport_and_unmasked_three_key_payload",
+    "test_deterministic_uuid_and_full_owned_projection",
+    "test_foreign_alias_conflict_is_rejected_without_mutation",
+    "test_legacy_post_update_rejected_by_exact_patch_route",
+    "test_inventory_accepts_removed_api_key_without_reusing_it",
+    "test_masked_parameter_is_rejected_from_inventory",
+    "test_owned_delete_removes_only_verified_owned_record",
+    "test_owned_delete_uses_exact_route_body_and_success_message",
+    "test_path_body_id_mismatch_is_rejected",
+    "test_top_level_blocked_rejected_from_inventory",
+    "test_update_preserves_nonrouting_server_model_info_extras",
+)
+
 
 @dataclass
 class _RecordedRequest:

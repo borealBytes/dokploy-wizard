@@ -16,6 +16,11 @@ import pytest
 
 from dokploy_wizard.core.models import SharedPostgresAllocation, SharedRedisAllocation
 from dokploy_wizard.dokploy import surfsense_backend as surfsense_backend_module
+from dokploy_wizard.dokploy.client import (
+    DokployComposeSummary,
+    DokployEnvironmentSummary,
+    DokployProjectSummary,
+)
 from dokploy_wizard.dokploy.env_spec import DokployEnvReconciler, DokployEnvSpec
 from dokploy_wizard.dokploy.surfsense import (
     SurfSenseBootstrapError,
@@ -48,6 +53,8 @@ from dokploy_wizard.state.models import (
     RawEnvInput,
     SurfSenseGeneratedSecrets,
 )
+from dokploy_wizard.state.uninstall_authority import UninstallAuthorityStore
+from dokploy_wizard.state.uninstall_targets import DockerVolumeRecord
 from dokploy_wizard.uninstall import build_pack_disable_plan, build_uninstall_plan
 
 _SURFSENSE_SECRETS = SurfSenseGeneratedSecrets(
@@ -926,6 +933,66 @@ def _dokploy_surfsense_backend(tmp_path: Path, *, stack_name: str = "wizard-stac
         admin_email=_ADMIN_EMAIL,
         admin_password=_ADMIN_PASSWORD,
     )
+
+
+def test_dokploy_surfsense_backend_records_reread_authorities_only_after_create(
+    tmp_path: Path,
+) -> None:
+    backend = _dokploy_surfsense_backend(tmp_path)
+    compose_id = "compose-1"
+    backend._applied_locator = surfsense_backend_module._ComposeLocator(
+        project_id="project-1",
+        environment_id="environment-1",
+        compose_id=compose_id,
+    )
+    backend._client = SimpleNamespace(
+        list_projects=lambda: (
+            DokployProjectSummary(
+                project_id="project-1",
+                name="wizard-stack",
+                environments=(
+                    DokployEnvironmentSummary(
+                        environment_id="environment-1",
+                        name="production",
+                        is_default=True,
+                        composes=(
+                            DokployComposeSummary(
+                                compose_id=compose_id,
+                                name="wizard-stack-surfsense",
+                                status="running",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    volume = DockerVolumeRecord(
+        volume_id="wizard-stack-surfsense-data",
+        name="wizard-stack-surfsense-data",
+    )
+    backend._authority_docker_client = SimpleNamespace(get_volume=lambda _: volume)
+    service = OwnedResource(
+        resource_type=SURFSENSE_SERVICE_RESOURCE_TYPE,
+        resource_id=f"dokploy-compose:{compose_id}:surfsense-service",
+        scope="stack:wizard-stack:surfsense:service",
+    )
+    data = OwnedResource(
+        resource_type=SURFSENSE_DATA_RESOURCE_TYPE,
+        resource_id=f"dokploy-compose:{compose_id}:surfsense-data",
+        scope="stack:wizard-stack:surfsense:data",
+    )
+    authorities = UninstallAuthorityStore(tmp_path)
+
+    backend.record_created_uninstall_authorities(authorities, (service, data))
+
+    assert authorities.load_created(service) is None
+    backend._compose_created = True
+    backend.record_created_uninstall_authorities(authorities, (service, data))
+    assert authorities.load_created(service) is not None
+    assert authorities.load_created(data) is not None
+    assert authorities.load_created(service).provider == "dokploy_compose"
+    assert authorities.load_created(data).provider == "docker_volume"
 
 
 def test_dokploy_backend_bootstrap_uses_extended_readiness_window(monkeypatch, tmp_path: Path) -> None:

@@ -47,6 +47,7 @@ def test_task1_initial_install_preserves_upload_bound_raw_state_after_runtime_au
     monkeypatch.setattr(cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
     monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
     monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **_: {"state_status": "fresh"})
+    monkeypatch.setattr(cli, "_build_coder_backend", lambda **_: object())
 
     def ensure_runtime_auth(**_kwargs: object) -> RawEnvInput:
         persist_dokploy_runtime_auth(state_dir, runtime_auth)

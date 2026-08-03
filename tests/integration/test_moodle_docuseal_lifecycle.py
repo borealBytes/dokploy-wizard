@@ -18,6 +18,7 @@ from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     OwnedResource,
     OwnershipLedger,
+    load_state_dir,
     parse_env_file,
     resolve_desired_state,
     write_applied_checkpoint,
@@ -25,6 +26,10 @@ from dokploy_wizard.state import (
     write_target_state,
 )
 from dokploy_wizard.state.inspection import build_live_drift_report
+from tests.integration.task11_authority_fakes import (
+    RecordingAuthorityBackend,
+    seed_creation_authority,
+)
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -230,6 +235,10 @@ def test_inspect_state_report_includes_both_enabled_moodle_and_docuseal_entries(
 def test_retain_uninstall_preserves_moodle_and_docuseal_data_resources(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     _seed_both_enabled_state(state_dir)
+    ledger = load_state_dir(state_dir).ownership_ledger
+    assert ledger is not None
+    seed_creation_authority(state_dir, ledger.resources)
+    backend = RecordingAuthorityBackend(state_dir)
     confirm_file = tmp_path / "retain.confirm"
     confirm_file.write_text(
         "# Retain-mode confirmation for moodle-docuseal-stack\n"
@@ -243,6 +252,8 @@ def test_retain_uninstall_preserves_moodle_and_docuseal_data_resources(tmp_path:
         dry_run=False,
         non_interactive=True,
         confirm_file=confirm_file,
+        uninstall_backend=backend,
+        stack_name="moodle-docuseal-stack",
     )
 
     deleted_types = {item["resource_type"] for item in summary["deleted_resources"]}

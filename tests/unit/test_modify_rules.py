@@ -152,10 +152,10 @@ def test_same_target_with_incomplete_checkpoint_and_stale_fingerprint_reruns_fro
     )
 
     assert plan.mode == "resume"
-    assert plan.start_phase == "preflight"
-    assert plan.preserved_phases == ()
-    assert plan.initial_completed_steps == ()
-    assert plan.phases_to_run == plan.applicable_phases
+    assert plan.start_phase == "shared_core"
+    assert plan.preserved_phases == ("preflight", "dokploy_bootstrap", "networking")
+    assert plan.initial_completed_steps == plan.preserved_phases
+    assert plan.phases_to_run == plan.applicable_phases[3:]
 
 
 def test_modify_access_email_change_reruns_access_phase() -> None:
@@ -417,6 +417,7 @@ def test_modify_ignores_ephemeral_docker_auth_key_differences() -> None:
                 "networking",
                 "shared_core",
             ),
+            runtime_images=existing_desired.runtime_images,
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
         requested_raw=requested_raw,
@@ -455,6 +456,7 @@ def test_modify_ignores_remote_helper_key_differences() -> None:
                 "networking",
                 "shared_core",
             ),
+            runtime_images=existing_desired.runtime_images,
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
         requested_raw=requested_raw,
@@ -492,6 +494,7 @@ def test_modify_ignores_desired_only_dokploy_api_url_drift() -> None:
                 "networking",
                 "shared_core",
             ),
+            runtime_images=existing_desired.runtime_images,
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
         requested_raw=raw,
@@ -570,6 +573,7 @@ def test_modify_ignores_redundant_pack_enable_flags_when_packs_is_authoritative(
                 "my-farm-advisor",
                 "cloudflare_access",
             ),
+            runtime_images=existing_desired.runtime_images,
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
         requested_raw=requested_raw,

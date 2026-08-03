@@ -7,6 +7,8 @@ import pytest
 from dokploy_wizard import remote
 from dokploy_wizard.proof.model_sync_task1_context import active_task1_proof_context
 from dokploy_wizard.proof.model_sync_task1_context_schema import Task1ProofContextV1
+from dokploy_wizard.release import CommitArchiveEvidence
+from dokploy_wizard.release_manifest import ReleaseFile, ReleaseManifest
 from dokploy_wizard.remote_transport import ParamikoRemoteTransport
 from tests.test_remote_task1_receipt import ZeroStateTransport, _context
 
@@ -30,7 +32,17 @@ def test_remote_proof_resolves_service_urls_with_validated_task1_context_active(
     monkeypatch.setattr(
         remote,
         "_upload_remote_bundle",
-        lambda **_kwargs: remote.RepositoryArchiveEvidence("1" * 40, "2" * 64),
+        lambda **_kwargs: CommitArchiveEvidence(
+            commit_sha="1" * 40,
+            archive_sha256="2" * 64,
+            manifest=ReleaseManifest(
+                commit_sha="1" * 40,
+                archive_sha256="2" * 64,
+                files=(ReleaseFile("bootstrap.py", "3" * 64, 0, 0o755),),
+            ),
+            bootstrap_bytes=b"",
+            bootstrap_sha256="3" * 64,
+        ),
     )
     monkeypatch.setattr(remote, "_extract_remote_bundle", lambda **_kwargs: None)
 

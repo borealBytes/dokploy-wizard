@@ -49,6 +49,7 @@ from dokploy_wizard.packs.surfsense import (
     SURFSENSE_SERVICE_RESOURCE_TYPE,
 )
 from dokploy_wizard.state import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput
+from dokploy_wizard.state.shared_core_sync import SYNC_SCHEDULE_RESOURCE_TYPE
 from dokploy_wizard.tailscale import TAILSCALE_NODE_RESOURCE_TYPE
 
 
@@ -101,6 +102,9 @@ class UninstallPlan:
 
 
 _RULES: dict[str, DeletionRule] = {
+    SYNC_SCHEDULE_RESOURCE_TYPE: DeletionRule(
+        phase="shared_core", retain_safe=False, priority=34
+    ),
     TAILSCALE_NODE_RESOURCE_TYPE: DeletionRule(phase="tailscale", retain_safe=True, priority=5),
     ACCESS_OTP_PROVIDER_RESOURCE_TYPE: DeletionRule(
         phase="cloudflare_access", retain_safe=True, priority=7
@@ -250,7 +254,12 @@ def build_uninstall_plan(
                 "Uninstall refuses to proceed because the ownership ledger contains "
                 f"unsupported resource type '{resource.resource_type}'."
             )
-        if destroy_data or rule.retain_safe:
+        preserve_only = (
+            resource.resource_type == SYNC_SCHEDULE_RESOURCE_TYPE
+            and resource.metadata is not None
+            and resource.metadata.deletion_policy == "preserve"
+        )
+        if (destroy_data or rule.retain_safe) and not preserve_only:
             deletions.append(
                 PlannedDeletion(
                     resource=resource,

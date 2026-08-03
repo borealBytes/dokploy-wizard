@@ -719,9 +719,14 @@ def _create_committed_archive_fixture(tmp_path: Path) -> Path:
     (repo_root / "src" / "dokploy_wizard").mkdir(parents=True)
     (repo_root / "bin").mkdir()
     (repo_root / "templates").mkdir()
+    (repo_root / "scripts").mkdir()
     (repo_root / "src" / "dokploy_wizard" / "__init__.py").write_text("\n", encoding="utf-8")
     (repo_root / "bin" / "dokploy-wizard").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     (repo_root / "templates" / "deploy.yaml").write_text("services: {}\n", encoding="utf-8")
+    (repo_root / "scripts" / "release_activation_bootstrap.py").write_text(
+        "#!/usr/bin/env python3\n",
+        encoding="utf-8",
+    )
     (repo_root / ".install.env.example").write_text("ROOT_DOMAIN=example.com\n", encoding="utf-8")
     (repo_root / ".gitignore").write_text(
         ".*.env\n.playwright-mcp/\n.omo/\n.codegraph/\n",
@@ -899,15 +904,17 @@ def test_create_repo_archive_fails_closed_when_git_archive_fails(
 ) -> None:
     remote_cli = import_remote_cli_module()
     repo_root = _create_committed_archive_fixture(tmp_path)
-    responses = iter(
-        (
-            subprocess.CompletedProcess(args=[], returncode=0, stdout="1" * 40 + "\n", stderr=""),
-            subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="git failure"),
-        )
-    )
-    monkeypatch.setattr(remote_cli.subprocess, "run", lambda *_args, **_kwargs: next(responses))
 
-    with pytest.raises(remote_cli.RepositoryArchiveError, match="git archive failed"):
+    def fail_create(**_kwargs: object) -> None:
+        raise remote_cli.ReleaseError("git archive command failed")
+
+    monkeypatch.setattr(
+        remote_cli,
+        "create_commit_archive",
+        fail_create,
+    )
+
+    with pytest.raises(remote_cli.RepositoryArchiveError, match="git archive command failed"):
         remote_cli._create_repo_archive(repo_root=repo_root, destination=tmp_path / "repo.tar.gz")
 
 

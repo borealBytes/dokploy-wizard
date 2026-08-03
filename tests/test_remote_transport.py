@@ -136,6 +136,13 @@ def install_env_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def activation_bootstrap(tmp_path: Path) -> Path:
+    path = tmp_path / "release-activation-bootstrap.py"
+    path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
 def make_fake_transport() -> Any:
     def _make(*, failures: dict[str, str] | None = None) -> FakeTransport:
         return FakeTransport(failures=failures)
@@ -168,18 +175,82 @@ def test_upload_records_remote_path_and_env_chmod(
     make_fake_transport: Any,
     repo_archive: Path,
     install_env_file: Path,
+    activation_bootstrap: Path,
+    tmp_path: Path,
 ) -> None:
+    manifest = tmp_path / "release-manifest.json"
+    manifest.write_text('{"archive_sha256":"a"}\n', encoding="utf-8")
     transport = make_fake_transport()
     session = _build_session(remote_transport_subject, transport=transport)
 
-    session.upload_bundle(repo_archive=repo_archive, install_env_file=install_env_file)
+    session.upload_bundle(
+        repo_archive=repo_archive,
+        release_manifest=manifest,
+        activation_bootstrap=activation_bootstrap,
+        bootstrap_sha256="a" * 64,
+        install_env_file=install_env_file,
+    )
 
     assert transport.created_directories == ["/root/dokploy-wizard"]
     assert transport.uploads == [
         (str(repo_archive), "/root/dokploy-wizard/repo.tar.gz"),
+        (str(manifest), "/root/dokploy-wizard/release-manifest.json"),
+        (str(activation_bootstrap), "/root/dokploy-wizard/release-activation-bootstrap.py"),
         (str(install_env_file), "/root/dokploy-wizard/.install.env"),
     ]
-    assert transport.chmod_calls == [("/root/dokploy-wizard/.install.env", 0o600)]
+    assert transport.chmod_calls == [
+        ("/root/dokploy-wizard/release-activation-bootstrap.py", 0o700),
+        ("/root/dokploy-wizard/.install.env", 0o600),
+    ]
+
+
+def test_upload_bundle_uploads_value_free_release_manifest(
+    remote_transport_subject: ModuleType,
+    make_fake_transport: Any,
+    repo_archive: Path,
+    install_env_file: Path,
+    activation_bootstrap: Path,
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "release-manifest.json"
+    manifest.write_text('{"archive_sha256":"a"}\n', encoding="utf-8")
+    transport = make_fake_transport()
+    session = _build_session(remote_transport_subject, transport=transport)
+
+    session.upload_bundle(
+        repo_archive=repo_archive,
+        release_manifest=manifest,
+        activation_bootstrap=activation_bootstrap,
+        bootstrap_sha256="a" * 64,
+        install_env_file=install_env_file,
+    )
+
+    assert (str(manifest), "/root/dokploy-wizard/release-manifest.json") in transport.uploads
+
+
+def test_session_activates_new_manifest_exact_release_before_lifecycle_commands(
+    remote_transport_subject: ModuleType,
+    make_fake_transport: Any,
+) -> None:
+    archive_sha256 = "a" * 64
+    transport = make_fake_transport()
+    session = _build_session(remote_transport_subject, transport=transport)
+
+    session.activate_release(archive_sha256, "b" * 64)
+    session.run_command(subcommand="mutate-install", command="install-command")
+
+    assert transport.commands[0][0] == "activate-release"
+    assert f". {archive_sha256}" not in transport.commands[0][1]
+    assert "tar -x" not in transport.commands[0][1]
+    assert "PYTHONPATH" not in transport.commands[0][1]
+    assert "dokploy_wizard.release" not in transport.commands[0][1]
+    assert (
+        "python3 /root/dokploy-wizard/release-activation-bootstrap.py" in transport.commands[0][1]
+    )
+    assert transport.commands[1] == (
+        "mutate-install",
+        "cd /root/dokploy-wizard/current && install-command",
+    )
 
 
 def test_capture_returns_bounded_stdout_and_separate_stderr(
@@ -282,10 +353,13 @@ def test_upload_bundle_preserves_explicit_env_and_context_file_modes(
     make_fake_transport: Any,
     repo_archive: Path,
     install_env_file: Path,
+    activation_bootstrap: Path,
     tmp_path: Path,
 ) -> None:
     task1_context = tmp_path / "task1-proof-context.json"
+    manifest = tmp_path / "release-manifest.json"
     task1_context.write_text('{"schema_version":1}\n', encoding="utf-8")
+    manifest.write_text('{"archive_sha256":"a"}\n', encoding="utf-8")
     transport = make_fake_transport()
     session = remote_transport_subject.RemoteTransportSession(
         transport=transport,
@@ -295,16 +369,22 @@ def test_upload_bundle_preserves_explicit_env_and_context_file_modes(
 
     session.upload_bundle(
         repo_archive=repo_archive,
+        release_manifest=manifest,
+        activation_bootstrap=activation_bootstrap,
+        bootstrap_sha256="a" * 64,
         install_env_file=install_env_file,
         task1_proof_context=task1_context,
     )
 
     assert transport.uploads == [
         (str(repo_archive), "/root/dokploy-wizard/repo.tar.gz"),
+        (str(manifest), "/root/dokploy-wizard/release-manifest.json"),
+        (str(activation_bootstrap), "/root/dokploy-wizard/release-activation-bootstrap.py"),
         (str(install_env_file), "/root/dokploy-wizard/.install.env"),
         (str(task1_context), "/root/dokploy-wizard/task1-proof-context.json"),
     ]
     assert transport.chmod_calls == [
+        ("/root/dokploy-wizard/release-activation-bootstrap.py", 0o700),
         ("/root/dokploy-wizard/.install.env", 0o600),
         ("/root/dokploy-wizard/task1-proof-context.json", 0o600),
     ]

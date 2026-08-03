@@ -29,10 +29,17 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-dokploy_wizard = ["litellm/*.json"]
+dokploy_wizard = ["litellm/*.json", "dokploy/*.json"]
 
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib"]
+markers = [
+  "central_catalog_only: remote proof executes central-only catalog behavior",
+  "four_costs: remote proof executes four-cost mapping behavior",
+  "unknown_or_unpriced: remote proof rejects unknown or unpriced models",
+  "fusion_ollama_subagent_speech_blocked: remote proof rejects unsupported routes",
+  "direct_route_zero_calls: remote proof verifies direct-route rejection without calls",
+]
 testpaths = ["tests"]
 
 [tool.ruff]
@@ -45,6 +52,7 @@ select = ["E", "F", "I"]
 [tool.mypy]
 python_version = "3.11"
 files = ["src", "tests"]
+exclude = ["^build/"]
 strict = true
 warn_unreachable = true
 show_error_codes = true

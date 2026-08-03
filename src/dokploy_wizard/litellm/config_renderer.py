@@ -41,7 +41,10 @@ def verified_opencode_go_chat_model_ids() -> tuple[str, ...]:
 
 
 def build_litellm_config(
-    flat_env: Mapping[str, str], upstream_creds: Mapping[str, object]
+    flat_env: Mapping[str, str],
+    upstream_creds: Mapping[str, object],
+    *,
+    include_opencode_go_models: bool = True,
 ) -> dict[str, object]:
     model_list: list[dict[str, object]] = []
 
@@ -100,7 +103,11 @@ def build_litellm_config(
         local_alias=local_alias,
         local_upstream_target=local_model,
         openrouter_model_ids=tuple(openrouter_model_ids),
-        opencode_go_model_ids=opencode_go_model_ids if opencode_go_api_key_env is not None else (),
+        opencode_go_model_ids=(
+            opencode_go_model_ids
+            if opencode_go_api_key_env is not None and include_opencode_go_models
+            else ()
+        ),
         nvidia_alias_targets=nvidia_alias_targets,
         cost_metadata_by_alias=cost_metadata_by_alias,
     )

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from hashlib import sha256
 from pathlib import Path
+from traceback import format_exception
 
 import pytest
 
@@ -308,7 +310,10 @@ class FakeLiteLLMAdminApi:
         self.created_keys: list[LiteLLMVirtualKeyRecord] = []
         self.updated_teams: list[LiteLLMTeamRecord] = []
         self.updated_keys: list[LiteLLMVirtualKeyRecord] = []
+        self.updated_key_values: list[str] = []
         self.deleted_key_aliases: list[str] = []
+        self.fail_update_team_for: str | None = None
+        self.update_failure_text = "LiteLLM team update failed."
 
     def readiness(self) -> dict[str, object]:
         return {"status": "connected", "db": "connected"}
@@ -341,6 +346,8 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMTeamRecord:
+        if self.fail_update_team_for == team_alias:
+            raise LiteLLMAdminError(self.update_failure_text)
         team = LiteLLMTeamRecord(
             team_id=team_id,
             team_alias=team_alias,
@@ -366,7 +373,7 @@ class FakeLiteLLMAdminApi:
         if self.fail_create_key_for == key_alias:
             raise LiteLLMAdminError(f"failed to create key {key_alias}")
         record = LiteLLMVirtualKeyRecord(
-            key=key,
+            key=(sha256(key.encode()).hexdigest() if key_alias.startswith("coder-") else key),
             key_alias=key_alias,
             team_id=team_id,
             models=models,
@@ -385,8 +392,9 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
+        existing_key_id = self._keys[key_alias].key
         record = LiteLLMVirtualKeyRecord(
-            key=key,
+            key=existing_key_id,
             key_alias=key_alias,
             team_id=team_id,
             models=models,
@@ -394,6 +402,7 @@ class FakeLiteLLMAdminApi:
         )
         self._keys[key_alias] = record
         self.updated_keys.append(record)
+        self.updated_key_values.append(key)
         return record
 
     def delete_key(self, *, key_alias: str) -> None:
@@ -402,6 +411,312 @@ class FakeLiteLLMAdminApi:
 
     def visible_models_for_key(self, key_alias: str) -> tuple[str, ...]:
         return self._keys[key_alias].models
+
+
+class _DuplicateCoderKeyApi(FakeLiteLLMAdminApi):
+    def list_keys(self) -> tuple[LiteLLMVirtualKeyRecord, ...]:
+        records = super().list_keys()
+        duplicate = next(record for record in records if record.key_alias == "coder-hermes")
+        return (*records, duplicate)
+
+
+class _DriftingNonCoderApi(FakeLiteLLMAdminApi):
+    def update_key(
+        self,
+        *,
+        key_alias: str,
+        key: str,
+        team_id: str | None,
+        models: tuple[str, ...],
+        metadata: Mapping[str, object] | None = None,
+    ) -> LiteLLMVirtualKeyRecord:
+        updated = super().update_key(
+            key_alias=key_alias,
+            key=key,
+            team_id=team_id,
+            models=models,
+            metadata=metadata,
+        )
+        if key_alias == "coder-hermes":
+            non_coder = self._keys["openclaw"]
+            self._keys["openclaw"] = LiteLLMVirtualKeyRecord(
+                key=non_coder.key,
+                key_alias=non_coder.key_alias,
+                team_id=non_coder.team_id,
+                models=("concurrent/non-coder-drift",),
+                metadata=non_coder.metadata,
+            )
+        return updated
+
+
+def _coder_scope_fixture() -> tuple[
+    FakeLiteLLMAdminApi,
+    dict[str, str],
+    dict[str, tuple[str, ...]],
+]:
+    state_keys = {
+        "coder-hermes": "sk-state-coder-hermes",
+        "coder-kdense": "sk-state-coder-kdense",
+        "openclaw": "sk-state-openclaw",
+    }
+    teams = tuple(
+        LiteLLMTeamRecord(
+            team_id=f"team-{consumer}",
+            team_alias=consumer,
+            models=(f"legacy/{consumer}",),
+            metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
+        )
+        for consumer in state_keys
+    )
+    keys = tuple(
+        LiteLLMVirtualKeyRecord(
+            key=(
+                sha256(raw_key.encode()).hexdigest()
+                if consumer.startswith("coder-")
+                else raw_key
+            ),
+            key_alias=consumer,
+            team_id=f"team-{consumer}",
+            models=(f"legacy/{consumer}",),
+            metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
+        )
+        for consumer, raw_key in state_keys.items()
+    )
+    return (
+        FakeLiteLLMAdminApi(teams=teams, keys=keys),
+        state_keys,
+        {
+            "coder-hermes": ("all-proxy-models",),
+            "coder-kdense": ("all-proxy-models",),
+            "openclaw": ("openrouter/new-scope-must-stay-frozen",),
+        },
+    )
+
+
+def _assert_frozen_non_coder_denied(
+    api: FakeLiteLLMAdminApi,
+    state_keys: Mapping[str, str],
+    allowlists: Mapping[str, tuple[str, ...]],
+) -> None:
+    before_teams = api.list_teams()
+    before_keys = api.list_keys()
+
+    with pytest.raises(LiteLLMAdminError) as raised:
+        LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None).reconcile_virtual_keys(
+            generated_keys=state_keys,
+            consumer_model_allowlists=allowlists,
+        )
+
+    assert getattr(raised.value, "status", None) == "blocked"
+    assert api.list_teams() == before_teams
+    assert api.list_keys() == before_keys
+    assert api.created_teams == []
+    assert api.created_keys == []
+    assert api.updated_teams == []
+    assert api.updated_keys == []
+    assert api.deleted_key_aliases == []
+
+
+def test_all_proxy_reconciles_coder_then_updates_non_coder_and_reruns_noop() -> None:
+    api, state_keys, allowlists = _coder_scope_fixture()
+    api._teams["unrelated"] = LiteLLMTeamRecord(
+        team_id="team-unrelated",
+        team_alias="unrelated",
+        models=("unrelated/frozen",),
+        metadata={"owner": "external"},
+    )
+    api._keys["unrelated"] = LiteLLMVirtualKeyRecord(
+        key="unrelated-key-id",
+        key_alias="unrelated",
+        team_id="team-unrelated",
+        models=("unrelated/frozen",),
+        metadata={"owner": "external"},
+    )
+    unrelated_team_before = api._teams["unrelated"]
+    unrelated_key_before = api._keys["unrelated"]
+    state_before = dict(state_keys)
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    first = manager.reconcile_virtual_keys(
+        generated_keys=state_keys,
+        consumer_model_allowlists=allowlists,
+    )
+    first_mutation_counts = (len(api.updated_teams), len(api.updated_keys))
+    second = manager.reconcile_virtual_keys(
+        generated_keys=state_keys,
+        consumer_model_allowlists=allowlists,
+    )
+
+    assert state_keys == state_before
+    assert first_mutation_counts == (3, 3)
+    assert (len(api.updated_teams), len(api.updated_keys)) == first_mutation_counts
+    assert {record.team_alias for record in api.updated_teams} == {
+        "coder-hermes",
+        "coder-kdense",
+        "openclaw",
+    }
+    assert {record.key_alias for record in api.updated_keys} == {
+        "coder-hermes",
+        "coder-kdense",
+        "openclaw",
+    }
+    assert api.created_teams == []
+    assert api.created_keys == []
+    assert api.deleted_key_aliases == []
+    assert api.updated_key_values == [
+        state_keys["coder-hermes"],
+        state_keys["coder-kdense"],
+        state_keys["openclaw"],
+    ]
+    assert first.keys() == state_keys.keys()
+    assert second.keys() == state_keys.keys()
+    assert api._teams["unrelated"] == unrelated_team_before
+    assert api._keys["unrelated"] == unrelated_key_before
+    assert first["openclaw"].models == allowlists["openclaw"]
+    assert second["openclaw"].models == allowlists["openclaw"]
+    for consumer in ("coder-hermes", "coder-kdense"):
+        expected_key_id = sha256(state_keys[consumer].encode()).hexdigest()
+        assert first[consumer].key == expected_key_id
+        assert second[consumer].key == expected_key_id
+        assert second[consumer].models == ("all-proxy-models",)
+        assert next(
+            team for team in api.list_teams() if team.team_alias == consumer
+        ).models == ("all-proxy-models",)
+
+
+def test_all_proxy_empty_inventory_bootstraps_every_requested_consumer_and_reruns_noop() -> (
+    None
+):
+    consumers = tuple(sorted(_EXPECTED_LITELLM_CONSUMERS))
+    state_keys = {consumer: f"sk-fresh-{consumer}" for consumer in consumers}
+    allowlists = {
+        consumer: (
+            ("all-proxy-models",)
+            if consumer.startswith("coder-")
+            else (f"restricted/{consumer}",)
+        )
+        for consumer in consumers
+    }
+    api = FakeLiteLLMAdminApi()
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    first = manager.reconcile_virtual_keys(
+        generated_keys=state_keys,
+        consumer_model_allowlists=allowlists,
+    )
+    first_write_counts = (len(api.created_teams), len(api.created_keys))
+    second = manager.reconcile_virtual_keys(
+        generated_keys=state_keys,
+        consumer_model_allowlists=allowlists,
+    )
+
+    assert first.keys() == state_keys.keys()
+    assert second.keys() == state_keys.keys()
+    assert first_write_counts == (len(consumers), len(consumers))
+    assert (len(api.created_teams), len(api.created_keys)) == first_write_counts
+    assert api.updated_teams == []
+    assert api.updated_keys == []
+    assert api.deleted_key_aliases == []
+    for consumer in consumers:
+        assert second[consumer].models == allowlists[consumer]
+    for consumer in ("coder-hermes", "coder-kdense"):
+        assert second[consumer].key == sha256(state_keys[consumer].encode()).hexdigest()
+
+
+def test_frozen_non_coder_denied_when_coder_row_is_missing() -> None:
+    api, state_keys, allowlists = _coder_scope_fixture()
+    api._keys.pop("coder-hermes")
+
+    _assert_frozen_non_coder_denied(api, state_keys, allowlists)
+
+
+def test_frozen_non_coder_denied_when_coder_row_is_duplicated() -> None:
+    source_api, state_keys, allowlists = _coder_scope_fixture()
+    api = _DuplicateCoderKeyApi(
+        teams=source_api.list_teams(),
+        keys=source_api.list_keys(),
+    )
+
+    _assert_frozen_non_coder_denied(api, state_keys, allowlists)
+
+
+def test_frozen_non_coder_denied_when_coder_row_is_renamed() -> None:
+    api, state_keys, allowlists = _coder_scope_fixture()
+    record = api._keys.pop("coder-hermes")
+    api._keys["coder-hermes-renamed"] = LiteLLMVirtualKeyRecord(
+        key=record.key,
+        key_alias="coder-hermes-renamed",
+        team_id=record.team_id,
+        models=record.models,
+        metadata=record.metadata,
+    )
+
+    _assert_frozen_non_coder_denied(api, state_keys, allowlists)
+
+
+def test_frozen_non_coder_denied_when_coder_identity_drifted() -> None:
+    api, state_keys, allowlists = _coder_scope_fixture()
+    record = api._keys["coder-hermes"]
+    api._keys["coder-hermes"] = LiteLLMVirtualKeyRecord(
+        key=sha256(b"sk-different-coder-key").hexdigest(),
+        key_alias=record.key_alias,
+        team_id=record.team_id,
+        models=record.models,
+        metadata=record.metadata,
+    )
+
+    _assert_frozen_non_coder_denied(api, state_keys, allowlists)
+
+
+def test_frozen_non_coder_denied_when_non_coder_scope_changes_during_update() -> None:
+    source_api, state_keys, allowlists = _coder_scope_fixture()
+    api = _DriftingNonCoderApi(
+        teams=source_api.list_teams(),
+        keys=source_api.list_keys(),
+    )
+
+    with pytest.raises(LiteLLMAdminError) as raised:
+        LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None).reconcile_virtual_keys(
+            generated_keys=state_keys,
+            consumer_model_allowlists=allowlists,
+        )
+
+    assert getattr(raised.value, "status", None) == "blocked"
+    assert getattr(raised.value, "phase", None) == "postcheck"
+    assert {team.team_alias for team in api.updated_teams} == {
+        "coder-hermes",
+        "coder-kdense",
+    }
+    assert {key.key_alias for key in api.updated_keys} == {
+        "coder-hermes",
+        "coder-kdense",
+    }
+    assert api.created_keys == []
+    assert api.deleted_key_aliases == []
+
+
+def test_rendered_key_leak_is_redacted_from_partial_scope_update_failure() -> None:
+    api, state_keys, allowlists = _coder_scope_fixture()
+    secrets = (
+        *state_keys.values(),
+        "sk-litellm-master-must-not-render",
+        "sk-upstream-provider-must-not-render",
+    )
+    api.fail_update_team_for = "coder-kdense"
+    api.update_failure_text = " ".join(secrets)
+
+    with pytest.raises(LiteLLMAdminError) as raised:
+        LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None).reconcile_virtual_keys(
+            generated_keys=state_keys,
+            consumer_model_allowlists=allowlists,
+        )
+
+    rendered = "".join(format_exception(raised.value))
+    assert getattr(raised.value, "status", None) == "failed"
+    assert getattr(raised.value, "completed_mutations", ()) != ()
+    assert {team.team_alias for team in api.updated_teams} == {"coder-hermes"}
+    assert {key.key_alias for key in api.updated_keys} == {"coder-hermes"}
+    assert all(secret not in rendered for secret in secrets)
 
 
 def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
@@ -449,7 +764,7 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
 
     assert api.created_keys == [
         LiteLLMVirtualKeyRecord(
-            key="new-coder-kdense-key",
+            key=sha256(b"new-coder-kdense-key").hexdigest(),
             key_alias="coder-kdense",
             team_id="team-coder-kdense",
             models=(
@@ -460,7 +775,7 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
         )
     ]
     assert reconciled["my-farm-advisor"].key == "existing-my-farm-key"
-    assert reconciled["coder-kdense"].key == "new-coder-kdense-key"
+    assert reconciled["coder-kdense"].key == sha256(b"new-coder-kdense-key").hexdigest()
     assert api.visible_models_for_key("my-farm-advisor") == (
         "local-model.internal/unsloth-active",
         "openrouter/anthropic/claude-3.5-sonnet",

@@ -162,6 +162,8 @@ def persist_compose_artifact_hash(
             lifecycle_checkpoint_contract_version=(
                 applied_state.lifecycle_checkpoint_contract_version
             ),
+            runtime_images=applied_state.runtime_images,
+            opencode_go_sync=applied_state.opencode_go_sync,
         ),
     )
     return rendered_hash
