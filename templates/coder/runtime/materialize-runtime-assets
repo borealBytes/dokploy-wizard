@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root_dir=$(cd "$(dirname "$0")/../../.." && pwd)
+PYTHONPATH="$root_dir/src${PYTHONPATH:+:$PYTHONPATH}" \
+  exec python3 -m dokploy_wizard.dokploy.coder_runtime_asset_materializer "$@"

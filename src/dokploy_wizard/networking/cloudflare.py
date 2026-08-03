@@ -147,6 +147,8 @@ class CloudflareBackend(Protocol):
         self, account_id: str, name: str
     ) -> CloudflareAccessIdentityProvider: ...
 
+    def delete_access_identity_provider(self, account_id: str, provider_id: str) -> None: ...
+
     def get_access_application(
         self, account_id: str, app_id: str
     ) -> CloudflareAccessApplication | None: ...
@@ -167,6 +169,8 @@ class CloudflareBackend(Protocol):
         domain: str,
         allowed_identity_provider_ids: tuple[str, ...],
     ) -> CloudflareAccessApplication: ...
+
+    def delete_access_application(self, account_id: str, app_id: str) -> None: ...
 
     def get_access_policy(
         self, account_id: str, app_id: str, policy_id: str
@@ -205,6 +209,7 @@ class CloudflareApiBackend:
             for item in values.get("CLOUDFLARE_MOCK_EXISTING_HOSTNAMES", "").split(",")
             if item.strip() != ""
         }
+        self._mock_dns_records: dict[str, CloudflareDnsRecord] = {}
         self._mock_access_app_ids: dict[str, str] = {}
         self._mock_access_policies: dict[str, CloudflareAccessPolicy] = {}
 
@@ -264,10 +269,7 @@ class CloudflareApiBackend:
 
     def get_tunnel(self, account_id: str, tunnel_id: str) -> CloudflareTunnel | None:
         if self._mock_account_ok is not None:
-            expected_tunnel_id = self._mock_existing_tunnel_id or _mock_tunnel_id(
-                self._mock_tunnel_name
-            )
-            if expected_tunnel_id == tunnel_id:
+            if self._mock_existing_tunnel_id == tunnel_id:
                 return CloudflareTunnel(tunnel_id=tunnel_id, name=self._mock_tunnel_name)
             return None
 
@@ -318,6 +320,8 @@ class CloudflareApiBackend:
     def create_tunnel(self, account_id: str, tunnel_name: str) -> CloudflareTunnel:
         if self._mock_account_ok is not None:
             tunnel_id = self._mock_existing_tunnel_id or _mock_tunnel_id(tunnel_name)
+            self._mock_existing_tunnel_id = tunnel_id
+            self._mock_tunnel_name = tunnel_name
             return CloudflareTunnel(tunnel_id=tunnel_id, name=tunnel_name)
 
         payload = self._request_json(
@@ -408,6 +412,14 @@ class CloudflareApiBackend:
         content: str | None,
     ) -> tuple[CloudflareDnsRecord, ...]:
         if self._mock_zone_ok is not None:
+            created = self._mock_dns_records.get(_mock_dns_record_id(hostname))
+            if created is not None:
+                if (
+                    (record_type is None or created.record_type == record_type)
+                    and (content is None or created.content == content)
+                ):
+                    return (created,)
+                return ()
             if hostname.lower() not in self._mock_existing_hostnames and content is None:
                 return ()
             target = content or (
@@ -454,13 +466,15 @@ class CloudflareApiBackend:
         proxied: bool,
     ) -> CloudflareDnsRecord:
         if self._mock_zone_ok is not None:
-            return CloudflareDnsRecord(
+            record = CloudflareDnsRecord(
                 record_id=_mock_dns_record_id(hostname),
                 name=hostname.lower(),
                 record_type="CNAME",
                 content=content,
                 proxied=proxied,
             )
+            self._mock_dns_records[record.record_id] = record
+            return record
 
         payload = self._request_json(
             method="POST",
@@ -476,7 +490,7 @@ class CloudflareApiBackend:
 
     def get_dns_record(self, zone_id: str, record_id: str) -> CloudflareDnsRecord | None:
         if self._mock_zone_ok is not None:
-            return None
+            return self._mock_dns_records.get(record_id)
         try:
             payload = self._request_json(
                 method="GET", path=f"/zones/{zone_id}/dns_records/{record_id}"
@@ -489,6 +503,7 @@ class CloudflareApiBackend:
 
     def delete_dns_record(self, zone_id: str, record_id: str) -> None:
         if self._mock_zone_ok is not None:
+            self._mock_dns_records.pop(record_id, None)
             return
         self._request_json(method="DELETE", path=f"/zones/{zone_id}/dns_records/{record_id}")
 
@@ -635,6 +650,14 @@ class CloudflareApiBackend:
             body={"name": name, "type": "onetimepin", "config": {}},
         )
         return _parse_access_identity_provider(payload)
+
+    def delete_access_identity_provider(self, account_id: str, provider_id: str) -> None:
+        if self._mock_account_ok is not None:
+            return
+        self._request_json(
+            method="DELETE",
+            path=f"/accounts/{account_id}/access/identity_providers/{provider_id}",
+        )
 
     def get_access_application(
         self, account_id: str, app_id: str

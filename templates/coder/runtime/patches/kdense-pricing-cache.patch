@@ -1,0 +1,100 @@
+diff --git a/scripts/update-models.py b/scripts/update-models.py
+index 15d173a..ef7e495 100644
+--- a/scripts/update-models.py
++++ b/scripts/update-models.py
+@@ -115,12 +115,16 @@ def main() -> None:
+                 continue
+             prompt = round(float(m["pricing"]["prompt"]) * 1_000_000, 6)
+             completion = round(float(m["pricing"]["completion"]) * 1_000_000, 6)
+-            if prompt < 0 or completion < 0:
++            cache_read = round(float(m["pricing"].get("input_cache_read", 0)) * 1_000_000, 6)
++            cache_write = round(float(m["pricing"].get("input_cache_write", 0)) * 1_000_000, 6)
++            if min(prompt, completion, cache_read, cache_write) < 0:
+                 continue
+         else:
+             # Fusion is a special meta-model with variable pricing and no tools param
+             prompt = 0.0
+             completion = 0.0
++            cache_read = 0.0
++            cache_write = 0.0
+ 
+         provider = "Openrouter Fusion" if is_fusion else provider_for(model_id)
+         or_id = model_id if is_fusion else f"openrouter/{model_id}"
+@@ -130,7 +134,12 @@ def main() -> None:
+             "provider": provider,
+             "tier": "flagship" if is_fusion else tier_for(prompt),
+             "context_length": m["context_length"],
+-            "pricing": {"prompt": prompt, "completion": completion},
++            "pricing": {
++                "prompt": prompt,
++                "completion": completion,
++                "input_cache_read": cache_read,
++                "input_cache_write": cache_write,
++            },
+             "modality": m["architecture"]["modality"],
+             "description": truncate(m["description"]),
+             "isFusion": is_fusion,
+diff --git a/server/src/agent/models.ts b/server/src/agent/models.ts
+index 5a49102..072df6a 100644
+--- a/server/src/agent/models.ts
++++ b/server/src/agent/models.ts
+@@ -35,6 +35,8 @@ interface CatalogueEntry {
+   maxTokens: number;
+   costInput: number; // USD per 1M prompt tokens
+   costOutput: number; // USD per 1M completion tokens
++  costCacheRead: number;
++  costCacheWrite: number;
+   input: ("text" | "image")[];
+   label: string;
+ }
+@@ -65,6 +67,8 @@ function loadCatalogue(): Map<string, CatalogueEntry> {
+         maxTokens: Number(m.max_completion_tokens ?? 0) || 8192,
+         costInput: Number(pricing.prompt ?? 0),
+         costOutput: Number(pricing.completion ?? 0),
++        costCacheRead: Number(pricing.input_cache_read ?? 0),
++        costCacheWrite: Number(pricing.input_cache_write ?? 0),
+         input,
+         label: String(m.label ?? id),
+       });
+@@ -119,8 +123,8 @@ function buildOpenRouterModel(orId: string): Model<Api> {
+     cost: {
+       input: cat?.costInput ?? 0,
+       output: cat?.costOutput ?? 0,
+-      cacheRead: 0,
+-      cacheWrite: 0,
++      cacheRead: cat?.costCacheRead ?? 0,
++      cacheWrite: cat?.costCacheWrite ?? 0,
+     },
+     contextWindow: cat?.contextWindow ?? 128_000,
+     maxTokens: cat?.maxTokens ?? 8192,
+@@ -147,12 +151,16 @@ function fusionPanelModels(fusionConfig: Record<string, unknown>): string[] {
+ export function buildFusionModel(fusionConfig: Record<string, unknown>): Model<Api> {
+   let costInput = 0;
+   let costOutput = 0;
++  let costCacheRead = 0;
++  let costCacheWrite = 0;
+   let priced = 0;
+   for (const modelId of fusionPanelModels(fusionConfig)) {
+     const entry = catalogueEntryFor(stripOpenRouter(modelId));
+     if (!entry) continue;
+     costInput += entry.costInput;
+     costOutput += entry.costOutput;
++    costCacheRead += entry.costCacheRead;
++    costCacheWrite += entry.costCacheWrite;
+     priced++;
+   }
+   if (priced === 0 || (costInput === 0 && costOutput === 0)) {
+@@ -169,7 +177,12 @@ export function buildFusionModel(fusionConfig: Record<string, unknown>): Model<A
+     baseUrl: OPENROUTER_BASE_URL,
+     reasoning: true,
+     input: ["text"],
+-    cost: { input: costInput, output: costOutput, cacheRead: 0, cacheWrite: 0 },
++    cost: {
++      input: costInput,
++      output: costOutput,
++      cacheRead: costCacheRead,
++      cacheWrite: costCacheWrite,
++    },
+     contextWindow: 1_000_000,
+     maxTokens: 8192,
+   };

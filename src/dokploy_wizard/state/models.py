@@ -8,6 +8,14 @@ from hashlib import sha256
 from typing import Any
 
 from dokploy_wizard.core.models import SharedCorePlan
+from dokploy_wizard.state.runtime_images import (
+    RuntimeImageError,
+    RuntimeImages,
+    resolve_runtime_images,
+)
+from dokploy_wizard.state.sync_ownership import SyncOwnershipMetadata
+from dokploy_wizard.state.sync_schema import SyncStateError
+from dokploy_wizard.state.sync_state import AppliedSyncState, SyncDesiredState
 
 STATE_FORMAT_VERSION = 1
 LEGACY_LIFECYCLE_CHECKPOINT_CONTRACT_VERSION = 1
@@ -398,6 +406,8 @@ class DesiredState:
     my_farm_advisor_channels: tuple[str, ...]
     my_farm_advisor_replicas: int | None
     shared_core: SharedCorePlan
+    runtime_images: RuntimeImages = field(default_factory=lambda: resolve_runtime_images({}))
+    opencode_go_sync: SyncDesiredState | None = None
 
     def __post_init__(self) -> None:
         if self.format_version != STATE_FORMAT_VERSION:
@@ -465,6 +475,9 @@ class DesiredState:
             raise StateValidationError(msg)
 
     def to_dict(self) -> dict[str, Any]:
+        shared_core = self.shared_core.to_dict()
+        if self.opencode_go_sync is not None:
+            shared_core["opencode_go_sync"] = self.opencode_go_sync.to_dict()
         return {
             "format_version": self.format_version,
             "stack_name": self.stack_name,
@@ -488,7 +501,8 @@ class DesiredState:
             "openclaw_replicas": self.openclaw_replicas,
             "my_farm_advisor_channels": list(self.my_farm_advisor_channels),
             "my_farm_advisor_replicas": self.my_farm_advisor_replicas,
-            "shared_core": self.shared_core.to_dict(),
+            "runtime_images": self.runtime_images.to_dict(),
+            "shared_core": shared_core,
         }
 
     def fingerprint(self) -> str:
@@ -528,7 +542,9 @@ class DesiredState:
             my_farm_advisor_replicas=_require_optional_positive_int(
                 payload, "my_farm_advisor_replicas"
             ),
+            runtime_images=_require_runtime_images(payload),
             shared_core=_require_shared_core(payload, "shared_core"),
+            opencode_go_sync=_require_sync_desired(payload, "shared_core"),
         )
 
 
@@ -537,9 +553,27 @@ def _require_shared_core(payload: dict[str, Any], key: str) -> SharedCorePlan:
     if not isinstance(value, dict):
         msg = f"Expected object for '{key}'."
         raise StateValidationError(msg)
+    plan_payload = dict(value)
+    plan_payload.pop("opencode_go_sync", None)
     try:
-        return SharedCorePlan.from_dict(value)
+        return SharedCorePlan.from_dict(plan_payload)
     except ValueError as error:
+        raise StateValidationError(str(error)) from error
+
+
+def _require_sync_desired(payload: dict[str, Any], key: str) -> SyncDesiredState | None:
+    shared_core = payload.get(key)
+    if not isinstance(shared_core, dict):
+        msg = f"Expected object for '{key}'."
+        raise StateValidationError(msg)
+    value = shared_core.get("opencode_go_sync")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise StateValidationError("Shared Core opencode_go_sync must be an object.")
+    try:
+        return SyncDesiredState.from_dict(value)
+    except SyncStateError as error:
         raise StateValidationError(str(error)) from error
 
 
@@ -551,6 +585,18 @@ def _require_optional_positive_int(payload: dict[str, Any], key: str) -> int | N
         msg = f"Expected positive integer or null for '{key}'."
         raise StateValidationError(msg)
     return value
+
+
+def _require_runtime_images(payload: dict[str, Any]) -> RuntimeImages:
+    value = payload.get("runtime_images")
+    if value is None:
+        return resolve_runtime_images({})
+    if not isinstance(value, dict):
+        raise StateValidationError("Runtime image manifest must be an object.")
+    try:
+        return RuntimeImages.from_dict(value)
+    except RuntimeImageError as error:
+        raise StateValidationError(str(error)) from error
 
 
 def _require_optional_string(payload: dict[str, Any], key: str) -> str | None:
@@ -718,6 +764,8 @@ class AppliedStateCheckpoint:
     completed_steps: tuple[str, ...]
     compose_artifact_hashes: dict[str, ComposeArtifactHashState] = field(default_factory=dict)
     lifecycle_checkpoint_contract_version: int = LIFECYCLE_CHECKPOINT_CONTRACT_VERSION
+    runtime_images: RuntimeImages | None = None
+    opencode_go_sync: AppliedSyncState | None = None
 
     def __post_init__(self) -> None:
         if self.format_version != STATE_FORMAT_VERSION:
@@ -750,7 +798,7 @@ class AppliedStateCheckpoint:
             raise StateValidationError(msg)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "format_version": self.format_version,
             "desired_state_fingerprint": self.desired_state_fingerprint,
             "completed_steps": list(self.completed_steps),
@@ -760,6 +808,11 @@ class AppliedStateCheckpoint:
             },
             "lifecycle_checkpoint_contract_version": self.lifecycle_checkpoint_contract_version,
         }
+        if self.opencode_go_sync is not None:
+            payload["opencode_go_sync"] = self.opencode_go_sync.to_dict()
+        if self.runtime_images is not None:
+            payload["runtime_images"] = self.runtime_images.to_dict()
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> AppliedStateCheckpoint:
@@ -773,7 +826,33 @@ class AppliedStateCheckpoint:
             lifecycle_checkpoint_contract_version=_require_lifecycle_checkpoint_contract_version(
                 payload
             ),
+            runtime_images=_require_optional_runtime_images(payload),
+            opencode_go_sync=_require_applied_sync(payload),
         )
+
+
+def _require_applied_sync(payload: dict[str, Any]) -> AppliedSyncState | None:
+    value = payload.get("opencode_go_sync")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise StateValidationError("Applied opencode_go_sync must be an object.")
+    try:
+        return AppliedSyncState.from_dict(value)
+    except SyncStateError as error:
+        raise StateValidationError(str(error)) from error
+
+
+def _require_optional_runtime_images(payload: dict[str, Any]) -> RuntimeImages | None:
+    value = payload.get("runtime_images")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise StateValidationError("Applied runtime image manifest must be an object.")
+    try:
+        return RuntimeImages.from_dict(value)
+    except RuntimeImageError as error:
+        raise StateValidationError(str(error)) from error
 
 
 @dataclass(frozen=True)
@@ -783,25 +862,51 @@ class OwnedResource:
     resource_type: str
     resource_id: str
     scope: str
+    metadata: SyncOwnershipMetadata | None = None
 
     def __post_init__(self) -> None:
         if self.resource_type == "" or self.resource_id == "" or self.scope == "":
             msg = "Owned resources require non-empty type, id, and scope."
             raise StateValidationError(msg)
+        if self.resource_type == "shared_core_sync_schedule" and self.metadata is None:
+            msg = "Shared Core sync schedules require strict ownership metadata."
+            raise StateValidationError(msg)
+        if self.metadata is not None and self.metadata.physical_target_id != self.resource_id:
+            msg = "Ownership metadata physical target must match the ledger resource id."
+            raise StateValidationError(msg)
 
-    def to_dict(self) -> dict[str, str]:
-        return {
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "resource_type": self.resource_type,
             "resource_id": self.resource_id,
             "scope": self.scope,
         }
+        if self.metadata is not None:
+            payload["metadata"] = self.metadata.to_dict()
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> OwnedResource:
+        expected_keys = {"resource_type", "resource_id", "scope"}
+        payload_keys = set(payload)
+        if payload_keys != expected_keys and payload_keys != expected_keys | {"metadata"}:
+            msg = "Owned resource must contain the exact keys for its schema version."
+            raise StateValidationError(msg)
+        metadata_payload = payload.get("metadata")
+        metadata: SyncOwnershipMetadata | None = None
+        if metadata_payload is not None:
+            if not isinstance(metadata_payload, dict):
+                msg = "Owned resource metadata must be an object."
+                raise StateValidationError(msg)
+            try:
+                metadata = SyncOwnershipMetadata.from_dict(metadata_payload)
+            except SyncStateError as error:
+                raise StateValidationError(str(error)) from error
         return cls(
             resource_type=_require_string(payload, "resource_type"),
             resource_id=_require_string(payload, "resource_id"),
             scope=_require_string(payload, "scope"),
+            metadata=metadata,
         )
 
 

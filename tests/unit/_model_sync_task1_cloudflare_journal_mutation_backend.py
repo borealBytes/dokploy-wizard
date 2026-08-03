@@ -141,6 +141,9 @@ class _MutationBackend:
     ) -> CloudflareAccessIdentityProvider:
         return CloudflareAccessIdentityProvider("otp-provider", name, "onetimepin")
 
+    def delete_access_identity_provider(self, _account_id: str, _provider_id: str) -> None:
+        return None
+
     def find_access_application_by_domain(
         self, _account_id: str, domain: str
     ) -> CloudflareAccessApplication | None:
@@ -169,6 +172,9 @@ class _MutationBackend:
         )
         self.apps[app.app_id] = app
         return app
+
+    def delete_access_application(self, _account_id: str, app_id: str) -> None:
+        self.apps.pop(app_id, None)
 
     def get_access_application(
         self, _account_id: str, app_id: str

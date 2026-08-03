@@ -2,8 +2,12 @@
 # ruff: noqa: E501
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import subprocess
+import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -12,6 +16,12 @@ import dokploy_wizard.cli as cli
 from dokploy_wizard.cli import run_install_flow, run_modify_flow
 from dokploy_wizard.core import SharedCoreResourceRecord
 from dokploy_wizard.lifecycle import applicable_phases_for
+from dokploy_wizard.release import (
+    ReleaseError,
+    activate_release,
+    create_commit_archive,
+    manifest_from_archive,
+)
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     OwnedResource,
@@ -68,6 +78,7 @@ def _seed_lifecycle_state(
             format_version=desired_state.format_version,
             desired_state_fingerprint=desired_state.fingerprint(),
             completed_steps=completed_steps or applicable_phases_for(desired_state),
+            runtime_images=desired_state.runtime_images,
         ),
     )
     write_ownership_ledger(
@@ -141,7 +152,9 @@ class FakeSharedCoreBackend:
         del resource_id
         return None
 
-    def find_mail_relay_service_by_name(self, resource_name: str) -> SharedCoreResourceRecord | None:
+    def find_mail_relay_service_by_name(
+        self, resource_name: str
+    ) -> SharedCoreResourceRecord | None:
         del resource_name
         return None
 
@@ -511,7 +524,9 @@ def test_cli_install_rejects_legacy_checkpoint_contract_with_nonempty_progress(
     assert "Only empty install scaffolds can be restarted" in resumed.stderr
 
 
-def test_run_install_rerun_noop_surfaces_both_enabled_moodle_and_docuseal(monkeypatch, tmp_path: Path) -> None:
+def test_run_install_rerun_noop_surfaces_both_enabled_moodle_and_docuseal(
+    monkeypatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_: None)
     state_dir = tmp_path / "state"
     env_path = _seed_moodle_docuseal_state(state_dir)
@@ -542,7 +557,9 @@ def test_run_modify_admin_change_keeps_moodle_and_docuseal_seed_only_after_succe
     env_path = _seed_moodle_docuseal_state(state_dir)
     modify_env = _write_env(
         tmp_path / "modify.env",
-        _replace_line(env_path.read_text(encoding="utf-8"), "DOKPLOY_ADMIN_PASSWORD", "EvenSaferPass123"),
+        _replace_line(
+            env_path.read_text(encoding="utf-8"), "DOKPLOY_ADMIN_PASSWORD", "EvenSaferPass123"
+        ),
     )
 
     with pytest.raises(
@@ -554,4 +571,226 @@ def test_run_modify_admin_change_keeps_moodle_and_docuseal_seed_only_after_succe
             state_dir=state_dir,
             dry_run=True,
             shared_core_backend=FakeSharedCoreBackend(allocations_ready=True),
+        )
+
+
+def _write_release_archive(path: Path, files: tuple[tuple[str, bytes], ...]) -> None:
+    with tarfile.open(path, "w:gz") as archive:
+        for name, content in files:
+            member = tarfile.TarInfo(name)
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+
+
+def test_remote_manifest_exact_rejects_tracked_deployable_drift(tmp_path: Path) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    def run_git(command: tuple[str, ...]) -> str:
+        commands.append(command)
+        return " M src/dokploy_wizard/cli.py\0"
+
+    with pytest.raises(ReleaseError, match="deployable drift"):
+        create_commit_archive(
+            repo_root=tmp_path,
+            deploy_commit="a" * 40,
+            destination=tmp_path / "release.tar.gz",
+            run_git=run_git,
+        )
+
+    assert commands == [
+        (
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            "src",
+            "templates",
+            "docker",
+            "bin",
+            "scripts",
+            "pyproject.toml",
+            "pytest.ini",
+            "README.md",
+            "AGENTS.md",
+        )
+    ]
+
+
+def test_remote_manifest_exact_rejects_untracked_deployable_drift(tmp_path: Path) -> None:
+    def run_git(_command: tuple[str, ...]) -> str:
+        return "?? templates/runtime/generated.txt\0"
+
+    with pytest.raises(ReleaseError, match="deployable drift"):
+        create_commit_archive(
+            repo_root=tmp_path,
+            deploy_commit="a" * 40,
+            destination=tmp_path / "release.tar.gz",
+            run_git=run_git,
+        )
+
+
+def test_remote_manifest_exact_archives_only_resolved_deploy_commit_and_activates_clean_generation(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "release.tar.gz"
+    commit = "a" * 40
+    commands: list[tuple[str, ...]] = []
+
+    def run_git(command: tuple[str, ...]) -> str:
+        commands.append(command)
+        match command:
+            case ("status", *_rest):
+                return ""
+            case ("rev-parse", "--verify", revision):
+                assert revision == f"{commit}^{{commit}}"
+                return f"{commit}\n"
+            case ("archive", "--format=tar.gz", output, archive_commit):
+                assert output == f"--output={archive.resolve()}"
+                assert archive_commit == commit
+                _write_release_archive(
+                    archive,
+                    (
+                        ("src/dokploy_wizard/__init__.py", b"version-one\n"),
+                        ("scripts/release_activation_bootstrap.py", b"#!/usr/bin/env python3\n"),
+                    ),
+                )
+                return ""
+            case unexpected:
+                raise AssertionError(unexpected)
+
+    evidence = create_commit_archive(
+        repo_root=tmp_path,
+        deploy_commit=commit,
+        destination=archive,
+        run_git=run_git,
+    )
+    current = tmp_path / "current"
+    releases = tmp_path / "releases"
+    first = activate_release(
+        archive_path=archive,
+        manifest=evidence.manifest,
+        releases_root=releases,
+        active_link=current,
+    )
+
+    next_archive = tmp_path / "next-release.tar.gz"
+    _write_release_archive(
+        next_archive,
+        (("src/dokploy_wizard/__init__.py", b"version-two\n"),),
+    )
+    next_manifest = manifest_from_archive(commit, next_archive)
+    second = activate_release(
+        archive_path=next_archive,
+        manifest=next_manifest,
+        releases_root=releases,
+        active_link=current,
+    )
+    assert current.resolve() == second.generation_path
+    assert first.generation_path != second.generation_path
+    assert (current / "src/dokploy_wizard/__init__.py").read_bytes() == b"version-two\n"
+
+    assert commands[-1] == ("archive", "--format=tar.gz", f"--output={archive.resolve()}", commit)
+
+
+def _bootstrap_run(
+    tmp_path: Path, archive: Path, manifest: Path, bootstrap_hash: str
+) -> subprocess.CompletedProcess[str]:
+    bootstrap = tmp_path / "bootstrap.py"
+    bootstrap.write_bytes((REPO_ROOT / "scripts/release_activation_bootstrap.py").read_bytes())
+    bootstrap.chmod(0o700)
+    return subprocess.run(
+        [
+            sys.executable,
+            str(bootstrap),
+            "--archive",
+            str(archive),
+            "--manifest",
+            str(manifest),
+            "--bootstrap-sha256",
+            bootstrap_hash,
+            "--releases-root",
+            str(tmp_path / "releases"),
+            "--active-link",
+            str(tmp_path / "current"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _bootstrap_manifest(archive: Path, members: tuple[tuple[str, bytes], ...]) -> Path:
+    entries = [
+        {"mode": 0o644, "path": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+        for name, data in members
+    ]
+    manifest = archive.with_suffix(".json")
+    manifest.write_bytes(
+        json.dumps(
+            {"archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(), "commit_sha": "a" * 40, "files": entries},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+    return manifest
+
+
+def test_standalone_bootstrap_activates_and_replays_exact_archive(tmp_path: Path) -> None:
+    archive = tmp_path / "release.tar.gz"
+    members = (("src/dokploy_wizard/__init__.py", b"version\n"),)
+    _write_release_archive(archive, members)
+    manifest = _bootstrap_manifest(archive, members)
+    bootstrap = REPO_ROOT / "scripts/release_activation_bootstrap.py"
+    digest = hashlib.sha256(bootstrap.read_bytes()).hexdigest()
+
+    first = _bootstrap_run(tmp_path, archive, manifest, digest)
+    second = _bootstrap_run(tmp_path, archive, manifest, digest)
+
+    assert first.returncode == second.returncode == 0
+    assert (tmp_path / "current").resolve().joinpath("src/dokploy_wizard/__init__.py").read_bytes() == b"version\n"
+
+
+def test_standalone_bootstrap_rejects_tamper_and_stale_generation(tmp_path: Path) -> None:
+    archive = tmp_path / "release.tar.gz"
+    members = (("src/dokploy_wizard/__init__.py", b"version\n"),)
+    _write_release_archive(archive, members)
+    manifest = _bootstrap_manifest(archive, members)
+    wrong_hash = "0" * 64
+
+    tampered = _bootstrap_run(tmp_path, archive, manifest, wrong_hash)
+    generation = tmp_path / "releases" / hashlib.sha256(archive.read_bytes()).hexdigest()
+    generation.mkdir(parents=True)
+    (generation / "extra").write_text("bad", encoding="utf-8")
+    digest = hashlib.sha256((REPO_ROOT / "scripts/release_activation_bootstrap.py").read_bytes()).hexdigest()
+    stale = _bootstrap_run(tmp_path, archive, manifest, digest)
+
+    assert tampered.returncode != 0
+    assert stale.returncode != 0
+    assert not (tmp_path / "current").exists()
+
+
+def test_remote_overlay_file_fails_closed_when_existing_generation_has_extra_content(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "release.tar.gz"
+    _write_release_archive(archive, (("src/dokploy_wizard/__init__.py", b"version\n"),))
+    manifest = manifest_from_archive("a" * 40, archive)
+    releases = tmp_path / "releases"
+    current = tmp_path / "current"
+    activation = activate_release(
+        archive_path=archive,
+        manifest=manifest,
+        releases_root=releases,
+        active_link=current,
+    )
+    (activation.generation_path / "unexpected.txt").write_text("drift\n", encoding="utf-8")
+
+    with pytest.raises(ReleaseError, match="manifest"):
+        activate_release(
+            archive_path=archive,
+            manifest=manifest,
+            releases_root=releases,
+            active_link=current,
         )

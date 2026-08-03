@@ -11,6 +11,7 @@ from dokploy_wizard.proof import model_sync_cli_commands as commands
 from dokploy_wizard.proof import model_sync_signal_recovery as signal_recovery
 from dokploy_wizard.proof import model_sync_task1_baseline_runner as baseline_runner
 from dokploy_wizard.proof import model_sync_task1_flow as task1_flow
+from dokploy_wizard.proof import model_sync_upgrade_host_a as upgrade_runner
 from dokploy_wizard.proof.model_sync_baseline import parse_captured_baseline
 from dokploy_wizard.proof.model_sync_cli_wrapper import (
     ProofWrapperInvocation,
@@ -74,12 +75,17 @@ resolve_task1_proof_namespace = task1_flow.resolve_task1_proof_namespace
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one bounded model-sync proof command without printing supplied secrets."""
-    return commands.execute(_build_parser(), argv, _baseline_host_a)
+    return commands.execute(_build_parser(), argv, _baseline_host_a, _upgrade_host_a)
 
 
 def _baseline_host_a(args: argparse.Namespace) -> None:
     """Delegate baseline execution to the recovery-aware Task 1 orchestration module."""
     baseline_runner.run_baseline_host_a(args)
+
+
+def _upgrade_host_a(args: argparse.Namespace) -> None:
+    """Delegate Host A upgrade execution to its fail-closed orchestration module."""
+    upgrade_runner.run_upgrade_host_a(args)
 
 
 def _run_wrapper(

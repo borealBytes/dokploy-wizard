@@ -240,6 +240,11 @@ class FakeCloudflareBackend:
         )
         return self.access_provider
 
+    def delete_access_identity_provider(self, account_id: str, provider_id: str) -> None:
+        del account_id
+        if self.access_provider is not None and self.access_provider.provider_id == provider_id:
+            self.access_provider = None
+
     def get_access_application(
         self, account_id: str, app_id: str
     ) -> CloudflareAccessApplication | None:
@@ -273,6 +278,12 @@ class FakeCloudflareBackend:
         )
         self.access_apps[domain] = app
         return app
+
+    def delete_access_application(self, account_id: str, app_id: str) -> None:
+        del account_id
+        self.access_apps = {
+            domain: app for domain, app in self.access_apps.items() if app.app_id != app_id
+        }
 
     def get_access_policy(
         self, account_id: str, app_id: str, policy_id: str

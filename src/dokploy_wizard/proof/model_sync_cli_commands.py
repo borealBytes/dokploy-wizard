@@ -26,6 +26,7 @@ def execute(
     parser: argparse.ArgumentParser,
     argv: Sequence[str] | None,
     run_baseline_host_a: Callable[[argparse.Namespace], None],
+    run_upgrade_host_a: Callable[[argparse.Namespace], None],
 ) -> int:
     """Execute the bounded model-sync command surface without owning its orchestration."""
     args = parser.parse_args(argv)
@@ -37,7 +38,10 @@ def execute(
             write_protected_manifest(args.output, proof.abort_status_payload(status))
         if args.command == "baseline-host-a":
             run_baseline_host_a(args)
-        if args.command not in {"atomic-finalize", "abort-status", "baseline-host-a"}:
+        if args.command == "upgrade-host-a":
+            run_upgrade_host_a(args)
+        known_commands = {"atomic-finalize", "abort-status", "baseline-host-a", "upgrade-host-a"}
+        if args.command not in known_commands:
             parser.error("unknown proof command")
     except (
         AbortGuardError,

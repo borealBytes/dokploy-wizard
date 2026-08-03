@@ -114,6 +114,16 @@ Treat all credentials as sensitive. Follow these rules:
 
 ## Testing
 
+### Release and proof safety
+
+- Remote deployment archives must be created from an explicit commit. Reject deployable
+  tracked or untracked drift instead of uploading a dirty tree or overlaying an old release.
+- Run remote lifecycle commands through the activated content-addressed release, not a
+  mutable extraction directory.
+- Proof workspaces must retain their mode-0600 lifecycle receipt through cleanup. Register
+  each external proof mutation before dispatch; strict control-plane and synchronizer totals
+  must remain zero.
+
 Run the full test suite before committing changes:
 
 ```bash

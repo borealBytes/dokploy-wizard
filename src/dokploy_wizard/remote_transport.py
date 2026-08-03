@@ -127,6 +127,15 @@ class RemoteTransportSession:
         self.transport = transport
         self.remote_root = remote_root.rstrip("/") or "/"
         self.remote_archive_path = posixpath.join(self.remote_root, "repo.tar.gz")
+        self.remote_release_manifest_path = posixpath.join(
+            self.remote_root, "release-manifest.json"
+        )
+        self.remote_activation_bootstrap_path = posixpath.join(
+            self.remote_root, "release-activation-bootstrap.py"
+        )
+        self.remote_releases_root = posixpath.join(self.remote_root, "releases")
+        self.remote_active_release_path = posixpath.join(self.remote_root, "current")
+        self._release_is_active = False
         self.remote_install_env_path = posixpath.join(self.remote_root, ".install.env")
         self.remote_task1_proof_context_path = (
             None
@@ -139,11 +148,19 @@ class RemoteTransportSession:
     def upload_bundle(
         self,
         repo_archive: Path,
+        release_manifest: Path,
+        activation_bootstrap: Path,
+        bootstrap_sha256: str,
         install_env_file: Path,
         task1_proof_context: Path | None = None,
     ) -> None:
         self.transport.ensure_dir(self.remote_root)
         self.transport.upload(repo_archive, self.remote_archive_path)
+        self.transport.upload(release_manifest, self.remote_release_manifest_path)
+        if len(bootstrap_sha256) != 64:
+            raise ValueError("release bootstrap identity is invalid")
+        self.transport.upload(activation_bootstrap, self.remote_activation_bootstrap_path)
+        self.transport.chmod(self.remote_activation_bootstrap_path, 0o700)
         self.transport.upload(install_env_file, self.remote_install_env_path)
         self.transport.chmod(self.remote_install_env_path, 0o600)
         if task1_proof_context is not None:
@@ -151,6 +168,20 @@ class RemoteTransportSession:
                 raise ValueError("Task 1 proof context upload was not configured for this session")
             self.transport.upload(task1_proof_context, self.remote_task1_proof_context_path)
             self.transport.chmod(self.remote_task1_proof_context_path, 0o600)
+
+    def activate_release(
+        self, archive_sha256: str, bootstrap_sha256: str, password: str | None = None
+    ) -> None:
+        """Extract and select one content-addressed release before lifecycle commands."""
+
+        if len(archive_sha256) != 64 or set(archive_sha256) - set("0123456789abcdef"):
+            raise ValueError("release archive identity is invalid")
+        self.run_command(
+            subcommand="activate-release",
+            command=self._build_release_activation_command(archive_sha256, bootstrap_sha256),
+            password=password,
+        )
+        self._release_is_active = True
 
     def run_proof(
         self,
@@ -245,6 +276,8 @@ class RemoteTransportSession:
         command: str,
         password: str | None = None,
     ) -> None:
+        if self._release_is_active and subcommand != "activate-release":
+            command = f"cd {shlex.quote(self.remote_active_release_path)} && {command}"
         self._emit_progress(f"starting remote command: {subcommand}")
         started = time.monotonic()
         try:
@@ -308,6 +341,28 @@ class RemoteTransportSession:
         ]
         arguments.extend(self._task1_proof_context_arguments())
         return self._with_unbuffered_python(self._shell_join(arguments))
+
+    def _build_release_activation_command(self, archive_sha256: str, bootstrap_sha256: str) -> str:
+        activate = self._shell_join(
+            [
+                "python3",
+                self.remote_activation_bootstrap_path,
+                "--archive",
+                self.remote_archive_path,
+                "--manifest",
+                self.remote_release_manifest_path,
+                "--releases-root",
+                self.remote_releases_root,
+                "--bootstrap-sha256",
+                bootstrap_sha256,
+                "--active-link",
+                self.remote_active_release_path,
+            ]
+        )
+        bootstrap_path = shlex.quote(self.remote_activation_bootstrap_path)
+        bootstrap_digest = shlex.quote(bootstrap_sha256)
+        verify = f"test $(sha256sum {bootstrap_path} | awk '{{print $1}}') = {bootstrap_digest}"
+        return f"{verify} && {activate}"
 
     def _build_verify_services_command(self) -> str:
         arguments = [

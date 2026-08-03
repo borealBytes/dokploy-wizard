@@ -1,0 +1,411 @@
+{
+  "images": {
+    "coder": "ghcr.io/coder/coder@sha256:8ccba928849cb6d857d6a59184618a2017626708c513251aac74768fdb477f78"
+  },
+  "schema_version": 3,
+  "workspace_runtime": {
+    "base_image": "codercom/enterprise-base@sha256:4e01f4c2cc588f3ddd1d8f0591574141689fe6eac82b2040e1ffd587a74877f2",
+    "hermes": {
+      "classic": {
+        "archive_sha256": "cd5f5d40ca5ad77336eb8048b226b05279721eace5cf14f8ca1cdb0513cb7662",
+        "archive_url": "https://codeload.github.com/nesquena/hermes-webui/tar.gz/4d9965b37a5ca3dbec1c19ccdaa261211b180804",
+        "commit": "4d9965b37a5ca3dbec1c19ccdaa261211b180804",
+        "repository": "nesquena/hermes-webui",
+        "tree": "a9436fa15d5752bfbf20e281fe54f39869ea5388"
+      },
+      "icons": {
+        "classic": {
+          "archive": "classic",
+          "path": "static/favicon.svg",
+          "sha256": "b883cc5f4e2fa5ee01cc87e1ed1546ba9ab47079632ce692a77cfa65178bb6d6"
+        },
+        "dashboard": {
+          "archive": "source",
+          "path": "acp_registry/icon.svg",
+          "sha256": "8f6157ebb2ca034bec36094205e47777c794f9586fe33b6ca7e11e5a0a0dd6a3"
+        },
+        "separate_webui": {
+          "archive": "source",
+          "path": "website/static/img/favicon.svg",
+          "sha256": "c4d55805bda8e16072ed77c0725176ab2218a9e628d1ba776a6048a39c28f751"
+        }
+      },
+      "python_packages": {
+        "pyyaml": {
+          "cp311": {
+            "amd64": "b8bb0864c5a28024fac8a632c443c87c5aa6f215c0b126c449ae1a150412f31d",
+            "arm64": "10892704fc220243f5305762e276552a0395f7beb4dbf9b14ec8fd43b57f126c"
+          },
+          "version": "6.0.3"
+        }
+      },
+      "source": {
+        "archive_sha256": "2a9cd3f205b9e0df5a687fe4cd61ac082a14d40ddc55149ee35b2b5093ab01d3",
+        "archive_url": "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/a7d7c02cb6db071eced4ac82e24f878588619600",
+        "commit": "a7d7c02cb6db071eced4ac82e24f878588619600",
+        "repository": "NousResearch/hermes-agent"
+      },
+      "tools": {
+        "cpython": {
+          "amd64": {
+            "sha256": "17e1f5b2c9668217ba554decd94db04adf3d085203d322c690fd44cde549d576",
+            "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260303/cpython-3.11.15%2B20260303-x86_64-unknown-linux-gnu-install_only.tar.gz"
+          },
+          "arm64": {
+            "sha256": "4786f5ef8567c982517fcd7cb189a5ef4a712ed0aaf3034e839749794155ad4c",
+            "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260303/cpython-3.11.15%2B20260303-aarch64-unknown-linux-gnu-install_only.tar.gz"
+          },
+          "version": "3.11.15+20260303"
+        },
+        "uv": {
+          "amd64": {
+            "sha256": "04f8b82f5d47f0512dcd32c67a4a6f16a0ea27c81537c338fd0ad6b23cebe829",
+            "url": "https://github.com/astral-sh/uv/releases/download/0.11.29/uv-x86_64-unknown-linux-gnu.tar.gz"
+          },
+          "arm64": {
+            "sha256": "94500fb064ae3c971a873cba64d94694c50677e0a4dbf78735c80509e7429919",
+            "url": "https://github.com/astral-sh/uv/releases/download/0.11.29/uv-aarch64-unknown-linux-gnu.tar.gz"
+          },
+          "version": "0.11.29"
+        }
+      }
+    },
+    "kdense": {
+      "catalog": {
+        "central_only_environment": [
+          "KDENSE_WIZARD_CENTRAL_ONLY=1",
+          "KDENSE_LITELLM_BASE_URL",
+          "KDENSE_LITELLM_API_KEY"
+        ],
+        "cost_fields": [
+          {
+            "source": "dokploy_scalar_input_per_million",
+            "target": "pricing.prompt"
+          },
+          {
+            "source": "dokploy_scalar_output_per_million",
+            "target": "pricing.completion"
+          },
+          {
+            "source": "dokploy_scalar_cache_read_per_million",
+            "target": "pricing.input_cache_read"
+          },
+          {
+            "source": "dokploy_scalar_cache_write_per_million",
+            "target": "pricing.input_cache_write"
+          }
+        ],
+        "limits": [
+          {
+            "source": "max_input_tokens",
+            "target": "context_length"
+          },
+          {
+            "source": "max_output_tokens",
+            "target": "max_completion_tokens"
+          }
+        ],
+        "provenance": [
+          {
+            "source": "source_id",
+            "target": "provenance.source_id"
+          },
+          {
+            "source": "merged_decision_sha256",
+            "target": "provenance.merged_decision_sha256"
+          },
+          {
+            "source": "dokploy_pricing_selection_sha256",
+            "target": "provenance.dokploy_pricing_selection_sha256"
+          }
+        ],
+        "rejected_paths": [
+          "registry",
+          "fusion",
+          "ollama",
+          "subagent",
+          "speech",
+          "credential_mutation"
+        ]
+      },
+      "patches": [
+        {
+          "name": "pricing-cache",
+          "path": "templates/coder/runtime/patches/kdense-pricing-cache.patch",
+          "sha256": "76f4b8d12f4843ca6d612f34e4b2e089886d59f801f6eafa8138711e5180aad0"
+        },
+        {
+          "name": "central-only",
+          "path": "templates/coder/runtime/patches/kdense-central-only.patch",
+          "sha256": "27f47437b191f26134452baa83604bad72fded51bc8fbcf6817463d109609ce5"
+        }
+      ],
+      "skills": {
+        "archive_sha256": "44a0aeb6246edc5944b5cc0f4c228e7c8dd003cb1e066f26534cf632461e11d1",
+        "archive_url": "https://codeload.github.com/K-Dense-AI/scientific-agent-skills/tar.gz/3f825caafe149b7853ec8c4d1dd7f4553ea6b2a5",
+        "canonical_sha256": "e5982515e05204240a3087644ba62dbf16d29d674957867e7951572ac22c6a53",
+        "commit": "3f825caafe149b7853ec8c4d1dd7f4553ea6b2a5",
+        "repository": "K-Dense-AI/scientific-agent-skills",
+        "subtree": "f6a5238100ac4c6a7a00cf623ddc3b738a6e1405",
+        "tree": "0118c6a9ab9c9b470addf3edc86cc1261622654e"
+      },
+      "source": {
+        "archive_root": "k-dense-byok-a2502d2fd0594db38f20ef8ea91e71a24a4c0e8d",
+        "archive_sha256": "a161dfdfd908f4eecfb53c0976ba6bec71967df56a55935c5fb9c89bc48787d1",
+        "codeload_url": "https://codeload.github.com/K-Dense-AI/k-dense-byok/tar.gz/a2502d2fd0594db38f20ef8ea91e71a24a4c0e8d",
+        "commit": "a2502d2fd0594db38f20ef8ea91e71a24a4c0e8d",
+        "prep_sandbox_absent": true,
+        "repository": "K-Dense-AI/k-dense-byok",
+        "required_paths": [
+          {
+            "path": "server/package-lock.json",
+            "sha256": "800f70a1d3ac0cdf77d2f12eb2232f604bd729443900e926efe1e72ac26eb012"
+          },
+          {
+            "path": "server/src/helpers/pyproject.toml",
+            "sha256": "00773655f15bc58457cc9eb0b0cef798fca46201d444963b0dea2a5b160bc9f0"
+          },
+          {
+            "path": "server/src/prep.ts",
+            "sha256": "e8fa9fe10f0efc6ab411dbf855466fe997ddf2b80f97431c354a98472fc61bc9"
+          },
+          {
+            "path": "server/src/sandbox-seed.ts",
+            "sha256": "04958f25ff500109db200180946b2fc9e1237994a679b0fe92cb12b74dfe6126"
+          },
+          {
+            "path": "start.mjs",
+            "sha256": "437b36d438bf722b7cc04cf6b59f5cadf2c9d4518fdc5cef3c93b62d7076ba85"
+          },
+          {
+            "path": "web/package-lock.json",
+            "sha256": "ced1bb68c9d95336d511498bac4c6171738edcc9cc36d685cb7faf1c8cc26692"
+          }
+        ],
+        "root_pyproject_absent": true,
+        "tree": "d7a10cd0dd0041a63754ed0f2a4ebe323648d46f",
+        "typescript_prep_path": "server/src/prep.ts",
+        "uv_lock_paths": []
+      },
+      "tools": {
+        "cpython": {
+          "amd64": {
+            "sha256": "ee1d08c3e6149343077d410d7de835a7a7dda8e2cec80df94f393e858a300055",
+            "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260303/cpython-3.13.12%2B20260303-x86_64-unknown-linux-gnu-install_only.tar.gz"
+          },
+          "arm64": {
+            "sha256": "3b88fc6dd6f0290f075353ca860b9dc48faca0d849a0a03c088883507ed63881",
+            "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260303/cpython-3.13.12%2B20260303-aarch64-unknown-linux-gnu-install_only.tar.gz"
+          },
+          "version": "3.13.12+20260303"
+        },
+        "node": {
+          "amd64": {
+            "sha256": "c0649af18e6a24f6fe5535a3e86b341dd49a8e71117c8b68bde973ef834f16f2",
+            "url": "https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.xz"
+          },
+          "arm64": {
+            "sha256": "0b2d9f564b6594222a62c82e1df2efe119dd4a4aff29644f4dd325bf360b6bcc",
+            "url": "https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-arm64.tar.xz"
+          },
+          "version": "v22.19.0"
+        },
+        "uv": {
+          "amd64": {
+            "sha256": "04f8b82f5d47f0512dcd32c67a4a6f16a0ea27c81537c338fd0ad6b23cebe829",
+            "url": "https://github.com/astral-sh/uv/releases/download/0.11.29/uv-x86_64-unknown-linux-gnu.tar.gz"
+          },
+          "arm64": {
+            "sha256": "94500fb064ae3c971a873cba64d94694c50677e0a4dbf78735c80509e7429919",
+            "url": "https://github.com/astral-sh/uv/releases/download/0.11.29/uv-aarch64-unknown-linux-gnu.tar.gz"
+          },
+          "version": "0.11.29"
+        }
+      }
+    },
+    "node": {
+      "amd64": {
+        "sha256": "c0649af18e6a24f6fe5535a3e86b341dd49a8e71117c8b68bde973ef834f16f2",
+        "url": "https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.xz"
+      },
+      "arm64": {
+        "sha256": "0b2d9f564b6594222a62c82e1df2efe119dd4a4aff29644f4dd325bf360b6bcc",
+        "url": "https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-arm64.tar.xz"
+      },
+      "version": "v22.19.0"
+    },
+    "opencode": {
+      "arm64": {
+        "asset_id": 479302069,
+        "sha256": "da0a631174eba380b2a1d51f9d364fa3812da433e72743c72471d4b5da59c69d",
+        "url": "https://api.github.com/repos/anomalyco/opencode/releases/assets/479302069"
+      },
+      "immutable": true,
+      "release_id": 355168624,
+      "x64": {
+        "asset_id": 479302078,
+        "sha256": "60f27b2679f00a511b6539f97e02448afaf58d9c66e2448285ea0c517ca84583",
+        "url": "https://api.github.com/repos/anomalyco/opencode/releases/assets/479302078"
+      }
+    },
+    "pi": {
+      "package": "@earendil-works/pi-coding-agent",
+      "package_lock_sha256": "f0815f7807ae0aca1a53519fcdd37b20cc48d1ad6fa4161674e9a329e6ba004c",
+      "package_lock_url": "https://github.com/earendil-works/pi/releases/download/v0.80.10/pi-coding-agent-install-package-lock.json",
+      "shrinkwrap_sha256": "290c8147844e5b2129e8133d1c62f6d577e1fc5be7a563af04edb7eb17b3205f",
+      "shrinkwrap_url": "https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-0.80.10.tgz#package/npm-shrinkwrap.json",
+      "tarball_sha512": "aL4apbupCHiVLSXASXvRzH4Q2vmtfrDa+0s909CJuVu/GgGylbDzr7oyF1mPmip5E+VxYYxKWmph4hV04wUcQg==",
+      "tarball_url": "https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-0.80.10.tgz",
+      "version": "0.80.10"
+    },
+    "providers": {
+      "code_server_install": "4.117.0",
+      "code_server_module": "1.5.2",
+      "coder": "2.18.0",
+      "docker": "4.5.0",
+      "platform_sha256": {
+        "coder": {
+          "amd64": "6ae37bef989559a212ce04a615444d40452425e01081d8499843a24db0a09e85",
+          "arm64": "1f8d904d59e35948f8f795e58d7895b791bd9a12c8409079f5bb90221303c1b6"
+        },
+        "docker": {
+          "amd64": "5a0e70d143759712fdda109f024a41d59d4758b5615378aa21ee6b959f65a416",
+          "arm64": "0ee4e9121632158a9ae1049bdd53c71fd9e06357de915dd193df2c1c55ae8814"
+        }
+      }
+    },
+    "proxy_node": {
+      "amd64": {
+        "sha256": "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742",
+        "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz"
+      },
+      "arm64": {
+        "sha256": "58c9520501f6ae2b52d5b210444e24b9d0c029a58c5011b797bc1fe7105886f6",
+        "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-arm64.tar.xz"
+      },
+      "version": "v24.18.0"
+    },
+    "source_date_epoch": 1782864000,
+    "ubuntu_snapshot": {
+      "inrelease": {
+        "sha256": "cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0",
+        "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/dists/noble/InRelease"
+      },
+      "package_indexes": {
+        "amd64": {
+          "security": "67fcbf87f803867b03be33cbf03f04aa34971be589bbecd3c9c4d68a2b6e9d84",
+          "universe": "ba9057fa1b91438cc8a1d26808d00c85389fe101d0c1496254df97236405599a",
+          "updates": "72569d5713aeab1ac3727be2c0af1963c2d504dd24972fa25e1c103cdd4e5629"
+        },
+        "arm64": {
+          "security": "98f9071f0299d4e19ccfd1b3fbf0793e31111df8752ff14172ba3ce7fb871126",
+          "universe": "6df230cf5cfebcbd59e4e2713b8eed07dc0aaed66fb471ebf046cb70ccb07275",
+          "updates": "244f6b66fd608180f82e4b17487dbe73ef9ea8673470a54a224e8dace3f9b126"
+        }
+      },
+      "packages": {
+        "amd64": [
+          {
+            "arch": "all",
+            "name": "ca-certificates",
+            "sha256": "6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb",
+            "version": "20260601~24.04.1"
+          },
+          {
+            "arch": "amd64",
+            "name": "curl",
+            "sha256": "e04c7ab912371c9d9c4d9c2083671dad59e793d7d349138b2ea00be3d9a1c593",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/main/c/curl/curl_8.5.0-2ubuntu10.10_amd64.deb",
+            "version": "8.5.0-2ubuntu10.10"
+          },
+          {
+            "arch": "amd64",
+            "name": "git",
+            "sha256": "099bb129f543adc4c14203334b0fa0a909f8bf038c4d56bc9cc7c774ebf78f87",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/main/g/git/git_2.43.0-1ubuntu7.3_amd64.deb",
+            "version": "2.43.0-1ubuntu7.3"
+          },
+          {
+            "arch": "amd64",
+            "name": "wget",
+            "sha256": "387c82d5a8a31cd2ea4e9bdb85fce07a8eeeb5dfaebb971b2839a80348f2eb26",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/main/w/wget/wget_1.21.4-1ubuntu4.1_amd64.deb",
+            "version": "1.21.4-1ubuntu4.1"
+          },
+          {
+            "arch": "amd64",
+            "name": "btop",
+            "sha256": "b6f3880c213bae6d6bb525fad668489991f3b3af27545b528db9482b54181b68",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/universe/b/btop/btop_1.3.0-1_amd64.deb",
+            "version": "1.3.0-1"
+          },
+          {
+            "arch": "amd64",
+            "name": "python3",
+            "sha256": "e691b9cc40841c41bbdc50bd794c876cb1b1801306ea27b06e9a1458180df1e9",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/main/p/python3-defaults/python3_3.12.3-0ubuntu2.1_amd64.deb",
+            "version": "3.12.3-0ubuntu2.1"
+          }
+        ],
+        "arm64": [
+          {
+            "arch": "all",
+            "name": "ca-certificates",
+            "sha256": "6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb",
+            "version": "20260601~24.04.1"
+          },
+          {
+            "arch": "arm64",
+            "name": "curl",
+            "sha256": "6bf655971e5844a1605e6ce98b5a1f62b296940ce1704e936ffed46dfe7bbb98",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/main/c/curl/curl_8.5.0-2ubuntu10.10_arm64.deb",
+            "version": "8.5.0-2ubuntu10.10"
+          },
+          {
+            "arch": "arm64",
+            "name": "git",
+            "sha256": "db7f9a9a06a5dd6d6d5bd4bc3b14a2a0f0aaf0cc48f6e096e7ba3f4db63503ee",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/main/g/git/git_2.43.0-1ubuntu7.3_arm64.deb",
+            "version": "2.43.0-1ubuntu7.3"
+          },
+          {
+            "arch": "arm64",
+            "name": "wget",
+            "sha256": "98bbc73b495055e9ad8c59867862bdb9127d71bced9da245cf09a9b43e501883",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/main/w/wget/wget_1.21.4-1ubuntu4.1_arm64.deb",
+            "version": "1.21.4-1ubuntu4.1"
+          },
+          {
+            "arch": "arm64",
+            "name": "btop",
+            "sha256": "1a0d30a5f90d02c29030dcb39bc91286d42b0d9ac1fc45c6d7da4e96118ff24a",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/universe/b/btop/btop_1.3.0-1_arm64.deb",
+            "version": "1.3.0-1"
+          },
+          {
+            "arch": "arm64",
+            "name": "python3",
+            "sha256": "ea792b91e0fc9e249b96b960d14e04a8b7107029988546e8dd3511b74a693a6c",
+            "url": "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/pool/main/p/python3-defaults/python3_3.12.3-0ubuntu2.1_arm64.deb",
+            "version": "3.12.3-0ubuntu2.1"
+          }
+        ]
+      },
+      "suite": "noble",
+      "timestamp": "20260701T000000Z"
+    },
+    "zellij": {
+      "amd64": {
+        "sha256": "0f7c346788627f506c0a28296517768633cff24fc822a739f8264b640ecad751",
+        "url": "https://github.com/zellij-org/zellij/releases/download/v0.44.3/zellij-x86_64-unknown-linux-musl.tar.gz"
+      },
+      "arm64": {
+        "sha256": "15e6534d42644d66973d136c590c49739dcfd6a1a2a0d3d917973f16c81b45fb",
+        "url": "https://github.com/zellij-org/zellij/releases/download/v0.44.3/zellij-aarch64-unknown-linux-musl.tar.gz"
+      },
+      "version": "v0.44.3"
+    }
+  }
+}

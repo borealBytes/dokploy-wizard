@@ -6,19 +6,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import posixpath
-import re
 import shlex
-import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, TextIO
 
-from dokploy_wizard.proof import read_bounded_regular_bytes
 from dokploy_wizard.proof.model_sync_task1_context import (
     Task1ProofContextError,
     Task1ProofContextV1,
@@ -27,6 +24,15 @@ from dokploy_wizard.proof.model_sync_task1_context import (
 )
 from dokploy_wizard.proof.model_sync_task1_remote_receipt_schema_types import (
     Task1RemoteProofBinding,
+)
+from dokploy_wizard.proof.model_sync_upgrade_host_a_remote_observation import (
+    RemoteModifyObservationRunner,
+)
+from dokploy_wizard.release import (
+    CommitArchiveEvidence,
+    ReleaseError,
+    create_commit_archive,
+    write_release_manifest,
 )
 from dokploy_wizard.remote_transport import (
     ParamikoRemoteTransport,
@@ -46,16 +52,11 @@ TASK1_CLEANUP_CAPTURE_LIMITS: Final[RemoteCommandCaptureLimits] = RemoteCommandC
 _TASK1_CLEANUP_JOURNAL_ABSENT: Final = b"Task 1 Cloudflare cleanup journal is absent"
 
 
-class RepositoryArchiveError(RuntimeError):
+class RepositoryArchiveError(ReleaseError):
     """Raised when the committed repository tree cannot be archived safely."""
 
 
-@dataclass(frozen=True, slots=True)
-class RepositoryArchiveEvidence:
-    """Value-free identity of the exact committed archive uploaded remotely."""
-
-    commit_sha: str
-    archive_sha256: str
+RepositoryArchiveEvidence = CommitArchiveEvidence
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_remote_common_arguments(modify_parser)
     _add_fresh_arguments(modify_parser)
+    modify_parser.add_argument(
+        "--capture-upgrade-observations",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
 
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -222,7 +228,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command in {"install", "modify", "uninstall", "proof"}:
             archive_evidence = _upload_remote_bundle(args=args, session=session, reporter=reporter)
-            _extract_remote_bundle(session=session, password=args.password)
+            _extract_remote_bundle(
+                session=session,
+                archive_evidence=archive_evidence,
+                password=args.password,
+            )
         if args.command == "install":
             if args.fresh:
                 remote_confirm_path = _upload_confirm_file(
@@ -275,12 +285,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     reporter,
                     _resolve_expected_service_url_links(args.env_file),
                 )
-            _run_remote_command(
-                session=session,
-                subcommand="modify",
-                command=_build_modify_command(session),
-                password=args.password,
+            command = _build_modify_command(
+                session,
+                capture_upgrade_observations=args.capture_upgrade_observations,
             )
+            if args.capture_upgrade_observations:
+                RemoteModifyObservationRunner(session, reporter.remote_output).run(
+                    command,
+                    args.password,
+                )
+            else:
+                _run_remote_command(
+                    session=session,
+                    subcommand="modify",
+                    command=command,
+                    password=args.password,
+                )
             exit_code = 0
             return exit_code
         if args.command == "uninstall":
@@ -415,6 +435,11 @@ def _add_remote_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--task1-proof-context",
         type=Path,
         help="validated external Task 1 proof context paired with the upload-only env file",
+    )
+    parser.add_argument(
+        "--deploy-commit",
+        default="HEAD",
+        help="commit to archive for remote deployment (default: HEAD)",
     )
     parser.set_defaults(_env_file_flag_provided=False)
 
@@ -577,13 +602,28 @@ def _upload_remote_bundle(
     reporter.progress("creating repo archive for upload")
     with tempfile.TemporaryDirectory(prefix="dokploy-wizard-remote-") as temp_dir:
         archive_path = Path(temp_dir) / "repo.tar.gz"
-        evidence = _create_repo_archive(repo_root=_repo_root(), destination=archive_path)
+        evidence = _create_repo_archive(
+            repo_root=_repo_root(),
+            destination=archive_path,
+            deploy_commit=args.deploy_commit,
+        )
+        manifest_path = Path(temp_dir) / "release-manifest.json"
+        write_release_manifest(manifest_path, evidence.manifest)
+        bootstrap_path = Path(temp_dir) / "release-activation-bootstrap.py"
+        descriptor = os.open(bootstrap_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+        with os.fdopen(descriptor, "wb") as bootstrap_file:
+            bootstrap_file.write(evidence.bootstrap_bytes)
+            bootstrap_file.flush()
+            os.fsync(bootstrap_file.fileno())
         reporter.progress(
             "uploading repo archive and install env file "
             f"to {session.remote_root} (env contents redacted)"
         )
         session.upload_bundle(
             repo_archive=archive_path,
+            release_manifest=manifest_path,
+            activation_bootstrap=bootstrap_path,
+            bootstrap_sha256=evidence.bootstrap_sha256,
             install_env_file=args.env_file,
             task1_proof_context=args.task1_proof_context,
         )
@@ -592,11 +632,15 @@ def _upload_remote_bundle(
     return evidence
 
 
-def _extract_remote_bundle(*, session: RemoteTransportSession, password: str | None) -> None:
-    _run_remote_command(
-        session=session,
-        subcommand="extract-repo",
-        command=_build_extract_command(session),
+def _extract_remote_bundle(
+    *,
+    session: RemoteTransportSession,
+    archive_evidence: RepositoryArchiveEvidence,
+    password: str | None,
+) -> None:
+    session.activate_release(
+        archive_evidence.archive_sha256,
+        archive_evidence.bootstrap_sha256,
         password=password,
     )
 
@@ -622,18 +666,6 @@ def _upload_confirm_file(
     return remote_confirm_path
 
 
-def _build_extract_command(session: RemoteTransportSession) -> str:
-    return _shell_join(
-        [
-            "tar",
-            "-xzf",
-            session.remote_archive_path,
-            "-C",
-            session.remote_root,
-        ]
-    )
-
-
 def _build_install_command(session: RemoteTransportSession) -> str:
     arguments = [
         "./bin/dokploy-wizard",
@@ -648,7 +680,11 @@ def _build_install_command(session: RemoteTransportSession) -> str:
     return _with_unbuffered_python(_shell_join(arguments))
 
 
-def _build_modify_command(session: RemoteTransportSession) -> str:
+def _build_modify_command(
+    session: RemoteTransportSession,
+    *,
+    capture_upgrade_observations: bool,
+) -> str:
     arguments = [
         "./bin/dokploy-wizard",
         "modify",
@@ -658,6 +694,8 @@ def _build_modify_command(session: RemoteTransportSession) -> str:
         session.remote_state_dir,
         "--non-interactive",
     ]
+    if capture_upgrade_observations:
+        arguments.append("--task18-force-model-sync-upgrade")
     arguments.extend(_task1_proof_context_arguments(session))
     return _with_unbuffered_python(_shell_join(arguments))
 
@@ -865,48 +903,17 @@ def _looks_like_env_assignment(line: str) -> bool:
     return bool(separator and key and key.replace("_", "").isalnum())
 
 
-def _create_repo_archive(*, repo_root: Path, destination: Path) -> RepositoryArchiveEvidence:
-    archive_destination = destination.resolve()
+def _create_repo_archive(
+    *, repo_root: Path, destination: Path, deploy_commit: str = "HEAD"
+) -> RepositoryArchiveEvidence:
     try:
-        head = subprocess.run(
-            ["git", "-C", str(repo_root), "rev-parse", "--verify", "HEAD^{commit}"],
-            check=False,
-            capture_output=True,
-            text=True,
+        return create_commit_archive(
+            repo_root=repo_root,
+            deploy_commit=deploy_commit,
+            destination=destination,
         )
-        if head.returncode != 0:
-            raise RepositoryArchiveError("repository HEAD is not a commit")
-        commit_sha = head.stdout.strip()
-        if re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", commit_sha) is None:
-            raise RepositoryArchiveError("repository HEAD identity is invalid")
-        archive = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo_root),
-                "archive",
-                "--format=tar.gz",
-                f"--output={archive_destination}",
-                "HEAD",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError as error:
-        raise RepositoryArchiveError("git archive is unavailable") from error
-    if archive.returncode != 0:
-        raise RepositoryArchiveError("git archive failed")
-    try:
-        archive_bytes, _mode = read_bounded_regular_bytes(
-            archive_destination, 64 * 1024 * 1024, None
-        )
-    except (OSError, ValueError) as error:
-        raise RepositoryArchiveError("repository archive is unreadable") from error
-    return RepositoryArchiveEvidence(
-        commit_sha=commit_sha,
-        archive_sha256=hashlib.sha256(archive_bytes).hexdigest(),
-    )
+    except ReleaseError as error:
+        raise RepositoryArchiveError(str(error)) from error
 
 
 if __name__ == "__main__":  # pragma: no cover

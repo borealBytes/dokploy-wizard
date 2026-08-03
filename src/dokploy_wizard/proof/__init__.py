@@ -1451,6 +1451,20 @@ def build_model_sync_parser() -> argparse.ArgumentParser:
     baseline.add_argument("--proof-commit", required=True)
     baseline.add_argument("--artifact-dir", type=Path, required=True)
     baseline.add_argument("--output", type=Path, required=True)
+    upgrade = commands.add_parser("upgrade-host-a")
+    upgrade.add_argument("--single-host-sequential", action="store_true")
+    upgrade.add_argument("--wrapper", type=Path, required=True)
+    upgrade.add_argument("--env-file", type=Path, required=True)
+    upgrade.add_argument("--abort-guard", type=Path, required=True)
+    upgrade.add_argument("--host-env", required=True)
+    upgrade.add_argument("--password-env", required=True)
+    upgrade.add_argument("--baseline", type=Path, required=True)
+    upgrade.add_argument("--baseline-result", type=Path, required=True)
+    upgrade.add_argument("--lifecycle-input", type=Path, required=True)
+    upgrade.add_argument("--lifecycle-output", type=Path, required=True)
+    upgrade.add_argument("--final-commit", required=True)
+    upgrade.add_argument("--artifact-dir", type=Path, required=True)
+    upgrade.add_argument("--output", type=Path, required=True)
     return parser
 
 

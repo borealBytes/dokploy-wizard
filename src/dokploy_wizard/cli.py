@@ -51,6 +51,12 @@ from dokploy_wizard.dokploy import (
     build_litellm_consumer_model_allowlists,
 )
 from dokploy_wizard.dokploy.cloudflared import CloudflaredConnectorError
+from dokploy_wizard.dokploy.coder import preflight_coder_template_migration
+from dokploy_wizard.dokploy.coder_secret_specs import build_coder_visible_litellm_aliases
+from dokploy_wizard.dokploy.sync_helper_orchestrator import (
+    ImmediateSyncConfig,
+    run_immediate_sync_with_helper,
+)
 from dokploy_wizard.host_prereqs import (
     DOCKER_APT_PACKAGES,
     UbuntuAptHostPrerequisiteBackend,
@@ -67,6 +73,16 @@ from dokploy_wizard.lifecycle import (
     execute_lifecycle_plan,
     validate_preserved_phases,
 )
+from dokploy_wizard.lifecycle.lock import (
+    LifecycleLockBusyError,
+    ensure_lifecycle_stack_binding,
+    lifecycle_operation_lock,
+)
+from dokploy_wizard.lifecycle.modify_upgrade import (
+    ModifyUpgradeIntent,
+    apply_modify_upgrade_intent,
+)
+from dokploy_wizard.lifecycle.shared_core_sync import prepare_sync_state_upgrade
 from dokploy_wizard.litellm import LiteLLMAdminClient
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.networking import (
@@ -178,6 +194,9 @@ from dokploy_wizard.uninstall import (
     collect_confirmation_lines,
     execute_uninstall_plan,
 )
+from dokploy_wizard.uninstall.lifecycle_authority import (
+    production_lifecycle_authority_publisher,
+)
 from dokploy_wizard.verification import (
     key_is_sensitive,
     redact_data,
@@ -288,6 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable interactive pack-selection prompts",
     )
     modify_parser.add_argument("--task1-proof-context", type=Path, help=argparse.SUPPRESS)
+    modify_parser.add_argument(
+        "--task18-force-model-sync-upgrade",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     modify_parser.set_defaults(handler=_handle_modify)
 
     uninstall_parser = subparsers.add_parser(
@@ -325,6 +349,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm-file",
         type=Path,
         help="path to a file containing typed uninstall confirmation lines",
+    )
+    uninstall_parser.add_argument(
+        "--stack-name",
+        help="validated stack name for a legacy state directory without an immutable binding",
     )
     uninstall_parser.set_defaults(handler=_handle_uninstall)
 
@@ -384,6 +412,8 @@ def _handle_install(args: argparse.Namespace) -> int:
                 prompt_for_memory_shortfall=not args.non_interactive and _stdin_is_interactive(),
                 enforce_live_run_contamination_check=True,
             )
+    except LifecycleLockBusyError as error:
+        raise SystemExit(error.exit_code) from error
     except (
         OSError,
         StateValidationError,
@@ -618,8 +648,15 @@ def _handle_modify(args: argparse.Namespace) -> int:
                 state_dir=args.state_dir,
                 dry_run=args.dry_run,
                 raw_env=raw_env,
+                modify_upgrade_intent=(
+                    ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC
+                    if getattr(args, "task18_force_model_sync_upgrade", False)
+                    else ModifyUpgradeIntent.OPERATOR
+                ),
                 enforce_live_run_contamination_check=True,
             )
+    except LifecycleLockBusyError as error:
+        raise SystemExit(error.exit_code) from error
     except (
         OSError,
         StateValidationError,
@@ -650,7 +687,10 @@ def _handle_uninstall(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             non_interactive=args.non_interactive,
             confirm_file=args.confirm_file,
+            stack_name=args.stack_name,
         )
+    except LifecycleLockBusyError as error:
+        raise SystemExit(error.exit_code) from error
     except (
         OSError,
         StateValidationError,
@@ -666,35 +706,49 @@ def _handle_uninstall(args: argparse.Namespace) -> int:
 
 def _handle_inspect_state(args: argparse.Namespace) -> int:
     try:
-        loaded_state = load_state_dir(args.state_dir)
         raw_env = parse_env_file(args.env_file)
         context = validate_task1_proof_context_argument(
             raw_env, getattr(args, "task1_proof_context", None)
         )
         with activate_task1_proof_context(context):
-            desired_state = resolve_desired_state(raw_env)
-        if context is not None:
-            runtime_auth = load_dokploy_runtime_auth(args.state_dir)
-            raw_env = merge_dokploy_runtime_auth(raw_env, runtime_auth)
-            desired_state = merge_dokploy_runtime_auth_desired_state(
-                desired_state,
-                runtime_auth,
+            lock_stack_name = resolve_desired_state(raw_env).stack_name
+        with lifecycle_operation_lock(
+            state_dir=args.state_dir,
+            stack_name=lock_stack_name,
+            command="inspect-state",
+            shared=True,
+        ):
+            loaded_state = load_state_dir(args.state_dir)
+            with activate_task1_proof_context(context):
+                desired_state = resolve_desired_state(raw_env)
+            if context is not None:
+                runtime_auth = load_dokploy_runtime_auth(args.state_dir)
+                raw_env = merge_dokploy_runtime_auth(raw_env, runtime_auth)
+                desired_state = merge_dokploy_runtime_auth_desired_state(
+                    desired_state,
+                    runtime_auth,
+                )
+            snapshot = _build_public_inspection_snapshot(
+                raw_env=raw_env,
+                desired_state=desired_state,
+                litellm_generated_keys=load_litellm_generated_keys(args.state_dir),
+                seaweedfs_generated_secrets=load_seaweedfs_generated_secrets(args.state_dir),
+                surfsense_generated_secrets=load_surfsense_generated_secrets(args.state_dir),
+                ownership_ledger=loaded_state.ownership_ledger,
             )
-        snapshot = _build_public_inspection_snapshot(
-            raw_env=raw_env,
-            desired_state=desired_state,
-            litellm_generated_keys=load_litellm_generated_keys(args.state_dir),
-            seaweedfs_generated_secrets=load_seaweedfs_generated_secrets(args.state_dir),
-            surfsense_generated_secrets=load_surfsense_generated_secrets(args.state_dir),
-            ownership_ledger=loaded_state.ownership_ledger,
-        )
-        snapshot["live_drift"] = build_live_drift_report(
-            desired_state=desired_state,
-            ownership_ledger=loaded_state.ownership_ledger,
-        )
-        snapshot = cast(dict[str, Any], redact_data(snapshot))
-        if not args.dry_run:
-            write_inspection_snapshot(args.state_dir, _redacted_raw_env_input(raw_env), snapshot)
+            snapshot["live_drift"] = build_live_drift_report(
+                desired_state=desired_state,
+                ownership_ledger=loaded_state.ownership_ledger,
+            )
+            snapshot = cast(dict[str, Any], redact_data(snapshot))
+            if not args.dry_run:
+                write_inspection_snapshot(
+                    args.state_dir,
+                    _redacted_raw_env_input(raw_env),
+                    snapshot,
+                )
+    except LifecycleLockBusyError as error:
+        raise SystemExit(error.exit_code) from error
     except (OSError, StateValidationError) as error:
         raise SystemExit(_redacted_cli_error(error)) from error
 
@@ -1077,28 +1131,36 @@ def run_install_flow(
     prompt_for_memory_shortfall: bool = False,
     enforce_live_run_contamination_check: bool = False,
 ) -> dict[str, Any]:
-    return _run_lifecycle_flow(
-        env_file=env_file,
+    resolved_raw = raw_env or parse_env_file(env_file)
+    stack_name = resolve_desired_state(resolved_raw).stack_name
+    with lifecycle_operation_lock(
         state_dir=state_dir,
-        dry_run=dry_run,
-        raw_env=raw_env,
-        bootstrap_backend=bootstrap_backend,
-        tailscale_backend=tailscale_backend,
-        networking_backend=networking_backend,
-        shared_core_backend=shared_core_backend,
-        headscale_backend=headscale_backend,
-        matrix_backend=matrix_backend,
-        nextcloud_backend=nextcloud_backend,
-        seaweedfs_backend=seaweedfs_backend,
-        surfsense_backend=surfsense_backend,
-        coder_backend=coder_backend,
-        openclaw_backend=openclaw_backend,
-        allow_modify=False,
-        remediate_install_host_prereqs=True,
-        allow_memory_shortfall=allow_memory_shortfall,
-        prompt_for_memory_shortfall=prompt_for_memory_shortfall,
-        enforce_live_run_contamination_check=enforce_live_run_contamination_check,
-    )
+        stack_name=stack_name,
+        command="install",
+        shared=dry_run,
+    ):
+        return _run_lifecycle_flow(
+            env_file=env_file,
+            state_dir=state_dir,
+            dry_run=dry_run,
+            raw_env=resolved_raw,
+            bootstrap_backend=bootstrap_backend,
+            tailscale_backend=tailscale_backend,
+            networking_backend=networking_backend,
+            shared_core_backend=shared_core_backend,
+            headscale_backend=headscale_backend,
+            matrix_backend=matrix_backend,
+            nextcloud_backend=nextcloud_backend,
+            seaweedfs_backend=seaweedfs_backend,
+            surfsense_backend=surfsense_backend,
+            coder_backend=coder_backend,
+            openclaw_backend=openclaw_backend,
+            allow_modify=False,
+            remediate_install_host_prereqs=True,
+            allow_memory_shortfall=allow_memory_shortfall,
+            prompt_for_memory_shortfall=prompt_for_memory_shortfall,
+            enforce_live_run_contamination_check=enforce_live_run_contamination_check,
+        )
 
 
 def run_modify_flow(
@@ -1118,30 +1180,42 @@ def run_modify_flow(
     surfsense_backend: SurfSenseBackend | None = None,
     coder_backend: CoderBackend | None = None,
     openclaw_backend: OpenClawBackend | None = None,
+    coder_migration_preflight: Callable[[], None] | None = None,
+    modify_upgrade_intent: ModifyUpgradeIntent = ModifyUpgradeIntent.OPERATOR,
     enforce_live_run_contamination_check: bool = False,
 ) -> dict[str, Any]:
-    return _run_lifecycle_flow(
-        env_file=env_file,
+    resolved_raw = raw_env or parse_env_file(env_file)
+    stack_name = resolve_desired_state(resolved_raw).stack_name
+    with lifecycle_operation_lock(
         state_dir=state_dir,
-        dry_run=dry_run,
-        raw_env=raw_env,
-        bootstrap_backend=bootstrap_backend,
-        tailscale_backend=tailscale_backend,
-        networking_backend=networking_backend,
-        shared_core_backend=shared_core_backend,
-        headscale_backend=headscale_backend,
-        matrix_backend=matrix_backend,
-        nextcloud_backend=nextcloud_backend,
-        seaweedfs_backend=seaweedfs_backend,
-        surfsense_backend=surfsense_backend,
-        coder_backend=coder_backend,
-        openclaw_backend=openclaw_backend,
-        allow_modify=True,
-        remediate_install_host_prereqs=False,
-        allow_memory_shortfall=False,
-        prompt_for_memory_shortfall=False,
-        enforce_live_run_contamination_check=enforce_live_run_contamination_check,
-    )
+        stack_name=stack_name,
+        command="modify",
+        shared=dry_run,
+    ):
+        return _run_lifecycle_flow(
+            env_file=env_file,
+            state_dir=state_dir,
+            dry_run=dry_run,
+            raw_env=resolved_raw,
+            bootstrap_backend=bootstrap_backend,
+            tailscale_backend=tailscale_backend,
+            networking_backend=networking_backend,
+            shared_core_backend=shared_core_backend,
+            headscale_backend=headscale_backend,
+            matrix_backend=matrix_backend,
+            nextcloud_backend=nextcloud_backend,
+            seaweedfs_backend=seaweedfs_backend,
+            surfsense_backend=surfsense_backend,
+            coder_backend=coder_backend,
+            openclaw_backend=openclaw_backend,
+            coder_migration_preflight=coder_migration_preflight,
+            modify_upgrade_intent=modify_upgrade_intent,
+            allow_modify=True,
+            remediate_install_host_prereqs=False,
+            allow_memory_shortfall=False,
+            prompt_for_memory_shortfall=False,
+            enforce_live_run_contamination_check=enforce_live_run_contamination_check,
+        )
 
 
 def run_uninstall_flow(
@@ -1152,6 +1226,34 @@ def run_uninstall_flow(
     non_interactive: bool,
     confirm_file: Path | None,
     uninstall_backend: UninstallBackend | None = None,
+    stack_name: str | None = None,
+) -> dict[str, Any]:
+    with lifecycle_operation_lock(
+        state_dir=state_dir,
+        stack_name=stack_name,
+        command="uninstall",
+        shared=dry_run,
+    ) as locked_stack_name:
+        return _run_uninstall_flow_locked(
+            state_dir=state_dir,
+            destroy_data=destroy_data,
+            dry_run=dry_run,
+            non_interactive=non_interactive,
+            confirm_file=confirm_file,
+            uninstall_backend=uninstall_backend,
+            locked_stack_name=locked_stack_name,
+        )
+
+
+def _run_uninstall_flow_locked(
+    *,
+    state_dir: Path,
+    destroy_data: bool,
+    dry_run: bool,
+    non_interactive: bool,
+    confirm_file: Path | None,
+    uninstall_backend: UninstallBackend | None,
+    locked_stack_name: str,
 ) -> dict[str, Any]:
     loaded_state = load_state_dir(state_dir)
     if not validate_existing_state(loaded_state):
@@ -1163,6 +1265,10 @@ def run_uninstall_flow(
     assert loaded_state.desired_state is not None
     assert loaded_state.applied_state is not None
     assert loaded_state.ownership_ledger is not None
+    if loaded_state.desired_state.stack_name != locked_stack_name:
+        raise StateValidationError(
+            "Persisted desired state does not match the locked lifecycle stack."
+        )
     if (
         loaded_state.applied_state.desired_state_fingerprint
         != loaded_state.desired_state.fingerprint()
@@ -1170,6 +1276,8 @@ def run_uninstall_flow(
         raise StateValidationError(
             "Persisted applied state fingerprint does not match the persisted desired state."
         )
+    if not dry_run:
+        ensure_lifecycle_stack_binding(state_dir, locked_stack_name)
 
     plan = build_uninstall_plan(
         raw_input=loaded_state.raw_input,
@@ -1177,6 +1285,8 @@ def run_uninstall_flow(
         ownership_ledger=loaded_state.ownership_ledger,
         destroy_data=destroy_data,
     )
+    runtime_auth = load_dokploy_runtime_auth(state_dir)
+    runtime_raw_input = merge_dokploy_runtime_auth(loaded_state.raw_input, runtime_auth)
     confirmation_lines: tuple[str, ...] = ()
     if not dry_run:
         confirmation_lines = collect_confirmation_lines(
@@ -1192,7 +1302,16 @@ def run_uninstall_flow(
         desired_state=loaded_state.desired_state,
         ownership_ledger=loaded_state.ownership_ledger,
         plan=plan,
-        backend=uninstall_backend or ShellUninstallBackend(loaded_state.raw_input),
+        backend=uninstall_backend
+        or ShellUninstallBackend(
+            runtime_raw_input,
+            state_dir=state_dir,
+            api_url=(
+                runtime_auth.api_url
+                if runtime_auth is not None
+                else loaded_state.desired_state.dokploy_api_url
+            ),
+        ),
         dry_run=dry_run,
     )
     return {
@@ -1232,6 +1351,8 @@ def _run_lifecycle_flow(
     prompt_for_memory_shortfall: bool,
     enforce_live_run_contamination_check: bool,
     surfsense_backend: SurfSenseBackend | None = None,
+    coder_migration_preflight: Callable[[], None] | None = None,
+    modify_upgrade_intent: ModifyUpgradeIntent = ModifyUpgradeIntent.OPERATOR,
 ) -> dict[str, Any]:
     loaded_state = load_state_dir(state_dir)
     existing_state = validate_existing_state(loaded_state)
@@ -1262,6 +1383,7 @@ def _run_lifecycle_flow(
             requested_raw=raw_env,
             requested_desired=desired_state,
         )
+        lifecycle_plan = apply_modify_upgrade_intent(lifecycle_plan, modify_upgrade_intent)
         disable_plan = build_pack_disable_plan(
             existing_desired=loaded_state.desired_state,
             requested_desired=desired_state,
@@ -1305,6 +1427,33 @@ def _run_lifecycle_flow(
             desired_equivalent=False,
         )
 
+    if enforce_live_run_contamination_check:
+        _validate_live_run_env_for_mutation(
+            raw_env=raw_env,
+            lifecycle_plan=lifecycle_plan,
+            dry_run=dry_run,
+        )
+        _validate_live_drift_for_mutation(
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            lifecycle_plan=lifecycle_plan,
+            dry_run=dry_run,
+        )
+    if allow_modify and lifecycle_plan.mode != "noop" and "coder" in desired_state.enabled_packs:
+        if coder_migration_preflight is not None:
+            coder_migration_preflight()
+        elif coder_backend is None:
+            hostname = desired_state.hostnames.get("coder")
+            if hostname is None:
+                raise CoderError("Coder migration preflight hostname is absent.")
+            preflight_coder_template_migration(
+                hostname,
+                raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
+                raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+            )
+        else:
+            raise CoderError("Injected Coder modify backend requires a migration preflight.")
+
     if allow_modify and existing_state and lifecycle_plan.mode != "noop":
         raw_env = _rehydrate_guided_retry_keys(
             env_file=env_file,
@@ -1321,18 +1470,8 @@ def _run_lifecycle_flow(
 
     docker_hub_credentials = _docker_hub_credentials_from_env(raw_env)
 
-    if enforce_live_run_contamination_check:
-        _validate_live_run_env_for_mutation(
-            raw_env=raw_env,
-            lifecycle_plan=lifecycle_plan,
-            dry_run=dry_run,
-        )
-        _validate_live_drift_for_mutation(
-            desired_state=desired_state,
-            ownership_ledger=ownership_ledger,
-            lifecycle_plan=lifecycle_plan,
-            dry_run=dry_run,
-        )
+    if not dry_run:
+        ensure_lifecycle_stack_binding(state_dir, desired_state.stack_name)
     host_facts = collect_host_facts(raw_env)
     host_prerequisite_summary: dict[str, Any] | None = None
     if remediate_install_host_prereqs and _host_supports_prerequisite_remediation(host_facts):
@@ -1406,8 +1545,16 @@ def _run_lifecycle_flow(
             dry_run=dry_run,
             require_real_dokploy_auth=require_real_dokploy_auth,
         )
+    legacy_task5_upgrade = (
+        existing_state
+        and loaded_state.applied_state is not None
+        and loaded_state.applied_state.runtime_images is None
+    )
     if not dry_run and lifecycle_plan.mode != "noop":
-        write_target_state(state_dir, persistable_raw_env, desired_state)
+        if legacy_task5_upgrade:
+            prepare_sync_state_upgrade(state_dir)
+        else:
+            write_target_state(state_dir, persistable_raw_env, desired_state)
         if not existing_state:
             write_applied_checkpoint(
                 state_dir,
@@ -1416,6 +1563,7 @@ def _run_lifecycle_flow(
                     desired_state_fingerprint=desired_state.fingerprint(),
                     completed_steps=(),
                     lifecycle_checkpoint_contract_version=LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+                    runtime_images=desired_state.runtime_images,
                 ),
             )
     tailscale_phase_backend = tailscale_backend or ShellTailscaleBackend(raw_env)
@@ -1494,6 +1642,27 @@ def _run_lifecycle_flow(
         session_client=dokploy_session_client,
         litellm_generated_keys=litellm_generated_keys,
     )
+    has_injected_lifecycle_backend = any(
+        candidate is not None
+        for candidate in (
+            bootstrap_backend,
+            tailscale_backend,
+            networking_backend,
+            shared_core_backend,
+            headscale_backend,
+            matrix_backend,
+            nextcloud_backend,
+            seaweedfs_backend,
+            surfsense_backend,
+            coder_backend,
+            openclaw_backend,
+        )
+    )
+    authority_publisher = (
+        None
+        if dry_run or has_injected_lifecycle_backend
+        else production_lifecycle_authority_publisher(raw_env, state_dir, desired_state.stack_name)
+    )
     lifecycle_backends = LifecycleBackends(
         bootstrap=backend,
         tailscale=tailscale_phase_backend,
@@ -1509,6 +1678,7 @@ def _run_lifecycle_flow(
         coder=coder_phase_backend,
         openclaw=openclaw_phase_backend,
         surfsense=surfsense_phase_backend,
+        authority_publisher=authority_publisher,
     )
 
     try:
@@ -1538,7 +1708,7 @@ def _run_lifecycle_flow(
         )
 
     if not dry_run:
-        if existing_state:
+        if existing_state and not legacy_task5_upgrade:
             if loaded_state.applied_state is None or (
                 loaded_state.applied_state.completed_steps != lifecycle_plan.initial_completed_steps
                 or loaded_state.applied_state.desired_state_fingerprint
@@ -1558,6 +1728,12 @@ def _run_lifecycle_flow(
                         lifecycle_checkpoint_contract_version=(
                             LIFECYCLE_CHECKPOINT_CONTRACT_VERSION
                         ),
+                        runtime_images=desired_state.runtime_images,
+                        opencode_go_sync=(
+                            None
+                            if loaded_state.applied_state is None
+                            else loaded_state.applied_state.opencode_go_sync
+                        ),
                     ),
                 )
 
@@ -1568,7 +1744,11 @@ def _run_lifecycle_flow(
                 desired_state=desired_state,
                 ownership_ledger=ownership_ledger,
                 plan=disable_plan,
-                backend=ShellUninstallBackend(raw_env),
+                backend=ShellUninstallBackend(
+                    raw_env,
+                    state_dir=state_dir,
+                    api_url=desired_state.dokploy_api_url,
+                ),
                 dry_run=False,
             )
             ownership_ledger = load_state_dir(state_dir).ownership_ledger or OwnershipLedger(
@@ -1595,6 +1775,7 @@ def _run_lifecycle_flow(
         backends=lifecycle_backends,
     )
     if not dry_run and lifecycle_plan.mode != "noop":
+        desired_state = load_state_dir(state_dir).desired_state or desired_state
         persisted_raw_env = (
             persistable_raw_env
             if active_task1_proof_context() is not None
@@ -2028,6 +2209,17 @@ def _build_shared_core_backend(
                 plan=desired_state.shared_core,
             ),
             state_dir=state_dir,
+            runtime_images=desired_state.runtime_images,
+            immediate_sync_runner=lambda outcome: run_immediate_sync_with_helper(
+                ImmediateSyncConfig(
+                    wizard_state_dir=state_dir,
+                    stack=desired_state.stack_name,
+                    image_digest=desired_state.runtime_images.litellm,
+                    network=desired_state.shared_core.network_name,
+                    metadata_volume=outcome.desired.metadata_volume,
+                ),
+                outcome,
+            ),
             litellm_admin_api=(
                 None
                 if litellm_generated_keys is None or desired_state.shared_core.litellm is None
@@ -2410,7 +2602,15 @@ def _build_coder_backend(
         hermes_model=hermes_model,
         ai_default_base_url=_shared_ai_default_base_url(raw_env),
         ai_default_api_key=litellm_generated_keys.virtual_keys["coder-hermes"],
+        coder_hermes_key=litellm_generated_keys.virtual_keys["coder-hermes"],
+        coder_kdense_key=litellm_generated_keys.virtual_keys["coder-kdense"],
+        visible_litellm_aliases=build_coder_visible_litellm_aliases(
+            flat_env=raw_env.values,
+            plan=desired_state.shared_core,
+        ),
         state_dir=state_dir,
+        image_digest=desired_state.runtime_images.coder,
+        runtime_images=desired_state.runtime_images,
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,

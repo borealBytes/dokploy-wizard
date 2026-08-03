@@ -17,7 +17,11 @@ from dokploy_wizard.networking import (
     reconcile_cloudflare_access,
     reconcile_networking,
 )
-from dokploy_wizard.state import DesiredState, OwnershipLedger, RawEnvInput
+from dokploy_wizard.state import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput
+from dokploy_wizard.state.uninstall_authority import UninstallAuthorityStore
+from dokploy_wizard.uninstall.executor import ShellUninstallBackend
+from dokploy_wizard.uninstall.planner import PlannedDeletion
+from dokploy_wizard.uninstall.providers import UninstallProviderClients
 
 
 @dataclass
@@ -26,6 +30,7 @@ class FakeCloudflareBackend:
     access_provider: CloudflareAccessIdentityProvider | None = None
     access_apps: dict[str, CloudflareAccessApplication] = field(default_factory=dict)
     access_policies: dict[str, CloudflareAccessPolicy] = field(default_factory=dict)
+    dns_records: dict[str, CloudflareDnsRecord] = field(default_factory=dict)
     dns_record_updates: list[tuple[str, str, str, str, bool]] = field(default_factory=list)
     update_tunnel_configuration_calls: list[tuple[str, str, tuple[dict[str, object], ...]]] = field(
         default_factory=list
@@ -100,17 +105,27 @@ class FakeCloudflareBackend:
         proxied: bool,
     ) -> CloudflareDnsRecord:
         del zone_id
-        return CloudflareDnsRecord(
+        record = CloudflareDnsRecord(
             record_id=f"dns-{hostname}",
             name=hostname,
             record_type="CNAME",
             content=content,
             proxied=proxied,
         )
+        self.dns_records[record.record_id] = record
+        return record
 
     def get_dns_record(self, zone_id: str, record_id: str) -> CloudflareDnsRecord | None:
-        del zone_id, record_id
-        return None
+        del zone_id
+        return self.dns_records.get(record_id)
+
+    def delete_tunnel(self, account_id: str, tunnel_id: str) -> None:
+        del account_id, tunnel_id
+        self.existing_tunnel = None
+
+    def delete_dns_record(self, zone_id: str, record_id: str) -> None:
+        del zone_id
+        self.dns_records.pop(record_id)
 
     def update_dns_record(
         self,
@@ -173,6 +188,11 @@ class FakeCloudflareBackend:
         )
         return self.access_provider
 
+    def delete_access_identity_provider(self, account_id: str, provider_id: str) -> None:
+        del account_id
+        if self.access_provider is not None and self.access_provider.provider_id == provider_id:
+            self.access_provider = None
+
     def get_access_application(
         self, account_id: str, app_id: str
     ) -> CloudflareAccessApplication | None:
@@ -209,6 +229,12 @@ class FakeCloudflareBackend:
         )
         self.access_apps[domain] = app
         return app
+
+    def delete_access_application(self, account_id: str, app_id: str) -> None:
+        del account_id
+        self.access_apps = {
+            domain: app for domain, app in self.access_apps.items() if app.app_id != app_id
+        }
 
     def get_access_policy(
         self, account_id: str, app_id: str, policy_id: str
@@ -298,6 +324,36 @@ def test_litellm_admin_access_uses_configured_subdomain() -> None:
 
     assert [item.hostname for item in phase.result.applications] == ["ai-admin.example.com"]
     assert any("https://ai-admin.example.com" in note for note in phase.result.notes)
+
+
+def test_networking_create_records_authority_for_default_backend_destroy(tmp_path: Path) -> None:
+    backend = FakeCloudflareBackend()
+    raw_env = _raw_env()
+    desired_state = _desired_state()
+    authorities = UninstallAuthorityStore(tmp_path)
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+        authority_store=authorities,
+    )
+    resource = OwnedResource(
+        "cloudflare_tunnel",
+        phase.tunnel_resource_id or "",
+        "account:account-123",
+    )
+    deletion = PlannedDeletion(resource=resource, phase="networking", policy="retain_safe")
+
+    ShellUninstallBackend(
+        raw_env,
+        state_dir=tmp_path,
+        providers=UninstallProviderClients(cloudflare=backend),
+    ).delete(deletion)
+
+    assert authorities.load_deletion(resource) is not None
 
 
 def test_task1_context_uses_external_otp_and_creates_access_before_unique_dns(

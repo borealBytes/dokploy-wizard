@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any
 
 from dokploy_wizard.networking.cloudflare import (
@@ -58,6 +59,7 @@ from dokploy_wizard.state import (
     RawEnvInput,
     StateValidationError,
 )
+from dokploy_wizard.state.uninstall_authority import UninstallAuthorityStore
 
 TUNNEL_RESOURCE_TYPE = "cloudflare_tunnel"
 DNS_RESOURCE_TYPE = "cloudflare_dns_record"
@@ -90,6 +92,7 @@ def reconcile_networking(
     backend: CloudflareBackend,
     connector_backend: Any | None = None,
     task1_journal: Task1CloudflareJournal | None = None,
+    authority_store: UninstallAuthorityStore | None = None,
 ) -> NetworkingPhase:
     proof_context = active_task1_proof_context()
     credentials = _resolve_credentials(raw_env, desired_state, backend)
@@ -187,6 +190,17 @@ def reconcile_networking(
         )
         if connector.passed:
             notes.append(f"Dokploy is publicly reachable at {connector.public_url}.")
+    if not dry_run and authority_store is not None and proof_context is None:
+        _record_networking_authority(
+            authority_store=authority_store,
+            backend=backend,
+            account_id=credentials.account_id,
+            zone_id=credentials.zone_id,
+            tunnel=tunnel,
+            tunnel_action=tunnel_action,
+            dns_records=dns_records,
+            stack_name=desired_state.stack_name,
+        )
 
     outcome = "plan_only" if dry_run else _derive_outcome(tunnel_action, dns_records)
     return NetworkingPhase(
@@ -246,6 +260,7 @@ def reconcile_cloudflare_access(
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
     task1_journal: Task1CloudflareJournal | None = None,
+    authority_store: UninstallAuthorityStore | None = None,
 ) -> AccessPhase:
     proof_context = active_task1_proof_context()
     credentials = _resolve_credentials(raw_env, desired_state, backend)
@@ -329,6 +344,17 @@ def reconcile_cloudflare_access(
     litellm_hostname = dict(target_hostnames).get(_LITELLM_ADMIN_ACCESS_KEY)
     if litellm_hostname is not None:
         notes.extend(_litellm_access_notes(desired_state=desired_state, hostname=litellm_hostname))
+    if not dry_run and authority_store is not None and proof_context is None:
+        _record_access_authority(
+            authority_store=authority_store,
+            backend=backend,
+            account_id=credentials.account_id,
+            provider=provider,
+            provider_action=provider_action,
+            applications=tuple(apps),
+            policies=tuple(policies),
+            stack_name=desired_state.stack_name,
+        )
     return AccessPhase(
         result=AccessResult(
             outcome=outcome,
@@ -393,6 +419,117 @@ def build_access_ledger(
     return OwnershipLedger(
         format_version=existing_ledger.format_version, resources=tuple(resources)
     )
+
+
+def _record_networking_authority(
+    *,
+    authority_store: UninstallAuthorityStore,
+    backend: CloudflareBackend,
+    account_id: str,
+    zone_id: str,
+    tunnel: CloudflareTunnel,
+    tunnel_action: str,
+    dns_records: tuple[PlannedDnsRecord, ...],
+    stack_name: str,
+) -> None:
+    if tunnel_action == "create":
+        observed_tunnel = backend.get_tunnel(account_id, tunnel.tunnel_id)
+        if observed_tunnel is None:
+            raise CloudflareError("Created Cloudflare tunnel could not be re-read for authority.")
+        authority_store.record_created(
+            resource=OwnedResource(TUNNEL_RESOURCE_TYPE, tunnel.tunnel_id, _account_scope(account_id)),
+            owner_id=f"stack:{stack_name}",
+            provider="cloudflare",
+            physical_target_id=observed_tunnel.tunnel_id,
+            parent_target_id=account_id,
+            expected_fingerprint=tunnel_fingerprint(observed_tunnel),
+        )
+    for record in dns_records:
+        if record.action != "create":
+            continue
+        observed_record = backend.get_dns_record(zone_id, record.record_id)
+        if observed_record is None:
+            raise CloudflareError("Created Cloudflare DNS record could not be re-read for authority.")
+        authority_store.record_created(
+            resource=OwnedResource(DNS_RESOURCE_TYPE, record.record_id, _dns_scope(zone_id, record.hostname)),
+            owner_id=f"stack:{stack_name}",
+            provider="cloudflare_dns",
+            physical_target_id=observed_record.record_id,
+            parent_target_id=zone_id,
+            expected_fingerprint=dns_fingerprint(observed_record),
+        )
+
+
+def _record_access_authority(
+    *,
+    authority_store: UninstallAuthorityStore,
+    backend: CloudflareBackend,
+    account_id: str,
+    provider: CloudflareAccessIdentityProvider,
+    provider_action: str,
+    applications: tuple[PlannedAccessApplication, ...],
+    policies: tuple[PlannedAccessPolicy, ...],
+    stack_name: str,
+) -> None:
+    owner_id = f"stack:{stack_name}"
+    if provider_action == "create":
+        observed_provider = backend.get_access_identity_provider(account_id, provider.provider_id)
+        if observed_provider is None:
+            raise CloudflareError("Created Cloudflare Access provider could not be re-read for authority.")
+        authority_store.record_created(
+            resource=OwnedResource(
+                ACCESS_OTP_PROVIDER_RESOURCE_TYPE,
+                provider.provider_id,
+                _access_provider_scope(account_id),
+            ),
+            owner_id=owner_id,
+            provider="cloudflare_access_identity_provider",
+            physical_target_id=observed_provider.provider_id,
+            parent_target_id=account_id,
+            expected_fingerprint=_identity_provider_fingerprint(observed_provider),
+        )
+    for application in applications:
+        if application.action != "create":
+            continue
+        observed_application = backend.get_access_application(account_id, application.app_id)
+        if observed_application is None:
+            raise CloudflareError("Created Cloudflare Access app could not be re-read for authority.")
+        authority_store.record_created(
+            resource=OwnedResource(
+                ACCESS_APPLICATION_RESOURCE_TYPE,
+                application.app_id,
+                _access_application_scope(account_id, application.hostname),
+            ),
+            owner_id=owner_id,
+            provider="cloudflare_access_application",
+            physical_target_id=observed_application.app_id,
+            parent_target_id=account_id,
+            expected_fingerprint=application_fingerprint(observed_application),
+        )
+    for policy in policies:
+        if policy.action != "create":
+            continue
+        application_ids = {application.hostname: application.app_id for application in applications}
+        app_id = application_ids[policy.hostname]
+        observed_policy = backend.get_access_policy(account_id, app_id, policy.policy_id)
+        if observed_policy is None:
+            raise CloudflareError("Created Cloudflare Access policy could not be re-read for authority.")
+        authority_store.record_created(
+            resource=OwnedResource(
+                ACCESS_POLICY_RESOURCE_TYPE,
+                policy.policy_id,
+                _access_policy_scope(account_id, policy.hostname),
+            ),
+            owner_id=owner_id,
+            provider="cloudflare_access_policy",
+            physical_target_id=observed_policy.policy_id,
+            parent_target_id=observed_policy.app_id,
+            expected_fingerprint=policy_fingerprint(observed_policy),
+        )
+
+
+def _identity_provider_fingerprint(provider: CloudflareAccessIdentityProvider) -> str:
+    return sha256(f"{provider.provider_id}\0{provider.name}\0{provider.provider_type}".encode()).hexdigest()
 
 
 def _resolve_credentials(

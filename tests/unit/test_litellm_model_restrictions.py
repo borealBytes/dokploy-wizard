@@ -24,6 +24,7 @@ import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import cast
 from urllib import error, request
 
@@ -39,6 +40,24 @@ from dokploy_wizard.litellm.admin import (
 from dokploy_wizard.litellm.config_renderer import build_litellm_config
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 
+_EXPECTED_ALL_PROXY_MODELS = (
+    DEFAULT_LOCAL_CANONICAL_ALIAS,
+    "opencode-go/minimax-m2.7",
+    "opencode-go/minimax-m2.5",
+    "opencode-go/kimi-k2.6",
+    "opencode-go/kimi-k2.5",
+    "opencode-go/glm-5.1",
+    "opencode-go/glm-5",
+    "opencode-go/deepseek-v4-pro",
+    "opencode-go/deepseek-v4-flash",
+    "opencode-go/qwen3.6-plus",
+    "opencode-go/qwen3.5-plus",
+    "opencode-go/mimo-v2-pro",
+    "opencode-go/mimo-v2-omni",
+    "opencode-go/mimo-v2.5-pro",
+    "opencode-go/mimo-v2.5",
+    "openrouter/anthropic/claude-3.5-sonnet",
+)
 EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
     "my-farm-advisor": (
         DEFAULT_LOCAL_CANONICAL_ALIAS,
@@ -48,14 +67,8 @@ EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
         DEFAULT_LOCAL_CANONICAL_ALIAS,
         "openrouter/anthropic/claude-3.5-sonnet",
     ),
-    "coder-hermes": (
-        DEFAULT_LOCAL_CANONICAL_ALIAS,
-        "openrouter/anthropic/claude-3.5-sonnet",
-    ),
-    "coder-kdense": (
-        DEFAULT_LOCAL_CANONICAL_ALIAS,
-        "openrouter/anthropic/claude-3.5-sonnet",
-    ),
+    "coder-hermes": _EXPECTED_ALL_PROXY_MODELS,
+    "coder-kdense": _EXPECTED_ALL_PROXY_MODELS,
 }
 EXPECTED_MODEL_INFO_COSTS: dict[str, dict[str, float]] = {
     "openrouter/anthropic/claude-3.5-sonnet": {
@@ -137,7 +150,7 @@ class FakeLiteLLMAdminApi:
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
-            key=key,
+            key=(sha256(key.encode()).hexdigest() if key_alias.startswith("coder-") else key),
             key_alias=key_alias,
             team_id=team_id,
             models=models,
@@ -155,8 +168,9 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
+        existing_key_id = self._keys[key_alias].key
         record = LiteLLMVirtualKeyRecord(
-            key=key,
+            key=existing_key_id,
             key_alias=key_alias,
             team_id=team_id,
             models=models,
@@ -175,22 +189,27 @@ class FakeLiteLLMRestrictionHarness:
         *,
         config: Mapping[str, object],
         keys_by_consumer: Mapping[str, LiteLLMVirtualKeyRecord],
+        raw_keys_by_consumer: Mapping[str, str],
     ) -> None:
         model_entries = cast(list[dict[str, object]], config["model_list"])
         self._models_by_name = {
             cast(str, entry["model_name"]): entry for entry in model_entries if isinstance(entry, dict)
         }
-        self._keys_by_value = {record.key: record for record in keys_by_consumer.values()}
+        self._keys_by_value = {
+            raw_keys_by_consumer[consumer]: record
+            for consumer, record in keys_by_consumer.items()
+        }
 
     def v1_models(self, api_key: str) -> HarnessResponse:
         record = self._authenticate(api_key)
+        visible_models = self._visible_models(record)
         return HarnessResponse(
             status_code=200,
             json_body={
                 "object": "list",
                 "data": [
                     {"id": model_name, "object": "model", "owned_by": "litellm"}
-                    for model_name in record.models
+                    for model_name in visible_models
                     if model_name in self._models_by_name
                 ],
             },
@@ -198,6 +217,7 @@ class FakeLiteLLMRestrictionHarness:
 
     def model_info(self, api_key: str) -> HarnessResponse:
         record = self._authenticate(api_key)
+        visible_models = self._visible_models(record)
         return HarnessResponse(
             status_code=200,
             json_body={
@@ -207,7 +227,7 @@ class FakeLiteLLMRestrictionHarness:
                         "litellm_params": self._models_by_name[model_name]["litellm_params"],
                         "model_info": self._model_info_payload(index=index, model_name=model_name),
                     }
-                    for index, model_name in enumerate(record.models, start=1)
+                    for index, model_name in enumerate(visible_models, start=1)
                     if model_name in self._models_by_name
                 ]
             },
@@ -222,7 +242,7 @@ class FakeLiteLLMRestrictionHarness:
 
     def chat_completion(self, api_key: str, *, model: str) -> HarnessResponse:
         record = self._authenticate(api_key)
-        if model not in record.models:
+        if model not in self._visible_models(record):
             return HarnessResponse(
                 status_code=403,
                 json_body={
@@ -246,6 +266,11 @@ class FakeLiteLLMRestrictionHarness:
         if record is None:
             raise AssertionError(f"unknown fake LiteLLM key: {api_key}")
         return record
+
+    def _visible_models(self, record: LiteLLMVirtualKeyRecord) -> tuple[str, ...]:
+        if record.models == ("all-proxy-models",):
+            return tuple(self._models_by_name)
+        return record.models
 
 
 class LiveLiteLLMRestrictionHarness:
@@ -333,6 +358,13 @@ def _build_fake_harness() -> FakeLiteLLMRestrictionHarness:
     )
     allowlists = build_litellm_consumer_model_allowlists(flat_env=flat_env, plan=plan)
     manager = LiteLLMGatewayManager(api=FakeLiteLLMAdminApi(), sleep_fn=lambda _: None)
+    manager.reconcile_virtual_keys(
+        generated_keys=_expected_consumer_keys(),
+        consumer_model_allowlists={
+            consumer: EXPECTED_VISIBLE_MODELS[consumer]
+            for consumer in _expected_consumer_keys()
+        },
+    )
     reconciled = manager.reconcile_virtual_keys(
         generated_keys=_expected_consumer_keys(),
         consumer_model_allowlists=allowlists,
@@ -361,7 +393,11 @@ def _build_fake_harness() -> FakeLiteLLMRestrictionHarness:
             },
         },
     )
-    return FakeLiteLLMRestrictionHarness(config=config, keys_by_consumer=reconciled)
+    return FakeLiteLLMRestrictionHarness(
+        config=config,
+        keys_by_consumer=reconciled,
+        raw_keys_by_consumer=_expected_consumer_keys(),
+    )
 
 
 def _consumer_api_key(consumer: str) -> str:

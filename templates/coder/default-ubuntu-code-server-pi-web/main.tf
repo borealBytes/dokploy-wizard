@@ -26,7 +26,8 @@ data "docker_network" "shared" {
 }
 
 locals {
-  username = data.coder_workspace_owner.me.name
+  username      = data.coder_workspace_owner.me.name
+  runtime_image = data.coder_provisioner.me.arch == "amd64" ? "__DOKPLOY_WIZARD_RUNTIME_IMAGE_AMD64__" : "__DOKPLOY_WIZARD_RUNTIME_IMAGE_ARM64__"
 }
 
 # Storage boundary for this default workspace template:
@@ -46,43 +47,12 @@ resource "coder_agent" "main" {
   startup_script = <<-EOT
     set -e
 
-    _SUDO=""
-    if command -v sudo >/dev/null 2>&1; then
-      _SUDO="sudo"
-    fi
+    for runtime_command in curl git wget btop python3 opencode zellij node pi; do
+      command -v "$runtime_command" >/dev/null 2>&1
+    done
 
-    $_SUDO apt-get update -q
-    $_SUDO apt-get install -y curl git ca-certificates wget btop
-
-    # OpenCode, skip if already installed
-    if ! command -v opencode >/dev/null 2>&1; then
-      if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then
-        if [ ! -x /home/coder/.opencode/bin/opencode ]; then
-          echo "OpenCode installer did not produce a usable binary" >&2
-          exit 1
-        fi
-      fi
-    fi
-
-    if [ -x /home/coder/.opencode/bin/opencode ]; then
-      $_SUDO ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode
-    fi
-
-    # Zellij, skip if already installed
-    if ! command -v zellij >/dev/null 2>&1; then
-      ARCH=$(uname -m)
-      ZELLIJ_URL="https://github.com/zellij-org/zellij/releases/latest/download/zellij-$${ARCH}-unknown-linux-musl.tar.gz"
-      curl -fsSL "$${ZELLIJ_URL}" | $_SUDO tar -C /usr/local/bin -xz
-    fi
-
-    # Node.js, corepack, pnpm, and Pi CLI
-    if ! command -v node >/dev/null 2>&1; then
-      curl -fsSL https://deb.nodesource.com/setup_22.x | $_SUDO -E bash -
-      $_SUDO apt-get install -y nodejs
-    fi
-    $_SUDO corepack enable
-    $_SUDO corepack prepare pnpm@10.27.0 --activate
-
+    corepack enable
+    corepack prepare pnpm@10.27.0 --activate
     export PNPM_HOME=/home/coder/.local/share/pnpm
     export PATH="$PNPM_HOME/bin:$PATH"
     mkdir -p "$PNPM_HOME/bin"
@@ -91,14 +61,6 @@ resource "coder_agent" "main" {
     grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc
     grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile
     grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile
-
-    if ! command -v pi >/dev/null 2>&1; then
-      pnpm add -g @earendil-works/pi-coding-agent
-    fi
-
-    command -v pi
-    pi --version
-    bash -lc 'command -v pi && pi --version'
 
     export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"
     export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"
@@ -503,7 +465,7 @@ JS
 module "code-server" {
   count    = data.coder_workspace.me.start_count
   source   = "registry.coder.com/coder/code-server/coder"
-  version  = "~> 1.0"
+  version  = "1.5.2"
   agent_id = coder_agent.main.id
   folder   = "/home/coder"
   order    = 1
@@ -532,9 +494,13 @@ resource "docker_volume" "home_volume" {
   }
 }
 
+resource "docker_image" "workspace" {
+  name = local.runtime_image
+}
+
 resource "docker_container" "workspace" {
   count    = data.coder_workspace.me.start_count
-  image    = "codercom/enterprise-base:ubuntu"
+  image    = docker_image.workspace.image_id
   name     = "coder-${data.coder_workspace_owner.me.name}-${lower(data.coder_workspace.me.name)}"
   hostname = data.coder_workspace.me.name
 

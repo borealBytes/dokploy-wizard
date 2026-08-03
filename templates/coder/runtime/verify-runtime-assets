@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+
+root=$1
+cd "$root"
+sha256sum -c checksums.sha256
+while IFS=' ' read -r checksum path; do
+  target=$(readlink "$path")
+  actual=$(printf '%s' "$target" | sha256sum | cut -d ' ' -f 1)
+  test "$actual" = "$checksum"
+done < links.sha256

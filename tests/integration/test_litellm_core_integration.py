@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
 
@@ -12,6 +16,7 @@ import pytest
 
 import dokploy_wizard.cli
 from dokploy_wizard.cli import run_install_flow, run_modify_flow
+from dokploy_wizard.core import SharedCoreError
 from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.dokploy import (
     DokployComposeRecord,
@@ -27,6 +32,16 @@ from dokploy_wizard.dokploy.shared_core import (
 )
 from dokploy_wizard.litellm import build_litellm_config
 from dokploy_wizard.litellm.admin import LiteLLMTeamRecord, LiteLLMVirtualKeyRecord
+from dokploy_wizard.proof.mutation_registry import (
+    MutationBackend,
+    MutationInventory,
+    MutationKind,
+    StrictLeaseNotHeldError,
+    StrictMutationTotals,
+    UnregisteredMutatorError,
+    execute_registered_mutation,
+)
+from dokploy_wizard.proof.strict_lease import strict_proof_lease
 from dokploy_wizard.state import (
     RawEnvInput,
     load_litellm_generated_keys,
@@ -34,6 +49,7 @@ from dokploy_wizard.state import (
     resolve_desired_state,
 )
 from dokploy_wizard.state.models import LiteLLMGeneratedKeys
+from dokploy_wizard.state.uninstall_targets import DockerNetworkRecord
 from tests.integration.test_networking_reconciler import (
     FakeCloudflareBackend as NetworkingCloudflareBackend,
 )
@@ -103,7 +119,9 @@ class RecordingDokploySharedCoreApi:
             ),
         )
 
-    def create_project(self, *, name: str, description: str | None, env: str | None) -> DokployCreatedProject:
+    def create_project(
+        self, *, name: str, description: str | None, env: str | None
+    ) -> DokployCreatedProject:
         del description, env
         self.create_project_calls += 1
         self.project_name = name
@@ -215,7 +233,7 @@ class RecordingManagedDriftLiteLLMAdminApi:
             }
         )
         record = LiteLLMVirtualKeyRecord(
-            key=key,
+            key=(sha256(key.encode()).hexdigest() if key_alias.startswith("coder-") else key),
             key_alias=key_alias,
             team_id=team_id,
             models=models,
@@ -247,7 +265,7 @@ class RecordingManagedDriftLiteLLMAdminApi:
             }
         )
         record = LiteLLMVirtualKeyRecord(
-            key=key,
+            key=self.keys[key_alias].key,
             key_alias=key_alias,
             team_id=team_id,
             models=models,
@@ -285,9 +303,23 @@ def _litellm_shared_core_backend(
         client=client,
         sleep_fn=lambda _: None,
         state_dir=state_dir,
+        authority_docker_client=_DockerAuthorityClient(
+            DockerNetworkRecord(
+                network_id=desired_state.shared_core.network_name,
+                name=desired_state.shared_core.network_name,
+            )
+        ),
     )
     setattr(backend, "_wait_for_shared_core_containers", lambda: None)
     return backend
+
+
+@dataclass(frozen=True, slots=True)
+class _DockerAuthorityClient:
+    network: DockerNetworkRecord
+
+    def get_network(self, network_id: str) -> DockerNetworkRecord | None:
+        return self.network if network_id == self.network.name else None
 
 
 def _litellm_route_env(**overrides: str) -> dict[str, str]:
@@ -299,8 +331,7 @@ def _litellm_route_env(**overrides: str) -> dict[str, str]:
         "LITELLM_OPENCODE_GO_API_KEY": "sk-opencode-go-key",
         "LITELLM_OPENROUTER_API_KEY": "sk-openrouter-key",
         "LITELLM_OPENROUTER_MODELS": (
-            "anthropic/claude-3.7-sonnet,"
-            "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"
+            "anthropic/claude-3.7-sonnet,openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"
         ),
         "LITELLM_NVIDIA_MODELS": "nvidia/kimi-k2.5=nvidia/moonshotai/kimi-k2.5",
         "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
@@ -336,7 +367,7 @@ def test_build_litellm_config_integrates_all_supported_provider_types() -> None:
                 "openrouter/openai/gpt-4.1-mini": {
                     "pricing": {"prompt": "0.0000008", "completion": "0.0000032"}
                 },
-            }
+            },
         },
     )
 
@@ -349,8 +380,7 @@ def test_build_litellm_config_integrates_all_supported_provider_types() -> None:
     ]
 
     entries = {
-        entry["model_name"]: entry
-        for entry in cast(list[dict[str, Any]], config["model_list"])
+        entry["model_name"]: entry for entry in cast(list[dict[str, Any]], config["model_list"])
     }
     assert entries["local-model.internal/unsloth-active"]["litellm_params"] == {
         "model": "openai/unsloth-active",
@@ -405,14 +435,45 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
     )
 
     assert allowlists == {
-        "coder-hermes": shared_models,
-        "coder-kdense": shared_models,
+        "coder-hermes": ("all-proxy-models",),
+        "coder-kdense": ("all-proxy-models",),
         "dokploy-ai": ("local-model.internal/unsloth-active",),
         "my-farm-advisor": (*shared_models, "nvidia/kimi-k2.5"),
         "openclaw": shared_models,
         "surfsense": shared_models,
     }
     assert "opencode-go/minimax-m2.7" in allowlists["my-farm-advisor"]
+
+
+def test_all_proxy_coder_scopes_preserve_literal_non_coder_scopes() -> None:
+    plan = build_shared_core_plan(
+        stack_name="wizard-stack",
+        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+    )
+
+    allowlists = build_litellm_consumer_model_allowlists(
+        flat_env=_litellm_route_env(
+            MY_FARM_ADVISOR_PRIMARY_MODEL="nvidia/kimi-k2.5",
+            MY_FARM_ADVISOR_FALLBACK_MODELS="opencode-go/minimax-m2.7",
+            OPENCLAW_PRIMARY_MODEL="openrouter/hunter-alpha",
+            OPENCLAW_FALLBACK_MODELS="opencode-go/mimo-v2.5",
+        ),
+        plan=plan,
+    )
+
+    shared_models = (
+        "local-model.internal/unsloth-active",
+        *_EXPECTED_OPENCODE_GO_CHAT_ALIASES,
+        "openrouter/anthropic/claude-3.7-sonnet",
+        "openrouter/hunter-alpha",
+    )
+
+    assert allowlists["coder-hermes"] == ("all-proxy-models",)
+    assert allowlists["coder-kdense"] == ("all-proxy-models",)
+    assert allowlists["dokploy-ai"] == ("local-model.internal/unsloth-active",)
+    assert allowlists["my-farm-advisor"] == (*shared_models, "nvidia/kimi-k2.5")
+    assert allowlists["openclaw"] == shared_models
+    assert allowlists["surfsense"] == shared_models
 
 
 def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases() -> None:
@@ -442,8 +503,8 @@ def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases
     )
 
     assert allowlists == {
-        "coder-hermes": shared_models,
-        "coder-kdense": shared_models,
+        "coder-hermes": ("all-proxy-models",),
+        "coder-kdense": ("all-proxy-models",),
         "dokploy-ai": ("local-model.internal/unsloth-active",),
         "my-farm-advisor": shared_models,
         "openclaw": shared_models,
@@ -472,8 +533,8 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
     )
 
     assert allowlists == {
-        "coder-hermes": shared_models,
-        "coder-kdense": shared_models,
+        "coder-hermes": ("all-proxy-models",),
+        "coder-kdense": ("all-proxy-models",),
         "dokploy-ai": ("local-model.internal/unsloth-active",),
         "my-farm-advisor": shared_models,
         "openclaw": shared_models,
@@ -488,7 +549,7 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
     assert "opencode-go/gpt-image-1.5" not in allowlists["openclaw"]
 
 
-def test_litellm_admin_reconciliation_adopts_live_managed_keys_into_generated_state(
+def test_litellm_admin_reconciliation_rejects_live_key_identity_drift_without_state_adoption(
     tmp_path: Path,
 ) -> None:
     plan = build_shared_core_plan(
@@ -540,33 +601,72 @@ def test_litellm_admin_reconciliation_adopts_live_managed_keys_into_generated_st
         state_dir=tmp_path,
     )
 
-    backend.reconcile_litellm_runtime()
+    with pytest.raises(SharedCoreError, match="blocked during identity"):
+        backend.reconcile_litellm_runtime()
 
     persisted_keys = load_litellm_generated_keys(tmp_path)
-    drifted_team_consumers = {
-        consumer for consumer, models in allowlists.items() if models != stale_models
-    }
     assert persisted_keys is None
-    assert {call["team_alias"] for call in admin_api.update_team_calls} == drifted_team_consumers
-    assert {call["key_alias"] for call in admin_api.delete_key_calls} == set(allowlists)
-    assert {call["key_alias"] for call in admin_api.create_key_calls} == set(allowlists)
+    assert admin_api.update_team_calls == []
+    assert admin_api.delete_key_calls == []
+    assert admin_api.create_key_calls == []
     assert admin_api.update_key_calls == []
+
+
+def test_model_sync_happy_bootstraps_every_consumer_and_reruns_noop(
+    tmp_path: Path,
+) -> None:
+    plan = build_shared_core_plan(
+        stack_name="wizard-stack",
+        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+    )
+    allowlists = build_litellm_consumer_model_allowlists(
+        flat_env=_litellm_route_env(),
+        plan=plan,
+    )
+    generated_keys = _generated_keys_for_consumers(tuple(allowlists))
+    admin_api = RecordingManagedDriftLiteLLMAdminApi(teams={}, keys={})
+    backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-test-key",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists=allowlists,
+        litellm_admin_api=admin_api,
+        client=RecordingDokploySharedCoreApi(),
+        sleep_fn=lambda _: None,
+        state_dir=tmp_path,
+    )
+
+    backend.reconcile_litellm_runtime()
+    first_write_counts = (
+        len(admin_api.teams),
+        len(admin_api.create_key_calls),
+        len(admin_api.update_team_calls),
+        len(admin_api.update_key_calls),
+    )
+    backend.reconcile_litellm_runtime()
+
+    assert set(admin_api.teams) == set(allowlists)
+    assert set(admin_api.keys) == set(allowlists)
+    assert first_write_counts == (len(allowlists), len(allowlists), 0, 0)
+    assert (
+        len(admin_api.teams),
+        len(admin_api.create_key_calls),
+        len(admin_api.update_team_calls),
+        len(admin_api.update_key_calls),
+    ) == first_write_counts
+    assert admin_api.delete_key_calls == []
     for consumer, models in allowlists.items():
-        if consumer in drifted_team_consumers:
-            assert {
-                "team_id": f"team-{consumer}",
-                "team_alias": consumer,
-                "models": models,
-                "metadata": {"consumer": consumer, "managed_by": "dokploy-wizard"},
-            } in admin_api.update_team_calls
-        assert {"key_alias": consumer} in admin_api.delete_key_calls
-        assert {
-            "key_alias": consumer,
-            "key": generated_keys.virtual_keys[consumer],
-            "team_id": f"team-{consumer}",
-            "models": models,
-            "metadata": {"consumer": consumer, "managed_by": "dokploy-wizard"},
-        } in admin_api.create_key_calls
+        assert admin_api.teams[consumer].models == models
+        assert admin_api.keys[consumer].models == models
+    for consumer in ("coder-hermes", "coder-kdense"):
+        raw_key = generated_keys.virtual_keys[consumer]
+        assert admin_api.keys[consumer].key == sha256(raw_key.encode()).hexdigest()
+        assert any(
+            call["key_alias"] == consumer and call["key"] == raw_key
+            for call in admin_api.create_key_calls
+        )
 
 
 def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
@@ -600,7 +700,7 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
     assert summary["shared_core"]["outcome"] == "applied"
     assert summary["shared_core"]["litellm"]["resource_name"] == "wizard-stack-shared-litellm"
     assert "  wizard-stack-shared-litellm:\n" in compose
-    assert "image: ghcr.io/berriai/litellm:" in compose
+    assert "image: ghcr.io/berriai/litellm@sha256:" in compose
     assert 'DATABASE_URL: "postgresql://wizard_stack_litellm:' in compose
     assert "LITELLM_VIRTUAL_KEY_OPENCLAW" not in compose
     assert "LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR" not in compose
@@ -633,7 +733,7 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
     }
 
 
-def test_core_only_rerun_is_noop_and_preserves_litellm_keys(
+def test_fresh_unchanged_durable_write_remains_stable_on_rerun(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -759,6 +859,7 @@ def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_f
         headscale_backend=FakeHeadscaleBackend(),
         matrix_backend=FakeMatrixBackend(),
         coder_backend=coder_backend,
+        coder_migration_preflight=lambda: None,
         openclaw_backend=openclaw_backend,
     )
     generated_after = load_litellm_generated_keys(state_dir)
@@ -833,3 +934,98 @@ def test_coder_and_advisor_install_persist_consumer_specific_virtual_keys(
     assert len(set(generated_keys.virtual_keys.values())) == 6
     assert api.compose_files_by_name["wizard-stack-openclaw"]
     assert api.compose_files_by_name["wizard-stack-my-farm-advisor"]
+
+
+def test_all_mutation_backends_registered() -> None:
+    inventory = MutationInventory.required()
+
+    assert inventory.backends == frozenset(MutationBackend)
+
+
+@pytest.mark.parametrize(
+    "backend",
+    (
+        MutationBackend.CLOUDFLARE,
+        MutationBackend.DOCKER,
+        MutationBackend.TAILSCALE,
+        MutationBackend.SHELL_PROCESS,
+    ),
+    ids=(
+        "cloudflare_mutation",
+        "docker_mutation",
+        "tailscale_mutation",
+        "shell_mutation",
+    ),
+)
+def test_registered_provider_mutation_dispatches(backend: MutationBackend) -> None:
+    calls: list[MutationBackend] = []
+
+    totals = execute_registered_mutation(
+        inventory=MutationInventory.required(),
+        totals=StrictMutationTotals(),
+        backend=backend.value,
+        kind=MutationKind.WORKSPACE_PROOF,
+        action=lambda: calls.append(backend),
+    )
+
+    assert calls == [backend]
+    assert totals == StrictMutationTotals()
+
+
+def test_unregistered_mutator_fails_before_external_action() -> None:
+    external_action_called = False
+
+    def external_action() -> None:
+        nonlocal external_action_called
+        external_action_called = True
+
+    with pytest.raises(UnregisteredMutatorError) as caught:
+        execute_registered_mutation(
+            inventory=MutationInventory.required(),
+            totals=StrictMutationTotals(),
+            backend="unregistered-adapter",
+            kind=MutationKind.CONTROL_PLANE,
+            action=external_action,
+        )
+
+    assert external_action_called is False
+    assert caught.value.totals.unregistered_mutators == 1
+
+
+def test_strict_zero_control_and_sync(tmp_path: Path) -> None:
+    with strict_proof_lease(tmp_path / "strict.lock") as recorder:
+        recorder.assert_strict_zero()
+
+
+def test_strict_lock_not_held(tmp_path: Path) -> None:
+    with strict_proof_lease(tmp_path / "strict.lock") as recorder:
+        pass
+    with pytest.raises(StrictLeaseNotHeldError):
+        recorder.assert_strict_zero()
+
+
+def test_strict_lock_not_held_by_child_process_and_reacquires(tmp_path: Path) -> None:
+    lock_path = tmp_path / "strict.lock"
+    child = (
+        "from pathlib import Path\n"
+        "from dokploy_wizard.proof.mutation_registry import StrictLeaseNotHeldError\n"
+        "from dokploy_wizard.proof.strict_lease import strict_proof_lease\n"
+        "try:\n"
+        "    with strict_proof_lease(Path(__import__('sys').argv[1])):\n"
+        "        raise SystemExit(2)\n"
+        "except StrictLeaseNotHeldError:\n"
+        "    raise SystemExit(0)\n"
+    )
+    environment = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[2] / "src")}
+    with strict_proof_lease(lock_path):
+        result = subprocess.run(
+            [sys.executable, "-c", child, str(lock_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=5,
+        )
+    assert result.returncode == 0
+    with strict_proof_lease(lock_path) as recorder:
+        recorder.assert_strict_zero()

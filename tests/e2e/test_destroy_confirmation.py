@@ -120,6 +120,8 @@ def test_cli_destroy_mode_rejects_weak_confirmation_without_mutation(tmp_path: P
         "--destroy-data",
         "--state-dir",
         str(state_dir),
+        "--stack-name",
+        "nextcloud-stack",
         "--non-interactive",
         "--confirm-file",
         str(FIXTURES_DIR / "weak.confirm"),

@@ -48,6 +48,7 @@ from dokploy_wizard.state import (
     resolve_desired_state,
     write_applied_checkpoint,
 )
+from dokploy_wizard.state.uninstall_targets import DockerNetworkRecord
 from dokploy_wizard.verification import ServiceVerificationResult
 from tests.integration.test_nextcloud_pack import NextcloudOccRecorder, RecordingNextcloudApi
 from tests.unit.fake_dokploy import FakeDokployApiClient
@@ -75,6 +76,16 @@ class FakeDokployBackend:
 
     def ensure_public_route(self) -> None:
         self.ensure_public_route_calls += 1
+
+
+@dataclass(frozen=True, slots=True)
+class FakeDockerNetworkAuthorityClient:
+    network: DockerNetworkRecord
+
+    def get_network(self, network_id: str) -> DockerNetworkRecord | None:
+        if network_id == self.network.network_id:
+            return self.network
+        return None
 
 
 @dataclass
@@ -134,6 +145,15 @@ class FakeCloudflareBackend:
         if content is not None and record.content != content:
             return ()
         return (record,)
+
+    def get_dns_record(self, zone_id: str, record_id: str) -> CloudflareDnsRecord | None:
+        del zone_id
+        if self.dns_records is None:
+            return None
+        return next(
+            (record for record in self.dns_records.values() if record.record_id == record_id),
+            None,
+        )
 
     def create_dns_record(
         self,
@@ -496,7 +516,11 @@ def test_install_auth_failure_leaves_fresh_scaffold_on_disk(
 
     assert state_dir.exists()
     assert sorted(path.name for path in state_dir.iterdir()) == sorted(
-        [*STATE_DOCUMENT_FILES, "litellm-generated-keys.json"]
+        [
+            *STATE_DOCUMENT_FILES,
+            "lifecycle-stack-binding-v1.json",
+            "litellm-generated-keys.json",
+        ]
     )
     assert loaded_state.raw_input is not None
     assert loaded_state.desired_state is not None
@@ -825,6 +849,7 @@ def test_full_stack_deploy_rerun_only_redeploys_service_with_changed_compose(
         nextcloud_backend=modify_backends.nextcloud,
         seaweedfs_backend=modify_backends.seaweedfs,
         coder_backend=modify_backends.coder,
+        coder_migration_preflight=lambda: None,
         openclaw_backend=modify_backends.openclaw,
     )
     mutation_counts_after = _mutation_counts(clients, service_names)
@@ -1070,6 +1095,12 @@ def _build_full_stack_backends(
         litellm_admin_api=_FakeLiteLLMAdminApi({"status": "connected", "db": "connected"}),
         state_dir=state_dir,
         client=clients.shared_core,
+        authority_docker_client=FakeDockerNetworkAuthorityClient(
+            DockerNetworkRecord(
+                network_id=desired_state.shared_core.network_name,
+                name=desired_state.shared_core.network_name,
+            )
+        ),
     )
     monkeypatch.setattr(
         shared_core_backend,
@@ -1253,6 +1284,8 @@ def _rewind_applied_steps(state_dir: Path, *, completed_steps: tuple[str, ...]) 
             lifecycle_checkpoint_contract_version=(
                 applied_state.lifecycle_checkpoint_contract_version
             ),
+            runtime_images=applied_state.runtime_images,
+            opencode_go_sync=applied_state.opencode_go_sync,
         ),
     )
 
@@ -1299,6 +1332,8 @@ def _persist_missing_compose_hashes(
             completed_steps=applied_state.completed_steps,
             compose_artifact_hashes=compose_hashes,
             lifecycle_checkpoint_contract_version=applied_state.lifecycle_checkpoint_contract_version,
+            runtime_images=applied_state.runtime_images,
+            opencode_go_sync=applied_state.opencode_go_sync,
         ),
     )
 

@@ -31,6 +31,7 @@ from dokploy_wizard.proof import (
     model_sync_preflight_payload,
     model_sync_remote,
     model_sync_results,
+    model_sync_upgrade_host_a,
     open_protected_directory,
     output_paths,
     protected_bytes,
@@ -185,9 +186,367 @@ def test_model_sync_cli_import_and_parser_commands_remain_available() -> None:
                 "result",
             ]
         ).command,
+        parser.parse_args(
+            [
+                "upgrade-host-a",
+                "--single-host-sequential",
+                "--wrapper",
+                "wrapper",
+                "--env-file",
+                "env",
+                "--abort-guard",
+                "guard",
+                "--host-env",
+                "HOST_A",
+                "--password-env",
+                "PASSWORD_A",
+                "--baseline",
+                "baseline",
+                "--baseline-result",
+                "baseline-result",
+                "--lifecycle-input",
+                "lifecycle-input",
+                "--lifecycle-output",
+                "lifecycle-output",
+                "--final-commit",
+                "a" * 40,
+                "--artifact-dir",
+                "artifacts",
+                "--output",
+                "result",
+            ]
+        ).command,
     }
 
-    assert commands == {"abort-status", "atomic-finalize", "baseline-host-a"}
+    assert commands == {"abort-status", "atomic-finalize", "baseline-host-a", "upgrade-host-a"}
+
+
+def test_upgrade_host_a_parser_accepts_single_host_contract() -> None:
+    # Given
+    parser = model_sync_cli._build_parser()
+
+    # When
+    arguments = parser.parse_args(
+        [
+            "upgrade-host-a",
+            "--single-host-sequential",
+            "--wrapper",
+            "wrapper",
+            "--env-file",
+            "env",
+            "--abort-guard",
+            "guard",
+            "--host-env",
+            "HOST_A",
+            "--password-env",
+            "PASSWORD_A",
+            "--baseline",
+            "baseline",
+            "--baseline-result",
+            "baseline-result",
+            "--lifecycle-input",
+            "lifecycle-input",
+            "--lifecycle-output",
+            "lifecycle-output",
+            "--final-commit",
+            "a" * 40,
+            "--artifact-dir",
+            "artifacts",
+            "--output",
+            "result",
+        ]
+    )
+
+    # Then
+    assert arguments.command == "upgrade-host-a"
+    assert arguments.single_host_sequential is True
+
+
+def test_upgrade_host_a_rejects_task1_hash_drift_before_remote_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    artifact_dir = tmp_path / "task-18"
+    artifact_dir.mkdir()
+    baseline = tmp_path / "baseline.json"
+    baseline.write_bytes(b"{}\n")
+    baseline.chmod(0o600)
+    baseline_result = tmp_path / "task-1-result.json"
+    baseline_result.write_text(
+        json.dumps(
+            {
+                "baseline_sha256": "a" * 64,
+                "host_identity_mode": "single_sequential",
+                "single_host_lifecycle_sha256": "b" * 64,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    baseline_result.chmod(0o600)
+    lifecycle_input = tmp_path / "single-host-lifecycle-baseline.json"
+    lifecycle_input.write_bytes(b"{}\n")
+    lifecycle_input.chmod(0o600)
+    wrapper = tmp_path / "dokploy-wizard-remote"
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    env_file = tmp_path / "install.env"
+    env_file.write_text("ROOT_DOMAIN=proof.example.test\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    callbacks: list[str] = []
+    monkeypatch.setattr(
+        "dokploy_wizard.proof.model_sync_cli_commands.run_proof_wrapper",
+        lambda *_args, **_kwargs: callbacks.append("wrapper"),
+    )
+
+    # When
+    exit_code = main(
+        [
+            "upgrade-host-a",
+            "--single-host-sequential",
+            "--wrapper",
+            str(wrapper),
+            "--env-file",
+            str(env_file),
+            "--abort-guard",
+            str(tmp_path / "abort-guard.json"),
+            "--host-env",
+            "FIXTURE_HOST_A",
+            "--password-env",
+            "FIXTURE_PASSWORD_A",
+            "--baseline",
+            str(baseline),
+            "--baseline-result",
+            str(baseline_result),
+            "--lifecycle-input",
+            str(lifecycle_input),
+            "--lifecycle-output",
+            str(artifact_dir / "single-host-lifecycle-host-a.json"),
+            "--final-commit",
+            "c" * 40,
+            "--artifact-dir",
+            str(artifact_dir),
+            "--output",
+            str(artifact_dir / "result.json"),
+        ]
+    )
+
+    # Then
+    assert exit_code == 1
+    assert callbacks == []
+    assert not (artifact_dir / "result.json").exists()
+    assert not (artifact_dir / "single-host-lifecycle-host-a.json").exists()
+
+
+def test_upgrade_resume_receipt_orchestrates_blocked_then_strict_result(tmp_path: Path) -> None:
+    # Given
+    from dokploy_wizard.proof.model_sync_strict_proof import StrictProofResult
+    from dokploy_wizard.proof.mutation_registry import StrictMutationTotals
+
+    planes = ("cloudflare", "coder", "docker", "dokploy", "tailscale")
+    managed_probe = model_sync_remote.RemoteProbe(
+        machine_sha256="1" * 64,
+        ssh_sha256="2" * 64,
+        boot_sha256="3" * 64,
+        architecture="amd64",
+        namespace_clean=False,
+        inventory={name: () for name in planes},
+        plane_states={name: "absent" for name in planes},
+    )
+    lifecycle = model_sync_upgrade_host_a.SingleHostLifecycleReceipt(
+        phase="baseline_epoch",
+        machine_sha256="1" * 64,
+        ssh_sha256="2" * 64,
+        architecture="amd64",
+        baseline_boot_sha256="3" * 64,
+        current_boot_sha256="3" * 64,
+        baseline_epoch_id="4" * 64,
+        host_a_epoch_id=None,
+        teardown_epoch_id=None,
+        final_epoch_id=None,
+        previous_receipt_sha256=None,
+        evidence_sha256="5" * 64,
+        namespace_resource_absence_verified=True,
+        fresh_install_epoch_verified=False,
+        temporal_clean_epoch_evidence=False,
+    )
+    binding = model_sync_upgrade_host_a.UpgradeHostABinding(
+        baseline_sha256="6" * 64,
+        baseline_result_sha256="7" * 64,
+        lifecycle_sha256=model_sync_upgrade_host_a.receipt_sha256(lifecycle),
+        lifecycle=lifecycle,
+        env_sha256="c" * 64,
+        env_mode=0o600,
+        final_commit="8" * 40,
+    )
+    events: list[str] = []
+    template_names = (
+        "ubuntu-vscode-hermes",
+        "ubuntu-vscode-kdense-byok",
+        "ubuntu-vscode-opencode-pi",
+        "ubuntu-vscode-opencode-web",
+    )
+
+    class Operations:
+        def probe(self) -> model_sync_remote.RemoteProbe:
+            events.append("probe")
+            return managed_probe
+
+        def snapshot(self) -> model_sync_upgrade_host_a.ManagedHostSnapshot:
+            phase = "before" if events.count("snapshot") == 0 else "after"
+            events.append("snapshot")
+            return model_sync_upgrade_host_a.ManagedHostSnapshot(
+                primary_uuid="primary-uuid",
+                template_names=template_names if phase == "after" else ("ubuntu-vscode",),
+                retained_state_sha256=("9" if phase == "before" else "a") * 64,
+                catalog_exact=phase == "after",
+                schedule_exact=phase == "after",
+                source_exact=phase == "after",
+            )
+
+        def create_retired_fixtures(self) -> model_sync_upgrade_host_a.RetiredFixtureEvidence:
+            events.append("fixtures")
+            return model_sync_upgrade_host_a.RetiredFixtureEvidence(
+                running_workspace_id="running-id",
+                running_workspace_name="running-fixture",
+                running_template_id="retired-running-template",
+                running_template_name="ubuntu-vscode-openwork",
+                stopped_workspace_id="stopped-id",
+                stopped_workspace_name="stopped-fixture",
+                stopped_template_id="retired-stopped-template",
+                stopped_template_name="ubuntu-vscode-pi-web",
+            )
+
+        def destructive_state_sha256(self) -> str:
+            events.append("destructive")
+            return "b" * 64
+
+        def modify(self) -> model_sync_upgrade_host_a.ModifyAttempt:
+            events.append("modify")
+            if events.count("modify") == 1:
+                return model_sync_upgrade_host_a.ModifyAttempt(
+                    exit_code=1,
+                    failure_code="CODER_RETIRED_WORKSPACE_NOT_STOPPED",
+                    deployed_commit=None,
+                    control_plane_mutations=0,
+                    synchronizer_durable_writes=0,
+                )
+            return model_sync_upgrade_host_a.ModifyAttempt(
+                exit_code=0,
+                failure_code=None,
+                deployed_commit="8" * 40,
+                control_plane_mutations=7,
+                synchronizer_durable_writes=3,
+            )
+
+        def stop_running_fixture(self, workspace_id: str) -> None:
+            events.append(f"stop:{workspace_id}")
+
+        def strict_proof(self) -> StrictProofResult:
+            events.append("strict")
+            return StrictProofResult(
+                template_names,
+                True,
+                StrictMutationTotals(),
+            )
+
+    lifecycle_output = tmp_path / "single-host-lifecycle-host-a.json"
+    result_output = tmp_path / "result.json"
+
+    # When
+    model_sync_upgrade_host_a.execute_upgrade_host_a(
+        model_sync_upgrade_host_a.UpgradeHostAExecution(
+            binding=binding,
+            lifecycle_input_path=tmp_path / "single-host-lifecycle-baseline.json",
+            lifecycle_output_path=lifecycle_output,
+            result_output_path=result_output,
+        ),
+        Operations(),
+    )
+
+    # Then
+    result = json.loads(result_output.read_text(encoding="utf-8"))
+    assert events == [
+        "probe",
+        "snapshot",
+        "fixtures",
+        "destructive",
+        "modify",
+        "destructive",
+        "stop:running-id",
+        "modify",
+        "snapshot",
+        "strict",
+        "probe",
+    ]
+    assert result["blocked_failure_code"] == "CODER_RETIRED_WORKSPACE_NOT_STOPPED"
+    assert result["blocked_destructive_state_equal"] is True
+    assert result["upgrade_control_plane_mutations_total"] == 7
+    assert result["upgrade_synchronizer_durable_writes_total"] == 3
+    assert result["strict_pass_control_plane_mutations_total"] == 0
+    assert result["strict_pass_synchronizer_durable_writes_total"] == 0
+    assert result["strict_pass_unregistered_mutators_total"] == 0
+    assert result["identity_before"] == result["identity_after"]
+    assert result["primary_uuid_before"] == result["primary_uuid_after"]
+    assert result["deployed_commit_matches"] is True
+    assert result["proof_workspace_cleanup_complete"] is True
+    assert result["template_names"] == list(template_names)
+    receipt = model_sync_upgrade_host_a.parse_lifecycle_receipt(
+        json.loads(lifecycle_output.read_text(encoding="utf-8"))
+    )
+    assert receipt.phase == "host_a_epoch"
+    assert receipt.previous_receipt_sha256 == binding.lifecycle_sha256
+
+
+@pytest.mark.parametrize(
+    ("control_plane", "synchronizer"),
+    [(1, 0), (0, 1)],
+    ids=["nonzero_control_plane_mutation", "nonzero_synchronizer_write"],
+)
+def test_upgrade_strict_rejects_nonzero_control_plane_mutation_or_nonzero_synchronizer_write(
+    control_plane: int,
+    synchronizer: int,
+) -> None:
+    from dokploy_wizard.proof.model_sync_strict_proof import StrictProofResult
+    from dokploy_wizard.proof.model_sync_upgrade_host_a_workflow import _require_strict
+    from dokploy_wizard.proof.mutation_registry import StrictMutationTotals
+
+    strict = StrictProofResult(
+        (
+            "ubuntu-vscode-opencode-pi",
+            "ubuntu-vscode-opencode-web",
+            "ubuntu-vscode-hermes",
+            "ubuntu-vscode-kdense-byok",
+        ),
+        True,
+        StrictMutationTotals(control_plane, synchronizer, 0),
+    )
+
+    with pytest.raises(model_sync_upgrade_host_a.UpgradeHostAError, match="mutation-free"):
+        _require_strict(strict)
+
+
+def test_upgrade_source_mismatch_rejects_post_upgrade_snapshot() -> None:
+    from dokploy_wizard.proof.model_sync_upgrade_host_a_workflow import (
+        _require_snapshot_continuity,
+    )
+
+    names = (
+        "ubuntu-vscode-hermes",
+        "ubuntu-vscode-kdense-byok",
+        "ubuntu-vscode-opencode-pi",
+        "ubuntu-vscode-opencode-web",
+    )
+    before = model_sync_upgrade_host_a.ManagedHostSnapshot(
+        "primary", ("ubuntu-vscode",), "1" * 64, False, False, False
+    )
+    after = model_sync_upgrade_host_a.ManagedHostSnapshot(
+        "primary", names, "2" * 64, True, True, False
+    )
+
+    with pytest.raises(model_sync_upgrade_host_a.UpgradeHostAError, match="incomplete"):
+        _require_snapshot_continuity(before, after)
 
 
 def test_baseline_parser_requires_explicit_active_root(
@@ -2193,24 +2552,25 @@ def test_legacy_renderer_uses_authoritative_internal_base_without_v1(
 
 def test_real_templates_preserve_authoritative_base_url_contracts() -> None:
     root = Path(__file__).parents[2]
-    primary_templates = (
-        "default-ubuntu-code-server",
-        "default-ubuntu-code-server-opencode-web",
-        "default-ubuntu-code-server-openwork",
+    managed_templates = (
+        ("default-ubuntu-code-server", "primary"),
+        ("default-ubuntu-code-server-opencode-web", "opencode-web"),
     )
-    for template in primary_templates:
+    for template, adapter in managed_templates:
         source = (root / f"templates/coder/{template}/main.tf").read_text(encoding="utf-8")
-        assert "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__" in source
-        assert 'base_url = os.environ["AI_DEFAULT_BASE_URL"].rstrip("/")' in source
-        assert 'f"{base_url}/v1/models"' in source
+        assert f"workspace-catalog-sync.pyz --adapter {adapter}" in source
+        assert "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__" not in source
+    legacy = (
+        root / "templates/coder/default-ubuntu-code-server-openwork/main.tf"
+    ).read_text(encoding="utf-8")
+    assert "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__" in legacy
+    assert 'base_url = os.environ["AI_DEFAULT_BASE_URL"].rstrip("/")' in legacy
+    assert 'f"{base_url}/v1/models"' in legacy
     kdense = (root / "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
         encoding="utf-8"
     )
-    assert 'default      = "https://opencode.ai/zen/go/v1"' in kdense
-    assert (
-        "KDENSE_OPENCODE_GO_BASE_URL=${data.coder_parameter.kdense_opencode_go_base_url.value}"
-        in kdense
-    )
+    assert 'KDENSE_LITELLM_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"' in kdense
+    assert "KDENSE_OPENCODE_GO_BASE_URL" not in kdense
 
 
 def test_model_inventory_rejects_empty_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2896,16 +3256,10 @@ def test_kdense_renderer_catalog_matches_terraform_static_options() -> None:
     terraform = (
         Path(__file__).parents[2] / "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
     ).read_text(encoding="utf-8")
-    block = terraform.split("kdense_model_options = [", 1)[1].split("\n  ]", 1)[0]
-    names = [
-        line.split('"', 2)[1] for line in block.splitlines() if line.strip().startswith("name  =")
-    ]
-    values = [
-        line.split('"', 2)[1] for line in block.splitlines() if line.strip().startswith("value =")
-    ]
-    authoritative = tuple(zip(names, values, strict=True))
-
-    assert authoritative == _KDENSE_CATALOG == model_sync_host_b._KDENSE_CATALOG
+    assert "kdense_model_options = [" not in terraform
+    assert "workspace-catalog-sync.pyz --adapter kdense" in terraform
+    assert "/model-sync/current/models.json" in terraform
+    assert _KDENSE_CATALOG == model_sync_host_b._KDENSE_CATALOG
 
 
 def _terraform_kdense_models(

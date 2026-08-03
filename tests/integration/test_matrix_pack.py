@@ -103,6 +103,13 @@ class FakeCloudflareBackend:
             return ()
         return (record,)
 
+    def get_dns_record(self, zone_id: str, record_id: str) -> CloudflareDnsRecord | None:
+        del zone_id
+        return next(
+            (record for record in self.dns_records.values() if record.record_id == record_id),
+            None,
+        )
+
     def create_dns_record(
         self,
         zone_id: str,

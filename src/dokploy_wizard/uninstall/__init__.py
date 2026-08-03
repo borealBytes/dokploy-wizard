@@ -4,11 +4,10 @@ from dokploy_wizard.uninstall.confirm import (
     UninstallConfirmationError,
     collect_confirmation_lines,
 )
+from dokploy_wizard.uninstall.contracts import UninstallBackend
+from dokploy_wizard.uninstall.errors import UninstallExecutionError
 from dokploy_wizard.uninstall.executor import (
     ShellUninstallBackend,
-    UninstallBackend,
-    UninstallExecutionError,
-    UninstallExecutionResult,
     execute_uninstall_plan,
 )
 from dokploy_wizard.uninstall.planner import (
@@ -19,6 +18,7 @@ from dokploy_wizard.uninstall.planner import (
     build_uninstall_plan,
     compute_remaining_completed_steps,
 )
+from dokploy_wizard.uninstall.result import UninstallExecutionResult
 
 __all__ = [
     "PlannedDeletion",

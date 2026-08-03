@@ -12,7 +12,7 @@ from dokploy_wizard.artifact_secret_scan import (
 )
 
 
-def test_scan_fails_on_raw_install_env_secret_without_printing_value(tmp_path: Path) -> None:
+def test_planted_secret_is_redacted_and_rejected(tmp_path: Path) -> None:
     env_file = tmp_path / ".install.env"
     secret = "SECRET_TEST_INSTALL_API_KEY_VALUE"
     env_file.write_text(

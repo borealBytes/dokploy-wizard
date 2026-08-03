@@ -50,6 +50,10 @@ from dokploy_wizard.state import (
     write_ownership_ledger,
 )
 from dokploy_wizard.verification import make_verification_result
+from tests.integration.task11_authority_fakes import (
+    RecordingAuthorityBackend,
+    seed_creation_authority,
+)
 from tests.unit.test_openclaw_pack import (
     FakeDokployOpenClawApi,
     _env_payload_values,
@@ -129,6 +133,13 @@ class FakeCloudflareBackend:
         if content is not None and record.content != content:
             return ()
         return (record,)
+
+    def get_dns_record(self, zone_id: str, record_id: str) -> CloudflareDnsRecord | None:
+        del zone_id
+        return next(
+            (record for record in self.dns_records.values() if record.record_id == record_id),
+            None,
+        )
 
     def create_dns_record(
         self,
@@ -1423,7 +1434,6 @@ def test_modify_adding_farm_later_reruns_nextcloud_without_rerunning_openclaw(
         nextcloud_backend=nextcloud_backend,
         openclaw_backend=None,
     )
-
     summary = run_modify_flow(
         env_file=env_file,
         state_dir=state_dir,
@@ -1509,6 +1519,21 @@ def test_modify_removing_farm_later_removes_owned_farm_resources_only(
         matrix_backend=FakeMatrixBackend(),
         nextcloud_backend=nextcloud_backend,
         openclaw_backend=None,
+    )
+    installed_ledger = load_state_dir(state_dir).ownership_ledger
+    assert installed_ledger is not None
+    seed_creation_authority(
+        state_dir,
+        tuple(
+            resource
+            for resource in installed_ledger.resources
+            if resource.resource_type == MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE
+        ),
+    )
+    monkeypatch.setattr(
+        dokploy_wizard.cli,
+        "ShellUninstallBackend",
+        lambda *_args, **_kwargs: RecordingAuthorityBackend(state_dir),
     )
 
     summary = run_modify_flow(

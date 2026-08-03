@@ -14,9 +14,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Protocol
@@ -34,6 +35,29 @@ from dokploy_wizard.dokploy.client import (
     DokployEnvironmentSummary,
     DokployProjectSummary,
 )
+from dokploy_wizard.dokploy.coder_runtime_asset_images import (
+    DockerWorkspaceRuntimeImageAdapter,
+    WorkspaceRuntimeImageAdapter,
+    build_workspace_runtime_images,
+)
+from dokploy_wizard.dokploy.coder_runtime_assets import (
+    load_runtime_manifest,
+    runtime_manifest_path,
+)
+from dokploy_wizard.dokploy.coder_secret_client import DockerExecCoderSecretClient
+from dokploy_wizard.dokploy.coder_secret_reconciliation import (
+    CoderSecretClient,
+    CoderSecretError,
+    CoderSecretReconciler,
+)
+from dokploy_wizard.dokploy.coder_secret_specs import build_coder_secret_specs
+from dokploy_wizard.dokploy.coder_template_migration_runtime import (
+    ProductionMigrationInputs,
+    TemplateMigrationExecutionError,
+    TemplateSource,
+    execute_template_migration,
+    execute_template_migration_preflight,
+)
 from dokploy_wizard.dokploy.compose_noop import (
     apply_compose_noop_guard,
     apply_rendered_compose_to_existing,
@@ -45,6 +69,13 @@ from dokploy_wizard.litellm.config_renderer import verified_opencode_go_chat_mod
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
 from dokploy_wizard.state import load_state_dir
+from dokploy_wizard.state.runtime_images import RuntimeImages, resolve_runtime_images
+from dokploy_wizard.state.upgrade import (
+    StateUpgradeError,
+    planned_sync_owner_id,
+    state_upgrade_paths,
+    upgrade_state_contract,
+)
 from dokploy_wizard.verification import make_verification_result, redact_text
 
 
@@ -64,11 +95,24 @@ class DokployCoderApi(Protocol):
     ) -> DokployDeployResult: ...
 
 
+class CoderSecretClientFactory(Protocol):
+    def __call__(
+        self, *, container_name: str, session_token: str, state_dir: Path
+    ) -> CoderSecretClient: ...
+
+
 @dataclass(frozen=True)
 class _ComposeLocator:
     project_id: str
     environment_id: str
     compose_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CoderSecretInputs:
+    coder_hermes_key: str
+    coder_kdense_key: str
+    visible_litellm_aliases: tuple[str, ...]
 
 
 _DEFAULT_AI_DEFAULT_PROVIDER = "opencode-go"
@@ -108,6 +152,13 @@ class DokployCoderBackend:
         ai_default_api_key: str | None = None,
         state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployCoderApi | None = None,
+        image_digest: str | None = None,
+        runtime_images: RuntimeImages | None = None,
+        workspace_image_adapter: WorkspaceRuntimeImageAdapter | None = None,
+        coder_hermes_key: str | None = None,
+        coder_kdense_key: str | None = None,
+        visible_litellm_aliases: tuple[str, ...] = (),
+        coder_secret_client_factory: CoderSecretClientFactory | None = None,
     ) -> None:
         self._stack_name = stack_name
         self._compose_name = _service_name(stack_name)
@@ -129,6 +180,41 @@ class DokployCoderBackend:
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
+        accepted_runtime_images = resolve_runtime_images({})
+        self._runtime_images = runtime_images or accepted_runtime_images
+        self._image_digest = image_digest or self._runtime_images.coder
+        if (
+            self._runtime_images.coder != accepted_runtime_images.coder
+            or self._image_digest != accepted_runtime_images.coder
+        ):
+            raise CoderError("Coder service image does not match the accepted migration image.")
+        self._workspace_image_adapter = (
+            workspace_image_adapter
+            or DockerWorkspaceRuntimeImageAdapter(
+                repository_root=Path(__file__).resolve().parents[3]
+            )
+        )
+        secret_values_supplied = (
+            coder_hermes_key is not None
+            or coder_kdense_key is not None
+            or bool(visible_litellm_aliases)
+        )
+        if secret_values_supplied and (
+            not coder_hermes_key or not coder_kdense_key or not visible_litellm_aliases
+        ):
+            raise CoderError("Coder LiteLLM secret inputs are incomplete.")
+        self._coder_secret_inputs = (
+            None
+            if not secret_values_supplied
+            else _CoderSecretInputs(
+                coder_hermes_key=coder_hermes_key,
+                coder_kdense_key=coder_kdense_key,
+                visible_litellm_aliases=visible_litellm_aliases,
+            )
+        )
+        self._coder_secret_client_factory = (
+            coder_secret_client_factory or DockerExecCoderSecretClient
+        )
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "service")
@@ -248,98 +334,40 @@ class DokployCoderBackend:
                 default_alias=f"{self._ai_default_provider}/{self._ai_default_model}"
             )
         )
-        _sync_hermes_workspace_secrets(
+        self._reconcile_coder_workspace_secrets(
             container_name=container_name,
-            hostname=self._hostname,
             session_token=session_token,
-            hermes_inference_provider=self._hermes_inference_provider,
-            hermes_model=self._hermes_model,
-            ai_default_base_url=hermes_litellm_base_url,
-            ai_default_api_key=self._ai_default_api_key,
         )
         shared_network_name = _shared_network_name(self._stack_name)
-        for template_name, template_dir, replacements in (
-            (
+        runtime_image_replacements = self._workspace_runtime_image_replacements()
+        shared_defaults = {
+            "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+            "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
+                self._ai_default_provider
+            ),
+            "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
+                self._ai_default_model
+            ),
+            "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                hermes_litellm_base_url
+            ),
+            "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
+                self._ai_default_api_key or ""
+            ),
+            "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+        }
+        sources = (
+            TemplateSource(
                 _default_template_name(),
                 _default_template_dir(),
-                {
-                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
-                        self._ai_default_provider
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
-                        self._ai_default_model
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
-                        hermes_litellm_base_url
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
-                },
+                {**shared_defaults, **runtime_image_replacements},
             ),
-            (
+            TemplateSource(
                 _default_opencode_web_template_name(),
                 _default_opencode_web_template_dir(),
-                {
-                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
-                        self._ai_default_provider
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
-                        self._ai_default_model
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
-                        hermes_litellm_base_url
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
-                },
+                {**shared_defaults, **runtime_image_replacements},
             ),
-            (
-                _default_openwork_template_name(),
-                _default_openwork_template_dir(),
-                {
-                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
-                        self._ai_default_provider
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
-                        self._ai_default_model
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
-                        hermes_litellm_base_url
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
-                },
-            ),
-            (
-                _default_kdense_byok_template_name(),
-                _default_kdense_byok_template_dir(),
-                {
-                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
-                        self._ai_default_provider
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
-                        self._ai_default_model
-                    ),
-                    "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": _shell_double_quote_escape(
-                        _litellm_internal_base_url(self._stack_name)
-                    ),
-                    "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": _litellm_virtual_key_ref(
-                        "coder-kdense"
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
-                },
-            ),
-            (
+            TemplateSource(
                 _default_hermes_template_name(),
                 _default_hermes_template_dir(),
                 {
@@ -353,15 +381,13 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_HERMES_BASE_URL__": _shell_double_quote_escape(
                         hermes_litellm_base_url
                     ),
-                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
-                    ),
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                    **runtime_image_replacements,
                 },
             ),
-            (
-                _default_pi_web_template_name(),
-                _default_pi_web_template_dir(),
+            TemplateSource(
+                _default_kdense_byok_template_name(),
+                _default_kdense_byok_template_dir(),
                 {
                     "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
                     "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
@@ -370,37 +396,37 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
                         self._ai_default_model
                     ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
+                    "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": _shell_double_quote_escape(
                         hermes_litellm_base_url
                     ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
+                    "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": _litellm_virtual_key_ref(
+                        "coder-kdense"
                     ),
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                    **runtime_image_replacements,
                 },
             ),
-        ):
-            try:
-                seeded = _seed_template(
-                    container_name=container_name,
+        )
+        try:
+            execute_template_migration(
+                ProductionMigrationInputs(
                     hostname=self._hostname,
                     session_token=session_token,
-                    template_name=template_name,
-                    template_dir=template_dir,
-                    replacements=replacements,
+                    container_name=container_name,
+                    state_dir=self._state_dir,
+                    runtime_lock_sha256=load_runtime_manifest(runtime_manifest_path()).lock_sha256,
+                    sources=sources,
+                    render_template=_rendered_template_dir,
+                    copy_template=_docker_copy_template_dir,
+                    push_template=_push_default_template,
+                    version_name=_template_version_name,
+                    active_version_name=_active_template_version_name,
+                    version_names_reader=_template_version_names,
                 )
-            except CoderError as e:
-                if template_name == _default_template_name():
-                    raise
-                note = (
-                    f"Skipped optional Coder template '{template_name}': "
-                    f"{_safe_progress_reason(str(e))}"
-                )
-                _emit_coder_progress(note)
-                notes.append(note)
-                continue
-            if seeded:
-                notes.append(f"Seeded default Coder template '{template_name}'.")
+            )
+        except TemplateMigrationExecutionError as error:
+            detail = "" if error.code is None else f" {error.code}"
+            raise CoderError(f"Coder template migration failed closed.{detail}") from None
         if bootstrap_ready:
             return tuple(notes)
         workspace_name = _default_workspace_name(self._hostname)
@@ -421,6 +447,81 @@ class DokployCoderBackend:
         except CoderError as e:
             notes.append(f"Skipped default workspace creation: {e}")
         return tuple(notes)
+
+    def _reconcile_coder_workspace_secrets(
+        self, *, container_name: str, session_token: str
+    ) -> None:
+        inputs = self._coder_secret_inputs
+        if inputs is None:
+            return
+        try:
+            specs = build_coder_secret_specs(
+                stack_name=self._stack_name,
+                default_alias=f"{self._ai_default_provider}/{self._ai_default_model}",
+                visible_aliases=inputs.visible_litellm_aliases,
+                coder_hermes_key=inputs.coder_hermes_key,
+                coder_kdense_key=inputs.coder_kdense_key,
+            )
+        except ValueError:
+            raise CoderError("Coder workspace secret specification is invalid.") from None
+        owner_id = hashlib.sha256(
+            f"coder-secret:{self._stack_name}:{self._hostname}".encode()
+        ).hexdigest()
+        reconciler = CoderSecretReconciler(
+            state_dir=self._state_dir,
+            client=self._coder_secret_client_factory(
+                container_name=container_name,
+                session_token=session_token,
+                state_dir=self._state_dir,
+            ),
+            owner_id=owner_id,
+        )
+        try:
+            reconciler.reconcile(specs)
+        except CoderSecretError:
+            raise CoderError("Coder workspace secret reconciliation failed.") from None
+
+    def _workspace_runtime_image_replacements(self) -> dict[str, str]:
+        loaded = load_state_dir(self._state_dir)
+        persisted = None if loaded.desired_state is None else loaded.desired_state.runtime_images
+        if (
+            persisted is not None
+            and persisted.workspace_amd64 is not None
+            and persisted.workspace_arm64 is not None
+        ):
+            self._runtime_images = persisted
+        if (
+            self._runtime_images.workspace_amd64 is None
+            or self._runtime_images.workspace_arm64 is None
+        ):
+            manifest = load_runtime_manifest(runtime_manifest_path())
+            derived = build_workspace_runtime_images(manifest, self._workspace_image_adapter)
+            self._runtime_images = replace(
+                self._runtime_images,
+                workspace_amd64=derived.amd64,
+                workspace_arm64=derived.arm64,
+            )
+        if (
+            loaded.desired_state is None
+            or loaded.applied_state is None
+            or loaded.ownership_ledger is None
+        ):
+            raise CoderError("Coder runtime image state is unavailable.")
+        try:
+            upgrade_state_contract(
+                state_dir=self._state_dir,
+                owner_id=planned_sync_owner_id(self._state_dir),
+                paths=state_upgrade_paths(self._state_dir),
+                runtime_images=self._runtime_images,
+                ownership_ledger=loaded.ownership_ledger,
+            )
+        except StateUpgradeError as error:
+            raise CoderError("Unable to persist Coder runtime image IDs.") from error
+        amd64 = self._runtime_images.workspace_amd64
+        arm64 = self._runtime_images.workspace_arm64
+        if amd64 is None or arm64 is None:
+            raise CoderError("Coder runtime image IDs are incomplete.")
+        return _workspace_runtime_image_replacements(amd64, arm64)
 
     def _find_compose_locator(self) -> _ComposeLocator | None:
         if self._applied_locator is not None:
@@ -455,6 +556,7 @@ class DokployCoderBackend:
             wildcard_hostname=self._wildcard_hostname,
             postgres_service_name=self._postgres_service_name,
             postgres=self._postgres,
+            image_digest=self._image_digest,
         )
         try:
             if self._applied_locator is not None:
@@ -743,6 +845,13 @@ def _litellm_virtual_key_ref(consumer: str) -> str:
     return f"$${{LITELLM_VIRTUAL_KEY_{normalized}}}"
 
 
+def _workspace_runtime_image_replacements(amd64: str, arm64: str) -> dict[str, str]:
+    return {
+        "__DOKPLOY_WIZARD_RUNTIME_IMAGE_AMD64__": amd64,
+        "__DOKPLOY_WIZARD_RUNTIME_IMAGE_ARM64__": arm64,
+    }
+
+
 def _normalize_hermes_model_ref(model_ref: str) -> str:
     normalized = model_ref.strip()
     if normalized in {"", "unsloth-active", "local/unsloth-active"}:
@@ -773,10 +882,12 @@ def _render_compose_file(
     wildcard_hostname: str | None,
     postgres_service_name: str,
     postgres: SharedPostgresAllocation,
+    image_digest: str | None = None,
 ) -> RenderedCompose:
     service_name = _service_name(stack_name)
     data_name = _data_name(stack_name)
     shared_network = _shared_network_name(stack_name)
+    image_digest = image_digest or resolve_runtime_images({}).coder
     wildcard_env = ""
     wildcard_router = ""
     if wildcard_hostname is not None:
@@ -797,7 +908,7 @@ def _render_compose_file(
     compose_file = (
         "services:\n"
         f"  {service_name}:\n"
-        "    image: ghcr.io/coder/coder:latest\n"
+        f"    image: {image_digest}\n"
         "    restart: unless-stopped\n"
         '    user: "0:0"\n'
         "    environment:\n"
@@ -995,6 +1106,17 @@ def _coder_login(*, hostname: str, email: str, password: str) -> str:
     return token
 
 
+def preflight_coder_template_migration(hostname: str, email: str, password: str) -> None:
+    """Run the production Coder migration's read-only global preflight."""
+
+    session_token = _coder_login(hostname=hostname, email=email, password=password)
+    try:
+        execute_template_migration_preflight(hostname, session_token)
+    except TemplateMigrationExecutionError as error:
+        detail = "" if error.code is None else f" {error.code}"
+        raise CoderError(f"Coder template migration preflight failed closed.{detail}") from None
+
+
 def _coder_request(
     *,
     hostname: str,
@@ -1056,7 +1178,7 @@ def _default_template_dir() -> Path:
 
 
 def _default_template_name() -> str:
-    return "ubuntu-vscode"
+    return "ubuntu-vscode-opencode-pi"
 
 
 def _default_opencode_web_template_dir() -> Path:
@@ -1140,10 +1262,8 @@ def _required_template_names() -> tuple[str, ...]:
     return (
         _default_template_name(),
         _default_opencode_web_template_name(),
-        _default_openwork_template_name(),
-        _default_kdense_byok_template_name(),
         _default_hermes_template_name(),
-        _default_pi_web_template_name(),
+        _default_kdense_byok_template_name(),
     )
 
 
@@ -1223,6 +1343,8 @@ def _safe_progress_reason(reason: str, *, limit: int = 360) -> str:
 
 def _template_version_name(*, template_dir: Path, replacements: dict[str, str] | None) -> str:
     digest = hashlib.sha256()
+    digest.update(template_dir.name.encode("utf-8"))
+    digest.update(b"\0")
     with _rendered_template_dir(
         template_dir=template_dir, replacements=replacements
     ) as rendered_dir:
@@ -1231,6 +1353,9 @@ def _template_version_name(*, template_dir: Path, replacements: dict[str, str] |
             digest.update(b"\0")
             digest.update(path.read_bytes())
             digest.update(b"\0")
+    digest.update(b"runtime-manifest\0")
+    digest.update(load_runtime_manifest(runtime_manifest_path()).lock_sha256.encode("utf-8"))
+    digest.update(b"\0")
     return f"dokploy-wizard-{digest.hexdigest()[:16]}"
 
 
@@ -1263,18 +1388,58 @@ def _rendered_template_dir(
 ) -> Iterator[Path]:
     if not template_dir.exists():
         raise CoderError(f"Default Coder template directory is missing: {template_dir}")
-    if not replacements:
-        yield template_dir
-        return
     with tempfile.TemporaryDirectory(prefix="dokploy-wizard-coder-template-") as tmp_dir:
         rendered_dir = Path(tmp_dir) / template_dir.name
         shutil.copytree(template_dir, rendered_dir)
-        rendered_main_tf = rendered_dir / "main.tf"
-        contents = rendered_main_tf.read_text(encoding="utf-8")
-        for placeholder, value in replacements.items():
-            contents = contents.replace(placeholder, value)
-        rendered_main_tf.write_text(contents, encoding="utf-8")
+        if replacements:
+            rendered_main_tf = rendered_dir / "main.tf"
+            contents = rendered_main_tf.read_text(encoding="utf-8")
+            for placeholder, value in replacements.items():
+                contents = contents.replace(placeholder, value)
+            rendered_main_tf.write_text(contents, encoding="utf-8")
+        _write_workspace_model_sync_utility(rendered_dir)
         yield rendered_dir
+
+
+def _workspace_model_sync_utility_sources() -> tuple[tuple[Path, str], ...]:
+    source_root = Path(__file__).resolve().parents[2]
+    dokploy_root = source_root / "dokploy_wizard" / "dokploy"
+    utility_sources = tuple(sorted(dokploy_root.glob("workspace_catalog_sync*.py")))
+    return tuple((source, f"dokploy_wizard/dokploy/{source.name}") for source in utility_sources)
+
+
+def _write_workspace_model_sync_utility(template_dir: Path) -> None:
+    utility_path = template_dir / ".dokploy-wizard/model-sync/workspace-catalog-sync.pyz"
+    utility_path.parent.mkdir(parents=True)
+    with zipfile.ZipFile(
+        utility_path,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+        strict_timestamps=True,
+    ) as archive:
+        _write_zipapp_member(archive, "dokploy_wizard/__init__.py", b"")
+        _write_zipapp_member(archive, "dokploy_wizard/dokploy/__init__.py", b"")
+        for source, archive_path in _workspace_model_sync_utility_sources():
+            _write_zipapp_member(archive, archive_path, source.read_bytes())
+        _write_zipapp_member(
+            archive,
+            "__main__.py",
+            b"from dokploy_wizard.dokploy.workspace_catalog_sync_runtime import main\n"
+            b"raise SystemExit(main())\n",
+        )
+
+
+def _write_zipapp_member(archive: zipfile.ZipFile, path: str, content: bytes) -> None:
+    metadata = zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
+    metadata.create_system = 3
+    metadata.external_attr = 0o100644 << 16
+    archive.writestr(
+        metadata,
+        content,
+        compress_type=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    )
 
 
 def _docker_copy_template_dir(
@@ -1323,7 +1488,6 @@ def _push_default_template(
         [
             "--directory",
             f"/tmp/{template_name}",
-            "--ignore-lockfile",
             "--yes",
         ]
     )
@@ -1364,115 +1528,15 @@ def _sync_hermes_workspace_secrets(
     ai_default_base_url: str,
     ai_default_api_key: str | None,
 ) -> None:
-    managed_values = (
-        (
-            "hermes-inference-provider",
-            "HERMES_INFERENCE_PROVIDER",
-            hermes_inference_provider,
-            "Hermes provider for wizard-managed workspaces.",
-        ),
-        (
-            "hermes-model",
-            "HERMES_MODEL",
-            hermes_model,
-            "Hermes model for wizard-managed workspaces.",
-        ),
-        (
-            "hermes-openai-api-base",
-            "OPENAI_API_BASE",
-            ai_default_base_url,
-            "Hermes LiteLLM base URL for wizard-managed workspaces.",
-        ),
-    )
-    for secret_name, env_name, value, description in managed_values:
-        try:
-            _upsert_coder_secret(
-                container_name=container_name,
-                hostname=hostname,
-                session_token=session_token,
-                secret_name=secret_name,
-                env_name=env_name,
-                value=value,
-                description=description,
-            )
-        except CoderError as error:
-            if "unknown flag: --env" in str(error):
-                return
-            raise
-    if ai_default_api_key:
-        try:
-            _upsert_coder_secret(
-                container_name=container_name,
-                hostname=hostname,
-                session_token=session_token,
-                secret_name="hermes-openai-api-key",
-                env_name="OPENAI_API_KEY",
-                value=ai_default_api_key,
-                description="Hermes LiteLLM virtual key for wizard-managed workspaces.",
-            )
-        except CoderError as error:
-            if "unknown flag: --env" not in str(error):
-                raise
-
-
-def _upsert_coder_secret(
-    *,
-    container_name: str,
-    hostname: str,
-    session_token: str,
-    secret_name: str,
-    env_name: str,
-    value: str,
-    description: str,
-) -> None:
-    command_prefix = [
-        "docker",
-        "exec",
-        "-i",
-        "-e",
-        f"CODER_URL={_coder_cli_url()}",
-        "-e",
-        f"CODER_SESSION_TOKEN={session_token}",
+    del (
         container_name,
-        "/opt/coder",
-        "secret",
-    ]
-    update_result = subprocess.run(
-        [
-            *command_prefix,
-            "update",
-            secret_name,
-            "--env",
-            env_name,
-            "--description",
-            description,
-        ],
-        input=value,
-        check=False,
-        capture_output=True,
-        text=True,
+        hostname,
+        session_token,
+        hermes_inference_provider,
+        hermes_model,
+        ai_default_base_url,
+        ai_default_api_key,
     )
-    if update_result.returncode == 0:
-        return
-    create_result = subprocess.run(
-        [
-            *command_prefix,
-            "create",
-            secret_name,
-            "--env",
-            env_name,
-            "--description",
-            description,
-        ],
-        input=value,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if create_result.returncode != 0:
-        raise CoderError(
-            f"Unable to sync Coder secret '{secret_name}': {(create_result.stderr or create_result.stdout).strip()}"
-        )
 
 
 def _shell_double_quote_escape(value: str) -> str:

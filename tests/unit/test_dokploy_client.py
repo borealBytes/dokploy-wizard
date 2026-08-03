@@ -11,6 +11,7 @@ from urllib import error, request
 import pytest
 
 from dokploy_wizard.dokploy import DokployApiClient, DokployApiError
+from dokploy_wizard.state.shared_core_sync import ScheduleSpec
 
 
 def test_dokploy_client_uses_x_api_key_and_api_paths() -> None:
@@ -597,6 +598,8 @@ def test_dokploy_client_lists_compose_schedules_with_query_string() -> None:
                     "shellType": "bash",
                     "command": "php /var/www/html/occ files:scan --path=...",
                     "enabled": True,
+                    "composeId": "cmp-1",
+                    "scheduleType": "compose",
                 }
             ]
         }
@@ -616,6 +619,18 @@ def test_dokploy_client_lists_compose_schedules_with_query_string() -> None:
     assert schedules[0].service_name == "wizard-nextcloud"
 
 
+def test_schedule_owner_id() -> None:
+    spec = ScheduleSpec.for_shared_core(
+        stack_name="wizard",
+        compose_id="cmp-1",
+        owner_id="3b8e1e83-0e57-4d66-a65e-1edbf2aac838",
+    )
+
+    assert spec.command.startswith(
+        "DOKPLOY_WIZARD_SCHEDULE_OWNER_ID=3b8e1e83-0e57-4d66-a65e-1edbf2aac838 "
+    )
+
+
 def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None:
     captured: dict[str, object] = {}
 
@@ -633,6 +648,8 @@ def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None
                 "shellType": "bash",
                 "command": "php /var/www/html/occ files:scan --path=...",
                 "enabled": True,
+                "composeId": "cmp-1",
+                "scheduleType": "compose",
             }
         }
 
@@ -685,6 +702,8 @@ def test_dokploy_client_updates_compose_schedule_with_expected_payload() -> None
                 "shellType": "bash",
                 "command": "php /var/www/html/occ files:scan --path=...",
                 "enabled": True,
+                "composeId": "cmp-1",
+                "scheduleType": "compose",
             }
         }
 

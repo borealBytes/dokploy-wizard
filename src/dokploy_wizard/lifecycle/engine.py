@@ -15,6 +15,12 @@ from dokploy_wizard.core import (
     reconcile_shared_core,
 )
 from dokploy_wizard.lifecycle.changes import LifecyclePlan
+from dokploy_wizard.lifecycle.shared_core_sync import (
+    SharedCoreSyncBackend,
+    UninstallAuthorityPublisher,
+    prepare_sync_state_upgrade,
+    reconcile_and_persist_sync_projection,
+)
 from dokploy_wizard.networking import (
     CloudflareBackend,
     build_access_ledger,
@@ -83,7 +89,22 @@ from dokploy_wizard.state import (
     write_applied_checkpoint,
     write_ownership_ledger,
 )
+from dokploy_wizard.state.uninstall_authority import UninstallAuthorityStore
 from dokploy_wizard.tailscale import TailscaleBackend, build_tailscale_ledger, reconcile_tailscale
+from dokploy_wizard.uninstall.lifecycle_authority import LifecycleAuthorityPublisher
+from dokploy_wizard.uninstall.lifecycle_authority_data_phases import (
+    publish_coder_authority,
+    publish_docuseal_authority,
+    publish_moodle_authority,
+    publish_nextcloud_authority,
+)
+from dokploy_wizard.uninstall.lifecycle_authority_phases import (
+    publish_headscale_authority,
+    publish_matrix_authority,
+    publish_openclaw_authority,
+    publish_seaweedfs_authority,
+    publish_tailscale_authority,
+)
 
 
 @dataclass(frozen=True)
@@ -102,6 +123,7 @@ class LifecycleBackends:
     coder: CoderBackend
     openclaw: OpenClawBackend
     surfsense: SurfSenseBackend | None = None
+    authority_publisher: LifecycleAuthorityPublisher | None = None
 
 
 def execute_lifecycle_plan(
@@ -204,6 +226,12 @@ def execute_lifecycle_plan(
                     stack_name=desired_state.stack_name,
                     node_resource_id=tailscale.node_resource_id,
                 )
+                publish_tailscale_authority(
+                    backends.authority_publisher,
+                    current_ledger,
+                    tailscale,
+                    backends.tailscale,
+                )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "networking":
             networking = reconcile_networking(
@@ -214,6 +242,7 @@ def execute_lifecycle_plan(
                 backend=backends.networking,
                 connector_backend=backends.cloudflared,
                 task1_journal=task1_cloudflare_journal,
+                authority_store=None if dry_run else UninstallAuthorityStore(state_dir),
             )
             phase_results[phase] = networking.result.to_dict()
             if (
@@ -234,6 +263,8 @@ def execute_lifecycle_plan(
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "shared_core":
+            if not dry_run and isinstance(backends.shared_core, SharedCoreSyncBackend):
+                prepare_sync_state_upgrade(state_dir)
             shared_core = reconcile_shared_core(
                 dry_run=dry_run,
                 desired_state=desired_state,
@@ -251,7 +282,21 @@ def execute_lifecycle_plan(
                     mail_relay_resource_id=shared_core.mail_relay_resource_id,
                     litellm_resource_id=shared_core.litellm_resource_id,
                 )
-                write_ownership_ledger(state_dir, current_ledger)
+                if isinstance(backends.shared_core, UninstallAuthorityPublisher):
+                    backends.shared_core.record_created_uninstall_authorities(
+                        UninstallAuthorityStore(state_dir), current_ledger.resources
+                    )
+                if isinstance(backends.shared_core, SharedCoreSyncBackend):
+                    projection = reconcile_and_persist_sync_projection(
+                        state_dir=state_dir,
+                        backend=backends.shared_core,
+                        desired_state=desired_state,
+                        ownership_ledger=current_ledger,
+                    )
+                    desired_state = projection.desired_state
+                    current_ledger = projection.ownership_ledger
+                else:
+                    write_ownership_ledger(state_dir, current_ledger)
         elif phase == "headscale":
             headscale = reconcile_headscale(
                 dry_run=dry_run,
@@ -266,6 +311,7 @@ def execute_lifecycle_plan(
                     stack_name=desired_state.stack_name,
                     service_resource_id=headscale.service_resource_id,
                 )
+                publish_headscale_authority(backends.authority_publisher, current_ledger, headscale)
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "matrix":
             matrix = reconcile_matrix(
@@ -282,6 +328,7 @@ def execute_lifecycle_plan(
                     service_resource_id=matrix.service_resource_id,
                     data_resource_id=matrix.data_resource_id,
                 )
+                publish_matrix_authority(backends.authority_publisher, current_ledger, matrix)
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "surfsense":
             if backends.surfsense is None:
@@ -302,6 +349,10 @@ def execute_lifecycle_plan(
                     service_resource_id=surfsense.service_resource_id,
                     data_resource_id=surfsense.data_resource_id,
                 )
+                if isinstance(backends.surfsense, UninstallAuthorityPublisher):
+                    backends.surfsense.record_created_uninstall_authorities(
+                        UninstallAuthorityStore(state_dir), current_ledger.resources
+                    )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "seaweedfs":
             seaweedfs = reconcile_seaweedfs(
@@ -318,6 +369,7 @@ def execute_lifecycle_plan(
                     service_resource_id=seaweedfs.service_resource_id,
                     data_resource_id=seaweedfs.data_resource_id,
                 )
+                publish_seaweedfs_authority(backends.authority_publisher, current_ledger, seaweedfs)
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "nextcloud":
             nextcloud = reconcile_nextcloud(
@@ -336,6 +388,7 @@ def execute_lifecycle_plan(
                     nextcloud_volume_resource_id=nextcloud.nextcloud_volume_resource_id,
                     onlyoffice_volume_resource_id=nextcloud.onlyoffice_volume_resource_id,
                 )
+                publish_nextcloud_authority(backends.authority_publisher, current_ledger, nextcloud)
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "moodle":
             moodle = reconcile_moodle(
@@ -352,6 +405,7 @@ def execute_lifecycle_plan(
                     service_resource_id=moodle.service_resource_id,
                     data_resource_id=moodle.data_resource_id,
                 )
+                publish_moodle_authority(backends.authority_publisher, current_ledger, moodle)
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "docuseal":
             docuseal = reconcile_docuseal(
@@ -368,6 +422,7 @@ def execute_lifecycle_plan(
                     service_resource_id=docuseal.service_resource_id,
                     data_resource_id=docuseal.data_resource_id,
                 )
+                publish_docuseal_authority(backends.authority_publisher, current_ledger, docuseal)
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "coder":
             coder = reconcile_coder(
@@ -384,6 +439,7 @@ def execute_lifecycle_plan(
                     service_resource_id=coder.service_resource_id,
                     data_resource_id=coder.data_resource_id,
                 )
+                publish_coder_authority(backends.authority_publisher, current_ledger, coder)
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "openclaw":
             advisor = reconcile_openclaw(
@@ -398,6 +454,12 @@ def execute_lifecycle_plan(
                     existing_ledger=current_ledger,
                     stack_name=desired_state.stack_name,
                     service_resource_id=advisor.service_resource_id,
+                )
+                publish_openclaw_authority(
+                    backends.authority_publisher,
+                    current_ledger,
+                    advisor,
+                    include_sidecars=True,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "my-farm-advisor":
@@ -414,6 +476,12 @@ def execute_lifecycle_plan(
                     stack_name=desired_state.stack_name,
                     service_resource_id=advisor.service_resource_id,
                 )
+                publish_openclaw_authority(
+                    backends.authority_publisher,
+                    current_ledger,
+                    advisor,
+                    include_sidecars=False,
+                )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "cloudflare_access":
             access = reconcile_cloudflare_access(
@@ -423,6 +491,7 @@ def execute_lifecycle_plan(
                 ownership_ledger=current_ledger,
                 backend=backends.networking,
                 task1_journal=task1_cloudflare_journal,
+                authority_store=None if dry_run else UninstallAuthorityStore(state_dir),
             )
             phase_results[phase] = access.result.to_dict()
             if not dry_run and proof_context is None:
@@ -524,17 +593,23 @@ def _write_checkpoint(
     valid_phases: set[str],
 ) -> None:
     completed_steps = _longest_prefix(applicable_phases, valid_phases)
-    existing_applied = load_state_dir(state_dir).applied_state
+    persisted_state = load_state_dir(state_dir)
+    existing_applied = persisted_state.applied_state
+    effective_desired = persisted_state.desired_state or desired_state
     write_applied_checkpoint(
         state_dir,
         AppliedStateCheckpoint(
-            format_version=desired_state.format_version,
-            desired_state_fingerprint=desired_state.fingerprint(),
+            format_version=effective_desired.format_version,
+            desired_state_fingerprint=effective_desired.fingerprint(),
             completed_steps=completed_steps,
             compose_artifact_hashes=(
                 {} if existing_applied is None else dict(existing_applied.compose_artifact_hashes)
             ),
             lifecycle_checkpoint_contract_version=LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
+            runtime_images=effective_desired.runtime_images,
+            opencode_go_sync=(
+                None if existing_applied is None else existing_applied.opencode_go_sync
+            ),
         ),
     )
 
