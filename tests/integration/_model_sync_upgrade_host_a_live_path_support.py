@@ -104,6 +104,8 @@ def production_config(tmp_path: Path) -> ProductionUpgradeConfig:
             0o600,
             FINAL_COMMIT,
             proof.ProofNamespace("stack", (), (), (), (), ()),
+            tmp_path / "task1-upload.env",
+            tmp_path / "task1-proof-context.json",
         ),
         proof.ProofNamespace("stack", (), (), (), (), ()),
         ProofTransport(None, None, "example.test", None, None, None, None, None, None, False),
@@ -204,10 +206,16 @@ def write_wrapper(path: Path) -> None:
     before_line = f"[remote:modify-observation-before:stdout] {payload}"
     summary_line = f"[remote:modify:stdout] {summary}"
     after_line = f"[remote:modify-observation-after:stdout] {payload}"
+    expected_env = str(path.parent / "task1-upload.env")
+    expected_context = str(path.parent / "task1-proof-context.json")
     source = f"""#!/usr/bin/env python3
 import sys
 required = {{"--verbose", "--capture-upgrade-observations"}}
-if not required <= set(sys.argv[1:]):
+def value(flag):
+    return sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv else None
+if (not required <= set(sys.argv[1:])
+    or value("--env-file") != {expected_env!r}
+    or value("--task1-proof-context") != {expected_context!r}):
     raise SystemExit(9)
 print({before_line!r}, file=sys.stderr)
 print({summary_line!r}, file=sys.stderr)

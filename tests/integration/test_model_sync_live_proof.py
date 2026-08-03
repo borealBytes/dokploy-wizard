@@ -380,6 +380,8 @@ def test_upgrade_resume_receipt_orchestrates_blocked_then_strict_result(tmp_path
         env_mode=0o600,
         final_commit="8" * 40,
         namespace=model_sync_proof.ProofNamespace("task1-bound", (), (), (), (), ()),
+        proof_env_file=tmp_path / "task1-upload.env",
+        proof_context_file=tmp_path / "task1-proof-context.json",
     )
     events: list[str] = []
     template_names = (
