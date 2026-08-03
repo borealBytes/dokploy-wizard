@@ -13,7 +13,6 @@ from dokploy_wizard.dokploy.coder_migration_api import (
 )
 from dokploy_wizard.proof.model_sync_artifacts import sha256_bytes
 from dokploy_wizard.proof.model_sync_env import (
-    resolve_proof_namespace,
     resolve_proof_transport,
 )
 from dokploy_wizard.proof.model_sync_upgrade_host_a_coder import CoderUpgradeClient
@@ -48,7 +47,7 @@ def build_production_operations(
     password = os.environ.get(args.password_env, "")
     if not host or not password:
         raise UpgradeHostAError("Host A external credentials are unavailable")
-    namespace = resolve_proof_namespace(env_file)
+    namespace = binding.namespace
     transport = resolve_proof_transport(env_file)
     if (
         transport.coder_hostname is None

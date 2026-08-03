@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from dokploy_wizard.proof import ProofNamespace
 from dokploy_wizard.proof.model_sync_identity import RemoteProbe
 from dokploy_wizard.proof.model_sync_lifecycle_schema import SingleHostLifecycleReceipt
 from dokploy_wizard.proof.model_sync_strict_proof import StrictProofResult
@@ -22,6 +23,7 @@ class UpgradeHostABinding:
     env_sha256: str
     env_mode: int
     final_commit: str
+    namespace: ProofNamespace
 
 
 class UpgradeHostAError(RuntimeError):

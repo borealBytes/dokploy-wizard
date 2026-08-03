@@ -64,7 +64,7 @@ def test_remote_coder_login_carries_credentials_only_in_ssh_stdin(
     assert ssh.closed is True
 
 
-def test_factory_uses_remote_internal_coder_transport_when_public_route_is_blocked(
+def test_factory_uses_task1_bound_internal_coder_transport_when_public_route_is_blocked(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -123,10 +123,14 @@ def test_factory_uses_remote_internal_coder_transport_when_public_route_is_block
     monkeypatch.setattr(factory, "_canonical_wrapper", lambda path: path)
     monkeypatch.setattr(factory, "_validated_env", lambda path, _binding: path)
     monkeypatch.setattr(factory, "resolve_proof_transport", lambda _path: transport)
+    def reject_restored_env_namespace(_path: Path) -> proof.ProofNamespace:
+        raise AssertionError("Task 18 must use the Task 1 bound proof namespace")
+
     monkeypatch.setattr(
         factory,
         "resolve_proof_namespace",
-        lambda _path: proof.ProofNamespace("fixture-stack", (), (), (), (), ()),
+        reject_restored_env_namespace,
+        raising=False,
     )
     monkeypatch.setattr(factory, "coder_login", reject_public_login, raising=False)
     monkeypatch.setattr(factory, "RemoteCoderTransport", FakeRemoteCoderTransport, raising=False)
@@ -138,7 +142,7 @@ def test_factory_uses_remote_internal_coder_transport_when_public_route_is_block
     # Then
     assert operations is not None
     assert events == [
-        ("remote", "fixture-host", "fixture-password", "fixture-stack"),
+        ("remote", "fixture-host", "fixture-password", "stack"),
         ("login", "admin@example.test", "admin-password"),
         ("api", "session-token"),
     ]
