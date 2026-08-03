@@ -16,7 +16,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, assert_never, cast
 
 from dokploy_wizard.bootstrap import (
     LOCAL_HEALTH_URL,
@@ -1716,31 +1716,39 @@ def _run_lifecycle_flow(
         authority_publisher=authority_publisher,
     )
 
-    try:
-        validate_preserved_phases(
-            raw_env=raw_env,
-            desired_state=desired_state,
-            ownership_ledger=ownership_ledger,
-            preserved_phases=lifecycle_plan.preserved_phases,
-            bootstrap_backend=backend,
-            tailscale_backend=tailscale_phase_backend,
-            networking_backend=cloudflare_backend,
-            shared_core_backend=shared_core_phase_backend,
-            headscale_backend=headscale_phase_backend,
-            matrix_backend=matrix_phase_backend,
-            nextcloud_backend=nextcloud_phase_backend,
-            moodle_backend=moodle_phase_backend,
-            docuseal_backend=docuseal_phase_backend,
-            seaweedfs_backend=seaweedfs_phase_backend,
-            surfsense_backend=surfsense_phase_backend,
-            coder_backend=coder_phase_backend,
-            openclaw_backend=openclaw_phase_backend,
-        )
-    except LifecycleDriftError as error:
-        lifecycle_plan = _resume_plan_from_drift(
-            lifecycle_plan=lifecycle_plan,
-            drift_error=error,
-        )
+    match modify_upgrade_intent:
+        case ModifyUpgradeIntent.OPERATOR:
+            validate_preserved = True
+        case ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC:
+            validate_preserved = False
+        case unreachable:
+            assert_never(unreachable)
+    if validate_preserved:
+        try:
+            validate_preserved_phases(
+                raw_env=raw_env,
+                desired_state=desired_state,
+                ownership_ledger=ownership_ledger,
+                preserved_phases=lifecycle_plan.preserved_phases,
+                bootstrap_backend=backend,
+                tailscale_backend=tailscale_phase_backend,
+                networking_backend=cloudflare_backend,
+                shared_core_backend=shared_core_phase_backend,
+                headscale_backend=headscale_phase_backend,
+                matrix_backend=matrix_phase_backend,
+                nextcloud_backend=nextcloud_phase_backend,
+                moodle_backend=moodle_phase_backend,
+                docuseal_backend=docuseal_phase_backend,
+                seaweedfs_backend=seaweedfs_phase_backend,
+                surfsense_backend=surfsense_phase_backend,
+                coder_backend=coder_phase_backend,
+                openclaw_backend=openclaw_phase_backend,
+            )
+        except LifecycleDriftError as error:
+            lifecycle_plan = _resume_plan_from_drift(
+                lifecycle_plan=lifecycle_plan,
+                drift_error=error,
+            )
 
     if not dry_run:
         if existing_state and not legacy_task5_upgrade:
