@@ -58,12 +58,13 @@ class SequencedTransport:
     def capture(
         self,
         subcommand: str,
-        _command: str,
+        command: str,
         _limits: RemoteCommandCaptureLimits,
     ) -> RemoteCommandOutput:
         if not self.events or self.events[0] != "activate-release":
             raise AssertionError("observation collector ran before final release activation")
         self.events.append(subcommand)
+        self.commands[subcommand] = command
         return RemoteCommandOutput(self.payload, b"")
 
     def close(self) -> None:

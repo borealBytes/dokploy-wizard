@@ -50,6 +50,7 @@ class RemoteModifyObservationRunner:
                 shlex.quote(active_release),
                 "&&",
                 "env",
+                "PYTHONDONTWRITEBYTECODE=1",
                 "PYTHONPATH=src",
                 "python3",
                 "-m",

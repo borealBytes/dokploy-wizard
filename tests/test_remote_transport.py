@@ -458,17 +458,20 @@ def test_proof_runs_install_verify_inspect_in_order(
     ]
     assert [command for _subcommand, command in transport.commands] == [
         (
-            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+                "PYTHONDONTWRITEBYTECODE=1 "
+                "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
             "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state --non-interactive"
         ),
         (
-            "PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 "
+                "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state"
         ),
         (
-            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
+                "PYTHONDONTWRITEBYTECODE=1 "
+                "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
             "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state"
         ),
@@ -514,7 +517,7 @@ def test_strict_proof_runs_second_install_after_verification(
         "inspect-state",
     ]
     assert transport.commands[2][1] == (
-        "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+        "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
         "/root/dokploy-wizard/.install.env "
         "--state-dir /root/dokploy-wizard/state --non-interactive"
     )
@@ -595,23 +598,27 @@ def test_fresh_proof_runs_destroy_uninstall_before_proof(
     ]
     assert [command for _subcommand, command in transport.commands] == [
         (
-            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard uninstall --state-dir "
+                "PYTHONDONTWRITEBYTECODE=1 "
+                "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard uninstall --state-dir "
             "/root/dokploy-wizard/state "
             "--destroy-data --non-interactive --confirm-file "
             "/root/dokploy-wizard/fixtures/destroy.confirm"
         ),
         (
-            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+                "PYTHONDONTWRITEBYTECODE=1 "
+                "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
             "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state --non-interactive"
         ),
         (
-            "PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 "
+                "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state"
         ),
         (
-            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
+                "PYTHONDONTWRITEBYTECODE=1 "
+                "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
             "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state"
         ),
@@ -629,7 +636,7 @@ def test_verify_services_command_uses_unquoted_pythonpath_assignment(
 
     verify_command = dict(transport.commands)["verify-services"]
     assert verify_command.startswith(
-        "PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} "
+        "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} "
     )
     assert "python3 -m dokploy_wizard.service_verification_runner" in verify_command
 
@@ -644,7 +651,8 @@ def test_proof_lifecycle_commands_run_python_unbuffered(
     session.run_proof(strict_idempotency=True)
 
     assert all(
-        command.startswith("PYTHONUNBUFFERED=1 ") for _subcommand, command in transport.commands
+        command.startswith("PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 ")
+        for _subcommand, command in transport.commands
     )
 
 
