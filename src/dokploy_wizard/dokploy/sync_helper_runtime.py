@@ -149,6 +149,8 @@ def _create_arguments(
         *labels,
         "-v",
         f"{launch.metadata_volume}:/state",
+        "--entrypoint",
+        "",
         launch.image_digest,
         *command,
     )
