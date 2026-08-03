@@ -93,7 +93,11 @@ def test_task18_rehydrates_inspection_redactions_before_force_planning(
     monkeypatch.setattr(cli, "active_task1_proof_context", lambda: object())
     monkeypatch.setattr(cli, "preflight_coder_template_migration", lambda *_args: None)
     monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _raw_env: object())
-    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_kwargs: None)
+
+    def reject_preserved_phase_validation(**_kwargs: proof.JsonValue) -> None:
+        pytest.fail("Task 18 explicit upgrade must not expand into preserved phases")
+
+    monkeypatch.setattr(cli, "validate_preserved_phases", reject_preserved_phase_validation)
     monkeypatch.setattr(cli, "execute_lifecycle_plan", capture_plan)
 
     # When
