@@ -17,7 +17,7 @@ index 15d173a..ef7e495 100644
              completion = 0.0
 +            cache_read = 0.0
 +            cache_write = 0.0
- 
+
          provider = "Openrouter Fusion" if is_fusion else provider_for(model_id)
          or_id = model_id if is_fusion else f"openrouter/{model_id}"
 @@ -130,7 +134,12 @@ def main() -> None:

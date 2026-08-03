@@ -132,12 +132,12 @@
         {
           "name": "pricing-cache",
           "path": "templates/coder/runtime/patches/kdense-pricing-cache.patch",
-          "sha256": "76f4b8d12f4843ca6d612f34e4b2e089886d59f801f6eafa8138711e5180aad0"
+          "sha256": "eb977baff3a50c6236993c9ab41762c5fbef3c04defc7bdb4f21bba18db8c28c"
         },
         {
           "name": "central-only",
           "path": "templates/coder/runtime/patches/kdense-central-only.patch",
-          "sha256": "27f47437b191f26134452baa83604bad72fded51bc8fbcf6817463d109609ce5"
+          "sha256": "f38c47e17208fbf7bdd4b92242a8d738057ec8afd24bc36a088150c7e8df57b4"
         }
       ],
       "skills": {

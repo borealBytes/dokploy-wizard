@@ -7,7 +7,7 @@ index dfcbc48..91a169b 100644
  import { getProject, resolvePaths, touchProject } from "../projects.ts";
  import { readNotebookEntries, type NotebookEntry } from "./notebook-store.ts";
 +import { modelGatewayApiKey, wizardCentralOnly } from "../config.ts";
- 
+
  export const METHODS_DRAFT_SESSION_ID = "methods-draft";
  const MAX_OUTPUT_TOKENS = 4_000;
 @@ -172,11 +173,19 @@ export async function runMethodsDraft(
@@ -45,7 +45,7 @@ index 072df6a..7bb572c 100644
 +  requireCentralGatewayConfig,
 +  wizardCentralOnly,
  } from "../config.ts";
- 
+
 -// OpenRouter's base URL. Overridable via OPENROUTER_BASE_URL so the
 -// OpenAI-compatible provider can point at any compatible gateway — e.g.
 -// Requesty (https://router.requesty.ai/v1), which uses the same
@@ -53,7 +53,7 @@ index 072df6a..7bb572c 100644
 -const OPENROUTER_BASE_URL =
 -  process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1";
  const CATALOGUE_PATH = path.join(REPO_ROOT, "web", "src", "data", "models.json");
- 
+
  interface CatalogueEntry {
 @@ -39,10 +37,67 @@ interface CatalogueEntry {
    costCacheWrite: number;
@@ -61,9 +61,9 @@ index 072df6a..7bb572c 100644
    label: string;
 +  centralProvenanceValid: boolean;
  }
- 
+
  let catalogue: Map<string, CatalogueEntry> | null = null;
- 
+
 +const SHA256_RE = /^[a-f0-9]{64}$/;
 +
 +export class ModelPolicyError extends Error {}
@@ -150,7 +150,7 @@ index 072df6a..7bb572c 100644
      input: ["text"],
      cost: {
 @@ -205,14 +261,16 @@ function buildOllamaModel(name: string): Model<Api> {
- 
+
  /** Configure app-specific providers and runtime credentials. */
  export async function setupModelRuntime(modelRuntime: ModelRuntime): Promise<void> {
 -  modelRuntime.registerProvider("ollama", {
@@ -167,12 +167,12 @@ index 072df6a..7bb572c 100644
 +      apiKey: "ollama",
 +    });
 +  }
- 
+
 -  const orKey = process.env.OPENROUTER_API_KEY || process.env.OR_API_KEY;
 +  const orKey = modelGatewayApiKey();
    if (orKey) await modelRuntime.setRuntimeApiKey("openrouter", orKey);
  }
- 
+
 @@ -225,6 +283,23 @@ export function resolveModel(
    registry: ModelRegistry,
    fusionConfig?: Record<string, unknown>,
@@ -281,11 +281,11 @@ index cd926c0..726ef08 100644
 -import { REPO_ROOT } from "../config.ts";
 +import { REPO_ROOT, wizardCentralOnly } from "../config.ts";
  import { getModelRuntime } from "../agent/session-registry.ts";
- 
+
  const ENV_PATH = path.join(REPO_ROOT, ".env");
 @@ -135,6 +135,19 @@ async function applyKey(spec: ManagedKey, raw: string | null): Promise<string |
  }
- 
+
  export async function registerCredentialRoutes(app: FastifyInstance): Promise<void> {
 +  app.addHook("onRequest", async (req, reply) => {
 +    const pathName = req.url.split("?", 1)[0];
@@ -301,7 +301,7 @@ index cd926c0..726ef08 100644
 +  });
 +
    app.get("/credentials", async () => status());
- 
+
    app.put<{ Body: Record<string, string | null | undefined> }>(
 diff --git a/server/src/api/sessions.ts b/server/src/api/sessions.ts
 index edc8329..b39df1a 100644
@@ -312,7 +312,7 @@ index edc8329..b39df1a 100644
    type CostSnapshot,
  } from "../cost/ledger.ts";
 +import { wizardCentralOnly } from "../config.ts";
- 
+
  function snapshot(session: { getSessionStats(): { cost: number; tokens: { input: number; output: number; cacheRead: number; total: number } } }): CostSnapshot {
    const s = session.getSessionStats();
 @@ -455,6 +456,11 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
@@ -375,11 +375,11 @@ index 1e15d68..fb49eb3 100644
  import { emptySnapshot, isBudgetExceeded, recordRun } from "../cost/ledger.ts";
  import { currentProjectId } from "../scope.ts";
 +import { wizardCentralOnly } from "../config.ts";
- 
+
  const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
  const DEFAULT_MODEL = "openai/whisper-large-v3";
 @@ -181,6 +182,10 @@ export async function transcribeAudio(
- 
+
  export async function registerSpeechRoutes(app: FastifyInstance): Promise<void> {
    app.post("/speech/transcribe", async (req, reply) => {
 +    if (wizardCentralOnly()) {
@@ -476,14 +476,14 @@ index 41644f9..2d5700e 100644
  import { withActiveProject } from "./scope.ts";
 @@ -98,7 +104,10 @@ export async function buildApp() {
    });
- 
+
    app.get("/health", async () => ({ status: "ok" }));
 -  app.get("/config", async () => ({ modal_configured: modalConfigured() }));
 +  app.get("/config", async () => ({
 +    modal_configured: modalConfigured(),
 +    wizard_central_only: wizardCentralOnly(),
 +  }));
- 
+
    await registerProjectRoutes(app);
    await registerSessionRoutes(app);
 diff --git a/server/src/latex/assist.ts b/server/src/latex/assist.ts
@@ -495,7 +495,7 @@ index 6d25831..6cd4eb5 100644
  import { resolveModel } from "../agent/models.ts";
  import { emptySnapshot, isBudgetExceeded, recordRun } from "../cost/ledger.ts";
 +import { modelGatewayApiKey, wizardCentralOnly } from "../config.ts";
- 
+
  export const ASSIST_SESSION_ID = "latex-assist";
  const MAX_OUTPUT_TOKENS = 4_000;
 @@ -131,11 +132,19 @@ export async function runLatexAssist(
@@ -589,7 +589,7 @@ index 1ff8ae2..96fb4f4 100644
  import { createProject, updateProject } from "../src/projects.ts";
 @@ -13,6 +13,9 @@ import {
  } from "../src/latex/assist.ts";
- 
+
  function reset(): void {
 +  delete process.env.KDENSE_WIZARD_CENTRAL_ONLY;
 +  delete process.env.KDENSE_LITELLM_BASE_URL;
@@ -640,7 +640,7 @@ index 245aee8..b704602 100644
  import { createProject, resolvePaths } from "../src/projects.ts";
 @@ -14,6 +14,9 @@ import {
  } from "../src/agent/methods-draft.ts";
- 
+
  function reset(): void {
 +  delete process.env.KDENSE_WIZARD_CENTRAL_ONLY;
 +  delete process.env.KDENSE_LITELLM_BASE_URL;
@@ -651,7 +651,7 @@ index 245aee8..b704602 100644
 @@ -146,6 +149,19 @@ describe("runMethodsDraft", () => {
      ).rejects.toMatchObject({ status: 422 });
    });
- 
+
 +  it("rejects a non-central model before completion in central-only mode", async () => {
 +    process.env.KDENSE_WIZARD_CENTRAL_ONLY = "1";
 +    const p = createProject({ name: "Central" });
@@ -681,7 +681,7 @@ index 009e91a..499afd1 100644
 +  isValidCentralCatalogueItem,
 +  resolveModel,
 +} from "../src/agent/models.ts";
- 
+
  // Reasoning-effort suffixes ("...-xhigh", "...-high", …) are an OpenRouter
  // routing form, not separate catalogue rows. Before the fix they missed the
 @@ -29,3 +33,109 @@ describe("catalogueEntryFor (reasoning-effort suffix pricing)", () => {
@@ -803,7 +803,7 @@ index d7e0baa..c7eef20 100644
  const originalOpenRouterBaseUrl = process.env.OPENROUTER_BASE_URL;
  const originalSpeechModel = process.env.SPEECH_TRANSCRIPTION_MODEL;
 +const originalCentralOnly = process.env.KDENSE_WIZARD_CENTRAL_ONLY;
- 
+
  afterEach(() => {
 +  if (originalCentralOnly === undefined) delete process.env.KDENSE_WIZARD_CENTRAL_ONLY;
 +  else process.env.KDENSE_WIZARD_CENTRAL_ONLY = originalCentralOnly;
@@ -854,7 +854,7 @@ index a1ebb01..660b669 100644
    setThinkingLevel(_level: unknown): void {}
 @@ -126,12 +128,38 @@ import { runBroker } from "../src/agent/run-broker.ts";
  const app = await buildApp();
- 
+
  beforeEach(() => {
 +  delete process.env.KDENSE_WIZARD_CENTRAL_ONLY;
 +  delete process.env.KDENSE_LITELLM_BASE_URL;
@@ -864,7 +864,7 @@ index a1ebb01..660b669 100644
    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
    fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
  });
- 
+
 +describe("POST /sessions/:id/run central-only policy", () => {
 +  it("returns 400 without retaining the session's old model", async () => {
 +    process.env.KDENSE_WIZARD_CENTRAL_ONLY = "1";
@@ -908,7 +908,7 @@ index f9d0f69..2149ee1 100644
    const budgetBlocked = budgetState === "exceeded";
    const controller = usePromptInputController();
 +  const { centralOnly } = useModels();
- 
+
    // "Ask Kady" handoff from the LaTeX editor: only the active tab's composer
    // appends the prefill text (it does not submit), so a background tab never
 @@ -860,7 +862,9 @@ function ChatInput({
@@ -945,7 +945,7 @@ index 5464538..f6c01ec 100644
 +  useModels,
 +  type UseModelsReturn,
 +} from "@/lib/use-models";
- 
+
  export type Model = {
    id: string;
 @@ -19,18 +23,41 @@ export type Model = {
@@ -974,9 +974,9 @@ index 5464538..f6c01ec 100644
 +    dokploy_pricing_selection_sha256?: string;
 +  };
  };
- 
+
  const STATIC_MODELS = models as Model[];
- 
+
  const DEFAULT_MODEL = STATIC_MODELS.find((m) => m.default) ?? STATIC_MODELS[0];
 +const NO_VALID_MODEL: Model = {
 +  id: "",
@@ -988,7 +988,7 @@ index 5464538..f6c01ec 100644
 +  modality: null,
 +  description: "",
 +};
- 
+
  const TIER_STYLES: Record<string, { dot: string; badge: string }> = {
    budget:   { dot: "bg-slate-400",  badge: "text-slate-500 dark:text-slate-400" },
 @@ -79,12 +106,13 @@ export { DEFAULT_MODEL };
@@ -998,19 +998,19 @@ index 5464538..f6c01ec 100644
 +  modelState: UseModelsReturn;
    compact?: boolean;
  }
- 
+
 -function ModelPickerList({ selected, onSelect, compact }: ModelPickerListProps) {
 +function ModelPickerList({ selected, onSelect, modelState, compact }: ModelPickerListProps) {
    const [search, setSearch] = useState("");
 -  const { models: allModels, ollamaAvailable, ollamaModels, refresh } = useModels();
 +  const { models: allModels, ollamaAvailable, ollamaModels, refresh, centralOnly } = modelState;
- 
+
    // PopoverContent unmounts when closed, so this effectively re-probes
    // Ollama each time the user opens the picker — lets them start the
 @@ -200,7 +228,7 @@ function ModelPickerList({ selected, onSelect, compact }: ModelPickerListProps)
        >
          {remoteFiltered.map(renderModelRow)}
- 
+
 -        {(localFiltered.length > 0 || !search) && (
 +        {centralOnly === false && (localFiltered.length > 0 || !search) && (
            <>
@@ -1027,7 +1027,7 @@ index 5464538..f6c01ec 100644
 +  useEffect(() => {
 +    if (normalized && normalized !== selected) onChange(normalized);
 +  }, [normalized, onChange, selected]);
- 
+
    const handleSelect = (model: Model) => {
      onChange(model);
 @@ -290,8 +325,8 @@ export function ModelSelector({
@@ -1066,12 +1066,12 @@ index 2f0fbd0..059503b 100644
 +const useModels = vi.hoisted(() => vi.fn());
 +
 +vi.mock("@/lib/use-models", () => ({ useModels }));
- 
+
  vi.mock("@/lib/use-projects", () => ({
    useProjects: () => ({ activeProject: { id: "p1", name: "P1" }, activeProjectId: "p1" }),
 @@ -8,6 +12,16 @@ vi.mock("@/lib/use-projects", () => ({
  import { SettingsDialog } from "@/components/settings-dialog";
- 
+
  describe("SettingsDialog", () => {
 +  beforeEach(() => {
 +    useModels.mockReturnValue({
@@ -1117,9 +1117,9 @@ index c952891..2faaf23 100644
  import { SubagentsPanel } from "@/components/subagents-panel";
  import { ConnectorsPanel } from "@/components/connectors-panel";
 +import { useModels } from "@/lib/use-models";
- 
+
  type CredentialStatus = Record<string, { set: boolean; masked: string | null }>;
- 
+
 @@ -329,6 +330,8 @@ export function SettingsDialog({
    open: boolean;
    onOpenChange: (open: boolean) => void;
@@ -1131,7 +1131,7 @@ index c952891..2faaf23 100644
        <DialogContent
 @@ -344,7 +347,8 @@ export function SettingsDialog({
          </DialogHeader>
- 
+
          <Tabs
 -          defaultValue="api-keys"
 +          key={standardControls ? "standard" : "central"}
@@ -1211,7 +1211,7 @@ index c952891..2faaf23 100644
 @@ -396,24 +406,30 @@ export function SettingsDialog({
              </TabsTrigger>
            </TabsList>
- 
+
 -          <TabsContent value="api-keys" className="flex-1 min-h-0 p-5">
 -            <ApiKeysPanel />
 -          </TabsContent>
@@ -1322,7 +1322,7 @@ index 1d4c2e6..ce7461b 100644
 @@ -14,6 +14,10 @@ interface OllamaListResponse {
    models?: Model[];
  }
- 
+
 +interface ConfigResponse {
 +  wizard_central_only?: boolean;
 +}
@@ -1376,14 +1376,14 @@ index 1d4c2e6..ce7461b 100644
 +export function normalizeModelSelection(selected: Model, models: Model[]): Model | null {
 +  return models.find((model) => model.id === selected.id) ?? models[0] ?? null;
  }
- 
+
  /**
 @@ -36,26 +81,43 @@ export interface UseModelsReturn {
  export function useModels(): UseModelsReturn {
    const [ollamaModels, setOllamaModels] = useState<Model[]>([]);
    const [ollamaAvailable, setOllamaAvailable] = useState(false);
 +  const [centralOnly, setCentralOnly] = useState<boolean | null>(null);
- 
+
 -  const fetchOllama = useCallback(() => {
 -    apiFetch("/ollama/models")
 -      .then((r) => (r.ok ? (r.json() as Promise<OllamaListResponse>) : null))
@@ -1417,16 +1417,16 @@ index 1d4c2e6..ce7461b 100644
          setOllamaModels([]);
        });
    }, []);
- 
+
    useEffect(() => {
 -    fetchOllama();
 -  }, [fetchOllama]);
 +    fetchModels();
 +  }, [fetchModels]);
- 
+
 -  useEffect(() => onProjectChange(() => fetchOllama()), [fetchOllama]);
 +  useEffect(() => onProjectChange(() => fetchModels()), [fetchModels]);
- 
+
    // Re-read Fusion configs when Settings saves them (or another tab edits them).
    const [fusionRevision, setFusionRevision] = useState(0);
 @@ -72,6 +134,7 @@ export function useModels(): UseModelsReturn {
@@ -1448,7 +1448,7 @@ index 1d4c2e6..ce7461b 100644
 +    () => OPENROUTER_MODELS.filter(isValidCentralModel),
 +    [],
 +  );
- 
+
    return {
      // Drop the static `openrouter/fusion` catalogue row — the presets above
      // replace it (it was a non-functional $0 duplicate).

@@ -227,4 +227,3 @@ def test_helper_rejects_nonexact_existing_intent_before_docker_mutation(
 
     assert runtime.find_count == 0
     assert runtime.create_arguments is None
-
