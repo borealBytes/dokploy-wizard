@@ -1575,6 +1575,7 @@ def _render_compose_file(
         )
         volume_block += (
             f"  {litellm_metadata_volume}:\n"
+            f"    name: {litellm_metadata_volume}\n"
             "    labels:\n"
             '      dokploy-wizard.owner: "opencode-go"\n'
         )
