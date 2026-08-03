@@ -151,12 +151,12 @@ def _patches(value: JsonValue) -> tuple[KdensePatch, ...]:
         (
             "pricing-cache",
             "templates/coder/runtime/patches/kdense-pricing-cache.patch",
-            "76f4b8d12f4843ca6d612f34e4b2e089886d59f801f6eafa8138711e5180aad0",
+            "eb977baff3a50c6236993c9ab41762c5fbef3c04defc7bdb4f21bba18db8c28c",
         ),
         (
             "central-only",
             "templates/coder/runtime/patches/kdense-central-only.patch",
-            "27f47437b191f26134452baa83604bad72fded51bc8fbcf6817463d109609ce5",
+            "f38c47e17208fbf7bdd4b92242a8d738057ec8afd24bc36a088150c7e8df57b4",
         ),
     )
     records = tuple(_patch(item, index) for index, item in enumerate(value))

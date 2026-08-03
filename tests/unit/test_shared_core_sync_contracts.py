@@ -223,4 +223,3 @@ def test_schedule_reconcile_fails_closed_for_same_name_different_owner() -> None
     assert client.create_calls == 0
     assert client.update_calls == 0
     assert client.delete_calls == 0
-
