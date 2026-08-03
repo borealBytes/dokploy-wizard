@@ -251,19 +251,19 @@ def test_remote_proof_default_flow_is_verification_first_after_install() -> None
     assert transport.commands == [
         (
             "mutate-install",
-            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
             "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state --non-interactive",
         ),
         (
             "verify-services",
-            "PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state",
         ),
         (
             "inspect-state",
-            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
             "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state",
         ),
@@ -279,25 +279,25 @@ def test_remote_proof_strict_mode_keeps_explicit_idempotency_install() -> None:
     assert transport.commands == [
         (
             "mutate-install",
-            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
             "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state --non-interactive",
         ),
         (
             "verify-services",
-            "PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH} python3 -m "
             "dokploy_wizard.service_verification_runner --env-file "
             "/root/dokploy-wizard/.install.env --state-dir /root/dokploy-wizard/state",
         ),
         (
             "assert-strict-idempotency",
-            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 ./bin/dokploy-wizard install --env-file "
             "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state --non-interactive",
         ),
         (
             "inspect-state",
-            "PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 ./bin/dokploy-wizard inspect-state --env-file "
             "/root/dokploy-wizard/.install.env "
             "--state-dir /root/dokploy-wizard/state",
         ),

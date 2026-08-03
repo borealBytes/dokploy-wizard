@@ -845,7 +845,7 @@ def _shell_join(arguments: Sequence[str]) -> str:
 
 
 def _with_unbuffered_python(command: str) -> str:
-    return f"PYTHONUNBUFFERED=1 {command}"
+    return f"PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 {command}"
 
 
 def _redact_runtime_message(message: str, *, password: str | None) -> str:

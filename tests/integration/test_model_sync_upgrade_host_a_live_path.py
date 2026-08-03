@@ -96,6 +96,15 @@ def test_remote_blocked_modify_collects_only_after_final_release_activation(
         "modify-observation-after",
         "close",
     ]
+    assert "&& PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 " in transport.commands[
+        "modify"
+    ]
+    assert "env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3" in transport.commands[
+        "modify-observation-before"
+    ]
+    assert "env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3" in transport.commands[
+        "modify-observation-after"
+    ]
     assert "--task18-force-model-sync-upgrade" in shlex.split(transport.commands["modify"])
 
 

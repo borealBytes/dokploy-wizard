@@ -377,7 +377,7 @@ class RemoteTransportSession:
         arguments.extend(self._task1_proof_context_arguments())
         return " ".join(
             [
-                "PYTHONUNBUFFERED=1",
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1",
                 "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}",
                 self._shell_join(arguments),
             ]
@@ -400,7 +400,7 @@ class RemoteTransportSession:
             raise ValueError("Task 1 Cloudflare cleanup requires a proof context")
         return " ".join(
             [
-                "PYTHONUNBUFFERED=1",
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1",
                 "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}",
                 self._shell_join(
                     [
@@ -454,7 +454,7 @@ class RemoteTransportSession:
     def _python_module_command(self, arguments: list[str]) -> str:
         return " ".join(
             [
-                "PYTHONUNBUFFERED=1",
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1",
                 "PYTHONPATH=./src${PYTHONPATH:+:$PYTHONPATH}",
                 self._shell_join(arguments),
             ]
@@ -485,7 +485,7 @@ class RemoteTransportSession:
         return " ".join(shlex.quote(argument) for argument in arguments)
 
     def _with_unbuffered_python(self, command: str) -> str:
-        return f"PYTHONUNBUFFERED=1 {command}"
+        return f"PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 {command}"
 
     def _remote_path(self, path: Path) -> str:
         remote_path = path.as_posix()

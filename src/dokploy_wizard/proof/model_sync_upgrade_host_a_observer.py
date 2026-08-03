@@ -29,6 +29,7 @@ class RemoteHostAObserver:
             shlex.join(
                 (
                     "env",
+                    "PYTHONDONTWRITEBYTECODE=1",
                     "PYTHONPATH=src",
                     "python3",
                     "-m",
