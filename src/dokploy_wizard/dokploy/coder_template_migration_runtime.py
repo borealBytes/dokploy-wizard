@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ssl
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -183,7 +184,7 @@ class RuntimeTemplatePusher:
 def execute_template_migration(inputs: ProductionMigrationInputs) -> None:
     pusher = RuntimeTemplatePusher(inputs)
     api = CoderMigrationApi(
-        transport=UrllibCoderTransport(f"https://{inputs.hostname}"),
+        transport=_local_coder_transport(inputs.hostname),
         session_token=inputs.session_token,
     )
     migration = CoderTemplateMigration(
@@ -217,7 +218,7 @@ def execute_template_migration_preflight(hostname: str, session_token: str) -> N
     """Validate retired Coder dependencies without creating a receipt or mutating."""
 
     api = CoderMigrationApi(
-        transport=UrllibCoderTransport(f"https://{hostname}"),
+        transport=_local_coder_transport(hostname),
         session_token=session_token,
     )
     try:
@@ -233,6 +234,14 @@ def execute_template_migration_preflight(hostname: str, session_token: str) -> N
             "Coder template migration preflight failed closed",
             code=code,
         ) from error
+
+
+def _local_coder_transport(hostname: str) -> UrllibCoderTransport:
+    return UrllibCoderTransport(
+        "https://127.0.0.1",
+        host_header=hostname,
+        ssl_context=ssl._create_unverified_context(),
+    )
 
 
 def _require_terraform_lock(directory: Path) -> None:

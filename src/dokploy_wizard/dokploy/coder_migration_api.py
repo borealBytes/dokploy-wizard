@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 from dataclasses import dataclass
 from http.client import HTTPMessage
 from typing import IO, Final, Protocol
@@ -54,17 +55,29 @@ class CoderTransport(Protocol):
 
 
 class UrllibCoderTransport:
-    def __init__(self, base_url: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        host_header: str | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._host_header = host_header
+        self._ssl_context = ssl_context
 
     def send(self, request: CoderHttpRequest) -> CoderHttpResponse:
+        headers = dict(request.headers)
+        if self._host_header is not None:
+            headers["Host"] = self._host_header
         request_value = urlrequest.Request(
             f"{self._base_url}{request.path}",
             data=request.body,
-            headers=dict(request.headers),
+            headers=headers,
             method=request.method,
         )
-        opener = urlrequest.build_opener(_NoRedirect())
+        https_handler = urlrequest.HTTPSHandler(context=self._ssl_context)
+        opener = urlrequest.build_opener(_NoRedirect(), https_handler)
         try:
             with opener.open(request_value, timeout=30) as response:
                 return CoderHttpResponse(status=response.status, body=_read_response(response))
