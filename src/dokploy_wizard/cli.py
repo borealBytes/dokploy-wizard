@@ -991,6 +991,17 @@ def _redacted_raw_env_input(raw_env: RawEnvInput) -> RawEnvInput:
     )
 
 
+def _rehydrate_inspection_redactions(
+    existing: RawEnvInput,
+    requested: RawEnvInput,
+) -> RawEnvInput:
+    values = {
+        key: requested.values.get(key, value) if value == _INSPECT_REDACTION_VALUE else value
+        for key, value in existing.values.items()
+    }
+    return RawEnvInput(format_version=existing.format_version, values=values)
+
+
 def _raw_env_value_is_sensitive(key: str) -> bool:
     normalized = key.upper()
     return any(token in normalized for token in _INSPECT_SECRET_KEYS) or key_is_sensitive(key)
@@ -1375,13 +1386,33 @@ def _run_lifecycle_flow(
         assert loaded_state.desired_state is not None
         assert loaded_state.applied_state is not None
         assert loaded_state.ownership_ledger is not None
+        classification_existing_raw = loaded_state.raw_input
+        classification_existing_desired = loaded_state.desired_state
+        classification_requested_raw = raw_env
+        classification_requested_desired = desired_state
+        if (
+            modify_upgrade_intent is ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC
+            and active_task1_proof_context() is not None
+        ):
+            runtime_auth = load_dokploy_runtime_auth(state_dir)
+            classification_requested_raw = merge_dokploy_runtime_auth(raw_env, runtime_auth)
+            classification_requested_desired = merge_dokploy_runtime_auth_desired_state(
+                desired_state,
+                runtime_auth,
+            )
+            classification_existing_raw = _rehydrate_inspection_redactions(
+                loaded_state.raw_input,
+                classification_requested_raw,
+            )
+            if classification_existing_raw == classification_requested_raw:
+                classification_existing_desired = classification_requested_desired
         lifecycle_plan = classify_modify_request(
-            existing_raw=loaded_state.raw_input,
-            existing_desired=loaded_state.desired_state,
+            existing_raw=classification_existing_raw,
+            existing_desired=classification_existing_desired,
             existing_applied=loaded_state.applied_state,
             existing_ledger=loaded_state.ownership_ledger,
-            requested_raw=raw_env,
-            requested_desired=desired_state,
+            requested_raw=classification_requested_raw,
+            requested_desired=classification_requested_desired,
         )
         lifecycle_plan = apply_modify_upgrade_intent(lifecycle_plan, modify_upgrade_intent)
         disable_plan = build_pack_disable_plan(
