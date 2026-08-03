@@ -163,6 +163,8 @@ def test_helper_checkpoints_full_id_unlinks_env_then_starts(tmp_path: Path) -> N
         f"dokploy-wizard.lease={_LEASE}",
         "-v",
         "wizard-shared-litellm-data:/state",
+        "--entrypoint",
+        "",
         _IMAGE,
         "python",
         "/state/runtime/lock_helper.py",

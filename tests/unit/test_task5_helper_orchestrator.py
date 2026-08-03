@@ -80,7 +80,7 @@ class ProcessBackedDockerRuntime:
             for index, value in enumerate(arguments)
             if index > 0 and arguments[index - 1] == "--label"
         )
-        image_index = arguments.index(volume) + 1
+        image_index = arguments.index("--entrypoint") + 2
         image = arguments[image_index]
         command = arguments[image_index + 1 :]
         self.observation = HelperContainerObservation(
