@@ -146,6 +146,8 @@ def load_upgrade_binding(args: argparse.Namespace) -> UpgradeHostABinding:
         env_mode=env_mode,
         final_commit=args.final_commit,
         namespace=namespace,
+        proof_env_file=Path(context_evidence.upload_env_path),
+        proof_context_file=Path(context_evidence.context_path),
     )
 
 

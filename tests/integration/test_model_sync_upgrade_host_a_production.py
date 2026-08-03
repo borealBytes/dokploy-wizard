@@ -117,6 +117,8 @@ def _config(tmp_path: Path) -> ProductionUpgradeConfig:
             0o600,
             "a" * 40,
             proof.ProofNamespace("stack", (), (), (), (), ()),
+            tmp_path / "task1-upload.env",
+            tmp_path / "task1-proof-context.json",
         ),
         namespace=proof.ProofNamespace("stack", (), (), (), (), ()),
         transport=ProofTransport(

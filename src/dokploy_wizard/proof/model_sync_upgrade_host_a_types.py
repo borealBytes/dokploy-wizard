@@ -24,6 +24,8 @@ class UpgradeHostABinding:
     env_mode: int
     final_commit: str
     namespace: ProofNamespace
+    proof_env_file: Path
+    proof_context_file: Path
 
 
 class UpgradeHostAError(RuntimeError):
