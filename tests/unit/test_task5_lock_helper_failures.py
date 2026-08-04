@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from dokploy_wizard.dokploy import lock_helper_runtime
+from dokploy_wizard.dokploy import lock_helper_io, lock_helper_runtime
 from dokploy_wizard.dokploy.sync_helper import (
     LeaseReceipt,
     LeaseRelease,
@@ -224,7 +224,7 @@ def test_helper_rejects_mismatched_parent_identity_tuple(
 def _wait_for_phase(path: Path, phase: str) -> LeaseReceipt:
     deadline = time.monotonic() + 3
     while time.monotonic() <= deadline:
-        receipt = LeaseReceipt.from_dict(read_json(path, json_values=True))
+        receipt = LeaseReceipt.from_dict(lock_helper_io.read_json(path))
         if receipt.phase == phase:
             return receipt
         time.sleep(0.02)
