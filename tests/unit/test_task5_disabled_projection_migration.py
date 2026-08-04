@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
+
 from dokploy_wizard.lifecycle.changes import (
     applicable_phases_for,
     classify_install_request,
@@ -24,6 +26,7 @@ from dokploy_wizard.state.shared_core_sync import (
     AppliedSyncState,
     SyncOwnershipMetadata,
 )
+from dokploy_wizard.state.upgrade_io import atomic_json
 
 _FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "nextcloud.env"
 
@@ -129,6 +132,67 @@ def test_disabled_legacy_projection_sanitizes_openclaw_gateway_token(
         ),
     )
     write_ownership_ledger(tmp_path, ledger)
+
+    # When
+    result = reconcile_and_persist_sync_projection(
+        state_dir=tmp_path,
+        backend=DisabledSyncBackend(),
+        desired_state=desired,
+        ownership_ledger=ledger,
+    )
+
+    # Then
+    assert result.desired_state.openclaw_gateway_token is None
+    assert load_state_dir(tmp_path).desired_state == result.desired_state
+
+
+def test_disabled_legacy_projection_resumes_after_desired_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    raw = parse_env_file(_FIXTURE)
+    desired = resolve_desired_state(raw)
+    ledger = OwnershipLedger(format_version=desired.format_version, resources=())
+    write_target_state(tmp_path, raw, desired)
+    legacy_desired = desired.to_dict()
+    legacy_desired["openclaw_gateway_token"] = "legacy-openclaw-token"
+    legacy_desired["shared_core"].pop("opencode_go_sync", None)
+    legacy_fingerprint = sha256(
+        json.dumps(legacy_desired, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    (tmp_path / "desired-state.json").write_text(
+        json.dumps(legacy_desired),
+        encoding="utf-8",
+    )
+    write_applied_checkpoint(
+        tmp_path,
+        AppliedStateCheckpoint(
+            format_version=desired.format_version,
+            desired_state_fingerprint=legacy_fingerprint,
+            completed_steps=applicable_phases_for(desired),
+        ),
+    )
+    write_ownership_ledger(tmp_path, ledger)
+    original_atomic_json = atomic_json
+    interrupted = False
+
+    def interrupt_applied_write(path: Path, payload: dict[str, object]) -> None:
+        nonlocal interrupted
+        if path.name == "applied-state.json" and not interrupted:
+            interrupted = True
+            raise OSError("fixture interruption")
+        original_atomic_json(path, payload)
+
+    monkeypatch.setattr("dokploy_wizard.state.upgrade.atomic_json", interrupt_applied_write)
+    with pytest.raises(OSError, match="fixture interruption"):
+        reconcile_and_persist_sync_projection(
+            state_dir=tmp_path,
+            backend=DisabledSyncBackend(),
+            desired_state=desired,
+            ownership_ledger=ledger,
+        )
+    monkeypatch.setattr("dokploy_wizard.state.upgrade.atomic_json", original_atomic_json)
 
     # When
     result = reconcile_and_persist_sync_projection(
