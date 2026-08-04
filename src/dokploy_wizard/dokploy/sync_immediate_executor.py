@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 import stat
 import subprocess
@@ -11,6 +12,19 @@ from pathlib import Path
 from typing import Protocol
 
 from dokploy_wizard.state.sync_schema import JsonValue, SyncStateError, canonical_digest
+
+_SYNC_ERROR_PATTERN = re.compile(r"^DOKPLOY_WIZARD_SYNC_ERROR=([a-z_]+)$", re.MULTILINE)
+_SYNC_ERROR_CATEGORIES = frozenset(
+    {
+        "catalog_source",
+        "catalog_state",
+        "model_admin",
+        "persistence",
+        "runtime_config",
+        "runtime_lock",
+        "runtime_unknown",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +80,11 @@ class DockerExecImmediateSyncExecutor:
             text=True,
         )
         if result.returncode != 0:
+            categories = tuple(_SYNC_ERROR_PATTERN.findall(result.stderr))
+            if len(categories) == 1 and categories[0] in _SYNC_ERROR_CATEGORIES:
+                raise SyncStateError(
+                    f"Immediate OpenCode Go sync command failed: {categories[0]}."
+                )
             raise SyncStateError("Immediate OpenCode Go sync command failed.")
         after = _snapshot(command.state_root)
         delta = tuple(
