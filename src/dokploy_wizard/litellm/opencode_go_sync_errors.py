@@ -13,6 +13,21 @@ SyncFailureCategory = Literal[
     "catalog_source",
     "catalog_state",
     "model_admin_conflict",
+    "model_admin_conflict_catalog_anomaly",
+    "model_admin_conflict_catalog_disabled",
+    "model_admin_conflict_catalog_source",
+    "model_admin_conflict_catalog_visibility",
+    "model_admin_conflict_delete_survivor",
+    "model_admin_conflict_duplicate_alias",
+    "model_admin_conflict_inventory_changed",
+    "model_admin_conflict_missing_fields",
+    "model_admin_conflict_pricing_metadata",
+    "model_admin_conflict_record_id",
+    "model_admin_conflict_record_identity",
+    "model_admin_conflict_source_mismatch",
+    "model_admin_conflict_stale_visibility",
+    "model_admin_conflict_write_ownership",
+    "model_admin_conflict_write_projection",
     "model_admin_http_400",
     "model_admin_http_401",
     "model_admin_http_403",
@@ -97,6 +112,40 @@ def model_admin_failure(error: LiteLLMModelAdminError) -> SyncFailureCategory:
         ),
     )
     for marker, category in lost_write_markers:
+        if reason.startswith(marker):
+            return category
+    conflict_markers: tuple[tuple[str, SyncFailureCategory], ...] = (
+        ("catalog anomalous shrink", "model_admin_conflict_catalog_anomaly"),
+        ("OpenCode Go catalog is not enabled", "model_admin_conflict_catalog_disabled"),
+        ("catalog source drift", "model_admin_conflict_catalog_source"),
+        ("catalog visibility failure", "model_admin_conflict_catalog_visibility"),
+        ("delete 400 recovery found surviving alias", "model_admin_conflict_delete_survivor"),
+        ("duplicate LiteLLM deployment alias", "model_admin_conflict_duplicate_alias"),
+        (
+            "LiteLLM inventory visibility changed before mutation",
+            "model_admin_conflict_inventory_changed",
+        ),
+        ("owned model_info is missing fields", "model_admin_conflict_missing_fields"),
+        ("missing pricing metadata", "model_admin_conflict_pricing_metadata"),
+        ("owned record model_info id does not match row id", "model_admin_conflict_record_id"),
+        (
+            "owned record identity does not match desired deployment",
+            "model_admin_conflict_record_identity",
+        ),
+        ("source mismatch", "model_admin_conflict_source_mismatch"),
+        ("stale row visibility failure", "model_admin_conflict_stale_visibility"),
+        (
+            "create response is not an owned OpenCode Go alias",
+            "model_admin_conflict_write_ownership",
+        ),
+        (
+            "patch response is not an owned OpenCode Go alias",
+            "model_admin_conflict_write_ownership",
+        ),
+        ("create response owned projection mismatch", "model_admin_conflict_write_projection"),
+        ("patch response owned projection mismatch", "model_admin_conflict_write_projection"),
+    )
+    for marker, category in conflict_markers:
         if reason.startswith(marker):
             return category
     markers: tuple[tuple[str, SyncFailureCategory], ...] = (
