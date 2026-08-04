@@ -25,6 +25,18 @@ _SYNC_ERROR_CATEGORIES = frozenset(
         "runtime_unknown",
     }
 )
+_RUNTIME_PREFLIGHT = (
+    "import pathlib,sys,zipfile;"
+    "package=pathlib.Path('/opt/dokploy-wizard/opencode_go_sync.py');"
+    "config=pathlib.Path('/opt/dokploy-wizard/opencode-go.json');"
+    "raise SystemExit(11 if not package.is_file() else "
+    "12 if not zipfile.is_zipfile(package) else 13 if not config.is_file() else 0)"
+)
+_PREFLIGHT_FAILURES = {
+    11: "runtime_package_missing",
+    12: "runtime_package_invalid",
+    13: "runtime_config_missing",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,8 +85,28 @@ class DockerExecImmediateSyncExecutor:
             for item in ("--env", f"{name}={value}")
         )
         runner = self.runner or _run_process
+        docker_exec = (
+            "docker",
+            "exec",
+            *arguments,
+            command.service_name,
+        )
+        preflight = runner(
+            (*docker_exec, "python", "-c", _RUNTIME_PREFLIGHT),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if preflight.returncode != 0:
+            category = _PREFLIGHT_FAILURES.get(
+                preflight.returncode,
+                "docker_exec_unavailable",
+            )
+            raise SyncStateError(
+                f"Immediate OpenCode Go sync command failed: {category}."
+            )
         result = runner(
-            ("docker", "exec", *arguments, command.service_name, *command.argv),
+            (*docker_exec, *command.argv),
             check=False,
             capture_output=True,
             text=True,
