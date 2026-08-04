@@ -4,10 +4,13 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytest
+
 from dokploy_wizard.dokploy.sync_immediate_executor import (
     DockerExecImmediateSyncExecutor,
     parse_immediate_sync_command,
 )
+from dokploy_wizard.state.sync_schema import SyncStateError
 
 _OWNER = "3b8e1e83-0e57-4d66-a65e-1edbf2aac838"
 
@@ -61,6 +64,25 @@ class ChurningControlRunner:
         )
         (self.state_root / "sync.lock").write_text("lock-2", encoding="utf-8")
         return subprocess.CompletedProcess(arguments, 0, stdout="ok\n", stderr="")
+
+
+@dataclass(frozen=True, slots=True)
+class CategorizedFailureRunner:
+    def __call__(
+        self,
+        arguments: tuple[str, ...],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        return subprocess.CompletedProcess(
+            arguments,
+            1,
+            stdout="",
+            stderr="DOKPLOY_WIZARD_SYNC_ERROR=catalog_source\n",
+        )
 
 
 def test_production_executor_runs_exact_schedule_argv_and_env_and_reports_real_delta(
@@ -126,3 +148,17 @@ def test_production_snapshot_excludes_helper_control_churn(tmp_path: Path) -> No
     ).execute(command)
 
     assert result.durable_write_delta == ("applied-state.json",)
+
+
+def test_production_executor_preserves_only_fixed_runtime_failure_category(
+    tmp_path: Path,
+) -> None:
+    command = parse_immediate_sync_command(
+        f"DOKPLOY_WIZARD_SCHEDULE_OWNER_ID={_OWNER} TZ=UTC python sync.py",
+        owner_id=_OWNER,
+        service_name="litellm",
+        state_root=tmp_path,
+    )
+
+    with pytest.raises(SyncStateError, match="catalog_source"):
+        DockerExecImmediateSyncExecutor(runner=CategorizedFailureRunner()).execute(command)

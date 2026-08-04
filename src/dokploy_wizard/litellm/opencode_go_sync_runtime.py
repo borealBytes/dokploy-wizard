@@ -4,14 +4,19 @@ import argparse
 import fcntl
 import json
 import os
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Literal, Mapping
 
 from dokploy_wizard.litellm.catalog_clock import CatalogClock
 from dokploy_wizard.litellm.catalog_observation import CatalogSources, build_observation
-from dokploy_wizard.litellm.catalog_persistence import persist_catalog_transition
+from dokploy_wizard.litellm.catalog_persistence import (
+    CatalogPersistenceError,
+    persist_catalog_transition,
+)
+from dokploy_wizard.litellm.catalog_pricing import PricingContractError
 from dokploy_wizard.litellm.catalog_source_parsers import (
     parse_models_dev,
     parse_official,
@@ -24,11 +29,31 @@ from dokploy_wizard.litellm.catalog_sources import (
     UrllibSourceTransport,
     fetch_source,
 )
+from dokploy_wizard.litellm.catalog_state import CatalogStateError
+from dokploy_wizard.litellm.catalog_types import SourceContractError
 from dokploy_wizard.litellm.model_admin_client import LiteLLMModelAdminClient
-from dokploy_wizard.litellm.model_admin_types import LiteLLMModelAdminApi
+from dokploy_wizard.litellm.model_admin_types import (
+    LiteLLMModelAdminApi,
+    LiteLLMModelAdminError,
+)
 from dokploy_wizard.litellm.opencode_go_plan import OpenCodeGoReconciliationInput
 from dokploy_wizard.litellm.opencode_go_reconciler import OpenCodeGoDatabaseReconciler
 from dokploy_wizard.litellm.opencode_go_sync_state import prepare_catalog_sync
+
+SyncFailureCategory = Literal[
+    "catalog_source",
+    "catalog_state",
+    "model_admin",
+    "persistence",
+    "runtime_config",
+    "runtime_lock",
+    "runtime_unknown",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class SyncRuntimeError(RuntimeError):
+    category: SyncFailureCategory
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,16 +118,39 @@ def synchronize(
     dependencies: SyncRuntimeDependencies,
 ) -> None:
     clock = dependencies.clock
-    sources = dependencies.catalog_loader(clock)
-    observation = build_observation(sources, clock)
-    prepared = prepare_catalog_sync(state_root, config.catalog_id, observation)
-    OpenCodeGoDatabaseReconciler(dependencies.model_admin_api).reconcile(
-        OpenCodeGoReconciliationInput(prepared.models, prepared.state, False)
-    )
-    persist_catalog_transition(state_root, prepared.state, prepared.generation)
+    try:
+        sources = dependencies.catalog_loader(clock)
+        observation = build_observation(sources, clock)
+    except (PricingContractError, SourceContractError) as error:
+        raise SyncRuntimeError("catalog_source") from error
+    try:
+        prepared = prepare_catalog_sync(state_root, config.catalog_id, observation)
+    except (CatalogPersistenceError, CatalogStateError, RuntimeError) as error:
+        raise SyncRuntimeError("catalog_state") from error
+    try:
+        OpenCodeGoDatabaseReconciler(dependencies.model_admin_api).reconcile(
+            OpenCodeGoReconciliationInput(prepared.models, prepared.state, False)
+        )
+    except LiteLLMModelAdminError as error:
+        raise SyncRuntimeError("model_admin") from error
+    try:
+        persist_catalog_transition(state_root, prepared.state, prepared.generation)
+    except (CatalogPersistenceError, OSError) as error:
+        raise SyncRuntimeError("persistence") from error
 
 
 def main() -> int:
+    try:
+        return _run()
+    except SyncRuntimeError as error:
+        print(f"DOKPLOY_WIZARD_SYNC_ERROR={error.category}", file=sys.stderr)
+        return 1
+    except Exception:
+        print("DOKPLOY_WIZARD_SYNC_ERROR=runtime_unknown", file=sys.stderr)
+        return 1
+
+
+def _run() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
@@ -112,23 +160,29 @@ def main() -> int:
     parser.add_argument("--http-timeout-seconds", type=int, required=True)
     arguments = parser.parse_args()
     if arguments.max_runtime_seconds != 300 or arguments.http_timeout_seconds != 30:
-        raise ValueError("OpenCode Go sync runtime limits are not canonical")
-    config = SyncRuntimeConfig.load(arguments.config, os.environ)
+        raise SyncRuntimeError("runtime_config")
+    try:
+        config = SyncRuntimeConfig.load(arguments.config, os.environ)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise SyncRuntimeError("runtime_config") from error
     master_key = os.environ.get("LITELLM_MASTER_KEY", "")
     if master_key == "":
-        raise ValueError("LiteLLM master key is missing")
-    arguments.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with arguments.lock_file.open("a+b") as lock:
-        try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            if not _active_external_lease(arguments.state_dir):
-                raise RuntimeError("OpenCode Go synchronizer lock is busy") from None
-        synchronize(
-            state_root=arguments.state_dir,
-            config=config,
-            dependencies=SyncRuntimeDependencies.live(master_key),
-        )
+        raise SyncRuntimeError("runtime_config")
+    try:
+        arguments.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with arguments.lock_file.open("a+b") as lock:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if not _active_external_lease(arguments.state_dir):
+                    raise SyncRuntimeError("runtime_lock") from None
+            synchronize(
+                state_root=arguments.state_dir,
+                config=config,
+                dependencies=SyncRuntimeDependencies.live(master_key),
+            )
+    except OSError as error:
+        raise SyncRuntimeError("runtime_lock") from error
     return 0
 
 
