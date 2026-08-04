@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Final
 
 _REMOTE_STDERR_PREFIX: Final = b"[remote:modify:stderr] "
+_PHASE_FAILURE_CATEGORIES: Final[dict[bytes, str]] = {
+    b"[remote:modify-observation-before:stderr] ": "observation_before",
+    b"[remote:modify-observation-after:stderr] ": "observation_after",
+}
 _FAILURE_CATEGORIES: Final[dict[bytes, str]] = {
     b"dokploy_wizard.state.sync_schema.SyncStateError": "sync_state",
     b"dokploy_wizard.state.models.StateValidationError": "state_validation",
@@ -31,12 +35,23 @@ def remote_fixed_failure(stderr: bytes) -> str | None:
     categories = {
         category
         for line in stderr.splitlines()
-        if line.startswith(_REMOTE_STDERR_PREFIX)
-        for category in (
-            _FAILURE_CATEGORIES.get(
-                line.removeprefix(_REMOTE_STDERR_PREFIX).partition(b": ")[0]
-            ),
-        )
+        for category in _line_failure_categories(line)
         if category is not None
     }
     return categories.pop() if len(categories) == 1 else None
+
+
+def _line_failure_categories(line: bytes) -> tuple[str | None, ...]:
+    fixed_type = None
+    if line.startswith(_REMOTE_STDERR_PREFIX):
+        fixed_type = _FAILURE_CATEGORIES.get(
+            line.removeprefix(_REMOTE_STDERR_PREFIX).partition(b": ")[0]
+        )
+    return (
+        fixed_type,
+        *(
+            category
+            for prefix, category in _PHASE_FAILURE_CATEGORIES.items()
+            if line.startswith(prefix)
+        ),
+    )
