@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Literal, Mapping
+from typing import Callable, Mapping
 
 from dokploy_wizard.litellm.catalog_clock import CatalogClock
 from dokploy_wizard.litellm.catalog_observation import CatalogSources, build_observation
@@ -34,41 +34,15 @@ from dokploy_wizard.litellm.catalog_types import SourceContractError
 from dokploy_wizard.litellm.model_admin_client import LiteLLMModelAdminClient
 from dokploy_wizard.litellm.model_admin_types import (
     LiteLLMModelAdminApi,
-    LiteLLMModelAdminConflict,
     LiteLLMModelAdminError,
-    LiteLLMModelAdminWriteAmbiguity,
 )
 from dokploy_wizard.litellm.opencode_go_plan import OpenCodeGoReconciliationInput
 from dokploy_wizard.litellm.opencode_go_reconciler import OpenCodeGoDatabaseReconciler
+from dokploy_wizard.litellm.opencode_go_sync_errors import (
+    SyncRuntimeError,
+    model_admin_failure,
+)
 from dokploy_wizard.litellm.opencode_go_sync_state import prepare_catalog_sync
-
-SyncFailureCategory = Literal[
-    "catalog_source",
-    "catalog_state",
-    "model_admin_conflict",
-    "model_admin_inventory_blocked",
-    "model_admin_inventory_data",
-    "model_admin_inventory_deployment",
-    "model_admin_inventory_masked",
-    "model_admin_inventory_model_id",
-    "model_admin_inventory_model_info",
-    "model_admin_inventory_model_name",
-    "model_admin_inventory_routing",
-    "model_admin_inventory_shape",
-    "model_admin_transport",
-    "model_admin_unknown",
-    "model_admin_unowned_alias",
-    "model_admin_write",
-    "persistence",
-    "runtime_config",
-    "runtime_lock",
-    "runtime_unknown",
-]
-
-
-@dataclass(frozen=True, slots=True)
-class SyncRuntimeError(RuntimeError):
-    category: SyncFailureCategory
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,7 +121,7 @@ def synchronize(
             OpenCodeGoReconciliationInput(prepared.models, prepared.state, False)
         )
     except LiteLLMModelAdminError as error:
-        raise SyncRuntimeError(_model_admin_failure(error)) from error
+        raise SyncRuntimeError(model_admin_failure(error)) from error
     try:
         persist_catalog_transition(state_root, prepared.state, prepared.generation)
     except (CatalogPersistenceError, OSError) as error:
@@ -210,34 +184,6 @@ def _load_live_sources(clock: CatalogClock) -> CatalogSources:
     )
 
 
-def _model_admin_failure(error: LiteLLMModelAdminError) -> SyncFailureCategory:
-    if error.reason.startswith("unowned alias "):
-        return "model_admin_unowned_alias"
-    if "masked routing parameter" in error.reason:
-        return "model_admin_inventory_masked"
-    if "routing parameters must contain" in error.reason:
-        return "model_admin_inventory_routing"
-    if "deployment blocked must be nested" in error.reason:
-        return "model_admin_inventory_blocked"
-    if "inventory requires a data array" in error.reason:
-        return "model_admin_inventory_data"
-    if "inventory deployment" in error.reason:
-        return "model_admin_inventory_deployment"
-    if "inventory model_name" in error.reason:
-        return "model_admin_inventory_model_name"
-    if "inventory model_info.id" in error.reason:
-        return "model_admin_inventory_model_id"
-    if "inventory model_info" in error.reason:
-        return "model_admin_inventory_model_info"
-    if "inventory" in error.reason:
-        return "model_admin_inventory_shape"
-    if "transport failed" in error.reason or "request failed with status" in error.reason:
-        return "model_admin_transport"
-    if isinstance(error, LiteLLMModelAdminWriteAmbiguity):
-        return "model_admin_write"
-    if isinstance(error, LiteLLMModelAdminConflict):
-        return "model_admin_conflict"
-    return "model_admin_unknown"
 def _active_external_lease(state_root: Path) -> bool:
     now = datetime.now(tz=UTC)
     for path in (state_root / "lease-receipts").glob("*.json"):
