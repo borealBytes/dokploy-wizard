@@ -13,6 +13,14 @@ SyncFailureCategory = Literal[
     "catalog_source",
     "catalog_state",
     "model_admin_conflict",
+    "model_admin_confirm_create_absent",
+    "model_admin_confirm_create_multiple",
+    "model_admin_confirm_create_ownership",
+    "model_admin_confirm_create_projection",
+    "model_admin_confirm_patch_absent",
+    "model_admin_confirm_patch_multiple",
+    "model_admin_confirm_patch_ownership",
+    "model_admin_confirm_patch_projection",
     "model_admin_conflict_catalog_anomaly",
     "model_admin_conflict_catalog_disabled",
     "model_admin_conflict_catalog_source",
@@ -116,6 +124,32 @@ def model_admin_failure(error: LiteLLMModelAdminError) -> SyncFailureCategory:
         if reason.startswith(marker):
             return category
     conflict_markers: tuple[tuple[str, SyncFailureCategory], ...] = (
+        ("create confirmation left no owned alias", "model_admin_confirm_create_absent"),
+        (
+            "create confirmation left multiple owned aliases",
+            "model_admin_confirm_create_multiple",
+        ),
+        (
+            "create confirmation is not an owned OpenCode Go alias",
+            "model_admin_confirm_create_ownership",
+        ),
+        (
+            "create confirmation owned projection mismatch",
+            "model_admin_confirm_create_projection",
+        ),
+        ("patch confirmation left no owned alias", "model_admin_confirm_patch_absent"),
+        (
+            "patch confirmation left multiple owned aliases",
+            "model_admin_confirm_patch_multiple",
+        ),
+        (
+            "patch confirmation is not an owned OpenCode Go alias",
+            "model_admin_confirm_patch_ownership",
+        ),
+        (
+            "patch confirmation owned projection mismatch",
+            "model_admin_confirm_patch_projection",
+        ),
         ("catalog anomalous shrink", "model_admin_conflict_catalog_anomaly"),
         ("OpenCode Go catalog is not enabled", "model_admin_conflict_catalog_disabled"),
         ("catalog source drift", "model_admin_conflict_catalog_source"),
