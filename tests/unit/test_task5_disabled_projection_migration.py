@@ -100,3 +100,44 @@ def test_disabled_legacy_projection_persists_images_and_second_pass_is_noop(
         requested_desired=desired,
     )
     assert rerun.mode == "noop"
+
+
+def test_disabled_legacy_projection_sanitizes_openclaw_gateway_token(
+    tmp_path: Path,
+) -> None:
+    # Given
+    raw = parse_env_file(_FIXTURE)
+    desired = resolve_desired_state(raw)
+    ledger = OwnershipLedger(format_version=desired.format_version, resources=())
+    write_target_state(tmp_path, raw, desired)
+    legacy_desired = desired.to_dict()
+    legacy_desired["openclaw_gateway_token"] = "legacy-openclaw-token"
+    legacy_desired["shared_core"].pop("opencode_go_sync", None)
+    legacy_fingerprint = sha256(
+        json.dumps(legacy_desired, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    (tmp_path / "desired-state.json").write_text(
+        json.dumps(legacy_desired),
+        encoding="utf-8",
+    )
+    write_applied_checkpoint(
+        tmp_path,
+        AppliedStateCheckpoint(
+            format_version=desired.format_version,
+            desired_state_fingerprint=legacy_fingerprint,
+            completed_steps=applicable_phases_for(desired),
+        ),
+    )
+    write_ownership_ledger(tmp_path, ledger)
+
+    # When
+    result = reconcile_and_persist_sync_projection(
+        state_dir=tmp_path,
+        backend=DisabledSyncBackend(),
+        desired_state=desired,
+        ownership_ledger=ledger,
+    )
+
+    # Then
+    assert result.desired_state.openclaw_gateway_token is None
+    assert load_state_dir(tmp_path).desired_state == result.desired_state
