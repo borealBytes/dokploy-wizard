@@ -97,6 +97,13 @@ class UnownedAliasApi:
         raise AssertionError(model_id)
 
 
+class MaskedInventoryApi(UnownedAliasApi):
+    def list_models(self) -> tuple[LiteLLMModelRecord, ...]:
+        raise LiteLLMModelAdminConflict(
+            "LiteLLM model inventory contains a masked routing parameter"
+        )
+
+
 def test_synchronize_classifies_unowned_model_alias_without_exposing_name(
     tmp_path: Path,
 ) -> None:
@@ -115,3 +122,23 @@ def test_synchronize_classifies_unowned_model_alias_without_exposing_name(
         )
 
     assert captured.value.category == "model_admin_unowned_alias"
+
+
+def test_synchronize_classifies_masked_inventory_without_exposing_payload(
+    tmp_path: Path,
+) -> None:
+    sources = catalog_sources()
+    dependencies = SyncRuntimeDependencies(
+        StaticClock(),
+        lambda _: sources,
+        MaskedInventoryApi(),
+    )
+
+    with pytest.raises(SyncRuntimeError) as captured:
+        synchronize(
+            state_root=tmp_path,
+            config=SyncRuntimeConfig("opencode-go", "a" * 64, "owner"),
+            dependencies=dependencies,
+        )
+
+    assert captured.value.category == "model_admin_inventory_masked"
