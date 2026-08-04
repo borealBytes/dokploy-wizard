@@ -25,8 +25,10 @@ def persistence_failure(error: CatalogPersistenceError | OSError) -> SyncFailure
             return category
     if "write failed" in reason:
         return "persistence_write_other"
-    if "bytes" in reason:
-        return "persistence_bytes"
+    if reason == "existing state bytes are unknown":
+        return "persistence_state_bytes"
+    if reason == "existing generation bytes are unknown":
+        return "persistence_generation_bytes"
     if "bind state" in reason:
         return "persistence_binding"
     if "mode" in reason:
