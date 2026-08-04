@@ -37,6 +37,13 @@ _FAILURE_CATEGORIES: Final[dict[bytes, str]] = {
 
 
 def remote_fixed_failure(stderr: bytes) -> str | None:
+    marker_categories = {
+        category
+        for line in stderr.splitlines()
+        if (category := _task18_marker_category(line)) is not None
+    }
+    if marker_categories:
+        return marker_categories.pop() if len(marker_categories) == 1 else None
     categories = {
         category
         for line in stderr.splitlines()
@@ -51,10 +58,6 @@ def _line_failure_categories(line: bytes) -> tuple[str | None, ...]:
     if line.startswith(_REMOTE_STDERR_PREFIX):
         remote_line = line.removeprefix(_REMOTE_STDERR_PREFIX)
         fixed_type = _FAILURE_CATEGORIES.get(remote_line.partition(b": ")[0])
-        if remote_line.startswith(_TASK18_ERROR_PREFIX):
-            candidate = remote_line.removeprefix(_TASK18_ERROR_PREFIX).decode("ascii")
-            if is_task18_modify_failure_category(candidate):
-                fixed_type = candidate
     return (
         fixed_type,
         *(
@@ -63,3 +66,11 @@ def _line_failure_categories(line: bytes) -> tuple[str | None, ...]:
             if line.startswith(prefix)
         ),
     )
+
+
+def _task18_marker_category(line: bytes) -> str | None:
+    prefix = _REMOTE_STDERR_PREFIX + _TASK18_ERROR_PREFIX
+    if not line.startswith(prefix):
+        return None
+    candidate = line.removeprefix(prefix).decode("ascii")
+    return candidate if is_task18_modify_failure_category(candidate) else None

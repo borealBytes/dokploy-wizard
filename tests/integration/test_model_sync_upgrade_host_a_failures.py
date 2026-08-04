@@ -114,6 +114,12 @@ def test_modify_command_preserves_only_fixed_remote_failure_type(
             "shared_core",
         ),
         (
+            b"[remote:modify:stderr] DOKPLOY_WIZARD_TASK18_ERROR=state_validation\n"
+            b"[remote:modify:stderr] "
+            b"dokploy_wizard.state.upgrade_intent.StateUpgradeError: fixture detail\n",
+            "state_validation",
+        ),
+        (
             b"[remote:modify-observation-before:stdout] {}\n"
             b"[remote:modify-observation-after:stdout] {}\n",
             "modify_command_unclassified",
