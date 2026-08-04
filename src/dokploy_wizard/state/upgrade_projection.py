@@ -10,7 +10,6 @@ from typing import Mapping
 
 from dokploy_wizard.state.models import (
     AppliedStateCheckpoint,
-    DesiredState,
     OwnershipLedger,
     StateValidationError,
 )
@@ -20,6 +19,7 @@ from dokploy_wizard.state.shared_core_sync import (
     SyncDesiredState,
     SyncStateError,
 )
+from dokploy_wizard.state.store import parse_desired_state_payload
 from dokploy_wizard.state.sync_schema import JsonValue
 from dokploy_wizard.state.upgrade_intent import StateUpgradeError
 from dokploy_wizard.state.upgrade_io import canonical_bytes, file_hash, read_json
@@ -35,7 +35,7 @@ def target_documents(
         desired_payload = json.loads(paths["desired"].read_text(encoding="utf-8"))
         applied_payload = json.loads(paths["applied"].read_text(encoding="utf-8"))
         ledger_payload = json.loads(paths["ledger"].read_text(encoding="utf-8"))
-        desired = DesiredState.from_dict(desired_payload)
+        desired = parse_desired_state_payload(desired_payload)
         applied = AppliedStateCheckpoint.from_dict(applied_payload)
         ledger = OwnershipLedger.from_dict(ledger_payload)
     except (OSError, json.JSONDecodeError, StateValidationError, SyncStateError) as error:
@@ -93,7 +93,7 @@ def runtime_target_documents(
     try:
         desired_payload = json.loads(paths["desired"].read_text(encoding="utf-8"))
         applied_payload = json.loads(paths["applied"].read_text(encoding="utf-8"))
-        desired = DesiredState.from_dict(desired_payload)
+        desired = parse_desired_state_payload(desired_payload)
         applied = AppliedStateCheckpoint.from_dict(applied_payload)
     except (OSError, json.JSONDecodeError, StateValidationError, SyncStateError) as error:
         raise StateUpgradeError("State upgrade input document is invalid.") from error

@@ -439,7 +439,7 @@ def load_state_dir(state_dir: Path) -> LoadedState:
     return LoadedState(
         raw_input=_load_optional_document(state_dir / RAW_INPUT_FILE, RawEnvInput.from_dict),
         desired_state=_load_optional_document(
-            state_dir / DESIRED_STATE_FILE, _load_desired_state_with_legacy_sanitization
+            state_dir / DESIRED_STATE_FILE, parse_desired_state_payload
         ),
         applied_state=_load_optional_document(
             state_dir / APPLIED_STATE_FILE,
@@ -452,7 +452,7 @@ def load_state_dir(state_dir: Path) -> LoadedState:
     )
 
 
-def _load_desired_state_with_legacy_sanitization(payload: dict[str, Any]) -> DesiredState:
+def parse_desired_state_payload(payload: dict[str, Any]) -> DesiredState:
     try:
         return DesiredState.from_dict(payload)
     except StateValidationError as error:
