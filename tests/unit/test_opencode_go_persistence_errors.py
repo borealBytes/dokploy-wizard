@@ -11,8 +11,14 @@ from dokploy_wizard.litellm.opencode_go_persistence_errors import persistence_fa
 @pytest.mark.parametrize(
     ("failure", "expected"),
     (
-        (CatalogPersistenceError("existing state bytes are unknown"), "persistence_bytes"),
-        (CatalogPersistenceError("existing generation bytes are unknown"), "persistence_bytes"),
+        (
+            CatalogPersistenceError("existing state bytes are unknown"),
+            "persistence_state_bytes",
+        ),
+        (
+            CatalogPersistenceError("existing generation bytes are unknown"),
+            "persistence_generation_bytes",
+        ),
         (CatalogPersistenceError("generation does not bind state"), "persistence_binding"),
         (CatalogPersistenceError("state file mode is invalid"), "persistence_mode"),
         (CatalogPersistenceError("state file is a symlink"), "persistence_contract"),
