@@ -136,9 +136,14 @@ def test_orchestrator_retries_one_dead_helper_with_the_same_lease(
     captured_request: list[LeaseRequest] = []
     original_stage = sync_helper_orchestrator._stage_helper_runtime
 
-    def capture_stage(state_root: Path, request: LeaseRequest) -> None:
+    def capture_stage(
+        state_root: Path,
+        request: LeaseRequest,
+        *,
+        owner_id: str,
+    ) -> None:
         captured_request.append(request)
-        original_stage(state_root, request)
+        original_stage(state_root, request, owner_id=owner_id)
 
     def fake_remove(intent: CreateIntent, *, runtime: DockerHelperRuntime) -> None:
         del runtime

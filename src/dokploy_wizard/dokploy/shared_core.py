@@ -1567,6 +1567,7 @@ def _render_compose_file(
             f"          - {plan.litellm.service_name}\n"
             "    volumes:\n"
             f"      - {litellm_metadata_volume}:/var/lib/dokploy-wizard/opencode-go\n"
+            f"      - {litellm_metadata_volume}:/opt/dokploy-wizard:ro\n"
         )
         config_entries.append(
             f"  {config_name}:\n"

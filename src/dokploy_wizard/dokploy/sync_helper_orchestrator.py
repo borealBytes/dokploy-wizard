@@ -18,6 +18,9 @@ from dokploy_wizard.dokploy import (
     lock_helper_protocol_validation,
     lock_helper_runtime,
 )
+from dokploy_wizard.dokploy.opencode_go_sync_package import (
+    render_opencode_go_sync_package,
+)
 from dokploy_wizard.dokploy.shared_core_sync_runtime import SyncScheduleOutcome
 from dokploy_wizard.dokploy.sync_helper_identity import read_parent_identity
 from dokploy_wizard.dokploy.sync_helper_lease import LeaseRelease, LeaseResult
@@ -84,7 +87,11 @@ def run_immediate_sync_with_helper(
         tombstone_sha256=outcome.applied.disable_tombstone_sha256,
         created_at=_now(),
     )
-    _stage_helper_runtime(state_root, request)
+    _stage_helper_runtime(
+        state_root,
+        request,
+        owner_id=outcome.desired.owner_id,
+    )
     env_file = _write_ephemeral_env(config.wizard_state_dir, lease, owner_env)
     launch = HelperLaunch(
             request=request,
@@ -159,7 +166,23 @@ def run_immediate_sync_with_helper(
             remove_sync_helper(intent, runtime=docker)
 
 
-def _stage_helper_runtime(state_root: Path, request: LeaseRequest) -> None:
+def _stage_helper_runtime(
+    state_root: Path,
+    request: LeaseRequest,
+    *,
+    owner_id: str,
+) -> None:
+    atomic_bytes(state_root / "opencode_go_sync.py", render_opencode_go_sync_package())
+    atomic_json(
+        state_root / "opencode-go.json",
+        {
+            "catalog_id": "opencode-go",
+            "config_sha256": request.config_sha256,
+            "owner_id": owner_id,
+            "schema_version": 1,
+            "sync_contract_version": 2,
+        },
+    )
     source = Path(lock_helper_runtime.__file__).read_bytes()
     runtime_path = state_root / "runtime" / "lock_helper.py"
     atomic_bytes(runtime_path, source)

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+import zipfile
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
@@ -169,6 +171,21 @@ def test_parent_reconciliation_runs_while_external_helper_holds_lock(tmp_path: P
     assert executor.commands[0].argv == tuple(
         _outcome().desired.schedule_spec.command.split()[2:]
     )
+    runtime_package = volume_root / "opencode_go_sync.py"
+    runtime_config = volume_root / "opencode-go.json"
+    assert runtime_package.is_file()
+    assert runtime_config.is_file()
+    with zipfile.ZipFile(runtime_package) as archive:
+        assert "__main__.py" in archive.namelist()
+        assert "dokploy_wizard/litellm/opencode_go_sync_runtime.py" in archive.namelist()
+    package_help = subprocess.run(
+        (sys.executable, str(runtime_package), "--help"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert package_help.returncode == 0
+    assert json.loads(runtime_config.read_text(encoding="utf-8"))["owner_id"] == _OWNER
     assert runtime.removed == [_CONTAINER_ID]
     assert not tuple((tmp_path / "wizard-state" / "sync-helper-env").glob("*.env"))
 
