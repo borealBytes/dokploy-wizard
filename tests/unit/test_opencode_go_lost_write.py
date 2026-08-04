@@ -40,6 +40,49 @@ class _AmbiguousCreateApi:
         raise AssertionError("create recovery must not delete")
 
 
+@dataclass(frozen=True, slots=True)
+class _TransformedCreateResponseApi:
+    stored: LiteLLMModelRecord
+    response: LiteLLMModelRecord
+    list_calls: list[int] = field(default_factory=list)
+
+    def list_models(self) -> tuple[LiteLLMModelRecord, ...]:
+        self.list_calls.append(len(self.list_calls))
+        return () if len(self.list_calls) <= 2 else (self.stored,)
+
+    def create_model(self, _: LiteLLMModelDeployment) -> LiteLLMModelRecord:
+        return self.response
+
+    def update_model(self, _: LiteLLMModelDeployment) -> LiteLLMModelRecord:
+        raise AssertionError("create confirmation must not update")
+
+    def delete_model(self, _: ModelUuid) -> None:
+        raise AssertionError("create confirmation must not delete")
+
+
+def test_create_confirms_transformed_response_from_database_inventory() -> None:
+    # Given
+    model = sample_catalog_model()
+    deployment = build_owned_model_deployment(model, bootstrap_static=False)
+    record = record_for(deployment)
+    stored = replace(
+        record,
+        litellm_params=replace(record.litellm_params, api_key=None),
+    )
+    response = replace(
+        record,
+        litellm_params=replace(record.litellm_params, api_key="encrypted"),
+    )
+    api = _TransformedCreateResponseApi(stored, response)
+
+    # When
+    result = OpenCodeGoDatabaseReconciler(api).reconcile(reconciliation_input((model,)))
+
+    # Then
+    assert result.applied[0].record == stored
+    assert api.list_calls == [0, 1, 2]
+
+
 @pytest.mark.parametrize(
     ("recovered_count", "expected"),
     (

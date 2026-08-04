@@ -96,19 +96,31 @@ class OpenCodeGoDatabaseReconciler:
 
     def _create(self, intent: CreateIntent) -> LiteLLMModelRecord:
         try:
-            record = self._api.create_model(intent.deployment)
+            self._api.create_model(intent.deployment)
         except LiteLLMModelAdminWriteAmbiguity as exc:
             return self._recover_lost_write(intent, exc)
-        self._require_exact(record, intent, "create response")
-        return record
+        return self._confirm_write(intent)
 
     def _update(self, intent: UpdateIntent) -> LiteLLMModelRecord:
         try:
-            record = self._api.update_model(intent.deployment)
+            self._api.update_model(intent.deployment)
         except LiteLLMModelAdminWriteAmbiguity as exc:
             return self._recover_lost_write(intent, exc)
-        self._require_exact(record, intent, "patch response")
-        return record
+        return self._confirm_write(intent)
+
+    def _confirm_write(self, intent: WriteIntent) -> LiteLLMModelRecord:
+        operation = _write_operation(intent)
+        matches = self._write_matches(intent)
+        if not matches:
+            raise LiteLLMModelAdminConflict(
+                f"{operation} confirmation left no owned alias"
+            )
+        if len(matches) > 1:
+            raise LiteLLMModelAdminConflict(
+                f"{operation} confirmation left multiple owned aliases"
+            )
+        self._require_exact(matches[0], intent, f"{operation} confirmation")
+        return matches[0]
 
     def _recover_lost_write(
         self,
@@ -116,11 +128,7 @@ class OpenCodeGoDatabaseReconciler:
         cause: LiteLLMModelAdminWriteAmbiguity,
     ) -> LiteLLMModelRecord:
         operation = _write_operation(intent)
-        matches = tuple(
-            record
-            for record in self._api.list_models()
-            if record.model_name == intent.deployment.model_name
-        )
+        matches = self._write_matches(intent)
         if not matches:
             raise LiteLLMModelAdminConflict(
                 f"lost {operation} response left no owned alias"
@@ -138,6 +146,13 @@ class OpenCodeGoDatabaseReconciler:
                 f"lost {operation} response mismatch for {intent.deployment.model_name}"
             ) from exc
         return matches[0]
+
+    def _write_matches(self, intent: WriteIntent) -> tuple[LiteLLMModelRecord, ...]:
+        return tuple(
+            record
+            for record in self._api.list_models()
+            if record.model_name == intent.deployment.model_name
+        )
 
     def _delete(self, previous: LiteLLMModelRecord) -> None:
         try:
