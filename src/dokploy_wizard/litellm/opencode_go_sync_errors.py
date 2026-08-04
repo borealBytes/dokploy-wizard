@@ -32,6 +32,10 @@ SyncFailureCategory = Literal[
     "model_admin_inventory_model_name",
     "model_admin_inventory_routing",
     "model_admin_inventory_shape",
+    "model_admin_lost_create_count",
+    "model_admin_lost_create_mismatch",
+    "model_admin_lost_patch_count",
+    "model_admin_lost_patch_mismatch",
     "model_admin_transport",
     "model_admin_unknown",
     "model_admin_unowned_alias",
@@ -64,6 +68,21 @@ def model_admin_failure(error: LiteLLMModelAdminError) -> SyncFailureCategory:
     reason = error.reason
     if reason.startswith("unowned alias "):
         return "model_admin_unowned_alias"
+    lost_write_markers: tuple[tuple[str, SyncFailureCategory], ...] = (
+        (
+            "lost create response did not leave one owned alias",
+            "model_admin_lost_create_count",
+        ),
+        ("lost create response mismatch", "model_admin_lost_create_mismatch"),
+        (
+            "lost patch response did not leave one owned alias",
+            "model_admin_lost_patch_count",
+        ),
+        ("lost patch response mismatch", "model_admin_lost_patch_mismatch"),
+    )
+    for marker, category in lost_write_markers:
+        if reason.startswith(marker):
+            return category
     markers: tuple[tuple[str, SyncFailureCategory], ...] = (
         ("masked routing parameter", "model_admin_inventory_masked"),
         ("routing parameters must contain", "model_admin_inventory_routing"),

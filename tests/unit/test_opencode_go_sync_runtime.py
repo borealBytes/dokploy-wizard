@@ -17,7 +17,10 @@ from dokploy_wizard.litellm.model_admin_types import (
     LiteLLMModelRecord,
     ModelUuid,
 )
-from dokploy_wizard.litellm.opencode_go_sync_errors import SyncRuntimeError
+from dokploy_wizard.litellm.opencode_go_sync_errors import (
+    SyncRuntimeError,
+    model_admin_failure,
+)
 from dokploy_wizard.litellm.opencode_go_sync_runtime import (
     SyncRuntimeConfig,
     SyncRuntimeDependencies,
@@ -117,6 +120,41 @@ class Http400Api(UnownedAliasApi):
         raise LiteLLMModelAdminError(
             "LiteLLM model admin request failed with status 400"
         )
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    (
+        (
+            "lost create response did not leave one owned alias",
+            "model_admin_lost_create_count",
+        ),
+        (
+            "lost create response mismatch for opencode-go/example",
+            "model_admin_lost_create_mismatch",
+        ),
+        (
+            "lost patch response did not leave one owned alias",
+            "model_admin_lost_patch_count",
+        ),
+        (
+            "lost patch response mismatch for opencode-go/example",
+            "model_admin_lost_patch_mismatch",
+        ),
+    ),
+)
+def test_model_admin_failure_classifies_lost_write_conflicts_without_alias(
+    reason: str,
+    expected: str,
+) -> None:
+    # Given
+    failure = LiteLLMModelAdminConflict(reason)
+
+    # When
+    category = model_admin_failure(failure)
+
+    # Then
+    assert category == expected
 
 
 def test_synchronize_classifies_unowned_model_alias_without_exposing_name(
