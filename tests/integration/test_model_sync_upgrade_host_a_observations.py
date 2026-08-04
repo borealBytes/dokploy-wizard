@@ -182,6 +182,46 @@ def test_modify_command_preserves_allowlisted_remote_sync_category(category: str
         parse_modify_command(process)
 
 
+@pytest.mark.parametrize(
+    ("failure_type", "category"),
+    (
+        (
+            "dokploy_wizard.state.sync_schema.SyncStateError",
+            "sync_state",
+        ),
+        (
+            "dokploy_wizard.dokploy.workspace_catalog_sync_models."
+            "WorkspaceCatalogSyncError",
+            "workspace_catalog_sync",
+        ),
+        (
+            "dokploy_wizard.dokploy.coder_template_migration_runtime."
+            "TemplateMigrationExecutionError",
+            "template_migration_execution",
+        ),
+        (
+            "dokploy_wizard.dokploy.coder_migration_workspace_models."
+            "CoderMigrationBlockedError",
+            "coder_migration_blocked",
+        ),
+    ),
+)
+def test_modify_command_preserves_only_fixed_remote_failure_type(
+    failure_type: str,
+    category: str,
+) -> None:
+    # Given
+    process = ProcessObservation(
+        1,
+        b"",
+        f"[remote:modify:stderr] {failure_type}: fixture detail\n".encode(),
+    )
+
+    # When / Then
+    with pytest.raises(UpgradeHostAError, match=category):
+        parse_modify_command(process)
+
+
 def test_modify_command_parses_noop_lifecycle_from_verbose_remote_output() -> None:
     # Given
     lines = (
