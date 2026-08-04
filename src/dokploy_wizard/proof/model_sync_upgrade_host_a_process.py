@@ -14,6 +14,7 @@ from pathlib import Path
 
 from dokploy_wizard import proof
 from dokploy_wizard.litellm.opencode_go_sync_errors import is_sync_failure_category
+from dokploy_wizard.proof.model_sync_upgrade_host_a_failures import remote_fixed_failure
 from dokploy_wizard.proof.model_sync_upgrade_host_a_observations import (
     HostAObservation,
     parse_host_a_observation,
@@ -32,42 +33,6 @@ _REMOTE_SYNC_ERROR_PATTERN = re.compile(
     rb"([a-z0-9_]+)\.$",
     re.MULTILINE,
 )
-_REMOTE_FIXED_FAILURE_PATTERNS = (
-    (
-        re.compile(
-            rb"^\[remote:modify:stderr\] "
-            rb"dokploy_wizard\.state\.sync_schema\.SyncStateError: ",
-            re.MULTILINE,
-        ),
-        "sync_state",
-    ),
-    (
-        re.compile(
-            rb"^\[remote:modify:stderr\] dokploy_wizard\.dokploy\."
-            rb"workspace_catalog_sync_models\.WorkspaceCatalogSyncError: ",
-            re.MULTILINE,
-        ),
-        "workspace_catalog_sync",
-    ),
-    (
-        re.compile(
-            rb"^\[remote:modify:stderr\] dokploy_wizard\.dokploy\."
-            rb"coder_template_migration_runtime\.TemplateMigrationExecutionError: ",
-            re.MULTILINE,
-        ),
-        "template_migration_execution",
-    ),
-    (
-        re.compile(
-            rb"^\[remote:modify:stderr\] dokploy_wizard\.dokploy\."
-            rb"coder_migration_workspace_models\.CoderMigrationBlockedError: ",
-            re.MULTILINE,
-        ),
-        "coder_migration_blocked",
-    ),
-)
-
-
 @dataclass(frozen=True, slots=True)
 class ProcessObservation:
     exit_code: int
@@ -183,7 +148,7 @@ def parse_modify_command(process: ProcessObservation) -> ModifyCommandObservatio
             category = sync_categories[0].decode("ascii")
             if is_sync_failure_category(category):
                 raise UpgradeHostAError(f"Host A modify wrapper failed: {category}")
-        fixed_failure = _remote_fixed_failure(process.stderr)
+        fixed_failure = remote_fixed_failure(process.stderr)
         if blocker is None and fixed_failure is not None:
             raise UpgradeHostAError(f"Host A modify wrapper failed: {fixed_failure}")
         if blocker is None or summary is not None or sync_categories:
@@ -199,15 +164,6 @@ def parse_modify_command(process: ProcessObservation) -> ModifyCommandObservatio
     if not all(isinstance(item, str) and item for item in phases):
         raise UpgradeHostAError("Host A modify wrapper lifecycle phases are malformed")
     return ModifyCommandObservation(process.exit_code, None, mode, tuple(phases))
-
-
-def _remote_fixed_failure(stderr: bytes) -> str | None:
-    matches = tuple(
-        category
-        for pattern, category in _REMOTE_FIXED_FAILURE_PATTERNS
-        if pattern.search(stderr) is not None
-    )
-    return matches[0] if len(matches) == 1 else None
 
 
 def parse_modify_execution(
