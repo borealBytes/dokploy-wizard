@@ -109,6 +109,34 @@ class CategorizedFailureRunner:
 
 
 @dataclass(frozen=True, slots=True)
+class CategorizedHttpFailureRunner:
+    def __call__(
+        self,
+        arguments: tuple[str, ...],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        if arguments[1] == "ps":
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                stdout="resolved-litellm-1\n",
+                stderr="",
+            )
+        if arguments[-2] == "-c":
+            return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            arguments,
+            1,
+            stdout="",
+            stderr="DOKPLOY_WIZARD_SYNC_ERROR=model_admin_http_400\n",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MissingRuntimeRunner:
     def __call__(
         self,
@@ -209,6 +237,22 @@ def test_production_executor_preserves_only_fixed_runtime_failure_category(
 
     with pytest.raises(SyncStateError, match="catalog_source"):
         DockerExecImmediateSyncExecutor(runner=CategorizedFailureRunner()).execute(command)
+
+
+def test_production_executor_preserves_allowlisted_numeric_failure_category(
+    tmp_path: Path,
+) -> None:
+    command = parse_immediate_sync_command(
+        f"DOKPLOY_WIZARD_SCHEDULE_OWNER_ID={_OWNER} TZ=UTC python sync.py",
+        owner_id=_OWNER,
+        service_name="litellm",
+        state_root=tmp_path,
+    )
+
+    with pytest.raises(SyncStateError, match="model_admin_http_400"):
+        DockerExecImmediateSyncExecutor(runner=CategorizedHttpFailureRunner()).execute(
+            command
+        )
 
 
 def test_production_executor_classifies_missing_packaged_runtime(tmp_path: Path) -> None:

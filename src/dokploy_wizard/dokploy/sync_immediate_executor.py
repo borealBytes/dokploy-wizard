@@ -14,7 +14,7 @@ from typing import Protocol
 from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
 from dokploy_wizard.state.sync_schema import JsonValue, SyncStateError, canonical_digest
 
-_SYNC_ERROR_PATTERN = re.compile(r"^DOKPLOY_WIZARD_SYNC_ERROR=([a-z_]+)$", re.MULTILINE)
+_SYNC_ERROR_PATTERN = re.compile(r"^DOKPLOY_WIZARD_SYNC_ERROR=([a-z0-9_]+)$", re.MULTILINE)
 _SYNC_ERROR_CATEGORIES = frozenset(
     {
         "catalog_source",
