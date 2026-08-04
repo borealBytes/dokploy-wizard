@@ -657,6 +657,11 @@ def _handle_modify(args: argparse.Namespace) -> int:
                 enforce_live_run_contamination_check=True,
             )
     except LifecycleLockBusyError as error:
+        if getattr(args, "task18_force_model_sync_upgrade", False):
+            print(
+                f"DOKPLOY_WIZARD_TASK18_ERROR={task18_modify_failure(error)}",
+                file=sys.stderr,
+            )
         raise SystemExit(error.exit_code) from error
     except (
         OSError,
@@ -681,6 +686,13 @@ def _handle_modify(args: argparse.Namespace) -> int:
             )
         raise SystemExit(_redacted_cli_error(error)) from error
     except Exception as error:
+        if getattr(args, "task18_force_model_sync_upgrade", False):
+            print(
+                f"DOKPLOY_WIZARD_TASK18_ERROR={task18_modify_failure(error)}",
+                file=sys.stderr,
+            )
+        raise
+    except SystemExit as error:
         if getattr(args, "task18_force_model_sync_upgrade", False):
             print(
                 f"DOKPLOY_WIZARD_TASK18_ERROR={task18_modify_failure(error)}",

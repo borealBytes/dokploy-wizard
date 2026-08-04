@@ -12,6 +12,7 @@ from dokploy_wizard.dokploy.coder_template_migration_runtime import (
 )
 from dokploy_wizard.dokploy.workspace_catalog_sync_models import WorkspaceCatalogSyncError
 from dokploy_wizard.lifecycle import LifecycleDriftError
+from dokploy_wizard.lifecycle.lock import LifecycleLockBusyError
 from dokploy_wizard.networking import CloudflareError
 from dokploy_wizard.packs.coder import CoderError
 from dokploy_wizard.packs.headscale import HeadscaleError
@@ -31,6 +32,7 @@ Task18ModifyFailureCategory = Literal[
     "coder",
     "headscale",
     "lifecycle_drift",
+    "lifecycle_lock",
     "matrix",
     "nextcloud",
     "openclaw",
@@ -41,6 +43,7 @@ Task18ModifyFailureCategory = Literal[
     "state_validation",
     "state_upgrade",
     "sync_state",
+    "system_exit",
     "tailscale",
     "template_migration_execution",
     "unexpected",
@@ -61,6 +64,8 @@ def is_task18_modify_failure_category(
 
 
 def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
+    if isinstance(error, SystemExit):
+        return "system_exit"
     if isinstance(error, OSError):
         return "os_error"
     if isinstance(error, StateValidationError):
@@ -81,6 +86,8 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
         return "coder"
     if isinstance(error, LifecycleDriftError):
         return "lifecycle_drift"
+    if isinstance(error, LifecycleLockBusyError):
+        return "lifecycle_lock"
     if isinstance(error, MatrixError):
         return "matrix"
     if isinstance(error, NextcloudError):
