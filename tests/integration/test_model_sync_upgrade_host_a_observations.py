@@ -165,19 +165,20 @@ def test_modify_command_rejects_success_without_remote_summary() -> None:
         parse_modify_command(process)
 
 
-def test_modify_command_preserves_allowlisted_remote_sync_http_category() -> None:
+@pytest.mark.parametrize("category", ("model_admin_http_400", "model_admin_conflict"))
+def test_modify_command_preserves_allowlisted_remote_sync_category(category: str) -> None:
     # Given
     process = ProcessObservation(
         1,
         b"",
         (
             b"[remote:modify:stderr] dokploy_wizard.state.sync_schema.SyncStateError: "
-            b"Immediate OpenCode Go sync command failed: model_admin_http_400.\n"
+            b"Immediate OpenCode Go sync command failed: " + category.encode("ascii") + b".\n"
         ),
     )
 
     # When / Then
-    with pytest.raises(UpgradeHostAError, match="model_admin_http_400"):
+    with pytest.raises(UpgradeHostAError, match=category):
         parse_modify_command(process)
 
 
