@@ -149,6 +149,57 @@ class Http400Api(UnownedAliasApi):
             "lost patch response left multiple owned aliases",
             "model_admin_lost_patch_multiple",
         ),
+        (
+            "LiteLLM inventory visibility changed before mutation",
+            "model_admin_conflict_inventory_changed",
+        ),
+        (
+            "owned record identity does not match desired deployment",
+            "model_admin_conflict_record_identity",
+        ),
+        (
+            "owned record model_info id does not match row id",
+            "model_admin_conflict_record_id",
+        ),
+        (
+            "owned model_info is missing fields: ('source_id',)",
+            "model_admin_conflict_missing_fields",
+        ),
+        ("OpenCode Go catalog is not enabled", "model_admin_conflict_catalog_disabled"),
+        ("catalog visibility failure", "model_admin_conflict_catalog_visibility"),
+        (
+            "catalog anomalous shrink blocks reconciliation",
+            "model_admin_conflict_catalog_anomaly",
+        ),
+        (
+            "catalog source drift blocks reconciliation",
+            "model_admin_conflict_catalog_source",
+        ),
+        (
+            "missing pricing metadata: fixture",
+            "model_admin_conflict_pricing_metadata",
+        ),
+        ("stale row visibility failure", "model_admin_conflict_stale_visibility"),
+        (
+            "duplicate LiteLLM deployment alias opencode-go/example",
+            "model_admin_conflict_duplicate_alias",
+        ),
+        (
+            "source mismatch for opencode-go/example",
+            "model_admin_conflict_source_mismatch",
+        ),
+        (
+            "create response is not an owned OpenCode Go alias",
+            "model_admin_conflict_write_ownership",
+        ),
+        (
+            "patch response owned projection mismatch",
+            "model_admin_conflict_write_projection",
+        ),
+        (
+            "delete 400 recovery found surviving alias opencode-go/example",
+            "model_admin_conflict_delete_survivor",
+        ),
     ),
 )
 def test_model_admin_failure_classifies_lost_write_conflicts_without_alias(
