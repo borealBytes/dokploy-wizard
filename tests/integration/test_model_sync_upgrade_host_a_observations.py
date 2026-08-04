@@ -171,8 +171,8 @@ def test_modify_command_preserves_allowlisted_remote_sync_http_category() -> Non
         1,
         b"",
         (
-            b"[remote:modify:stderr] Immediate OpenCode Go sync command failed: "
-            b"model_admin_http_400.\n"
+            b"[remote:modify:stderr] dokploy_wizard.state.sync_schema.SyncStateError: "
+            b"Immediate OpenCode Go sync command failed: model_admin_http_400.\n"
         ),
     )
 

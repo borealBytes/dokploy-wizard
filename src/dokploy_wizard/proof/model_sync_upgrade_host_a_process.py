@@ -25,7 +25,9 @@ _REMOTE_STDOUT_PREFIX = b"[remote:modify:stdout] "
 _REMOTE_BEFORE_PREFIX = b"[remote:modify-observation-before:stdout] "
 _REMOTE_AFTER_PREFIX = b"[remote:modify-observation-after:stdout] "
 _REMOTE_SYNC_HTTP_PATTERN = re.compile(
-    rb"^\[remote:modify:stderr\] Immediate OpenCode Go sync command failed: "
+    rb"^\[remote:modify:stderr\] "
+    rb"(?:dokploy_wizard\.state\.sync_schema\.SyncStateError: )?"
+    rb"Immediate OpenCode Go sync command failed: "
     rb"(model_admin_http_(?:400|401|403|404|409|422|500|502|503|other))\.$",
     re.MULTILINE,
 )
