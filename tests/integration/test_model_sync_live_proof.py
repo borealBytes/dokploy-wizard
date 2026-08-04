@@ -750,6 +750,16 @@ def _command_fixture(
         if commands is not None:
             commands.append(key)
         if key[:2] == ("docker", "ps"):
+            if key[2:] == (
+                "--filter",
+                "label=com.docker.compose.service=proof-stack-coder",
+                "--filter",
+                "status=running",
+                "--format",
+                "{{.ID}}",
+            ):
+                output = b"coder-container\n" if matching else b""
+                return subprocess.CompletedProcess(command, 0, output, b"")
             if failure == "docker-timeout":
                 raise subprocess.TimeoutExpired(command, 20)
             if failure == "docker-permission":
@@ -771,6 +781,11 @@ def _command_fixture(
             return subprocess.CompletedProcess(
                 command, 0, "\n".join(map(json.dumps, rows)).encode(), b""
             )
+        if key == ("docker", "inspect", "coder-container"):
+            inspection = [
+                {"NetworkSettings": {"Networks": {"proof-stack-shared": {"IPAddress": "172.20.0.7"}}}}
+            ]
+            return subprocess.CompletedProcess(command, 0, json.dumps(inspection).encode(), b"")
         if key[:2] == ("docker", "info"):
             return subprocess.CompletedProcess(command, 0, b"active\n", b"")
         if key == _SERVICE_LIST_COMMAND:
@@ -1280,6 +1295,145 @@ def test_dokploy_collector_uses_session_after_api_key_unauthorized() -> None:
     assert [method for method, _url in requests] == ["GET", "POST", "GET", "GET"]
 
 
+def test_coder_collector_uses_private_container_route() -> None:
+    # Given
+    scope: dict[str, Any] = {"__name__": "fixture"}
+    exec(model_sync_results.PREFLIGHT_SCRIPT, scope)
+    commands: list[tuple[str, ...]] = []
+    requests: list[str] = []
+
+    def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        commands.append(tuple(command))
+        if command[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(command, 0, b"coder-container\n", b"")
+        if command == ["docker", "inspect", "coder-container"]:
+            payload = [{"NetworkSettings": {"Networks": {"proof-stack-shared": {"IPAddress": "172.20.0.7"}}}}]
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload).encode(), b"")
+        raise AssertionError(command)
+
+    wire = _wire_fixture()
+
+    def open_request(request_value: Any, *, timeout: int) -> _WireResponse:
+        requests.append(request_value.full_url)
+        response = wire(request_value, timeout=timeout)
+        assert isinstance(response, _WireResponse)
+        return response
+
+    scope["_run_process"] = run
+    scope["_open_request"] = open_request
+
+    # When
+    resources = scope["_coder"](
+        _transport_fixture(),
+        [{"image": "ghcr.io/coder/coder:latest", "name": "proof-stack-coder"}],
+    )
+
+    # Then
+    assert resources
+    assert requests[0] == "http://172.20.0.7:3000/api/v2/users/login"
+    assert commands == [
+        (
+            "docker",
+            "ps",
+            "--filter",
+            "label=com.docker.compose.service=proof-stack-coder",
+            "--filter",
+            "status=running",
+            "--format",
+            "{{.ID}}",
+        ),
+        ("docker", "inspect", "coder-container"),
+    ]
+
+
+def test_coder_collector_rejects_ambiguous_service_identity() -> None:
+    # Given
+    scope: dict[str, Any] = {"__name__": "fixture"}
+    exec(model_sync_results.PREFLIGHT_SCRIPT, scope)
+
+    # When / Then
+    with pytest.raises(RuntimeError, match="identity is ambiguous"):
+        scope["_coder"](
+            _transport_fixture(),
+            [
+                {"image": "ghcr.io/coder/coder:latest", "name": "proof-stack-coder"},
+                {"image": "ghcr.io/coder/coder:2.0", "name": "other-stack-coder"},
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    ("inspection", "message"),
+    (
+        (b"{", "Coder container inspection is invalid"),
+        (
+            json.dumps([{"NetworkSettings": {"Networks": {}}}]).encode(),
+            "Coder shared network is absent",
+        ),
+        (
+            json.dumps(
+                [{"NetworkSettings": {"Networks": {"proof-stack-shared": {"IPAddress": "127.0.0.1"}}}}]
+            ).encode(),
+            "Coder shared network address must be routable",
+        ),
+        (
+            json.dumps(
+                [{"NetworkSettings": {"Networks": {"proof-stack-shared": {"IPAddress": "0.0.0.0"}}}}]
+            ).encode(),
+            "Coder shared network address must be routable",
+        ),
+        (
+            json.dumps(
+                [{"NetworkSettings": {"Networks": {"proof-stack-shared": {"IPAddress": "224.0.0.1"}}}}]
+            ).encode(),
+            "Coder shared network address must be routable",
+        ),
+        (
+            json.dumps(
+                [{"NetworkSettings": {"Networks": {"proof-stack-shared": {"IPAddress": "169.254.1.1"}}}}]
+            ).encode(),
+            "Coder shared network address must be routable",
+        ),
+        (
+            json.dumps(
+                [{"NetworkSettings": {"Networks": {"proof-stack-shared": {"IPAddress": "240.0.0.1"}}}}]
+            ).encode(),
+            "Coder shared network address must be routable",
+        ),
+        (
+            json.dumps(
+                [{"NetworkSettings": {"Networks": {"proof-stack-shared": {"IPAddress": "8.8.8.8"}}}}]
+            ).encode(),
+            "Coder shared network address must be routable",
+        ),
+    ),
+)
+def test_coder_collector_rejects_invalid_private_container_route(
+    inspection: bytes,
+    message: str,
+) -> None:
+    # Given
+    scope: dict[str, Any] = {"__name__": "fixture"}
+    exec(model_sync_results.PREFLIGHT_SCRIPT, scope)
+
+    def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        if command[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(command, 0, b"coder-container\n", b"")
+        if command == ["docker", "inspect", "coder-container"]:
+            return subprocess.CompletedProcess(command, 0, inspection, b"")
+        raise AssertionError(command)
+
+    scope["_run_process"] = run
+    scope["_request_json"] = lambda *_args: pytest.fail("invalid route reached Coder API")
+
+    # When / Then
+    with pytest.raises(RuntimeError, match=message):
+        scope["_coder"](
+            _transport_fixture(),
+            [{"image": "ghcr.io/coder/coder:latest", "name": "proof-stack-coder"}],
+        )
+
+
 def test_authoritative_collectors_accept_complete_docker_absence() -> None:
     planes = _collect_planes(
         empty=True,
@@ -1300,10 +1454,18 @@ def test_preflight_payload_decodes_authoritative_docker_absence_collector() -> N
 
     assert payload_source.count("_PREFLIGHT_ENCODED =") == 1
     assert "_PREFLIGHT_ENCODED_V2" not in payload_source
+    assert (
+        'PREFLIGHT_SCRIPT = zlib.decompress(base64.b85decode(_PREFLIGHT_ENCODED)).decode("utf-8")'
+        in payload_source
+    )
+    assert "_PRIVATE_CODER_EXTENSION" not in payload_source
+    assert "_PREFLIGHT_PREAMBLE" not in payload_source
+    assert "_PREFLIGHT_ENTRYPOINT" not in payload_source
+    assert ".rsplit(" not in payload_source
     assert "with_cloudflare_" + "fingerprints" not in source
     assert ".replace(" not in source
     assert hashlib.sha256(model_sync_results.PREFLIGHT_SCRIPT.encode()).hexdigest() == (
-        "c9b66a986edb8dde8b0b4ae946ca5047106bd1bdd61b95e02976d07f6ebbe92d"
+        "ecb6fc120e0bfc350f90f3c88f48566dab42315b1bf40db200e789c30699d474"
     )
     assert "def _docker_absent_clean():" in model_sync_results.PREFLIGHT_SCRIPT
     assert '_which("dockerd") is None' in model_sync_results.PREFLIGHT_SCRIPT
@@ -1693,7 +1855,7 @@ def test_coder_preflight_collects_all_identifiers_beyond_first_page() -> None:
     assert {item["id"] for item in resources if item["kind"] == "secret"} == {
         f"secret-{index}" for index in range(101)
     }
-    assert template_requests == ["https://coder.example.test/api/v2/templates"]
+    assert template_requests == ["http://172.20.0.7:3000/api/v2/templates"]
 
 
 @pytest.mark.parametrize("template_count", [100, 101])
@@ -1711,7 +1873,7 @@ def test_coder_preflight_accepts_unpaginated_template_arrays(
     assert {item["id"] for item in resources if item["kind"] == "template"} == {
         f"template-{index}" for index in range(template_count)
     }
-    assert template_requests == ["https://coder.example.test/api/v2/templates"]
+    assert template_requests == ["http://172.20.0.7:3000/api/v2/templates"]
 
 
 def test_coder_preflight_fails_closed_for_malformed_template_response() -> None:
@@ -1724,7 +1886,7 @@ def test_coder_preflight_fails_closed_for_malformed_template_response() -> None:
     )
 
     assert planes["coder"] == {"resources": [], "state": "error"}
-    assert template_requests == ["https://coder.example.test/api/v2/templates"]
+    assert template_requests == ["http://172.20.0.7:3000/api/v2/templates"]
 
 
 @pytest.mark.parametrize(
