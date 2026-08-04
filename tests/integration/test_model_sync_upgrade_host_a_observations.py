@@ -195,6 +195,16 @@ def test_modify_command_preserves_allowlisted_remote_sync_category(category: str
             "workspace_catalog_sync",
         ),
         (
+            "dokploy_wizard.dokploy.workspace_catalog_sync_models."
+            "TransactionBlockedError",
+            "workspace_catalog_sync",
+        ),
+        (
+            "dokploy_wizard.dokploy.workspace_catalog_sync_catalog_fetch."
+            "CatalogUnavailableError",
+            "workspace_catalog_sync",
+        ),
+        (
             "dokploy_wizard.dokploy.coder_template_migration_runtime."
             "TemplateMigrationExecutionError",
             "template_migration_execution",
@@ -203,6 +213,26 @@ def test_modify_command_preserves_allowlisted_remote_sync_category(category: str
             "dokploy_wizard.dokploy.coder_migration_workspace_models."
             "CoderMigrationBlockedError",
             "coder_migration_blocked",
+        ),
+        (
+            "dokploy_wizard.dokploy.coder_migration_types.CoderApiError",
+            "coder_api",
+        ),
+        (
+            "dokploy_wizard.dokploy.coder_migration_types.CoderProtocolError",
+            "coder_protocol",
+        ),
+        (
+            "dokploy_wizard.dokploy.coder_migration_api.CoderTransportError",
+            "coder_transport",
+        ),
+        (
+            "dokploy_wizard.state.models.StateValidationError",
+            "state_validation",
+        ),
+        (
+            "dokploy_wizard.state.upgrade_intent.StateUpgradeError",
+            "state_upgrade",
         ),
     ),
 )
