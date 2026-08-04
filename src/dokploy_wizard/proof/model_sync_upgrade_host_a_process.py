@@ -151,6 +151,8 @@ def parse_modify_command(process: ProcessObservation) -> ModifyCommandObservatio
         fixed_failure = remote_fixed_failure(process.stderr)
         if blocker is None and fixed_failure is not None:
             raise UpgradeHostAError(f"Host A modify wrapper failed: {fixed_failure}")
+        if blocker is None and summary is not None:
+            raise UpgradeHostAError("Host A modify wrapper failed: modify_nonzero_summary")
         if blocker is None or summary is not None or sync_categories:
             raise UpgradeHostAError("Host A modify wrapper failed without authoritative blocker")
         return ModifyCommandObservation(process.exit_code, _BLOCKED_CODE, None, ())

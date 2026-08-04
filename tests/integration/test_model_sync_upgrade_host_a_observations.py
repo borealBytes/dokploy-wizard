@@ -252,6 +252,36 @@ def test_modify_command_preserves_only_fixed_remote_failure_type(
         parse_modify_command(process)
 
 
+@pytest.mark.parametrize(
+    ("stderr", "category"),
+    (
+        (
+            b"[remote:modify-observation-before:stderr] fixture detail\n",
+            "observation_before",
+        ),
+        (
+            b"[remote:modify-observation-after:stderr] fixture detail\n",
+            "observation_after",
+        ),
+        (
+            b'[remote:modify:stdout] {"lifecycle":{"mode":"modify",'
+            b'"phases_to_run":["shared_core"]}}\n',
+            "modify_nonzero_summary",
+        ),
+    ),
+)
+def test_modify_command_preserves_only_fixed_remote_failure_structure(
+    stderr: bytes,
+    category: str,
+) -> None:
+    # Given
+    process = ProcessObservation(1, b"", stderr)
+
+    # When / Then
+    with pytest.raises(UpgradeHostAError, match=category):
+        parse_modify_command(process)
+
+
 def test_modify_command_parses_noop_lifecycle_from_verbose_remote_output() -> None:
     # Given
     lines = (
