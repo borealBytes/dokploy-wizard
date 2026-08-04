@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dokploy_wizard import proof
+from dokploy_wizard.dokploy.sync_immediate_executor import SYNC_ERROR_CATEGORIES
 from dokploy_wizard.proof.model_sync_upgrade_host_a_observations import (
     HostAObservation,
     parse_host_a_observation,
@@ -24,11 +25,11 @@ _BLOCKED_PATTERN = re.compile(rb"(?:^|[^A-Z_])CODER_RETIRED_WORKSPACE_NOT_STOPPE
 _REMOTE_STDOUT_PREFIX = b"[remote:modify:stdout] "
 _REMOTE_BEFORE_PREFIX = b"[remote:modify-observation-before:stdout] "
 _REMOTE_AFTER_PREFIX = b"[remote:modify-observation-after:stdout] "
-_REMOTE_SYNC_HTTP_PATTERN = re.compile(
+_REMOTE_SYNC_ERROR_PATTERN = re.compile(
     rb"^\[remote:modify:stderr\] "
     rb"(?:dokploy_wizard\.state\.sync_schema\.SyncStateError: )?"
     rb"Immediate OpenCode Go sync command failed: "
-    rb"(model_admin_http_(?:400|401|403|404|409|422|500|502|503|other))\.$",
+    rb"([a-z0-9_]+)\.$",
     re.MULTILINE,
 )
 
@@ -143,11 +144,12 @@ def parse_modify_command(process: ProcessObservation) -> ModifyCommandObservatio
     summary = _remote_summary(process.stderr)
     if process.exit_code != 0:
         blocker = _BLOCKED_PATTERN.search(process.stderr)
-        sync_http_categories = _REMOTE_SYNC_HTTP_PATTERN.findall(process.stderr)
-        if blocker is None and summary is None and len(sync_http_categories) == 1:
-            category = sync_http_categories[0].decode("ascii")
-            raise UpgradeHostAError(f"Host A modify wrapper failed: {category}")
-        if blocker is None or summary is not None or sync_http_categories:
+        sync_categories = _REMOTE_SYNC_ERROR_PATTERN.findall(process.stderr)
+        if blocker is None and summary is None and len(sync_categories) == 1:
+            category = sync_categories[0].decode("ascii")
+            if category in SYNC_ERROR_CATEGORIES:
+                raise UpgradeHostAError(f"Host A modify wrapper failed: {category}")
+        if blocker is None or summary is not None or sync_categories:
             raise UpgradeHostAError("Host A modify wrapper failed without authoritative blocker")
         return ModifyCommandObservation(process.exit_code, _BLOCKED_CODE, None, ())
     if summary is None:

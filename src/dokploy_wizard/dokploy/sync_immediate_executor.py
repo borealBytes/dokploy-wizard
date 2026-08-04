@@ -15,7 +15,7 @@ from dokploy_wizard.dokploy.container_resolution import resolve_compose_containe
 from dokploy_wizard.state.sync_schema import JsonValue, SyncStateError, canonical_digest
 
 _SYNC_ERROR_PATTERN = re.compile(r"^DOKPLOY_WIZARD_SYNC_ERROR=([a-z0-9_]+)$", re.MULTILINE)
-_SYNC_ERROR_CATEGORIES = frozenset(
+SYNC_ERROR_CATEGORIES = frozenset(
     {
         "catalog_source",
         "catalog_state",
@@ -239,7 +239,7 @@ def _resolve_container(service_name: str, runner: ProcessRunner) -> str:
 
 def _failure_category(stderr: str) -> str:
     categories = tuple(str(category) for category in _SYNC_ERROR_PATTERN.findall(stderr))
-    if len(categories) == 1 and categories[0] in _SYNC_ERROR_CATEGORIES:
+    if len(categories) == 1 and categories[0] in SYNC_ERROR_CATEGORIES:
         return categories[0]
     if "can't open file '/opt/dokploy-wizard/opencode_go_sync.py'" in stderr:
         return "runtime_package_missing"
