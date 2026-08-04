@@ -165,6 +165,22 @@ def test_modify_command_rejects_success_without_remote_summary() -> None:
         parse_modify_command(process)
 
 
+def test_modify_command_preserves_allowlisted_remote_sync_http_category() -> None:
+    # Given
+    process = ProcessObservation(
+        1,
+        b"",
+        (
+            b"[remote:modify:stderr] Immediate OpenCode Go sync command failed: "
+            b"model_admin_http_400.\n"
+        ),
+    )
+
+    # When / Then
+    with pytest.raises(UpgradeHostAError, match="model_admin_http_400"):
+        parse_modify_command(process)
+
+
 def test_modify_command_parses_noop_lifecycle_from_verbose_remote_output() -> None:
     # Given
     lines = (
