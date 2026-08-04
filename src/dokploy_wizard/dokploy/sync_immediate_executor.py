@@ -12,47 +12,10 @@ from pathlib import Path
 from typing import Protocol
 
 from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
+from dokploy_wizard.litellm.opencode_go_sync_errors import is_sync_failure_category
 from dokploy_wizard.state.sync_schema import JsonValue, SyncStateError, canonical_digest
 
 _SYNC_ERROR_PATTERN = re.compile(r"^DOKPLOY_WIZARD_SYNC_ERROR=([a-z0-9_]+)$", re.MULTILINE)
-SYNC_ERROR_CATEGORIES = frozenset(
-    {
-        "catalog_source",
-        "catalog_state",
-        "model_admin_conflict",
-        "model_admin_http_400",
-        "model_admin_http_401",
-        "model_admin_http_403",
-        "model_admin_http_404",
-        "model_admin_http_409",
-        "model_admin_http_422",
-        "model_admin_http_500",
-        "model_admin_http_502",
-        "model_admin_http_503",
-        "model_admin_http_other",
-        "model_admin_inventory_blocked",
-        "model_admin_inventory_data",
-        "model_admin_inventory_deployment",
-        "model_admin_inventory_masked",
-        "model_admin_inventory_model_id",
-        "model_admin_inventory_model_info",
-        "model_admin_inventory_model_name",
-        "model_admin_inventory_routing",
-        "model_admin_inventory_shape",
-        "model_admin_lost_create_count",
-        "model_admin_lost_create_mismatch",
-        "model_admin_lost_patch_count",
-        "model_admin_lost_patch_mismatch",
-        "model_admin_transport",
-        "model_admin_unknown",
-        "model_admin_unowned_alias",
-        "model_admin_write",
-        "persistence",
-        "runtime_config",
-        "runtime_lock",
-        "runtime_unknown",
-    }
-)
 _RUNTIME_PREFLIGHT = (
     "import pathlib,sys,zipfile;"
     "package=pathlib.Path('/opt/dokploy-wizard/opencode_go_sync.py');"
@@ -243,7 +206,7 @@ def _resolve_container(service_name: str, runner: ProcessRunner) -> str:
 
 def _failure_category(stderr: str) -> str:
     categories = tuple(str(category) for category in _SYNC_ERROR_PATTERN.findall(stderr))
-    if len(categories) == 1 and categories[0] in SYNC_ERROR_CATEGORIES:
+    if len(categories) == 1 and is_sync_failure_category(categories[0]):
         return categories[0]
     if "can't open file '/opt/dokploy-wizard/opencode_go_sync.py'" in stderr:
         return "runtime_package_missing"

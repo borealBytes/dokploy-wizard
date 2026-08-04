@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dokploy_wizard import proof
-from dokploy_wizard.dokploy.sync_immediate_executor import SYNC_ERROR_CATEGORIES
+from dokploy_wizard.litellm.opencode_go_sync_errors import is_sync_failure_category
 from dokploy_wizard.proof.model_sync_upgrade_host_a_observations import (
     HostAObservation,
     parse_host_a_observation,
@@ -147,7 +147,7 @@ def parse_modify_command(process: ProcessObservation) -> ModifyCommandObservatio
         sync_categories = _REMOTE_SYNC_ERROR_PATTERN.findall(process.stderr)
         if blocker is None and summary is None and len(sync_categories) == 1:
             category = sync_categories[0].decode("ascii")
-            if category in SYNC_ERROR_CATEGORIES:
+            if is_sync_failure_category(category):
                 raise UpgradeHostAError(f"Host A modify wrapper failed: {category}")
         if blocker is None or summary is not None or sync_categories:
             raise UpgradeHostAError("Host A modify wrapper failed without authoritative blocker")

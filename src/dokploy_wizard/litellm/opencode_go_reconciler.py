@@ -121,9 +121,13 @@ class OpenCodeGoDatabaseReconciler:
             for record in self._api.list_models()
             if record.model_name == intent.deployment.model_name
         )
-        if len(matches) != 1:
+        if not matches:
             raise LiteLLMModelAdminConflict(
-                f"lost {operation} response did not leave one owned alias"
+                f"lost {operation} response left no owned alias"
+            ) from cause
+        if len(matches) > 1:
+            raise LiteLLMModelAdminConflict(
+                f"lost {operation} response left multiple owned aliases"
             ) from cause
         try:
             self._require_exact(

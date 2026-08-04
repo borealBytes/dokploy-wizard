@@ -126,20 +126,28 @@ class Http400Api(UnownedAliasApi):
     ("reason", "expected"),
     (
         (
-            "lost create response did not leave one owned alias",
-            "model_admin_lost_create_count",
+            "lost create response left no owned alias",
+            "model_admin_lost_create_absent",
         ),
         (
             "lost create response mismatch for opencode-go/example",
             "model_admin_lost_create_mismatch",
         ),
         (
-            "lost patch response did not leave one owned alias",
-            "model_admin_lost_patch_count",
+            "lost create response left multiple owned aliases",
+            "model_admin_lost_create_multiple",
+        ),
+        (
+            "lost patch response left no owned alias",
+            "model_admin_lost_patch_absent",
         ),
         (
             "lost patch response mismatch for opencode-go/example",
             "model_admin_lost_patch_mismatch",
+        ),
+        (
+            "lost patch response left multiple owned aliases",
+            "model_admin_lost_patch_multiple",
         ),
     ),
 )
