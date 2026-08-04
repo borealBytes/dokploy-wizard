@@ -17,17 +17,18 @@ SyncFailureCategory = Literal[
     "model_admin_conflict_catalog_disabled",
     "model_admin_conflict_catalog_source",
     "model_admin_conflict_catalog_visibility",
+    "model_admin_conflict_create_projection",
     "model_admin_conflict_delete_survivor",
     "model_admin_conflict_duplicate_alias",
     "model_admin_conflict_inventory_changed",
     "model_admin_conflict_missing_fields",
+    "model_admin_conflict_patch_projection",
     "model_admin_conflict_pricing_metadata",
     "model_admin_conflict_record_id",
     "model_admin_conflict_record_identity",
     "model_admin_conflict_source_mismatch",
     "model_admin_conflict_stale_visibility",
     "model_admin_conflict_write_ownership",
-    "model_admin_conflict_write_projection",
     "model_admin_http_400",
     "model_admin_http_401",
     "model_admin_http_403",
@@ -142,8 +143,14 @@ def model_admin_failure(error: LiteLLMModelAdminError) -> SyncFailureCategory:
             "patch response is not an owned OpenCode Go alias",
             "model_admin_conflict_write_ownership",
         ),
-        ("create response owned projection mismatch", "model_admin_conflict_write_projection"),
-        ("patch response owned projection mismatch", "model_admin_conflict_write_projection"),
+        (
+            "create response owned projection mismatch",
+            "model_admin_conflict_create_projection",
+        ),
+        (
+            "patch response owned projection mismatch",
+            "model_admin_conflict_patch_projection",
+        ),
     )
     for marker, category in conflict_markers:
         if reason.startswith(marker):

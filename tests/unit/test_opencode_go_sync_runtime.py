@@ -189,12 +189,12 @@ class Http400Api(UnownedAliasApi):
             "model_admin_conflict_source_mismatch",
         ),
         (
-            "create response is not an owned OpenCode Go alias",
-            "model_admin_conflict_write_ownership",
+            "create response owned projection mismatch",
+            "model_admin_conflict_create_projection",
         ),
         (
             "patch response owned projection mismatch",
-            "model_admin_conflict_write_projection",
+            "model_admin_conflict_patch_projection",
         ),
         (
             "delete 400 recovery found surviving alias opencode-go/example",
