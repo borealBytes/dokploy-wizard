@@ -4,6 +4,13 @@ from typing import Final, Literal, TypeGuard, get_args
 
 from dokploy_wizard.bootstrap import DokployBootstrapError
 from dokploy_wizard.core import SharedCoreError
+from dokploy_wizard.dokploy.coder_migration_workspace_models import (
+    CoderMigrationBlockedError,
+)
+from dokploy_wizard.dokploy.coder_template_migration_runtime import (
+    TemplateMigrationExecutionError,
+)
+from dokploy_wizard.dokploy.workspace_catalog_sync_models import WorkspaceCatalogSyncError
 from dokploy_wizard.lifecycle import LifecycleDriftError
 from dokploy_wizard.networking import CloudflareError
 from dokploy_wizard.packs.coder import CoderError
@@ -14,6 +21,8 @@ from dokploy_wizard.packs.openclaw import OpenClawError
 from dokploy_wizard.packs.seaweedfs import SeaweedFsError
 from dokploy_wizard.preflight import PreflightError
 from dokploy_wizard.state.models import StateValidationError
+from dokploy_wizard.state.sync_schema import SyncStateError
+from dokploy_wizard.state.upgrade_intent import StateUpgradeError
 from dokploy_wizard.tailscale import TailscaleError
 
 Task18ModifyFailureCategory = Literal[
@@ -30,7 +39,13 @@ Task18ModifyFailureCategory = Literal[
     "seaweedfs",
     "shared_core",
     "state_validation",
+    "state_upgrade",
+    "sync_state",
     "tailscale",
+    "template_migration_execution",
+    "unexpected",
+    "workspace_catalog_sync",
+    "coder_migration_blocked",
 ]
 TASK18_MODIFY_FAILURE_CATEGORIES: Final[frozenset[str]] = frozenset(
     category
@@ -74,4 +89,14 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
         return "openclaw"
     if isinstance(error, SeaweedFsError):
         return "seaweedfs"
-    raise ValueError("unsupported Task 18 modify failure")
+    if isinstance(error, SyncStateError):
+        return "sync_state"
+    if isinstance(error, WorkspaceCatalogSyncError):
+        return "workspace_catalog_sync"
+    if isinstance(error, TemplateMigrationExecutionError):
+        return "template_migration_execution"
+    if isinstance(error, CoderMigrationBlockedError):
+        return "coder_migration_blocked"
+    if isinstance(error, StateUpgradeError):
+        return "state_upgrade"
+    return "unexpected"
