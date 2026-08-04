@@ -46,7 +46,10 @@ SyncFailureCategory = Literal[
     "catalog_source",
     "catalog_state",
     "model_admin_conflict",
-    "model_admin_inventory",
+    "model_admin_inventory_blocked",
+    "model_admin_inventory_masked",
+    "model_admin_inventory_routing",
+    "model_admin_inventory_shape",
     "model_admin_transport",
     "model_admin_unknown",
     "model_admin_unowned_alias",
@@ -205,14 +208,14 @@ def _load_live_sources(clock: CatalogClock) -> CatalogSources:
 def _model_admin_failure(error: LiteLLMModelAdminError) -> SyncFailureCategory:
     if error.reason.startswith("unowned alias "):
         return "model_admin_unowned_alias"
-    inventory_markers = (
-        "inventory",
-        "masked routing parameter",
-        "routing parameters must contain",
-        "deployment blocked must be nested",
-    )
-    if any(marker in error.reason for marker in inventory_markers):
-        return "model_admin_inventory"
+    if "masked routing parameter" in error.reason:
+        return "model_admin_inventory_masked"
+    if "routing parameters must contain" in error.reason:
+        return "model_admin_inventory_routing"
+    if "deployment blocked must be nested" in error.reason:
+        return "model_admin_inventory_blocked"
+    if "inventory" in error.reason:
+        return "model_admin_inventory_shape"
     if "transport failed" in error.reason or "request failed with status" in error.reason:
         return "model_admin_transport"
     if isinstance(error, LiteLLMModelAdminWriteAmbiguity):
