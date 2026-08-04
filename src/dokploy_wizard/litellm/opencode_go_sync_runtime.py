@@ -47,7 +47,12 @@ SyncFailureCategory = Literal[
     "catalog_state",
     "model_admin_conflict",
     "model_admin_inventory_blocked",
+    "model_admin_inventory_data",
+    "model_admin_inventory_deployment",
     "model_admin_inventory_masked",
+    "model_admin_inventory_model_id",
+    "model_admin_inventory_model_info",
+    "model_admin_inventory_model_name",
     "model_admin_inventory_routing",
     "model_admin_inventory_shape",
     "model_admin_transport",
@@ -214,6 +219,16 @@ def _model_admin_failure(error: LiteLLMModelAdminError) -> SyncFailureCategory:
         return "model_admin_inventory_routing"
     if "deployment blocked must be nested" in error.reason:
         return "model_admin_inventory_blocked"
+    if "inventory requires a data array" in error.reason:
+        return "model_admin_inventory_data"
+    if "inventory deployment" in error.reason:
+        return "model_admin_inventory_deployment"
+    if "inventory model_name" in error.reason:
+        return "model_admin_inventory_model_name"
+    if "inventory model_info.id" in error.reason:
+        return "model_admin_inventory_model_id"
+    if "inventory model_info" in error.reason:
+        return "model_admin_inventory_model_info"
     if "inventory" in error.reason:
         return "model_admin_inventory_shape"
     if "transport failed" in error.reason or "request failed with status" in error.reason:

@@ -104,6 +104,13 @@ class MaskedInventoryApi(UnownedAliasApi):
         )
 
 
+class MissingDataArrayApi(UnownedAliasApi):
+    def list_models(self) -> tuple[LiteLLMModelRecord, ...]:
+        raise LiteLLMModelAdminConflict(
+            "LiteLLM model inventory requires a data array"
+        )
+
+
 def test_synchronize_classifies_unowned_model_alias_without_exposing_name(
     tmp_path: Path,
 ) -> None:
@@ -142,3 +149,23 @@ def test_synchronize_classifies_masked_inventory_without_exposing_payload(
         )
 
     assert captured.value.category == "model_admin_inventory_masked"
+
+
+def test_synchronize_classifies_missing_inventory_data_array(
+    tmp_path: Path,
+) -> None:
+    sources = catalog_sources()
+    dependencies = SyncRuntimeDependencies(
+        StaticClock(),
+        lambda _: sources,
+        MissingDataArrayApi(),
+    )
+
+    with pytest.raises(SyncRuntimeError) as captured:
+        synchronize(
+            state_root=tmp_path,
+            config=SyncRuntimeConfig("opencode-go", "a" * 64, "owner"),
+            dependencies=dependencies,
+        )
+
+    assert captured.value.category == "model_admin_inventory_data"
