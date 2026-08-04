@@ -11,6 +11,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
 
+from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
 from dokploy_wizard.state.sync_schema import JsonValue, SyncStateError, canonical_digest
 
 _SYNC_ERROR_PATTERN = re.compile(r"^DOKPLOY_WIZARD_SYNC_ERROR=([a-z_]+)$", re.MULTILINE)
@@ -85,11 +86,12 @@ class DockerExecImmediateSyncExecutor:
             for item in ("--env", f"{name}={value}")
         )
         runner = self.runner or _run_process
+        container_name = _resolve_container(command.service_name, runner)
         docker_exec = (
             "docker",
             "exec",
             *arguments,
-            command.service_name,
+            container_name,
         )
         preflight = runner(
             (*docker_exec, "python", "-c", _RUNTIME_PREFLIGHT),
@@ -181,6 +183,35 @@ def _run_process(
         capture_output=capture_output,
         text=text,
     )
+
+
+def _resolve_container(service_name: str, runner: ProcessRunner) -> str:
+    result = runner(
+        (
+            "docker",
+            "ps",
+            "--filter",
+            f"label=com.docker.compose.service={service_name}",
+            "--format",
+            "{{.Names}}",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SyncStateError(
+            "Immediate OpenCode Go sync command failed: container_discovery."
+        )
+    container_name = resolve_compose_container_name(
+        service_name,
+        result.stdout.splitlines(),
+    )
+    if container_name is None:
+        raise SyncStateError(
+            "Immediate OpenCode Go sync command failed: container_unavailable."
+        )
+    return container_name
 
 
 def _failure_category(stderr: str) -> str:
