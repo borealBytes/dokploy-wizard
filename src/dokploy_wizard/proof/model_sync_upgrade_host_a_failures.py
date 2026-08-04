@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Final
 
+from dokploy_wizard.proof.model_sync_task18_modify_failure import (
+    is_task18_modify_failure_category,
+)
+
 _REMOTE_STDERR_PREFIX: Final = b"[remote:modify:stderr] "
+_TASK18_ERROR_PREFIX: Final = b"DOKPLOY_WIZARD_TASK18_ERROR="
 _PHASE_FAILURE_CATEGORIES: Final[dict[bytes, str]] = {
     b"[remote:modify-observation-before:stderr] ": "observation_before",
     b"[remote:modify-observation-after:stderr] ": "observation_after",
@@ -44,9 +49,12 @@ def remote_fixed_failure(stderr: bytes) -> str | None:
 def _line_failure_categories(line: bytes) -> tuple[str | None, ...]:
     fixed_type = None
     if line.startswith(_REMOTE_STDERR_PREFIX):
-        fixed_type = _FAILURE_CATEGORIES.get(
-            line.removeprefix(_REMOTE_STDERR_PREFIX).partition(b": ")[0]
-        )
+        remote_line = line.removeprefix(_REMOTE_STDERR_PREFIX)
+        fixed_type = _FAILURE_CATEGORIES.get(remote_line.partition(b": ")[0])
+        if remote_line.startswith(_TASK18_ERROR_PREFIX):
+            candidate = remote_line.removeprefix(_TASK18_ERROR_PREFIX).decode("ascii")
+            if is_task18_modify_failure_category(candidate):
+                fixed_type = candidate
     return (
         fixed_type,
         *(

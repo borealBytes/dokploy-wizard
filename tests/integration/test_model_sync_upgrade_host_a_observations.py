@@ -268,6 +268,10 @@ def test_modify_command_preserves_only_fixed_remote_failure_type(
             b'"phases_to_run":["shared_core"]}}\n',
             "modify_nonzero_summary",
         ),
+        (
+            b"[remote:modify:stderr] DOKPLOY_WIZARD_TASK18_ERROR=shared_core\n",
+            "shared_core",
+        ),
     ),
 )
 def test_modify_command_preserves_only_fixed_remote_failure_structure(

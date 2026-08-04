@@ -150,6 +150,7 @@ from dokploy_wizard.proof.model_sync_task1_context import (
     active_task1_proof_context,
     validate_task1_proof_context_argument,
 )
+from dokploy_wizard.proof.model_sync_task18_modify_failure import task18_modify_failure
 from dokploy_wizard.state import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
@@ -673,6 +674,11 @@ def _handle_modify(args: argparse.Namespace) -> int:
         OpenClawError,
         SeaweedFsError,
     ) as error:
+        if getattr(args, "task18_force_model_sync_upgrade", False):
+            print(
+                f"DOKPLOY_WIZARD_TASK18_ERROR={task18_modify_failure(error)}",
+                file=sys.stderr,
+            )
         raise SystemExit(_redacted_cli_error(error)) from error
 
     print(json.dumps(summary, indent=2, sort_keys=True))
