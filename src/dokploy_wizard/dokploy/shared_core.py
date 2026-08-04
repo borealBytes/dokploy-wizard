@@ -1541,7 +1541,7 @@ def _render_compose_file(
             "    command: [\"--config\", \"/app/config.yaml\", \"--port\", \"4000\"]\n"
             "    environment:\n"
             f'      DATABASE_URL: "postgresql://{plan.litellm.postgres.user_name}:{_required_placeholder(postgres_password_env)}@{postgres_service_name}:5432/{plan.litellm.postgres.database_name}"\n'
-            '      LITELLM_USE_DB: "true"\n'
+            '      LITELLM_USE_DB: "true"\n      STORE_MODEL_IN_DB: "True"\n'
             '      ENFORCE_PRISMA_MIGRATION_CHECK: "true"\n'
             f"{local_api_key_lines}"
             f"{provider_env_lines}"
