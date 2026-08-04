@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from email.message import Message
-from typing import IO, Final, Literal
+from typing import Final, Literal
 from urllib import error, request
 from uuid import UUID
 
 from dokploy_wizard.litellm.catalog_json import JsonValue
+from dokploy_wizard.litellm.model_admin_transport import default_model_admin_request
 from dokploy_wizard.litellm.model_admin_types import (
     LiteLLMInventoryRoutingParams,
     LiteLLMModelAdminError,
@@ -87,7 +87,7 @@ class LiteLLMModelAdminClient:
     ) -> None:
         self._api_url = api_url.removesuffix("/")
         self._master_key = master_key
-        self._request_fn = request_fn or _default_request
+        self._request_fn = request_fn or default_model_admin_request
 
     def list_models(self) -> tuple[LiteLLMModelRecord, ...]:
         payload = self._request_json("GET", "/v1/model/info")
@@ -95,7 +95,11 @@ class LiteLLMModelAdminClient:
         data = root.get("data")
         if not isinstance(data, list):
             raise LiteLLMModelAdminError("LiteLLM model inventory requires a data array")
-        return tuple(_parse_record(item, context="inventory", inventory=True) for item in data)
+        return tuple(
+            _parse_record(item, context="inventory", inventory=True)
+            for item in data
+            if not _is_config_deployment(item)
+        )
 
     def create_model(self, deployment: LiteLLMModelDeployment) -> LiteLLMModelRecord:
         payload = self._request_json("POST", "/model/new", deployment.to_api_payload())
@@ -162,6 +166,22 @@ def _parse_stored_record(
     if record.model_name != deployment.model_name:
         raise LiteLLMModelAdminError("LiteLLM model response name mismatch")
     return record
+
+
+def _is_config_deployment(payload: JsonValue) -> bool:
+    record = _expect_object(payload, "LiteLLM inventory deployment")
+    model_info = _expect_object(
+        record.get("model_info"),
+        "LiteLLM inventory model_info",
+    )
+    db_model = model_info.get("db_model")
+    if db_model is False:
+        return True
+    if db_model is not None and db_model is not True:
+        raise LiteLLMModelAdminError(
+            "LiteLLM inventory model_info.db_model must be boolean"
+        )
+    return False
 
 
 def _parse_record(
@@ -248,27 +268,3 @@ def _parse_model_id(value: JsonValue | None, context: str) -> ModelUuid:
     if str(parsed) != raw_model_id:
         raise LiteLLMModelAdminError(f"{context} must be a canonical UUID")
     return ModelUuid(raw_model_id)
-
-
-class _NoRedirect(request.HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        req: request.Request,
-        fp: IO[bytes],
-        code: int,
-        msg: str,
-        headers: Message,
-        new_url: str,
-    ) -> request.Request | None:
-        del req, fp, code, msg, headers, new_url
-        return None
-
-
-def _default_request(raw_request: request.Request) -> JsonValue:
-    opener = request.build_opener(_NoRedirect())
-    with opener.open(raw_request, timeout=30) as response:
-        return _json_value(json.loads(response.read().decode("utf-8")))
-
-
-def _json_value(value: JsonValue) -> JsonValue:
-    return value
