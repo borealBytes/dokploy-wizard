@@ -68,6 +68,30 @@ def test_inventory_accepts_removed_api_key_without_reusing_it() -> None:
     assert records[0].litellm_params.api_key is None
 
 
+def test_inventory_ignores_explicit_non_db_config_deployments() -> None:
+    deployment = build_owned_model_deployment(catalog_model(), bootstrap_static=False)
+
+    def request_fn(_: request.Request) -> JsonValue:
+        static_row = _inventory_row(deployment)
+        static_info = static_row["model_info"]
+        assert isinstance(static_info, dict)
+        static_info["db_model"] = False
+        static_info["id"] = None
+        db_row = _inventory_row(deployment)
+        db_info = db_row["model_info"]
+        assert isinstance(db_info, dict)
+        db_info["db_model"] = True
+        return {"data": [static_row, db_row]}
+
+    records = LiteLLMModelAdminClient(
+        api_url="http://litellm.internal",
+        master_key="test-master-key",
+        request_fn=request_fn,
+    ).list_models()
+
+    assert tuple(record.model_id for record in records) == (deployment.model_id,)
+
+
 def test_top_level_blocked_rejected_from_inventory() -> None:
     deployment = build_owned_model_deployment(catalog_model(), bootstrap_static=False)
 

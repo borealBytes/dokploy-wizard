@@ -20,6 +20,7 @@ from ._litellm_model_admin_cases import (
 )
 from ._litellm_model_admin_parser_cases import (
     test_inventory_accepts_removed_api_key_without_reusing_it,
+    test_inventory_ignores_explicit_non_db_config_deployments,
     test_masked_parameter_is_rejected_from_inventory,
     test_owned_delete_removes_only_verified_owned_record,
     test_owned_delete_uses_exact_route_body_and_success_message,
@@ -34,6 +35,7 @@ __all__ = (
     "test_foreign_alias_conflict_is_rejected_without_mutation",
     "test_legacy_post_update_rejected_by_exact_patch_route",
     "test_inventory_accepts_removed_api_key_without_reusing_it",
+    "test_inventory_ignores_explicit_non_db_config_deployments",
     "test_masked_parameter_is_rejected_from_inventory",
     "test_owned_delete_removes_only_verified_owned_record",
     "test_owned_delete_uses_exact_route_body_and_success_message",
