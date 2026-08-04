@@ -12,14 +12,15 @@ from dokploy_wizard.dokploy.opencode_go_sync_package import (
 )
 from dokploy_wizard.litellm.model_admin_types import (
     LiteLLMModelAdminConflict,
+    LiteLLMModelAdminError,
     LiteLLMModelDeployment,
     LiteLLMModelRecord,
     ModelUuid,
 )
+from dokploy_wizard.litellm.opencode_go_sync_errors import SyncRuntimeError
 from dokploy_wizard.litellm.opencode_go_sync_runtime import (
     SyncRuntimeConfig,
     SyncRuntimeDependencies,
-    SyncRuntimeError,
     synchronize,
 )
 from tests.unit._opencode_go_catalog_support import StaticClock, catalog_sources
@@ -111,6 +112,13 @@ class MissingDataArrayApi(UnownedAliasApi):
         )
 
 
+class Http400Api(UnownedAliasApi):
+    def list_models(self) -> tuple[LiteLLMModelRecord, ...]:
+        raise LiteLLMModelAdminError(
+            "LiteLLM model admin request failed with status 400"
+        )
+
+
 def test_synchronize_classifies_unowned_model_alias_without_exposing_name(
     tmp_path: Path,
 ) -> None:
@@ -169,3 +177,23 @@ def test_synchronize_classifies_missing_inventory_data_array(
         )
 
     assert captured.value.category == "model_admin_inventory_data"
+
+
+def test_synchronize_classifies_model_admin_http_status_without_body(
+    tmp_path: Path,
+) -> None:
+    sources = catalog_sources()
+    dependencies = SyncRuntimeDependencies(
+        StaticClock(),
+        lambda _: sources,
+        Http400Api(),
+    )
+
+    with pytest.raises(SyncRuntimeError) as captured:
+        synchronize(
+            state_root=tmp_path,
+            config=SyncRuntimeConfig("opencode-go", "a" * 64, "owner"),
+            dependencies=dependencies,
+        )
+
+    assert captured.value.category == "model_admin_http_400"
