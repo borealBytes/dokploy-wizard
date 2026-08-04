@@ -32,6 +32,13 @@ class RecordingRunner:
         assert capture_output is True
         assert text is True
         self.calls.append(arguments)
+        if arguments[1] == "ps":
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                stdout="resolved-litellm-1\n",
+                stderr="",
+            )
         (self.state_root / "applied-state.json").write_text("after", encoding="utf-8")
         return subprocess.CompletedProcess(arguments, 0, stdout="ok\n", stderr="")
 
@@ -49,6 +56,13 @@ class ChurningControlRunner:
         text: bool,
     ) -> subprocess.CompletedProcess[str]:
         del check, capture_output, text
+        if arguments[1] == "ps":
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                stdout="resolved-litellm-1\n",
+                stderr="",
+            )
         (self.state_root / "applied-state.json").write_text("after", encoding="utf-8")
         (self.state_root / "lease-receipts" / "lease.json").write_text(
             "heartbeat-2",
@@ -77,6 +91,13 @@ class CategorizedFailureRunner:
         text: bool,
     ) -> subprocess.CompletedProcess[str]:
         del check, capture_output, text
+        if arguments[1] == "ps":
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                stdout="resolved-litellm-1\n",
+                stderr="",
+            )
         if arguments[-2] == "-c":
             return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(
@@ -98,6 +119,13 @@ class MissingRuntimeRunner:
         text: bool,
     ) -> subprocess.CompletedProcess[str]:
         del check, capture_output, text
+        if arguments[1] == "ps":
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                stdout="resolved-litellm-1\n",
+                stderr="",
+            )
         assert arguments[-2] == "-c"
         return subprocess.CompletedProcess(arguments, 11, stdout="", stderr="")
 
@@ -117,7 +145,7 @@ def test_production_executor_runs_exact_schedule_argv_and_env_and_reports_real_d
 
     result = DockerExecImmediateSyncExecutor(runner=runner).execute(command)
 
-    assert runner.calls[1:] == [
+    assert runner.calls[2:] == [
         (
             "docker",
             "exec",
@@ -125,14 +153,15 @@ def test_production_executor_runs_exact_schedule_argv_and_env_and_reports_real_d
             f"DOKPLOY_WIZARD_SCHEDULE_OWNER_ID={_OWNER}",
             "--env",
             "TZ=UTC",
-            "litellm",
+            "resolved-litellm-1",
             "python",
             "/app/scripts/reconcile_opencode_go.py",
             "--state-dir",
             "/state",
         )
     ]
-    assert runner.calls[0][-2] == "-c"
+    assert runner.calls[0][1] == "ps"
+    assert runner.calls[1][-2] == "-c"
     assert result.before_snapshot_sha256 != result.after_snapshot_sha256
     assert result.durable_write_delta == ("applied-state.json",)
 
