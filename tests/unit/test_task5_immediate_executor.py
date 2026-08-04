@@ -77,6 +77,8 @@ class CategorizedFailureRunner:
         text: bool,
     ) -> subprocess.CompletedProcess[str]:
         del check, capture_output, text
+        if arguments[-2] == "-c":
+            return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(
             arguments,
             1,
@@ -96,12 +98,8 @@ class MissingRuntimeRunner:
         text: bool,
     ) -> subprocess.CompletedProcess[str]:
         del check, capture_output, text
-        return subprocess.CompletedProcess(
-            arguments,
-            2,
-            stdout="",
-            stderr="python: can't open file '/opt/dokploy-wizard/opencode_go_sync.py'\n",
-        )
+        assert arguments[-2] == "-c"
+        return subprocess.CompletedProcess(arguments, 11, stdout="", stderr="")
 
 
 def test_production_executor_runs_exact_schedule_argv_and_env_and_reports_real_delta(
@@ -119,7 +117,7 @@ def test_production_executor_runs_exact_schedule_argv_and_env_and_reports_real_d
 
     result = DockerExecImmediateSyncExecutor(runner=runner).execute(command)
 
-    assert runner.calls == [
+    assert runner.calls[1:] == [
         (
             "docker",
             "exec",
@@ -134,6 +132,7 @@ def test_production_executor_runs_exact_schedule_argv_and_env_and_reports_real_d
             "/state",
         )
     ]
+    assert runner.calls[0][-2] == "-c"
     assert result.before_snapshot_sha256 != result.after_snapshot_sha256
     assert result.durable_write_delta == ("applied-state.json",)
 
