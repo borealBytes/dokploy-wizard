@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from dokploy_wizard.litellm.catalog_persistence import CatalogGeneration, persist_catalog_transition
+from dokploy_wizard.litellm.catalog_persistence import (
+    CatalogGeneration,
+    CatalogPersistenceTransition,
+    persist_catalog_transition,
+)
 from dokploy_wizard.litellm.catalog_state import (
     CatalogStateError,
     empty_catalog_state,
@@ -79,7 +83,10 @@ def test_generation_then_state_persistence_counts_committed_files(tmp_path: Path
         last_result=replace(state.last_result, output_sha256=model_hash),
     )
 
-    committed = persist_catalog_transition(tmp_path, state, generation)
+    committed = persist_catalog_transition(
+        tmp_path,
+        CatalogPersistenceTransition(None, state, generation),
+    )
 
     generation_path = tmp_path / "generations" / f"1-{model_hash}.json"
     state_path = tmp_path / "opencode-go-sync-state-v1.json"
@@ -97,7 +104,10 @@ def test_no_change_transition_keeps_state_file_byte_identical(tmp_path: Path) ->
     os.chmod(state_path, 0o600)
     before = state_path.read_bytes()
 
-    committed = persist_catalog_transition(tmp_path, state, None)
+    committed = persist_catalog_transition(
+        tmp_path,
+        CatalogPersistenceTransition(before, state, None),
+    )
 
     assert state_path.read_bytes() == before
     assert committed == state

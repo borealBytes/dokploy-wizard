@@ -31,14 +31,25 @@ class CatalogGeneration:
     payload: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class CatalogPersistenceTransition:
+    expected_state_bytes: bytes | None
+    state: CatalogState
+    generation: CatalogGeneration | None
+
+
 def persist_catalog_transition(
     state_root: Path,
-    state: CatalogState,
-    generation: CatalogGeneration | None,
+    transition: CatalogPersistenceTransition,
 ) -> CatalogState:
+    state = transition.state
+    generation = transition.generation
     if generation is None:
         existing_state = validate_existing_contract(state_root, STATE_FILENAME)
-        if existing_state is not None and existing_state != state_bytes(state):
+        if existing_state not in {
+            transition.expected_state_bytes,
+            state_bytes(state),
+        }:
             raise CatalogPersistenceError("existing state bytes are unknown")
         return state
     if generation.generation < 1:
@@ -66,11 +77,13 @@ def persist_catalog_transition(
     state_path = state_root / STATE_FILENAME
     existing_generation = read_contract_file(generation_path, "generation")
     existing_state = read_contract_file(state_path, "state")
-    previous_state_bytes = state_bytes(state)
     committed_state_bytes = state_bytes(committed)
     if existing_generation is not None and existing_generation != generation.payload:
         raise CatalogPersistenceError("existing generation bytes are unknown")
-    if existing_state not in {None, previous_state_bytes, committed_state_bytes}:
+    if existing_state not in {
+        transition.expected_state_bytes,
+        committed_state_bytes,
+    }:
         raise CatalogPersistenceError("existing state bytes are unknown")
     if existing_state == committed_state_bytes and existing_generation is None:
         raise CatalogPersistenceError("committed state generation is missing")
