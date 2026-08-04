@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import argparse
+from pathlib import Path
+
 import pytest
 
+from dokploy_wizard import cli
 from dokploy_wizard.bootstrap import DokployBootstrapError
 from dokploy_wizard.core import SharedCoreError
 from dokploy_wizard.dokploy.coder_migration_workspace_models import (
@@ -12,6 +16,7 @@ from dokploy_wizard.dokploy.coder_template_migration_runtime import (
 )
 from dokploy_wizard.dokploy.workspace_catalog_sync_models import WorkspaceCatalogSyncError
 from dokploy_wizard.lifecycle import DriftReport, LifecycleDriftError
+from dokploy_wizard.lifecycle.lock import LifecycleLockBusyError
 from dokploy_wizard.networking import CloudflareError
 from dokploy_wizard.packs.coder import CoderError
 from dokploy_wizard.packs.headscale import HeadscaleError
@@ -52,6 +57,8 @@ from dokploy_wizard.tailscale import TailscaleError
         ),
         (CoderMigrationBlockedError("fixture"), "coder_migration_blocked"),
         (StateUpgradeError("fixture"), "state_upgrade"),
+        (LifecycleLockBusyError("fixture"), "lifecycle_lock"),
+        (SystemExit(1), "system_exit"),
         (RuntimeError("fixture"), "unexpected"),
     ),
 )
@@ -64,3 +71,27 @@ def test_task18_modify_failure_returns_only_exception_type_category(
 
     # Then
     assert category == expected
+
+
+def test_handle_modify_emits_task18_marker_for_busy_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Given
+    def raise_busy_lock(*_args: object, **_kwargs: object) -> None:
+        raise LifecycleLockBusyError("fixture")
+
+    monkeypatch.setattr(cli, "_load_install_raw_env", raise_busy_lock)
+    arguments = argparse.Namespace(
+        env_file=Path("fixture.env"),
+        non_interactive=True,
+        dry_run=False,
+        task18_force_model_sync_upgrade=True,
+    )
+
+    # When
+    with pytest.raises(SystemExit):
+        cli._handle_modify(arguments)
+
+    # Then
+    assert capsys.readouterr().err == "DOKPLOY_WIZARD_TASK18_ERROR=lifecycle_lock\n"
