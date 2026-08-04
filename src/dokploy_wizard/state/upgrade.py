@@ -31,8 +31,9 @@ from dokploy_wizard.state.upgrade_io import (
     read_json,
 )
 from dokploy_wizard.state.upgrade_projection import (
+    RuntimeProjectionRequest,
     ledger_target_documents,
-    runtime_target_documents,
+    runtime_target_documents_or_resume,
     targets_match,
 )
 from dokploy_wizard.state.upgrade_projection import target_documents as build_target_documents
@@ -83,7 +84,15 @@ def upgrade_state_contract(
             ownership_ledger,
         )
     elif runtime_images is not None and ownership_ledger is not None:
-        target_documents = runtime_target_documents(paths, runtime_images, ownership_ledger)
+        target_documents = runtime_target_documents_or_resume(
+            RuntimeProjectionRequest(
+                state_dir,
+                owner_id,
+                all_paths,
+                runtime_images,
+                ownership_ledger,
+            )
+        )
     elif ownership_ledger is not None:
         target_documents = ledger_target_documents(paths, ownership_ledger)
     else:
