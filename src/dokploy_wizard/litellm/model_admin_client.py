@@ -142,6 +142,10 @@ class LiteLLMModelAdminClient:
         try:
             return self._request_fn(raw_request)
         except error.HTTPError as exc:
+            if 500 <= exc.code < 600 and path == "/model/new":
+                raise LiteLLMModelAdminWriteAmbiguity("ambiguous create") from exc
+            if 500 <= exc.code < 600 and method == "PATCH":
+                raise LiteLLMModelAdminWriteAmbiguity("ambiguous update") from exc
             raise LiteLLMModelAdminError(
                 f"LiteLLM model admin request failed with status {exc.code}"
             ) from exc
