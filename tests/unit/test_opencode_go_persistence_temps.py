@@ -11,6 +11,7 @@ from dokploy_wizard.litellm.catalog_persistence import (
     STATE_FILENAME,
     CatalogGeneration,
     CatalogPersistenceError,
+    CatalogPersistenceTransition,
     persist_catalog_transition,
 )
 from dokploy_wizard.litellm.catalog_state_types import CatalogState
@@ -56,7 +57,10 @@ def test_persistence_does_not_remove_foreign_generation_temp_symlink(
     temporary.symlink_to(tmp_path / "foreign")
 
     with pytest.raises(CatalogPersistenceError, match="temporary"):
-        persist_catalog_transition(root, _state_for(generation), generation)
+        persist_catalog_transition(
+            root,
+            CatalogPersistenceTransition(None, _state_for(generation), generation),
+        )
 
     assert temporary.is_symlink()
 
@@ -81,6 +85,9 @@ def test_persistence_does_not_remove_foreign_state_temp_symlink(
     temporary.symlink_to(tmp_path / "foreign")
 
     with pytest.raises(CatalogPersistenceError, match="temporary"):
-        persist_catalog_transition(root, _state_for(generation), generation)
+        persist_catalog_transition(
+            root,
+            CatalogPersistenceTransition(None, _state_for(generation), generation),
+        )
 
     assert temporary.is_symlink()

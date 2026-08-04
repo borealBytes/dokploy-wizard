@@ -7,7 +7,12 @@ from pathlib import Path
 from dokploy_wizard.litellm.catalog_json import canonical_json_bytes, sha256_bytes
 from dokploy_wizard.litellm.catalog_model_decision import catalog_model_payload
 from dokploy_wizard.litellm.catalog_observation_types import CatalogModel, CatalogObservation
-from dokploy_wizard.litellm.catalog_persistence import STATE_FILENAME, CatalogGeneration
+from dokploy_wizard.litellm.catalog_persistence import (
+    STATE_FILENAME,
+    CatalogGeneration,
+    CatalogPersistenceTransition,
+)
+from dokploy_wizard.litellm.catalog_persistence_fs import validate_existing_contract
 from dokploy_wizard.litellm.catalog_retirement import (
     CatalogCandidate,
     CatalogTimeline,
@@ -26,8 +31,13 @@ from dokploy_wizard.litellm.catalog_state_types import (
 @dataclass(frozen=True, slots=True)
 class PreparedCatalogSync:
     models: tuple[CatalogModel, ...]
+    transition: CatalogPersistenceTransition
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedCatalogState:
     state: CatalogState
-    generation: CatalogGeneration | None
+    raw_bytes: bytes | None
 
 
 def prepare_catalog_sync(
@@ -35,14 +45,18 @@ def prepare_catalog_sync(
     catalog_id: str,
     observation: CatalogObservation,
 ) -> PreparedCatalogSync:
-    previous = _load_state(state_root, catalog_id)
+    loaded = _load_state(state_root, catalog_id)
+    previous = loaded.state
     models = observation.visible_models
     generation_payload = canonical_json_bytes(
         {"models": [catalog_model_payload(model) for model in models]}
     )
     output_sha256 = sha256_bytes(generation_payload)
     if previous.last_output_sha256 == output_sha256:
-        return PreparedCatalogSync(models, previous, None)
+        return PreparedCatalogSync(
+            models,
+            CatalogPersistenceTransition(loaded.raw_bytes, previous, None),
+        )
     timeline = advance_timeline(
         _timeline(previous),
         CatalogCandidate(observation.source_ids, observation.accepted_ids),
@@ -112,8 +126,11 @@ def prepare_catalog_sync(
     )
     return PreparedCatalogSync(
         models,
-        state,
-        CatalogGeneration(generation_number, output_sha256, generation_payload),
+        CatalogPersistenceTransition(
+            loaded.raw_bytes,
+            state,
+            CatalogGeneration(generation_number, output_sha256, generation_payload),
+        ),
     )
 
 
@@ -125,11 +142,11 @@ class _ObservationClock:
         return self.observed_at
 
 
-def _load_state(state_root: Path, catalog_id: str) -> CatalogState:
-    state_path = state_root / STATE_FILENAME
-    if not state_path.exists():
-        return empty_catalog_state(catalog_id)
-    return parse_catalog_state(state_path.read_bytes())
+def _load_state(state_root: Path, catalog_id: str) -> LoadedCatalogState:
+    raw_bytes = validate_existing_contract(state_root, STATE_FILENAME)
+    if raw_bytes is None:
+        return LoadedCatalogState(empty_catalog_state(catalog_id), None)
+    return LoadedCatalogState(parse_catalog_state(raw_bytes), raw_bytes)
 
 
 def _timeline(state: CatalogState) -> CatalogTimeline:

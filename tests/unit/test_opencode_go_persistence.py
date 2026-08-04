@@ -11,6 +11,7 @@ from dokploy_wizard.litellm.catalog_persistence import (
     STATE_FILENAME,
     CatalogGeneration,
     CatalogPersistenceError,
+    CatalogPersistenceTransition,
     persist_catalog_transition,
 )
 from dokploy_wizard.litellm.catalog_state import empty_catalog_state, state_bytes
@@ -49,6 +50,14 @@ def _state_for(generation: CatalogGeneration) -> CatalogState:
     )
 
 
+def _transition(
+    state: CatalogState,
+    generation: CatalogGeneration | None,
+    expected_state_bytes: bytes | None = None,
+) -> CatalogPersistenceTransition:
+    return CatalogPersistenceTransition(expected_state_bytes, state, generation)
+
+
 @pytest.mark.parametrize("unsafe_path", ["root", "generations", "state", "generation"])
 def test_persistence_rejects_every_symlinked_contract_path(
     tmp_path: Path,
@@ -75,7 +84,7 @@ def test_persistence_rejects_every_symlinked_contract_path(
             path.symlink_to(tmp_path / "missing")
 
     with pytest.raises(CatalogPersistenceError, match="symlink"):
-        persist_catalog_transition(root, _state_for(generation), generation)
+        persist_catalog_transition(root, _transition(_state_for(generation), generation))
 
 
 @pytest.mark.parametrize("unsafe_path", ["root", "generations", "state", "generation"])
@@ -101,7 +110,10 @@ def test_persistence_rejects_mode_drift(tmp_path: Path, unsafe_path: str) -> Non
     os.chmod(selected, 0o755 if selected.is_dir() else 0o640)
 
     with pytest.raises(CatalogPersistenceError, match="mode"):
-        persist_catalog_transition(root, state, generation)
+        persist_catalog_transition(
+            root,
+            _transition(state, generation, state_bytes(state)),
+        )
 
 
 def test_persistence_rejects_unknown_existing_generation_bytes(tmp_path: Path) -> None:
@@ -115,7 +127,7 @@ def test_persistence_rejects_unknown_existing_generation_bytes(tmp_path: Path) -
     os.chmod(generation_path, 0o600)
 
     with pytest.raises(CatalogPersistenceError, match="generation bytes"):
-        persist_catalog_transition(root, _state_for(generation), generation)
+        persist_catalog_transition(root, _transition(_state_for(generation), generation))
 
     assert generation_path.read_bytes() == b'{"models":["foreign"]}'
 
@@ -135,8 +147,7 @@ def test_generation_before_state_crash_retries_without_replacing_generation(
 
     committed = persist_catalog_transition(
         root,
-        _state_for(generation),
-        generation,
+        _transition(_state_for(generation), generation),
     )
 
     assert generation_path.stat().st_ino == generation_inode
@@ -159,7 +170,10 @@ def test_partial_retry_accepts_only_exact_previous_state_bytes(tmp_path: Path) -
     os.chmod(state_path, 0o600)
     generation_inode = generation_path.stat().st_ino
 
-    committed = persist_catalog_transition(root, state, generation)
+    committed = persist_catalog_transition(
+        root,
+        _transition(state, generation, state_bytes(state)),
+    )
 
     assert generation_path.stat().st_ino == generation_inode
     assert state_path.read_bytes() == state_bytes(committed)
@@ -168,7 +182,8 @@ def test_partial_retry_accepts_only_exact_previous_state_bytes(tmp_path: Path) -
 def test_completed_retry_is_byte_and_inode_identical(tmp_path: Path) -> None:
     generation = _generation()
     state = _state_for(generation)
-    committed = persist_catalog_transition(tmp_path, state, generation)
+    transition = _transition(state, generation)
+    committed = persist_catalog_transition(tmp_path, transition)
     generation_path = _generation_path(tmp_path, generation)
     state_path = tmp_path / STATE_FILENAME
     before = (
@@ -178,7 +193,7 @@ def test_completed_retry_is_byte_and_inode_identical(tmp_path: Path) -> None:
         state_path.read_bytes(),
     )
 
-    retried = persist_catalog_transition(tmp_path, state, generation)
+    retried = persist_catalog_transition(tmp_path, transition)
 
     assert retried == committed
     assert (
@@ -200,7 +215,7 @@ def test_persistence_rejects_unknown_existing_state_bytes(tmp_path: Path) -> Non
     os.chmod(state_path, 0o600)
 
     with pytest.raises(CatalogPersistenceError, match="state bytes"):
-        persist_catalog_transition(root, _state_for(generation), generation)
+        persist_catalog_transition(root, _transition(_state_for(generation), generation))
 
 
 def test_no_change_rejects_unknown_existing_state_bytes(tmp_path: Path) -> None:
@@ -209,7 +224,10 @@ def test_no_change_rejects_unknown_existing_state_bytes(tmp_path: Path) -> None:
     os.chmod(state_path, 0o600)
 
     with pytest.raises(CatalogPersistenceError, match="state bytes"):
-        persist_catalog_transition(tmp_path, empty_catalog_state("opencode-go"), None)
+        persist_catalog_transition(
+            tmp_path,
+            _transition(empty_catalog_state("opencode-go"), None),
+        )
 
 
 def test_persistence_rejects_committed_state_without_generation(tmp_path: Path) -> None:
@@ -227,4 +245,4 @@ def test_persistence_rejects_committed_state_without_generation(tmp_path: Path) 
     os.chmod(state_path, 0o600)
 
     with pytest.raises(CatalogPersistenceError, match="generation is missing"):
-        persist_catalog_transition(tmp_path, state, generation)
+        persist_catalog_transition(tmp_path, _transition(state, generation))

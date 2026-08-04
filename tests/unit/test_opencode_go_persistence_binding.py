@@ -10,6 +10,7 @@ import pytest
 from dokploy_wizard.litellm.catalog_persistence import (
     CatalogGeneration,
     CatalogPersistenceError,
+    CatalogPersistenceTransition,
     persist_catalog_transition,
 )
 from dokploy_wizard.litellm.catalog_state_types import CatalogState, LkgRecord
@@ -134,6 +135,9 @@ def test_generation_publication_rejects_every_unbound_state_before_directory_cre
     state_root = tmp_path / "state"
 
     with pytest.raises(CatalogPersistenceError, match="generation does not bind state"):
-        persist_catalog_transition(state_root, state, generation)
+        persist_catalog_transition(
+            state_root,
+            CatalogPersistenceTransition(None, state, generation),
+        )
 
     assert not state_root.exists()

@@ -119,12 +119,16 @@ def synchronize(
         raise SyncRuntimeError("catalog_state") from error
     try:
         OpenCodeGoDatabaseReconciler(dependencies.model_admin_api).reconcile(
-            OpenCodeGoReconciliationInput(prepared.models, prepared.state, False)
+            OpenCodeGoReconciliationInput(
+                prepared.models,
+                prepared.transition.state,
+                False,
+            )
         )
     except LiteLLMModelAdminError as error:
         raise SyncRuntimeError(model_admin_failure(error)) from error
     try:
-        persist_catalog_transition(state_root, prepared.state, prepared.generation)
+        persist_catalog_transition(state_root, prepared.transition)
     except (CatalogPersistenceError, OSError) as error:
         raise SyncRuntimeError(persistence_failure(error)) from error
 
