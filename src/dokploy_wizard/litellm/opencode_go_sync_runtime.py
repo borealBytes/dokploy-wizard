@@ -36,6 +36,7 @@ from dokploy_wizard.litellm.model_admin_types import (
     LiteLLMModelAdminApi,
     LiteLLMModelAdminError,
 )
+from dokploy_wizard.litellm.opencode_go_persistence_errors import persistence_failure
 from dokploy_wizard.litellm.opencode_go_plan import OpenCodeGoReconciliationInput
 from dokploy_wizard.litellm.opencode_go_reconciler import OpenCodeGoDatabaseReconciler
 from dokploy_wizard.litellm.opencode_go_sync_errors import (
@@ -125,7 +126,7 @@ def synchronize(
     try:
         persist_catalog_transition(state_root, prepared.state, prepared.generation)
     except (CatalogPersistenceError, OSError) as error:
-        raise SyncRuntimeError("persistence") from error
+        raise SyncRuntimeError(persistence_failure(error)) from error
 
 
 def main() -> int:
