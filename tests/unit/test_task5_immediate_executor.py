@@ -85,6 +85,25 @@ class CategorizedFailureRunner:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class MissingRuntimeRunner:
+    def __call__(
+        self,
+        arguments: tuple[str, ...],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        return subprocess.CompletedProcess(
+            arguments,
+            2,
+            stdout="",
+            stderr="python: can't open file '/opt/dokploy-wizard/opencode_go_sync.py'\n",
+        )
+
+
 def test_production_executor_runs_exact_schedule_argv_and_env_and_reports_real_delta(
     tmp_path: Path,
 ) -> None:
@@ -162,3 +181,15 @@ def test_production_executor_preserves_only_fixed_runtime_failure_category(
 
     with pytest.raises(SyncStateError, match="catalog_source"):
         DockerExecImmediateSyncExecutor(runner=CategorizedFailureRunner()).execute(command)
+
+
+def test_production_executor_classifies_missing_packaged_runtime(tmp_path: Path) -> None:
+    command = parse_immediate_sync_command(
+        f"DOKPLOY_WIZARD_SCHEDULE_OWNER_ID={_OWNER} TZ=UTC python sync.py",
+        owner_id=_OWNER,
+        service_name="litellm",
+        state_root=tmp_path,
+    )
+
+    with pytest.raises(SyncStateError, match="runtime_package_missing"):
+        DockerExecImmediateSyncExecutor(runner=MissingRuntimeRunner()).execute(command)
