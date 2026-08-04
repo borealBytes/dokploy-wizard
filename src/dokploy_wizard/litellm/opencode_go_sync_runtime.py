@@ -1,0 +1,151 @@
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Callable, Mapping
+
+from dokploy_wizard.litellm.catalog_clock import CatalogClock
+from dokploy_wizard.litellm.catalog_observation import CatalogSources, build_observation
+from dokploy_wizard.litellm.catalog_persistence import persist_catalog_transition
+from dokploy_wizard.litellm.catalog_source_parsers import (
+    parse_models_dev,
+    parse_official,
+    parse_zen,
+)
+from dokploy_wizard.litellm.catalog_sources import (
+    MODELS_DEV_SOURCE,
+    OFFICIAL_SOURCE,
+    ZEN_SOURCE,
+    UrllibSourceTransport,
+    fetch_source,
+)
+from dokploy_wizard.litellm.model_admin_client import LiteLLMModelAdminClient
+from dokploy_wizard.litellm.model_admin_types import LiteLLMModelAdminApi
+from dokploy_wizard.litellm.opencode_go_plan import OpenCodeGoReconciliationInput
+from dokploy_wizard.litellm.opencode_go_reconciler import OpenCodeGoDatabaseReconciler
+from dokploy_wizard.litellm.opencode_go_sync_state import prepare_catalog_sync
+
+
+@dataclass(frozen=True, slots=True)
+class SyncRuntimeConfig:
+    catalog_id: str
+    config_sha256: str
+    owner_id: str
+
+    @classmethod
+    def load(cls, path: Path, environment: Mapping[str, str]) -> SyncRuntimeConfig:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or set(payload) != {
+            "catalog_id",
+            "config_sha256",
+            "owner_id",
+            "schema_version",
+            "sync_contract_version",
+        }:
+            raise ValueError("OpenCode Go sync config has an invalid shape")
+        owner_id = environment.get("DOKPLOY_WIZARD_SCHEDULE_OWNER_ID")
+        if (
+            payload["schema_version"] != 1
+            or payload["sync_contract_version"] != 2
+            or payload["catalog_id"] != "opencode-go"
+            or not isinstance(payload["config_sha256"], str)
+            or len(payload["config_sha256"]) != 64
+            or not isinstance(payload["owner_id"], str)
+            or payload["owner_id"] != owner_id
+        ):
+            raise ValueError("OpenCode Go sync config does not match the runtime")
+        return cls(payload["catalog_id"], payload["config_sha256"], payload["owner_id"])
+
+
+@dataclass(frozen=True, slots=True)
+class SystemClock:
+    def now(self) -> datetime:
+        return datetime.now(tz=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class SyncRuntimeDependencies:
+    clock: CatalogClock
+    catalog_loader: Callable[[CatalogClock], CatalogSources]
+    model_admin_api: LiteLLMModelAdminApi
+
+    @classmethod
+    def live(cls, master_key: str) -> SyncRuntimeDependencies:
+        return cls(
+            SystemClock(),
+            _load_live_sources,
+            LiteLLMModelAdminClient(
+                api_url="http://127.0.0.1:4000",
+                master_key=master_key,
+            ),
+        )
+
+
+def synchronize(
+    *,
+    state_root: Path,
+    config: SyncRuntimeConfig,
+    dependencies: SyncRuntimeDependencies,
+) -> None:
+    clock = dependencies.clock
+    sources = dependencies.catalog_loader(clock)
+    observation = build_observation(sources, clock)
+    prepared = prepare_catalog_sync(state_root, config.catalog_id, observation)
+    OpenCodeGoDatabaseReconciler(dependencies.model_admin_api).reconcile(
+        OpenCodeGoReconciliationInput(prepared.models, prepared.state, False)
+    )
+    persist_catalog_transition(state_root, prepared.state, prepared.generation)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--lock-file", type=Path, required=True)
+    parser.add_argument("--once", action="store_true", required=True)
+    parser.add_argument("--max-runtime-seconds", type=int, required=True)
+    parser.add_argument("--http-timeout-seconds", type=int, required=True)
+    arguments = parser.parse_args()
+    if arguments.max_runtime_seconds != 300 or arguments.http_timeout_seconds != 30:
+        raise ValueError("OpenCode Go sync runtime limits are not canonical")
+    config = SyncRuntimeConfig.load(arguments.config, os.environ)
+    master_key = os.environ.get("LITELLM_MASTER_KEY", "")
+    if master_key == "":
+        raise ValueError("LiteLLM master key is missing")
+    arguments.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with arguments.lock_file.open("a+b") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if not _active_external_lease(arguments.state_dir):
+                raise RuntimeError("OpenCode Go synchronizer lock is busy") from None
+        synchronize(
+            state_root=arguments.state_dir,
+            config=config,
+            dependencies=SyncRuntimeDependencies.live(master_key),
+        )
+    return 0
+
+
+def _load_live_sources(clock: CatalogClock) -> CatalogSources:
+    transport = UrllibSourceTransport()
+    return CatalogSources(
+        parse_zen(fetch_source(ZEN_SOURCE, transport), clock),
+        parse_models_dev(fetch_source(MODELS_DEV_SOURCE, transport), clock),
+        parse_official(fetch_source(OFFICIAL_SOURCE, transport), clock),
+    )
+def _active_external_lease(state_root: Path) -> bool:
+    now = datetime.now(tz=UTC)
+    for path in (state_root / "lease-receipts").glob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("phase") != "parent_running":
+            continue
+        deadline = payload.get("heartbeat_deadline_at")
+        if isinstance(deadline, str) and datetime.fromisoformat(deadline) >= now:
+            return True
+    return False

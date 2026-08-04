@@ -429,6 +429,10 @@ def test_runtime_package_dynamic_config_removes_opencode_go_static_aliases() -> 
         "wizard-stack-shared-litellm-data:/var/lib/dokploy-wizard/opencode-go"
         in dynamic.compose_file
     )
+    assert (
+        "wizard-stack-shared-litellm-data:/opt/dokploy-wizard:ro"
+        in dynamic.compose_file
+    )
     assert "    name: wizard-stack-shared-litellm-data\n" in dynamic.compose_file
     assert 'LITELLM_USE_DB: "true"' in dynamic.compose_file
     assert "replicas: 1" in dynamic.compose_file
