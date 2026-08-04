@@ -19,7 +19,12 @@ _SYNC_ERROR_CATEGORIES = frozenset(
     {
         "catalog_source",
         "catalog_state",
-        "model_admin",
+        "model_admin_conflict",
+        "model_admin_inventory",
+        "model_admin_transport",
+        "model_admin_unknown",
+        "model_admin_unowned_alias",
+        "model_admin_write",
         "persistence",
         "runtime_config",
         "runtime_lock",

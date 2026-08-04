@@ -34,7 +34,9 @@ from dokploy_wizard.litellm.catalog_types import SourceContractError
 from dokploy_wizard.litellm.model_admin_client import LiteLLMModelAdminClient
 from dokploy_wizard.litellm.model_admin_types import (
     LiteLLMModelAdminApi,
+    LiteLLMModelAdminConflict,
     LiteLLMModelAdminError,
+    LiteLLMModelAdminWriteAmbiguity,
 )
 from dokploy_wizard.litellm.opencode_go_plan import OpenCodeGoReconciliationInput
 from dokploy_wizard.litellm.opencode_go_reconciler import OpenCodeGoDatabaseReconciler
@@ -43,7 +45,12 @@ from dokploy_wizard.litellm.opencode_go_sync_state import prepare_catalog_sync
 SyncFailureCategory = Literal[
     "catalog_source",
     "catalog_state",
-    "model_admin",
+    "model_admin_conflict",
+    "model_admin_inventory",
+    "model_admin_transport",
+    "model_admin_unknown",
+    "model_admin_unowned_alias",
+    "model_admin_write",
     "persistence",
     "runtime_config",
     "runtime_lock",
@@ -132,7 +139,7 @@ def synchronize(
             OpenCodeGoReconciliationInput(prepared.models, prepared.state, False)
         )
     except LiteLLMModelAdminError as error:
-        raise SyncRuntimeError("model_admin") from error
+        raise SyncRuntimeError(_model_admin_failure(error)) from error
     try:
         persist_catalog_transition(state_root, prepared.state, prepared.generation)
     except (CatalogPersistenceError, OSError) as error:
@@ -193,6 +200,26 @@ def _load_live_sources(clock: CatalogClock) -> CatalogSources:
         parse_models_dev(fetch_source(MODELS_DEV_SOURCE, transport), clock),
         parse_official(fetch_source(OFFICIAL_SOURCE, transport), clock),
     )
+
+
+def _model_admin_failure(error: LiteLLMModelAdminError) -> SyncFailureCategory:
+    if error.reason.startswith("unowned alias "):
+        return "model_admin_unowned_alias"
+    inventory_markers = (
+        "inventory",
+        "masked routing parameter",
+        "routing parameters must contain",
+        "deployment blocked must be nested",
+    )
+    if any(marker in error.reason for marker in inventory_markers):
+        return "model_admin_inventory"
+    if "transport failed" in error.reason or "request failed with status" in error.reason:
+        return "model_admin_transport"
+    if isinstance(error, LiteLLMModelAdminWriteAmbiguity):
+        return "model_admin_write"
+    if isinstance(error, LiteLLMModelAdminConflict):
+        return "model_admin_conflict"
+    return "model_admin_unknown"
 def _active_external_lease(state_root: Path) -> bool:
     now = datetime.now(tz=UTC)
     for path in (state_root / "lease-receipts").glob("*.json"):
