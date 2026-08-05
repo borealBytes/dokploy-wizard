@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-from typing import Final
 
 from dokploy_wizard.proof.model_sync_task1_context import (
     activate_task1_proof_context,
@@ -18,20 +17,20 @@ from dokploy_wizard.state.upgrade import state_upgrade_paths
 from dokploy_wizard.state.upgrade_intent import ALL_KEYS, StateUpgradeIntent
 from dokploy_wizard.state.upgrade_io import file_hash, read_json
 
-_MISSING: Final = "MISSING"
-
 
 def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | str]:
     """Read and summarize the exact authority required for upgrade recovery."""
 
     paths = state_upgrade_paths(state_dir)
-    required_present = all(path.exists() for path in paths.values())
+    desired_present = paths["desired"].exists()
+    applied_present = paths["applied"].exists()
     owner_path = state_dir / "shared-core-sync-owner.json"
     intent_path = state_dir / "state-upgrade-intent-v1.json"
-    if not required_present:
+    if not desired_present or not applied_present:
         return {
             "schema_version": 1,
-            "state_files_present": False,
+            "desired_present": desired_present,
+            "applied_present": applied_present,
             "intent_present": intent_path.exists(),
             "owner_present": owner_path.exists(),
         }
@@ -46,7 +45,8 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
     if intent is None or owner is None:
         return {
             "schema_version": 1,
-            "state_files_present": True,
+            "desired_present": True,
+            "applied_present": True,
             "desired_schema_valid": True,
             "applied_schema_valid": True,
             "applied_matches_current_desired": applied.desired_state_fingerprint
@@ -61,7 +61,8 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
     current_paths = {**paths, "owner": owner_path}
     return {
         "schema_version": 1,
-        "state_files_present": True,
+        "desired_present": True,
+        "applied_present": True,
         "desired_schema_valid": True,
         "applied_schema_valid": True,
         "applied_matches_current_desired": applied.desired_state_fingerprint
@@ -80,6 +81,8 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
             intent.status == "writing"
             and intent.completed_writes == ("owner", "desired")
             and applied.desired_state_fingerprint != desired_fingerprint
+            and intent.pre_hashes["desired"] != intent.post_hashes["desired"]
+            and intent.pre_hashes["applied"] == intent.post_hashes["applied"]
             and all(file_hash(current_paths[key]) == expected_hashes[key] for key in ALL_KEYS)
         ),
     }
