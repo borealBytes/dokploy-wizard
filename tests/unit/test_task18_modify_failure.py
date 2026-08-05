@@ -57,6 +57,10 @@ from dokploy_wizard.tailscale import TailscaleError
         ),
         (CoderMigrationBlockedError("fixture"), "coder_migration_blocked"),
         (StateUpgradeError("fixture"), "state_upgrade"),
+        (
+            StateUpgradeError("State upgrade resume hash mismatch."),
+            "state_upgrade_resume_hash_mismatch",
+        ),
         (LifecycleLockBusyError("fixture"), "lifecycle_lock"),
         (SystemExit(1), "system_exit"),
         (RuntimeError("fixture"), "unexpected"),
