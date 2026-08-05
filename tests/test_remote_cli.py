@@ -568,7 +568,8 @@ def test_positional_env_connect_failure_is_clean_and_redacted(
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "[remote] starting remote modify" in captured.err
-    assert "connecting to root@127.0.0.1:22" in captured.err
+    assert "[remote] connecting over SSH" in captured.err
+    assert "127.0.0.1" not in captured.err
     assert "Traceback" not in captured.err
     assert secret not in captured.err
     assert "<REDACTED>" in captured.err

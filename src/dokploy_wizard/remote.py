@@ -199,7 +199,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     try:
-        reporter.progress(f"connecting to {args.user}@{args.host}:22 path={args.remote_path}")
+        reporter.progress("connecting over SSH")
         connect_started = time.monotonic()
         transport = ParamikoRemoteTransport.connect(
             hostname=args.host,
