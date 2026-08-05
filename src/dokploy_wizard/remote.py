@@ -49,6 +49,13 @@ TASK1_CLEANUP_CAPTURE_LIMITS: Final[RemoteCommandCaptureLimits] = RemoteCommandC
     max_stdout_bytes=2 * 1024 * 1024,
     max_stderr_bytes=2 * 1024 * 1024,
 )
+STATE_UPGRADE_OBSERVATION_CAPTURE_LIMITS: Final[RemoteCommandCaptureLimits] = (
+    RemoteCommandCaptureLimits(
+        timeout_seconds=120.0,
+        max_stdout_bytes=64 * 1024,
+        max_stderr_bytes=64 * 1024,
+    )
+)
 _TASK1_CLEANUP_JOURNAL_ABSENT: Final = b"Task 1 Cloudflare cleanup journal is absent"
 
 
@@ -140,6 +147,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_remote_common_arguments(inspect_parser)
 
+    observe_parser = subparsers.add_parser(
+        "state-upgrade-observe",
+        help="observe remote state-upgrade recovery authority",
+        description=(
+            "Upload the committed release and emit value-free read-only state-upgrade "
+            "authority evidence. Requires a validated Task 1 proof context."
+        ),
+    )
+    _add_remote_common_arguments(observe_parser)
+
     proof_parser = subparsers.add_parser(
         "proof",
         help="run remote proof flow",
@@ -168,7 +185,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_remote_common_arguments(cleanup_parser)
 
     parser.epilog = (
-        "Lifecycle commands: install, modify, uninstall, inspect-state, proof. "
+        "Lifecycle commands: install, modify, uninstall, inspect-state, "
+        "state-upgrade-observe, proof. "
         "Remote defaults: /root/dokploy-wizard and .install.env."
     )
     return parser
@@ -190,7 +208,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     task1_context: Task1ProofContextV1 | None = None
     try:
-        if args.command in {"install", "modify", "uninstall", "proof", "task1-cleanup"}:
+        if args.command in {
+            "install",
+            "modify",
+            "uninstall",
+            "proof",
+            "task1-cleanup",
+            "state-upgrade-observe",
+        }:
             _require_local_env_file(args.env_file)
         task1_context = _validate_task1_proof_context(args)
     except (OSError, Task1ProofContextError, ValueError) as error:
@@ -226,13 +251,29 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     archive_evidence: RepositoryArchiveEvidence | None = None
     try:
-        if args.command in {"install", "modify", "uninstall", "proof"}:
+        if args.command in {
+            "install",
+            "modify",
+            "uninstall",
+            "proof",
+            "state-upgrade-observe",
+        }:
             archive_evidence = _upload_remote_bundle(args=args, session=session, reporter=reporter)
             _extract_remote_bundle(
                 session=session,
                 archive_evidence=archive_evidence,
                 password=args.password,
             )
+        if args.command == "state-upgrade-observe":
+            if args.task1_proof_context is None:
+                raise RuntimeError("State upgrade observation requires a Task 1 proof context")
+            observation = _capture_state_upgrade_observation(
+                session=session,
+                password=args.password,
+            )
+            sys.stdout.buffer.write(observation)
+            exit_code = 0
+            return exit_code
         if args.command == "install":
             if args.fresh:
                 remote_confirm_path = _upload_confirm_file(
@@ -480,7 +521,14 @@ def _validate_task1_proof_context(
     args: argparse.Namespace,
 ) -> Task1ProofContextV1 | None:
     command = args.command
-    if command not in {"install", "modify", "proof", "inspect-state", "task1-cleanup"}:
+    if command not in {
+        "install",
+        "modify",
+        "proof",
+        "inspect-state",
+        "task1-cleanup",
+        "state-upgrade-observe",
+    }:
         return None
     if (
         command == "inspect-state"
@@ -761,6 +809,39 @@ def _run_task1_cleanup(*, session: RemoteTransportSession, password: str) -> byt
             raise RuntimeError("Task 1 Cloudflare cleanup journal is absent") from None
         raise
     return output.stdout
+
+
+def _capture_state_upgrade_observation(
+    *, session: RemoteTransportSession, password: str
+) -> bytes:
+    context_path = session.remote_task1_proof_context_path
+    if context_path is None:
+        raise RuntimeError("State upgrade observation requires a Task 1 proof context")
+    command = " ".join(
+        (
+            "cd",
+            shlex.quote(session.remote_active_release_path),
+            "&&",
+            "env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "PYTHONPATH=src",
+            "python3",
+            "-m",
+            "dokploy_wizard.proof.model_sync_state_upgrade_observation",
+            "--env-file",
+            shlex.quote(session.remote_install_env_path),
+            "--state-dir",
+            shlex.quote(session.remote_state_dir),
+            "--task1-proof-context",
+            shlex.quote(context_path),
+        )
+    )
+    return session.capture_command(
+        subcommand="state-upgrade-observe",
+        command=command,
+        limits=STATE_UPGRADE_OBSERVATION_CAPTURE_LIMITS,
+        password=password,
+    ).stdout
 
 
 def capture_remote_output(
