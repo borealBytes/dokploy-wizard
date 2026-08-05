@@ -251,6 +251,51 @@ def test_help_lists_expected_subcommands() -> None:
     assert result.stderr == ""
 
 
+def test_state_upgrade_observe_uses_context_bound_read_only_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsysbinary: pytest.CaptureFixture[bytes],
+) -> None:
+    remote_cli = import_remote_cli_module()
+    transport = _Task1CleanupTransport(b"")
+    env_file = _write_remote_env(tmp_path, packs="nextcloud")
+    context = tmp_path / "task1-proof-context.json"
+
+    monkeypatch.setattr(
+        remote_cli.ParamikoRemoteTransport,
+        "connect",
+        lambda **_kwargs: transport,
+    )
+    monkeypatch.setattr(remote_cli, "_validate_task1_proof_context", lambda _args: None)
+    monkeypatch.setattr(remote_cli, "_upload_remote_bundle", lambda **_kwargs: None)
+    monkeypatch.setattr(remote_cli, "_extract_remote_bundle", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        remote_cli,
+        "_capture_state_upgrade_observation",
+        lambda **_kwargs: b'{"schema_version":1,"task1_context_active":true}\n',
+    )
+
+    exit_code = remote_cli.main(
+        [
+            "state-upgrade-observe",
+            "--host",
+            "example.com",
+            "--password",
+            "password-sentinel",
+            "--env-file",
+            str(env_file),
+            "--task1-proof-context",
+            str(context),
+        ]
+    )
+
+    captured = capsysbinary.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == b'{"schema_version":1,"task1_context_active":true}\n'
+    assert b"password-sentinel" not in captured.err
+
+
 def test_remote_parser_defaults_match_contract() -> None:
     remote_cli = import_remote_cli_module()
 
