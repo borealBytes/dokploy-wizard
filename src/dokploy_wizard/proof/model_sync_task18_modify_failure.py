@@ -42,6 +42,7 @@ Task18ModifyFailureCategory = Literal[
     "shared_core",
     "state_validation",
     "state_upgrade",
+    "state_upgrade_resume_hash_mismatch",
     "sync_state",
     "system_exit",
     "tailscale",
@@ -50,6 +51,7 @@ Task18ModifyFailureCategory = Literal[
     "workspace_catalog_sync",
     "coder_migration_blocked",
 ]
+_STATE_UPGRADE_RESUME_HASH_MISMATCH: Final = "State upgrade resume hash mismatch."
 TASK18_MODIFY_FAILURE_CATEGORIES: Final[frozenset[str]] = frozenset(
     category
     for category in get_args(Task18ModifyFailureCategory)
@@ -105,5 +107,7 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
     if isinstance(error, CoderMigrationBlockedError):
         return "coder_migration_blocked"
     if isinstance(error, StateUpgradeError):
+        if str(error) == _STATE_UPGRADE_RESUME_HASH_MISMATCH:
+            return "state_upgrade_resume_hash_mismatch"
         return "state_upgrade"
     return "unexpected"
