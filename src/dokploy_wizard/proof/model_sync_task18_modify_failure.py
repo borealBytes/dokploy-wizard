@@ -42,6 +42,12 @@ Task18ModifyFailureCategory = Literal[
     "shared_core",
     "state_validation",
     "state_upgrade",
+    "state_upgrade_applied_fingerprint_mismatch",
+    "state_upgrade_cas_mismatch",
+    "state_upgrade_input_invalid",
+    "state_upgrade_intent_invalid",
+    "state_upgrade_owner_mismatch",
+    "state_upgrade_recovery_invalid",
     "state_upgrade_resume_hash_mismatch",
     "sync_state",
     "system_exit",
@@ -107,7 +113,22 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
     if isinstance(error, CoderMigrationBlockedError):
         return "coder_migration_blocked"
     if isinstance(error, StateUpgradeError):
-        if str(error) == _STATE_UPGRADE_RESUME_HASH_MISMATCH:
+        message = str(error)
+        if message == _STATE_UPGRADE_RESUME_HASH_MISMATCH:
             return "state_upgrade_resume_hash_mismatch"
+        if message.startswith("State upgrade intent ") or message.startswith(
+            "State upgrade hash map "
+        ):
+            return "state_upgrade_intent_invalid"
+        if message.startswith("State upgrade owner "):
+            return "state_upgrade_owner_mismatch"
+        if message == "State upgrade generation/token CAS mismatch.":
+            return "state_upgrade_cas_mismatch"
+        if message == "State upgrade input document is invalid.":
+            return "state_upgrade_input_invalid"
+        if message == "State upgrade applied fingerprint mismatch.":
+            return "state_upgrade_applied_fingerprint_mismatch"
+        if message.startswith("State upgrade recovery "):
+            return "state_upgrade_recovery_invalid"
         return "state_upgrade"
     return "unexpected"

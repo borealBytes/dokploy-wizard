@@ -61,6 +61,30 @@ from dokploy_wizard.tailscale import TailscaleError
             StateUpgradeError("State upgrade resume hash mismatch."),
             "state_upgrade_resume_hash_mismatch",
         ),
+        (
+            StateUpgradeError("State upgrade intent has an unsupported schema."),
+            "state_upgrade_intent_invalid",
+        ),
+        (
+            StateUpgradeError("State upgrade owner does not match the requested owner."),
+            "state_upgrade_owner_mismatch",
+        ),
+        (
+            StateUpgradeError("State upgrade generation/token CAS mismatch."),
+            "state_upgrade_cas_mismatch",
+        ),
+        (
+            StateUpgradeError("State upgrade input document is invalid."),
+            "state_upgrade_input_invalid",
+        ),
+        (
+            StateUpgradeError("State upgrade applied fingerprint mismatch."),
+            "state_upgrade_applied_fingerprint_mismatch",
+        ),
+        (
+            StateUpgradeError("State upgrade recovery target does not match the intent."),
+            "state_upgrade_recovery_invalid",
+        ),
         (LifecycleLockBusyError("fixture"), "lifecycle_lock"),
         (SystemExit(1), "system_exit"),
         (RuntimeError("fixture"), "unexpected"),
