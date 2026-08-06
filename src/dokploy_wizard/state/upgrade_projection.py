@@ -23,11 +23,11 @@ from dokploy_wizard.state.store import parse_desired_state_payload
 from dokploy_wizard.state.sync_schema import JsonValue
 from dokploy_wizard.state.upgrade_intent import (
     ALL_KEYS,
-    WRITE_ORDER,
     StateUpgradeError,
     StateUpgradeIntent,
 )
 from dokploy_wizard.state.upgrade_io import canonical_bytes, file_hash, read_json
+from dokploy_wizard.state.upgrade_terminal_recovery import recover_terminal_runtime_projection
 
 
 class StateUpgradeAppliedFingerprintMismatch(StateUpgradeError):
@@ -161,34 +161,7 @@ def runtime_complete_intent_target_documents(
 ) -> dict[str, dict[str, JsonValue]]:
     """Reopen an exact terminal receipt whose applied checkpoint is semantically stale."""
 
-    if intent.owner_id != request.owner_id:
-        raise StateUpgradeError("State upgrade complete intent owner does not match the request.")
-    if set(request.paths) != set(ALL_KEYS):
-        raise StateUpgradeError("State upgrade complete intent paths are incomplete.")
-    if intent.completed_writes != WRITE_ORDER:
-        raise StateUpgradeError("State upgrade complete intent writes are incomplete.")
-    if {key: file_hash(request.paths[key]) for key in ALL_KEYS} != intent.post_hashes:
-        raise StateUpgradeError("State upgrade complete intent bytes do not match the receipt.")
-    try:
-        applied = AppliedStateCheckpoint.from_dict(read_json(request.paths["applied"]))
-    except StateValidationError as error:
-        raise StateUpgradeError(
-            "State upgrade complete intent applied state is invalid."
-        ) from error
-    protected_keys = ("raw_input", "litellm_keys", "surfsense_secrets", "seaweedfs_secrets")
-    if any(intent.pre_hashes[key] != intent.post_hashes[key] for key in protected_keys):
-        raise StateUpgradeError("State upgrade complete intent changed protected bytes.")
-    if (
-        intent.pre_hashes["desired"] == intent.post_hashes["desired"]
-        or intent.pre_hashes["applied"] != intent.post_hashes["applied"]
-        or applied.desired_state_fingerprint != intent.pre_hashes["desired"]
-    ):
-        raise StateUpgradeError(
-            "State upgrade complete intent does not bind the stale applied image."
-        )
-    return runtime_target_documents(
-        replace(request, expected_applied_fingerprint=applied.desired_state_fingerprint)
-    )
+    return recover_terminal_runtime_projection(request, intent, runtime_target_documents)
 
 
 def runtime_resume_target_documents(
