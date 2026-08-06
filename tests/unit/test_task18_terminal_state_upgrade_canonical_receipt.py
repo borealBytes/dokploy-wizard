@@ -30,7 +30,7 @@ _FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "nextcloud.env"
 _OWNER = "3b8e1e83-0e57-4d66-a65e-1edbf2aac838"
 
 
-def test_complete_intent_recovers_when_canonical_preimage_hash_is_not_semantic_fingerprint(
+def test_complete_noop_intent_recovers_when_legacy_semantic_preimage_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Given: a production-written state and a terminal receipt after the desired write.
@@ -79,7 +79,12 @@ def test_complete_intent_recovers_when_canonical_preimage_hash_is_not_semantic_f
     monkeypatch.setattr("dokploy_wizard.state.upgrade.atomic_json", original_atomic_json)
     intent_path = tmp_path / "state-upgrade-intent-v1.json"
     intent = StateUpgradeIntent.from_dict(read_json(intent_path))
-    terminal_intent = replace(intent, status="complete", completed_writes=WRITE_ORDER)
+    terminal_intent = replace(
+        intent,
+        status="complete",
+        pre_hashes=intent.post_hashes,
+        completed_writes=WRITE_ORDER,
+    )
     atomic_json(intent_path, terminal_intent.to_dict())
     assert intent.pre_hashes["desired"] != legacy_fingerprint
     assert AppliedStateCheckpoint.from_dict(
@@ -105,7 +110,7 @@ def test_complete_intent_recovers_when_canonical_preimage_hash_is_not_semantic_f
     assert applied.desired_state_fingerprint == expected_fingerprint
 
 
-def test_complete_intent_rejects_wrong_canonical_preimage_fingerprint(
+def test_complete_noop_intent_rejects_wrong_legacy_semantic_preimage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     raw = parse_env_file(_FIXTURE)
@@ -161,11 +166,12 @@ def test_complete_intent_rejects_wrong_canonical_preimage_fingerprint(
     intent_path = tmp_path / "state-upgrade-intent-v1.json"
     intent = StateUpgradeIntent.from_dict(read_json(intent_path))
     applied_hash = file_hash(paths["applied"])
+    current_hashes = {**intent.post_hashes, "applied": applied_hash}
     terminal_intent = replace(
         intent,
         status="complete",
-        pre_hashes={**intent.pre_hashes, "applied": applied_hash},
-        post_hashes={**intent.post_hashes, "applied": applied_hash},
+        pre_hashes=current_hashes,
+        post_hashes=current_hashes,
         completed_writes=WRITE_ORDER,
     )
     atomic_json(intent_path, terminal_intent.to_dict())
