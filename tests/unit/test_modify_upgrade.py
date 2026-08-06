@@ -64,7 +64,7 @@ def test_task18_rejects_incomplete_legacy_runtime_binding_upgrade() -> None:
     )
 
     # When / Then
-    with pytest.raises(StateValidationError, match="target is incomplete"):
+    with pytest.raises(StateValidationError, match="checkpoint requires only Task 18 phases"):
         apply_modify_upgrade_intent(
             plan,
             ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC,
