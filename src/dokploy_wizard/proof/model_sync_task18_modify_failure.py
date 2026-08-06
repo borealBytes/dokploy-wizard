@@ -30,6 +30,12 @@ Task18ModifyFailureCategory = Literal[
     "bootstrap",
     "cloudflare",
     "coder",
+    "coder_active_plan",
+    "coder_bootstrap",
+    "coder_http",
+    "coder_runtime_images",
+    "coder_template_migration",
+    "coder_workspace_secrets",
     "headscale",
     "lifecycle_drift",
     "lifecycle_lock",
@@ -134,6 +140,29 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
     if isinstance(error, HeadscaleError):
         return "headscale"
     if isinstance(error, CoderError):
+        message = str(error)
+        if message.startswith("Coder template migration failed closed."):
+            return "coder_template_migration"
+        if message.startswith(("Coder runtime image ", "Unable to persist Coder runtime image ")):
+            return "coder_runtime_images"
+        if message.startswith("Coder workspace secret "):
+            return "coder_workspace_secrets"
+        if message.startswith(
+            (
+                "Coder service image ",
+                "Coder service name ",
+                "Coder hostnames ",
+                "Coder postgres inputs ",
+                "Coder data ",
+            )
+        ):
+            return "coder_active_plan"
+        if message.startswith(
+            ("Coder container ", "Coder bootstrap ", "Unable to determine Coder bootstrap ")
+        ):
+            return "coder_bootstrap"
+        if message.startswith("Coder request "):
+            return "coder_http"
         return "coder"
     if isinstance(error, LifecycleDriftError):
         return "lifecycle_drift"
