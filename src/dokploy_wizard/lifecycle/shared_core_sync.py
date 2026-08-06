@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -25,6 +27,7 @@ from dokploy_wizard.state.upgrade import (
     state_upgrade_paths,
     upgrade_state_contract,
 )
+from dokploy_wizard.state.upgrade_io import read_json
 
 
 @runtime_checkable
@@ -72,7 +75,24 @@ def reconcile_and_persist_sync_projection(
 ) -> SyncProjection:
     """Invoke production schedule reconciliation and persist its canonical projection."""
 
-    existing = load_state_dir(state_dir).applied_state
+    loaded = load_state_dir(state_dir)
+    existing = loaded.applied_state
+    paths = state_upgrade_paths(state_dir)
+    if existing is not None:
+        desired_payload = read_json(paths["desired"])
+        desired_fingerprint = sha256(
+            json.dumps(desired_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if existing.desired_state_fingerprint != desired_fingerprint:
+            upgrade_state_contract(
+                state_dir=state_dir,
+                owner_id=planned_sync_owner_id(state_dir),
+                paths=paths,
+                runtime_images=desired_state.runtime_images,
+                ownership_ledger=ownership_ledger,
+            )
+            loaded = load_state_dir(state_dir)
+    existing = loaded.applied_state
     metadata = _existing_metadata(ownership_ledger)
     outcome = backend.reconcile_sync_schedule(
         existing_applied=None if existing is None else existing.opencode_go_sync,
@@ -82,7 +102,7 @@ def reconcile_and_persist_sync_projection(
         upgrade_state_contract(
             state_dir=state_dir,
             owner_id=planned_sync_owner_id(state_dir),
-            paths=state_upgrade_paths(state_dir),
+            paths=paths,
             runtime_images=desired_state.runtime_images,
             ownership_ledger=ownership_ledger,
         )

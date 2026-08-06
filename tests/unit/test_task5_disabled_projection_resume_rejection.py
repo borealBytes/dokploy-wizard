@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from dokploy_wizard.dokploy.shared_core_sync_runtime import SyncScheduleOutcome
 from dokploy_wizard.lifecycle.changes import applicable_phases_for
 from dokploy_wizard.lifecycle.shared_core_sync import reconcile_and_persist_sync_projection
 from dokploy_wizard.state import (
@@ -21,9 +22,11 @@ from dokploy_wizard.state import (
 )
 from dokploy_wizard.state.shared_core_sync import (
     AppliedSyncState,
+    SyncDesiredState,
     SyncOwnershipMetadata,
 )
-from dokploy_wizard.state.upgrade import StateUpgradeError
+from dokploy_wizard.state.sync_schema import ScheduleSpec
+from dokploy_wizard.state.upgrade import StateUpgradeError, planned_sync_owner_id
 from dokploy_wizard.state.upgrade_io import atomic_json, read_json
 
 _FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "nextcloud.env"
@@ -40,6 +43,21 @@ class DisabledSyncBackend:
     ) -> None:
         assert existing_applied is None
         assert existing_metadata is None
+
+
+@dataclass(frozen=True, slots=True)
+class EnabledSyncBackend:
+    outcome: SyncScheduleOutcome
+
+    def reconcile_sync_schedule(
+        self,
+        *,
+        existing_applied: AppliedSyncState | None,
+        existing_metadata: SyncOwnershipMetadata | None,
+    ) -> SyncScheduleOutcome:
+        assert existing_applied is None
+        assert existing_metadata is None
+        return self.outcome
 
 
 def _interrupted_runtime_projection(
@@ -209,3 +227,41 @@ def test_runtime_complete_intent_recovers_stale_applied_checkpoint(
         json.dumps(current_desired, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     assert (tmp_path / "raw-input.json").read_bytes() == protected
+
+
+def test_enabled_sync_projection_recovers_terminal_runtime_state_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desired, ledger = _interrupted_runtime_projection(tmp_path, monkeypatch)
+    intent = _intent_payload(tmp_path)
+    intent["status"] = "complete"
+    intent["completed_writes"] = ["owner", "desired", "applied", "ledger"]
+    (tmp_path / _INTENT).write_text(json.dumps(intent), encoding="utf-8")
+    owner_id = planned_sync_owner_id(tmp_path)
+    sync_desired = SyncDesiredState.from_schedule(
+        owner_id=owner_id,
+        config_sha256="b" * 64,
+        litellm_image_digest=desired.runtime_images.litellm,
+        metadata_volume="wizard-shared-litellm-data",
+        schedule_spec=ScheduleSpec.for_shared_core(
+            stack_name=desired.stack_name,
+            compose_id="compose-1",
+            owner_id=owner_id,
+        ),
+    )
+
+    result = reconcile_and_persist_sync_projection(
+        state_dir=tmp_path,
+        backend=EnabledSyncBackend(
+            SyncScheduleOutcome(
+                sync_desired,
+                AppliedSyncState.initial(sync_desired),
+                None,
+            )
+        ),
+        desired_state=desired,
+        ownership_ledger=ledger,
+    )
+
+    assert result.desired_state.opencode_go_sync == sync_desired
