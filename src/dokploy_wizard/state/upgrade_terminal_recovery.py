@@ -106,7 +106,8 @@ def recover_terminal_runtime_projection(
         and applied.desired_state_fingerprint in preimage_fingerprints
     )
     legacy_noop_authorized = (
-        all(intent.pre_hashes[key] == intent.post_hashes[key] for key in ALL_KEYS)
+        intent.pre_hashes["desired"] == intent.post_hashes["desired"]
+        and intent.pre_hashes["applied"] == intent.post_hashes["applied"]
         and legacy_receipt_fingerprint is not None
         and applied.desired_state_fingerprint == legacy_receipt_fingerprint
     )

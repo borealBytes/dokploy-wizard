@@ -30,6 +30,11 @@ _FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "nextcloud.env"
 _OWNER = "3b8e1e83-0e57-4d66-a65e-1edbf2aac838"
 
 
+def _different_hash(value: str) -> str:
+    candidate = "0" * 64
+    return candidate if value != candidate else "1" * 64
+
+
 def test_complete_noop_intent_recovers_when_legacy_semantic_preimage_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -82,7 +87,11 @@ def test_complete_noop_intent_recovers_when_legacy_semantic_preimage_matches(
     terminal_intent = replace(
         intent,
         status="complete",
-        pre_hashes=intent.post_hashes,
+        pre_hashes={
+            **intent.post_hashes,
+            "owner": _different_hash(intent.post_hashes["owner"]),
+            "ledger": _different_hash(intent.post_hashes["ledger"]),
+        },
         completed_writes=WRITE_ORDER,
     )
     atomic_json(intent_path, terminal_intent.to_dict())
