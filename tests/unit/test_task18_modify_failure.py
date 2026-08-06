@@ -80,6 +80,27 @@ from dokploy_wizard.tailscale import TailscaleError
             "state_validation_modify_unmodeled",
         ),
         (
+            StateValidationError(
+                "Requested modify operation changes values that are not modeled. "
+                "Category: inactive_dokploy_admin."
+            ),
+            "state_validation_modify_inactive_dokploy_admin",
+        ),
+        (
+            StateValidationError(
+                "Requested modify operation changes values that are not modeled. "
+                "Category: disabled_tailscale."
+            ),
+            "state_validation_modify_disabled_tailscale",
+        ),
+        (
+            StateValidationError(
+                "Requested modify operation changes values that are not modeled. "
+                "Category: inactive_pack."
+            ),
+            "state_validation_modify_inactive_pack",
+        ),
+        (
             StateValidationError("Unsupported mutable env keys for Task 11."),
             "state_validation_modify_unsupported_keys",
         ),
