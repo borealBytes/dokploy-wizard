@@ -187,6 +187,12 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
         "intent_owner_matches": intent.owner_id == owner,
         "intent_status": intent.status,
         "intent_completed_write_count": len(intent.completed_writes),
+        "intent_desired_changed": (
+            intent.pre_hashes["desired"] != intent.post_hashes["desired"]
+        ),
+        "intent_applied_unchanged": (
+            intent.pre_hashes["applied"] == intent.post_hashes["applied"]
+        ),
         "intent_hash_map_matches_current_state": all(
             file_hash(current_paths[key]) == expected_hashes[key] for key in ALL_KEYS
         ),
