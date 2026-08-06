@@ -41,6 +41,13 @@ Task18ModifyFailureCategory = Literal[
     "seaweedfs",
     "shared_core",
     "state_validation",
+    "state_validation_checkpoint",
+    "state_validation_docker_auth",
+    "state_validation_dokploy_auth",
+    "state_validation_lifecycle_binding",
+    "state_validation_modify_request",
+    "state_validation_state_absent",
+    "state_validation_task18_upgrade_intent",
     "state_upgrade",
     "state_upgrade_applied_fingerprint_mismatch",
     "state_upgrade_cas_mismatch",
@@ -78,6 +85,29 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
     if isinstance(error, OSError):
         return "os_error"
     if isinstance(error, StateValidationError):
+        message = str(error)
+        if message.startswith("Task 18 Host A model-sync upgrade requires "):
+            return "state_validation_task18_upgrade_intent"
+        if message.startswith(("Dokploy mutation auth ", "Task 1 Dokploy auth ")):
+            return "state_validation_dokploy_auth"
+        if message.startswith(("Docker Hub authentication ", "Docker Hub login ")):
+            return "state_validation_docker_auth"
+        if message.startswith("Applied checkpoint "):
+            return "state_validation_checkpoint"
+        if message.startswith(
+            ("Lifecycle stack ", "Persisted desired state does not match the locked ")
+        ):
+            return "state_validation_lifecycle_binding"
+        if message.startswith(
+            (
+                "Requested modify operation ",
+                "Unsupported mutable env keys ",
+                "STACK_NAME changes ",
+            )
+        ):
+            return "state_validation_modify_request"
+        if message.startswith("Cannot modify before "):
+            return "state_validation_state_absent"
         return "state_validation"
     if isinstance(error, PreflightError):
         return "preflight"

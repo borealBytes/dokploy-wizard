@@ -37,6 +37,36 @@ from dokploy_wizard.tailscale import TailscaleError
     (
         (OSError("fixture"), "os_error"),
         (StateValidationError("fixture"), "state_validation"),
+        (
+            StateValidationError(
+                "Task 18 Host A model-sync upgrade requires an unchanged completed target."
+            ),
+            "state_validation_task18_upgrade_intent",
+        ),
+        (
+            StateValidationError("Dokploy mutation auth qualification requires a usable key."),
+            "state_validation_dokploy_auth",
+        ),
+        (
+            StateValidationError("Docker Hub login failed."),
+            "state_validation_docker_auth",
+        ),
+        (
+            StateValidationError("Applied checkpoint does not match the lifecycle phase order."),
+            "state_validation_checkpoint",
+        ),
+        (
+            StateValidationError("Lifecycle stack binding schema is invalid."),
+            "state_validation_lifecycle_binding",
+        ),
+        (
+            StateValidationError("Requested modify operation changes unsupported values."),
+            "state_validation_modify_request",
+        ),
+        (
+            StateValidationError("Cannot modify before state exists."),
+            "state_validation_state_absent",
+        ),
         (PreflightError("fixture"), "preflight"),
         (DokployBootstrapError("fixture"), "bootstrap"),
         (CloudflareError("fixture"), "cloudflare"),
