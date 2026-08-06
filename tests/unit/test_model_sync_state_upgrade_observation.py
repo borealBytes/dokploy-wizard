@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
@@ -20,7 +21,9 @@ _OWNER = "3b8e1e83-0e57-4d66-a65e-1edbf2aac838"
 
 def _write_authorized_interruption(state_dir: Path) -> None:
     paths = state_upgrade_paths(state_dir)
-    desired = resolve_desired_state(parse_env_file(_FIXTURE)).to_dict()
+    raw = parse_env_file(_FIXTURE)
+    desired = resolve_desired_state(raw).to_dict()
+    paths["raw_input"].write_text(json.dumps(raw.to_dict()), encoding="utf-8")
     desired_bytes = json.dumps(desired, sort_keys=True, separators=(",", ":")).encode()
     (paths["desired"]).write_bytes(desired_bytes)
     (paths["applied"]).write_text(
@@ -36,6 +39,7 @@ def _write_authorized_interruption(state_dir: Path) -> None:
     owner = state_dir / "shared-core-sync-owner.json"
     owner.write_text(json.dumps({"owner_id": _OWNER, "schema_version": 1}), encoding="utf-8")
     post = {key: "MISSING" for key in ALL_KEYS}
+    post["raw_input"] = file_hash(paths["raw_input"])
     post["owner"] = file_hash(owner)
     post["desired"] = file_hash(paths["desired"])
     post["applied"] = file_hash(paths["applied"])
@@ -68,6 +72,37 @@ def test_observation_authorizes_missing_optional_documents_when_intent_binds_mis
     assert observation["applied_present"] is True
     assert observation["intent_hash_map_matches_current_state"] is True
     assert observation["intent_authorizes_desired_applied_mixed_state"] is True
+    assert observation["applied_matches_raw_input_desired"] is False
+
+
+def test_observation_reports_raw_input_preimage_fingerprint_match(tmp_path: Path) -> None:
+    _write_authorized_interruption(tmp_path)
+    paths = state_upgrade_paths(tmp_path)
+    desired = resolve_desired_state(parse_env_file(_FIXTURE))
+    paths["applied"].write_text(
+        json.dumps(
+            AppliedStateCheckpoint(
+                format_version=desired.format_version,
+                desired_state_fingerprint=desired.fingerprint(),
+                completed_steps=(),
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+    intent_path = tmp_path / "state-upgrade-intent-v1.json"
+    intent = StateUpgradeIntent.from_dict(json.loads(intent_path.read_text(encoding="utf-8")))
+    applied_hash = file_hash(paths["applied"])
+    updated_intent = replace(
+        intent,
+        pre_hashes={**intent.pre_hashes, "applied": applied_hash},
+        post_hashes={**intent.post_hashes, "applied": applied_hash},
+    )
+    intent_path.write_text(json.dumps(updated_intent.to_dict()), encoding="utf-8")
+
+    observation = observe_state_upgrade_authority(tmp_path)
+
+    assert observation["applied_matches_raw_input_desired"] is True
+    assert "desired_state_fingerprint" not in observation
 
 
 @pytest.mark.parametrize(
