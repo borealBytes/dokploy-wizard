@@ -64,7 +64,47 @@ def test_task18_rejects_incomplete_legacy_runtime_binding_upgrade() -> None:
     )
 
     # When / Then
-    with pytest.raises(StateValidationError):
+    with pytest.raises(StateValidationError, match="target is incomplete"):
+        apply_modify_upgrade_intent(
+            plan,
+            ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC,
+            applied,
+        )
+
+
+@pytest.mark.parametrize(
+    ("raw_equivalent", "desired_equivalent", "message"),
+    (
+        (False, True, "raw input changed"),
+        (True, False, "desired state changed"),
+    ),
+)
+def test_task18_rejects_changed_target(
+    raw_equivalent: bool,
+    desired_equivalent: bool,
+    message: str,
+) -> None:
+    # Given
+    applicable_phases = ("preflight", "shared_core", "coder")
+    plan = LifecyclePlan(
+        mode="noop",
+        reasons=(),
+        applicable_phases=applicable_phases,
+        phases_to_run=(),
+        preserved_phases=applicable_phases,
+        initial_completed_steps=applicable_phases,
+        start_phase=None,
+        raw_equivalent=raw_equivalent,
+        desired_equivalent=desired_equivalent,
+    )
+    applied = AppliedStateCheckpoint(
+        format_version=1,
+        desired_state_fingerprint="f" * 64,
+        completed_steps=applicable_phases,
+    )
+
+    # When / Then
+    with pytest.raises(StateValidationError, match=message):
         apply_modify_upgrade_intent(
             plan,
             ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC,

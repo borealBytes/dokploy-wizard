@@ -38,10 +38,20 @@ from dokploy_wizard.tailscale import TailscaleError
         (OSError("fixture"), "os_error"),
         (StateValidationError("fixture"), "state_validation"),
         (
-            StateValidationError(
-                "Task 18 Host A model-sync upgrade requires an unchanged completed target."
-            ),
-            "state_validation_task18_upgrade_intent",
+            StateValidationError("Task 18 Host A model-sync upgrade target is incomplete."),
+            "state_validation_task18_target_incomplete",
+        ),
+        (
+            StateValidationError("Task 18 Host A model-sync upgrade raw input changed."),
+            "state_validation_task18_raw_changed",
+        ),
+        (
+            StateValidationError("Task 18 Host A model-sync upgrade desired state changed."),
+            "state_validation_task18_desired_changed",
+        ),
+        (
+            StateValidationError("Task 18 Host A model-sync upgrade phases are unavailable."),
+            "state_validation_task18_phases_unavailable",
         ),
         (
             StateValidationError("Dokploy mutation auth qualification requires a usable key."),

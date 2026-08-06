@@ -29,16 +29,22 @@ def apply_modify_upgrade_intent(
                 and applied.runtime_images is None
                 and applied.completed_steps == plan.applicable_phases
             )
-            if not target_is_complete or not plan.raw_equivalent or not plan.desired_equivalent:
+            if not target_is_complete:
                 raise StateValidationError(
-                    "Task 18 Host A model-sync upgrade requires an unchanged completed target."
+                    "Task 18 Host A model-sync upgrade target is incomplete."
+                )
+            if not plan.raw_equivalent:
+                raise StateValidationError("Task 18 Host A model-sync upgrade raw input changed.")
+            if not plan.desired_equivalent:
+                raise StateValidationError(
+                    "Task 18 Host A model-sync upgrade desired state changed."
                 )
             phases_to_run = tuple(
                 phase for phase in plan.applicable_phases if phase in _TASK18_PHASES
             )
             if phases_to_run != _TASK18_PHASES:
                 raise StateValidationError(
-                    "Task 18 Host A model-sync upgrade requires Shared Core and Coder phases."
+                    "Task 18 Host A model-sync upgrade phases are unavailable."
                 )
             preserved_phases = tuple(
                 phase for phase in plan.preserved_phases if phase not in _TASK18_PHASES
