@@ -1027,6 +1027,14 @@ def _rehydrate_inspection_redactions(
         else value
         for key, value in existing.values.items()
     }
+    values = {
+        **values,
+        **{
+            key: requested.values[key]
+            for key in task18_credentials
+            if key in requested.values
+        },
+    }
     return RawEnvInput(format_version=existing.format_version, values=values)
 
 

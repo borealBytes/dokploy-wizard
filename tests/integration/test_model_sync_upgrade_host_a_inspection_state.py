@@ -126,7 +126,11 @@ def test_task18_rehydration_preserves_nonsecret_drift() -> None:
     )
     requested = RawEnvInput(
         format_version=1,
-        values={"DOKPLOY_ADMIN_PASSWORD": "current-password", "ROOT_DOMAIN": "new.test"},
+        values={
+            "DOKPLOY_ADMIN_EMAIL": "operator@example.test",
+            "DOKPLOY_ADMIN_PASSWORD": "current-password",
+            "ROOT_DOMAIN": "new.test",
+        },
     )
 
     # When
@@ -134,6 +138,7 @@ def test_task18_rehydration_preserves_nonsecret_drift() -> None:
 
     # Then
     assert rehydrated.values == {
+        "DOKPLOY_ADMIN_EMAIL": "operator@example.test",
         "DOKPLOY_ADMIN_PASSWORD": "current-password",
         "ROOT_DOMAIN": "old.test",
     }
