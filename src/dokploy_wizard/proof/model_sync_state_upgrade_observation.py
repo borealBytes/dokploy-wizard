@@ -10,6 +10,7 @@ from pathlib import Path
 from dokploy_wizard.proof.model_sync_task1_context import (
     Task1ProofContextError,
     activate_task1_proof_context,
+    deactivate_task1_proof_context,
     validate_task1_proof_context_argument,
 )
 from dokploy_wizard.proof.model_sync_task1_context_schema import PROOF_CONTROL_KEYS
@@ -51,6 +52,7 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
     raw_input_fingerprint: str | None = None
     receipt_raw_fingerprint: str | None = None
     legacy_receipt_fingerprint: str | None = None
+    context_free_legacy_fingerprint: str | None = None
     raw_input: RawEnvInput | None = None
     raw_input_desired_reconstructable = False
     receipt_raw_desired_reconstructable = False
@@ -89,6 +91,14 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
                 desired,
                 applied,
             )
+            with deactivate_task1_proof_context():
+                context_free_legacy_fingerprint = (
+                    legacy_receipt_without_runtime_images_fingerprint(
+                        raw_input,
+                        desired,
+                        applied,
+                    )
+                )
     desired_fingerprint = hashlib.sha256(
         json.dumps(desired_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -124,6 +134,12 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
             "applied_matches_legacy_receipt_without_runtime_images": (
                 applied.desired_state_fingerprint == legacy_receipt_fingerprint
             ),
+            "context_free_legacy_receipt_candidate_available": (
+                context_free_legacy_fingerprint is not None
+            ),
+            "applied_matches_context_free_legacy_receipt": (
+                applied.desired_state_fingerprint == context_free_legacy_fingerprint
+            ),
             "raw_input_desired_reconstructable": raw_input_desired_reconstructable,
             "raw_input_reconstruction_failure": raw_input_reconstruction_failure,
             "receipt_raw_desired_reconstructable": receipt_raw_desired_reconstructable,
@@ -154,6 +170,12 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
         == receipt_raw_fingerprint,
         "applied_matches_legacy_receipt_without_runtime_images": (
             applied.desired_state_fingerprint == legacy_receipt_fingerprint
+        ),
+        "context_free_legacy_receipt_candidate_available": (
+            context_free_legacy_fingerprint is not None
+        ),
+        "applied_matches_context_free_legacy_receipt": (
+            applied.desired_state_fingerprint == context_free_legacy_fingerprint
         ),
         "raw_input_desired_reconstructable": raw_input_desired_reconstructable,
         "raw_input_reconstruction_failure": raw_input_reconstruction_failure,

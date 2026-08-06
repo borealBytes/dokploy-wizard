@@ -43,6 +43,8 @@ def test_observation_rejects_malformed_raw_input_without_unbound_local(tmp_path:
     assert observation["receipt_raw_desired_reconstructable"] is False
     assert observation["applied_matches_receipt_raw_desired"] is False
     assert observation["applied_matches_legacy_receipt_without_runtime_images"] is False
+    assert observation["context_free_legacy_receipt_candidate_available"] is False
+    assert observation["applied_matches_context_free_legacy_receipt"] is False
 
 
 def test_observation_matches_combined_legacy_receipt_candidate(tmp_path: Path) -> None:
@@ -107,3 +109,5 @@ def test_observation_matches_combined_legacy_receipt_candidate(tmp_path: Path) -
     assert observation["applied_matches_current_without_runtime_images"] is False
     assert observation["applied_matches_receipt_raw_desired"] is False
     assert observation["applied_matches_legacy_receipt_without_runtime_images"] is True
+    assert observation["context_free_legacy_receipt_candidate_available"] is True
+    assert observation["applied_matches_context_free_legacy_receipt"] is True
