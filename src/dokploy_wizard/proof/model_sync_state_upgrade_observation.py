@@ -11,7 +11,12 @@ from dokploy_wizard.proof.model_sync_task1_context import (
     activate_task1_proof_context,
     validate_task1_proof_context_argument,
 )
-from dokploy_wizard.state import AppliedStateCheckpoint, parse_env_file
+from dokploy_wizard.state import (
+    AppliedStateCheckpoint,
+    RawEnvInput,
+    parse_env_file,
+    resolve_desired_state,
+)
 from dokploy_wizard.state.store import parse_desired_state_payload
 from dokploy_wizard.state.upgrade import state_upgrade_paths
 from dokploy_wizard.state.upgrade_intent import ALL_KEYS, StateUpgradeIntent
@@ -37,6 +42,10 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
     desired_payload = read_json(paths["desired"])
     applied = AppliedStateCheckpoint.from_dict(read_json(paths["applied"]))
     parse_desired_state_payload(desired_payload)
+    raw_input_fingerprint = None
+    if paths["raw_input"].exists():
+        raw_input = RawEnvInput.from_dict(read_json(paths["raw_input"]))
+        raw_input_fingerprint = resolve_desired_state(raw_input).fingerprint()
     desired_fingerprint = hashlib.sha256(
         json.dumps(desired_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -51,6 +60,8 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
             "applied_schema_valid": True,
             "applied_matches_current_desired": applied.desired_state_fingerprint
             == desired_fingerprint,
+            "applied_matches_raw_input_desired": applied.desired_state_fingerprint
+            == raw_input_fingerprint,
             "intent_present": intent is not None,
             "owner_present": owner is not None,
         }
@@ -67,6 +78,8 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
         "applied_schema_valid": True,
         "applied_matches_current_desired": applied.desired_state_fingerprint
         == desired_fingerprint,
+        "applied_matches_raw_input_desired": applied.desired_state_fingerprint
+        == raw_input_fingerprint,
         "intent_present": True,
         "intent_schema_valid": True,
         "owner_present": True,
