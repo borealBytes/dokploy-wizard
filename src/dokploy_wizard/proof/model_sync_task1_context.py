@@ -39,6 +39,7 @@ __all__ = (
     "Task1ProofContextV1",
     "activate_task1_proof_context",
     "active_task1_proof_context",
+    "deactivate_task1_proof_context",
     "derive_task1_proof_context",
     "load_task1_proof_context",
     "project_task1_desired_state",
@@ -172,6 +173,17 @@ def activate_task1_proof_context(context: Task1ProofContextV1 | None) -> Iterato
         yield
         return
     token = _CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _CONTEXT.reset(token)
+
+
+@contextmanager
+def deactivate_task1_proof_context() -> Iterator[None]:
+    """Temporarily resolve proof-derived state without ambient Task 1 context."""
+
+    token = _CONTEXT.set(None)
     try:
         yield
     finally:
