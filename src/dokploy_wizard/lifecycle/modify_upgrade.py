@@ -24,14 +24,22 @@ def apply_modify_upgrade_intent(
         case ModifyUpgradeIntent.OPERATOR:
             return plan
         case ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC:
-            target_is_complete = plan.mode == "noop" or (
-                plan.mode == "resume"
-                and applied.runtime_images is None
-                and applied.completed_steps == plan.applicable_phases
-            )
-            if not target_is_complete:
+            if plan.mode == "resume":
+                if applied.completed_steps != plan.applicable_phases:
+                    if plan.phases_to_run == _TASK18_PHASES:
+                        raise StateValidationError(
+                            "Task 18 Host A model-sync checkpoint requires only Task 18 phases."
+                        )
+                    raise StateValidationError(
+                        "Task 18 Host A model-sync checkpoint requires additional phases."
+                    )
+                if applied.runtime_images is not None:
+                    raise StateValidationError(
+                        "Task 18 Host A model-sync runtime is already bound."
+                    )
+            elif plan.mode != "noop":
                 raise StateValidationError(
-                    "Task 18 Host A model-sync upgrade target is incomplete."
+                    "Task 18 Host A model-sync lifecycle mode is unsupported."
                 )
             if not plan.raw_equivalent:
                 raise StateValidationError("Task 18 Host A model-sync upgrade raw input changed.")

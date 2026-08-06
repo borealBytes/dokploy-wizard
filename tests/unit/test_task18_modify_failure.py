@@ -38,8 +38,24 @@ from dokploy_wizard.tailscale import TailscaleError
         (OSError("fixture"), "os_error"),
         (StateValidationError("fixture"), "state_validation"),
         (
-            StateValidationError("Task 18 Host A model-sync upgrade target is incomplete."),
-            "state_validation_task18_target_incomplete",
+            StateValidationError(
+                "Task 18 Host A model-sync checkpoint requires only Task 18 phases."
+            ),
+            "state_validation_task18_resume_exact",
+        ),
+        (
+            StateValidationError(
+                "Task 18 Host A model-sync checkpoint requires additional phases."
+            ),
+            "state_validation_task18_resume_additional",
+        ),
+        (
+            StateValidationError("Task 18 Host A model-sync runtime is already bound."),
+            "state_validation_task18_runtime_bound",
+        ),
+        (
+            StateValidationError("Task 18 Host A model-sync lifecycle mode is unsupported."),
+            "state_validation_task18_mode_unsupported",
         ),
         (
             StateValidationError("Task 18 Host A model-sync upgrade raw input changed."),
