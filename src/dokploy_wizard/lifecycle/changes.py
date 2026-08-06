@@ -551,9 +551,19 @@ def classify_modify_request(
     phases_to_run.update(_removed_pack_phases(existing_desired, requested_desired))
 
     if not phases_to_run and not tailscale_disable_only:
+        if effective_changed_keys <= _SUPPORTED_DOKPLOY_ADMIN_KEYS:
+            unmodeled_category = "inactive_dokploy_admin"
+        elif effective_changed_keys <= _SUPPORTED_TAILSCALE_KEYS:
+            unmodeled_category = "disabled_tailscale"
+        elif effective_changed_keys <= (
+            _SUPPORTED_MUTABLE_PACK_ENV_KEYS | _SUPPORTED_MUTABLE_PACK_RESOURCE_KEYS
+        ):
+            unmodeled_category = "inactive_pack"
+        else:
+            unmodeled_category = "other"
         raise StateValidationError(
             "Requested modify operation changes values that are not modeled as supported "
-            "runtime mutations in Task 11."
+            f"runtime mutations in Task 11. Category: {unmodeled_category}."
         )
 
     applicable_phases = applicable_phases_for(requested_desired)

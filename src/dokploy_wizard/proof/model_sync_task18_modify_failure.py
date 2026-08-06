@@ -52,6 +52,9 @@ Task18ModifyFailureCategory = Literal[
     "state_validation_dokploy_auth",
     "state_validation_lifecycle_binding",
     "state_validation_modify_stack_name",
+    "state_validation_modify_inactive_dokploy_admin",
+    "state_validation_modify_inactive_pack",
+    "state_validation_modify_disabled_tailscale",
     "state_validation_modify_unmodeled",
     "state_validation_modify_unsupported_keys",
     "state_validation_state_absent",
@@ -119,6 +122,12 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
         ):
             return "state_validation_lifecycle_binding"
         if message.startswith("Requested modify operation "):
+            if message.endswith("Category: inactive_dokploy_admin."):
+                return "state_validation_modify_inactive_dokploy_admin"
+            if message.endswith("Category: disabled_tailscale."):
+                return "state_validation_modify_disabled_tailscale"
+            if message.endswith("Category: inactive_pack."):
+                return "state_validation_modify_inactive_pack"
             return "state_validation_modify_unmodeled"
         if message.startswith("Unsupported mutable env keys "):
             return "state_validation_modify_unsupported_keys"
