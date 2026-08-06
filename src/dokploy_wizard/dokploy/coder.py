@@ -1113,8 +1113,9 @@ def preflight_coder_template_migration(hostname: str, email: str, password: str)
     try:
         execute_template_migration_preflight(hostname, session_token)
     except TemplateMigrationExecutionError as error:
-        detail = "" if error.code is None else f" {error.code}"
-        raise CoderError(f"Coder template migration preflight failed closed.{detail}") from None
+        if error.code is not None:
+            raise
+        raise CoderError("Coder template migration preflight failed closed.") from None
 
 
 def _coder_request(
