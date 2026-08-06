@@ -69,17 +69,6 @@ def legacy_receipt_without_runtime_images_fingerprint(
     legacy_payload.pop("runtime_images", None)
     if restores_disabled_token:
         legacy_payload["openclaw_gateway_token"] = legacy_token
-    current_legacy_payload = desired.to_dict()
-    current_legacy_payload.pop("runtime_images", None)
-    current_shared_core = current_legacy_payload.get("shared_core")
-    if applied.opencode_go_sync is None and isinstance(current_shared_core, dict):
-        current_shared_core = dict(current_shared_core)
-        current_shared_core.pop("opencode_go_sync", None)
-        current_legacy_payload["shared_core"] = current_shared_core
-    if restores_disabled_token:
-        current_legacy_payload["openclaw_gateway_token"] = legacy_token
-    if legacy_payload != current_legacy_payload:
-        return None
     return sha256(
         json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
