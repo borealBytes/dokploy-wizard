@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 import dokploy_wizard.cli as cli
+import dokploy_wizard.dokploy.coder as coder_module
 from dokploy_wizard import proof
+from dokploy_wizard.dokploy.coder_template_migration_runtime import (
+    TemplateMigrationExecutionError,
+)
 from dokploy_wizard.lifecycle import LifecyclePlan, applicable_phases_for
 from dokploy_wizard.packs.coder import CoderError, ShellCoderBackend
 from dokploy_wizard.state import (
@@ -20,6 +24,27 @@ from dokploy_wizard.state import (
 )
 
 _BLOCKED_CODE = "CODER_RETIRED_WORKSPACE_NOT_STOPPED"
+
+
+def test_production_preflight_preserves_typed_workspace_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **_kwargs: "session-token")
+
+    def block_preflight(_hostname: str, _session_token: str) -> None:
+        raise TemplateMigrationExecutionError("blocked migration", code=_BLOCKED_CODE)
+
+    monkeypatch.setattr(coder_module, "execute_template_migration_preflight", block_preflight)
+
+    # When / Then
+    with pytest.raises(TemplateMigrationExecutionError) as raised:
+        coder_module.preflight_coder_template_migration(
+            "coder.example.test",
+            "operator@example.test",
+            "fixture-password",
+        )
+    assert raised.value.code == _BLOCKED_CODE
 
 
 class _BlockingCoderBackend(ShellCoderBackend):
