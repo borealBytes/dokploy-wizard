@@ -52,7 +52,6 @@ Task18ModifyFailureCategory = Literal[
     "state_validation_task18_phases_unavailable",
     "state_validation_task18_raw_changed",
     "state_validation_task18_resume_missing_required",
-    "state_validation_task18_runtime_bound",
     "state_upgrade",
     "state_upgrade_applied_fingerprint_mismatch",
     "state_upgrade_cas_mismatch",
@@ -93,8 +92,6 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
         message = str(error)
         if message == "Task 18 Host A model-sync resume is missing required phases.":
             return "state_validation_task18_resume_missing_required"
-        if message == "Task 18 Host A model-sync runtime is already bound.":
-            return "state_validation_task18_runtime_bound"
         if message == "Task 18 Host A model-sync lifecycle mode is unsupported.":
             return "state_validation_task18_mode_unsupported"
         if message == "Task 18 Host A model-sync upgrade raw input changed.":

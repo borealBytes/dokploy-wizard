@@ -8,6 +8,7 @@ from dokploy_wizard.lifecycle.modify_upgrade import (
     apply_modify_upgrade_intent,
 )
 from dokploy_wizard.state import AppliedStateCheckpoint, StateValidationError
+from dokploy_wizard.state.runtime_images import resolve_runtime_images
 
 
 def test_task18_accepts_completed_legacy_runtime_binding_upgrade() -> None:
@@ -43,7 +44,7 @@ def test_task18_accepts_completed_legacy_runtime_binding_upgrade() -> None:
     assert upgraded.phases_to_run == ("shared_core", "coder")
 
 
-def test_task18_preserves_incomplete_resume_with_model_sync_phases() -> None:
+def test_task18_converts_exact_same_target_resume_with_model_sync_phases() -> None:
     # Given
     plan = LifecyclePlan(
         mode="resume",
@@ -60,7 +61,7 @@ def test_task18_preserves_incomplete_resume_with_model_sync_phases() -> None:
         format_version=1,
         desired_state_fingerprint="f" * 64,
         completed_steps=("preflight",),
-        runtime_images=None,
+        runtime_images=resolve_runtime_images({}),
     )
 
     # When
@@ -71,7 +72,8 @@ def test_task18_preserves_incomplete_resume_with_model_sync_phases() -> None:
     )
 
     # Then
-    assert upgraded is plan
+    assert upgraded.mode == "modify"
+    assert upgraded.phases_to_run == ("shared_core", "coder")
 
 
 def test_task18_rejects_incomplete_resume_without_all_model_sync_phases() -> None:
@@ -91,6 +93,7 @@ def test_task18_rejects_incomplete_resume_without_all_model_sync_phases() -> Non
         format_version=1,
         desired_state_fingerprint="f" * 64,
         completed_steps=("preflight", "shared_core"),
+        runtime_images=resolve_runtime_images({}),
     )
 
     # When / Then

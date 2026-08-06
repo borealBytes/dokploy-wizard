@@ -31,15 +31,27 @@ def apply_modify_upgrade_intent(
                     "Task 18 Host A model-sync upgrade desired state changed."
                 )
             if plan.mode == "resume":
-                if applied.completed_steps != plan.applicable_phases:
-                    if not all(phase in plan.phases_to_run for phase in _TASK18_PHASES):
-                        raise StateValidationError(
-                            "Task 18 Host A model-sync resume is missing required phases."
-                        )
-                    return plan
-                if applied.runtime_images is not None:
+                legacy_complete = (
+                    applied.runtime_images is None
+                    and applied.completed_steps == plan.applicable_phases
+                )
+                same_target_resume = (
+                    applied.runtime_images is not None
+                    and applied.completed_steps != plan.applicable_phases
+                    and plan.preserved_phases == applied.completed_steps
+                    and plan.initial_completed_steps == applied.completed_steps
+                    and plan.phases_to_run
+                    == plan.applicable_phases[len(applied.completed_steps) :]
+                )
+                if same_target_resume and not all(
+                    phase in plan.phases_to_run for phase in _TASK18_PHASES
+                ):
                     raise StateValidationError(
-                        "Task 18 Host A model-sync runtime is already bound."
+                        "Task 18 Host A model-sync resume is missing required phases."
+                    )
+                if not legacy_complete and not same_target_resume:
+                    raise StateValidationError(
+                        "Task 18 Host A model-sync lifecycle mode is unsupported."
                     )
             elif plan.mode != "noop":
                 raise StateValidationError(
