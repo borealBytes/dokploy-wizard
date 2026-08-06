@@ -1023,9 +1023,10 @@ def _rehydrate_inspection_redactions(
     task18_credentials = {"DOKPLOY_ADMIN_EMAIL", "DOKPLOY_ADMIN_PASSWORD"}
     values = {
         key: requested.values.get(key, value)
-        if value == _INSPECT_REDACTION_VALUE or key in task18_credentials
+        if value == _INSPECT_REDACTION_VALUE
         else value
         for key, value in existing.values.items()
+        if key not in task18_credentials
     }
     values = {
         **values,

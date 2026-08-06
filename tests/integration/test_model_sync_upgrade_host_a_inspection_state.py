@@ -143,3 +143,18 @@ def test_task18_rehydration_preserves_nonsecret_drift() -> None:
         "ROOT_DOMAIN": "old.test",
     }
     assert rehydrated != requested
+
+
+def test_task18_rehydration_removes_unrequested_admin_credential() -> None:
+    # Given
+    existing = RawEnvInput(
+        format_version=1,
+        values={"DOKPLOY_ADMIN_EMAIL": "legacy@example.test", "ROOT_DOMAIN": "old.test"},
+    )
+    requested = RawEnvInput(format_version=1, values={"ROOT_DOMAIN": "new.test"})
+
+    # When
+    rehydrated = cli._rehydrate_inspection_redactions(existing, requested)
+
+    # Then
+    assert rehydrated.values == {"ROOT_DOMAIN": "old.test"}
