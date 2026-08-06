@@ -56,7 +56,9 @@ def _interrupted_runtime_projection(
     legacy_fingerprint = sha256(
         json.dumps(legacy_desired, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    (tmp_path / "desired-state.json").write_text(json.dumps(legacy_desired), encoding="utf-8")
+    (tmp_path / "desired-state.json").write_text(
+        json.dumps(legacy_desired, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
     write_applied_checkpoint(
         tmp_path,
         AppliedStateCheckpoint(
@@ -177,3 +179,29 @@ def test_runtime_resume_rejects_hash_mismatched_target(
 
     with pytest.raises(StateUpgradeError, match="recovery bytes"):
         _resume(tmp_path, desired, ledger)
+
+
+def test_runtime_complete_intent_recovers_stale_applied_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desired, ledger = _interrupted_runtime_projection(tmp_path, monkeypatch)
+    intent = _intent_payload(tmp_path)
+    intent["status"] = "complete"
+    intent["completed_writes"] = ["owner", "desired", "applied", "ledger"]
+    (tmp_path / _INTENT).write_text(json.dumps(intent), encoding="utf-8")
+    protected = (tmp_path / "raw-input.json").read_bytes()
+
+    _resume(tmp_path, desired, ledger)
+
+    completed = _intent_payload(tmp_path)
+    applied = AppliedStateCheckpoint.from_dict(read_json(tmp_path / "applied-state.json"))
+    current_desired = read_json(tmp_path / "desired-state.json")
+    assert completed["status"] == "complete"
+    generation = completed["generation"]
+    assert isinstance(generation, int)
+    assert generation > 1
+    assert applied.desired_state_fingerprint == sha256(
+        json.dumps(current_desired, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert (tmp_path / "raw-input.json").read_bytes() == protected
