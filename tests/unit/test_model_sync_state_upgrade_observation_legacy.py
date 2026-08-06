@@ -9,6 +9,8 @@ from dokploy_wizard.proof.model_sync_state_upgrade_observation import (
     observe_state_upgrade_authority,
 )
 from dokploy_wizard.state import AppliedStateCheckpoint, parse_env_file, resolve_desired_state
+from dokploy_wizard.state.shared_core_sync import SyncDesiredState
+from dokploy_wizard.state.sync_schema import ScheduleSpec
 from dokploy_wizard.state.upgrade import state_upgrade_paths
 
 _FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "nextcloud.env"
@@ -46,12 +48,25 @@ def test_observation_rejects_malformed_raw_input_without_unbound_local(tmp_path:
 def test_observation_matches_combined_legacy_receipt_candidate(tmp_path: Path) -> None:
     raw = parse_env_file(_FIXTURE)
     desired = resolve_desired_state(raw)
+    owner_id = "3b8e1e83-0e57-4d66-a65e-1edbf2aac838"
+    sync_desired = SyncDesiredState.from_schedule(
+        owner_id=owner_id,
+        config_sha256="b" * 64,
+        litellm_image_digest=desired.runtime_images.litellm,
+        metadata_volume="wizard-shared-litellm-data",
+        schedule_spec=ScheduleSpec.for_shared_core(
+            stack_name=desired.stack_name,
+            compose_id="compose-1",
+            owner_id=owner_id,
+        ),
+    )
     desired = replace(
         desired,
         hostnames={
             **desired.hostnames,
             "litellm-admin": f"litellm-admin.{desired.root_domain}",
         },
+        opencode_go_sync=sync_desired,
     )
     legacy_token = "legacy-openclaw-token"
     receipt_raw = replace(
@@ -66,6 +81,7 @@ def test_observation_matches_combined_legacy_receipt_candidate(tmp_path: Path) -
     )
     legacy_desired = desired.to_dict()
     legacy_desired.pop("runtime_images")
+    legacy_desired["shared_core"].pop("opencode_go_sync")
     legacy_desired["openclaw_gateway_token"] = legacy_token
     legacy_fingerprint = sha256(
         json.dumps(legacy_desired, sort_keys=True, separators=(",", ":")).encode()
