@@ -44,6 +44,7 @@ Task18ModifyFailureCategory = Literal[
     "state_upgrade",
     "state_upgrade_applied_fingerprint_mismatch",
     "state_upgrade_cas_mismatch",
+    "state_upgrade_complete_binding_invalid",
     "state_upgrade_input_invalid",
     "state_upgrade_intent_invalid",
     "state_upgrade_owner_mismatch",
@@ -128,6 +129,8 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
             return "state_upgrade_input_invalid"
         if message == "State upgrade applied fingerprint mismatch.":
             return "state_upgrade_applied_fingerprint_mismatch"
+        if message == "State upgrade complete intent does not bind the stale applied image.":
+            return "state_upgrade_complete_binding_invalid"
         if message.startswith("State upgrade recovery "):
             return "state_upgrade_recovery_invalid"
         return "state_upgrade"

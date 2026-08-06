@@ -85,6 +85,12 @@ from dokploy_wizard.tailscale import TailscaleError
             StateUpgradeError("State upgrade recovery target does not match the intent."),
             "state_upgrade_recovery_invalid",
         ),
+        (
+            StateUpgradeError(
+                "State upgrade complete intent does not bind the stale applied image."
+            ),
+            "state_upgrade_complete_binding_invalid",
+        ),
         (LifecycleLockBusyError("fixture"), "lifecycle_lock"),
         (SystemExit(1), "system_exit"),
         (RuntimeError("fixture"), "unexpected"),
