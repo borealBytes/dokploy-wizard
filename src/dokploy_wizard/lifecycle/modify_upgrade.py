@@ -24,15 +24,19 @@ def apply_modify_upgrade_intent(
         case ModifyUpgradeIntent.OPERATOR:
             return plan
         case ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC:
+            if not plan.raw_equivalent:
+                raise StateValidationError("Task 18 Host A model-sync upgrade raw input changed.")
+            if not plan.desired_equivalent:
+                raise StateValidationError(
+                    "Task 18 Host A model-sync upgrade desired state changed."
+                )
             if plan.mode == "resume":
                 if applied.completed_steps != plan.applicable_phases:
-                    if plan.phases_to_run == _TASK18_PHASES:
+                    if not all(phase in plan.phases_to_run for phase in _TASK18_PHASES):
                         raise StateValidationError(
-                            "Task 18 Host A model-sync checkpoint requires only Task 18 phases."
+                            "Task 18 Host A model-sync resume is missing required phases."
                         )
-                    raise StateValidationError(
-                        "Task 18 Host A model-sync checkpoint requires additional phases."
-                    )
+                    return plan
                 if applied.runtime_images is not None:
                     raise StateValidationError(
                         "Task 18 Host A model-sync runtime is already bound."
@@ -40,12 +44,6 @@ def apply_modify_upgrade_intent(
             elif plan.mode != "noop":
                 raise StateValidationError(
                     "Task 18 Host A model-sync lifecycle mode is unsupported."
-                )
-            if not plan.raw_equivalent:
-                raise StateValidationError("Task 18 Host A model-sync upgrade raw input changed.")
-            if not plan.desired_equivalent:
-                raise StateValidationError(
-                    "Task 18 Host A model-sync upgrade desired state changed."
                 )
             phases_to_run = tuple(
                 phase for phase in plan.applicable_phases if phase in _TASK18_PHASES
