@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 
@@ -48,6 +48,10 @@ def _interrupted_runtime_projection(
 ) -> tuple[DesiredState, OwnershipLedger]:
     raw = parse_env_file(_FIXTURE)
     desired = resolve_desired_state(raw)
+    raw = replace(
+        raw,
+        values={**raw.values, "OPENCLAW_GATEWAY_TOKEN": "legacy-openclaw-token"},
+    )
     ledger = OwnershipLedger(format_version=desired.format_version, resources=())
     write_target_state(tmp_path, raw, desired)
     legacy_desired = desired.to_dict()

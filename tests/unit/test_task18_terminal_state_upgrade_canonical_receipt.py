@@ -36,19 +36,27 @@ def test_complete_intent_recovers_when_canonical_preimage_hash_is_not_semantic_f
     # Given: a production-written state and a terminal receipt after the desired write.
     raw = parse_env_file(_FIXTURE)
     desired = resolve_desired_state(raw)
+    legacy_token = "legacy-openclaw-token"
+    raw = replace(raw, values={**raw.values, "OPENCLAW_GATEWAY_TOKEN": legacy_token})
     requested_images = replace(
         desired.runtime_images,
         redis="docker.io/library/redis@sha256:" + "e" * 64,
     )
     ledger = OwnershipLedger(format_version=desired.format_version, resources=())
     write_target_state(tmp_path, raw, desired)
+    legacy_desired = desired.to_dict()
+    legacy_desired.pop("runtime_images")
+    legacy_desired["openclaw_gateway_token"] = legacy_token
+    atomic_json(state_upgrade_paths(tmp_path)["desired"], legacy_desired)
+    legacy_fingerprint = sha256(
+        json.dumps(legacy_desired, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     write_applied_checkpoint(
         tmp_path,
         AppliedStateCheckpoint(
             format_version=desired.format_version,
-            desired_state_fingerprint=desired.fingerprint(),
+            desired_state_fingerprint=legacy_fingerprint,
             completed_steps=(),
-            runtime_images=desired.runtime_images,
         ),
     )
     write_ownership_ledger(tmp_path, ledger)
@@ -73,10 +81,10 @@ def test_complete_intent_recovers_when_canonical_preimage_hash_is_not_semantic_f
     intent = StateUpgradeIntent.from_dict(read_json(intent_path))
     terminal_intent = replace(intent, status="complete", completed_writes=WRITE_ORDER)
     atomic_json(intent_path, terminal_intent.to_dict())
-    assert intent.pre_hashes["desired"] != desired.fingerprint()
+    assert intent.pre_hashes["desired"] != legacy_fingerprint
     assert AppliedStateCheckpoint.from_dict(
         read_json(state_upgrade_paths(tmp_path)["applied"])
-    ).desired_state_fingerprint == desired.fingerprint()
+    ).desired_state_fingerprint == legacy_fingerprint
 
     # When: the production state-upgrade route reopens the terminal receipt.
     completed = upgrade_state_contract(
@@ -102,19 +110,27 @@ def test_complete_intent_rejects_wrong_canonical_preimage_fingerprint(
 ) -> None:
     raw = parse_env_file(_FIXTURE)
     desired = resolve_desired_state(raw)
+    legacy_token = "legacy-openclaw-token"
+    raw = replace(raw, values={**raw.values, "OPENCLAW_GATEWAY_TOKEN": legacy_token})
     requested_images = replace(
         desired.runtime_images,
         redis="docker.io/library/redis@sha256:" + "e" * 64,
     )
     ledger = OwnershipLedger(format_version=desired.format_version, resources=())
     write_target_state(tmp_path, raw, desired)
+    legacy_desired = desired.to_dict()
+    legacy_desired.pop("runtime_images")
+    legacy_desired["openclaw_gateway_token"] = legacy_token
+    atomic_json(state_upgrade_paths(tmp_path)["desired"], legacy_desired)
+    legacy_fingerprint = sha256(
+        json.dumps(legacy_desired, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     write_applied_checkpoint(
         tmp_path,
         AppliedStateCheckpoint(
             format_version=desired.format_version,
-            desired_state_fingerprint=desired.fingerprint(),
+            desired_state_fingerprint=legacy_fingerprint,
             completed_steps=(),
-            runtime_images=desired.runtime_images,
         ),
     )
     write_ownership_ledger(tmp_path, ledger)
@@ -137,7 +153,7 @@ def test_complete_intent_rejects_wrong_canonical_preimage_fingerprint(
     monkeypatch.setattr("dokploy_wizard.state.upgrade.atomic_json", original_atomic_json)
     paths = state_upgrade_paths(tmp_path)
     applied = AppliedStateCheckpoint.from_dict(read_json(paths["applied"]))
-    wrong_fingerprint = "0" * 64 if desired.fingerprint() != "0" * 64 else "1" * 64
+    wrong_fingerprint = "0" * 64 if legacy_fingerprint != "0" * 64 else "1" * 64
     atomic_json(
         paths["applied"],
         replace(applied, desired_state_fingerprint=wrong_fingerprint).to_dict(),
