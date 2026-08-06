@@ -44,10 +44,6 @@ from dokploy_wizard.tailscale import TailscaleError
             "state_validation_task18_resume_missing_required",
         ),
         (
-            StateValidationError("Task 18 Host A model-sync runtime is already bound."),
-            "state_validation_task18_runtime_bound",
-        ),
-        (
             StateValidationError("Task 18 Host A model-sync lifecycle mode is unsupported."),
             "state_validation_task18_mode_unsupported",
         ),
