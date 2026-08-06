@@ -72,6 +72,8 @@ def test_observation_authorizes_missing_optional_documents_when_intent_binds_mis
     assert observation["applied_present"] is True
     assert observation["intent_hash_map_matches_current_state"] is True
     assert observation["intent_authorizes_desired_applied_mixed_state"] is True
+    assert observation["intent_desired_changed"] is True
+    assert observation["intent_applied_unchanged"] is True
     assert observation["applied_matches_raw_input_desired"] is False
 
 
