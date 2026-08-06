@@ -43,7 +43,7 @@ def test_task18_accepts_completed_legacy_runtime_binding_upgrade() -> None:
     assert upgraded.phases_to_run == ("shared_core", "coder")
 
 
-def test_task18_rejects_incomplete_legacy_runtime_binding_upgrade() -> None:
+def test_task18_preserves_incomplete_resume_with_model_sync_phases() -> None:
     # Given
     plan = LifecyclePlan(
         mode="resume",
@@ -63,8 +63,38 @@ def test_task18_rejects_incomplete_legacy_runtime_binding_upgrade() -> None:
         runtime_images=None,
     )
 
+    # When
+    upgraded = apply_modify_upgrade_intent(
+        plan,
+        ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC,
+        applied,
+    )
+
+    # Then
+    assert upgraded is plan
+
+
+def test_task18_rejects_incomplete_resume_without_all_model_sync_phases() -> None:
+    # Given
+    plan = LifecyclePlan(
+        mode="resume",
+        reasons=(),
+        applicable_phases=("preflight", "shared_core", "coder"),
+        phases_to_run=("coder",),
+        preserved_phases=("preflight", "shared_core"),
+        initial_completed_steps=("preflight", "shared_core"),
+        start_phase="coder",
+        raw_equivalent=True,
+        desired_equivalent=True,
+    )
+    applied = AppliedStateCheckpoint(
+        format_version=1,
+        desired_state_fingerprint="f" * 64,
+        completed_steps=("preflight", "shared_core"),
+    )
+
     # When / Then
-    with pytest.raises(StateValidationError, match="checkpoint requires only Task 18 phases"):
+    with pytest.raises(StateValidationError, match="missing required phases"):
         apply_modify_upgrade_intent(
             plan,
             ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC,

@@ -39,15 +39,9 @@ from dokploy_wizard.tailscale import TailscaleError
         (StateValidationError("fixture"), "state_validation"),
         (
             StateValidationError(
-                "Task 18 Host A model-sync checkpoint requires only Task 18 phases."
+                "Task 18 Host A model-sync resume is missing required phases."
             ),
-            "state_validation_task18_resume_exact",
-        ),
-        (
-            StateValidationError(
-                "Task 18 Host A model-sync checkpoint requires additional phases."
-            ),
-            "state_validation_task18_resume_additional",
+            "state_validation_task18_resume_missing_required",
         ),
         (
             StateValidationError("Task 18 Host A model-sync runtime is already bound."),
