@@ -47,7 +47,10 @@ Task18ModifyFailureCategory = Literal[
     "state_validation_lifecycle_binding",
     "state_validation_modify_request",
     "state_validation_state_absent",
-    "state_validation_task18_upgrade_intent",
+    "state_validation_task18_desired_changed",
+    "state_validation_task18_phases_unavailable",
+    "state_validation_task18_raw_changed",
+    "state_validation_task18_target_incomplete",
     "state_upgrade",
     "state_upgrade_applied_fingerprint_mismatch",
     "state_upgrade_cas_mismatch",
@@ -86,8 +89,14 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
         return "os_error"
     if isinstance(error, StateValidationError):
         message = str(error)
-        if message.startswith("Task 18 Host A model-sync upgrade requires "):
-            return "state_validation_task18_upgrade_intent"
+        if message == "Task 18 Host A model-sync upgrade target is incomplete.":
+            return "state_validation_task18_target_incomplete"
+        if message == "Task 18 Host A model-sync upgrade raw input changed.":
+            return "state_validation_task18_raw_changed"
+        if message == "Task 18 Host A model-sync upgrade desired state changed.":
+            return "state_validation_task18_desired_changed"
+        if message == "Task 18 Host A model-sync upgrade phases are unavailable.":
+            return "state_validation_task18_phases_unavailable"
         if message.startswith(("Dokploy mutation auth ", "Task 1 Dokploy auth ")):
             return "state_validation_dokploy_auth"
         if message.startswith(("Docker Hub authentication ", "Docker Hub login ")):
