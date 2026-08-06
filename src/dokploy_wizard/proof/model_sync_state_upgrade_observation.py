@@ -43,19 +43,32 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
         }
     desired_payload = read_json(paths["desired"])
     applied = AppliedStateCheckpoint.from_dict(read_json(paths["applied"]))
-    parse_desired_state_payload(desired_payload)
+    desired = parse_desired_state_payload(desired_payload)
     raw_input_fingerprint: str | None = None
     raw_input_desired_reconstructable = False
+    raw_input_reconstruction_failure = "absent"
     if paths["raw_input"].exists():
         try:
             raw_input = RawEnvInput.from_dict(read_json(paths["raw_input"]))
             raw_input_fingerprint = resolve_desired_state(raw_input).fingerprint()
-        except (StateValidationError, Task1ProofContextError):
-            raw_input_desired_reconstructable = False
+        except StateValidationError:
+            raw_input_reconstruction_failure = "state_validation"
+        except Task1ProofContextError:
+            raw_input_reconstruction_failure = "task1_context"
         else:
             raw_input_desired_reconstructable = True
+            raw_input_reconstruction_failure = "none"
     desired_fingerprint = hashlib.sha256(
         json.dumps(desired_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    desired_without_runtime_images = dict(desired_payload)
+    desired_without_runtime_images.pop("runtime_images", None)
+    desired_without_runtime_images_fingerprint = hashlib.sha256(
+        json.dumps(
+            desired_without_runtime_images,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
     intent = _load_intent(intent_path)
     owner = _load_owner(owner_path)
@@ -70,7 +83,13 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
             == desired_fingerprint,
             "applied_matches_raw_input_desired": applied.desired_state_fingerprint
             == raw_input_fingerprint,
+            "applied_matches_parsed_current_desired": applied.desired_state_fingerprint
+            == desired.fingerprint(),
+            "applied_matches_current_without_runtime_images": (
+                applied.desired_state_fingerprint == desired_without_runtime_images_fingerprint
+            ),
             "raw_input_desired_reconstructable": raw_input_desired_reconstructable,
+            "raw_input_reconstruction_failure": raw_input_reconstruction_failure,
             "intent_present": intent is not None,
             "owner_present": owner is not None,
         }
@@ -89,7 +108,13 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
         == desired_fingerprint,
         "applied_matches_raw_input_desired": applied.desired_state_fingerprint
         == raw_input_fingerprint,
+        "applied_matches_parsed_current_desired": applied.desired_state_fingerprint
+        == desired.fingerprint(),
+        "applied_matches_current_without_runtime_images": (
+            applied.desired_state_fingerprint == desired_without_runtime_images_fingerprint
+        ),
         "raw_input_desired_reconstructable": raw_input_desired_reconstructable,
+        "raw_input_reconstruction_failure": raw_input_reconstruction_failure,
         "intent_present": True,
         "intent_schema_valid": True,
         "owner_present": True,

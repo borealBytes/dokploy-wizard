@@ -150,6 +150,43 @@ def test_observation_reports_context_bound_raw_input_as_unreconstructable(tmp_pa
     observation = observe_state_upgrade_authority(tmp_path)
 
     assert observation["raw_input_desired_reconstructable"] is False
+    assert observation["raw_input_reconstruction_failure"] == "task1_context"
+
+
+def test_observation_compares_applied_to_legacy_runtime_image_shape(tmp_path: Path) -> None:
+    _write_authorized_interruption(tmp_path)
+    paths = state_upgrade_paths(tmp_path)
+    desired_payload = json.loads(paths["desired"].read_text(encoding="utf-8"))
+    desired_payload.pop("runtime_images")
+    legacy_fingerprint = sha256(
+        json.dumps(desired_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    applied = AppliedStateCheckpoint.from_dict(
+        json.loads(paths["applied"].read_text(encoding="utf-8"))
+    )
+    paths["applied"].write_text(
+        json.dumps(replace(applied, desired_state_fingerprint=legacy_fingerprint).to_dict()),
+        encoding="utf-8",
+    )
+    intent_path = tmp_path / "state-upgrade-intent-v1.json"
+    intent = StateUpgradeIntent.from_dict(json.loads(intent_path.read_text(encoding="utf-8")))
+    applied_hash = file_hash(paths["applied"])
+    intent_path.write_text(
+        json.dumps(
+            replace(
+                intent,
+                pre_hashes={**intent.pre_hashes, "applied": applied_hash},
+                post_hashes={**intent.post_hashes, "applied": applied_hash},
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    observation = observe_state_upgrade_authority(tmp_path)
+
+    assert observation["applied_matches_current_desired"] is False
+    assert observation["applied_matches_parsed_current_desired"] is False
+    assert observation["applied_matches_current_without_runtime_images"] is True
 
 
 @pytest.mark.parametrize(
