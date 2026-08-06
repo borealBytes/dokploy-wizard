@@ -76,8 +76,16 @@ from dokploy_wizard.tailscale import TailscaleError
             "state_validation_lifecycle_binding",
         ),
         (
-            StateValidationError("Requested modify operation changes unsupported values."),
-            "state_validation_modify_request",
+            StateValidationError("Requested modify operation changes values that are not modeled."),
+            "state_validation_modify_unmodeled",
+        ),
+        (
+            StateValidationError("Unsupported mutable env keys for Task 11."),
+            "state_validation_modify_unsupported_keys",
+        ),
+        (
+            StateValidationError("STACK_NAME changes are unsupported in Task 11."),
+            "state_validation_modify_stack_name",
         ),
         (
             StateValidationError("Cannot modify before state exists."),

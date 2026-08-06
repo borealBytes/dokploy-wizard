@@ -51,7 +51,9 @@ Task18ModifyFailureCategory = Literal[
     "state_validation_docker_auth",
     "state_validation_dokploy_auth",
     "state_validation_lifecycle_binding",
-    "state_validation_modify_request",
+    "state_validation_modify_stack_name",
+    "state_validation_modify_unmodeled",
+    "state_validation_modify_unsupported_keys",
     "state_validation_state_absent",
     "state_validation_task18_desired_changed",
     "state_validation_task18_mode_unsupported",
@@ -116,14 +118,12 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
             ("Lifecycle stack ", "Persisted desired state does not match the locked ")
         ):
             return "state_validation_lifecycle_binding"
-        if message.startswith(
-            (
-                "Requested modify operation ",
-                "Unsupported mutable env keys ",
-                "STACK_NAME changes ",
-            )
-        ):
-            return "state_validation_modify_request"
+        if message.startswith("Requested modify operation "):
+            return "state_validation_modify_unmodeled"
+        if message.startswith("Unsupported mutable env keys "):
+            return "state_validation_modify_unsupported_keys"
+        if message.startswith("STACK_NAME changes "):
+            return "state_validation_modify_stack_name"
         if message.startswith("Cannot modify before "):
             return "state_validation_state_absent"
         return "state_validation"
