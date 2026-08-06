@@ -46,6 +46,13 @@ def test_observation_rejects_malformed_raw_input_without_unbound_local(tmp_path:
 def test_observation_matches_combined_legacy_receipt_candidate(tmp_path: Path) -> None:
     raw = parse_env_file(_FIXTURE)
     desired = resolve_desired_state(raw)
+    desired = replace(
+        desired,
+        hostnames={
+            **desired.hostnames,
+            "litellm-admin": f"litellm-admin.{desired.root_domain}",
+        },
+    )
     legacy_token = "legacy-openclaw-token"
     receipt_raw = replace(
         raw,
@@ -53,6 +60,7 @@ def test_observation_matches_combined_legacy_receipt_candidate(tmp_path: Path) -
             **raw.values,
             "DOKPLOY_WIZARD_TASK1_DISABLE_CODER_WILDCARD": "true",
             "DOKPLOY_WIZARD_TASK1_PROOF_CONTEXT_ID": "a" * 64,
+            "LITELLM_ADMIN_SUBDOMAIN": "litellm-admin",
             "OPENCLAW_GATEWAY_TOKEN": legacy_token,
         },
     )
