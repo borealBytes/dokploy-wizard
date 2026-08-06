@@ -1020,8 +1020,11 @@ def _rehydrate_inspection_redactions(
     existing: RawEnvInput,
     requested: RawEnvInput,
 ) -> RawEnvInput:
+    task18_credentials = {"DOKPLOY_ADMIN_EMAIL", "DOKPLOY_ADMIN_PASSWORD"}
     values = {
-        key: requested.values.get(key, value) if value == _INSPECT_REDACTION_VALUE else value
+        key: requested.values.get(key, value)
+        if value == _INSPECT_REDACTION_VALUE or key in task18_credentials
+        else value
         for key, value in existing.values.items()
     }
     return RawEnvInput(format_version=existing.format_version, values=values)
