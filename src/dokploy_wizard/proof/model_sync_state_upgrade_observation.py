@@ -12,6 +12,7 @@ from dokploy_wizard.proof.model_sync_task1_context import (
     activate_task1_proof_context,
     validate_task1_proof_context_argument,
 )
+from dokploy_wizard.proof.model_sync_task1_context_schema import PROOF_CONTROL_KEYS
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     RawEnvInput,
@@ -45,7 +46,9 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
     applied = AppliedStateCheckpoint.from_dict(read_json(paths["applied"]))
     desired = parse_desired_state_payload(desired_payload)
     raw_input_fingerprint: str | None = None
+    receipt_raw_fingerprint: str | None = None
     raw_input_desired_reconstructable = False
+    receipt_raw_desired_reconstructable = False
     raw_input_reconstruction_failure = "absent"
     if paths["raw_input"].exists():
         try:
@@ -58,6 +61,20 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
         else:
             raw_input_desired_reconstructable = True
             raw_input_reconstruction_failure = "none"
+        receipt_raw = RawEnvInput(
+            format_version=raw_input.format_version,
+            values={
+                key: value
+                for key, value in raw_input.values.items()
+                if key not in PROOF_CONTROL_KEYS
+            },
+        )
+        try:
+            receipt_raw_fingerprint = resolve_desired_state(receipt_raw).fingerprint()
+        except (StateValidationError, Task1ProofContextError):
+            receipt_raw_desired_reconstructable = False
+        else:
+            receipt_raw_desired_reconstructable = True
     desired_fingerprint = hashlib.sha256(
         json.dumps(desired_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -88,8 +105,11 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
             "applied_matches_current_without_runtime_images": (
                 applied.desired_state_fingerprint == desired_without_runtime_images_fingerprint
             ),
+            "applied_matches_receipt_raw_desired": applied.desired_state_fingerprint
+            == receipt_raw_fingerprint,
             "raw_input_desired_reconstructable": raw_input_desired_reconstructable,
             "raw_input_reconstruction_failure": raw_input_reconstruction_failure,
+            "receipt_raw_desired_reconstructable": receipt_raw_desired_reconstructable,
             "intent_present": intent is not None,
             "owner_present": owner is not None,
         }
@@ -113,8 +133,11 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
         "applied_matches_current_without_runtime_images": (
             applied.desired_state_fingerprint == desired_without_runtime_images_fingerprint
         ),
+        "applied_matches_receipt_raw_desired": applied.desired_state_fingerprint
+        == receipt_raw_fingerprint,
         "raw_input_desired_reconstructable": raw_input_desired_reconstructable,
         "raw_input_reconstruction_failure": raw_input_reconstruction_failure,
+        "receipt_raw_desired_reconstructable": receipt_raw_desired_reconstructable,
         "intent_present": True,
         "intent_schema_valid": True,
         "owner_present": True,
