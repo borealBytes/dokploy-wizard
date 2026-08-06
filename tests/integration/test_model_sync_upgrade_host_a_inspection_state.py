@@ -122,7 +122,7 @@ def test_task18_rehydration_preserves_nonsecret_drift() -> None:
     # Given
     existing = RawEnvInput(
         format_version=1,
-        values={"DOKPLOY_ADMIN_PASSWORD": "<redacted>", "ROOT_DOMAIN": "old.test"},
+        values={"DOKPLOY_ADMIN_PASSWORD": "stale-password", "ROOT_DOMAIN": "old.test"},
     )
     requested = RawEnvInput(
         format_version=1,
