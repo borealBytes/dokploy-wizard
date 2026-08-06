@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from dokploy_wizard.proof.model_sync_task1_context import (
+    Task1ProofContextError,
     activate_task1_proof_context,
     validate_task1_proof_context_argument,
 )
@@ -49,7 +50,7 @@ def observe_state_upgrade_authority(state_dir: Path) -> dict[str, bool | int | s
         try:
             raw_input = RawEnvInput.from_dict(read_json(paths["raw_input"]))
             raw_input_fingerprint = resolve_desired_state(raw_input).fingerprint()
-        except StateValidationError:
+        except (StateValidationError, Task1ProofContextError):
             raw_input_desired_reconstructable = False
         else:
             raw_input_desired_reconstructable = True

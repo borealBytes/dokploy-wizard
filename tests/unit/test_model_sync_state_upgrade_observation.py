@@ -128,6 +128,30 @@ def test_observation_reports_unreconstructable_raw_input_without_values(tmp_path
     assert observation["applied_matches_raw_input_desired"] is False
 
 
+def test_observation_reports_context_bound_raw_input_as_unreconstructable(tmp_path: Path) -> None:
+    _write_authorized_interruption(tmp_path)
+    paths = state_upgrade_paths(tmp_path)
+    raw = parse_env_file(_FIXTURE)
+    context_bound_raw = replace(
+        raw,
+        values={**raw.values, "DOKPLOY_WIZARD_TASK1_DISABLE_CODER_WILDCARD": "true"},
+    )
+    paths["raw_input"].write_text(json.dumps(context_bound_raw.to_dict()), encoding="utf-8")
+    intent_path = tmp_path / "state-upgrade-intent-v1.json"
+    intent = StateUpgradeIntent.from_dict(json.loads(intent_path.read_text(encoding="utf-8")))
+    raw_input_hash = file_hash(paths["raw_input"])
+    updated_intent = replace(
+        intent,
+        pre_hashes={**intent.pre_hashes, "raw_input": raw_input_hash},
+        post_hashes={**intent.post_hashes, "raw_input": raw_input_hash},
+    )
+    intent_path.write_text(json.dumps(updated_intent.to_dict()), encoding="utf-8")
+
+    observation = observe_state_upgrade_authority(tmp_path)
+
+    assert observation["raw_input_desired_reconstructable"] is False
+
+
 @pytest.mark.parametrize(
     ("key", "expected"),
     (("desired", (False, True)), ("applied", (True, False))),
