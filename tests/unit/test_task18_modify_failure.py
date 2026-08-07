@@ -178,6 +178,10 @@ from dokploy_wizard.tailscale import TailscaleError
             "coder_workspace_secrets_reconciliation_receipt_read_schema",
         ),
         (
+            CoderError("Coder workspace secret reconciliation failed. receipt_read_schema_fields"),
+            "coder_workspace_secrets_reconciliation_receipt_read_schema_fields",
+        ),
+        (
             CoderError("Coder workspace secret reconciliation failed. receipt_schema"),
             "coder_workspace_secrets_reconciliation_receipt_schema",
         ),

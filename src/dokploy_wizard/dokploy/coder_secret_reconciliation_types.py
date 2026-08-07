@@ -25,6 +25,7 @@ CoderSecretFailureKind = Literal[
     "receipt_read_file",
     "receipt_read_json",
     "receipt_read_schema",
+    "receipt_read_schema_fields",
     "receipt_schema",
     "receipt_write",
     "reconciliation",

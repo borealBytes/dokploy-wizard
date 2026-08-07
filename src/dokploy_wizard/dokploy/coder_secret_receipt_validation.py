@@ -176,7 +176,9 @@ def _expected_hash(secret_id: str | None, step: CoderSecretReceiptStep) -> str:
 
 def _mapping(value: JsonValue, keys: frozenset[str], label: str) -> dict[str, JsonValue]:
     if not isinstance(value, dict) or frozenset(value) != keys:
-        raise CoderSecretReceiptError(f"Coder secret {label} has unknown or missing fields")
+        raise CoderSecretReceiptError(
+            f"Coder secret {label} has unknown or missing fields", kind="schema_fields"
+        )
     return value
 
 

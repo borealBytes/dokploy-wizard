@@ -49,6 +49,7 @@ Task18ModifyFailureCategory = Literal[
     "coder_workspace_secrets_reconciliation_receipt_read_file",
     "coder_workspace_secrets_reconciliation_receipt_read_json",
     "coder_workspace_secrets_reconciliation_receipt_read_schema",
+    "coder_workspace_secrets_reconciliation_receipt_read_schema_fields",
     "coder_workspace_secrets_reconciliation_receipt_schema",
     "coder_workspace_secrets_reconciliation_receipt_write",
     "coder_workspace_secrets_reconciliation_unknown",
@@ -199,6 +200,8 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
             return "coder_workspace_secrets_reconciliation_receipt_read_json"
         if message == "Coder workspace secret reconciliation failed. receipt_read_schema":
             return "coder_workspace_secrets_reconciliation_receipt_read_schema"
+        if message == "Coder workspace secret reconciliation failed. receipt_read_schema_fields":
+            return "coder_workspace_secrets_reconciliation_receipt_read_schema_fields"
         if message == "Coder workspace secret reconciliation failed. receipt_schema":
             return "coder_workspace_secrets_reconciliation_receipt_schema"
         if message == "Coder workspace secret reconciliation failed. receipt_write":

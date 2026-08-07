@@ -210,7 +210,7 @@ def test_secret_receipt_owner_mismatch_has_typed_invalid_receipt_failure(
     ("payload", "expected_kind"),
     (
         (b"not-json", "receipt_read_json"),
-        (b'{"schema_version":2}', "receipt_read_schema"),
+        (b'{"schema_version":2}', "receipt_read_schema_fields"),
     ),
 )
 def test_secret_receipt_load_failures_preserve_typed_origin(
