@@ -21,6 +21,7 @@ CoderSecretFailureKind = Literal[
     "blocked",
     "client",
     "client_workspace_present",
+    "client_workspace_terminal",
     "metadata",
     "receipt",
     "receipt_invalid",

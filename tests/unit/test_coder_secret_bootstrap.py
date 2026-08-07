@@ -206,6 +206,7 @@ def test_secret_reconciliation_failure_classifies_terminal_receipt(
         "blocked",
         "client",
         "client_workspace_present",
+        "client_workspace_terminal",
         "metadata",
         "receipt_invalid",
         "receipt_owner",
