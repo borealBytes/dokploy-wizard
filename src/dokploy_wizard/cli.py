@@ -1426,6 +1426,7 @@ def _run_lifecycle_flow(
         assert loaded_state.ownership_ledger is not None
         classification_existing_raw = loaded_state.raw_input
         classification_existing_desired = loaded_state.desired_state
+        classification_existing_applied = loaded_state.applied_state
         classification_requested_raw = raw_env
         classification_requested_desired = desired_state
         if modify_upgrade_intent is ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC:
@@ -1451,10 +1452,21 @@ def _run_lifecycle_flow(
                 classification_requested_raw,
             ):
                 classification_existing_desired = classification_requested_desired
+                if (
+                    loaded_state.applied_state.desired_state_fingerprint
+                    == loaded_state.desired_state.fingerprint()
+                ):
+                    projected_applied = loaded_state.applied_state.to_dict()
+                    projected_applied["desired_state_fingerprint"] = (
+                        classification_requested_desired.fingerprint()
+                    )
+                    classification_existing_applied = AppliedStateCheckpoint.from_dict(
+                        projected_applied
+                    )
         lifecycle_plan = classify_modify_request(
             existing_raw=classification_existing_raw,
             existing_desired=classification_existing_desired,
-            existing_applied=loaded_state.applied_state,
+            existing_applied=classification_existing_applied,
             existing_ledger=loaded_state.ownership_ledger,
             requested_raw=classification_requested_raw,
             requested_desired=classification_requested_desired,
@@ -1462,7 +1474,7 @@ def _run_lifecycle_flow(
         lifecycle_plan = apply_modify_upgrade_intent(
             lifecycle_plan,
             modify_upgrade_intent,
-            loaded_state.applied_state,
+            classification_existing_applied,
         )
         disable_plan = build_pack_disable_plan(
             existing_desired=loaded_state.desired_state,

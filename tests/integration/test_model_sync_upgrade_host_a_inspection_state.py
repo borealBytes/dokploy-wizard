@@ -188,6 +188,8 @@ def test_task18_inspection_snapshot_uses_normalized_raw_equivalence(
     redacted_desired_payload["seaweedfs_access_key"] = "<redacted>"
     redacted_desired_payload["seaweedfs_secret_key"] = "<redacted>"
     redacted_desired = DesiredState.from_dict(redacted_desired_payload)
+    applicable_phases = applicable_phases_for(redacted_desired)
+    completed_steps = applicable_phases[: applicable_phases.index("shared_core")]
     write_target_state(
         state_dir,
         cli._redacted_raw_env_input(raw),
@@ -198,7 +200,7 @@ def test_task18_inspection_snapshot_uses_normalized_raw_equivalence(
         AppliedStateCheckpoint(
             format_version=redacted_desired.format_version,
             desired_state_fingerprint=redacted_desired.fingerprint(),
-            completed_steps=applicable_phases_for(redacted_desired),
+            completed_steps=completed_steps,
             runtime_images=redacted_desired.runtime_images,
         ),
     )
