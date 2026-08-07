@@ -53,6 +53,30 @@ def test_preflight_blocks_ambiguous_target_template_without_retaining_identity()
     assert "00000000" not in report.to_bytes().decode()
 
 
+def test_preflight_blocks_same_organization_duplicate_target_template() -> None:
+    # Given
+    templates: JsonValue = [
+        {
+            "id": "00000000-0000-4000-8000-000000000001",
+            "name": "ubuntu-vscode-opencode-pi",
+            "organization_id": "00000000-0000-4000-8000-000000000011",
+        },
+        {
+            "id": "00000000-0000-4000-8000-000000000002",
+            "name": "ubuntu-vscode-opencode-pi",
+            "organization_id": "00000000-0000-4000-8000-000000000011",
+        },
+    ]
+
+    # When
+    report = classify_preflight(templates, None, None, None, None)
+
+    # Then
+    assert report.target_template_count == 2
+    assert report.target_organization_count == 1
+    assert report.blockers == ("target_template_ambiguous",)
+
+
 def test_preflight_blocks_noninteractive_contract_gaps() -> None:
     # Given
     templates: JsonValue = [
