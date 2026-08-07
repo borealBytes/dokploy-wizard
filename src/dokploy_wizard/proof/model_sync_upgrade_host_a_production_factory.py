@@ -65,7 +65,16 @@ def build_production_operations(
     ):
         raise UpgradeHostAError("Coder proof transport credentials are incomplete")
     coder_transport = RemoteCoderTransport(host, password, namespace.stack_name)
-    authorization_path = artifact_dir / "coder-verifier-authorization.json"
+    private_artifact_dir = artifact_dir / ".private"
+    private_artifact_dir.mkdir(mode=0o700, exist_ok=True)
+    private_metadata = private_artifact_dir.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(private_metadata.st_mode)
+        or stat.S_IMODE(private_metadata.st_mode) != 0o700
+        or private_metadata.st_uid != os.geteuid()
+    ):
+        raise UpgradeHostAError("Task 18 private artifact directory is unsafe")
+    authorization_path = private_artifact_dir / "coder-verifier-authorization.json"
     attempt_context = hashlib.sha256(
         f"{binding.lifecycle_sha256}:{binding.final_commit}".encode()
     ).hexdigest()
