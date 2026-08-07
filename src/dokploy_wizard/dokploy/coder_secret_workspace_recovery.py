@@ -84,7 +84,16 @@ def create_planned(
     receipt: WorkspaceVerificationReceipt,
 ) -> WorkspaceVerificationReceipt:
     attempted = store.begin_create(receipt)
-    runner(("create", "--yes", "--template", attempted.template_name, attempted.workspace_name))
+    runner(
+        (
+            "create",
+            "--yes",
+            "--no-wait",
+            "--template",
+            attempted.template_name,
+            attempted.workspace_name,
+        )
+    )
     return _bind_planned(runner, store, attempted)
 
 
