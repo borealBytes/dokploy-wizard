@@ -6,7 +6,11 @@ import pytest
 
 import dokploy_wizard.cli as cli
 from dokploy_wizard import proof
-from dokploy_wizard.lifecycle import LifecyclePlan, applicable_phases_for
+from dokploy_wizard.lifecycle import (
+    LifecyclePlan,
+    applicable_phases_for,
+    classify_modify_request,
+)
 from dokploy_wizard.lifecycle.modify_upgrade import ModifyUpgradeIntent
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
@@ -122,7 +126,7 @@ def test_task18_rehydration_preserves_nonsecret_drift() -> None:
     # Given
     existing = RawEnvInput(
         format_version=1,
-        values={"DOKPLOY_ADMIN_PASSWORD": "stale-password", "ROOT_DOMAIN": "old.test"},
+        values={"DOKPLOY_ADMIN_PASSWORD": "<redacted>", "ROOT_DOMAIN": "old.test"},
     )
     requested = RawEnvInput(
         format_version=1,
@@ -138,23 +142,77 @@ def test_task18_rehydration_preserves_nonsecret_drift() -> None:
 
     # Then
     assert rehydrated.values == {
-        "DOKPLOY_ADMIN_EMAIL": "operator@example.test",
         "DOKPLOY_ADMIN_PASSWORD": "current-password",
         "ROOT_DOMAIN": "old.test",
     }
     assert rehydrated != requested
 
 
-def test_task18_rehydration_removes_unrequested_admin_credential() -> None:
+def test_task18_runtime_comparison_preserves_missing_admin_credentials() -> None:
     # Given
-    existing = RawEnvInput(
-        format_version=1,
-        values={"DOKPLOY_ADMIN_EMAIL": "legacy@example.test", "ROOT_DOMAIN": "old.test"},
-    )
-    requested = RawEnvInput(format_version=1, values={"ROOT_DOMAIN": "new.test"})
+    raw = RawEnvInput(format_version=1, values={"ROOT_DOMAIN": "example.test"})
 
     # When
-    rehydrated = cli._rehydrate_inspection_redactions(existing, requested)
+    comparison = cli._task18_runtime_comparison_raw(raw)
 
     # Then
-    assert rehydrated.values == {"ROOT_DOMAIN": "old.test"}
+    assert comparison == raw
+
+
+def test_task18_runtime_comparison_omits_admin_credentials() -> None:
+    # Given
+    raw = RawEnvInput(
+        format_version=1,
+        values={
+            "DOKPLOY_ADMIN_EMAIL": "operator@example.test",
+            "DOKPLOY_ADMIN_PASSWORD": "fixture-password",
+            "ROOT_DOMAIN": "example.test",
+        },
+    )
+
+    # When
+    comparison = cli._task18_runtime_comparison_raw(raw)
+
+    # Then
+    assert comparison.values == {"ROOT_DOMAIN": "example.test"}
+
+
+@pytest.mark.parametrize("requested_password", ("fixture-password", None))
+def test_operator_modify_still_rejects_inactive_admin_only_change(
+    tmp_path: Path,
+    requested_password: str | None,
+) -> None:
+    # Given
+    env_file = _write_env(tmp_path / "operator-modify.env")
+    requested_from_file = parse_env_file(env_file)
+    requested_values = dict(requested_from_file.values)
+    if requested_password is None:
+        requested_values.pop("DOKPLOY_ADMIN_PASSWORD")
+    else:
+        requested_values["DOKPLOY_ADMIN_PASSWORD"] = requested_password
+    requested = RawEnvInput(
+        format_version=requested_from_file.format_version,
+        values=requested_values,
+    )
+    desired = resolve_desired_state(requested)
+    existing = RawEnvInput(
+        format_version=requested.format_version,
+        values={**requested.values, "DOKPLOY_ADMIN_PASSWORD": "previous-password"},
+    )
+    applied = AppliedStateCheckpoint(
+        format_version=desired.format_version,
+        desired_state_fingerprint=desired.fingerprint(),
+        completed_steps=applicable_phases_for(desired),
+        runtime_images=desired.runtime_images,
+    )
+
+    # When / Then
+    with pytest.raises(ValueError, match="inactive_dokploy_admin"):
+        classify_modify_request(
+            existing_raw=existing,
+            existing_desired=desired,
+            existing_applied=applied,
+            existing_ledger=OwnershipLedger(format_version=desired.format_version, resources=()),
+            requested_raw=requested,
+            requested_desired=desired,
+        )

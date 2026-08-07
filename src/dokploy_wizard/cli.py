@@ -1020,23 +1020,23 @@ def _rehydrate_inspection_redactions(
     existing: RawEnvInput,
     requested: RawEnvInput,
 ) -> RawEnvInput:
-    task18_credentials = {"DOKPLOY_ADMIN_EMAIL", "DOKPLOY_ADMIN_PASSWORD"}
     values = {
         key: requested.values.get(key, value)
         if value == _INSPECT_REDACTION_VALUE
         else value
         for key, value in existing.values.items()
-        if key not in task18_credentials
-    }
-    values = {
-        **values,
-        **{
-            key: requested.values[key]
-            for key in task18_credentials
-            if key in requested.values
-        },
     }
     return RawEnvInput(format_version=existing.format_version, values=values)
+
+
+def _task18_runtime_comparison_raw(raw_env: RawEnvInput) -> RawEnvInput:
+    runtime_credentials = {"DOKPLOY_ADMIN_EMAIL", "DOKPLOY_ADMIN_PASSWORD"}
+    return RawEnvInput(
+        format_version=raw_env.format_version,
+        values={
+            key: value for key, value in raw_env.values.items() if key not in runtime_credentials
+        },
+    )
 
 
 def _raw_env_value_is_sensitive(key: str) -> bool:
@@ -1440,6 +1440,12 @@ def _run_lifecycle_flow(
             classification_existing_raw = _rehydrate_inspection_redactions(
                 loaded_state.raw_input,
                 classification_requested_raw,
+            )
+            classification_existing_raw = _task18_runtime_comparison_raw(
+                classification_existing_raw
+            )
+            classification_requested_raw = _task18_runtime_comparison_raw(
+                classification_requested_raw
             )
             if classification_existing_raw == classification_requested_raw:
                 classification_existing_desired = classification_requested_desired
