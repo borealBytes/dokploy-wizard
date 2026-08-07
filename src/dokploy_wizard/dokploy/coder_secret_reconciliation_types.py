@@ -13,7 +13,15 @@ from dokploy_wizard.dokploy.coder_secret_receipts import (
 )
 from dokploy_wizard.state.sync_schema import JsonValue
 
-CoderSecretFailureKind = Literal["receipt", "unknown"]
+CoderSecretFailureKind = Literal[
+    "blocked",
+    "client",
+    "metadata",
+    "receipt",
+    "receipt_invalid",
+    "reconciliation",
+    "unknown",
+]
 
 
 @dataclass(slots=True)
@@ -104,7 +112,10 @@ def operation_for_metadata(
 ) -> SecretOperation:
     if metadata is None:
         if previous is not None:
-            raise CoderSecretError("Coder secret metadata drift blocks recreation")
+            raise CoderSecretError(
+                "Coder secret metadata drift blocks recreation",
+                kind="metadata",
+            )
         return "create"
     return "update"
 
@@ -151,21 +162,32 @@ def validate_receipt_for_specs(
     by_name = {spec.name: spec for spec in specs}
     receipt_names = tuple(step.secret_name for step in receipt.steps)
     if any(name not in by_name for name in receipt_names):
-        raise CoderSecretError("Coder secret receipt contains an unknown managed secret")
+        raise CoderSecretError(
+            "Coder secret receipt contains an unknown managed secret",
+            kind="receipt_invalid",
+        )
     if receipt.status == "completed" and receipt_names != tuple(sorted(by_name)):
-        raise CoderSecretError("Coder secret completed receipt inventory is incomplete")
+        raise CoderSecretError(
+            "Coder secret completed receipt inventory is incomplete",
+            kind="receipt_invalid",
+        )
     for step in receipt.steps:
         spec = by_name[step.secret_name]
         if step.env_name != spec.env_name or step.description != spec.description:
             raise CoderSecretError(
-                "Coder secret receipt metadata does not match the requested secret"
+                "Coder secret receipt metadata does not match the requested secret",
+                kind="receipt_invalid",
             )
         expected_id = None if step.operation == "create" else step.secret_id
         if step.expected_post_sha256 != expected_metadata_hash(expected_id, spec):
-            raise CoderSecretError("Coder secret receipt expected metadata is invalid")
+            raise CoderSecretError(
+                "Coder secret receipt expected metadata is invalid",
+                kind="receipt_invalid",
+            )
         if step.status != "verified" and step.source_value_sha256 != value_hash(spec.value):
             raise CoderSecretError(
-                "Coder secret receipt source value does not match the requested secret"
+                "Coder secret receipt source value does not match the requested secret",
+                kind="receipt_invalid",
             )
 
 

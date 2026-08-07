@@ -480,8 +480,18 @@ class DokployCoderBackend:
             reconciler.reconcile(specs)
         except CoderSecretError as error:
             match error.kind:
+                case "blocked":
+                    failure_kind = "blocked"
+                case "client":
+                    failure_kind = "client"
+                case "metadata":
+                    failure_kind = "metadata"
                 case "receipt":
                     failure_kind = "receipt"
+                case "receipt_invalid":
+                    failure_kind = "receipt_invalid"
+                case "reconciliation":
+                    failure_kind = "reconciliation"
                 case "unknown":
                     failure_kind = "unknown"
                 case unreachable:

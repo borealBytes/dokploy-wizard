@@ -14,6 +14,9 @@ from dokploy_wizard.dokploy.coder_secret_reconciliation import (
     CoderSecretMetadata,
     CoderSecretSpec,
 )
+from dokploy_wizard.dokploy.coder_secret_reconciliation_types import (
+    CoderSecretFailureKind,
+)
 from dokploy_wizard.dokploy.coder_template_migration_runtime import (
     ProductionMigrationInputs,
 )
@@ -194,4 +197,33 @@ def test_secret_reconciliation_failure_classifies_terminal_receipt(
         )
 
     assert str(raised.value) == "Coder workspace secret reconciliation failed. receipt"
+    assert events == ["reconciliation-failed"]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("blocked", "client", "metadata", "receipt_invalid", "reconciliation"),
+)
+def test_secret_reconciliation_failure_keeps_only_typed_kind(
+    tmp_path: Path,
+    kind: CoderSecretFailureKind,
+) -> None:
+    events: list[str] = []
+    backend = _backend(
+        client_factory=FixedSecretClientFactory(
+            FailingSecretClient(
+                events,
+                CoderSecretError("provider detail is discarded", kind=kind),
+            )
+        ),
+        state_dir=tmp_path,
+    )
+
+    with pytest.raises(CoderError) as raised:
+        backend._reconcile_coder_workspace_secrets(
+            container_name="coder-container",
+            session_token="session-token",
+        )
+
+    assert str(raised.value) == f"Coder workspace secret reconciliation failed. {kind}"
     assert events == ["reconciliation-failed"]

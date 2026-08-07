@@ -183,10 +183,27 @@ def test_unowned_secret_collision_blocks_before_write(tmp_path: Path) -> None:
     )
     reconciler = CoderSecretReconciler(state_dir=tmp_path, client=client, owner_id="b" * 64)
 
-    with pytest.raises(CoderSecretError, match="ownership"):
+    with pytest.raises(CoderSecretError, match="ownership") as raised:
         reconciler.reconcile((spec,))
 
+    assert raised.value.kind == "blocked"
     assert client.writes == []
+
+
+def test_secret_receipt_owner_mismatch_has_typed_invalid_receipt_failure(
+    tmp_path: Path,
+) -> None:
+    CoderSecretReceiptStore(tmp_path).write(CoderSecretReceipt("a" * 64, "planned", ()))
+    reconciler = CoderSecretReconciler(
+        state_dir=tmp_path,
+        client=FakeCoderSecrets(),
+        owner_id="b" * 64,
+    )
+
+    with pytest.raises(CoderSecretError) as raised:
+        reconciler.reconcile(_specs())
+
+    assert raised.value.kind == "receipt_invalid"
 
 
 def test_workspace_secret_unsupported_blocks_without_value_leak(tmp_path: Path) -> None:

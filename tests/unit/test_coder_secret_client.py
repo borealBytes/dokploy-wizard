@@ -131,8 +131,10 @@ def test_secret_client_rejects_malformed_or_ambiguous_metadata(
         container_name="coder-container", session_token="session-token", runner=runner
     )
 
-    with pytest.raises(CoderSecretClientError):
+    with pytest.raises(CoderSecretClientError) as raised:
         client.list_secrets()
+
+    assert raised.value.kind == "client"
 
 
 def test_secret_client_metadata_uses_closed_schema() -> None:
