@@ -15,6 +15,11 @@ from dokploy_wizard.proof.coder_workspace_create_preflight import (
 from dokploy_wizard.proof.coder_workspace_create_preflight_cli_runner import (
     run_coder_cli as _run_coder_cli,
 )
+from dokploy_wizard.proof.coder_workspace_create_preflight_setup import (
+    PreflightSetupBlocked,
+    PreflightSetupReady,
+    collect_preflight_setup,
+)
 from dokploy_wizard.proof.coder_workspace_create_preflight_types import (
     AuthStatus,
     CoderCreatePreflightError,
@@ -29,18 +34,18 @@ from dokploy_wizard.proof.model_sync_coder_api import (
     coder_login,
     nullable_api,
 )
-from dokploy_wizard.proof.model_sync_env import EnvPreparationError, resolve_proof_transport
 from dokploy_wizard.proof.model_sync_task1_context import (
-    Task1ProofContextError,
     activate_task1_proof_context,
-    load_task1_proof_context,
 )
-from dokploy_wizard.state import StateValidationError, parse_env_file
 
 PreflightFailure = Literal[
     "coder_url_unavailable",
     "coder_token_unavailable",
     "coder_auth_unavailable",
+    "preflight_env_unavailable",
+    "preflight_task1_context_unavailable",
+    "preflight_transport_unavailable",
+    "preflight_setup_unexpected",
     "preflight_transport_configuration_invalid",
     "preflight_payload_invalid",
     "coder_container_missing",
@@ -73,14 +78,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         report = collect_preflight(args.env_file, args.task1_proof_context)
-    except (
-        CoderCreatePreflightError,
-        EnvPreparationError,
-        OSError,
-        StateValidationError,
-        Task1ProofContextError,
-    ):
-        report = _unavailable_report("preflight_transport_configuration_invalid")
+    except CoderCreatePreflightError:
+        report = _unavailable_report("preflight_setup_unexpected")
     _write_private_report(args.output, report)
     return 0
 
@@ -88,14 +87,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 def collect_preflight(env_file: Path, context_file: Path) -> CoderCreatePreflightReport:
     """Collect read-only Coder contract state without exposing provider response values."""
 
-    raw_env = parse_env_file(env_file)
-    context = load_task1_proof_context(context_file, raw_env)
-    transport = resolve_proof_transport(env_file)
-    if transport.coder_hostname is None:
-        return _unavailable_report("preflight_transport_configuration_invalid")
+    setup = collect_preflight_setup(env_file, context_file)
+    match setup:
+        case PreflightSetupBlocked(blocker=blocker):
+            return _unavailable_report(blocker)
+        case PreflightSetupReady(
+            context=context,
+            transport=transport,
+            coder_hostname=coder_hostname,
+        ):
+            pass
+        case unreachable:
+            assert_never(unreachable)
     with activate_task1_proof_context(context):
         try:
-            api(transport.coder_hostname, None, "/api/v2/buildinfo")
+            api(coder_hostname, None, "/api/v2/buildinfo")
         except CoderSnapshotApiError as error:
             return _snapshot_failure(error)
         except (OSError, ValueError):
@@ -104,7 +110,7 @@ def collect_preflight(env_file: Path, context_file: Path) -> CoderCreatePrefligh
             return _unavailable_report("coder_token_unavailable")
         try:
             token = coder_login(
-                transport.coder_hostname,
+                coder_hostname,
                 transport.coder_email,
                 transport.coder_password,
             )
@@ -134,19 +140,19 @@ def collect_preflight(env_file: Path, context_file: Path) -> CoderCreatePrefligh
                 auth_status="authenticated",
             )
         try:
-            version = api(transport.coder_hostname, token, f"/api/v2/templateversions/{version_id}")
+            version = api(coder_hostname, token, f"/api/v2/templateversions/{version_id}")
             parameters = api(
-                transport.coder_hostname,
+                coder_hostname,
                 token,
                 f"/api/v2/templateversions/{version_id}/rich-parameters",
             )
             presets = nullable_api(
-                transport.coder_hostname,
+                coder_hostname,
                 token,
                 f"/api/v2/templateversions/{version_id}/presets",
             )
             external_auth = api(
-                transport.coder_hostname,
+                coder_hostname,
                 token,
                 f"/api/v2/templateversions/{version_id}/external-auth",
             )
@@ -177,7 +183,13 @@ def _unavailable_report(blocker: PreflightFailure) -> CoderCreatePreflightReport
             unavailable = _UnavailableReport("reachable", "unavailable", "not_checked", blocker)
         case "coder_auth_unavailable":
             unavailable = _UnavailableReport("reachable", "issued", "unavailable", blocker)
-        case "preflight_transport_configuration_invalid":
+        case (
+            "preflight_env_unavailable"
+            | "preflight_task1_context_unavailable"
+            | "preflight_transport_unavailable"
+            | "preflight_setup_unexpected"
+            | "preflight_transport_configuration_invalid"
+        ):
             unavailable = _UnavailableReport("not_checked", "not_checked", "not_checked", blocker)
         case "preflight_payload_invalid":
             unavailable = _UnavailableReport("reachable", "issued", "authenticated", blocker)
