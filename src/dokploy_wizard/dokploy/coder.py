@@ -490,6 +490,14 @@ class DokployCoderBackend:
                     failure_kind = "receipt"
                 case "receipt_invalid":
                     failure_kind = "receipt_invalid"
+                case "receipt_owner":
+                    failure_kind = "receipt_owner"
+                case "receipt_read":
+                    failure_kind = "receipt_read"
+                case "receipt_schema":
+                    failure_kind = "receipt_schema"
+                case "receipt_write":
+                    failure_kind = "receipt_write"
                 case "reconciliation":
                     failure_kind = "reconciliation"
                 case "unknown":

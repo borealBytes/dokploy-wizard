@@ -43,6 +43,10 @@ Task18ModifyFailureCategory = Literal[
     "coder_workspace_secrets_reconciliation_metadata",
     "coder_workspace_secrets_reconciliation_receipt",
     "coder_workspace_secrets_reconciliation_receipt_invalid",
+    "coder_workspace_secrets_reconciliation_receipt_owner",
+    "coder_workspace_secrets_reconciliation_receipt_read",
+    "coder_workspace_secrets_reconciliation_receipt_schema",
+    "coder_workspace_secrets_reconciliation_receipt_write",
     "coder_workspace_secrets_reconciliation_unknown",
     "coder_workspace_secrets_specification",
     "headscale",
@@ -179,6 +183,14 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
             return "coder_workspace_secrets_reconciliation_metadata"
         if message == "Coder workspace secret reconciliation failed. receipt_invalid":
             return "coder_workspace_secrets_reconciliation_receipt_invalid"
+        if message == "Coder workspace secret reconciliation failed. receipt_owner":
+            return "coder_workspace_secrets_reconciliation_receipt_owner"
+        if message == "Coder workspace secret reconciliation failed. receipt_read":
+            return "coder_workspace_secrets_reconciliation_receipt_read"
+        if message == "Coder workspace secret reconciliation failed. receipt_schema":
+            return "coder_workspace_secrets_reconciliation_receipt_schema"
+        if message == "Coder workspace secret reconciliation failed. receipt_write":
+            return "coder_workspace_secrets_reconciliation_receipt_write"
         if message == "Coder workspace secret reconciliation failed. reconciliation":
             return "coder_workspace_secrets_reconciliation_internal"
         if message.startswith("Coder workspace secret "):

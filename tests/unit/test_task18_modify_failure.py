@@ -154,6 +154,22 @@ from dokploy_wizard.tailscale import TailscaleError
             "coder_workspace_secrets_reconciliation_receipt_invalid",
         ),
         (
+            CoderError("Coder workspace secret reconciliation failed. receipt_owner"),
+            "coder_workspace_secrets_reconciliation_receipt_owner",
+        ),
+        (
+            CoderError("Coder workspace secret reconciliation failed. receipt_read"),
+            "coder_workspace_secrets_reconciliation_receipt_read",
+        ),
+        (
+            CoderError("Coder workspace secret reconciliation failed. receipt_schema"),
+            "coder_workspace_secrets_reconciliation_receipt_schema",
+        ),
+        (
+            CoderError("Coder workspace secret reconciliation failed. receipt_write"),
+            "coder_workspace_secrets_reconciliation_receipt_write",
+        ),
+        (
             CoderError("Coder workspace secret reconciliation failed. reconciliation"),
             "coder_workspace_secrets_reconciliation_internal",
         ),

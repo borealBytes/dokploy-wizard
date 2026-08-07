@@ -203,7 +203,7 @@ def test_secret_receipt_owner_mismatch_has_typed_invalid_receipt_failure(
     with pytest.raises(CoderSecretError) as raised:
         reconciler.reconcile(_specs())
 
-    assert raised.value.kind == "receipt_invalid"
+    assert raised.value.kind == "receipt_owner"
 
 
 def test_workspace_secret_unsupported_blocks_without_value_leak(tmp_path: Path) -> None:
