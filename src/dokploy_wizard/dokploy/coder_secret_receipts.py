@@ -20,7 +20,17 @@ _FILENAME: Final = "coder-secret-receipts-v1.json"
 ReceiptStatus = Literal["planned", "running", "blocked", "completed", "failed"]
 SecretOperation = Literal["create", "update", "noop"]
 StepStatus = Literal["intent", "submitted", "verified", "blocked"]
-ReceiptErrorKind = Literal["directory", "file", "json", "schema", "schema_fields"]
+ReceiptErrorKind = Literal[
+    "directory",
+    "file",
+    "json",
+    "schema",
+    "schema_fields",
+    "schema_lifecycle",
+    "schema_order",
+    "schema_value",
+    "schema_version",
+]
 
 
 @dataclass(frozen=True, slots=True)

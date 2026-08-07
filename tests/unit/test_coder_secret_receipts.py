@@ -102,6 +102,16 @@ def test_receipt_rejects_verified_step_without_a_durable_submitted_hash() -> Non
         parse_receipt(payload)
 
 
+def test_receipt_version_failure_has_typed_schema_origin() -> None:
+    payload = _receipt_payload()
+    payload["schema_version"] = 2
+
+    with pytest.raises(CoderSecretReceiptError) as raised:
+        parse_receipt(payload)
+
+    assert raised.value.kind == "schema_version"
+
+
 def test_receipt_rejects_completed_receipt_with_an_unresolved_step() -> None:
     payload = _receipt_payload()
     unresolved = _step("test-secret", status="intent").to_dict()
