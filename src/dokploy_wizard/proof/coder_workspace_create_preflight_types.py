@@ -26,6 +26,10 @@ PreflightBlocker = Literal[
     "coder_token_unavailable",
     "coder_auth_unavailable",
     "preflight_transport_configuration_invalid",
+    "coder_container_unavailable",
+    "coder_container_inspect_unavailable",
+    "coder_shared_network_unavailable",
+    "coder_shared_address_invalid",
     "active_template_version_unavailable",
     "active_template_version_unhealthy",
     "preset_selection_required",
@@ -231,7 +235,11 @@ def _blocker(value: JsonValue) -> PreflightBlocker:
             return blocker
         case (
             (
-                "preflight_transport_configuration_invalid"
+            "preflight_transport_configuration_invalid"
+            | "coder_container_unavailable"
+            | "coder_container_inspect_unavailable"
+            | "coder_shared_network_unavailable"
+            | "coder_shared_address_invalid"
                 | "active_template_version_unavailable"
                 | "active_template_version_unhealthy"
             ) as blocker

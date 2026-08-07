@@ -132,7 +132,7 @@ def test_api_rejects_missing_task1_shared_network_before_request(
     with pytest.raises(model_sync_coder_api.CoderSnapshotApiError) as error:
         model_sync_coder_api.api("coder-proof.example.test", None, "/api/v2/users/me")
 
-    assert error.value.stage == "route"
+    assert error.value.stage == "network"
     assert captured == []
 
 

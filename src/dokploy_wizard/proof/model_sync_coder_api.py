@@ -7,6 +7,7 @@ from typing import IO, Final, Literal
 from urllib import request
 
 from dokploy_wizard.dokploy.coder import _coder_container_name
+from dokploy_wizard.packs.coder.reconciler import CoderError
 from dokploy_wizard.proof.model_sync_artifacts import (
     JsonValue,
     require_list,
@@ -19,7 +20,7 @@ from dokploy_wizard.proof.model_sync_task1_context import active_task1_proof_con
 _OUTPUT_LIMIT: Final = 2 * 1024 * 1024
 
 
-CoderSnapshotStage = Literal["route", "endpoint", "payload"]
+CoderSnapshotStage = Literal["container", "inspect", "network", "address", "endpoint", "payload"]
 
 
 class CoderSnapshotApiError(ValueError):
@@ -75,8 +76,10 @@ def _api_value(
         headers["Content-Type"] = "application/json"
     try:
         url = _api_url(hostname, path)
-    except (CoderSnapshotApiError, ValueError, OSError):
-        raise CoderSnapshotApiError("route") from None
+    except CoderSnapshotApiError:
+        raise
+    except (ValueError, OSError):
+        raise CoderSnapshotApiError("container") from None
     request_value = request.Request(
         url,
         data=data,
@@ -108,34 +111,43 @@ def _api_url(hostname: str, path: str) -> str:
 def _internal_base_url(stack_name: str) -> str:
     try:
         container = _coder_container_name(f"{stack_name}-coder")
-    except ValueError:
-        raise CoderSnapshotApiError("route") from None
+    except CoderError:
+        raise CoderSnapshotApiError("container") from None
     if container is None:
-        raise CoderSnapshotApiError("route")
-    raw = run_bounded_process(
-        ["docker", "inspect", "--type", "container", container],
-        stdin=b"",
-        output_limit=_OUTPUT_LIMIT,
-        timeout_seconds=30,
-        label="Coder internal API container inspect",
-    )
-    values = require_list(json.loads(raw), "Coder internal API container inspect")
+        raise CoderSnapshotApiError("container")
+    try:
+        raw = run_bounded_process(
+            ["docker", "inspect", "--type", "container", container],
+            stdin=b"",
+            output_limit=_OUTPUT_LIMIT,
+            timeout_seconds=30,
+            label="Coder internal API container inspect",
+        )
+        values = require_list(json.loads(raw), "Coder internal API container inspect")
+    except (RuntimeError, ValueError, json.JSONDecodeError):
+        raise CoderSnapshotApiError("inspect") from None
     if len(values) != 1:
-        raise CoderSnapshotApiError("route")
-    inspected = require_mapping(values[0], "Coder internal API container inspect")
-    settings = require_mapping(inspected.get("NetworkSettings"), "Coder network settings")
-    networks = require_mapping(settings.get("Networks"), "Coder networks")
+        raise CoderSnapshotApiError("inspect")
+    try:
+        inspected = require_mapping(values[0], "Coder internal API container inspect")
+        settings = require_mapping(inspected.get("NetworkSettings"), "Coder network settings")
+        networks = require_mapping(settings.get("Networks"), "Coder networks")
+    except RuntimeError:
+        raise CoderSnapshotApiError("inspect") from None
     shared_value = networks.get(f"{stack_name}-shared")
     if shared_value is None:
-        raise CoderSnapshotApiError("route")
-    shared = require_mapping(shared_value, "Coder shared network")
-    address = require_text(shared.get("IPAddress"), "Coder shared network address")
+        raise CoderSnapshotApiError("network")
+    try:
+        shared = require_mapping(shared_value, "Coder shared network")
+        address = require_text(shared.get("IPAddress"), "Coder shared network address")
+    except RuntimeError:
+        raise CoderSnapshotApiError("network") from None
     try:
         parsed = ip_address(address)
     except ValueError as error:
-        raise CoderSnapshotApiError("route") from error
+        raise CoderSnapshotApiError("address") from error
     if not parsed.is_private:
-        raise CoderSnapshotApiError("route")
+        raise CoderSnapshotApiError("address")
     authority = f"[{address}]" if parsed.version == 6 else address
     return f"http://{authority}:3000"
 
