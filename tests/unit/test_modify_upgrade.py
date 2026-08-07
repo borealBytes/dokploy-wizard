@@ -76,7 +76,7 @@ def test_task18_converts_exact_same_target_resume_with_model_sync_phases() -> No
     assert upgraded.phases_to_run == ("shared_core", "coder")
 
 
-def test_task18_rejects_incomplete_resume_without_all_model_sync_phases() -> None:
+def test_task18_rewinds_completed_shared_core_for_coder_resume() -> None:
     # Given
     plan = LifecyclePlan(
         mode="resume",
@@ -96,8 +96,69 @@ def test_task18_rejects_incomplete_resume_without_all_model_sync_phases() -> Non
         runtime_images=resolve_runtime_images({}),
     )
 
+    # When
+    upgraded = apply_modify_upgrade_intent(
+        plan,
+        ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC,
+        applied,
+    )
+
+    # Then
+    assert upgraded.mode == "modify"
+    assert upgraded.phases_to_run == ("shared_core", "coder")
+
+
+def test_task18_rejects_resume_after_coder_phase() -> None:
+    # Given
+    plan = LifecyclePlan(
+        mode="resume",
+        reasons=(),
+        applicable_phases=("preflight", "shared_core", "coder", "openclaw"),
+        phases_to_run=("openclaw",),
+        preserved_phases=("preflight", "shared_core", "coder"),
+        initial_completed_steps=("preflight", "shared_core", "coder"),
+        start_phase="openclaw",
+        raw_equivalent=True,
+        desired_equivalent=True,
+    )
+    applied = AppliedStateCheckpoint(
+        format_version=1,
+        desired_state_fingerprint="f" * 64,
+        completed_steps=("preflight", "shared_core", "coder"),
+        runtime_images=resolve_runtime_images({}),
+    )
+
     # When / Then
     with pytest.raises(StateValidationError, match="missing required phases"):
+        apply_modify_upgrade_intent(
+            plan,
+            ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC,
+            applied,
+        )
+
+
+def test_task18_rejects_resume_with_nonprefix_completed_steps() -> None:
+    # Given
+    plan = LifecyclePlan(
+        mode="resume",
+        reasons=(),
+        applicable_phases=("preflight", "shared_core", "headscale", "coder"),
+        phases_to_run=("headscale", "coder"),
+        preserved_phases=("preflight", "headscale"),
+        initial_completed_steps=("preflight", "headscale"),
+        start_phase="headscale",
+        raw_equivalent=True,
+        desired_equivalent=True,
+    )
+    applied = AppliedStateCheckpoint(
+        format_version=1,
+        desired_state_fingerprint="f" * 64,
+        completed_steps=("preflight", "headscale"),
+        runtime_images=resolve_runtime_images({}),
+    )
+
+    # When / Then
+    with pytest.raises(StateValidationError, match="lifecycle mode is unsupported"):
         apply_modify_upgrade_intent(
             plan,
             ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC,
