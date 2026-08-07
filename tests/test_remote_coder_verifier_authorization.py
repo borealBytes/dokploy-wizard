@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 
 from dokploy_wizard import remote
+from dokploy_wizard.proof.coder_workspace_create_preflight_types import (
+    CoderCreatePreflightReport,
+)
 from dokploy_wizard.remote_transport import (
     RemoteCommandCaptureLimits,
     RemoteCommandOutput,
@@ -91,7 +94,7 @@ def test_modify_receives_authorization_only_after_private_upload() -> None:
 
 def test_capture_executes_module_from_source_layout(tmp_path: Path) -> None:
     transport = PrivateArtifactTransport(b"private")
-    session = RemoteTransportSession(transport, "/remote")
+    session = RemoteTransportSession(transport, "/remote", task1_proof_context=Path("context.json"))
     args = Namespace(
         output=tmp_path / "authorization.json",
         machine_sha256="1" * 64,
@@ -109,3 +112,59 @@ def test_capture_executes_module_from_source_layout(tmp_path: Path) -> None:
     assert len(transport.commands) == 1
     assert "env PYTHONPATH=src python3 -m" in transport.commands[0]
     assert len(transport.removed) == 1
+
+
+def test_workspace_create_preflight_downloads_private_report_and_removes_remote_copy(
+    tmp_path: Path,
+) -> None:
+    # Given
+    report = CoderCreatePreflightReport(
+        url_status="reachable",
+        token_status="issued",
+        auth_status="authenticated",
+        target_template_count=1,
+        organization_count=1,
+        target_organization_count=1,
+        active_template_version_health="healthy",
+        preset_selection="required",
+        required_parameter_default_gap_count=0,
+        required_external_auth_unsatisfied_count=0,
+        external_auth_status="not_required",
+        blockers=("preset_selection_required",),
+    ).to_bytes()
+    transport = PrivateArtifactTransport(report)
+    session = RemoteTransportSession(transport, "/remote", task1_proof_context=Path("context.json"))
+    output = tmp_path / "preflight.json"
+
+    # When
+    remote._capture_coder_workspace_create_preflight(
+        session=session,
+        password="fixture-password",
+        output=output,
+    )
+
+    # Then
+    assert output.read_bytes() == report
+    assert os.stat(output).st_mode & 0o777 == 0o600
+    assert transport.removed == ["/remote/state/.coder-workspace-create-preflight.json"]
+    assert len(transport.commands) == 1
+    assert "dokploy_wizard.proof.coder_workspace_create_preflight" in transport.commands[0]
+    assert "/remote/task1-proof-context.json" in transport.commands[0]
+
+
+def test_workspace_create_preflight_discards_invalid_downloaded_bytes(tmp_path: Path) -> None:
+    # Given
+    transport = PrivateArtifactTransport(b'{"raw":"must-not-persist"}\n')
+    session = RemoteTransportSession(transport, "/remote", task1_proof_context=Path("context.json"))
+    output = tmp_path / "preflight.json"
+
+    # When / Then
+    with pytest.raises(RuntimeError, match="report is invalid"):
+        remote._capture_coder_workspace_create_preflight(
+            session=session,
+            password="fixture-password",
+            output=output,
+        )
+
+    assert not output.exists()
+    assert transport.removed == ["/remote/state/.coder-workspace-create-preflight.json"]

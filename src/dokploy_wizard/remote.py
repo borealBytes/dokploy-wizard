@@ -17,6 +17,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final, TextIO
 
+from dokploy_wizard.proof.coder_workspace_create_preflight_types import (
+    CoderCreatePreflightReport,
+)
 from dokploy_wizard.proof.model_sync_task1_context import (
     Task1ProofContextError,
     Task1ProofContextV1,
@@ -123,6 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
     authorize_parser.add_argument("--stack-sha256", required=True)
     authorize_parser.add_argument("--final-commit", required=True)
     authorize_parser.add_argument("--attempt-context-sha256", required=True)
+
+    coder_preflight_parser = subparsers.add_parser(
+        "coder-workspace-create-preflight", help=argparse.SUPPRESS, description=argparse.SUPPRESS
+    )
+    _add_remote_common_arguments(coder_preflight_parser)
+    coder_preflight_parser.add_argument("--output", type=Path, required=True)
 
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -234,6 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "task1-cleanup",
             "state-upgrade-observe",
             "coder-verifier-authorize",
+            "coder-workspace-create-preflight",
         }:
             _require_local_env_file(args.env_file)
         task1_context = _validate_task1_proof_context(args)
@@ -277,6 +287,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "proof",
             "state-upgrade-observe",
             "coder-verifier-authorize",
+            "coder-workspace-create-preflight",
         }:
             archive_evidence = _upload_remote_bundle(args=args, session=session, reporter=reporter)
             _extract_remote_bundle(
@@ -299,6 +310,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args=args,
                 session=session,
                 password=args.password,
+            )
+            exit_code = 0
+            return exit_code
+        if args.command == "coder-workspace-create-preflight":
+            _capture_coder_workspace_create_preflight(
+                session=session,
+                password=args.password,
+                output=args.output,
             )
             exit_code = 0
             return exit_code
@@ -938,6 +957,50 @@ def _capture_coder_verifier_authorization(
     )
     try:
         _download_private_file(session, remote_output, args.output)
+    finally:
+        session.transport.remove(remote_output)
+
+
+def _capture_coder_workspace_create_preflight(
+    *,
+    session: RemoteTransportSession,
+    password: str,
+    output: Path,
+) -> None:
+    context_path = session.remote_task1_proof_context_path
+    if context_path is None:
+        raise RuntimeError("Coder workspace create preflight requires a Task 1 proof context")
+    remote_output = posixpath.join(
+        session.remote_state_dir, ".coder-workspace-create-preflight.json"
+    )
+    command = _with_unbuffered_python(
+        _shell_join(
+            (
+                "env",
+                "PYTHONPATH=src",
+                "python3",
+                "-m",
+                "dokploy_wizard.proof.coder_workspace_create_preflight_cli",
+                "--env-file",
+                session.remote_install_env_path,
+                "--task1-proof-context",
+                context_path,
+                "--output",
+                remote_output,
+            )
+        )
+    )
+    try:
+        session.run_command(
+            subcommand="coder-workspace-create-preflight",
+            command=command,
+            password=password,
+        )
+        _download_private_file(session, remote_output, output)
+        CoderCreatePreflightReport.from_bytes(output.read_bytes())
+    except (OSError, ValueError) as error:
+        output.unlink(missing_ok=True)
+        raise RuntimeError("Coder workspace create preflight report is invalid") from error
     finally:
         session.transport.remove(remote_output)
 
