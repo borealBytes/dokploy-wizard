@@ -53,7 +53,7 @@ class CoderSecretReconciler:
             validate_receipt_for_specs(existing, specs)
         receipt = existing or CoderSecretReceipt(self._owner_id, "planned", ())
         if receipt.status in {"blocked", "failed"}:
-            raise CoderSecretError("Coder secret receipt is terminal")
+            raise CoderSecretError("Coder secret receipt is terminal", kind="receipt")
         for spec in sorted(specs, key=lambda item: item.name):
             receipt = self._reconcile_one(receipt, spec)
         completed = replace(receipt, status="completed")

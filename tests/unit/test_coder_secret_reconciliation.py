@@ -201,6 +201,28 @@ def test_workspace_secret_unsupported_blocks_without_value_leak(tmp_path: Path) 
     assert client.writes == []
 
 
+def test_terminal_secret_receipt_has_typed_receipt_failure(tmp_path: Path) -> None:
+    spec = _specs()[0]
+    client = FakeCoderSecrets()
+    owner_id = "d" * 64
+    _write_receipt(
+        tmp_path,
+        _receipt_step(spec, operation="create", status="blocked", metadata=None),
+        status="failed",
+    )
+    reconciler = CoderSecretReconciler(
+        state_dir=tmp_path,
+        client=client,
+        owner_id=owner_id,
+    )
+
+    with pytest.raises(CoderSecretError) as raised:
+        reconciler.reconcile((spec,))
+
+    assert raised.value.kind == "receipt"
+    assert client.writes == []
+
+
 def test_exact_five_secret_specs_reject_blank_coder_key_before_mutation() -> None:
     with pytest.raises(ValueError, match="values are invalid"):
         build_coder_secret_specs(

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Protocol
+from typing import Literal, Protocol
 
 from dokploy_wizard.dokploy.coder_secret_receipts import (
     CoderSecretReceipt,
@@ -13,10 +13,13 @@ from dokploy_wizard.dokploy.coder_secret_receipts import (
 )
 from dokploy_wizard.state.sync_schema import JsonValue
 
+CoderSecretFailureKind = Literal["receipt", "unknown"]
+
 
 @dataclass(slots=True)
 class CoderSecretError(RuntimeError):
     reason: str
+    kind: CoderSecretFailureKind = "unknown"
 
     def __str__(self) -> str:
         return self.reason
