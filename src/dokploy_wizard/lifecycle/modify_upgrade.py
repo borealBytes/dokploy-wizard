@@ -38,13 +38,17 @@ def apply_modify_upgrade_intent(
                 same_target_resume = (
                     applied.runtime_images is not None
                     and applied.completed_steps != plan.applicable_phases
+                    and applied.completed_steps
+                    == plan.applicable_phases[: len(applied.completed_steps)]
                     and plan.preserved_phases == applied.completed_steps
                     and plan.initial_completed_steps == applied.completed_steps
                     and plan.phases_to_run
                     == plan.applicable_phases[len(applied.completed_steps) :]
                 )
-                if same_target_resume and not all(
-                    phase in plan.phases_to_run for phase in _TASK18_PHASES
+                has_coder_remaining = _TASK18_PHASES[1] in plan.phases_to_run
+                if same_target_resume and (
+                    _TASK18_PHASES[1] in applied.completed_steps
+                    or not has_coder_remaining
                 ):
                     raise StateValidationError(
                         "Task 18 Host A model-sync resume is missing required phases."
