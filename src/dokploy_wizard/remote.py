@@ -907,6 +907,8 @@ def _capture_coder_verifier_authorization(
     command = _with_unbuffered_python(
         _shell_join(
             (
+                "env",
+                "PYTHONPATH=src",
                 "python3",
                 "-m",
                 "dokploy_wizard.proof.coder_verifier_authorization_cli",
