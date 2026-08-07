@@ -435,7 +435,19 @@ def test_secret_client_observes_environment_hash_in_temporary_workspace(
         command[-5:] == ("/opt/coder", "templates", "list", "--output", "json")
         for command in commands
     )
-    assert any("create" in command for command in commands)
+    assert any(
+        command[-7:]
+        == (
+            "/opt/coder",
+            "create",
+            "--yes",
+            "--no-wait",
+            "--template",
+            template_name,
+            "proof-workspace",
+        )
+        for command in commands
+    )
     assert any("ssh" in command for command in commands)
     assert any("delete" in command for command in commands)
     assert all(spec.value not in argument for call, _ in runner.calls for argument in call)
