@@ -80,7 +80,10 @@ class DockerExecCoderSecretClient:
             or workspace.template_name != receipt.template_name
         ):
             raise CoderSecretClientError("Coder verification workspace identity drifted")
-        raise CoderSecretClientError("Coder verification workspace remains present")
+        raise CoderSecretClientError(
+            "Coder verification workspace remains present",
+            kind="client_workspace_present",
+        )
 
     def verify_workspace_value_hash(self, spec: CoderSecretSpec, owner_id: str) -> str:
         verifier = CoderWorkspaceValueHashVerifier(

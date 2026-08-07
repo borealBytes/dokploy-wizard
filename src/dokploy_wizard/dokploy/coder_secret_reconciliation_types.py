@@ -20,6 +20,7 @@ from dokploy_wizard.state.sync_schema import JsonValue
 CoderSecretFailureKind = Literal[
     "blocked",
     "client",
+    "client_workspace_present",
     "metadata",
     "receipt",
     "receipt_invalid",

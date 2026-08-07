@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Literal, Protocol
 
 from dokploy_wizard.dokploy.coder_secret_reconciliation import CoderSecretError
 
@@ -10,8 +10,13 @@ from dokploy_wizard.dokploy.coder_secret_reconciliation import CoderSecretError
 class CoderSecretClientError(CoderSecretError):
     """Carries a redacted failure reason while Python attaches traceback state."""
 
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason, kind="client")
+    def __init__(
+        self,
+        reason: str,
+        *,
+        kind: Literal["client", "client_workspace_present"] = "client",
+    ) -> None:
+        super().__init__(reason, kind=kind)
 
 
 class CoderSecretProcessRunner(Protocol):

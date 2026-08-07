@@ -39,6 +39,7 @@ Task18ModifyFailureCategory = Literal[
     "coder_workspace_secrets_reconciliation",
     "coder_workspace_secrets_reconciliation_blocked",
     "coder_workspace_secrets_reconciliation_client",
+    "coder_workspace_secrets_reconciliation_client_workspace_present",
     "coder_workspace_secrets_reconciliation_internal",
     "coder_workspace_secrets_reconciliation_metadata",
     "coder_workspace_secrets_reconciliation_receipt",
@@ -188,6 +189,8 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
             return "coder_workspace_secrets_reconciliation_blocked"
         if message == "Coder workspace secret reconciliation failed. client":
             return "coder_workspace_secrets_reconciliation_client"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_present":
+            return "coder_workspace_secrets_reconciliation_client_workspace_present"
         if message == "Coder workspace secret reconciliation failed. metadata":
             return "coder_workspace_secrets_reconciliation_metadata"
         if message == "Coder workspace secret reconciliation failed. receipt_invalid":
