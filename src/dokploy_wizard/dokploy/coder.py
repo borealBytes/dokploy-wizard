@@ -484,6 +484,8 @@ class DokployCoderBackend:
                     failure_kind = "blocked"
                 case "client":
                     failure_kind = "client"
+                case "client_workspace_present":
+                    failure_kind = "client_workspace_present"
                 case "metadata":
                     failure_kind = "metadata"
                 case "receipt":
