@@ -285,6 +285,39 @@ def test_task18_modify_failure_returns_only_exception_type_category(
     assert category == expected
 
 
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "client_command_failed",
+        "client_command_timeout",
+        "client_env_binding",
+        "client_invalid_operation",
+        "client_metadata_invalid",
+        "client_output_limit",
+        "client_workspace_cleanup",
+        "client_workspace_create",
+        "client_workspace_delete",
+        "client_workspace_hash",
+        "client_workspace_identity",
+        "client_workspace_intent",
+        "client_workspace_inventory",
+        "client_workspace_policy",
+        "client_workspace_readiness",
+        "client_workspace_receipt_invalid",
+        "client_workspace_receipt_read",
+        "client_workspace_receipt_state",
+        "client_workspace_receipt_write",
+        "client_workspace_template",
+    ),
+)
+def test_task18_modify_failure_preserves_each_client_origin(kind: str) -> None:
+    failure = CoderError(f"Coder workspace secret reconciliation failed. {kind}")
+
+    category = task18_modify_failure(failure)
+
+    assert category == f"coder_workspace_secrets_reconciliation_{kind}"
+
+
 def test_handle_modify_emits_task18_marker_for_busy_lock(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

@@ -482,12 +482,50 @@ class DokployCoderBackend:
             match error.kind:
                 case "blocked":
                     failure_kind = "blocked"
-                case "client":
-                    failure_kind = "client"
                 case "client_workspace_present":
                     failure_kind = "client_workspace_present"
                 case "client_workspace_terminal":
                     failure_kind = "client_workspace_terminal"
+                case "client_command_failed":
+                    failure_kind = "client_command_failed"
+                case "client_command_timeout":
+                    failure_kind = "client_command_timeout"
+                case "client_env_binding":
+                    failure_kind = "client_env_binding"
+                case "client_invalid_operation":
+                    failure_kind = "client_invalid_operation"
+                case "client_metadata_invalid":
+                    failure_kind = "client_metadata_invalid"
+                case "client_output_limit":
+                    failure_kind = "client_output_limit"
+                case "client_workspace_cleanup":
+                    failure_kind = "client_workspace_cleanup"
+                case "client_workspace_create":
+                    failure_kind = "client_workspace_create"
+                case "client_workspace_delete":
+                    failure_kind = "client_workspace_delete"
+                case "client_workspace_hash":
+                    failure_kind = "client_workspace_hash"
+                case "client_workspace_identity":
+                    failure_kind = "client_workspace_identity"
+                case "client_workspace_intent":
+                    failure_kind = "client_workspace_intent"
+                case "client_workspace_inventory":
+                    failure_kind = "client_workspace_inventory"
+                case "client_workspace_policy":
+                    failure_kind = "client_workspace_policy"
+                case "client_workspace_readiness":
+                    failure_kind = "client_workspace_readiness"
+                case "client_workspace_receipt_invalid":
+                    failure_kind = "client_workspace_receipt_invalid"
+                case "client_workspace_receipt_read":
+                    failure_kind = "client_workspace_receipt_read"
+                case "client_workspace_receipt_state":
+                    failure_kind = "client_workspace_receipt_state"
+                case "client_workspace_receipt_write":
+                    failure_kind = "client_workspace_receipt_write"
+                case "client_workspace_template":
+                    failure_kind = "client_workspace_template"
                 case "metadata":
                     failure_kind = "metadata"
                 case "receipt":

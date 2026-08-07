@@ -84,7 +84,8 @@ def write_receipt_bytes(state_dir: Path, filename: str, payload: bytes) -> None:
             os.close(descriptor)
         _remove_owned_temp(temporary, identity)
         raise CoderSecretClientError(
-            "Coder workspace verification receipt cannot be written"
+            "Coder workspace verification receipt cannot be written",
+            kind="client_workspace_receipt_write",
         ) from error
 
 
@@ -170,4 +171,7 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _read_error() -> CoderSecretClientError:
-    return CoderSecretClientError("Coder workspace verification receipt cannot be read")
+    return CoderSecretClientError(
+        "Coder workspace verification receipt cannot be read",
+        kind="client_workspace_receipt_read",
+    )

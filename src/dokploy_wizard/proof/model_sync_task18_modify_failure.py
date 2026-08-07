@@ -41,6 +41,26 @@ Task18ModifyFailureCategory = Literal[
     "coder_workspace_secrets_reconciliation_client",
     "coder_workspace_secrets_reconciliation_client_workspace_present",
     "coder_workspace_secrets_reconciliation_client_workspace_terminal",
+    "coder_workspace_secrets_reconciliation_client_command_failed",
+    "coder_workspace_secrets_reconciliation_client_command_timeout",
+    "coder_workspace_secrets_reconciliation_client_env_binding",
+    "coder_workspace_secrets_reconciliation_client_invalid_operation",
+    "coder_workspace_secrets_reconciliation_client_metadata_invalid",
+    "coder_workspace_secrets_reconciliation_client_output_limit",
+    "coder_workspace_secrets_reconciliation_client_workspace_cleanup",
+    "coder_workspace_secrets_reconciliation_client_workspace_create",
+    "coder_workspace_secrets_reconciliation_client_workspace_delete",
+    "coder_workspace_secrets_reconciliation_client_workspace_hash",
+    "coder_workspace_secrets_reconciliation_client_workspace_identity",
+    "coder_workspace_secrets_reconciliation_client_workspace_intent",
+    "coder_workspace_secrets_reconciliation_client_workspace_inventory",
+    "coder_workspace_secrets_reconciliation_client_workspace_policy",
+    "coder_workspace_secrets_reconciliation_client_workspace_readiness",
+    "coder_workspace_secrets_reconciliation_client_workspace_receipt_invalid",
+    "coder_workspace_secrets_reconciliation_client_workspace_receipt_read",
+    "coder_workspace_secrets_reconciliation_client_workspace_receipt_state",
+    "coder_workspace_secrets_reconciliation_client_workspace_receipt_write",
+    "coder_workspace_secrets_reconciliation_client_workspace_template",
     "coder_workspace_secrets_reconciliation_internal",
     "coder_workspace_secrets_reconciliation_metadata",
     "coder_workspace_secrets_reconciliation_receipt",
@@ -194,6 +214,55 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
             return "coder_workspace_secrets_reconciliation_client_workspace_present"
         if message == "Coder workspace secret reconciliation failed. client_workspace_terminal":
             return "coder_workspace_secrets_reconciliation_client_workspace_terminal"
+        if message == "Coder workspace secret reconciliation failed. client_command_failed":
+            return "coder_workspace_secrets_reconciliation_client_command_failed"
+        if message == "Coder workspace secret reconciliation failed. client_command_timeout":
+            return "coder_workspace_secrets_reconciliation_client_command_timeout"
+        if message == "Coder workspace secret reconciliation failed. client_env_binding":
+            return "coder_workspace_secrets_reconciliation_client_env_binding"
+        if message == "Coder workspace secret reconciliation failed. client_invalid_operation":
+            return "coder_workspace_secrets_reconciliation_client_invalid_operation"
+        if message == "Coder workspace secret reconciliation failed. client_metadata_invalid":
+            return "coder_workspace_secrets_reconciliation_client_metadata_invalid"
+        if message == "Coder workspace secret reconciliation failed. client_output_limit":
+            return "coder_workspace_secrets_reconciliation_client_output_limit"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_cleanup":
+            return "coder_workspace_secrets_reconciliation_client_workspace_cleanup"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_create":
+            return "coder_workspace_secrets_reconciliation_client_workspace_create"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_delete":
+            return "coder_workspace_secrets_reconciliation_client_workspace_delete"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_hash":
+            return "coder_workspace_secrets_reconciliation_client_workspace_hash"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_identity":
+            return "coder_workspace_secrets_reconciliation_client_workspace_identity"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_intent":
+            return "coder_workspace_secrets_reconciliation_client_workspace_intent"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_inventory":
+            return "coder_workspace_secrets_reconciliation_client_workspace_inventory"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_policy":
+            return "coder_workspace_secrets_reconciliation_client_workspace_policy"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_readiness":
+            return "coder_workspace_secrets_reconciliation_client_workspace_readiness"
+        if message == (
+            "Coder workspace secret reconciliation failed. "
+            "client_workspace_receipt_invalid"
+        ):
+            return "coder_workspace_secrets_reconciliation_client_workspace_receipt_invalid"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_receipt_read":
+            return "coder_workspace_secrets_reconciliation_client_workspace_receipt_read"
+        if message == (
+            "Coder workspace secret reconciliation failed. "
+            "client_workspace_receipt_state"
+        ):
+            return "coder_workspace_secrets_reconciliation_client_workspace_receipt_state"
+        if message == (
+            "Coder workspace secret reconciliation failed. "
+            "client_workspace_receipt_write"
+        ):
+            return "coder_workspace_secrets_reconciliation_client_workspace_receipt_write"
+        if message == "Coder workspace secret reconciliation failed. client_workspace_template":
+            return "coder_workspace_secrets_reconciliation_client_workspace_template"
         if message == "Coder workspace secret reconciliation failed. metadata":
             return "coder_workspace_secrets_reconciliation_metadata"
         if message == "Coder workspace secret reconciliation failed. receipt_invalid":

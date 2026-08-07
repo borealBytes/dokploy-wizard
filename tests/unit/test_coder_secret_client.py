@@ -134,7 +134,7 @@ def test_secret_client_rejects_malformed_or_ambiguous_metadata(
     with pytest.raises(CoderSecretClientError) as raised:
         client.list_secrets()
 
-    assert raised.value.kind == "client"
+    assert raised.value.kind == "client_metadata_invalid"
 
 
 def test_secret_client_metadata_uses_closed_schema() -> None:
@@ -184,9 +184,32 @@ def test_secret_client_rejects_unsupported_environment_binding_before_write() ->
     with pytest.raises(CoderSecretClientError) as raised:
         client.write_secret("create", spec)
 
+    assert raised.value.kind == "client_env_binding"
     assert value not in str(raised.value)
     assert len(runner.calls) == 1
     assert all(value not in argument for call, _ in runner.calls for argument in call)
+
+
+def test_secret_client_command_failure_keeps_fixed_origin_without_output() -> None:
+    runner = RecordingRunner(
+        [
+            subprocess.CompletedProcess(
+                (),
+                1,
+                stdout="provider output must be discarded",
+                stderr="provider error must be discarded",
+            )
+        ]
+    )
+    client = DockerExecCoderSecretClient(
+        container_name="coder-container", session_token="session-token", runner=runner
+    )
+
+    with pytest.raises(CoderSecretClientError) as raised:
+        client.list_secrets()
+
+    assert raised.value.kind == "client_command_failed"
+    assert "provider" not in str(raised.value)
 
 
 def test_secret_client_checks_update_environment_binding_before_write() -> None:

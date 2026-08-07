@@ -50,7 +50,9 @@ class DockerExecCoderSecretClient:
 
     def write_secret(self, operation: str, spec: CoderSecretSpec) -> str:
         if operation not in {"create", "update"}:
-            raise CoderSecretClientError("Coder secret operation is invalid")
+            raise CoderSecretClientError(
+                "Coder secret operation is invalid", kind="client_invalid_operation"
+            )
         self._require_environment_binding(operation)
         output = self._secret_run(
             (operation, "--env", spec.env_name, "--description", spec.description, spec.name),
@@ -63,7 +65,10 @@ class DockerExecCoderSecretClient:
 
     def require_workspace_receipt_absence(self, receipt: WorkspaceVerificationReceipt) -> None:
         if receipt.workspace_id is None:
-            raise CoderSecretClientError("Coder verification workspace identity is unavailable")
+            raise CoderSecretClientError(
+                "Coder verification workspace identity is unavailable",
+                kind="client_workspace_identity",
+            )
         matches = tuple(
             workspace
             for workspace in workspace_records(self._coder_run(("list", "--output", "json")))
@@ -79,7 +84,10 @@ class DockerExecCoderSecretClient:
             or workspace.template_id != receipt.template_id
             or workspace.template_name != receipt.template_name
         ):
-            raise CoderSecretClientError("Coder verification workspace identity drifted")
+            raise CoderSecretClientError(
+                "Coder verification workspace identity drifted",
+                kind="client_workspace_identity",
+            )
         raise CoderSecretClientError(
             "Coder verification workspace remains present",
             kind="client_workspace_present",
@@ -98,7 +106,10 @@ class DockerExecCoderSecretClient:
     def _require_environment_binding(self, operation: str) -> None:
         help_text = self._secret_run((operation, "--help"), stdin=None)
         if "--env" not in help_text:
-            raise CoderSecretClientError("Coder CLI lacks required secret environment binding")
+            raise CoderSecretClientError(
+                "Coder CLI lacks required secret environment binding",
+                kind="client_env_binding",
+            )
 
     def _secret_run(self, command: tuple[str, ...], *, stdin: str | None) -> str:
         return self._run(("secret", *command), stdin=stdin)
@@ -130,14 +141,20 @@ class DockerExecCoderSecretClient:
                 env={**os.environ, "CODER_SESSION_TOKEN": self.session_token},
             )
         except subprocess.TimeoutExpired as error:
-            raise CoderSecretClientError("Coder secret command timed out") from error
+            raise CoderSecretClientError(
+                "Coder secret command timed out", kind="client_command_timeout"
+            ) from error
         if result.returncode != 0:
-            raise CoderSecretClientError("Coder secret command failed")
+            raise CoderSecretClientError(
+                "Coder secret command failed", kind="client_command_failed"
+            )
         if (
             len(result.stdout.encode()) > _MAX_OUTPUT_BYTES
             or len(result.stderr.encode()) > _MAX_OUTPUT_BYTES
         ):
-            raise CoderSecretClientError("Coder secret command output exceeds its limit")
+            raise CoderSecretClientError(
+                "Coder secret command output exceeds its limit", kind="client_output_limit"
+            )
         return result.stdout
 
 
@@ -166,20 +183,28 @@ def _parse_metadata_list(output: str) -> tuple[CoderSecretMetadata, ...]:
     try:
         value: JsonValue = json.loads(output)
     except json.JSONDecodeError as error:
-        raise CoderSecretClientError("Coder secret metadata is malformed") from error
+        raise CoderSecretClientError(
+            "Coder secret metadata is malformed", kind="client_metadata_invalid"
+        ) from error
     if not isinstance(value, list):
-        raise CoderSecretClientError("Coder secret metadata must be a list")
+        raise CoderSecretClientError(
+            "Coder secret metadata must be a list", kind="client_metadata_invalid"
+        )
     metadata = tuple(_parse_metadata(record) for record in value)
     names = tuple(item.name for item in metadata)
     identifiers = tuple(item.secret_id for item in metadata)
     if len(set(names)) != len(names) or len(set(identifiers)) != len(identifiers):
-        raise CoderSecretClientError("Coder secret metadata is ambiguous")
+        raise CoderSecretClientError(
+            "Coder secret metadata is ambiguous", kind="client_metadata_invalid"
+        )
     return metadata
 
 
 def _parse_metadata(value: JsonValue) -> CoderSecretMetadata:
     if not isinstance(value, dict) or frozenset(value) != _SECRET_METADATA_KEYS:
-        raise CoderSecretClientError("Coder secret metadata has an invalid schema")
+        raise CoderSecretClientError(
+            "Coder secret metadata has an invalid schema", kind="client_metadata_invalid"
+        )
     return CoderSecretMetadata(
         secret_id=_uuid(value.get("id"), "id"),
         name=_text(value.get("name"), "name"),
@@ -193,15 +218,21 @@ def _uuid(value: JsonValue | None, label: str) -> str:
     try:
         parsed = UUID(text)
     except ValueError as error:
-        raise CoderSecretClientError("Coder secret metadata ID is invalid") from error
+        raise CoderSecretClientError(
+            "Coder secret metadata ID is invalid", kind="client_metadata_invalid"
+        ) from error
     if str(parsed) != text:
-        raise CoderSecretClientError("Coder secret metadata ID is invalid")
+        raise CoderSecretClientError(
+            "Coder secret metadata ID is invalid", kind="client_metadata_invalid"
+        )
     return text
 
 
 def _text(value: JsonValue | None, label: str) -> str:
     if not isinstance(value, str) or value == "":
-        raise CoderSecretClientError(f"Coder secret metadata {label} is invalid")
+        raise CoderSecretClientError(
+            f"Coder secret metadata {label} is invalid", kind="client_metadata_invalid"
+        )
     return value
 
 
