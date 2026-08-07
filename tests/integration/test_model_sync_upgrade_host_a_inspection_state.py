@@ -14,6 +14,7 @@ from dokploy_wizard.lifecycle import (
 from dokploy_wizard.lifecycle.modify_upgrade import ModifyUpgradeIntent
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
+    DesiredState,
     OwnershipLedger,
     RawEnvInput,
     parse_env_file,
@@ -22,6 +23,7 @@ from dokploy_wizard.state import (
     write_ownership_ledger,
     write_target_state,
 )
+from dokploy_wizard.state.dokploy_runtime_auth import DokployRuntimeAuth
 
 
 def _write_env(path: Path) -> Path:
@@ -123,61 +125,6 @@ def test_task18_rehydrates_inspection_redactions_before_force_planning(
     assert plans[0].desired_equivalent is True
 
 
-def test_task18_rehydration_preserves_nonsecret_drift() -> None:
-    # Given
-    existing = RawEnvInput(
-        format_version=1,
-        values={"DOKPLOY_ADMIN_PASSWORD": "<redacted>", "ROOT_DOMAIN": "old.test"},
-    )
-    requested = RawEnvInput(
-        format_version=1,
-        values={
-            "DOKPLOY_ADMIN_EMAIL": "operator@example.test",
-            "DOKPLOY_ADMIN_PASSWORD": "current-password",
-            "ROOT_DOMAIN": "new.test",
-        },
-    )
-
-    # When
-    rehydrated = cli._rehydrate_inspection_redactions(existing, requested)
-
-    # Then
-    assert rehydrated.values == {
-        "DOKPLOY_ADMIN_PASSWORD": "current-password",
-        "ROOT_DOMAIN": "old.test",
-    }
-    assert rehydrated != requested
-
-
-def test_task18_runtime_comparison_preserves_missing_admin_credentials() -> None:
-    # Given
-    raw = RawEnvInput(format_version=1, values={"ROOT_DOMAIN": "example.test"})
-
-    # When
-    comparison = cli._task18_runtime_comparison_raw(raw)
-
-    # Then
-    assert comparison == raw
-
-
-def test_task18_runtime_comparison_omits_admin_credentials() -> None:
-    # Given
-    raw = RawEnvInput(
-        format_version=1,
-        values={
-            "DOKPLOY_ADMIN_EMAIL": "operator@example.test",
-            "DOKPLOY_ADMIN_PASSWORD": "fixture-password",
-            "ROOT_DOMAIN": "example.test",
-        },
-    )
-
-    # When
-    comparison = cli._task18_runtime_comparison_raw(raw)
-
-    # Then
-    assert comparison.values == {"ROOT_DOMAIN": "example.test"}
-
-
 @pytest.mark.parametrize("requested_password", ("fixture-password", None))
 def test_operator_modify_still_rejects_inactive_admin_only_change(
     tmp_path: Path,
@@ -217,3 +164,83 @@ def test_operator_modify_still_rejects_inactive_admin_only_change(
             requested_raw=requested,
             requested_desired=desired,
         )
+
+
+def test_task18_inspection_snapshot_uses_normalized_raw_equivalence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    state_dir = tmp_path / "state"
+    env_file = _write_env(tmp_path / "install.env")
+    env_raw = parse_env_file(env_file)
+    raw = RawEnvInput(
+        format_version=env_raw.format_version,
+        values={
+            **env_raw.values,
+            "PACKS": "coder,seaweedfs",
+            "SEAWEEDFS_ACCESS_KEY": "fixture-access-key",
+            "SEAWEEDFS_SECRET_KEY": "fixture-secret-key",
+        },
+    )
+    desired = resolve_desired_state(raw)
+    redacted_desired_payload = desired.to_dict()
+    redacted_desired_payload["seaweedfs_access_key"] = "<redacted>"
+    redacted_desired_payload["seaweedfs_secret_key"] = "<redacted>"
+    redacted_desired = DesiredState.from_dict(redacted_desired_payload)
+    write_target_state(
+        state_dir,
+        cli._redacted_raw_env_input(raw),
+        redacted_desired,
+    )
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=redacted_desired.format_version,
+            desired_state_fingerprint=redacted_desired.fingerprint(),
+            completed_steps=applicable_phases_for(redacted_desired),
+            runtime_images=redacted_desired.runtime_images,
+        ),
+    )
+    write_ownership_ledger(
+        state_dir,
+        OwnershipLedger(format_version=desired.format_version, resources=()),
+    )
+    monkeypatch.setattr(cli, "active_task1_proof_context", lambda: object())
+    monkeypatch.setattr(
+        cli,
+        "load_dokploy_runtime_auth",
+        lambda _state_dir: DokployRuntimeAuth(
+            api_url="https://runtime.example.test/api",
+            api_key="runtime-fixture-key",
+        ),
+    )
+    monkeypatch.setattr(cli, "preflight_coder_template_migration", lambda *_args: None)
+    monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _raw_env: object())
+    monkeypatch.setattr(cli, "_build_coder_backend", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(cli, "validate_preserved_phases", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "execute_lifecycle_plan",
+        lambda **kwargs: {
+            "lifecycle": {
+                "mode": kwargs["lifecycle_plan"].mode,
+                "phases_to_run": list(kwargs["lifecycle_plan"].phases_to_run),
+            }
+        },
+    )
+
+    # When
+    summary = cli.run_modify_flow(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=True,
+        raw_env=raw,
+        modify_upgrade_intent=ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC,
+    )
+
+    # Then
+    assert summary["lifecycle"] == {
+        "mode": "modify",
+        "phases_to_run": ["shared_core", "coder"],
+    }
