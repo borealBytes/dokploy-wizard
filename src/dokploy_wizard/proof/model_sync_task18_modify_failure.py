@@ -36,6 +36,8 @@ Task18ModifyFailureCategory = Literal[
     "coder_runtime_images",
     "coder_template_migration",
     "coder_workspace_secrets",
+    "coder_workspace_secrets_reconciliation",
+    "coder_workspace_secrets_specification",
     "headscale",
     "lifecycle_drift",
     "lifecycle_lock",
@@ -154,6 +156,10 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
             return "coder_template_migration"
         if message.startswith(("Coder runtime image ", "Unable to persist Coder runtime image ")):
             return "coder_runtime_images"
+        if message == "Coder workspace secret specification is invalid.":
+            return "coder_workspace_secrets_specification"
+        if message == "Coder workspace secret reconciliation failed.":
+            return "coder_workspace_secrets_reconciliation"
         if message.startswith("Coder workspace secret "):
             return "coder_workspace_secrets"
         if message.startswith(

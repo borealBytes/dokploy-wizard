@@ -121,7 +121,14 @@ from dokploy_wizard.tailscale import TailscaleError
         (CoderError("fixture"), "coder"),
         (CoderError("Coder template migration failed closed."), "coder_template_migration"),
         (CoderError("Coder runtime image state is unavailable."), "coder_runtime_images"),
-        (CoderError("Coder workspace secret specification is invalid."), "coder_workspace_secrets"),
+        (
+            CoderError("Coder workspace secret specification is invalid."),
+            "coder_workspace_secrets_specification",
+        ),
+        (
+            CoderError("Coder workspace secret reconciliation failed."),
+            "coder_workspace_secrets_reconciliation",
+        ),
         (CoderError("Coder service image does not match the plan."), "coder_active_plan"),
         (CoderError("Coder bootstrap API did not become ready."), "coder_bootstrap"),
         (CoderError("Coder request GET /api returned HTTP 500."), "coder_http"),
