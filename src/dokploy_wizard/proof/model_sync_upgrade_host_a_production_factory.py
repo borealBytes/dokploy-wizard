@@ -16,6 +16,7 @@ from dokploy_wizard.dokploy.coder_secret_types import CoderSecretClientError
 from dokploy_wizard.dokploy.coder_secret_workspace_authorization import (
     WorkspaceSupersessionContext,
     require_workspace_supersession_context,
+    require_workspace_supersession_host_context,
 )
 from dokploy_wizard.proof.model_sync_artifacts import sha256_bytes
 from dokploy_wizard.proof.model_sync_env import (
@@ -86,7 +87,8 @@ def build_production_operations(
         final_commit=binding.final_commit,
         attempt_context_sha256=attempt_context,
     )
-    if not authorization_path.exists():
+    authorization_was_captured = not authorization_path.exists()
+    if authorization_was_captured:
         process = run_bounded_observed_process(
             [
                 str(wrapper),
@@ -130,9 +132,14 @@ def build_production_operations(
     ):
         raise UpgradeHostAError("Coder verifier authorization is absent or unsafe")
     try:
-        require_workspace_supersession_context(
-            authorization_path, authorization_context
-        )
+        if authorization_was_captured:
+            require_workspace_supersession_context(
+                authorization_path, authorization_context
+            )
+        else:
+            require_workspace_supersession_host_context(
+                authorization_path, authorization_context
+            )
     except CoderSecretClientError as error:
         raise UpgradeHostAError("Coder verifier authorization context is invalid") from error
     token = coder_transport.login(
