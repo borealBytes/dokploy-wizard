@@ -42,14 +42,23 @@ class CoderSecretReconciler:
 
     def reconcile(self, specs: tuple[CoderSecretSpec, ...]) -> CoderSecretReceipt:
         if not specs or len({spec.name for spec in specs}) != len(specs):
-            raise CoderSecretError("Coder secret reconciliation names are invalid")
+            raise CoderSecretError(
+                "Coder secret reconciliation names are invalid",
+                kind="reconciliation",
+            )
         try:
             existing = self._store.load()
         except CoderSecretReceiptError as error:
-            raise CoderSecretError("Coder secret receipt cannot be read") from error
+            raise CoderSecretError(
+                "Coder secret receipt cannot be read",
+                kind="receipt_invalid",
+            ) from error
         if existing is not None:
             if existing.owner_id != self._owner_id:
-                raise CoderSecretError("Coder secret receipt ownership does not match")
+                raise CoderSecretError(
+                    "Coder secret receipt ownership does not match",
+                    kind="receipt_invalid",
+                )
             validate_receipt_for_specs(existing, specs)
         receipt = existing or CoderSecretReceipt(self._owner_id, "planned", ())
         if receipt.status in {"blocked", "failed"}:
@@ -202,7 +211,7 @@ class CoderSecretReconciler:
     def _metadata(self, name: str) -> CoderSecretMetadata | None:
         matches = tuple(secret for secret in self._client.list_secrets() if secret.name == name)
         if len(matches) > 1:
-            raise CoderSecretError("Coder secret metadata is ambiguous")
+            raise CoderSecretError("Coder secret metadata is ambiguous", kind="metadata")
         return matches[0] if matches else None
 
     def _is_owned(
@@ -255,10 +264,16 @@ class CoderSecretReconciler:
     ) -> NoReturn:
         blocked = replace(step, status="blocked", updated_at=now())
         self._write(replace(replace_step(receipt, blocked), status="blocked"))
-        raise CoderSecretError(f"Coder secret reconciliation blocked: {reason}")
+        raise CoderSecretError(
+            f"Coder secret reconciliation blocked: {reason}",
+            kind="blocked",
+        )
 
     def _write(self, receipt: CoderSecretReceipt) -> None:
         try:
             self._store.write(receipt)
         except CoderSecretReceiptError as error:
-            raise CoderSecretError("Coder secret receipt cannot be written") from error
+            raise CoderSecretError(
+                "Coder secret receipt cannot be written",
+                kind="receipt_invalid",
+            ) from error

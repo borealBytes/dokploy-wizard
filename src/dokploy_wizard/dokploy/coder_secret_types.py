@@ -11,7 +11,7 @@ class CoderSecretClientError(CoderSecretError):
     """Carries a redacted failure reason while Python attaches traceback state."""
 
     def __init__(self, reason: str) -> None:
-        super().__init__(reason)
+        super().__init__(reason, kind="client")
 
 
 class CoderSecretProcessRunner(Protocol):
