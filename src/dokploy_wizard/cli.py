@@ -71,6 +71,7 @@ from dokploy_wizard.lifecycle import (
     classify_install_request,
     classify_modify_request,
     execute_lifecycle_plan,
+    modify_raw_inputs_equivalent,
     validate_preserved_phases,
 )
 from dokploy_wizard.lifecycle.lock import (
@@ -1445,7 +1446,10 @@ def _run_lifecycle_flow(
             classification_requested_raw = _task18_runtime_comparison_raw(
                 classification_requested_raw
             )
-            if classification_existing_raw == classification_requested_raw:
+            if modify_raw_inputs_equivalent(
+                classification_existing_raw,
+                classification_requested_raw,
+            ):
                 classification_existing_desired = classification_requested_desired
         lifecycle_plan = classify_modify_request(
             existing_raw=classification_existing_raw,

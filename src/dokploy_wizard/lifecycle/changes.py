@@ -419,9 +419,7 @@ def classify_modify_request(
 ) -> LifecyclePlan:
     old_applicable = applicable_phases_for(existing_desired)
     validate_checkpoint_contract(existing_applied, old_applicable)
-    raw_equivalent = _normalized_modify_raw_values(existing_raw) == _normalized_modify_raw_values(
-        requested_raw
-    )
+    raw_equivalent = modify_raw_inputs_equivalent(existing_raw, requested_raw)
     desired_equivalent = _normalized_modify_desired_values(
         existing_desired
     ) == _normalized_modify_desired_values(requested_desired)
@@ -750,6 +748,15 @@ def _normalized_modify_raw_values(raw_env: RawEnvInput) -> dict[str, str]:
         for key, value in raw_env.values.items()
         if key not in _IGNORED_MODIFY_RAW_ENV_KEYS
     }
+
+
+def modify_raw_inputs_equivalent(
+    existing_raw: RawEnvInput,
+    requested_raw: RawEnvInput,
+) -> bool:
+    return _normalized_modify_raw_values(existing_raw) == _normalized_modify_raw_values(
+        requested_raw
+    )
 
 
 def _normalized_install_desired_values(desired_state: DesiredState) -> dict[str, object]:
