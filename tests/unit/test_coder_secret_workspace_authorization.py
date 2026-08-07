@@ -14,6 +14,7 @@ from dokploy_wizard.dokploy.coder_secret_workspace_authorization import (
     WorkspaceSupersessionContext,
     capture_workspace_supersession_authorization,
     require_workspace_supersession_context,
+    require_workspace_supersession_host_context,
 )
 from dokploy_wizard.dokploy.coder_secret_workspace_contract import (
     WorkspaceVerificationIntent,
@@ -107,6 +108,24 @@ def test_authorization_context_must_match_canonical_task(tmp_path: Path) -> None
 
     with pytest.raises(CoderSecretClientError, match="cannot be captured"):
         require_workspace_supersession_context(output, wrong_context)
+
+
+def test_resume_context_allows_commit_advance_on_same_host(tmp_path: Path) -> None:
+    store, _parent = _exhausted_store(tmp_path)
+    output_dir = tmp_path / "evidence"
+    output_dir.mkdir(mode=0o700)
+    output = output_dir / "authorization.json"
+    capture_workspace_supersession_authorization(store.state_dir, output, _context())
+    resumed_context = WorkspaceSupersessionContext(
+        machine_sha256="1" * 64,
+        ssh_sha256="2" * 64,
+        lifecycle_sha256="3" * 64,
+        stack_sha256="4" * 64,
+        final_commit="7" * 40,
+        attempt_context_sha256="8" * 64,
+    )
+
+    require_workspace_supersession_host_context(output, resumed_context)
 
 
 def test_atomic_write_failure_preserves_exact_parent(

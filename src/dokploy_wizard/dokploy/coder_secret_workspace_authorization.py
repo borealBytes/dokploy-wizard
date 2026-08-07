@@ -118,6 +118,28 @@ def require_workspace_supersession_context(
         raise _authorization_error()
 
 
+def require_workspace_supersession_host_context(
+    authorization_path: Path, context: WorkspaceSupersessionContext
+) -> None:
+    from dokploy_wizard.dokploy.coder_secret_workspace_supersession import (
+        load_workspace_supersession_authorization,
+    )
+
+    authorization = load_workspace_supersession_authorization(authorization_path)
+    if (
+        authorization.machine_sha256,
+        authorization.ssh_sha256,
+        authorization.lifecycle_sha256,
+        authorization.stack_sha256,
+    ) != (
+        context.machine_sha256,
+        context.ssh_sha256,
+        context.lifecycle_sha256,
+        context.stack_sha256,
+    ):
+        raise _authorization_error()
+
+
 def _require_digest(value: str) -> None:
     if len(value) != 64 or set(value) - set("0123456789abcdef"):
         raise _authorization_error()
