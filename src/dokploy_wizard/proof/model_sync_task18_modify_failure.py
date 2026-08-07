@@ -61,6 +61,12 @@ Task18ModifyFailureCategory = Literal[
     "coder_workspace_secrets_reconciliation_client_workspace_receipt_state",
     "coder_workspace_secrets_reconciliation_client_workspace_receipt_write",
     "coder_workspace_secrets_reconciliation_client_workspace_template",
+    "coder_workspace_secrets_reconciliation_client_workspace_template_legacy_ambiguous",
+    "coder_workspace_secrets_reconciliation_client_workspace_template_payload",
+    "coder_workspace_secrets_reconciliation_client_workspace_template_primary_absent",
+    "coder_workspace_secrets_reconciliation_client_workspace_template_primary_ambiguous",
+    "coder_workspace_secrets_reconciliation_client_workspace_template_record_invalid",
+    "coder_workspace_secrets_reconciliation_client_workspace_template_root",
     "coder_workspace_secrets_reconciliation_internal",
     "coder_workspace_secrets_reconciliation_metadata",
     "coder_workspace_secrets_reconciliation_receipt",
@@ -263,6 +269,45 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
             return "coder_workspace_secrets_reconciliation_client_workspace_receipt_write"
         if message == "Coder workspace secret reconciliation failed. client_workspace_template":
             return "coder_workspace_secrets_reconciliation_client_workspace_template"
+        if message == (
+            "Coder workspace secret reconciliation failed. "
+            "client_workspace_template_legacy_ambiguous"
+        ):
+            return (
+                "coder_workspace_secrets_reconciliation_client_workspace_template_"
+                "legacy_ambiguous"
+            )
+        if message == (
+            "Coder workspace secret reconciliation failed. "
+            "client_workspace_template_payload"
+        ):
+            return "coder_workspace_secrets_reconciliation_client_workspace_template_payload"
+        if message == (
+            "Coder workspace secret reconciliation failed. "
+            "client_workspace_template_primary_absent"
+        ):
+            return "coder_workspace_secrets_reconciliation_client_workspace_template_primary_absent"
+        if message == (
+            "Coder workspace secret reconciliation failed. "
+            "client_workspace_template_primary_ambiguous"
+        ):
+            return (
+                "coder_workspace_secrets_reconciliation_client_workspace_template_"
+                "primary_ambiguous"
+            )
+        if message == (
+            "Coder workspace secret reconciliation failed. "
+            "client_workspace_template_record_invalid"
+        ):
+            return (
+                "coder_workspace_secrets_reconciliation_client_workspace_template_"
+                "record_invalid"
+            )
+        if message == (
+            "Coder workspace secret reconciliation failed. "
+            "client_workspace_template_root"
+        ):
+            return "coder_workspace_secrets_reconciliation_client_workspace_template_root"
         if message == "Coder workspace secret reconciliation failed. metadata":
             return "coder_workspace_secrets_reconciliation_metadata"
         if message == "Coder workspace secret reconciliation failed. receipt_invalid":

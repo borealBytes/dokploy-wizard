@@ -526,6 +526,18 @@ class DokployCoderBackend:
                     failure_kind = "client_workspace_receipt_write"
                 case "client_workspace_template":
                     failure_kind = "client_workspace_template"
+                case "client_workspace_template_legacy_ambiguous":
+                    failure_kind = "client_workspace_template_legacy_ambiguous"
+                case "client_workspace_template_payload":
+                    failure_kind = "client_workspace_template_payload"
+                case "client_workspace_template_primary_absent":
+                    failure_kind = "client_workspace_template_primary_absent"
+                case "client_workspace_template_primary_ambiguous":
+                    failure_kind = "client_workspace_template_primary_ambiguous"
+                case "client_workspace_template_record_invalid":
+                    failure_kind = "client_workspace_template_record_invalid"
+                case "client_workspace_template_root":
+                    failure_kind = "client_workspace_template_root"
                 case "metadata":
                     failure_kind = "metadata"
                 case "receipt":

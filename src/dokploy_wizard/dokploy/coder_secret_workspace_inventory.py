@@ -19,39 +19,63 @@ _ENV_NAME: Final = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 
 
 def verification_template(output: str) -> WorkspaceTemplate:
-    value = _json(output, "templates")
+    try:
+        value: JsonValue = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise CoderSecretClientError(
+            "Coder verification template payload is malformed",
+            kind="client_workspace_template_payload",
+        ) from error
     match value:
         case list() as templates:
-            primary_matches = tuple(
-                _template_record(template)
+            primary_candidates = tuple(
+                template
                 for template in templates
                 if isinstance(template, dict) and template.get("name") == _PRIMARY_TEMPLATE
             )
         case _:
             raise CoderSecretClientError(
-                "Coder has no verification template", kind="client_workspace_template"
+                "Coder verification template payload is not a list",
+                kind="client_workspace_template_root",
             )
-    match primary_matches:
-        case (primary,):
-            return primary
+    match primary_candidates:
+        case (primary_candidate,):
+            return _verification_template_record(primary_candidate)
         case ():
-            legacy_matches = tuple(
-                _template_record(template)
+            legacy_candidates = tuple(
+                template
                 for template in templates
                 if isinstance(template, dict)
                 and template.get("name") == _LEGACY_PRIMARY_TEMPLATE
             )
-            match legacy_matches:
-                case (legacy,):
-                    return legacy
+            match legacy_candidates:
+                case (legacy_candidate,):
+                    return _verification_template_record(legacy_candidate)
+                case ():
+                    raise CoderSecretClientError(
+                        "Coder verification template is absent",
+                        kind="client_workspace_template_primary_absent",
+                    )
                 case _:
-                    pass
+                    raise CoderSecretClientError(
+                        "Coder legacy verification template is ambiguous",
+                        kind="client_workspace_template_legacy_ambiguous",
+                    )
         case _:
-            pass
-    raise CoderSecretClientError(
-        "Coder primary verification template is unavailable",
-        kind="client_workspace_template",
-    )
+            raise CoderSecretClientError(
+                "Coder primary verification template is ambiguous",
+                kind="client_workspace_template_primary_ambiguous",
+            )
+
+
+def _verification_template_record(value: dict[str, JsonValue]) -> WorkspaceTemplate:
+    try:
+        return _template_record(value)
+    except CoderSecretClientError as error:
+        raise CoderSecretClientError(
+            "Coder verification template record is invalid",
+            kind="client_workspace_template_record_invalid",
+        ) from error
 
 
 def workspace_records(output: str) -> tuple[WorkspaceRecord, ...]:
