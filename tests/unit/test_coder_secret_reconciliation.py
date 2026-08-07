@@ -206,6 +206,33 @@ def test_secret_receipt_owner_mismatch_has_typed_invalid_receipt_failure(
     assert raised.value.kind == "receipt_owner"
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected_kind"),
+    (
+        (b"not-json", "receipt_read_json"),
+        (b'{"schema_version":2}', "receipt_read_schema"),
+    ),
+)
+def test_secret_receipt_load_failures_preserve_typed_origin(
+    tmp_path: Path,
+    payload: bytes,
+    expected_kind: str,
+) -> None:
+    receipt_path = tmp_path / "coder-secret-receipts-v1.json"
+    receipt_path.write_bytes(payload)
+    receipt_path.chmod(0o600)
+    reconciler = CoderSecretReconciler(
+        state_dir=tmp_path,
+        client=FakeCoderSecrets(),
+        owner_id="b" * 64,
+    )
+
+    with pytest.raises(CoderSecretError) as raised:
+        reconciler.reconcile(_specs())
+
+    assert raised.value.kind == expected_kind
+
+
 def test_workspace_secret_unsupported_blocks_without_value_leak(tmp_path: Path) -> None:
     spec = _specs()[0]
     client = FakeCoderSecrets(unsupported_env=True)
