@@ -9,12 +9,12 @@ from dokploy_wizard.proof.coder_workspace_create_preflight_types import (
     CoderCreatePreflightReport,
     ExternalAuthStatus,
     PreflightBlocker,
+    PresetSelection,
     TemplateRecord,
 )
 from dokploy_wizard.proof.model_sync_artifacts import JsonValue
 
 _TARGET_TEMPLATE: Final = "ubuntu-vscode-opencode-pi"
-
 
 
 def classify_preflight(
@@ -45,13 +45,7 @@ def classify_preflight(
             blockers=("target_template_ambiguous", "target_organization_ambiguous"),
         )
     active_version_id = targets[0].active_version_id
-    if (
-        active_version_id is None
-        or version is None
-        or parameters is None
-        or presets is None
-        or external_auth is None
-    ):
+    if active_version_id is None or version is None or parameters is None or external_auth is None:
         report = _target_report(
             target_template_count=1,
             organization_count=len(organizations),
@@ -73,8 +67,8 @@ def classify_preflight(
             blockers=report.blockers,
         )
     try:
-        _version_facts(version, active_version_id)
-        preset_count = _preset_count(presets)
+        version_healthy = _version_healthy(version, active_version_id, targets[0].template_id)
+        preset_selection = _preset_selection(presets)
         parameter_gap_count = _required_parameter_gap_count(parameters)
         unsatisfied_external_auth_count = _unsatisfied_external_auth_count(external_auth)
     except CoderCreatePreflightError:
@@ -85,8 +79,12 @@ def classify_preflight(
             blockers=("preflight_payload_invalid",),
         )
     blockers: list[PreflightBlocker] = []
-    if preset_count > 0:
+    if not version_healthy:
+        blockers.append("active_template_version_unhealthy")
+    if preset_selection == "required":
         blockers.append("preset_selection_required")
+    if preset_selection == "invalid":
+        blockers.append("preset_selection_invalid")
     if parameter_gap_count > 0:
         blockers.append("required_parameter_default_gap")
     if unsatisfied_external_auth_count > 0:
@@ -105,8 +103,8 @@ def classify_preflight(
         target_template_count=1,
         organization_count=len(organizations),
         target_organization_count=1,
-        active_template_version_health="healthy",
-        preset_selection="required" if preset_count > 0 else "not_required",
+        active_template_version_health="healthy" if version_healthy else "unhealthy",
+        preset_selection=preset_selection,
         required_parameter_default_gap_count=parameter_gap_count,
         required_external_auth_unsatisfied_count=unsatisfied_external_auth_count,
         external_auth_status=external_auth_status,
@@ -163,16 +161,24 @@ def _template_record(value: JsonValue) -> TemplateRecord:
     )
     _text(template.get("id"), "template.id")
     return TemplateRecord(
+        template_id=_text(template.get("id"), "template.id"),
         organization_id=organization_id,
         name=_text(template.get("name"), "template.name"),
         active_version_id=_optional_text(template.get("active_version_id")),
     )
 
 
-def _version_facts(value: JsonValue, expected_id: str) -> None:
+def _version_healthy(value: JsonValue, expected_id: str, expected_template_id: str) -> bool:
     version = _mapping(value, "template version")
-    if _text(version.get("id"), "template version.id") != expected_id:
-        raise CoderCreatePreflightError("template version identity is invalid")
+    return (
+        _text(version.get("id"), "template version.id") == expected_id
+        and _text(version.get("template_id"), "template version.template_id")
+        == expected_template_id
+        and not _bool(version.get("archived"), "template version.archived")
+        and _text(_mapping(version.get("job"), "template version.job").get("status"), "job.status")
+        == "succeeded"
+        and _mapping(version.get("job"), "template version.job").get("completed_at") is not None
+    )
 
 
 def _parameter_requires_input(value: JsonValue) -> bool:
@@ -210,11 +216,28 @@ def _required_external_auth(record: dict[str, JsonValue]) -> bool:
     return not _bool(record.get("optional"), "external auth.optional")
 
 
-def _preset_count(value: JsonValue) -> int:
+def _preset_selection(value: JsonValue) -> PresetSelection:
+    if value is None:
+        return "not_required"
     presets = _records(value, "template version presets")
-    for preset in presets:
-        _text(_mapping(preset, "template version preset").get("ID"), "template version preset.ID")
-    return len(presets)
+    defaults = sum(
+        1
+        for preset in (_mapping(item, "template version preset") for item in presets)
+        if _preset_default(preset)
+    )
+    if len(presets) == 0:
+        return "not_required"
+    if defaults == 1:
+        return "automatic_default"
+    if defaults > 1:
+        return "invalid"
+    return "required"
+
+
+def _preset_default(preset: dict[str, JsonValue]) -> bool:
+    _text(preset.get("ID"), "template version preset.ID")
+    _text(preset.get("Name"), "template version preset.Name")
+    return _bool(preset.get("Default"), "template version preset.Default")
 
 
 def _records(value: JsonValue | None, label: str) -> list[JsonValue]:

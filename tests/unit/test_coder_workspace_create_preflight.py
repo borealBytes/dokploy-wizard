@@ -69,7 +69,7 @@ def test_preflight_blocks_noninteractive_contract_gaps() -> None:
         "template_id": "00000000-0000-4000-8000-000000000001",
         "organization_id": "00000000-0000-4000-8000-000000000011",
         "archived": False,
-        "job": {"status": "succeeded"},
+        "job": {"status": "succeeded", "completed_at": "2026-08-07T00:00:00Z"},
     }
     parameters: JsonValue = [
         {
@@ -79,7 +79,7 @@ def test_preflight_blocks_noninteractive_contract_gaps() -> None:
         }
     ]
     presets: JsonValue = [
-        {"ID": "00000000-0000-4000-8000-000000000301", "Name": "default"}
+        {"ID": "00000000-0000-4000-8000-000000000301", "Name": "default", "Default": False}
     ]
     external_auth: JsonValue = [
         {
@@ -123,7 +123,7 @@ def test_preflight_blocks_required_parameter_even_with_default_value() -> None:
         "template_id": "00000000-0000-4000-8000-000000000001",
         "organization_id": "00000000-0000-4000-8000-000000000011",
         "archived": False,
-        "job": {"status": "succeeded"},
+        "job": {"status": "succeeded", "completed_at": "2026-08-07T00:00:00Z"},
     }
     parameters: JsonValue = [{"name": "required", "required": True, "default_value": "value"}]
 
@@ -133,6 +133,102 @@ def test_preflight_blocks_required_parameter_even_with_default_value() -> None:
     # Then
     assert report.required_parameter_default_gap_count == 1
     assert report.blockers == ("required_parameter_default_gap",)
+
+
+@pytest.mark.parametrize(
+    ("presets", "selection", "blockers"),
+    [
+        (None, "not_required", ()),
+        ([], "not_required", ()),
+        ([{"ID": "id", "Name": "default", "Default": True}], "automatic_default", ()),
+        (
+            [{"ID": "id", "Name": "one", "Default": False}],
+            "required",
+            ("preset_selection_required",),
+        ),
+        (
+            [
+                {"ID": "one", "Name": "one", "Default": True},
+                {"ID": "two", "Name": "two", "Default": True},
+            ],
+            "invalid",
+            ("preset_selection_invalid",),
+        ),
+    ],
+)
+def test_preflight_classifies_coder_preset_default_selection(
+    presets: JsonValue | None, selection: str, blockers: tuple[str, ...]
+) -> None:
+    # Given
+    templates: JsonValue = [
+        {
+            "id": "template",
+            "name": "ubuntu-vscode-opencode-pi",
+            "organization_id": "org",
+            "active_version_id": "version",
+        }
+    ]
+    version: JsonValue = {
+        "id": "version",
+        "template_id": "template",
+        "archived": False,
+        "job": {"status": "succeeded", "completed_at": "done"},
+    }
+
+    # When
+    report = classify_preflight(templates, version, [], presets, [])
+
+    # Then
+    assert report.preset_selection == selection
+    assert report.blockers == blockers
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        {
+            "id": "wrong",
+            "template_id": "template",
+            "archived": False,
+            "job": {"status": "succeeded", "completed_at": "done"},
+        },
+        {
+            "id": "version",
+            "template_id": "wrong",
+            "archived": False,
+            "job": {"status": "succeeded", "completed_at": "done"},
+        },
+        {
+            "id": "version",
+            "template_id": "template",
+            "archived": True,
+            "job": {"status": "succeeded", "completed_at": "done"},
+        },
+        {
+            "id": "version",
+            "template_id": "template",
+            "archived": False,
+            "job": {"status": "running", "completed_at": None},
+        },
+    ],
+)
+def test_preflight_blocks_unhealthy_active_template_version(version: JsonValue) -> None:
+    # Given
+    templates: JsonValue = [
+        {
+            "id": "template",
+            "name": "ubuntu-vscode-opencode-pi",
+            "organization_id": "org",
+            "active_version_id": "version",
+        }
+    ]
+
+    # When
+    report = classify_preflight(templates, version, [], [], [])
+
+    # Then
+    assert report.active_template_version_health == "unhealthy"
+    assert report.blockers == ("active_template_version_unhealthy",)
 
 
 def test_report_rejects_unknown_schema_fields() -> None:
