@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Final, Literal, Sequence, assert_never
 
 from dokploy_wizard.dokploy.coder import _coder_container_name
+from dokploy_wizard.packs.coder.reconciler import CoderError
 from dokploy_wizard.proof.coder_workspace_create_preflight import (
     classify_preflight,
     target_active_version_id,
@@ -46,6 +47,10 @@ PreflightFailure = Literal[
     "coder_auth_unavailable",
     "preflight_transport_configuration_invalid",
     "preflight_payload_invalid",
+    "coder_container_unavailable",
+    "coder_container_inspect_unavailable",
+    "coder_shared_network_unavailable",
+    "coder_shared_address_invalid",
 ]
 
 
@@ -164,7 +169,10 @@ def collect_preflight(env_file: Path, context_file: Path) -> CoderCreatePrefligh
 
 
 def _run_coder_cli(stack_name: str, token: str, arguments: tuple[str, ...]) -> JsonValue:
-    container = _coder_container_name(f"{stack_name}-coder")
+    try:
+        container = _coder_container_name(f"{stack_name}-coder")
+    except CoderError as error:
+        raise CoderCreatePreflightError("Coder container is unavailable") from error
     if container is None:
         raise CoderCreatePreflightError("Coder container is unavailable")
     command = (
@@ -214,6 +222,13 @@ def _unavailable_report(blocker: PreflightFailure) -> CoderCreatePreflightReport
             unavailable = _UnavailableReport("not_checked", "not_checked", "not_checked", blocker)
         case "preflight_payload_invalid":
             unavailable = _UnavailableReport("reachable", "issued", "authenticated", blocker)
+        case (
+            "coder_container_unavailable"
+            | "coder_container_inspect_unavailable"
+            | "coder_shared_network_unavailable"
+            | "coder_shared_address_invalid"
+        ):
+            unavailable = _UnavailableReport("not_checked", "not_checked", "not_checked", blocker)
         case unreachable:
             assert_never(unreachable)
     return CoderCreatePreflightReport(
@@ -234,8 +249,14 @@ def _unavailable_report(blocker: PreflightFailure) -> CoderCreatePreflightReport
 
 def _snapshot_failure(error: CoderSnapshotApiError) -> CoderCreatePreflightReport:
     match error.stage:
-        case "route":
-            return _unavailable_report("preflight_transport_configuration_invalid")
+        case "container":
+            return _unavailable_report("coder_container_unavailable")
+        case "inspect":
+            return _unavailable_report("coder_container_inspect_unavailable")
+        case "network":
+            return _unavailable_report("coder_shared_network_unavailable")
+        case "address":
+            return _unavailable_report("coder_shared_address_invalid")
         case "endpoint":
             return _unavailable_report("coder_url_unavailable")
         case "payload":
