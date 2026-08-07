@@ -1427,20 +1427,18 @@ def _run_lifecycle_flow(
         classification_existing_desired = loaded_state.desired_state
         classification_requested_raw = raw_env
         classification_requested_desired = desired_state
-        if (
-            modify_upgrade_intent is ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC
-            and active_task1_proof_context() is not None
-        ):
-            runtime_auth = load_dokploy_runtime_auth(state_dir)
-            classification_requested_raw = merge_dokploy_runtime_auth(raw_env, runtime_auth)
-            classification_requested_desired = merge_dokploy_runtime_auth_desired_state(
-                desired_state,
-                runtime_auth,
-            )
-            classification_existing_raw = _rehydrate_inspection_redactions(
-                loaded_state.raw_input,
-                classification_requested_raw,
-            )
+        if modify_upgrade_intent is ModifyUpgradeIntent.TASK18_HOST_A_MODEL_SYNC:
+            if active_task1_proof_context() is not None:
+                runtime_auth = load_dokploy_runtime_auth(state_dir)
+                classification_requested_raw = merge_dokploy_runtime_auth(raw_env, runtime_auth)
+                classification_requested_desired = merge_dokploy_runtime_auth_desired_state(
+                    desired_state,
+                    runtime_auth,
+                )
+                classification_existing_raw = _rehydrate_inspection_redactions(
+                    loaded_state.raw_input,
+                    classification_requested_raw,
+                )
             classification_existing_raw = _task18_runtime_comparison_raw(
                 classification_existing_raw
             )

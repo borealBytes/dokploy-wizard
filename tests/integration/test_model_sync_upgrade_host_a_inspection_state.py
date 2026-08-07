@@ -56,9 +56,11 @@ def _write_env(path: Path) -> Path:
     return path
 
 
+@pytest.mark.parametrize("task1_context", (object(), None))
 def test_task18_rehydrates_inspection_redactions_before_force_planning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    task1_context: object | None,
 ) -> None:
     # Given
     state_dir = tmp_path / "state"
@@ -66,7 +68,6 @@ def test_task18_rehydrates_inspection_redactions_before_force_planning(
     raw = parse_env_file(env_file)
     desired = resolve_desired_state(raw)
     redacted_values = dict(raw.values)
-    redacted_values["AI_DEFAULT_API_KEY"] = "<redacted>"
     redacted_values["DOKPLOY_ADMIN_PASSWORD"] = "<redacted>"
     write_target_state(
         state_dir,
@@ -94,7 +95,7 @@ def test_task18_rehydrates_inspection_redactions_before_force_planning(
         plans.append(plan)
         return {"lifecycle": {"mode": plan.mode, "phases_to_run": list(plan.phases_to_run)}}
 
-    monkeypatch.setattr(cli, "active_task1_proof_context", lambda: object())
+    monkeypatch.setattr(cli, "active_task1_proof_context", lambda: task1_context)
     monkeypatch.setattr(cli, "preflight_coder_template_migration", lambda *_args: None)
     monkeypatch.setattr(cli, "CloudflareApiBackend", lambda _raw_env: object())
 
