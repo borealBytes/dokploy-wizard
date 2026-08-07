@@ -436,12 +436,13 @@ def test_secret_client_observes_environment_hash_in_temporary_workspace(
         for command in commands
     )
     assert any(
-        command[-7:]
+        command[-8:]
         == (
             "/opt/coder",
             "create",
             "--yes",
             "--no-wait",
+            "--use-parameter-defaults",
             "--template",
             template_name,
             "proof-workspace",
