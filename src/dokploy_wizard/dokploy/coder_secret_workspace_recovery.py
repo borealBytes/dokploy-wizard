@@ -28,7 +28,8 @@ def require_matching_receipt(
         or receipt.expected_value_sha256 != intent.expected_value_sha256
     ):
         raise CoderSecretClientError(
-            "Coder workspace verification receipt ownership does not match"
+            "Coder workspace verification receipt ownership does not match",
+            kind="client_workspace_intent",
         )
 
 
@@ -130,7 +131,10 @@ def finish_resumed(
 ) -> str:
     observed = receipt.observed_value_sha256
     if observed is None:
-        raise CoderSecretClientError("Coder workspace verification receipt is incomplete")
+        raise CoderSecretClientError(
+            "Coder workspace verification receipt is incomplete",
+            kind="client_workspace_receipt_state",
+        )
     cleaner._cleanup(store, receipt, WorkspaceVerificationPhase.DELETED)
     return observed
 
@@ -161,6 +165,7 @@ def fail_after_cleanup(
             failure_reason=f"{failure.reason}_cleanup_failure",
         )
         raise CoderSecretClientError(
-            "Coder verification failed and cleanup failed"
+            "Coder verification failed and cleanup failed",
+            kind="client_workspace_cleanup",
         ) from failure.primary
     raise failure.primary

@@ -27,9 +27,14 @@ def verification_template(output: str) -> WorkspaceTemplate:
                 if isinstance(template, dict) and template.get("name") == _PRIMARY_TEMPLATE
             )
         case _:
-            raise CoderSecretClientError("Coder has no verification template")
+            raise CoderSecretClientError(
+                "Coder has no verification template", kind="client_workspace_template"
+            )
     if len(matches) != 1:
-        raise CoderSecretClientError("Coder primary verification template is unavailable")
+        raise CoderSecretClientError(
+            "Coder primary verification template is unavailable",
+            kind="client_workspace_template",
+        )
     return matches[0]
 
 
@@ -39,12 +44,17 @@ def workspace_records(output: str) -> tuple[WorkspaceRecord, ...]:
         case list() as workspaces:
             return tuple(_workspace(workspace) for workspace in workspaces)
         case _:
-            raise CoderSecretClientError("Coder workspace inventory is invalid")
+            raise CoderSecretClientError(
+                "Coder workspace inventory is invalid", kind="client_workspace_inventory"
+            )
 
 
 def environment_name(value: str) -> str:
     if _ENV_NAME.fullmatch(value) is None:
-        raise CoderSecretClientError("Coder verification environment name is invalid")
+        raise CoderSecretClientError(
+            "Coder verification environment name is invalid",
+            kind="client_workspace_intent",
+        )
     return value
 
 
@@ -86,16 +96,28 @@ def _workspace(value: JsonValue) -> WorkspaceRecord:
                         _text(build.get("status"), "workspace status"),
                     )
                 case _:
-                    raise CoderSecretClientError("Coder workspace latest build is invalid")
+                    raise CoderSecretClientError(
+                        "Coder workspace latest build is invalid",
+                        kind="client_workspace_inventory",
+                    )
         case _:
-            raise CoderSecretClientError("Coder workspace inventory is invalid")
+            raise CoderSecretClientError(
+                "Coder workspace inventory is invalid", kind="client_workspace_inventory"
+            )
 
 
 def _json(output: str, label: str) -> JsonValue:
     try:
         value: JsonValue = json.loads(output)
     except json.JSONDecodeError as error:
-        raise CoderSecretClientError(f"Coder {label} is malformed") from error
+        raise CoderSecretClientError(
+            f"Coder {label} is malformed",
+            kind=(
+                "client_workspace_template"
+                if label == "templates"
+                else "client_workspace_inventory"
+            ),
+        ) from error
     return value
 
 
@@ -104,9 +126,13 @@ def _uuid(value: JsonValue | None, label: str) -> str:
     try:
         parsed = UUID(text)
     except ValueError as error:
-        raise CoderSecretClientError("Coder workspace identity is invalid") from error
+        raise CoderSecretClientError(
+            "Coder workspace identity is invalid", kind="client_workspace_identity"
+        ) from error
     if str(parsed) != text:
-        raise CoderSecretClientError("Coder workspace identity is invalid")
+        raise CoderSecretClientError(
+            "Coder workspace identity is invalid", kind="client_workspace_identity"
+        )
     return text
 
 
@@ -115,4 +141,6 @@ def _text(value: JsonValue | None, label: str) -> str:
         case str() as text if text:
             return text
         case _:
-            raise CoderSecretClientError(f"Coder {label} is invalid")
+            raise CoderSecretClientError(
+                f"Coder {label} is invalid", kind="client_workspace_inventory"
+            )

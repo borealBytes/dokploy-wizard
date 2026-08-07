@@ -55,7 +55,8 @@ class WorkspaceVerificationReceiptStore:
                     )
                     self.write(exhausted)
                     raise CoderSecretClientError(
-                        "Coder workspace verification create retries exhausted"
+                        "Coder workspace verification create retries exhausted",
+                        kind="client_workspace_create",
                     )
                 attempted = replace(
                     receipt,
@@ -65,7 +66,10 @@ class WorkspaceVerificationReceiptStore:
                 self.write(attempted)
                 return attempted
             case _:
-                raise CoderSecretClientError("Coder workspace verification receipt cannot create")
+                raise CoderSecretClientError(
+                    "Coder workspace verification receipt cannot create",
+                    kind="client_workspace_receipt_state",
+                )
 
     def bind_workspace(
         self, workspace_id: str, workspace_owner_id: str, workspace_owner_name: str
@@ -84,7 +88,10 @@ class WorkspaceVerificationReceiptStore:
                 self.write(bound)
                 return bound
             case _:
-                raise CoderSecretClientError("Coder workspace verification receipt cannot bind")
+                raise CoderSecretClientError(
+                    "Coder workspace verification receipt cannot bind",
+                    kind="client_workspace_receipt_state",
+                )
 
     def transition(
         self, receipt: WorkspaceVerificationReceipt, phase: WorkspaceVerificationPhase,
@@ -105,7 +112,8 @@ class WorkspaceVerificationReceiptStore:
         current = read_receipt_bytes(self._state_dir, _FILENAME)
         if current != expected:
             raise CoderSecretClientError(
-                "Coder workspace verification receipt changed before removal"
+                "Coder workspace verification receipt changed before removal",
+                kind="client_workspace_receipt_state",
             )
         try:
             (self._state_dir / _FILENAME).unlink()
@@ -119,13 +127,17 @@ class WorkspaceVerificationReceiptStore:
                 os.close(descriptor)
         except OSError as error:
             raise CoderSecretClientError(
-                "Coder workspace verification receipt cannot be removed"
+                "Coder workspace verification receipt cannot be removed",
+                kind="client_workspace_receipt_write",
             ) from error
 
     def _require_current(self) -> WorkspaceVerificationReceipt:
         receipt = self.load()
         if receipt is None:
-            raise CoderSecretClientError("Coder workspace verification receipt is missing")
+            raise CoderSecretClientError(
+                "Coder workspace verification receipt is missing",
+                kind="client_workspace_receipt_state",
+            )
         return receipt
 
 

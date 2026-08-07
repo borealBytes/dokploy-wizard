@@ -178,7 +178,10 @@ class CoderWorkspaceValueHashVerifier:
             if workspace.status == "running":
                 return receipt
             if self.clock.monotonic() >= deadline:
-                raise CoderSecretClientError("Coder verification workspace readiness timed out")
+                raise CoderSecretClientError(
+                    "Coder verification workspace readiness timed out",
+                    kind="client_workspace_readiness",
+                )
             self.clock.sleep(self.policy.poll_interval_seconds)
 
     def _cleanup(
@@ -188,7 +191,10 @@ class CoderWorkspaceValueHashVerifier:
         terminal_phase: WorkspaceVerificationPhase,
     ) -> None:
         if receipt.workspace_id is None:
-            raise CoderSecretClientError("Coder verification workspace identity is unavailable")
+            raise CoderSecretClientError(
+                "Coder verification workspace identity is unavailable",
+                kind="client_workspace_identity",
+            )
         current = store.transition(receipt, WorkspaceVerificationPhase.DELETING)
         if self._require_exact(current) is None:
             store.transition(
@@ -200,7 +206,10 @@ class CoderWorkspaceValueHashVerifier:
             return
         workspace_id = current.workspace_id
         if workspace_id is None:
-            raise CoderSecretClientError("Coder verification workspace identity is unavailable")
+            raise CoderSecretClientError(
+                "Coder verification workspace identity is unavailable",
+                kind="client_workspace_identity",
+            )
         self.runner(("delete", "--yes", workspace_id))
         deadline = self.clock.monotonic() + self.policy.timeout_seconds
         while True:
@@ -213,7 +222,10 @@ class CoderWorkspaceValueHashVerifier:
                 )
                 return
             if self.clock.monotonic() >= deadline:
-                raise CoderSecretClientError("Coder verification workspace deletion timed out")
+                raise CoderSecretClientError(
+                    "Coder verification workspace deletion timed out",
+                    kind="client_workspace_delete",
+                )
             self.clock.sleep(self.policy.poll_interval_seconds)
 
     def _require_exact(self, receipt: WorkspaceVerificationReceipt) -> WorkspaceRecord | None:

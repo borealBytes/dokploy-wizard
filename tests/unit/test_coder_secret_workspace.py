@@ -219,7 +219,12 @@ def test_value_hash_rejects_non_uppercase_environment_before_workspace_creation(
 
 def test_value_hash_leaves_planned_receipt_after_create_timeout(tmp_path: Path) -> None:
     runner = ScriptedRunner(
-        [_templates(), CoderSecretClientError("Coder secret command timed out")]
+        [
+            _templates(),
+            CoderSecretClientError(
+                "Coder secret command timed out", kind="client_command_timeout"
+            ),
+        ]
     )
     verifier = _verifier(tmp_path, runner, AdvancingClock())
 
@@ -238,7 +243,14 @@ def test_value_hash_retries_planned_create_once_when_timeout_left_no_workspace(
     expected_hash = sha256(_VALUE.encode()).hexdigest()
     first = _verifier(
         tmp_path,
-        ScriptedRunner([_templates(), CoderSecretClientError("Coder secret command timed out")]),
+        ScriptedRunner(
+            [
+                _templates(),
+                CoderSecretClientError(
+                    "Coder secret command timed out", kind="client_command_timeout"
+                ),
+            ]
+        ),
         AdvancingClock(),
     )
 
@@ -292,14 +304,28 @@ def test_value_hash_binds_planned_workspace_without_duplicate_create(tmp_path: P
 def test_value_hash_exhausts_planned_create_retries_without_unowned_delete(tmp_path: Path) -> None:
     first = _verifier(
         tmp_path,
-        ScriptedRunner([_templates(), CoderSecretClientError("Coder secret command timed out")]),
+        ScriptedRunner(
+            [
+                _templates(),
+                CoderSecretClientError(
+                    "Coder secret command timed out", kind="client_command_timeout"
+                ),
+            ]
+        ),
         AdvancingClock(),
     )
     with pytest.raises(CoderSecretClientError, match="command timed out"):
         first.verify(_spec(), _OWNER)
     second = _verifier(
         tmp_path,
-        ScriptedRunner(["[]", CoderSecretClientError("Coder secret command timed out")]),
+        ScriptedRunner(
+            [
+                "[]",
+                CoderSecretClientError(
+                    "Coder secret command timed out", kind="client_command_timeout"
+                ),
+            ]
+        ),
         AdvancingClock(),
     )
     with pytest.raises(CoderSecretClientError, match="command timed out"):
@@ -372,7 +398,9 @@ def test_value_hash_retains_failed_receipt_when_exact_delete_fails(tmp_path: Pat
             _workspaces(),
             f"{expected_hash}\n",
             _workspaces(),
-            CoderSecretClientError("Coder secret command failed"),
+            CoderSecretClientError(
+                "Coder secret command failed", kind="client_command_failed"
+            ),
         ]
     )
     verifier = _verifier(tmp_path, runner, AdvancingClock())

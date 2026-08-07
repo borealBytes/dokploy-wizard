@@ -33,7 +33,10 @@ class WorkspaceVerificationPolicy:
 
     def __post_init__(self) -> None:
         if self.timeout_seconds <= 0 or self.poll_interval_seconds <= 0:
-            raise CoderSecretClientError("Coder workspace verification timing is invalid")
+            raise CoderSecretClientError(
+                "Coder workspace verification timing is invalid",
+                kind="client_workspace_policy",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,8 +64,10 @@ class WorkspaceRecord:
 
 
 class WorkspaceIdentityError(CoderSecretClientError):
-    pass
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, kind="client_workspace_identity")
 
 
 class WorkspaceHashError(CoderSecretClientError):
-    pass
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, kind="client_workspace_hash")

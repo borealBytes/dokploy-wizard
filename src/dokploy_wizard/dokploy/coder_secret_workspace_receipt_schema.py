@@ -213,4 +213,7 @@ def _parsed_time(value: str) -> datetime:
 
 
 def _invalid() -> CoderSecretClientError:
-    return CoderSecretClientError("Coder workspace verification receipt is invalid")
+    return CoderSecretClientError(
+        "Coder workspace verification receipt is invalid",
+        kind="client_workspace_receipt_invalid",
+    )
