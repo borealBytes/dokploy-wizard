@@ -51,6 +51,7 @@ class ProductionUpgradeConfig:
     binding: UpgradeHostABinding
     namespace: proof.ProofNamespace
     transport: ProofTransport
+    verifier_authorization: Path | None = None
 
 
 class ProductionUpgradeHostAOperations:
@@ -165,22 +166,30 @@ class ProductionUpgradeHostAOperations:
             raise UpgradeHostAError("Host A strict observation drifted")
 
     def _run_modify(self) -> ModifyExecutionObservation:
+        command = [
+            str(self._config.wrapper),
+            "modify",
+            "--host",
+            self._config.host,
+            "--password-stdin",
+            "--env-file",
+            str(self._config.binding.proof_env_file),
+            "--task1-proof-context",
+            str(self._config.binding.proof_context_file),
+            "--deploy-commit",
+            self._config.binding.final_commit,
+            "--verbose",
+            "--capture-upgrade-observations",
+        ]
+        if self._config.verifier_authorization is not None:
+            command.extend(
+                (
+                    "--coder-verifier-authorization",
+                    str(self._config.verifier_authorization),
+                )
+            )
         process = run_bounded_observed_process(
-            [
-                str(self._config.wrapper),
-                "modify",
-                "--host",
-                self._config.host,
-                "--password-stdin",
-                "--env-file",
-                str(self._config.binding.proof_env_file),
-                "--task1-proof-context",
-                str(self._config.binding.proof_context_file),
-                "--deploy-commit",
-                self._config.binding.final_commit,
-                "--verbose",
-                "--capture-upgrade-observations",
-            ],
+            command,
             stdin=(self._config.password + "\n").encode(),
             output_limit=_OUTPUT_LIMIT,
             timeout_seconds=3600,

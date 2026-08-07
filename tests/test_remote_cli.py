@@ -162,6 +162,12 @@ class _FakeRemoteTransport:
     def upload(self, _local_path: Path, _remote_path: str) -> None:
         return None
 
+    def download(self, _remote_path: str, _local_path: Path) -> None:
+        return None
+
+    def remove(self, _remote_path: str) -> None:
+        return None
+
     def chmod(self, _remote_path: str, _mode: int) -> None:
         return None
 
@@ -186,6 +192,12 @@ class _Task1CleanupTransport:
         return None
 
     def upload(self, _local_path: Path, _remote_path: str) -> None:
+        return None
+
+    def download(self, _remote_path: str, _local_path: Path) -> None:
+        return None
+
+    def remove(self, _remote_path: str) -> None:
         return None
 
     def chmod(self, _remote_path: str, _mode: int) -> None:

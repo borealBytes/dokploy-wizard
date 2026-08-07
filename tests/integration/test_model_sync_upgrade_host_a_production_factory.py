@@ -136,6 +136,22 @@ def test_factory_uses_task1_bound_internal_coder_transport_when_public_route_is_
     monkeypatch.setattr(factory, "RemoteCoderTransport", FakeRemoteCoderTransport, raising=False)
     monkeypatch.setattr(factory, "CoderMigrationApi", FakeCoderMigrationApi)
 
+    def capture_authorization(
+        command: list[str], *, stdin: bytes, output_limit: int, timeout_seconds: float
+    ) -> Namespace:
+        del stdin, output_limit, timeout_seconds
+        output = Path(command[command.index("--output") + 1])
+        output.write_text("{}")
+        output.chmod(0o600)
+        return Namespace(exit_code=0)
+
+    monkeypatch.setattr(factory, "run_bounded_observed_process", capture_authorization)
+    monkeypatch.setattr(
+        factory,
+        "require_workspace_supersession_context",
+        lambda _path, _context: None,
+    )
+
     # When
     operations = factory.build_production_operations(args, config.binding)
 

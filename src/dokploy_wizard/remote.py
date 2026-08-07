@@ -9,6 +9,7 @@ import hashlib
 import os
 import posixpath
 import shlex
+import stat
 import sys
 import tempfile
 import time
@@ -105,6 +106,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    modify_parser.add_argument(
+        "--coder-verifier-authorization",
+        type=Path,
+        help=argparse.SUPPRESS,
+    )
+
+    authorize_parser = subparsers.add_parser(
+        "coder-verifier-authorize", help=argparse.SUPPRESS, description=argparse.SUPPRESS
+    )
+    _add_remote_common_arguments(authorize_parser)
+    authorize_parser.add_argument("--output", type=Path, required=True)
+    authorize_parser.add_argument("--machine-sha256", required=True)
+    authorize_parser.add_argument("--ssh-sha256", required=True)
+    authorize_parser.add_argument("--lifecycle-sha256", required=True)
+    authorize_parser.add_argument("--stack-sha256", required=True)
+    authorize_parser.add_argument("--final-commit", required=True)
+    authorize_parser.add_argument("--attempt-context-sha256", required=True)
 
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -215,6 +233,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "proof",
             "task1-cleanup",
             "state-upgrade-observe",
+            "coder-verifier-authorize",
         }:
             _require_local_env_file(args.env_file)
         task1_context = _validate_task1_proof_context(args)
@@ -257,6 +276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "uninstall",
             "proof",
             "state-upgrade-observe",
+            "coder-verifier-authorize",
         }:
             archive_evidence = _upload_remote_bundle(args=args, session=session, reporter=reporter)
             _extract_remote_bundle(
@@ -272,6 +292,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 password=args.password,
             )
             sys.stdout.buffer.write(observation)
+            exit_code = 0
+            return exit_code
+        if args.command == "coder-verifier-authorize":
+            _capture_coder_verifier_authorization(
+                args=args,
+                session=session,
+                password=args.password,
+            )
             exit_code = 0
             return exit_code
         if args.command == "install":
@@ -528,6 +556,7 @@ def _validate_task1_proof_context(
         "inspect-state",
         "task1-cleanup",
         "state-upgrade-observe",
+        "coder-verifier-authorize",
     }:
         return None
     if (
@@ -675,6 +704,21 @@ def _upload_remote_bundle(
             install_env_file=args.env_file,
             task1_proof_context=args.task1_proof_context,
         )
+        authorization = getattr(args, "coder_verifier_authorization", None)
+        if authorization is not None:
+            metadata = authorization.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_uid != os.geteuid()
+            ):
+                raise RuntimeError("Coder verifier authorization is absent or unsafe")
+            remote_authorization = posixpath.join(
+                session.remote_state_dir, ".coder-verifier-authorization.json"
+            )
+            session.transport.upload(authorization, remote_authorization)
+            session.transport.chmod(remote_authorization, 0o600)
+            session.remote_coder_verifier_authorization_path = remote_authorization
     elapsed = time.monotonic() - started
     reporter.progress(f"uploaded remote bundle ({elapsed:.1f}s)")
     return evidence
@@ -745,7 +789,14 @@ def _build_modify_command(
     if capture_upgrade_observations:
         arguments.append("--task18-force-model-sync-upgrade")
     arguments.extend(_task1_proof_context_arguments(session))
-    return _with_unbuffered_python(_shell_join(arguments))
+    command = _with_unbuffered_python(_shell_join(arguments))
+    if session.remote_coder_verifier_authorization_path:
+        authorization = shlex.quote(session.remote_coder_verifier_authorization_path)
+        command = (
+            "DOKPLOY_WIZARD_CODER_VERIFIER_SUPERSESSION_AUTHORIZATION="
+            f"{authorization} {command}"
+        )
+    return command
 
 
 def _build_uninstall_command(
@@ -842,6 +893,90 @@ def _capture_state_upgrade_observation(
         limits=STATE_UPGRADE_OBSERVATION_CAPTURE_LIMITS,
         password=password,
     ).stdout
+
+
+def _capture_coder_verifier_authorization(
+    *,
+    args: argparse.Namespace,
+    session: RemoteTransportSession,
+    password: str,
+) -> None:
+    remote_output = posixpath.join(
+        session.remote_state_dir, ".coder-verifier-authorization-capture.json"
+    )
+    command = _with_unbuffered_python(
+        _shell_join(
+            (
+                "python3",
+                "-m",
+                "dokploy_wizard.proof.coder_verifier_authorization_cli",
+                "--state-dir",
+                session.remote_state_dir,
+                "--output",
+                remote_output,
+                "--machine-sha256",
+                args.machine_sha256,
+                "--ssh-sha256",
+                args.ssh_sha256,
+                "--lifecycle-sha256",
+                args.lifecycle_sha256,
+                "--stack-sha256",
+                args.stack_sha256,
+                "--final-commit",
+                args.final_commit,
+                "--attempt-context-sha256",
+                args.attempt_context_sha256,
+            )
+        )
+    )
+    session.run_command(
+        subcommand="capture-coder-verifier-authorization",
+        command=command,
+        password=password,
+    )
+    try:
+        _download_private_file(session, remote_output, args.output)
+    finally:
+        session.transport.remove(remote_output)
+
+
+def _download_private_file(
+    session: RemoteTransportSession, remote_path: str, output: Path
+) -> None:
+    directory_metadata = output.parent.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(directory_metadata.st_mode)
+        or stat.S_IMODE(directory_metadata.st_mode) != 0o700
+        or directory_metadata.st_uid != os.geteuid()
+    ):
+        raise RuntimeError("Coder verifier authorization directory is unsafe")
+    if os.path.lexists(output):
+        raise RuntimeError("Coder verifier authorization output already exists")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output.name}.", suffix=".tmp", dir=output.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.close(descriptor)
+        descriptor = -1
+        session.transport.download(remote_path, temporary)
+        os.chmod(temporary, 0o600)
+        with temporary.open("rb") as downloaded:
+            os.fsync(downloaded.fileno())
+        os.replace(temporary, output)
+        directory = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def capture_remote_output(

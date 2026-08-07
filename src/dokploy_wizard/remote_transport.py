@@ -103,6 +103,10 @@ class RemoteTransport(Protocol):
 
     def upload(self, local_path: Path, remote_path: str) -> None: ...
 
+    def download(self, remote_path: str, local_path: Path) -> None: ...
+
+    def remove(self, remote_path: str) -> None: ...
+
     def chmod(self, remote_path: str, mode: int) -> None: ...
 
     def run(self, subcommand: str, command: str) -> None: ...
@@ -143,6 +147,7 @@ class RemoteTransportSession:
             else posixpath.join(self.remote_root, "task1-proof-context.json")
         )
         self.remote_state_dir = posixpath.join(self.remote_root, "state")
+        self.remote_coder_verifier_authorization_path: str | None = None
         self.progress_callback = progress_callback
 
     def upload_bundle(
@@ -566,6 +571,20 @@ class ParamikoRemoteTransport:
         sftp = self.client.open_sftp()
         try:
             sftp.put(str(local_path), remote_path)
+        finally:
+            sftp.close()
+
+    def download(self, remote_path: str, local_path: Path) -> None:
+        sftp = self.client.open_sftp()
+        try:
+            sftp.get(remote_path, str(local_path))
+        finally:
+            sftp.close()
+
+    def remove(self, remote_path: str) -> None:
+        sftp = self.client.open_sftp()
+        try:
+            sftp.remove(remote_path)
         finally:
             sftp.close()
 

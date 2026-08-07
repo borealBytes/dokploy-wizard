@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import stat
 from pathlib import Path
@@ -11,11 +12,19 @@ from dokploy_wizard import proof
 from dokploy_wizard.dokploy.coder_migration_api import (
     CoderMigrationApi,
 )
+from dokploy_wizard.dokploy.coder_secret_types import CoderSecretClientError
+from dokploy_wizard.dokploy.coder_secret_workspace_authorization import (
+    WorkspaceSupersessionContext,
+    require_workspace_supersession_context,
+)
 from dokploy_wizard.proof.model_sync_artifacts import sha256_bytes
 from dokploy_wizard.proof.model_sync_env import (
     resolve_proof_transport,
 )
 from dokploy_wizard.proof.model_sync_upgrade_host_a_coder import CoderUpgradeClient
+from dokploy_wizard.proof.model_sync_upgrade_host_a_process import (
+    run_bounded_observed_process,
+)
 from dokploy_wizard.proof.model_sync_upgrade_host_a_production import (
     ProductionUpgradeConfig,
     ProductionUpgradeHostAOperations,
@@ -56,6 +65,67 @@ def build_production_operations(
     ):
         raise UpgradeHostAError("Coder proof transport credentials are incomplete")
     coder_transport = RemoteCoderTransport(host, password, namespace.stack_name)
+    authorization_path = artifact_dir / "coder-verifier-authorization.json"
+    attempt_context = hashlib.sha256(
+        f"{binding.lifecycle_sha256}:{binding.final_commit}".encode()
+    ).hexdigest()
+    authorization_context = WorkspaceSupersessionContext(
+        machine_sha256=binding.lifecycle.machine_sha256,
+        ssh_sha256=binding.lifecycle.ssh_sha256,
+        lifecycle_sha256=binding.lifecycle_sha256,
+        stack_sha256=hashlib.sha256(namespace.stack_name.encode()).hexdigest(),
+        final_commit=binding.final_commit,
+        attempt_context_sha256=attempt_context,
+    )
+    if not authorization_path.exists():
+        process = run_bounded_observed_process(
+            [
+                str(wrapper),
+                "coder-verifier-authorize",
+                "--host",
+                host,
+                "--password-stdin",
+                "--env-file",
+                str(binding.proof_env_file),
+                "--task1-proof-context",
+                str(binding.proof_context_file),
+                "--deploy-commit",
+                binding.final_commit,
+                "--quiet-remote-output",
+                "--output",
+                str(authorization_path),
+                "--machine-sha256",
+                binding.lifecycle.machine_sha256,
+                "--ssh-sha256",
+                binding.lifecycle.ssh_sha256,
+                "--lifecycle-sha256",
+                binding.lifecycle_sha256,
+                "--stack-sha256",
+                authorization_context.stack_sha256,
+                "--final-commit",
+                binding.final_commit,
+                "--attempt-context-sha256",
+                attempt_context,
+            ],
+            stdin=(password + "\n").encode(),
+            output_limit=64 * 1024,
+            timeout_seconds=300,
+        )
+        if process.exit_code != 0:
+            raise UpgradeHostAError("Coder verifier authorization capture failed")
+    metadata = authorization_path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise UpgradeHostAError("Coder verifier authorization is absent or unsafe")
+    try:
+        require_workspace_supersession_context(
+            authorization_path, authorization_context
+        )
+    except CoderSecretClientError as error:
+        raise UpgradeHostAError("Coder verifier authorization context is invalid") from error
     token = coder_transport.login(
         transport.coder_email,
         transport.coder_password,
@@ -79,6 +149,7 @@ def build_production_operations(
             binding=binding,
             namespace=namespace,
             transport=transport,
+            verifier_authorization=authorization_path,
         ),
         coder,
     )
