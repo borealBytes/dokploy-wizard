@@ -234,7 +234,13 @@ def test_secret_client_checks_update_environment_binding_before_write() -> None:
     assert all(value not in argument for call, _ in runner.calls for argument in call)
 
 
-def test_secret_client_observes_environment_hash_in_temporary_workspace(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "template_name", ("ubuntu-vscode-opencode-pi", "ubuntu-vscode")
+)
+def test_secret_client_observes_environment_hash_in_temporary_workspace(
+    tmp_path: Path,
+    template_name: str,
+) -> None:
     expected_hash = sha256("SECRET-CODER-HERMES".encode()).hexdigest()
     runner = RecordingRunner(
         [
@@ -243,7 +249,7 @@ def test_secret_client_observes_environment_hash_in_temporary_workspace(tmp_path
                 0,
                 stdout=(
                     '[{"id":"00000000-0000-4000-8000-000000000003",'
-                    '"name":"ubuntu-vscode-opencode-pi"}]'
+                    f'"name":"{template_name}"}}]'
                 ),
                 stderr="",
             ),
@@ -257,7 +263,7 @@ def test_secret_client_observes_environment_hash_in_temporary_workspace(tmp_path
                     '"owner_id":"00000000-0000-4000-8000-000000000002",'
                     '"owner_name":"admin",'
                     '"template_id":"00000000-0000-4000-8000-000000000003",'
-                    '"template_name":"ubuntu-vscode-opencode-pi",'
+                    f'"template_name":"{template_name}",'
                     '"latest_build":{"status":"running"}}]'
                 ),
                 stderr="",
@@ -271,7 +277,7 @@ def test_secret_client_observes_environment_hash_in_temporary_workspace(tmp_path
                     '"owner_id":"00000000-0000-4000-8000-000000000002",'
                     '"owner_name":"admin",'
                     '"template_id":"00000000-0000-4000-8000-000000000003",'
-                    '"template_name":"ubuntu-vscode-opencode-pi",'
+                    f'"template_name":"{template_name}",'
                     '"latest_build":{"status":"running"}}]'
                 ),
                 stderr="",
@@ -285,7 +291,7 @@ def test_secret_client_observes_environment_hash_in_temporary_workspace(tmp_path
                     '"owner_id":"00000000-0000-4000-8000-000000000002",'
                     '"owner_name":"admin",'
                     '"template_id":"00000000-0000-4000-8000-000000000003",'
-                    '"template_name":"ubuntu-vscode-opencode-pi",'
+                    f'"template_name":"{template_name}",'
                     '"latest_build":{"status":"running"}}]'
                 ),
                 stderr="",
@@ -300,7 +306,7 @@ def test_secret_client_observes_environment_hash_in_temporary_workspace(tmp_path
                     '"owner_id":"00000000-0000-4000-8000-000000000002",'
                     '"owner_name":"admin",'
                     '"template_id":"00000000-0000-4000-8000-000000000003",'
-                    '"template_name":"ubuntu-vscode-opencode-pi",'
+                    f'"template_name":"{template_name}",'
                     '"latest_build":{"status":"running"}}]'
                 ),
                 stderr="",

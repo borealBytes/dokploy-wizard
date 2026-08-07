@@ -14,6 +14,7 @@ from dokploy_wizard.dokploy.coder_secret_workspace_contract import (
 )
 
 _PRIMARY_TEMPLATE: Final = "ubuntu-vscode-opencode-pi"
+_LEGACY_PRIMARY_TEMPLATE: Final = "ubuntu-vscode"
 _ENV_NAME: Final = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 
 
@@ -21,7 +22,7 @@ def verification_template(output: str) -> WorkspaceTemplate:
     value = _json(output, "templates")
     match value:
         case list() as templates:
-            matches = tuple(
+            primary_matches = tuple(
                 _template_record(template)
                 for template in templates
                 if isinstance(template, dict) and template.get("name") == _PRIMARY_TEMPLATE
@@ -30,12 +31,27 @@ def verification_template(output: str) -> WorkspaceTemplate:
             raise CoderSecretClientError(
                 "Coder has no verification template", kind="client_workspace_template"
             )
-    if len(matches) != 1:
-        raise CoderSecretClientError(
-            "Coder primary verification template is unavailable",
-            kind="client_workspace_template",
-        )
-    return matches[0]
+    match primary_matches:
+        case (primary,):
+            return primary
+        case ():
+            legacy_matches = tuple(
+                _template_record(template)
+                for template in templates
+                if isinstance(template, dict)
+                and template.get("name") == _LEGACY_PRIMARY_TEMPLATE
+            )
+            match legacy_matches:
+                case (legacy,):
+                    return legacy
+                case _:
+                    pass
+        case _:
+            pass
+    raise CoderSecretClientError(
+        "Coder primary verification template is unavailable",
+        kind="client_workspace_template",
+    )
 
 
 def workspace_records(output: str) -> tuple[WorkspaceRecord, ...]:
