@@ -16,6 +16,7 @@ from dokploy_wizard.dokploy.coder_secret_reconciliation import (
     CoderSecretMetadata,
     CoderSecretSpec,
 )
+from dokploy_wizard.dokploy.coder_secret_workspace_inventory import verification_template
 
 
 class RecordingRunner:
@@ -42,6 +43,45 @@ class RecordingRunner:
         assert "CODER_SESSION_TOKEN" in env
         self.calls.append((arguments, input))
         return self._results.pop(0)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_kind"),
+    (
+        ("{", "client_workspace_template_payload"),
+        ("{}", "client_workspace_template_root"),
+        (
+            '[{"id":"00000000-0000-4000-8000-000000000001","name":"retired"}]',
+            "client_workspace_template_primary_absent",
+        ),
+        (
+            '[{"id":"00000000-0000-4000-8000-000000000001",'
+            '"name":"ubuntu-vscode-opencode-pi"},{"id":'
+            '"00000000-0000-4000-8000-000000000002",'
+            '"name":"ubuntu-vscode-opencode-pi"}]',
+            "client_workspace_template_primary_ambiguous",
+        ),
+        (
+            '[{"id":"00000000-0000-4000-8000-000000000001",'
+            '"name":"ubuntu-vscode"},{"id":'
+            '"00000000-0000-4000-8000-000000000002","name":"ubuntu-vscode"}]',
+            "client_workspace_template_legacy_ambiguous",
+        ),
+        (
+            '[{"id":"invalid","name":"ubuntu-vscode-opencode-pi"}]',
+            "client_workspace_template_record_invalid",
+        ),
+    ),
+)
+def test_verification_template_failure_origin_is_value_free(
+    payload: str,
+    expected_kind: str,
+) -> None:
+    with pytest.raises(CoderSecretClientError) as raised:
+        verification_template(payload)
+
+    assert raised.value.kind == expected_kind
+    assert "00000000" not in str(raised.value)
 
 
 def test_secret_client_probes_environment_binding_before_stdin_write() -> None:

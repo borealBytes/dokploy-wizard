@@ -28,6 +28,12 @@ CoderSecretClientFailureKind = Literal[
     "client_workspace_receipt_state",
     "client_workspace_receipt_write",
     "client_workspace_template",
+    "client_workspace_template_legacy_ambiguous",
+    "client_workspace_template_payload",
+    "client_workspace_template_primary_absent",
+    "client_workspace_template_primary_ambiguous",
+    "client_workspace_template_record_invalid",
+    "client_workspace_template_root",
     "client_workspace_terminal",
 ]
 

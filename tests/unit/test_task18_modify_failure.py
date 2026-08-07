@@ -308,6 +308,12 @@ def test_task18_modify_failure_returns_only_exception_type_category(
         "client_workspace_receipt_state",
         "client_workspace_receipt_write",
         "client_workspace_template",
+        "client_workspace_template_legacy_ambiguous",
+        "client_workspace_template_payload",
+        "client_workspace_template_primary_absent",
+        "client_workspace_template_primary_ambiguous",
+        "client_workspace_template_record_invalid",
+        "client_workspace_template_root",
     ),
 )
 def test_task18_modify_failure_preserves_each_client_origin(kind: str) -> None:
