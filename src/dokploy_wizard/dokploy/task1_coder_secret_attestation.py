@@ -7,6 +7,7 @@ from importlib.resources import files
 from typing import Final
 from uuid import UUID
 
+from dokploy_wizard.dokploy.coder_secret_receipts import metadata_sha256
 from dokploy_wizard.state.sync_schema import JsonValue
 
 _MAX_BYTES: Final = 8 * 1024
@@ -44,6 +45,25 @@ def proves_task1_created_secret(
     *, secret_id: str, name: str, env_name: str, description: str
 ) -> bool:
     return (secret_id, name, env_name, description) in _load()
+
+
+def proves_task1_metadata_hash(
+    *, secret_id: str, name: str, metadata_hash: str
+) -> bool:
+    return any(
+        candidate_id == secret_id
+        and candidate_name == name
+        and metadata_sha256(
+            {
+                "secret_id": candidate_id,
+                "name": candidate_name,
+                "env_name": env_name,
+                "description": description,
+            }
+        )
+        == metadata_hash
+        for candidate_id, candidate_name, env_name, description in _load()
+    )
 
 
 def _load() -> frozenset[tuple[str, str, str, str]]:

@@ -156,7 +156,13 @@ def _validate_step_lifecycle(step: CoderSecretReceiptStep) -> None:
             )
             if step.status == "verified":
                 _require(step.secret_id is not None, "verified create lacks secret id")
-        case "update" | "noop":
+        case "update":
+            _require(step.secret_id is not None, "existing secret receipt lacks secret id")
+            _require(
+                step.expected_post_sha256 == _expected_hash(step.secret_id, step),
+                "existing receipt expected metadata is invalid",
+            )
+        case "noop":
             _require(step.secret_id is not None, "existing secret receipt lacks secret id")
             _require(
                 step.expected_post_sha256 == _expected_hash(step.secret_id, step),

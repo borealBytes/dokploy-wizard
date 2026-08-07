@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import dokploy_wizard.dokploy.coder_secret_reconciliation_types as reconciliation_types
 from dokploy_wizard.dokploy.coder_secret_receipts import (
     CoderSecretReceipt,
     CoderSecretReceiptStep,
@@ -403,6 +404,92 @@ def test_submitted_update_recovery_verifies_without_a_second_write(tmp_path: Pat
     assert client.writes == []
     assert receipt.steps[0].operation == "update"
     assert receipt.steps[0].status == "verified"
+
+
+def test_completed_legacy_metadata_update_receipt_recovers_without_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _specs()[0]
+    legacy_metadata = CoderSecretMetadata(
+        secret_id="owned-secret",
+        name=spec.name,
+        env_name=spec.env_name,
+        description="legacy metadata",
+    )
+    current_metadata = CoderSecretMetadata(
+        secret_id=legacy_metadata.secret_id,
+        name=spec.name,
+        env_name=spec.env_name,
+        description=spec.description,
+    )
+    verified = _receipt_step(
+        spec,
+        operation="update",
+        status="verified",
+        metadata=legacy_metadata,
+        response_sha256="a" * 64,
+        workspace_verification_sha256=sha256(spec.value.encode()).hexdigest(),
+    )
+    _write_receipt(tmp_path, verified, status="completed")
+    receipt_path = tmp_path / "coder-secret-receipts-v1.json"
+    client = FakeCoderSecrets(
+        secrets={spec.name: current_metadata},
+        values={spec.name: spec.value},
+    )
+    reconciler = CoderSecretReconciler(
+        state_dir=tmp_path,
+        client=client,
+        owner_id="d" * 64,
+    )
+
+    def proves_legacy_metadata(**_kwargs: str) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        reconciliation_types,
+        "proves_task1_metadata_hash",
+        proves_legacy_metadata,
+    )
+
+    receipt = reconciler.reconcile((spec,))
+
+    assert receipt.steps == (verified,)
+    assert client.writes == []
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_legacy_metadata_update_receipt_without_task1_attestation_fails_closed(
+    tmp_path: Path,
+) -> None:
+    spec = _specs()[0]
+    legacy_metadata = CoderSecretMetadata(
+        secret_id="synthetic-secret",
+        name=spec.name,
+        env_name=spec.env_name,
+        description="legacy metadata",
+    )
+    verified = _receipt_step(
+        spec,
+        operation="update",
+        status="verified",
+        metadata=legacy_metadata,
+        response_sha256="a" * 64,
+        workspace_verification_sha256=sha256(spec.value.encode()).hexdigest(),
+    )
+    _write_receipt(tmp_path, verified, status="completed")
+    client = FakeCoderSecrets()
+    reconciler = CoderSecretReconciler(
+        state_dir=tmp_path,
+        client=client,
+        owner_id="d" * 64,
+    )
+
+    with pytest.raises(CoderSecretError) as raised:
+        reconciler.reconcile((spec,))
+
+    assert raised.value.kind == "receipt_schema"
+    assert client.writes == []
 
 
 def test_completed_receipt_is_byte_stable_on_an_unchanged_rerun(tmp_path: Path) -> None:
