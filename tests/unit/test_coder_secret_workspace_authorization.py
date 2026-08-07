@@ -148,6 +148,32 @@ def test_external_authorization_environment_enables_store_supersession(
     assert successor.predecessor_receipt_bytes == parent
 
 
+def test_external_authorization_cannot_reopen_terminal_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, parent = _exhausted_store(tmp_path)
+    authorization = _authorization(tmp_path, parent)
+    successor = supersede_exhausted_receipt(
+        EmptyInventoryRunner(), store, _intent(), authorization
+    )
+    successor = store.begin_create(successor)
+    successor = store.begin_create(successor)
+    with pytest.raises(CoderSecretClientError, match="create retries exhausted"):
+        store.begin_create(successor)
+    terminal = store.load()
+    assert terminal is not None
+    monkeypatch.setenv(
+        "DOKPLOY_WIZARD_CODER_VERIFIER_SUPERSESSION_AUTHORIZATION",
+        str(authorization),
+    )
+
+    observed = store.supersede_authorized(
+        EmptyInventoryRunner(), terminal, _intent()
+    )
+
+    assert observed == terminal
+
+
 def test_concurrent_supersession_has_one_successor_and_no_fork(tmp_path: Path) -> None:
     store, parent = _exhausted_store(tmp_path)
     authorization = _authorization(tmp_path, parent)
