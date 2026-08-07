@@ -11,8 +11,10 @@ from dokploy_wizard.proof.model_sync_artifacts import JsonValue
 UrlStatus = Literal["not_checked", "reachable", "unavailable"]
 TokenStatus = Literal["not_checked", "issued", "unavailable"]
 AuthStatus = Literal["not_checked", "authenticated", "unavailable"]
-VersionHealth = Literal["not_checked", "healthy", "unavailable"]
-PresetSelection = Literal["not_checked", "not_required", "required", "unavailable"]
+VersionHealth = Literal["not_checked", "healthy", "unhealthy", "unavailable"]
+PresetSelection = Literal[
+    "not_checked", "not_required", "automatic_default", "required", "invalid", "unavailable"
+]
 ExternalAuthStatus = Literal[
     "not_checked", "not_required", "satisfied", "unsatisfied", "unavailable"
 ]
@@ -25,7 +27,9 @@ PreflightBlocker = Literal[
     "coder_auth_unavailable",
     "preflight_transport_configuration_invalid",
     "active_template_version_unavailable",
+    "active_template_version_unhealthy",
     "preset_selection_required",
+    "preset_selection_invalid",
     "required_parameter_default_gap",
     "required_external_auth_unsatisfied",
     "preflight_payload_invalid",
@@ -38,6 +42,7 @@ class CoderCreatePreflightError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class TemplateRecord:
+    template_id: str
     organization_id: str
     name: str
     active_version_id: str | None
@@ -159,7 +164,7 @@ def _auth_status(value: JsonValue) -> AuthStatus:
 
 def _version_health(value: JsonValue) -> VersionHealth:
     match value:
-        case "not_checked" | "healthy" | "unavailable" as health:
+        case "not_checked" | "healthy" | "unhealthy" | "unavailable" as health:
             return health
         case _:
             raise CoderCreatePreflightError("preflight report version health is invalid")
@@ -167,7 +172,16 @@ def _version_health(value: JsonValue) -> VersionHealth:
 
 def _preset_selection(value: JsonValue) -> PresetSelection:
     match value:
-        case "not_checked" | "not_required" | "required" | "unavailable" as selection:
+        case (
+            (
+                "not_checked"
+                | "not_required"
+                | "automatic_default"
+                | "required"
+                | "invalid"
+                | "unavailable"
+            ) as selection
+        ):
             return selection
         case _:
             raise CoderCreatePreflightError("preflight report preset selection is invalid")
@@ -202,20 +216,34 @@ def _blockers(value: JsonValue) -> tuple[PreflightBlocker, ...]:
 def _blocker(value: JsonValue) -> PreflightBlocker:
     match value:
         case (
-            "target_template_missing"
-            | "target_template_ambiguous"
-            | "target_organization_ambiguous"
-        ) as blocker:
+            (
+                "target_template_missing"
+                | "target_template_ambiguous"
+                | "target_organization_ambiguous"
+            ) as blocker
+        ):
             return blocker
         case (
-            "coder_url_unavailable" | "coder_token_unavailable" | "coder_auth_unavailable"
-        ) as blocker:
+            (
+                "coder_url_unavailable" | "coder_token_unavailable" | "coder_auth_unavailable"
+            ) as blocker
+        ):
             return blocker
         case (
-            "preflight_transport_configuration_invalid" | "active_template_version_unavailable"
-        ) as blocker:
+            (
+                "preflight_transport_configuration_invalid"
+                | "active_template_version_unavailable"
+                | "active_template_version_unhealthy"
+            ) as blocker
+        ):
             return blocker
-        case "preset_selection_required" | "required_parameter_default_gap" as blocker:
+        case (
+            (
+                "preset_selection_required"
+                | "preset_selection_invalid"
+                | "required_parameter_default_gap"
+            ) as blocker
+        ):
             return blocker
         case "required_external_auth_unsatisfied" | "preflight_payload_invalid" as blocker:
             return blocker
