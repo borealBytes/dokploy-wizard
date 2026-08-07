@@ -74,6 +74,7 @@ class CoderWorkspaceValueHashVerifier:
                     ),
                 )
         else:
+            receipt = store.supersede_authorized(self.runner, receipt, intent)
             require_matching_receipt(receipt, intent)
             try:
                 receipt = self._resume(store, receipt)

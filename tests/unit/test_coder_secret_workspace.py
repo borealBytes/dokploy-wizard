@@ -280,7 +280,7 @@ def test_value_hash_retries_planned_create_once_when_timeout_left_no_workspace(
     assert second_runner.commands[1][0] == "create"
 
 
-def test_value_hash_binds_planned_workspace_without_duplicate_create(tmp_path: Path) -> None:
+def test_value_hash_rejects_unattempted_planned_workspace(tmp_path: Path) -> None:
     expected_hash = sha256(_VALUE.encode()).hexdigest()
     store = WorkspaceVerificationReceiptStore(tmp_path)
     store.write_planned(
@@ -297,8 +297,11 @@ def test_value_hash_binds_planned_workspace_without_duplicate_create(tmp_path: P
         [_workspaces(), _workspaces(), _workspaces(), f"{expected_hash}\n", _workspaces(), "", "[]"]
     )
 
-    assert _verifier(tmp_path, runner, AdvancingClock()).verify(_spec(), _OWNER) == expected_hash
+    with pytest.raises(CoderSecretClientError, match="identity drifted"):
+        _verifier(tmp_path, runner, AdvancingClock()).verify(_spec(), _OWNER)
+
     assert not any(command[0] == "create" for command in runner.commands)
+    assert not any(command[0] == "delete" for command in runner.commands)
 
 
 def test_value_hash_exhausts_planned_create_retries_without_unowned_delete(tmp_path: Path) -> None:

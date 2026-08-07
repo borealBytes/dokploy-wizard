@@ -30,6 +30,12 @@ def parse_receipt_bytes(payload: bytes) -> WorkspaceVerificationReceipt:
     except json.JSONDecodeError as error:
         raise _invalid() from error
     match value:
+        case dict() as mapping if mapping.get("schema_version") == 2:
+            from dokploy_wizard.dokploy.coder_secret_workspace_receipt_schema_v2 import (
+                parse_v2_receipt,
+            )
+
+            return parse_v2_receipt(mapping)
         case dict() as mapping if (
             frozenset(mapping) == _RECEIPT_KEYS
             and mapping.get("schema_version") == _SCHEMA_VERSION
@@ -58,6 +64,14 @@ def parse_receipt_bytes(payload: bytes) -> WorkspaceVerificationReceipt:
 
 
 def receipt_bytes(receipt: WorkspaceVerificationReceipt) -> bytes:
+    if receipt.protocol_revision == 2:
+        from dokploy_wizard.dokploy.coder_secret_workspace_receipt_schema_v2 import (
+            v2_receipt_bytes,
+        )
+
+        return v2_receipt_bytes(receipt)
+    if receipt.protocol_revision != 1 or receipt.predecessor_receipt_bytes is not None:
+        raise _invalid()
     _validate_lifecycle(receipt)
     return json.dumps(
         {

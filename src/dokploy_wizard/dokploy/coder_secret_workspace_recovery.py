@@ -72,7 +72,7 @@ def create_or_bind_planned(
     match candidates:
         case ():
             return create_planned(runner, store, receipt)
-        case (workspace,):
+        case (workspace,) if receipt.create_attempts > 0:
             return _bind_candidate(store, receipt, workspace)
         case _:
             raise WorkspaceIdentityError("Coder verification workspace identity drifted")

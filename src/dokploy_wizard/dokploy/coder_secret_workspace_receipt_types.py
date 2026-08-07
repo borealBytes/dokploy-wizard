@@ -35,6 +35,8 @@ class WorkspaceVerificationReceipt:
     failure_reason: str | None
     created_at: str
     updated_at: str
+    protocol_revision: int = 1
+    predecessor_receipt_bytes: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)

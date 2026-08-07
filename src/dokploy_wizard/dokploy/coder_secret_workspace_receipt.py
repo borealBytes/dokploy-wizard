@@ -4,6 +4,7 @@ import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dokploy_wizard.dokploy.coder_secret_types import CoderSecretClientError
 from dokploy_wizard.dokploy.coder_secret_workspace_receipt_fs import (
@@ -21,7 +22,13 @@ from dokploy_wizard.dokploy.coder_secret_workspace_receipt_types import (
     WorkspaceVerificationReceipt,
 )
 
-_FILENAME = "coder-workspace-verification-receipt.json"
+if TYPE_CHECKING:
+    from dokploy_wizard.dokploy.coder_secret_workspace_contract import (
+        CoderWorkspaceRunner,
+        WorkspaceVerificationIntent,
+    )
+
+WORKSPACE_VERIFICATION_RECEIPT_FILENAME = "coder-workspace-verification-receipt.json"
 
 
 class WorkspaceVerificationReceiptStore:
@@ -29,8 +36,17 @@ class WorkspaceVerificationReceiptStore:
         self._state_dir = state_dir
 
     def load(self) -> WorkspaceVerificationReceipt | None:
-        payload = read_receipt_bytes(self._state_dir, _FILENAME)
+        payload = self.load_bytes()
         return None if payload is None else parse_receipt_bytes(payload)
+
+    @property
+    def state_dir(self) -> Path:
+        return self._state_dir
+
+    def load_bytes(self) -> bytes | None:
+        return read_receipt_bytes(
+            self._state_dir, WORKSPACE_VERIFICATION_RECEIPT_FILENAME
+        )
 
     def write_planned(self, plan: WorkspaceVerificationPlan) -> WorkspaceVerificationReceipt:
         now = _now()
@@ -105,18 +121,51 @@ class WorkspaceVerificationReceiptStore:
         return updated
 
     def write(self, receipt: WorkspaceVerificationReceipt) -> None:
-        write_receipt_bytes(self._state_dir, _FILENAME, receipt_bytes(receipt))
+        write_receipt_bytes(
+            self._state_dir,
+            WORKSPACE_VERIFICATION_RECEIPT_FILENAME,
+            receipt_bytes(receipt),
+        )
+
+    def replace_exact(
+        self, expected: bytes, receipt: WorkspaceVerificationReceipt
+    ) -> None:
+        if self.load_bytes() != expected:
+            raise CoderSecretClientError(
+                "Coder workspace verification receipt changed before supersession",
+                kind="client_workspace_receipt_state",
+            )
+        self.write(receipt)
+
+    def supersede_authorized(
+        self,
+        runner: CoderWorkspaceRunner,
+        receipt: WorkspaceVerificationReceipt,
+        intent: WorkspaceVerificationIntent,
+    ) -> WorkspaceVerificationReceipt:
+        from dokploy_wizard.dokploy.coder_secret_workspace_supersession import (
+            supersede_exhausted_receipt,
+        )
+
+        if receipt.phase is not WorkspaceVerificationPhase.FAILED:
+            return receipt
+        authorization = os.environ.get(
+            "DOKPLOY_WIZARD_CODER_VERIFIER_SUPERSESSION_AUTHORIZATION"
+        )
+        if authorization is None:
+            return receipt
+        return supersede_exhausted_receipt(runner, self, intent, Path(authorization))
 
     def remove(self, receipt: WorkspaceVerificationReceipt) -> None:
         expected = receipt_bytes(receipt)
-        current = read_receipt_bytes(self._state_dir, _FILENAME)
+        current = self.load_bytes()
         if current != expected:
             raise CoderSecretClientError(
                 "Coder workspace verification receipt changed before removal",
                 kind="client_workspace_receipt_state",
             )
         try:
-            (self._state_dir / _FILENAME).unlink()
+            (self._state_dir / WORKSPACE_VERIFICATION_RECEIPT_FILENAME).unlink()
             descriptor = os.open(
                 self._state_dir,
                 os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
