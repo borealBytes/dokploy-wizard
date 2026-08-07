@@ -14,7 +14,9 @@ class CoderSecretClientError(CoderSecretError):
         self,
         reason: str,
         *,
-        kind: Literal["client", "client_workspace_present"] = "client",
+        kind: Literal[
+            "client", "client_workspace_present", "client_workspace_terminal"
+        ] = "client",
     ) -> None:
         super().__init__(reason, kind=kind)
 

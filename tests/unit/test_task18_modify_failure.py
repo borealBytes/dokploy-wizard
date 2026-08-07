@@ -150,6 +150,10 @@ from dokploy_wizard.tailscale import TailscaleError
             "coder_workspace_secrets_reconciliation_client_workspace_present",
         ),
         (
+            CoderError("Coder workspace secret reconciliation failed. client_workspace_terminal"),
+            "coder_workspace_secrets_reconciliation_client_workspace_terminal",
+        ),
+        (
             CoderError("Coder workspace secret reconciliation failed. metadata"),
             "coder_workspace_secrets_reconciliation_metadata",
         ),

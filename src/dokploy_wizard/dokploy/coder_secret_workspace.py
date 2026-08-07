@@ -162,7 +162,10 @@ class CoderWorkspaceValueHashVerifier:
             case WorkspaceVerificationPhase.BLOCKED | WorkspaceVerificationPhase.FAILED:
                 if receipt.workspace_id is not None:
                     self._cleanup(store, receipt, receipt.phase)
-                raise CoderSecretClientError("Coder workspace verification receipt is terminal")
+                raise CoderSecretClientError(
+                    "Coder workspace verification receipt is terminal",
+                    kind="client_workspace_terminal",
+                )
             case _:
                 return receipt
 
