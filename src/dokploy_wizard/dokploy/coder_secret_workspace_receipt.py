@@ -147,7 +147,10 @@ class WorkspaceVerificationReceiptStore:
             supersede_exhausted_receipt,
         )
 
-        if receipt.phase is not WorkspaceVerificationPhase.FAILED:
+        if (
+            receipt.phase is not WorkspaceVerificationPhase.FAILED
+            or receipt.protocol_revision != 1
+        ):
             return receipt
         authorization = os.environ.get(
             "DOKPLOY_WIZARD_CODER_VERIFIER_SUPERSESSION_AUTHORIZATION"
