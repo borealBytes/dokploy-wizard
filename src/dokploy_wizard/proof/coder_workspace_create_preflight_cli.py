@@ -28,6 +28,7 @@ from dokploy_wizard.proof.model_sync_coder_api import (
     CoderSnapshotApiError,
     api,
     coder_login,
+    nullable_api,
 )
 from dokploy_wizard.proof.model_sync_env import EnvPreparationError, resolve_proof_transport
 from dokploy_wizard.proof.model_sync_task1_context import (
@@ -84,17 +85,17 @@ def collect_preflight(env_file: Path, context_file: Path) -> CoderCreatePrefligh
     raw_env = parse_env_file(env_file)
     context = load_task1_proof_context(context_file, raw_env)
     transport = resolve_proof_transport(env_file)
-    if (
-        transport.coder_email is None
-        or transport.coder_hostname is None
-        or transport.coder_password is None
-    ):
-        return _unavailable_report("coder_token_unavailable")
+    if transport.coder_hostname is None:
+        return _unavailable_report("preflight_transport_configuration_invalid")
     with activate_task1_proof_context(context):
         try:
             api(transport.coder_hostname, None, "/api/v2/buildinfo")
-        except (CoderSnapshotApiError, OSError, ValueError):
+        except CoderSnapshotApiError as error:
+            return _snapshot_failure(error)
+        except (OSError, ValueError):
             return _unavailable_report("coder_url_unavailable")
+        if transport.coder_email is None or transport.coder_password is None:
+            return _unavailable_report("coder_token_unavailable")
         try:
             token = coder_login(
                 transport.coder_hostname,
@@ -133,7 +134,7 @@ def collect_preflight(env_file: Path, context_file: Path) -> CoderCreatePrefligh
                 token,
                 f"/api/v2/templateversions/{version_id}/rich-parameters",
             )
-            presets = api(
+            presets = nullable_api(
                 transport.coder_hostname,
                 token,
                 f"/api/v2/templateversions/{version_id}/presets",
@@ -143,7 +144,9 @@ def collect_preflight(env_file: Path, context_file: Path) -> CoderCreatePrefligh
                 token,
                 f"/api/v2/templateversions/{version_id}/external-auth",
             )
-        except (CoderSnapshotApiError, OSError, ValueError):
+        except CoderSnapshotApiError as error:
+            return _snapshot_failure(error)
+        except (OSError, ValueError):
             version = None
             parameters = None
             presets = None
@@ -227,6 +230,16 @@ def _unavailable_report(blocker: PreflightFailure) -> CoderCreatePreflightReport
         external_auth_status="not_checked",
         blockers=(unavailable.blocker,),
     )
+
+
+def _snapshot_failure(error: CoderSnapshotApiError) -> CoderCreatePreflightReport:
+    match error.stage:
+        case "route":
+            return _unavailable_report("preflight_transport_configuration_invalid")
+        case "endpoint":
+            return _unavailable_report("coder_url_unavailable")
+        case "payload":
+            return _unavailable_report("preflight_payload_invalid")
 
 
 def _write_private_report(output: Path, report: CoderCreatePreflightReport) -> None:

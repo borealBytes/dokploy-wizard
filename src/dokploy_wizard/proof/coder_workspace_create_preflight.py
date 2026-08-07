@@ -38,11 +38,16 @@ def classify_preflight(
             blockers=("target_template_missing",),
         )
     if len(targets) != 1:
+        target_blockers: tuple[PreflightBlocker, ...] = (
+            ("target_template_ambiguous", "target_organization_ambiguous")
+            if len(target_organizations) > 1
+            else ("target_template_ambiguous",)
+        )
         return _target_report(
             target_template_count=len(targets),
             organization_count=len(organizations),
             target_organization_count=len(target_organizations),
-            blockers=("target_template_ambiguous", "target_organization_ambiguous"),
+            blockers=target_blockers,
         )
     active_version_id = targets[0].active_version_id
     if active_version_id is None or version is None or parameters is None or external_auth is None:

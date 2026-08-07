@@ -129,10 +129,23 @@ def test_api_rejects_missing_task1_shared_network_before_request(
         networks={"proof-stack-default": {"IPAddress": "172.19.0.3"}},
     )
 
-    with pytest.raises(ValueError, match="shared network"):
+    with pytest.raises(model_sync_coder_api.CoderSnapshotApiError) as error:
         model_sync_coder_api.api("coder-proof.example.test", None, "/api/v2/users/me")
 
+    assert error.value.stage == "route"
     assert captured == []
+
+
+def test_nullable_api_accepts_null_while_strict_api_rejects_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_sync_coder_api, "_api_value", lambda *_args: None)
+
+    assert model_sync_coder_api.nullable_api("coder.example.test", None, "/presets") is None
+    with pytest.raises(model_sync_coder_api.CoderSnapshotApiError) as error:
+        model_sync_coder_api.api("coder.example.test", None, "/presets")
+
+    assert error.value.stage == "payload"
 
 
 def test_templates_resolve_active_version_name_from_version_detail(
