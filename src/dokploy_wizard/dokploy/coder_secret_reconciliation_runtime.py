@@ -51,13 +51,13 @@ class CoderSecretReconciler:
         except CoderSecretReceiptError as error:
             raise CoderSecretError(
                 "Coder secret receipt cannot be read",
-                kind="receipt_invalid",
+                kind="receipt_read",
             ) from error
         if existing is not None:
             if existing.owner_id != self._owner_id:
                 raise CoderSecretError(
                     "Coder secret receipt ownership does not match",
-                    kind="receipt_invalid",
+                    kind="receipt_owner",
                 )
             validate_receipt_for_specs(existing, specs)
         receipt = existing or CoderSecretReceipt(self._owner_id, "planned", ())
@@ -275,5 +275,5 @@ class CoderSecretReconciler:
         except CoderSecretReceiptError as error:
             raise CoderSecretError(
                 "Coder secret receipt cannot be written",
-                kind="receipt_invalid",
+                kind="receipt_write",
             ) from error

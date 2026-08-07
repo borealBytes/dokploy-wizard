@@ -19,6 +19,10 @@ CoderSecretFailureKind = Literal[
     "metadata",
     "receipt",
     "receipt_invalid",
+    "receipt_owner",
+    "receipt_read",
+    "receipt_schema",
+    "receipt_write",
     "reconciliation",
     "unknown",
 ]
@@ -164,30 +168,30 @@ def validate_receipt_for_specs(
     if any(name not in by_name for name in receipt_names):
         raise CoderSecretError(
             "Coder secret receipt contains an unknown managed secret",
-            kind="receipt_invalid",
+            kind="receipt_schema",
         )
     if receipt.status == "completed" and receipt_names != tuple(sorted(by_name)):
         raise CoderSecretError(
             "Coder secret completed receipt inventory is incomplete",
-            kind="receipt_invalid",
+            kind="receipt_schema",
         )
     for step in receipt.steps:
         spec = by_name[step.secret_name]
         if step.env_name != spec.env_name or step.description != spec.description:
             raise CoderSecretError(
                 "Coder secret receipt metadata does not match the requested secret",
-                kind="receipt_invalid",
+                kind="receipt_schema",
             )
         expected_id = None if step.operation == "create" else step.secret_id
         if step.expected_post_sha256 != expected_metadata_hash(expected_id, spec):
             raise CoderSecretError(
                 "Coder secret receipt expected metadata is invalid",
-                kind="receipt_invalid",
+                kind="receipt_schema",
             )
         if step.status != "verified" and step.source_value_sha256 != value_hash(spec.value):
             raise CoderSecretError(
                 "Coder secret receipt source value does not match the requested secret",
-                kind="receipt_invalid",
+                kind="receipt_schema",
             )
 
 

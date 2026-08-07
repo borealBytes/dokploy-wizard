@@ -202,7 +202,17 @@ def test_secret_reconciliation_failure_classifies_terminal_receipt(
 
 @pytest.mark.parametrize(
     "kind",
-    ("blocked", "client", "metadata", "receipt_invalid", "reconciliation"),
+    (
+        "blocked",
+        "client",
+        "metadata",
+        "receipt_invalid",
+        "receipt_owner",
+        "receipt_read",
+        "receipt_schema",
+        "receipt_write",
+        "reconciliation",
+    ),
 )
 def test_secret_reconciliation_failure_keeps_only_typed_kind(
     tmp_path: Path,
