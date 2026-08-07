@@ -20,11 +20,13 @@ _FILENAME: Final = "coder-secret-receipts-v1.json"
 ReceiptStatus = Literal["planned", "running", "blocked", "completed", "failed"]
 SecretOperation = Literal["create", "update", "noop"]
 StepStatus = Literal["intent", "submitted", "verified", "blocked"]
+ReceiptErrorKind = Literal["directory", "file", "json", "schema"]
 
 
 @dataclass(frozen=True, slots=True)
 class CoderSecretReceiptError(ValueError):
     reason: str
+    kind: ReceiptErrorKind = "schema"
 
     def __str__(self) -> str:
         return self.reason
@@ -88,13 +90,17 @@ class CoderSecretReceiptStore:
         try:
             payload = read_contract_file(self._path, "Coder secret receipt")
         except CatalogPersistenceError as error:
-            raise CoderSecretReceiptError("Coder secret receipt is unavailable") from error
+            raise CoderSecretReceiptError(
+                "Coder secret receipt is unavailable", kind="file"
+            ) from error
         if payload is None:
             return None
         try:
             value: JsonValue = json.loads(payload)
         except json.JSONDecodeError as error:
-            raise CoderSecretReceiptError("Coder secret receipt is malformed") from error
+            raise CoderSecretReceiptError(
+                "Coder secret receipt is malformed", kind="json"
+            ) from error
         return parse_receipt(value)
 
     def write(self, receipt: CoderSecretReceipt) -> None:
@@ -126,7 +132,9 @@ class CoderSecretReceiptStore:
         try:
             secure_directory(self._state_dir)
         except CatalogPersistenceError as error:
-            raise CoderSecretReceiptError("Coder secret receipt directory is invalid") from error
+            raise CoderSecretReceiptError(
+                "Coder secret receipt directory is invalid", kind="directory"
+            ) from error
 
 
 def canonical_receipt_bytes(receipt: CoderSecretReceipt) -> bytes:

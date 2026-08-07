@@ -14,6 +14,7 @@ from dokploy_wizard.dokploy.coder_secret_receipts import (
 from dokploy_wizard.dokploy.coder_secret_reconciliation_types import (
     CoderSecretClient,
     CoderSecretError,
+    CoderSecretFailureKind,
     CoderSecretMetadata,
     CoderSecretSpec,
     MetadataPair,
@@ -49,9 +50,21 @@ class CoderSecretReconciler:
         try:
             existing = self._store.load()
         except CoderSecretReceiptError as error:
+            failure_kind: CoderSecretFailureKind
+            match error.kind:
+                case "directory":
+                    failure_kind = "receipt_read_directory"
+                case "file":
+                    failure_kind = "receipt_read_file"
+                case "json":
+                    failure_kind = "receipt_read_json"
+                case "schema":
+                    failure_kind = "receipt_read_schema"
+                case _ as unreachable_receipt_error_kind:
+                    assert_never(unreachable_receipt_error_kind)
             raise CoderSecretError(
                 "Coder secret receipt cannot be read",
-                kind="receipt_read",
+                kind=failure_kind,
             ) from error
         if existing is not None:
             if existing.owner_id != self._owner_id:

@@ -494,6 +494,14 @@ class DokployCoderBackend:
                     failure_kind = "receipt_owner"
                 case "receipt_read":
                     failure_kind = "receipt_read"
+                case "receipt_read_directory":
+                    failure_kind = "receipt_read_directory"
+                case "receipt_read_file":
+                    failure_kind = "receipt_read_file"
+                case "receipt_read_json":
+                    failure_kind = "receipt_read_json"
+                case "receipt_read_schema":
+                    failure_kind = "receipt_read_schema"
                 case "receipt_schema":
                     failure_kind = "receipt_schema"
                 case "receipt_write":
