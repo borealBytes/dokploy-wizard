@@ -38,18 +38,26 @@ _STEP_KEYS: Final = frozenset(
 def parse_receipt(value: JsonValue) -> CoderSecretReceipt:
     mapping = _mapping(value, _RECEIPT_KEYS, "receipt")
     if mapping["schema_version"] != 1 or isinstance(mapping["schema_version"], bool):
-        raise CoderSecretReceiptError("Coder secret receipt version is unsupported")
+        raise CoderSecretReceiptError(
+            "Coder secret receipt version is unsupported", kind="schema_version"
+        )
     status = _receipt_status(mapping["status"])
     owner_id = _hash(mapping["owner_id"], "owner_id")
     steps_value = mapping["steps"]
     if not isinstance(steps_value, list):
-        raise CoderSecretReceiptError("Coder secret receipt steps are invalid")
+        raise CoderSecretReceiptError(
+            "Coder secret receipt steps are invalid", kind="schema_value"
+        )
     steps = tuple(_step(item) for item in steps_value)
     names = tuple(step.secret_name for step in steps)
     if tuple(sorted(names)) != names:
-        raise CoderSecretReceiptError("Coder secret receipt steps are not sorted")
+        raise CoderSecretReceiptError(
+            "Coder secret receipt steps are not sorted", kind="schema_order"
+        )
     if len(set(names)) != len(names):
-        raise CoderSecretReceiptError("Coder secret receipt steps are duplicated")
+        raise CoderSecretReceiptError(
+            "Coder secret receipt steps are duplicated", kind="schema_order"
+        )
     _validate_receipt_lifecycle(status, steps)
     return CoderSecretReceipt(owner_id=owner_id, status=status, steps=steps)
 
@@ -184,7 +192,9 @@ def _mapping(value: JsonValue, keys: frozenset[str], label: str) -> dict[str, Js
 
 def _text(value: JsonValue, label: str) -> str:
     if not isinstance(value, str) or not value:
-        raise CoderSecretReceiptError(f"Coder secret {label} is invalid")
+        raise CoderSecretReceiptError(
+            f"Coder secret {label} is invalid", kind="schema_value"
+        )
     return value
 
 
@@ -195,7 +205,9 @@ def _nullable_text(value: JsonValue, label: str) -> str | None:
 def _hash(value: JsonValue, label: str) -> str:
     text = _text(value, label)
     if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
-        raise CoderSecretReceiptError(f"Coder secret {label} is invalid")
+        raise CoderSecretReceiptError(
+            f"Coder secret {label} is invalid", kind="schema_value"
+        )
     return text
 
 
@@ -208,9 +220,13 @@ def _timestamp(value: JsonValue) -> str:
     try:
         parsed = datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError as error:
-        raise CoderSecretReceiptError("Coder secret updated_at is invalid") from error
+        raise CoderSecretReceiptError(
+            "Coder secret updated_at is invalid", kind="schema_value"
+        ) from error
     if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != text:
-        raise CoderSecretReceiptError("Coder secret updated_at is invalid")
+        raise CoderSecretReceiptError(
+            "Coder secret updated_at is invalid", kind="schema_value"
+        )
     return text
 
 
@@ -220,7 +236,9 @@ def _receipt_status(value: JsonValue) -> ReceiptStatus:
         case "planned" | "running" | "blocked" | "completed" | "failed":
             return text
         case _:
-            raise CoderSecretReceiptError("Coder secret receipt status is invalid")
+            raise CoderSecretReceiptError(
+                "Coder secret receipt status is invalid", kind="schema_value"
+            )
 
 
 def _operation(value: JsonValue) -> SecretOperation:
@@ -229,7 +247,9 @@ def _operation(value: JsonValue) -> SecretOperation:
         case "create" | "update" | "noop":
             return text
         case _:
-            raise CoderSecretReceiptError("Coder secret operation is invalid")
+            raise CoderSecretReceiptError(
+                "Coder secret operation is invalid", kind="schema_value"
+            )
 
 
 def _step_status(value: JsonValue) -> StepStatus:
@@ -238,9 +258,13 @@ def _step_status(value: JsonValue) -> StepStatus:
         case "intent" | "submitted" | "verified" | "blocked":
             return text
         case _:
-            raise CoderSecretReceiptError("Coder secret step status is invalid")
+            raise CoderSecretReceiptError(
+                "Coder secret step status is invalid", kind="schema_value"
+            )
 
 
 def _require(condition: bool, reason: str) -> None:
     if not condition:
-        raise CoderSecretReceiptError(f"Coder secret receipt {reason}")
+        raise CoderSecretReceiptError(
+            f"Coder secret receipt {reason}", kind="schema_lifecycle"
+        )

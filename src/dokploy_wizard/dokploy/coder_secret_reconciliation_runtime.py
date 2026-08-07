@@ -62,6 +62,14 @@ class CoderSecretReconciler:
                     failure_kind = "receipt_read_schema"
                 case "schema_fields":
                     failure_kind = "receipt_read_schema_fields"
+                case "schema_lifecycle":
+                    failure_kind = "receipt_read_schema_lifecycle"
+                case "schema_order":
+                    failure_kind = "receipt_read_schema_order"
+                case "schema_value":
+                    failure_kind = "receipt_read_schema_value"
+                case "schema_version":
+                    failure_kind = "receipt_read_schema_version"
                 case _ as unreachable_receipt_error_kind:
                     assert_never(unreachable_receipt_error_kind)
             raise CoderSecretError(
