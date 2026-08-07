@@ -17,6 +17,7 @@ from dokploy_wizard.dokploy.coder_secret_reconciliation import (
 )
 from dokploy_wizard.dokploy.coder_secret_types import (
     CoderSecretClientError,
+    CoderSecretClientFailureKind,
     CoderSecretProcessRunner,
 )
 from dokploy_wizard.dokploy.coder_secret_workspace import CoderWorkspaceValueHashVerifier
@@ -115,7 +116,28 @@ class DockerExecCoderSecretClient:
         return self._run(("secret", *command), stdin=stdin)
 
     def _coder_run(self, command: tuple[str, ...]) -> str:
-        return self._run(command, stdin=None)
+        try:
+            return self._run(command, stdin=None)
+        except CoderSecretClientError as error:
+            if error.kind != "client_command_failed":
+                raise
+            kind: CoderSecretClientFailureKind
+            match command[0]:
+                case "create":
+                    kind = "client_workspace_create"
+                case "delete":
+                    kind = "client_workspace_delete"
+                case "list":
+                    kind = "client_workspace_inventory"
+                case "ssh":
+                    kind = "client_workspace_hash"
+                case "templates":
+                    kind = "client_workspace_template"
+                case _:
+                    raise
+            raise CoderSecretClientError(
+                "Coder workspace verification command failed", kind=kind
+            ) from error
 
     def _run(self, command: tuple[str, ...], *, stdin: str | None) -> str:
         runner = self.runner or _run_process

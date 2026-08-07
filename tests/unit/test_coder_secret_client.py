@@ -268,6 +268,38 @@ def test_secret_client_command_failure_keeps_fixed_origin_without_output() -> No
     assert "provider" not in str(raised.value)
 
 
+def test_workspace_create_command_failure_keeps_workspace_origin(tmp_path: Path) -> None:
+    template_record = (
+        '{"Template":{"id":"00000000-0000-4000-8000-000000000003",'
+        '"name":"ubuntu-vscode"}}'
+    )
+    runner = RecordingRunner(
+        [
+            subprocess.CompletedProcess((), 0, stdout=f"[{template_record}]", stderr=""),
+            subprocess.CompletedProcess((), 1, stdout="discarded", stderr="discarded"),
+        ]
+    )
+    client = DockerExecCoderSecretClient(
+        container_name="coder-container",
+        session_token="session-token",
+        state_dir=tmp_path,
+        runner=runner,
+        workspace_name="proof-workspace",
+    )
+    spec = CoderSecretSpec(
+        name="hermes-openai-api-key",
+        env_name="OPENAI_API_KEY",
+        value="synthetic-value",
+        description="Hermes LiteLLM key",
+    )
+
+    with pytest.raises(CoderSecretClientError) as raised:
+        client.verify_workspace_value_hash(spec, "a" * 64)
+
+    assert raised.value.kind == "client_workspace_create"
+    assert "discarded" not in str(raised.value)
+
+
 def test_secret_client_checks_update_environment_binding_before_write() -> None:
     value = "SECRET-CODER-HERMES"
     runner = RecordingRunner(
