@@ -71,6 +71,22 @@ class RecordingRunner:
             '[{"id":"invalid","name":"ubuntu-vscode-opencode-pi"}]',
             "client_workspace_template_record_invalid",
         ),
+        (
+            '[{"Template":"invalid","name":"ubuntu-vscode-opencode-pi"}]',
+            "client_workspace_template_record_invalid",
+        ),
+        (
+            '[{"Template":{"id":"00000000-0000-4000-8000-000000000001",'
+            '"name":"ubuntu-vscode-opencode-pi"}},{"id":'
+            '"00000000-0000-4000-8000-000000000002",'
+            '"name":"ubuntu-vscode-opencode-pi"}]',
+            "client_workspace_template_primary_ambiguous",
+        ),
+        (
+            '[{"Template":{"id":"00000000-0000-4000-8000-000000000001",'
+            '"name":"retired-template"}}]',
+            "client_workspace_template_primary_absent",
+        ),
     ),
 )
 def test_verification_template_failure_origin_is_value_free(
@@ -275,22 +291,33 @@ def test_secret_client_checks_update_environment_binding_before_write() -> None:
 
 
 @pytest.mark.parametrize(
-    "template_name", ("ubuntu-vscode-opencode-pi", "ubuntu-vscode")
+    ("template_name", "wrapped"),
+    (
+        ("ubuntu-vscode-opencode-pi", False),
+        ("ubuntu-vscode-opencode-pi", True),
+        ("ubuntu-vscode", False),
+        ("ubuntu-vscode", True),
+    ),
 )
 def test_secret_client_observes_environment_hash_in_temporary_workspace(
     tmp_path: Path,
     template_name: str,
+    wrapped: bool,
 ) -> None:
     expected_hash = sha256("SECRET-CODER-HERMES".encode()).hexdigest()
+    template_record = (
+        '{"id":"00000000-0000-4000-8000-000000000003",'
+        f'"name":"{template_name}"}}'
+    )
+    template_output = (
+        f'[{{"Template":{template_record}}}]' if wrapped else f"[{template_record}]"
+    )
     runner = RecordingRunner(
         [
             subprocess.CompletedProcess(
                 (),
                 0,
-                stdout=(
-                    '[{"id":"00000000-0000-4000-8000-000000000003",'
-                    f'"name":"{template_name}"}}]'
-                ),
+                stdout=template_output,
                 stderr="",
             ),
             subprocess.CompletedProcess((), 0, stdout="", stderr=""),
