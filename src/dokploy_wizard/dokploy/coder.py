@@ -502,6 +502,8 @@ class DokployCoderBackend:
                     failure_kind = "receipt_read_json"
                 case "receipt_read_schema":
                     failure_kind = "receipt_read_schema"
+                case "receipt_read_schema_fields":
+                    failure_kind = "receipt_read_schema_fields"
                 case "receipt_schema":
                     failure_kind = "receipt_schema"
                 case "receipt_write":
