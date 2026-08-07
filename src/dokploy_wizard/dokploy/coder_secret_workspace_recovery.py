@@ -89,6 +89,7 @@ def create_planned(
             "create",
             "--yes",
             "--no-wait",
+            "--use-parameter-defaults",
             "--template",
             attempted.template_name,
             attempted.workspace_name,
