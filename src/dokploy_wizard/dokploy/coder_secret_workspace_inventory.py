@@ -28,10 +28,11 @@ def verification_template(output: str) -> WorkspaceTemplate:
         ) from error
     match value:
         case list() as templates:
+            candidates = tuple(_template_candidate(template) for template in templates)
             primary_candidates = tuple(
-                template
-                for template in templates
-                if isinstance(template, dict) and template.get("name") == _PRIMARY_TEMPLATE
+                candidate
+                for candidate in candidates
+                if candidate.get("name") == _PRIMARY_TEMPLATE
             )
         case _:
             raise CoderSecretClientError(
@@ -43,10 +44,9 @@ def verification_template(output: str) -> WorkspaceTemplate:
             return _verification_template_record(primary_candidate)
         case ():
             legacy_candidates = tuple(
-                template
-                for template in templates
-                if isinstance(template, dict)
-                and template.get("name") == _LEGACY_PRIMARY_TEMPLATE
+                candidate
+                for candidate in candidates
+                if candidate.get("name") == _LEGACY_PRIMARY_TEMPLATE
             )
             match legacy_candidates:
                 case (legacy_candidate,):
@@ -76,6 +76,23 @@ def _verification_template_record(value: dict[str, JsonValue]) -> WorkspaceTempl
             "Coder verification template record is invalid",
             kind="client_workspace_template_record_invalid",
         ) from error
+
+
+def _template_candidate(value: JsonValue) -> dict[str, JsonValue]:
+    if not isinstance(value, dict):
+        raise CoderSecretClientError(
+            "Coder verification template record is invalid",
+            kind="client_workspace_template_record_invalid",
+        )
+    if "Template" not in value:
+        return value
+    inner = value["Template"]
+    if not isinstance(inner, dict):
+        raise CoderSecretClientError(
+            "Coder verification template record is invalid",
+            kind="client_workspace_template_record_invalid",
+        )
+    return inner
 
 
 def workspace_records(output: str) -> tuple[WorkspaceRecord, ...]:
