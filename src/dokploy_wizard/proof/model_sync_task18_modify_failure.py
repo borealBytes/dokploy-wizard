@@ -37,6 +37,8 @@ Task18ModifyFailureCategory = Literal[
     "coder_template_migration",
     "coder_workspace_secrets",
     "coder_workspace_secrets_reconciliation",
+    "coder_workspace_secrets_reconciliation_receipt",
+    "coder_workspace_secrets_reconciliation_unknown",
     "coder_workspace_secrets_specification",
     "headscale",
     "lifecycle_drift",
@@ -160,6 +162,10 @@ def task18_modify_failure(error: BaseException) -> Task18ModifyFailureCategory:
             return "coder_workspace_secrets_specification"
         if message == "Coder workspace secret reconciliation failed.":
             return "coder_workspace_secrets_reconciliation"
+        if message == "Coder workspace secret reconciliation failed. receipt":
+            return "coder_workspace_secrets_reconciliation_receipt"
+        if message == "Coder workspace secret reconciliation failed. unknown":
+            return "coder_workspace_secrets_reconciliation_unknown"
         if message.startswith("Coder workspace secret "):
             return "coder_workspace_secrets"
         if message.startswith(

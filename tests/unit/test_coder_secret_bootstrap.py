@@ -47,9 +47,9 @@ class RecordingSecretClient:
 
 
 class FailingSecretClient:
-    def __init__(self, events: list[str], secret_value: str) -> None:
+    def __init__(self, events: list[str], failure: CoderSecretError) -> None:
         self._events = events
-        self._secret_value = secret_value
+        self._failure = failure
 
     def list_secrets(self) -> tuple[CoderSecretMetadata, ...]:
         return ()
@@ -57,7 +57,7 @@ class FailingSecretClient:
     def write_secret(self, operation: str, spec: CoderSecretSpec) -> str:
         del operation, spec
         self._events.append("reconciliation-failed")
-        raise CoderSecretError(f"remote failure {self._secret_value}")
+        raise self._failure
 
     def verify_workspace_value_hash(self, spec: CoderSecretSpec, owner_id: str) -> str:
         del spec, owner_id
@@ -147,7 +147,9 @@ def test_secret_reconciliation_failure_blocks_template_push_and_redacts_value(
     events: list[str] = []
     secret_value = "SECRET-CODER-HERMES"
     backend = _backend(
-        client_factory=FixedSecretClientFactory(FailingSecretClient(events, secret_value)),
+        client_factory=FixedSecretClientFactory(
+            FailingSecretClient(events, CoderSecretError(f"remote failure {secret_value}"))
+        ),
         state_dir=tmp_path,
     )
     _patch_bootstrap(monkeypatch, backend)
@@ -164,5 +166,32 @@ def test_secret_reconciliation_failure_blocks_template_push_and_redacts_value(
     with pytest.raises(CoderError) as raised:
         backend.ensure_application_ready()
 
+    assert str(raised.value) == "Coder workspace secret reconciliation failed. unknown"
     assert secret_value not in str(raised.value)
+    assert events == ["reconciliation-failed"]
+
+
+def test_secret_reconciliation_failure_classifies_terminal_receipt(
+    tmp_path: Path,
+) -> None:
+    # Given
+    events: list[str] = []
+    backend = _backend(
+        client_factory=FixedSecretClientFactory(
+            FailingSecretClient(
+                events,
+                CoderSecretError("provider detail is discarded", kind="receipt"),
+            )
+        ),
+        state_dir=tmp_path,
+    )
+
+    # When / Then
+    with pytest.raises(CoderError) as raised:
+        backend._reconcile_coder_workspace_secrets(
+            container_name="coder-container",
+            session_token="session-token",
+        )
+
+    assert str(raised.value) == "Coder workspace secret reconciliation failed. receipt"
     assert events == ["reconciliation-failed"]

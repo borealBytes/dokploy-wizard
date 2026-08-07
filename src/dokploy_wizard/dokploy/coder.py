@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, assert_never
 from urllib import error as urlerror
 from urllib import parse
 from urllib import request as urlrequest
@@ -478,8 +478,17 @@ class DokployCoderBackend:
         )
         try:
             reconciler.reconcile(specs)
-        except CoderSecretError:
-            raise CoderError("Coder workspace secret reconciliation failed.") from None
+        except CoderSecretError as error:
+            match error.kind:
+                case "receipt":
+                    failure_kind = "receipt"
+                case "unknown":
+                    failure_kind = "unknown"
+                case unreachable:
+                    assert_never(unreachable)
+            raise CoderError(
+                f"Coder workspace secret reconciliation failed. {failure_kind}"
+            ) from None
 
     def _workspace_runtime_image_replacements(self) -> dict[str, str]:
         loaded = load_state_dir(self._state_dir)

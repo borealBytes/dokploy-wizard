@@ -129,6 +129,14 @@ from dokploy_wizard.tailscale import TailscaleError
             CoderError("Coder workspace secret reconciliation failed."),
             "coder_workspace_secrets_reconciliation",
         ),
+        (
+            CoderError("Coder workspace secret reconciliation failed. receipt"),
+            "coder_workspace_secrets_reconciliation_receipt",
+        ),
+        (
+            CoderError("Coder workspace secret reconciliation failed. unknown"),
+            "coder_workspace_secrets_reconciliation_unknown",
+        ),
         (CoderError("Coder service image does not match the plan."), "coder_active_plan"),
         (CoderError("Coder bootstrap API did not become ready."), "coder_bootstrap"),
         (CoderError("Coder request GET /api returned HTTP 500."), "coder_http"),
