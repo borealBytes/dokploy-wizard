@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final, Literal, Sequence, assert_never
+from typing import Literal, Sequence, assert_never
 
-from dokploy_wizard.dokploy.coder import _coder_container_name
-from dokploy_wizard.packs.coder.reconciler import CoderError
 from dokploy_wizard.proof.coder_workspace_create_preflight import (
     classify_preflight,
     target_active_version_id,
+)
+from dokploy_wizard.proof.coder_workspace_create_preflight_cli_runner import (
+    run_coder_cli as _run_coder_cli,
 )
 from dokploy_wizard.proof.coder_workspace_create_preflight_types import (
     AuthStatus,
@@ -24,7 +23,6 @@ from dokploy_wizard.proof.coder_workspace_create_preflight_types import (
     TokenStatus,
     UrlStatus,
 )
-from dokploy_wizard.proof.model_sync_artifacts import JsonValue
 from dokploy_wizard.proof.model_sync_coder_api import (
     CoderSnapshotApiError,
     api,
@@ -39,15 +37,18 @@ from dokploy_wizard.proof.model_sync_task1_context import (
 )
 from dokploy_wizard.state import StateValidationError, parse_env_file
 
-_OUTPUT_LIMIT: Final = 2 * 1024 * 1024
-_COMMAND_TIMEOUT_SECONDS: Final = 60
 PreflightFailure = Literal[
     "coder_url_unavailable",
     "coder_token_unavailable",
     "coder_auth_unavailable",
     "preflight_transport_configuration_invalid",
     "preflight_payload_invalid",
-    "coder_container_unavailable",
+    "coder_container_missing",
+    "coder_container_not_running",
+    "coder_container_restarting",
+    "coder_container_ambiguous",
+    "coder_container_discovery_unavailable",
+    "coder_container_discovery_inconsistent",
     "coder_container_inspect_unavailable",
     "coder_shared_network_unavailable",
     "coder_shared_address_invalid",
@@ -168,48 +169,6 @@ def collect_preflight(env_file: Path, context_file: Path) -> CoderCreatePrefligh
         )
 
 
-def _run_coder_cli(stack_name: str, token: str, arguments: tuple[str, ...]) -> JsonValue:
-    try:
-        container = _coder_container_name(f"{stack_name}-coder")
-    except CoderError as error:
-        raise CoderCreatePreflightError("Coder container is unavailable") from error
-    if container is None:
-        raise CoderCreatePreflightError("Coder container is unavailable")
-    command = (
-        "docker",
-        "exec",
-        "-i",
-        "-e",
-        "CODER_URL=http://127.0.0.1:3000",
-        container,
-        "sh",
-        "-c",
-        "IFS= read -r CODER_SESSION_TOKEN; export CODER_SESSION_TOKEN; exec /opt/coder \"$@\"",
-        "sh",
-        *arguments,
-    )
-    try:
-        result = subprocess.run(
-            command,
-            input=f"{token}\n",
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_COMMAND_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise CoderCreatePreflightError("Coder CLI probe failed") from error
-    if result.returncode != 0:
-        raise CoderCreatePreflightError("Coder CLI probe failed")
-    if len(result.stdout.encode()) > _OUTPUT_LIMIT or len(result.stderr.encode()) > _OUTPUT_LIMIT:
-        raise CoderCreatePreflightError("Coder CLI output exceeded the capture limit")
-    try:
-        value: JsonValue = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise CoderCreatePreflightError("Coder CLI output is invalid") from error
-    return value
-
-
 def _unavailable_report(blocker: PreflightFailure) -> CoderCreatePreflightReport:
     match blocker:
         case "coder_url_unavailable":
@@ -223,7 +182,12 @@ def _unavailable_report(blocker: PreflightFailure) -> CoderCreatePreflightReport
         case "preflight_payload_invalid":
             unavailable = _UnavailableReport("reachable", "issued", "authenticated", blocker)
         case (
-            "coder_container_unavailable"
+            "coder_container_missing"
+            | "coder_container_not_running"
+            | "coder_container_restarting"
+            | "coder_container_ambiguous"
+            | "coder_container_discovery_unavailable"
+            | "coder_container_discovery_inconsistent"
             | "coder_container_inspect_unavailable"
             | "coder_shared_network_unavailable"
             | "coder_shared_address_invalid"
@@ -249,8 +213,18 @@ def _unavailable_report(blocker: PreflightFailure) -> CoderCreatePreflightReport
 
 def _snapshot_failure(error: CoderSnapshotApiError) -> CoderCreatePreflightReport:
     match error.stage:
-        case "container":
-            return _unavailable_report("coder_container_unavailable")
+        case "container_missing":
+            return _unavailable_report("coder_container_missing")
+        case "container_not_running":
+            return _unavailable_report("coder_container_not_running")
+        case "container_restarting":
+            return _unavailable_report("coder_container_restarting")
+        case "container_ambiguous":
+            return _unavailable_report("coder_container_ambiguous")
+        case "container_discovery_unavailable":
+            return _unavailable_report("coder_container_discovery_unavailable")
+        case "container_discovery_inconsistent":
+            return _unavailable_report("coder_container_discovery_inconsistent")
         case "inspect":
             return _unavailable_report("coder_container_inspect_unavailable")
         case "network":
@@ -261,6 +235,8 @@ def _snapshot_failure(error: CoderSnapshotApiError) -> CoderCreatePreflightRepor
             return _unavailable_report("coder_url_unavailable")
         case "payload":
             return _unavailable_report("preflight_payload_invalid")
+        case unreachable:
+            assert_never(unreachable)
 
 
 def _write_private_report(output: Path, report: CoderCreatePreflightReport) -> None:

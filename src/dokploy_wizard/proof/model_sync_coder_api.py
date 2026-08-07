@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from http.client import HTTPMessage
 from ipaddress import ip_address
 from typing import IO, Final, Literal
@@ -20,7 +21,33 @@ from dokploy_wizard.proof.model_sync_task1_context import active_task1_proof_con
 _OUTPUT_LIMIT: Final = 2 * 1024 * 1024
 
 
-CoderSnapshotStage = Literal["container", "inspect", "network", "address", "endpoint", "payload"]
+CoderContainerStage = Literal[
+    "container_missing",
+    "container_not_running",
+    "container_restarting",
+    "container_ambiguous",
+    "container_discovery_unavailable",
+    "container_discovery_inconsistent",
+]
+CoderSnapshotStage = CoderContainerStage | Literal[
+    "inspect", "network", "address", "endpoint", "payload"
+]
+
+
+class DockerContainerState(StrEnum):
+    """Docker state values accepted from the all-container projection."""
+
+    CREATED = "created"
+    RESTARTING = "restarting"
+    RUNNING = "running"
+    REMOVING = "removing"
+    PAUSED = "paused"
+    EXITED = "exited"
+    DEAD = "dead"
+
+
+class CoderContainerObservationError(ValueError):
+    """Raised when the all-container state projection is not allowlisted."""
 
 
 class CoderSnapshotApiError(ValueError):
@@ -79,7 +106,7 @@ def _api_value(
     except CoderSnapshotApiError:
         raise
     except (ValueError, OSError):
-        raise CoderSnapshotApiError("container") from None
+        raise CoderSnapshotApiError("endpoint") from None
     request_value = request.Request(
         url,
         data=data,
@@ -109,12 +136,13 @@ def _api_url(hostname: str, path: str) -> str:
 
 
 def _internal_base_url(stack_name: str) -> str:
+    service_name = f"{stack_name}-coder"
     try:
-        container = _coder_container_name(f"{stack_name}-coder")
+        container = _coder_container_name(service_name)
     except CoderError:
-        raise CoderSnapshotApiError("container") from None
+        raise CoderSnapshotApiError(_unresolved_container_stage(service_name)) from None
     if container is None:
-        raise CoderSnapshotApiError("container")
+        raise CoderSnapshotApiError(_unresolved_container_stage(service_name))
     try:
         raw = run_bounded_process(
             ["docker", "inspect", "--type", "container", container],
@@ -150,6 +178,48 @@ def _internal_base_url(stack_name: str) -> str:
         raise CoderSnapshotApiError("address")
     authority = f"[{address}]" if parsed.version == 6 else address
     return f"http://{authority}:3000"
+
+
+def _unresolved_container_stage(service_name: str) -> CoderContainerStage:
+    try:
+        raw = run_bounded_process(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                f"label=com.docker.compose.service={service_name}",
+                "--format",
+                "{{.State}}",
+            ],
+            stdin=b"",
+            output_limit=_OUTPUT_LIMIT,
+            timeout_seconds=30,
+            label="Coder all-container state",
+        )
+        states = _all_container_states(raw)
+    except (CoderContainerObservationError, RuntimeError, UnicodeDecodeError):
+        return "container_discovery_unavailable"
+    if DockerContainerState.RUNNING in states:
+        return "container_discovery_inconsistent"
+    if len(states) == 0:
+        return "container_missing"
+    if len(states) > 1:
+        return "container_ambiguous"
+    if states == (DockerContainerState.RESTARTING,):
+        return "container_restarting"
+    return "container_not_running"
+
+
+def _all_container_states(raw: bytes) -> tuple[DockerContainerState, ...]:
+    return tuple(_container_state(value) for value in raw.decode("ascii").splitlines())
+
+
+def _container_state(value: str) -> DockerContainerState:
+    try:
+        return DockerContainerState(value)
+    except ValueError:
+        raise CoderContainerObservationError("Coder all-container state is invalid") from None
 
 
 def _field(value: JsonValue, key: str) -> str:
