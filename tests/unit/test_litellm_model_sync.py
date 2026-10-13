@@ -206,7 +206,7 @@ def test_sidecar_creates_new_models_and_prunes_gone_models(
     assert create[2]["model_name"] == "sync/openrouter/deepseek/new-thing"
     assert create[2]["litellm_params"] == {
         "model": "openrouter/deepseek/new-thing",
-        "api_key": "os.environ/LITELLM_OPENROUTER_API_KEY",
+        "api_key": "or-upstream-key",
     }
     assert create[2]["model_info"]["metadata"]["managed_by"] == "dokploy-wizard-model-sync"
     delete = next(call for call in calls if call[1].endswith("/model/delete"))
@@ -255,7 +255,7 @@ def test_sidecar_applies_source_extra_headers(
     assert create[2]["litellm_params"] == {
         "model": "openai/deepseek-v4-flash",
         "api_base": "https://opencode.ai/zen/go/v1",
-        "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
+        "api_key": "zen-upstream-key",
         "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
     }
 

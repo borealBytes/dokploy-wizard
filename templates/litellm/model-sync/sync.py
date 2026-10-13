@@ -115,7 +115,14 @@ def desired_deployments(document: dict[str, Any]) -> tuple[dict[str, dict[str, A
                 params["api_base"] = api_base
             api_key_env = source.get("api_key_env")
             if isinstance(api_key_env, str) and api_key_env:
-                params["api_key"] = f"os.environ/{api_key_env}"
+                # The admin API does not resolve os.environ/ references for
+                # DB-stored deployments (unlike config-file models), so the
+                # sidecar resolves the key from its own environment and sends
+                # the literal value; the reference form is only a fallback.
+                resolved_key = os.environ.get(api_key_env)
+                params["api_key"] = (
+                    resolved_key if resolved_key else f"os.environ/{api_key_env}"
+                )
             extra_headers = source.get("extra_headers")
             if isinstance(extra_headers, dict) and extra_headers:
                 params["extra_headers"] = {
