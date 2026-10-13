@@ -257,6 +257,9 @@ Model behavior inside SurfSense:
 - SurfSense model labels are rendered as `LiteLLM - <alias>`, so users see the gateway-backed alias they are selecting.
 - Local private model traffic goes through LiteLLM when `LITELLM_LOCAL_BASE_URL` is configured. The wizard-generated LiteLLM config includes the compatibility setting needed for local chat templates that reject non-leading system messages.
 - OpenCode Go aliases also go through LiteLLM when `LITELLM_OPENCODE_GO_API_KEY` is set.
+  The gateway sends the `x-opencode-session` routing header and a dedicated User-Agent
+  on every OpenCode Go request (required by the OpenCode Go API), and forwards
+  per-conversation session headers when clients provide their own.
 - SurfSense never receives raw OpenRouter, NVIDIA, OpenCode Go, or local upstream provider keys.
 
 ### Coder

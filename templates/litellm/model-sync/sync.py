@@ -109,13 +109,18 @@ def desired_deployments(document: dict[str, Any]) -> tuple[dict[str, dict[str, A
         prefix = str(source.get("alias_prefix", f"{ALIAS_PREFIX}/{name}"))
         template = str(source.get("model_ref_template", "{model}"))
         for model_id in model_ids:
-            params = {"model": template.format(model=model_id)}
+            params: dict[str, Any] = {"model": template.format(model=model_id)}
             api_base = source.get("api_base")
             if isinstance(api_base, str) and api_base:
                 params["api_base"] = api_base
             api_key_env = source.get("api_key_env")
             if isinstance(api_key_env, str) and api_key_env:
                 params["api_key"] = f"os.environ/{api_key_env}"
+            extra_headers = source.get("extra_headers")
+            if isinstance(extra_headers, dict) and extra_headers:
+                params["extra_headers"] = {
+                    str(key): str(value) for key, value in extra_headers.items()
+                }
             deployments[f"{prefix}/{model_id}"] = {"params": params, "source": name}
     return deployments, ok_sources
 

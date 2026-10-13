@@ -12,6 +12,7 @@ import pytest
 
 from dokploy_wizard.litellm.model_sync import (
     MODEL_SYNC_CONSUMER_WILDCARD,
+    OPENCODE_GO_GATEWAY_EXTRA_HEADERS,
     build_model_sync_sources,
     model_sync_enabled,
     model_sync_interval_minutes,
@@ -59,6 +60,7 @@ def test_sources_cover_configured_providers_only() -> None:
     assert opencode_go["list_url"] == "https://opencode.ai/zen/go/v1/models"
     assert opencode_go["api_base"] == "https://opencode.ai/zen/go/v1"
     assert opencode_go["model_ref_template"] == "openai/{model}"
+    assert opencode_go["extra_headers"] == dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS)
     assert model_sync_enabled(env, creds) is True
 
 
@@ -181,6 +183,52 @@ def test_sidecar_creates_new_models_and_prunes_gone_models(
     delete = next(call for call in calls if call[1].endswith("/model/delete"))
     assert delete[2] == {"id": "db-id-gone"}
     assert all(call[2] != {"id": "db-id-kept"} and call[2] != {"id": "db-id-static"} for call in calls if call[1].endswith("/model/delete"))
+
+
+def test_sidecar_applies_source_extra_headers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LITELLM_OPENCODE_GO_API_KEY", "zen-upstream-key")
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    document = {
+        "interval_minutes": 360,
+        "max_models_per_provider": 2,
+        "sources": [
+            {
+                "name": "opencode-go",
+                "alias_prefix": "sync/opencode-go",
+                "list_url": "https://opencode.ai/zen/go/v1/models",
+                "api_key_env": "LITELLM_OPENCODE_GO_API_KEY",
+                "api_base": "https://opencode.ai/zen/go/v1",
+                "model_ref_template": "openai/{model}",
+                "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
+            }
+        ],
+    }
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_http_json(method: str, url: str, *, token: str | None = None, payload: dict | None = None):
+        calls.append((method, url, payload))
+        if url.endswith("/v1/models"):
+            assert token == "zen-upstream-key"
+            return {"data": [{"id": "deepseek-v4-flash"}]}
+        if url.endswith("/model/info"):
+            return {"data": []}
+        return {}
+
+    sidecar.http_json = fake_http_json
+
+    summary = sidecar.sync_once(document)
+
+    assert summary["created"] == 1
+    create = next(call for call in calls if call[1].endswith("/model/new"))
+    assert create[2]["model_name"] == "sync/opencode-go/deepseek-v4-flash"
+    assert create[2]["litellm_params"] == {
+        "model": "openai/deepseek-v4-flash",
+        "api_base": "https://opencode.ai/zen/go/v1",
+        "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
+        "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
+    }
 
 
 def test_sidecar_keeps_models_when_source_fetch_fails(

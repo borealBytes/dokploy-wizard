@@ -21,6 +21,18 @@ MODEL_SYNC_MIN_INTERVAL_MINUTES = 5
 MODEL_SYNC_DEFAULT_MAX_MODELS_PER_PROVIDER = 50
 MODEL_SYNC_DEFAULT_PROVIDERS = ("openrouter", "opencode-go", "nvidia")
 
+# OpenCode Go rejects requests without a stable session id (x-opencode-session)
+# and a non-generic user agent. The gateway injects both on every OpenCode Go
+# deployment so all consumers route successfully; clients that send their own
+# session header have it forwarded per-request (see config_renderer).
+OPENCODE_GO_SESSION_HEADER = "x-opencode-session"
+OPENCODE_GO_GATEWAY_SESSION_ID = "dokploy-wizard-shared-gateway"
+OPENCODE_GO_GATEWAY_USER_AGENT = "dokploy-wizard-litellm/1.0"
+OPENCODE_GO_GATEWAY_EXTRA_HEADERS: dict[str, str] = {
+    OPENCODE_GO_SESSION_HEADER: OPENCODE_GO_GATEWAY_SESSION_ID,
+    "User-Agent": OPENCODE_GO_GATEWAY_USER_AGENT,
+}
+
 _MODEL_SYNC_DISABLED_VALUES = {"0", "false", "no", "off"}
 _MODEL_SYNC_TEMPLATE_DIR = (
     Path(__file__).resolve().parents[3] / "templates" / "litellm" / "model-sync"
@@ -96,6 +108,7 @@ def build_model_sync_sources(
                     "api_key_env": opencode_go_api_key_env,
                     "api_base": base_url,
                     "model_ref_template": "openai/{model}",
+                    "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
                 }
             )
 

@@ -11,7 +11,10 @@ from dokploy_wizard.litellm.model_catalog import (
     ModelCostMetadata,
     build_model_catalog,
 )
-from dokploy_wizard.litellm.model_sync import model_sync_enabled
+from dokploy_wizard.litellm.model_sync import (
+    OPENCODE_GO_GATEWAY_EXTRA_HEADERS,
+    model_sync_enabled,
+)
 
 DEFAULT_LOCAL_ALIAS = DEFAULT_LOCAL_CANONICAL_ALIAS
 DEFAULT_LOCAL_MODEL = "openai/unsloth-active"
@@ -135,6 +138,7 @@ def build_litellm_config(
                         "model": entry.upstream_target,
                         "api_base": opencode_go_base_url,
                         "api_key": _env_ref(opencode_go_api_key_env),
+                        "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
                     },
                 }
             )
@@ -187,12 +191,19 @@ def build_litellm_config(
             route_entry["model_info"] = model_info
         model_list.append(route_entry)
 
+    general_settings: dict[str, object] = {
+        # Forward client-supplied provider headers (real OpenCode session ids
+        # from OpenCode/Pi/Hermes clients) to upstreams; the static
+        # x-opencode-session extra_headers remain as the guaranteed fallback.
+        "forward_client_headers_to_llm_api": True,
+    }
+    if model_sync_enabled(flat_env, upstream_creds):
+        general_settings["store_model_in_db"] = True
     config: dict[str, object] = {
         "model_list": model_list,
         "litellm_settings": {"drop_params": True},
+        "general_settings": general_settings,
     }
-    if model_sync_enabled(flat_env, upstream_creds):
-        config["general_settings"] = {"store_model_in_db": True}
     return config
 
 

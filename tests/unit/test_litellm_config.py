@@ -7,6 +7,9 @@ from typing import Any, cast
 import pytest
 
 from dokploy_wizard.litellm.config_renderer import build_litellm_config, render_litellm_config_yaml
+from dokploy_wizard.litellm.model_sync import OPENCODE_GO_GATEWAY_EXTRA_HEADERS
+
+_EXPECTED_OPENCODE_GO_GATEWAY_HEADERS = dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS)
 
 _EXPECTED_OPENCODE_GO_CHAT_ALIASES = [
     "opencode-go/minimax-m2.7",
@@ -177,6 +180,7 @@ def test_build_litellm_config_exposes_verified_opencode_go_chat_models_only_when
         "model": "openai/minimax-m2.7",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "os.environ/OPENCODE_GO_API_KEY",
+        "extra_headers": _EXPECTED_OPENCODE_GO_GATEWAY_HEADERS,
     }
 
 
@@ -217,6 +221,7 @@ def test_build_litellm_config_exposes_verified_opencode_go_models_with_default_b
         "model": "openai/minimax-m2.7",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
+        "extra_headers": _EXPECTED_OPENCODE_GO_GATEWAY_HEADERS,
     }
 
 
@@ -245,6 +250,7 @@ def test_build_litellm_config_ignores_opencode_go_wildcard_flag_and_keeps_concre
         "model": "openai/minimax-m2.7",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
+        "extra_headers": _EXPECTED_OPENCODE_GO_GATEWAY_HEADERS,
     }
     assert "opencode-go/*" not in model_names
     assert "opencode-go/deepseek-v4-flash" in model_names
@@ -254,6 +260,27 @@ def test_build_litellm_config_ignores_opencode_go_wildcard_flag_and_keeps_concre
     assert "opencode-go/whisper-1" not in model_names
     assert "opencode-go/sora-2" not in model_names
     assert "opencode-go/gpt-image-1.5" not in model_names
+
+
+def test_build_litellm_config_forwards_client_session_headers_to_upstreams() -> None:
+    # OpenCode Go rejects requests without x-opencode-session; the gateway
+    # forwards real client session ids and pins a stable fallback header on
+    # every OpenCode Go deployment so generic clients never hit 400s.
+    config = build_litellm_config(
+        {
+            "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
+            "LITELLM_LOCAL_MODEL": "unsloth-active",
+            "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
+            "LITELLM_OPENCODE_GO_API_KEY": "sk-opencode-go-key",
+        },
+        {},
+    )
+
+    general_settings = config["general_settings"]
+    assert isinstance(general_settings, dict)
+    assert general_settings["forward_client_headers_to_llm_api"] is True
+    zen_params = _model_entry(config, "opencode-go/deepseek-v4-flash")["litellm_params"]
+    assert zen_params["extra_headers"] == _EXPECTED_OPENCODE_GO_GATEWAY_HEADERS
 
 
 def test_build_litellm_config_prefers_canonical_litellm_env_refs_for_non_local_routes() -> None:

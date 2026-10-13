@@ -27,6 +27,7 @@ from dokploy_wizard.dokploy.shared_core import (
 )
 from dokploy_wizard.litellm import build_litellm_config
 from dokploy_wizard.litellm.admin import LiteLLMTeamRecord, LiteLLMVirtualKeyRecord
+from dokploy_wizard.litellm.model_sync import OPENCODE_GO_GATEWAY_EXTRA_HEADERS
 from dokploy_wizard.state import (
     RawEnvInput,
     load_litellm_generated_keys,
@@ -361,6 +362,7 @@ def test_build_litellm_config_integrates_all_supported_provider_types() -> None:
         "model": "openai/minimax-m2.7",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
+        "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
     }
     assert entries["openrouter/anthropic/claude-3.7-sonnet"]["model_info"] == {
         "input_cost_per_token": 0.000003,
