@@ -362,7 +362,7 @@ def test_build_litellm_config_still_allows_optional_nvidia_route() -> None:
         "nvidia/kimi-k2.5",
     ]
     assert model_list[1]["litellm_params"] == {
-        "model": "nvidia/moonshotai/kimi-k2.5",
+        "model": "openai/moonshotai/kimi-k2.5",
         "api_base": "https://integrate.api.nvidia.com/v1",
         "api_key": "os.environ/NVIDIA_API_KEY",
     }
@@ -390,7 +390,7 @@ def test_build_litellm_config_uses_canonical_nvidia_env_from_flat_raw_models() -
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     ]
     assert model_list[0]["litellm_params"] == {
-        "model": "nvidia/moonshotai/kimi-k2.6",
+        "model": "openai/moonshotai/kimi-k2.6",
         "api_base": "https://integrate.api.nvidia.example.com/v1",
         "api_key": "os.environ/LITELLM_NVIDIA_API_KEY",
         "max_tokens": 16384,
@@ -400,7 +400,7 @@ def test_build_litellm_config_uses_canonical_nvidia_env_from_flat_raw_models() -
         "extra_body": {"chat_template_kwargs": {"thinking": True}},
     }
     assert model_list[1]["litellm_params"] == {
-        "model": "nvidia/deepseek-ai/deepseek-v4-flash",
+        "model": "openai/deepseek-ai/deepseek-v4-flash",
         "api_base": "https://integrate.api.nvidia.example.com/v1",
         "api_key": "os.environ/LITELLM_NVIDIA_API_KEY",
         "max_tokens": 16384,
@@ -415,7 +415,7 @@ def test_build_litellm_config_uses_canonical_nvidia_env_from_flat_raw_models() -
         },
     }
     assert model_list[2]["litellm_params"] == {
-        "model": "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        "model": "openai/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
         "api_base": "https://integrate.api.nvidia.example.com/v1",
         "api_key": "os.environ/LITELLM_NVIDIA_API_KEY",
         "max_tokens": 65536,
@@ -447,7 +447,7 @@ def test_build_litellm_config_keeps_unknown_nvidia_models_without_defaults() -> 
         "nvidia/acme/unknown-chat-model",
     ]
     assert model_list[0]["litellm_params"] == {
-        "model": "nvidia/acme/unknown-chat-model",
+        "model": "openai/acme/unknown-chat-model",
         "api_base": "https://integrate.api.nvidia.example.com/v1",
         "api_key": "os.environ/LITELLM_NVIDIA_API_KEY",
     }
@@ -466,7 +466,7 @@ def test_build_litellm_config_applies_nvidia_defaults_by_explicit_target_not_ali
     route = _model_entry(config, "nvidia/kimi-default")
 
     assert route["litellm_params"] == {
-        "model": "nvidia/moonshotai/kimi-k2.6",
+        "model": "openai/moonshotai/kimi-k2.6",
         "api_base": "https://integrate.api.nvidia.example.com/v1",
         "api_key": "os.environ/LITELLM_NVIDIA_API_KEY",
         "max_tokens": 16384,
@@ -496,7 +496,7 @@ def test_render_litellm_config_yaml_preserves_nvidia_alias_routes() -> None:
     rendered_yaml = render_litellm_config_yaml(config)
 
     assert 'model_name: "nvidia/kimi-k2.5"' in rendered_yaml
-    assert 'model: "nvidia/moonshotai/kimi-k2.5"' in rendered_yaml
+    assert 'model: "openai/moonshotai/kimi-k2.5"' in rendered_yaml
     assert 'api_base: "https://integrate.api.nvidia.com/v1"' in rendered_yaml
     assert 'model_name: "openrouter/google/gemma-4-31b-it:free"' in rendered_yaml
     assert 'model_name: "openrouter/nvidia/kimi-k2.5"' not in rendered_yaml

@@ -123,7 +123,7 @@ def build_model_sync_sources(
                     "list_url": f"{base_url}/models",
                     "api_key_env": nvidia_api_key_env,
                     "api_base": base_url,
-                    "model_ref_template": "nvidia/{model}",
+                    "model_ref_template": "openai/{model}",
                 }
             )
 

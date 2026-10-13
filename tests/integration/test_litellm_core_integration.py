@@ -377,7 +377,7 @@ def test_build_litellm_config_integrates_all_supported_provider_types() -> None:
         "output_cost_per_token": 0.0000032,
     }
     assert entries["nvidia/kimi-k2.5"]["litellm_params"] == {
-        "model": "nvidia/moonshotai/kimi-k2.5",
+        "model": "openai/moonshotai/kimi-k2.5",
         "api_base": "https://integrate.api.nvidia.com/v1",
         "api_key": "os.environ/NVIDIA_API_KEY",
     }

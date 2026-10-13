@@ -165,7 +165,7 @@ def build_litellm_config(
                     "LITELLM_NVIDIA_API_KEY"
                 )
             litellm_params: dict[str, object] = {
-                "model": entry.upstream_target,
+                "model": _nvidia_litellm_model_ref(entry.upstream_target),
                 "api_base": nvidia_base_url,
                 "api_key": _env_ref(nvidia_api_key_env),
             }
@@ -215,6 +215,17 @@ def _nvidia_base_url(flat_env: Mapping[str, str]) -> str | None:
     return _optional(flat_env, "LITELLM_NVIDIA_BASE_URL") or _optional(
         flat_env, "NVIDIA_BASE_URL"
     )
+
+
+def _nvidia_litellm_model_ref(upstream_target: str) -> str:
+    # The pinned LiteLLM proxy cannot parse the bare `nvidia/` model prefix
+    # for DB-backed deployments (it raises "LLM Provider NOT provided" and
+    # silently drops the deployment from the router). The NVIDIA integrate
+    # API is OpenAI-compatible, so route those models as `openai/` targets
+    # with the explicit api_base; consumer-facing aliases keep `nvidia/`.
+    if upstream_target.startswith("nvidia/"):
+        return "openai/" + upstream_target.removeprefix("nvidia/")
+    return upstream_target
 
 
 def _opencode_go_base_url(flat_env: Mapping[str, str]) -> str:
