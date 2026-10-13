@@ -70,8 +70,8 @@ _OPTIONAL_COMMENTED_KEYS = frozenset(
         "LITELLM_NVIDIA_BASE_URL",
     }
 )
-_DEFAULT_AI_PROVIDER = "openrouter"
-_DEFAULT_AI_MODEL = "deepseek/deepseek-v4-flash:free"
+_DEFAULT_AI_PROVIDER = "opencode-go"
+_DEFAULT_AI_MODEL = "deepseek-v4-flash"
 
 
 def _repo_root():
@@ -170,8 +170,8 @@ def test_minimal_env_contract_key_categories_are_explicit_and_secret_free() -> N
     assert model_shape["LITELLM_OPENROUTER_MODELS"] == (True, True)
     assert _ALWAYS_REQUIRED_KEYS <= categorized_keys
     assert _GENERATED_STATE_BACKED_KEYS.isdisjoint(_LIVE_BOOTSTRAP_REQUIRED_KEYS)
-    assert _DEFAULT_AI_PROVIDER == "openrouter"
-    assert _DEFAULT_AI_MODEL == "deepseek/deepseek-v4-flash:free"
+    assert _DEFAULT_AI_PROVIDER == "opencode-go"
+    assert _DEFAULT_AI_MODEL == "deepseek-v4-flash"
 
 
 def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> None:
