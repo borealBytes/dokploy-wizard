@@ -11,6 +11,7 @@ from dokploy_wizard.litellm.model_catalog import (
     ModelCostMetadata,
     build_model_catalog,
 )
+from dokploy_wizard.litellm.model_sync import model_sync_enabled
 
 DEFAULT_LOCAL_ALIAS = DEFAULT_LOCAL_CANONICAL_ALIAS
 DEFAULT_LOCAL_MODEL = "openai/unsloth-active"
@@ -186,7 +187,13 @@ def build_litellm_config(
             route_entry["model_info"] = model_info
         model_list.append(route_entry)
 
-    return {"model_list": model_list, "litellm_settings": {"drop_params": True}}
+    config: dict[str, object] = {
+        "model_list": model_list,
+        "litellm_settings": {"drop_params": True},
+    }
+    if model_sync_enabled(flat_env, upstream_creds):
+        config["general_settings"] = {"store_model_in_db": True}
+    return config
 
 
 def render_litellm_config_yaml(config: Mapping[str, object]) -> str:

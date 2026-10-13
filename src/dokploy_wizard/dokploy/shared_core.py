@@ -54,6 +54,14 @@ from dokploy_wizard.litellm.model_catalog import (
     ModelCostMetadata,
     build_model_catalog,
 )
+from dokploy_wizard.litellm.model_sync import (
+    MODEL_SYNC_CONSUMER_WILDCARD,
+    model_sync_enabled,
+    model_sync_interval_minutes,
+    model_sync_script_text,
+    model_sync_service_name,
+    render_model_sync_sources_document,
+)
 from dokploy_wizard.state import write_litellm_generated_keys
 from dokploy_wizard.state.models import (
     LITELLM_CONSUMER_VIRTUAL_KEY_NAMES,
@@ -146,7 +154,10 @@ class DokploySharedCoreBackend:
         self._created_in_process = False
         self._allocation_provisioner = allocation_provisioner
         self._litellm_generated_keys = litellm_generated_keys
-        self._litellm_consumer_model_allowlists = litellm_consumer_model_allowlists or {}
+        self._litellm_consumer_model_allowlists = _litellm_key_model_allowlists(
+            litellm_consumer_model_allowlists or {},
+            litellm_env=self._litellm_env,
+        )
         self._litellm_admin_api = litellm_admin_api
         self._sleep_fn = sleep_fn
         self._state_dir = state_dir
@@ -1120,12 +1131,17 @@ def _render_compose_file(
         provider_env_lines = _render_litellm_upstream_env_lines(
             litellm_env=litellm_env, upstream_creds=upstream_creds
         )
+        sync_enabled = model_sync_enabled(litellm_env, upstream_creds)
+        sync_service = (
+            model_sync_service_name(plan.litellm.service_name) if sync_enabled else ""
+        )
         env_specs.extend(
             _litellm_env_specs(
                 litellm_env=litellm_env,
                 upstream_creds=upstream_creds,
                 service_name=plan.litellm.service_name,
                 generated_keys=litellm_generated_keys,
+                extra_target_services=(sync_service,) if sync_enabled else (),
             )
         )
         local_api_key_lines = (
@@ -1177,6 +1193,57 @@ def _render_compose_file(
             "    content: |\n"
             f"{_indent_block(litellm_config, 6)}"
         )
+        if sync_enabled:
+            sync_script = model_sync_script_text()
+            sync_sources = render_model_sync_sources_document(litellm_env, upstream_creds)
+            sync_script_config = _config_name_with_hash(f"{sync_service}-script", sync_script)
+            sync_sources_config = _config_name_with_hash(f"{sync_service}-sources", sync_sources)
+            sync_volume = f"{sync_service}-state"
+            litellm_block += (
+                f"  {sync_service}:\n"
+                "    image: python:3.12-alpine3.20\n"
+                "    restart: unless-stopped\n"
+                '    entrypoint: ["python3", "/app/model_sync.py"]\n'
+                "    environment:\n"
+                f'      LITELLM_GATEWAY_URL: "http://{plan.litellm.service_name}:4000"\n'
+                f'      LITELLM_MASTER_KEY: "{_required_placeholder("LITELLM_MASTER_KEY")}"\n'
+                f"{provider_env_lines}"
+                f'      MODEL_SYNC_INTERVAL_MINUTES: "{model_sync_interval_minutes(litellm_env)}"\n'
+                "    configs:\n"
+                f"      - source: {sync_script_config}\n"
+                "        target: /app/model_sync.py\n"
+                f"      - source: {sync_sources_config}\n"
+                "        target: /app/sources.json\n"
+                "    depends_on:\n"
+                f"      {plan.litellm.service_name}:\n"
+                "        condition: service_healthy\n"
+                "    volumes:\n"
+                f"      - {sync_volume}:/state\n"
+                "    healthcheck:\n"
+                '      test: ["CMD", "python3", "/app/model_sync.py", "--healthcheck"]\n'
+                "      interval: 300s\n"
+                "      timeout: 10s\n"
+                "      retries: 3\n"
+                "      start_period: 120s\n"
+                "    networks:\n"
+                "      shared:\n"
+                "        aliases:\n"
+                f"          - {sync_service}\n"
+                "      dokploy-network:\n"
+                "        aliases:\n"
+                f"          - {sync_service}\n"
+            )
+            volume_block += f"  {sync_volume}:\n"
+            config_entries.extend(
+                (
+                    f"  {sync_script_config}:\n"
+                    "    content: |\n"
+                    f"{_indent_block(sync_script, 6)}",
+                    f"  {sync_sources_config}:\n"
+                    "    content: |\n"
+                    f"{_indent_block(sync_sources, 6)}",
+                )
+            )
     config_block = f"configs:\n{''.join(config_entries)}" if config_entries else ""
     compose_file = (
         "services:\n"
@@ -1293,6 +1360,7 @@ def _litellm_env_specs(
     upstream_creds: dict[str, str],
     service_name: str,
     generated_keys: LiteLLMGeneratedKeys | None,
+    extra_target_services: tuple[str, ...] = (),
 ) -> tuple[DokployEnvSpec, ...]:
     specs: list[DokployEnvSpec] = []
     local_api_key = _optional_value(litellm_env, "LITELLM_LOCAL_API_KEY")
@@ -1315,7 +1383,7 @@ def _litellm_env_specs(
                 name=env_name,
                 value=value,
                 owner="shared-core-litellm",
-                target_services=(service_name,),
+                target_services=(service_name, *extra_target_services),
                 source=_litellm_secret_ref_source(litellm_env, env_name) or "operator-input",
             )
         )
@@ -1325,7 +1393,7 @@ def _litellm_env_specs(
                 name="LITELLM_MASTER_KEY",
                 value=_litellm_master_key_value(litellm_env, generated_keys),
                 owner="shared-core-litellm",
-                target_services=(service_name,),
+                target_services=(service_name, *extra_target_services),
                 source="generated-litellm" if generated_keys is not None else "operator-input",
             ),
             _shared_core_env_spec(
@@ -1444,6 +1512,22 @@ def _configure_local_litellm_chat_template_compatibility(config: dict[str, objec
         # only system message is first. LiteLLM maps system content into user content
         # when this flag is false, which keeps SurfSense chat histories compatible.
         litellm_params.setdefault("supports_system_message", False)
+
+
+def _litellm_key_model_allowlists(
+    allowlists: dict[str, tuple[str, ...]], *, litellm_env: dict[str, str]
+) -> dict[str, tuple[str, ...]]:
+    if not allowlists or not model_sync_enabled(
+        litellm_env, _build_litellm_upstream_creds(litellm_env)
+    ):
+        return allowlists
+    keyed: dict[str, tuple[str, ...]] = {}
+    for consumer, models in allowlists.items():
+        normalized = tuple(models)
+        if consumer != "dokploy-ai" and normalized and MODEL_SYNC_CONSUMER_WILDCARD not in normalized:
+            normalized = (*normalized, MODEL_SYNC_CONSUMER_WILDCARD)
+        keyed[consumer] = normalized
+    return keyed
 
 
 def build_litellm_consumer_model_allowlists(

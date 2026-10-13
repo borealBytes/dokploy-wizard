@@ -359,7 +359,18 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
     assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "opencode-go-upstream-key"
     assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "farm-openrouter-upstream-key"
     assert env_specs["LITELLM_LOCAL_API_KEY"].target_services == ("wizard-stack-shared-litellm",)
-    assert env_specs["LITELLM_MASTER_KEY"].target_services == ("wizard-stack-shared-litellm",)
+    assert env_specs["LITELLM_MASTER_KEY"].target_services == (
+        "wizard-stack-shared-litellm",
+        "wizard-stack-shared-litellm-sync",
+    )
+    assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].target_services == (
+        "wizard-stack-shared-litellm",
+        "wizard-stack-shared-litellm-sync",
+    )
+    assert env_specs["LITELLM_OPENROUTER_API_KEY"].target_services == (
+        "wizard-stack-shared-litellm",
+        "wizard-stack-shared-litellm-sync",
+    )
     assert env_specs["LITELLM_SALT_KEY"].target_services == ("wizard-stack-shared-litellm",)
     assert env_specs["WIZARD_STACK_LITELLM_POSTGRES_PASSWORD"].target_services == (
         "wizard-stack-shared-postgres",
@@ -1803,3 +1814,97 @@ def test_verify_dokploy_ai_provider_fails_on_test_connection_error_without_leaki
     assert "test_connection_error" in result.detail
     assert "fetch failed" in result.detail
     assert generated.virtual_keys["dokploy-ai"] not in result.detail
+
+
+_MODEL_SYNC_ENV = {
+    "LITELLM_OPENROUTER_API_KEY": "openrouter-upstream-key",
+    "LITELLM_OPENCODE_GO_API_KEY": "opencode-go-upstream-key",
+    "LITELLM_NVIDIA_API_KEY": "nvidia-upstream-key",
+    "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
+}
+
+
+def test_rendered_compose_includes_model_sync_sidecar() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(plan, {}, dict(_MODEL_SYNC_ENV))
+    compose = rendered.compose_file
+
+    assert "  wizard-stack-shared-litellm-sync:\n" in compose
+    assert "image: python:3.12-alpine3.20" in compose
+    assert 'LITELLM_GATEWAY_URL: "http://wizard-stack-shared-litellm:4000"' in compose
+    assert 'MODEL_SYNC_INTERVAL_MINUTES: "360"' in compose
+    assert "target: /app/model_sync.py" in compose
+    assert "target: /app/sources.json" in compose
+    assert re.search(r"source: wizard-stack-shared-litellm-sync-sources-[0-9a-f]{12}", compose)
+    assert re.search(r"source: wizard-stack-shared-litellm-sync-script-[0-9a-f]{12}", compose)
+    assert "wizard-stack-shared-litellm-sync-state:/state" in compose
+    assert "condition: service_healthy" in compose
+    assert '"CMD", "python3", "/app/model_sync.py", "--healthcheck"' in compose
+    assert "store_model_in_db: true" in compose
+    assert '"alias_prefix": "sync/openrouter"' in compose
+    assert '"alias_prefix": "sync/opencode-go"' in compose
+    assert '"alias_prefix": "sync/nvidia"' in compose
+    assert "openrouter-upstream-key" not in compose
+
+
+def test_rendered_compose_model_sync_disabled_by_env() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(
+        plan, {}, {**_MODEL_SYNC_ENV, "LITELLM_MODEL_SYNC_ENABLED": "0"}
+    )
+    compose = rendered.compose_file
+
+    assert "wizard-stack-shared-litellm-sync" not in compose
+    assert "store_model_in_db" not in compose
+
+
+def test_rendered_compose_model_sync_absent_without_provider_keys() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(plan, {}, {})
+    compose = rendered.compose_file
+
+    assert "wizard-stack-shared-litellm-sync" not in compose
+    assert "store_model_in_db" not in compose
+
+
+def test_rendered_compose_model_sync_honors_provider_subset_and_interval() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(
+        plan,
+        {},
+        {
+            "LITELLM_OPENROUTER_API_KEY": "openrouter-upstream-key",
+            "LITELLM_OPENCODE_GO_API_KEY": "opencode-go-upstream-key",
+            "LITELLM_MODEL_SYNC_PROVIDERS": "openrouter",
+            "LITELLM_MODEL_SYNC_INTERVAL_MINUTES": "30",
+        },
+    )
+    compose = rendered.compose_file
+
+    assert 'MODEL_SYNC_INTERVAL_MINUTES: "30"' in compose
+    assert '"alias_prefix": "sync/openrouter"' in compose
+    assert '"alias_prefix": "sync/opencode-go"' not in compose
+
+
+def test_consumer_virtual_keys_receive_sync_wildcard() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+    allowlists = build_litellm_consumer_model_allowlists(flat_env=dict(_MODEL_SYNC_ENV), plan=plan)
+
+    key_lists = shared_core_module._litellm_key_model_allowlists(
+        allowlists, litellm_env=dict(_MODEL_SYNC_ENV)
+    )
+
+    assert all(consumer in key_lists for consumer in allowlists)
+    assert key_lists["openclaw"][-1] == "sync/*"
+    assert key_lists["surfsense"][-1] == "sync/*"
+    assert "sync/*" not in key_lists["dokploy-ai"]
+    assert "sync/*" not in allowlists["openclaw"]
+
+    disabled = shared_core_module._litellm_key_model_allowlists(
+        allowlists, litellm_env={**_MODEL_SYNC_ENV, "LITELLM_MODEL_SYNC_ENABLED": "0"}
+    )
+    assert all("sync/*" not in models for models in disabled.values())
