@@ -494,15 +494,16 @@ def test_full_pack_lifecycle_schedules_surfsense_after_faster_application_packs(
 
 
 def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
+    values = {
+        "STACK_NAME": "catalog-stack",
+        "ROOT_DOMAIN": "example.com",
+        "PACKS": "matrix,my-farm-advisor",
+        "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
+    }
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
-            values={
-                "STACK_NAME": "catalog-stack",
-                "ROOT_DOMAIN": "example.com",
-                "PACKS": "matrix,my-farm-advisor",
-                "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
-            },
+            values=values,
         )
     )
 
@@ -513,7 +514,7 @@ def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
         "my-farm-advisor",
     ]
     assert (
-        build_shared_core_plan("catalog-stack", desired_state.enabled_packs)
+        build_shared_core_plan("catalog-stack", desired_state.enabled_packs, values=values)
         == desired_state.shared_core
     )
 

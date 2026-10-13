@@ -9,6 +9,7 @@ from dokploy_wizard.core.models import (
     SharedCorePlan,
     SharedLiteLLMServicePlan,
     SharedMailRelayServicePlan,
+    SharedModelSyncPlan,
     SharedPostgresAllocation,
     SharedPostgresServicePlan,
     SharedRedisAllocation,
@@ -73,6 +74,14 @@ def build_shared_core_plan(
                 )
             )
 
+    # Imported lazily: dokploy_wizard.dokploy.shared_core pulls in modules
+    # that import state, which imports this planner module.
+    from dokploy_wizard.dokploy.shared_core import _build_litellm_upstream_creds
+    from dokploy_wizard.litellm.model_sync import (
+        model_sync_enabled,
+        model_sync_service_name,
+    )
+
     return SharedCorePlan(
         network_name=f"{stack_name}-shared",
         mail_relay=_build_shared_mail_relay_plan(stack_name, enabled_packs, values),
@@ -80,6 +89,13 @@ def build_shared_core_plan(
             service_name=f"{stack_name}-shared-litellm",
             postgres=litellm_postgres,
             default_model_alias_order=_build_litellm_default_alias_order(values),
+        ),
+        model_sync=(
+            SharedModelSyncPlan(
+                service_name=model_sync_service_name(f"{stack_name}-shared-litellm")
+            )
+            if model_sync_enabled(values, _build_litellm_upstream_creds(values))
+            else None
         ),
         postgres=(
             None

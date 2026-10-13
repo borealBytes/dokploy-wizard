@@ -103,6 +103,35 @@ def test_sidecar_script_is_valid_python() -> None:
     compile(model_sync_script_text(), str(_SIDECAR_PATH), "exec")
 
 
+def test_shared_core_plan_includes_model_sync_when_provider_key_configured() -> None:
+    from dokploy_wizard.core.planner import build_shared_core_plan
+
+    plan = build_shared_core_plan(
+        stack_name="openmerge-me",
+        enabled_packs=(),
+        values={"LITELLM_OPENROUTER_API_KEY": "or-key"},
+    )
+    assert plan.model_sync is not None
+    assert plan.model_sync.service_name == "openmerge-me-shared-litellm-sync"
+
+
+def test_shared_core_plan_omits_model_sync_without_keys_or_when_disabled() -> None:
+    from dokploy_wizard.core.planner import build_shared_core_plan
+
+    without_keys = build_shared_core_plan(stack_name="openmerge-me", enabled_packs=(), values={})
+    assert without_keys.model_sync is None
+
+    disabled = build_shared_core_plan(
+        stack_name="openmerge-me",
+        enabled_packs=(),
+        values={
+            "LITELLM_OPENROUTER_API_KEY": "or-key",
+            "LITELLM_MODEL_SYNC_ENABLED": "false",
+        },
+    )
+    assert disabled.model_sync is None
+
+
 def test_readme_documents_model_autosync() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 
