@@ -301,26 +301,6 @@ class DokployCoderBackend:
                 },
             ),
             (
-                _default_openwork_template_name(),
-                _default_openwork_template_dir(),
-                {
-                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
-                        self._ai_default_provider
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
-                        self._ai_default_model
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
-                        hermes_litellm_base_url
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
-                },
-            ),
-            (
                 _default_kdense_byok_template_name(),
                 _default_kdense_byok_template_dir(),
                 {
@@ -360,26 +340,6 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
                 },
             ),
-            (
-                _default_pi_web_template_name(),
-                _default_pi_web_template_dir(),
-                {
-                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
-                        self._ai_default_provider
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
-                        self._ai_default_model
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
-                        hermes_litellm_base_url
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
-                },
-            ),
         ):
             try:
                 seeded = _seed_template(
@@ -402,6 +362,18 @@ class DokployCoderBackend:
                 continue
             if seeded:
                 notes.append(f"Seeded default Coder template '{template_name}'.")
+        try:
+            retired_templates = _retire_removed_templates(
+                container_name=container_name,
+                hostname=self._hostname,
+                session_token=session_token,
+            )
+        except CoderError as e:
+            note = f"Skipped retiring removed Coder templates: {_safe_progress_reason(str(e))}"
+            _emit_coder_progress(note)
+            notes.append(note)
+            retired_templates = ()
+        notes.extend(f"Retired removed Coder template '{name}'." for name in retired_templates)
         if bootstrap_ready:
             return tuple(notes)
         workspace_name = _default_workspace_name(self._hostname)
@@ -1066,19 +1038,6 @@ def _default_opencode_web_template_name() -> str:
     return "ubuntu-vscode-opencode-web"
 
 
-def _default_openwork_template_dir() -> Path:
-    return (
-        Path(__file__).resolve().parents[3]
-        / "templates"
-        / "coder"
-        / "default-ubuntu-code-server-openwork"
-    )
-
-
-def _default_openwork_template_name() -> str:
-    return "ubuntu-vscode-openwork"
-
-
 def _default_kdense_byok_template_dir() -> Path:
     return (
         Path(__file__).resolve().parents[3]
@@ -1105,19 +1064,6 @@ def _default_hermes_template_name() -> str:
     return "ubuntu-vscode-hermes"
 
 
-def _default_pi_web_template_dir() -> Path:
-    return (
-        Path(__file__).resolve().parents[3]
-        / "templates"
-        / "coder"
-        / "default-ubuntu-code-server-pi-web"
-    )
-
-
-def _default_pi_web_template_name() -> str:
-    return "ubuntu-vscode-pi-web"
-
-
 def _default_workspace_name(hostname: str, *, today: date | None = None) -> str:
     root_domain = (
         hostname.split(".", 1)[1] if hostname.startswith("coder.") and "." in hostname else hostname
@@ -1134,10 +1080,15 @@ def _required_template_names() -> tuple[str, ...]:
     return (
         _default_template_name(),
         _default_opencode_web_template_name(),
-        _default_openwork_template_name(),
         _default_kdense_byok_template_name(),
         _default_hermes_template_name(),
-        _default_pi_web_template_name(),
+    )
+
+
+def _retired_template_names() -> tuple[str, ...]:
+    return (
+        "ubuntu-vscode-openwork",
+        "ubuntu-vscode-pi-web",
     )
 
 
@@ -1574,8 +1525,8 @@ def _coder_live_template_update_command_bundle() -> tuple[str, ...]:
             "# Focused Coder template reseed only. Do not print DOKPLOY_API_KEY, Coder session tokens, or LiteLLM keys.\n"
             "# 1. Load .install.env and .dokploy-wizard-state.\n"
             "# 2. If applied-state.json and ownership-ledger.json exist, run non-interactive modify to invoke DokployCoderBackend.ensure_application_ready().\n"
-            "# 3. If state is incomplete, authenticate to live Coder with redacted operator credentials, copy templates/coder/* into the running Coder container, and run /opt/coder templates push for the six wizard-managed templates only.\n"
-            "# 4. Query template versions and assert github.copilot.chat.customOAIModels exists in all six payloads.\n"
+            "# 3. If state is incomplete, authenticate to live Coder with redacted operator credentials, copy templates/coder/* into the running Coder container, and run /opt/coder templates push for the four wizard-managed templates only.\n"
+            "# 4. Query template versions and assert github.copilot.chat.customOAIModels exists in all four payloads.\n"
             "print('focused-coder-template-reseed <redacted credentials>')\n"
             "PY"
         ),
@@ -1661,6 +1612,75 @@ def _list_templates(
         template = item.get("Template")
         templates.append(template if isinstance(template, dict) else item)
     return tuple(templates)
+
+
+def _retire_removed_templates(
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+) -> tuple[str, ...]:
+    existing = {
+        item.get("name")
+        for item in _list_templates(
+            container_name=container_name,
+            hostname=hostname,
+            session_token=session_token,
+        )
+        if isinstance(item.get("name"), str)
+    }
+    retired: list[str] = []
+    for template_name in _retired_template_names():
+        if template_name not in existing:
+            continue
+        if _delete_template(
+            container_name=container_name,
+            session_token=session_token,
+            template_name=template_name,
+        ):
+            retired.append(template_name)
+    return tuple(retired)
+
+
+def _delete_template(
+    *,
+    container_name: str,
+    session_token: str,
+    template_name: str,
+) -> bool:
+    _emit_coder_progress(f"Retiring removed Coder template '{template_name}'.")
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "templates",
+            "delete",
+            template_name,
+            "--yes",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        output = "\n".join(part for part in (result.stderr, result.stdout) if part).strip()
+        if _is_missing_template_error(output=output):
+            return False
+        raise CoderError(
+            f"Unable to retire Coder template '{template_name}': {_safe_progress_reason(output)}"
+        )
+    return True
+
+
+def _is_missing_template_error(*, output: str) -> bool:
+    normalized_output = output.lower()
+    return "template not found" in normalized_output or "no templates found" in normalized_output
 
 
 def _active_template_version_name(

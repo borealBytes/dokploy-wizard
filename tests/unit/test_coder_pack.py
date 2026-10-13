@@ -148,15 +148,6 @@ def test_base_copilot_byok_template_settings() -> None:
     assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
 
 
-def test_pi_web_copilot_byok_template_settings() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-pi-web/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    _assert_template_preseeds_copilot_byok(template)
-    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
-
-
 def test_opencode_web_copilot_byok_template_settings() -> None:
     template = Path("templates/coder/default-ubuntu-code-server-opencode-web/main.tf").read_text(
         encoding="utf-8"
@@ -165,16 +156,6 @@ def test_opencode_web_copilot_byok_template_settings() -> None:
     _assert_template_preseeds_copilot_byok(template)
     assert "OPENCODE_WEB_PORT=4096" in template
     assert "OPENCODE_PROXY_PORT=4097" in template
-
-
-def test_openwork_copilot_byok_template_settings() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-openwork/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    _assert_template_preseeds_copilot_byok(template)
-    assert "OPENWORK_UI_PORT=8790" in template
-    assert "OPENWORK_PROXY_PORT=8788" in template
 
 
 def test_hermes_copilot_byok_template_settings() -> None:
@@ -522,173 +503,112 @@ def test_default_opencode_web_template_includes_web_app() -> None:
     assert 'url       = "http://localhost:4097"' in template
 
 
-def test_default_openwork_template_includes_full_webui_stack() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-openwork/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    assert "$_SUDO apt-get install -y curl git ca-certificates wget btop" in template
-    assert "$_SUDO corepack enable" in template
-    assert "$_SUDO corepack prepare pnpm@10.27.0 --activate" in template
-    assert "$_SUDO npm install -g openwork-orchestrator" in template
-    assert (
-        "Shared LiteLLM defaults keep OpenWork's embedded OpenCode routes aligned with the wizard-managed gateway."
-        in template
-    )
-    assert 'export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"' in template
-    assert 'export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"' in template
-    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"' in template
-    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
-    assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
-    assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
-    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
-    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
-    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
-    assert 'payload = json.load(response)' in template
-    assert 'payload = {"data": []}' in template
-    assert 'model_ids = list(dict.fromkeys(model_ids + fallback_models))' in template
-    assert '"npm": "@ai-sdk/openai-compatible"' in template
-    assert '"options": {"baseURL": base_url, "apiKey": api_key}' in template
-    assert '"models": {model_id: {} for model_id in model_ids}' in template
-    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
-    assert "OPENWORK_WEBUI_BUILD_KEY=v6-coder-mounted-basename" in template
-    assert "OPENWORK_CLIENT_TOKEN=openwork-client-token" in template
-    assert "OPENWORK_HOST_TOKEN=openwork-host-token" in template
-    assert (
-        'git clone --depth 1 --branch dev https://github.com/different-ai/openwork "$OPENWORK_SRC_DIR"'
-        in template
-    )
-    assert "CI=true pnpm install" in template
-    assert (
-        "VITE_OPENWORK_DEPLOYMENT=web OPENWORK_PUBLIC_HOST=localhost VITE_ALLOWED_HOSTS=localhost,127.0.0.1 pnpm --filter @openwork/app exec vite build --base ./"
-        in template
-    )
-    assert "perl -0pi -e " in template
-    assert (
-        'OPENWORK_APPROVAL_MODE=auto OPENWORK_PORT=$OPENWORK_SERVER_PORT OPENWORK_TOKEN="$OPENWORK_CLIENT_TOKEN" OPENWORK_HOST_TOKEN="$OPENWORK_HOST_TOKEN" nohup openwork serve --workspace /home/coder --json'
-        in template
-    )
-    assert (
-        "pnpm exec vite preview --host 127.0.0.1 --port $OPENWORK_UI_PORT --strictPort" in template
-    )
-    assert 'localStorage.setItem("openwork.server.urlOverride", baseUrl);' in template
-    assert 'localStorage.setItem("openwork.server.token"' in template
-    assert 'localStorage.setItem("openwork.server.active", baseUrl' in template
-    assert "const routerBasename =" in template
-    assert "<Router basename={routerBasename}>" in template
-    assert '"/w/", "/api"' in template
-    assert "function isStaticAsset(pathname)" in template
-    assert 'raw === mount || raw.startsWith(mount + "/")' in template
-    assert "await input.clone().arrayBuffer()" in template
-    assert "originalFetch(new Request(url, next))" in template
-    assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
-    assert (
-        'nohup env UI_PORT="$OPENWORK_UI_PORT" API_PORT="$OPENWORK_SERVER_PORT" PROXY_PORT="$OPENWORK_PROXY_PORT" CLIENT_TOKEN="$OPENWORK_OWNER_TOKEN" node /tmp/coder-mounted-proxy.mjs'
-        in template
-    )
-    assert 'resource "coder_app" "openwork"' in template
-    assert 'slug         = "openwork"' in template
-    assert 'display_name = "OpenWork"' in template
-    assert (
-        'icon         = "https://raw.githubusercontent.com/different-ai/openwork/refs/heads/dev/apps/app/public/openwork-logo-square.svg"'
-        in template
-    )
-    assert 'url          = "http://localhost:8788"' in template
-    assert "subdomain    = false" in template
-    assert 'url       = "http://localhost:8788/health"' in template
-
-
-def test_pi_web_template_helpers_and_required_template_names() -> None:
-    assert coder_module._default_pi_web_template_dir() == (
-        Path(coder_module.__file__).resolve().parents[3]
-        / "templates"
-        / "coder"
-        / "default-ubuntu-code-server-pi-web"
-    )
-    assert coder_module._default_pi_web_template_name() == "ubuntu-vscode-pi-web"
+def test_required_template_names_cover_only_remaining_templates() -> None:
     assert coder_module._required_template_names() == (
         coder_module._default_template_name(),
         coder_module._default_opencode_web_template_name(),
-        coder_module._default_openwork_template_name(),
         coder_module._default_kdense_byok_template_name(),
         coder_module._default_hermes_template_name(),
-        coder_module._default_pi_web_template_name(),
     )
-    assert len(coder_module._required_template_names()) == 6
+    assert len(coder_module._required_template_names()) == 4
 
 
-def test_default_pi_web_template_includes_clickable_pi_web_ui() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-pi-web/main.tf").read_text(
-        encoding="utf-8"
+def test_retired_template_names_cover_removed_templates() -> None:
+    assert coder_module._retired_template_names() == (
+        "ubuntu-vscode-openwork",
+        "ubuntu-vscode-pi-web",
+    )
+    assert set(coder_module._retired_template_names()).isdisjoint(
+        coder_module._required_template_names()
     )
 
-    assert "$_SUDO apt-get install -y curl git ca-certificates wget btop" in template
-    assert "curl -fsSL https://deb.nodesource.com/setup_22.x | $_SUDO -E bash -" in template
-    assert "$_SUDO corepack enable" in template
-    assert "$_SUDO corepack prepare pnpm@10.27.0 --activate" in template
-    assert "export PNPM_HOME=/home/coder/.local/share/pnpm" in template
-    assert 'export PATH="$PNPM_HOME/bin:$PATH"' in template
-    assert (
-        'grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc'
-        in template
+
+def test_retire_removed_templates_deletes_only_retired_templates(monkeypatch) -> None:
+    delete_calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        delete_calls.append(command)
+        return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+
+    def fake_list_templates(*, container_name: str, hostname: str, session_token: str) -> tuple[dict[str, object], ...]:
+        del container_name, hostname, session_token
+        return (
+            {"name": "ubuntu-vscode"},
+            {"name": "ubuntu-vscode-openwork"},
+            {"name": "operator-custom-template"},
+        )
+
+    monkeypatch.setattr(coder_module, "_list_templates", fake_list_templates)
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
+    retired = coder_module._retire_removed_templates(
+        container_name="stack-coder",
+        hostname="coder.example.com",
+        session_token="tok",
     )
-    assert 'grep -qxF "export PATH=\\"$PNPM_HOME/bin:$PATH\\"" /home/coder/.profile' in template
-    assert "pnpm add -g @earendil-works/pi-coding-agent" in template
-    assert 'export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"' in template
-    assert 'export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"' in template
-    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"' in template
-    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
-    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
-    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
-    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
-    assert 'payload = json.load(response)' in template
-    assert 'payload = {"data": []}' in template
-    assert '"baseUrl": base_url' in template
-    assert '"api": "openai-completions"' in template
-    assert '"apiKey": api_key' in template
-    assert '"models": [{"id": model_id, "name": model_id} for model_id in model_ids]' in template
-    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
-    assert 'PI_WEB_SRC_DIR=/home/coder/.cache/pi-web-ui' in template
-    assert 'PI_WEB_BUILD_KEY=v1-coder-mounted-preview' in template
-    assert 'PI_WEB_UI_PORT=8650' in template
-    assert 'PI_WEB_PROXY_PORT=8651' in template
-    assert "Pi Web UI stays browser-local, but the workspace now pre-seeds custom LiteLLM" in template
-    assert '"@earendil-works/pi-agent-core": "^0.74.0"' in template
-    assert '"@earendil-works/pi-ai": "^0.74.0"' in template
-    assert '"@earendil-works/pi-web-ui": "^0.74.0"' in template
-    assert "import { Agent } from '@earendil-works/pi-agent-core';" in template
-    assert "import { getModel } from '@earendil-works/pi-ai';" in template
-    assert "import '@earendil-works/pi-web-ui/app.css';" in template
-    assert 'document.title = "Pi Web UI";' in template
-    assert "CI=true pnpm install" in template
-    assert "pnpm exec vite build --base ./" in template
+
+    assert retired == ("ubuntu-vscode-openwork",)
+    assert len(delete_calls) == 1
+    assert delete_calls[0][-4:] == ["templates", "delete", "ubuntu-vscode-openwork", "--yes"]
+
+
+def test_retire_removed_templates_reports_delete_failure(monkeypatch) -> None:
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        return subprocess.CompletedProcess(
+            command,
+            returncode=1,
+            stdout="",
+            stderr="template is used by 1 workspace",
+        )
+
+    def fake_list_templates(*, container_name: str, hostname: str, session_token: str) -> tuple[dict[str, object], ...]:
+        del container_name, hostname, session_token
+        return ({"name": "ubuntu-vscode-pi-web"},)
+
+    monkeypatch.setattr(coder_module, "_list_templates", fake_list_templates)
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
+    try:
+        coder_module._retire_removed_templates(
+            container_name="stack-coder",
+            hostname="coder.example.com",
+            session_token="tok",
+        )
+    except coder_module.CoderError as error:
+        assert "ubuntu-vscode-pi-web" in str(error)
+    else:
+        raise AssertionError("Expected CoderError when template delete fails")
+
+
+def test_retire_removed_templates_is_silent_when_nothing_retired(monkeypatch) -> None:
+    def fake_list_templates(*, container_name: str, hostname: str, session_token: str) -> tuple[dict[str, object], ...]:
+        del container_name, hostname, session_token
+        return ({"name": "ubuntu-vscode"},)
+
+    def fail_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"Unexpected subprocess call: {command}")
+
+    monkeypatch.setattr(coder_module, "_list_templates", fake_list_templates)
+    monkeypatch.setattr(coder_module.subprocess, "run", fail_run)
+
     assert (
-        'pnpm exec vite preview --host 127.0.0.1 --port $PI_WEB_UI_PORT --strictPort' in template
+        coder_module._retire_removed_templates(
+            container_name="stack-coder",
+            hostname="coder.example.com",
+            session_token="tok",
+        )
+        == ()
     )
-    assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
-    assert 'const parsed = new URL(req.url || "/", "http://localhost");' in template
-    assert 'const targetPath = needsSpaFallback(remainder) ? "/" : remainder + parsed.search;' in template
-    assert (
-        'nohup env SYNTHETIC_HEALTHCHECK=1 TARGET_PORT="$PI_WEB_UI_PORT" PROXY_PORT="$PI_WEB_PROXY_PORT" node /tmp/coder-mounted-proxy.mjs'
-        in template
-    )
-    assert 'resource "coder_app" "pi_web"' in template
-    assert 'slug         = "pi-web"' in template
-    assert 'display_name = "Pi Web UI"' in template
-    assert 'url          = "http://localhost:8651"' in template
-    assert 'share        = "owner"' in template
-    assert 'subdomain    = false' in template
-    assert 'url       = "http://localhost:8651/health"' in template
-    assert "pi.dev/install.sh" not in template
-    assert "curl | sh" not in template
 
 
 def test_readme_documents_coder_litellm_scope_boundaries() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 
-    assert "OpenCode Web and OpenWork inherit wizard-managed LiteLLM defaults" in readme
-    assert "Pi Web UI is still a browser-local surface and is not centrally model-restricted" in readme
-    assert "Pi Web UI does not receive a wizard-managed virtual key." in readme
+    assert "OpenCode Web inherits wizard-managed LiteLLM defaults" in readme
+    assert "OpenWork" not in readme
+    assert "Pi Web" not in readme
 
 
 def test_default_kdense_byok_template_includes_upstream_parameterized_stack() -> None:
@@ -1129,7 +1049,7 @@ def test_hermes_template_uses_litellm_credentials(
     }
 
 
-def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
+def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = DokployCoderBackend(
@@ -1175,6 +1095,7 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
     )
     monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
     monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
 
     backend.ensure_application_ready()
 
@@ -1194,14 +1115,6 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
-    assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-    }
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
@@ -1210,14 +1123,8 @@ def test_base_opencode_web_openwork_templates_receive_shared_litellm_defaults(
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
-    assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-    }
+    assert "ubuntu-vscode-openwork" not in template_replacements_by_name
+    assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
 
 
 def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
@@ -1277,25 +1184,22 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
         "_ensure_default_workspace",
         lambda **kwargs: ensure_workspace_calls.append(kwargs),
     )
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
 
     notes = backend.ensure_application_ready()
 
     assert template_push_calls == [
         coder_module._default_template_name(),
         coder_module._default_opencode_web_template_name(),
-        coder_module._default_openwork_template_name(),
         coder_module._default_kdense_byok_template_name(),
         coder_module._default_hermes_template_name(),
-        coder_module._default_pi_web_template_name(),
     ]
     assert ensure_workspace_calls == []
     assert notes == (
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
-        "Seeded default Coder template 'ubuntu-vscode-openwork'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
-        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
     )
     assert template_replacements_by_name[coder_module._default_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -1313,22 +1217,8 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
-    assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-    }
-    assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-    }
+    assert "ubuntu-vscode-openwork" not in template_replacements_by_name
+    assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
 
 
 def test_push_default_template_ignores_missing_terraform_lockfile(
@@ -1530,6 +1420,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     monkeypatch.setattr(coder_module, "_copy_template_into_container", lambda **kwargs: None)
     monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
     monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
 
     notes = backend.ensure_application_ready()
 
@@ -1545,10 +1436,8 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
         "Provisioned initial Coder admin for 'admin@example.com'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
-        "Seeded default Coder template 'ubuntu-vscode-openwork'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
-        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
     )
 
 
@@ -1628,6 +1517,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
         workspaces.add(workspace_name)
 
     monkeypatch.setattr(coder_module, "_create_default_workspace", fake_create_default_workspace)
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
 
     first_notes = backend.ensure_application_ready()
     second_notes = backend.ensure_application_ready()
@@ -1635,10 +1525,8 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     expected_template_names = {
         coder_module._default_template_name(),
         coder_module._default_opencode_web_template_name(),
-        coder_module._default_openwork_template_name(),
         coder_module._default_kdense_byok_template_name(),
         coder_module._default_hermes_template_name(),
-        coder_module._default_pi_web_template_name(),
     }
     assert first_user_calls == [("coder.example.com", "admin@openmerge.me", "ChangeMeSoon")]
     assert set(template_copy_calls) == expected_template_names
@@ -1653,10 +1541,8 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
-        "Seeded default Coder template 'ubuntu-vscode-openwork'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
-        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
         "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'admin@openmerge.me'.",
     )
     assert second_notes == ()
@@ -2626,6 +2512,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "_default_workspace_name",
         lambda hostname: "openmergeme-workspace-2026-04-18",
     )
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
 
     notes = backend.ensure_application_ready()
 
@@ -2644,11 +2531,6 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         ),
         (
             "wizard-stack-coder-container",
-            str(coder_module._default_openwork_template_dir()),
-            coder_module._default_openwork_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
             str(coder_module._default_kdense_byok_template_dir()),
             coder_module._default_kdense_byok_template_name(),
         ),
@@ -2656,11 +2538,6 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "wizard-stack-coder-container",
             str(coder_module._default_hermes_template_dir()),
             coder_module._default_hermes_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
-            str(coder_module._default_pi_web_template_dir()),
-            coder_module._default_pi_web_template_name(),
         ),
     ]
     assert template_push_calls == [
@@ -2680,12 +2557,6 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "wizard-stack-coder-container",
             "coder.example.com",
             "session-123",
-            coder_module._default_openwork_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
-            "coder.example.com",
-            "session-123",
             coder_module._default_kdense_byok_template_name(),
         ),
         (
@@ -2693,12 +2564,6 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "coder.example.com",
             "session-123",
             coder_module._default_hermes_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
-            "coder.example.com",
-            "session-123",
-            coder_module._default_pi_web_template_name(),
         ),
     ]
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
@@ -2717,14 +2582,6 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
-    assert template_replacements_by_name[coder_module._default_openwork_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-    }
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
@@ -2733,14 +2590,8 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
-    assert template_replacements_by_name[coder_module._default_pi_web_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-    }
+    assert "ubuntu-vscode-openwork" not in template_replacements_by_name
+    assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
     assert ensure_workspace_calls == [
         (
             "wizard-stack-coder-container",
@@ -2762,10 +2613,8 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
-        "Seeded default Coder template 'ubuntu-vscode-openwork'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
-        "Seeded default Coder template 'ubuntu-vscode-pi-web'.",
         "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'admin@openmerge.me'.",
     )
 

@@ -272,12 +272,12 @@ On first successful bootstrap the wizard:
   |---|---|
   | `ubuntu-vscode` | Base Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `opencode`, `zellij`, `pi` CLI |
   | `ubuntu-vscode-opencode-web` | OpenCode Web (browser-based IDE) |
-  | `ubuntu-vscode-openwork` | OpenWork (AI-assisted workspace) |
   | `ubuntu-vscode-kdense-byok` | K-Dense BYOK (Bring Your Own Key for local model inference) |
   | `ubuntu-vscode-hermes` | Hermes (on-device AI assistant) |
-  | `ubuntu-vscode-pi-web` | Pi CLI plus clickable Pi Web UI (Coder app, not a public Dokploy pack) |
 
 - creates a default workspace for the operator
+
+Removed templates are retired automatically on the next wizard rerun or modify.
 
 That default template installs:
 
@@ -317,7 +317,7 @@ Future architecture options:
 
 Operational note:
 
-- Hermes, OpenCode Web, and OpenWork are already path-based Coder apps in this repo.
+- Hermes and OpenCode Web are already path-based Coder apps in this repo.
 - K-Dense BYOK is the current outlier that uses `subdomain = true` and benefits the most from proper wildcard app routing.
 
 ### SeaweedFS
@@ -649,9 +649,9 @@ Primary consumers today are:
 - My Farm Advisor
 - SurfSense
 - Coder Hermes and Coder K-Dense
-- Coder OpenCode Web and OpenWork through generated template gateway defaults
+- Coder OpenCode Web through generated template gateway defaults
 
-Those services use internal gateway config or wizard-managed virtual keys. They should not receive raw OpenRouter, NVIDIA, OpenCode Go, local model, or other upstream provider keys directly when the wizard-managed LiteLLM path is in use. Pi Web UI remains the exception because its browser-local provider-key flow is intentionally unchanged and this repo does not control a Pi scoped-models endpoint.
+Those services use internal gateway config or wizard-managed virtual keys. They should not receive raw OpenRouter, NVIDIA, OpenCode Go, local model, or other upstream provider keys directly when the wizard-managed LiteLLM path is in use.
 
 ### Flat env inputs
 
@@ -697,7 +697,7 @@ The wizard auto-generates stable virtual keys for each consumer:
 - Coder Hermes
 - Coder K-Dense
 
-OpenCode Web and OpenWork inherit wizard-managed LiteLLM defaults through the shared Coder AI gateway env during template bootstrap rather than receiving their own dedicated LiteLLM virtual-key consumer records. Pi Web UI is still a browser-local surface and is not centrally model-restricted. Pi Web UI does not receive a wizard-managed virtual key.
+OpenCode Web inherits wizard-managed LiteLLM defaults through the shared Coder AI gateway env during template bootstrap rather than receiving its own dedicated LiteLLM virtual-key consumer record.
 
 These keys are generated once and reused across reruns and modify operations. They are stored in the wizard state directory, not written back into `.install.env`. If you need to rotate a key, that is a future operator action, not something that happens silently on reinstall.
 
@@ -740,7 +740,7 @@ This keeps admin verification aligned with the intended trust boundary: public a
 
 ### Migration from direct provider envs
 
-If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, wizard-managed server-side consumers receive LiteLLM virtual keys or inherited LiteLLM gateway defaults instead of raw upstream provider keys. SurfSense follows this model: it gets only its restricted LiteLLM virtual key and approved aliases. Upstream secrets terminate at the LiteLLM proxy. Pi Web UI remains the exception because its browser-local provider-key flow is intentionally unchanged.
+If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, wizard-managed server-side consumers receive LiteLLM virtual keys or inherited LiteLLM gateway defaults instead of raw upstream provider keys. SurfSense follows this model: it gets only its restricted LiteLLM virtual key and approved aliases. Upstream secrets terminate at the LiteLLM proxy.
 
 ### Validation
 
