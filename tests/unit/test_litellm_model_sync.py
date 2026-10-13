@@ -101,6 +101,16 @@ def test_sidecar_script_is_valid_python() -> None:
     compile(model_sync_script_text(), str(_SIDECAR_PATH), "exec")
 
 
+def test_readme_documents_model_autosync() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "### Model autosync" in readme
+    assert "sync/<source>/<model-id>" in readme
+    assert "LITELLM_MODEL_SYNC_ENABLED" in readme
+    assert "LITELLM_MODEL_SYNC_INTERVAL_MINUTES" in readme
+    assert "store_model_in_db" in readme
+
+
 def _sidecar_document() -> dict:
     return {
         "interval_minutes": 360,

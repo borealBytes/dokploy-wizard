@@ -87,6 +87,27 @@ resource "coder_agent" "main" {
       $_SUDO apt-get install -y nodejs
     fi
 
+    # Pi coding agent, installed on every wizard-managed workspace
+    $_SUDO corepack enable
+    $_SUDO corepack prepare pnpm@10.27.0 --activate
+
+    export PNPM_HOME=/home/coder/.local/share/pnpm
+    export PATH="$PNPM_HOME/bin:$PATH"
+    mkdir -p "$PNPM_HOME/bin"
+    touch /home/coder/.bashrc /home/coder/.profile
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile
+
+    if ! command -v pi >/dev/null 2>&1; then
+      pnpm add -g @earendil-works/pi-coding-agent
+    fi
+
+    command -v pi
+    pi --version
+    bash -lc 'command -v pi && pi --version'
+
     export HERMES_HOME=/home/coder/.hermes
     export HERMES_INSTALL_DIR=/home/coder/.hermes/hermes-agent
     export NPM_CONFIG_PREFIX=/home/coder/.local
@@ -325,6 +346,39 @@ def write_vscode_copilot_byok_settings(raw_base_url: str, raw_api_key: str, ids:
 
 
 write_vscode_copilot_byok_settings(base_url, api_key, model_ids)
+
+Path("/home/coder/.config/opencode").mkdir(parents=True, exist_ok=True)
+opencode_config = {
+    "provider": {
+        "litellm": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": base_url, "apiKey": api_key},
+            "models": {model_id: {} for model_id in model_ids},
+        }
+    },
+    "model": default_model,
+}
+Path("/home/coder/.config/opencode/opencode.json").write_text(
+    json.dumps(opencode_config, indent=2) + "\n",
+    encoding="utf-8",
+)
+
+Path("/home/coder/.pi/agent").mkdir(parents=True, exist_ok=True)
+pi_models_config = {
+    "providers": {
+        "litellm": {
+            "name": "LiteLLM",
+            "baseUrl": base_url,
+            "api": "openai-completions",
+            "apiKey": api_key,
+            "models": [{"id": model_id, "name": model_id} for model_id in model_ids],
+        }
+    }
+}
+Path("/home/coder/.pi/agent/models.json").write_text(
+    json.dumps(pi_models_config, indent=2) + "\n",
+    encoding="utf-8",
+)
 
 PY
 
@@ -821,6 +875,39 @@ def write_vscode_copilot_byok_settings(raw_base_url: str, raw_api_key: str, ids:
 
 
 write_vscode_copilot_byok_settings(base_url, api_key, model_ids)
+
+Path("/home/coder/.config/opencode").mkdir(parents=True, exist_ok=True)
+opencode_config = {
+    "provider": {
+        "litellm": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": base_url, "apiKey": api_key},
+            "models": {model_id: {} for model_id in model_ids},
+        }
+    },
+    "model": default_model,
+}
+Path("/home/coder/.config/opencode/opencode.json").write_text(
+    json.dumps(opencode_config, indent=2) + "\n",
+    encoding="utf-8",
+)
+
+Path("/home/coder/.pi/agent").mkdir(parents=True, exist_ok=True)
+pi_models_config = {
+    "providers": {
+        "litellm": {
+            "name": "LiteLLM",
+            "baseUrl": base_url,
+            "api": "openai-completions",
+            "apiKey": api_key,
+            "models": [{"id": model_id, "name": model_id} for model_id in model_ids],
+        }
+    }
+}
+Path("/home/coder/.pi/agent/models.json").write_text(
+    json.dumps(pi_models_config, indent=2) + "\n",
+    encoding="utf-8",
+)
 
 PY
 

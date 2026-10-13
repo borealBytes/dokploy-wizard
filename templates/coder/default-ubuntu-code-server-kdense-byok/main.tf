@@ -369,6 +369,27 @@ PY
       NPM_CONFIG_PREFIX=/home/coder/.local npm install -g @google/gemini-cli
     fi
 
+    # Pi coding agent, installed on every wizard-managed workspace
+    $_SUDO corepack enable
+    $_SUDO corepack prepare pnpm@10.27.0 --activate
+
+    export PNPM_HOME=/home/coder/.local/share/pnpm
+    export PATH="$PNPM_HOME/bin:$PATH"
+    mkdir -p "$PNPM_HOME/bin"
+    touch /home/coder/.bashrc /home/coder/.profile
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile
+
+    if ! command -v pi >/dev/null 2>&1; then
+      pnpm add -g @earendil-works/pi-coding-agent
+    fi
+
+    command -v pi
+    pi --version
+    bash -lc 'command -v pi && pi --version'
+
     export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"
     export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"
     export KDENSE_COPILOT_DEFAULT_ALIAS="__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__/__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__"
@@ -497,6 +518,39 @@ for settings_path in [
         settings = {}
     settings["github.copilot.chat.customOAIModels"] = custom_models
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+Path("/home/coder/.config/opencode").mkdir(parents=True, exist_ok=True)
+opencode_config = {
+    "provider": {
+        "litellm": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": base_url, "apiKey": api_key},
+            "models": {model_id: {} for model_id in model_ids},
+        }
+    },
+    "model": default_alias,
+}
+Path("/home/coder/.config/opencode/opencode.json").write_text(
+    json.dumps(opencode_config, indent=2) + "\n",
+    encoding="utf-8",
+)
+
+Path("/home/coder/.pi/agent").mkdir(parents=True, exist_ok=True)
+pi_models_config = {
+    "providers": {
+        "litellm": {
+            "name": "LiteLLM",
+            "baseUrl": base_url,
+            "api": "openai-completions",
+            "apiKey": api_key,
+            "models": [{"id": model_id, "name": model_id} for model_id in model_ids],
+        }
+    }
+}
+Path("/home/coder/.pi/agent/models.json").write_text(
+    json.dumps(pi_models_config, indent=2) + "\n",
+    encoding="utf-8",
+)
 PY
 
     normalize_model_for_gateway() {

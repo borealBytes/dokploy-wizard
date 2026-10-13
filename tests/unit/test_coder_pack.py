@@ -138,6 +138,29 @@ def _assert_template_preseeds_copilot_byok(template: str) -> None:
     assert "openai-compat-provider.providers" not in template
 
 
+_TEMPLATE_DIRS_WITH_PI_AND_OPENCODE = (
+    "default-ubuntu-code-server",
+    "default-ubuntu-code-server-opencode-web",
+    "default-ubuntu-code-server-kdense-byok",
+    "default-ubuntu-code-server-hermes",
+)
+
+
+@pytest.mark.parametrize("template_dir", _TEMPLATE_DIRS_WITH_PI_AND_OPENCODE)
+def test_every_template_installs_pi_and_opencode_and_preseeds_litellm(template_dir: str) -> None:
+    template = Path(f"templates/coder/{template_dir}/main.tf").read_text(encoding="utf-8")
+
+    assert "curl -fsSL https://opencode.ai/install" in template
+    assert "pnpm add -g @earendil-works/pi-coding-agent" in template
+    assert "command -v pi" in template
+    assert "pi --version" in template
+    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
+    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
+    assert '"npm": "@ai-sdk/openai-compatible"' in template
+    assert '"api": "openai-completions"' in template
+    assert "DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON" in template
+
+
 def test_base_copilot_byok_template_settings() -> None:
     template = Path("templates/coder/default-ubuntu-code-server/main.tf").read_text(
         encoding="utf-8"
@@ -609,6 +632,13 @@ def test_readme_documents_coder_litellm_scope_boundaries() -> None:
     assert "OpenCode Web inherits wizard-managed LiteLLM defaults" in readme
     assert "OpenWork" not in readme
     assert "Pi Web" not in readme
+
+
+def test_readme_documents_pi_and_opencode_on_every_template() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "Every wizard-managed template installs the OpenCode CLI and the Pi coding agent" in readme
+    assert "pre-wired on first boot" in readme
 
 
 def test_default_kdense_byok_template_includes_upstream_parameterized_stack() -> None:

@@ -88,6 +88,27 @@ resource "coder_agent" "main" {
       $_SUDO apt-get install -y nodejs
     fi
 
+    # Pi coding agent, installed on every wizard-managed workspace
+    $_SUDO corepack enable
+    $_SUDO corepack prepare pnpm@10.27.0 --activate
+
+    export PNPM_HOME=/home/coder/.local/share/pnpm
+    export PATH="$PNPM_HOME/bin:$PATH"
+    mkdir -p "$PNPM_HOME/bin"
+    touch /home/coder/.bashrc /home/coder/.profile
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile
+
+    if ! command -v pi >/dev/null 2>&1; then
+      pnpm add -g @earendil-works/pi-coding-agent
+    fi
+
+    command -v pi
+    pi --version
+    bash -lc 'command -v pi && pi --version'
+
     # Shared LiteLLM defaults keep OpenCode Web on the wizard-managed gateway.
     export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"
     export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"
@@ -98,7 +119,7 @@ resource "coder_agent" "main" {
     export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"
     export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"
 
-    mkdir -p /home/coder/.config/opencode
+    mkdir -p /home/coder/.config/opencode /home/coder/.pi/agent
     python3 - <<'PY'
 import json
 import os
@@ -148,6 +169,22 @@ config = {
 }
 Path("/home/coder/.config/opencode/opencode.json").write_text(
     json.dumps(config, indent=2) + "\n",
+    encoding="utf-8",
+)
+
+pi_models_config = {
+    "providers": {
+        "litellm": {
+            "name": "LiteLLM",
+            "baseUrl": base_url,
+            "api": "openai-completions",
+            "apiKey": api_key,
+            "models": [{"id": model_id, "name": model_id} for model_id in model_ids],
+        }
+    }
+}
+Path("/home/coder/.pi/agent/models.json").write_text(
+    json.dumps(pi_models_config, indent=2) + "\n",
     encoding="utf-8",
 )
 # Official Copilot BYOK is intentionally chat/agent-only; inline completions stay on Copilot-managed models.

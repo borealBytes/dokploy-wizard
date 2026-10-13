@@ -270,10 +270,16 @@ On first successful bootstrap the wizard:
 
   | Template | What it provides |
   |---|---|
-  | `ubuntu-vscode` | Base Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `opencode`, `zellij`, `pi` CLI |
+  | `ubuntu-vscode` | Base Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `zellij` |
   | `ubuntu-vscode-opencode-web` | OpenCode Web (browser-based IDE) |
   | `ubuntu-vscode-kdense-byok` | K-Dense BYOK (Bring Your Own Key for local model inference) |
   | `ubuntu-vscode-hermes` | Hermes (on-device AI assistant) |
+
+Every wizard-managed template installs the OpenCode CLI and the Pi coding agent
+(`@earendil-works/pi-coding-agent`) and pre-seeds OpenCode, Pi, and VS Code
+Copilot BYOK with the full alias list resolved from the wizard-managed LiteLLM
+gateway, so agents are pre-wired on first boot instead of waiting for manual
+provider setup.
 
 - creates a default workspace for the operator
 
@@ -286,6 +292,7 @@ That default template installs:
 - `wget`
 - `btop`
 - `opencode`
+- `pi` (Pi coding agent CLI)
 - `zellij`
 
 The workspace home directory lives on a per-workspace Docker volume. The control plane state lives in shared-core Postgres.
@@ -668,6 +675,27 @@ The generated LiteLLM config enforces a strict precedence:
 OpenRouter wildcard routes are not allowed. The config renderer rejects `openrouter/*` or broad `*` aliases.
 
 SurfSense receives the same approved alias list through its generated LiteLLM virtual key. Inside SurfSense, model labels are displayed as `LiteLLM - <alias>`. That keeps the user-facing choice clear while keeping upstream keys at LiteLLM.
+
+### Model autosync
+
+Besides the explicit aliases above, the wizard runs a model autosync sidecar beside the LiteLLM service so newly published provider models appear without a wizard rerun. The sidecar (`<stack-name>-shared-litellm-sync`) loops on a schedule, polls the model catalogs of every upstream provider whose key is configured (OpenRouter, OpenCode Go/Zen, NVIDIA), and registers models the gateway does not expose yet through the LiteLLM admin API.
+
+How autosynced models behave:
+
+- Autosynced deployments are named `sync/<source>/<model-id>`, so they never collide with the explicit config-file aliases.
+- Deployments created by autosync are tagged internally; when a source drops a model, only wizard-created `sync/...` deployments are pruned. Config-file aliases and models you added yourself in the admin UI are never touched.
+- Consumer virtual keys carry a `sync/*` wildcard, so autosynced models are immediately callable from OpenClaw, My Farm Advisor, SurfSense, Coder Hermes, and Coder K-Dense. `dokploy-ai` stays restricted to the resolved default alias.
+- Rendered LiteLLM config sets `general_settings.store_model_in_db` so admin-API-registered models survive proxy restarts.
+- Coder workspaces resolve their model lists live from the gateway at boot, so autosynced models show up in OpenCode, Pi, and Copilot BYOK on the next workspace start.
+
+Autosync is on whenever at least one upstream provider key is configured. Optional env knobs:
+
+```bash
+LITELLM_MODEL_SYNC_ENABLED=1                # set to 0/false to disable the sidecar
+LITELLM_MODEL_SYNC_INTERVAL_MINUTES=360     # sync loop interval (min 5)
+LITELLM_MODEL_SYNC_PROVIDERS=openrouter,opencode-go,nvidia  # subset of sources
+LITELLM_MODEL_SYNC_MAX_MODELS=50            # cap of new models registered per provider per cycle
+```
 
 ### AI env contract
 
