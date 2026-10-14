@@ -263,6 +263,27 @@ class DokployCoderBackend:
                 _default_template_dir(),
                 {
                     "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": _shell_double_quote_escape(
+                        self._hermes_inference_provider
+                    ),
+                    "__DOKPLOY_WIZARD_HERMES_MODEL__": _shell_double_quote_escape(
+                        self._hermes_model
+                    ),
+                    "__DOKPLOY_WIZARD_HERMES_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                    "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": f"https://{self._hostname}",
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                },
+            ),
+            (
+                _base_template_name(),
+                _base_template_dir(),
+                {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
                     "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
                         self._ai_default_provider
                     ),
@@ -1015,11 +1036,24 @@ def _coder_container_name(service_name: str) -> str | None:
 
 def _default_template_dir() -> Path:
     return (
-        Path(__file__).resolve().parents[3] / "templates" / "coder" / "default-ubuntu-code-server"
+        Path(__file__).resolve().parents[3]
+        / "templates"
+        / "coder"
+        / "default-ubuntu-vscode-opencode-hermes-pi"
     )
 
 
 def _default_template_name() -> str:
+    return "ubuntu-vscode-opencode-hermes-pi"
+
+
+def _base_template_dir() -> Path:
+    return (
+        Path(__file__).resolve().parents[3] / "templates" / "coder" / "default-ubuntu-code-server"
+    )
+
+
+def _base_template_name() -> str:
     return "ubuntu-vscode"
 
 
@@ -1077,6 +1111,7 @@ def _default_workspace_name(hostname: str, *, today: date | None = None) -> str:
 def _required_template_names() -> tuple[str, ...]:
     return (
         _default_template_name(),
+        _base_template_name(),
         _default_opencode_web_template_name(),
         _default_kdense_byok_template_name(),
         _default_hermes_template_name(),

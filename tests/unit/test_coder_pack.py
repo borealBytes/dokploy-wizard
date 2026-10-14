@@ -54,6 +54,43 @@ def test_coder_litellm_fallback_models_json_is_minimal_default_alias() -> None:
     assert "opencode-go/*" not in aliases
 
 
+def test_consolidated_default_template_is_the_workspace_default() -> None:
+    assert coder_module._default_template_name() == "ubuntu-vscode-opencode-hermes-pi"
+    assert coder_module._default_template_dir().name == "default-ubuntu-vscode-opencode-hermes-pi"
+    assert coder_module._default_template_dir().is_dir()
+    assert coder_module._base_template_name() == "ubuntu-vscode"
+    assert "ubuntu-vscode" in coder_module._required_template_names()
+
+
+def test_consolidated_template_apps_are_desktop_server_opencode_hermes_terminal() -> None:
+    template = Path(
+        "templates/coder/default-ubuntu-vscode-opencode-hermes-pi/main.tf"
+    ).read_text(encoding="utf-8")
+
+    # VS Code browser + terminal + desktop come from the official code-server module.
+    assert 'source   = "registry.coder.com/coder/code-server/coder"' in template
+    assert 'slug         = "opencode"' in template
+    assert 'slug         = "hermes-webui"' in template
+    # Classic webui only: no ekko webui, no hermes dashboard surface anywhere.
+    assert 'slug         = "hermes-web-ui"' not in template
+    assert 'slug         = "hermes-dashboard"' not in template
+    assert "npm install -g hermes-web-ui" not in template
+    assert "hermes dashboard" not in template
+
+
+def test_consolidated_template_serves_opencode_web_and_classic_hermes_with_cors_origin() -> None:
+    template = Path(
+        "templates/coder/default-ubuntu-vscode-opencode-hermes-pi/main.tf"
+    ).read_text(encoding="utf-8")
+
+    assert 'nohup opencode web --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT"' in template
+    assert "/tmp/opencode-mounted-proxy.mjs" in template
+    # The CSRF gate must trust the public Coder origin or POSTs 403 silently.
+    assert 'export HERMES_PUBLIC_ORIGIN="__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"' in template
+    assert 'HERMES_WEBUI_ALLOWED_ORIGINS="$HERMES_PUBLIC_ORIGIN"' in template
+    assert "HERMES_WEBUI_TRUST_FORWARDED_HOST=1" in template
+
+
 def test_copilot_byok_contract_documents_official_chat_only_scope() -> None:
     contract = coder_module._copilot_byok_contract()
 
@@ -144,6 +181,7 @@ _TEMPLATE_DIRS_WITH_PI_AND_OPENCODE = (
     "default-ubuntu-code-server-opencode-web",
     "default-ubuntu-code-server-kdense-byok",
     "default-ubuntu-code-server-hermes",
+    "default-ubuntu-vscode-opencode-hermes-pi",
 )
 
 
@@ -167,6 +205,7 @@ def test_every_template_installs_pi_and_opencode_and_preseeds_litellm(template_d
     assert "def setting(name: str, default: str" in template
     assert 'if "--daemon" in sys.argv[1:]' in template
     assert "model-refresh.py --daemon" in template
+    assert "def _restore_inner_quotes" in template
 
 
 def test_base_copilot_byok_template_settings() -> None:
@@ -541,11 +580,12 @@ def test_default_opencode_web_template_includes_web_app() -> None:
 def test_required_template_names_cover_only_remaining_templates() -> None:
     assert coder_module._required_template_names() == (
         coder_module._default_template_name(),
+        coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
         coder_module._default_hermes_template_name(),
     )
-    assert len(coder_module._required_template_names()) == 4
+    assert len(coder_module._required_template_names()) == 5
 
 
 def test_retired_template_names_cover_removed_templates() -> None:
@@ -1141,7 +1181,23 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
 
     backend.ensure_application_ready()
 
-    assert template_replacements_by_name[coder_module._default_template_name()] == {
+    consolidated_replacements = template_replacements_by_name[coder_module._default_template_name()]
+    hermes_legacy_replacements = template_replacements_by_name[coder_module._default_hermes_template_name()]
+    assert consolidated_replacements["__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"] == "https://coder.example.com"
+    assert consolidated_replacements["__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__"] == "wizard-stack-shared"
+    assert consolidated_replacements["__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"] == (
+        _expected_coder_fallback_models_json_escaped()
+    )
+    assert {
+        key: value
+        for key, value in consolidated_replacements.items()
+        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
+    } == {
+        key: value
+        for key, value in hermes_legacy_replacements.items()
+        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
+    }
+    assert template_replacements_by_name[coder_module._base_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
@@ -1232,18 +1288,36 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
 
     assert template_push_calls == [
         coder_module._default_template_name(),
+        coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
         coder_module._default_hermes_template_name(),
     ]
     assert ensure_workspace_calls == []
     assert notes == (
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
     )
-    assert template_replacements_by_name[coder_module._default_template_name()] == {
+    consolidated_replacements = template_replacements_by_name[coder_module._default_template_name()]
+    hermes_legacy_replacements = template_replacements_by_name[coder_module._default_hermes_template_name()]
+    assert consolidated_replacements["__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"] == "https://coder.example.com"
+    assert consolidated_replacements["__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__"] == "wizard-stack-shared"
+    assert consolidated_replacements["__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"] == (
+        _expected_coder_fallback_models_json_escaped()
+    )
+    assert {
+        key: value
+        for key, value in consolidated_replacements.items()
+        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
+    } == {
+        key: value
+        for key, value in hermes_legacy_replacements.items()
+        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
+    }
+    assert template_replacements_by_name[coder_module._base_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
         "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
@@ -1476,6 +1550,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     ]
     assert notes == (
         "Provisioned initial Coder admin for 'admin@example.com'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
@@ -1566,6 +1641,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
 
     expected_template_names = {
         coder_module._default_template_name(),
+        coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
         coder_module._default_hermes_template_name(),
@@ -1581,6 +1657,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     ]
     assert first_notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
@@ -2568,6 +2645,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         ),
         (
             "wizard-stack-coder-container",
+            str(coder_module._base_template_dir()),
+            coder_module._base_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
             str(coder_module._default_opencode_web_template_dir()),
             coder_module._default_opencode_web_template_name(),
         ),
@@ -2588,6 +2670,12 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "coder.example.com",
             "session-123",
             coder_module._default_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
+            "coder.example.com",
+            "session-123",
+            coder_module._base_template_name(),
         ),
         (
             "wizard-stack-coder-container",
@@ -2653,6 +2741,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     ]
     assert notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
