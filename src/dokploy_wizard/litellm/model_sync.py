@@ -53,6 +53,15 @@ MODEL_SYNC_OPENROUTER_MAX_RANKED_FREE = 10
 MODEL_SYNC_OPENCODE_GO_MAX_MODELS = 100
 _OPENCODE_GO_BASE_URL_DEFAULT = "https://opencode.ai/zen/go/v1"
 _NVIDIA_BASE_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
+# NVIDIA's /v1/models list is "servable" rather than "live": it contains
+# delisted models that 404 on chat completion and embedding/utility models
+# that never answer a chat probe. The sidecar therefore liveness-probes the
+# NVIDIA catalog with a 1-token chat completion (never paid OpenRouter-style
+# traffic) and keeps only the top slice that answers, capped so the picker
+# stays human-scale. Probe verdicts are cached for a week; dead models are
+# re-probed every cycle.
+MODEL_SYNC_NVIDIA_MAX_MODELS_DEFAULT = 20
+MODEL_SYNC_DEFAULT_PROBE_TTL_DAYS = 7
 
 
 def model_sync_service_name(litellm_service_name: str) -> str:
@@ -85,6 +94,35 @@ def model_sync_max_models_per_provider(flat_env: Mapping[str, str]) -> int:
         parsed = int(raw)
     except ValueError:
         return MODEL_SYNC_DEFAULT_MAX_MODELS_PER_PROVIDER
+    return max(1, parsed)
+
+
+def model_sync_nvidia_probe_enabled(flat_env: Mapping[str, str]) -> bool:
+    raw = _optional(flat_env, "LITELLM_MODEL_SYNC_NVIDIA_PROBE")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in _MODEL_SYNC_DISABLED_VALUES
+
+
+def model_sync_nvidia_max_models(flat_env: Mapping[str, str]) -> int:
+    raw = _optional(flat_env, "LITELLM_MODEL_SYNC_NVIDIA_MAX_MODELS")
+    if raw is None:
+        return MODEL_SYNC_NVIDIA_MAX_MODELS_DEFAULT
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return MODEL_SYNC_NVIDIA_MAX_MODELS_DEFAULT
+    return max(1, parsed)
+
+
+def model_sync_probe_ttl_days(flat_env: Mapping[str, str]) -> int:
+    raw = _optional(flat_env, "LITELLM_MODEL_SYNC_PROBE_TTL_DAYS")
+    if raw is None:
+        return MODEL_SYNC_DEFAULT_PROBE_TTL_DAYS
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return MODEL_SYNC_DEFAULT_PROBE_TTL_DAYS
     return max(1, parsed)
 
 
@@ -142,6 +180,9 @@ def build_model_sync_sources(
                     "api_key_env": nvidia_api_key_env,
                     "api_base": base_url,
                     "model_ref_template": "openai/{model}",
+                    "max_models": model_sync_nvidia_max_models(flat_env),
+                    "probe": model_sync_nvidia_probe_enabled(flat_env),
+                    "probe_ttl_days": model_sync_probe_ttl_days(flat_env),
                 }
             )
 

@@ -7,6 +7,10 @@ API, and prunes managed deployments that disappeared from their source.
 Sources that declare a rankings_url (OpenRouter) register the leaderboard's
 top paid (standard-variant) models followed by the top ":free" variants
 instead of an arbitrary catalog slice.
+Sources that declare "probe": true (NVIDIA) are liveness-checked with a
+1-token chat completion before the per-source budget is applied: models the
+provider 404s are dropped, everything else is kept, verdicts are cached under
+the state dir for probe_ttl_days, and dead models are re-probed every cycle.
 
 Managed deployments are tagged with model_info.metadata.managed_by, so only
 wizard-created deployments are ever pruned. Config-file models and
@@ -34,6 +38,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib import request
 from urllib.parse import quote
@@ -56,6 +61,9 @@ DEFAULT_MAX_MODELS_PER_PROVIDER = 50
 OPENROUTER_RANKINGS_METRIC_FIELD = "rankingMetricValue"
 DEFAULT_MAX_RANKED_PAID = 20
 DEFAULT_MAX_RANKED_FREE = 10
+DEFAULT_PROBE_TTL_DAYS = 7
+DEFAULT_PROBE_TIMEOUT_SECONDS = 8.0
+DEFAULT_PROBE_PARALLELISM = 6
 
 
 def log(message: str) -> None:
@@ -69,6 +77,7 @@ def http_json(
     *,
     token: str | None = None,
     payload: dict[str, Any] | None = None,
+    timeout: float = REQUEST_TIMEOUT_SECONDS,
 ) -> Any:
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = request.Request(url, method=method, data=body)
@@ -78,7 +87,7 @@ def http_json(
         req.add_header("Content-Type", "application/json")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
-    with request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+    with request.urlopen(req, timeout=timeout) as response:
         raw = response.read()
     return json.loads(raw) if raw else {}
 
@@ -189,6 +198,133 @@ def _ranked_catalog_model_ids(source: dict[str, Any], catalog: dict[str, Any]) -
     return ranked + [model_id for model_id in free_ids if model_id not in ranked]
 
 
+def _probe_cache_path(source_name: str) -> str:
+    return os.path.join(STATE_DIR, f"probe-cache-{source_name}.json")
+
+
+def _load_probe_cache(source_name: str, ttl_seconds: float) -> dict[str, str]:
+    """Return cached model_id -> verdict verdicts while the cache is fresh."""
+
+    try:
+        with open(_probe_cache_path(source_name), encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    checked_at = raw.get("checked_at")
+    results = raw.get("results")
+    if not isinstance(checked_at, (int, float)) or not isinstance(results, dict):
+        return {}
+    if time.time() - float(checked_at) > ttl_seconds:
+        return {}
+    return {
+        str(model_id): str(verdict)
+        for model_id, verdict in results.items()
+        if verdict in ("alive", "dead", "unknown")
+    }
+
+
+def _save_probe_cache(source_name: str, results: dict[str, str]) -> None:
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(_probe_cache_path(source_name), "w", encoding="utf-8") as handle:
+            json.dump({"checked_at": time.time(), "results": results}, handle)
+    except OSError as exc:
+        log(f"source {source_name} probe cache save failed: {type(exc).__name__}: {exc}")
+
+
+def _probe_model_status(
+    source: dict[str, Any], token: str, model_id: str, timeout: float
+) -> str:
+    """Chat-probe one model: alive on 2xx, dead on a clean 404, else unknown.
+
+    The probe is a 1-token chat completion, which also filters embedding,
+    transcription, and utility models (they reject chat requests) without
+    counting as dead so an inconclusive answer never prunes a working model.
+    """
+
+    api_base = str(source.get("api_base", "")).rstrip("/")
+    payload: dict[str, Any] = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+    }
+    try:
+        http_json(
+            "POST",
+            f"{api_base}/chat/completions",
+            token=token or None,
+            payload=payload,
+            timeout=timeout,
+        )
+        return "alive"
+    except Exception as exc:  # noqa: BLE001 - any transport failure must not sink the cycle
+        if getattr(exc, "code", None) == 404:
+            return "dead"
+        return "unknown"
+
+
+def probe_source_models(source: dict[str, Any], token: str, model_ids: list[str]) -> list[str]:
+    """Drop models the provider 404s on chat completion, keep everything else."""
+
+    name = str(source.get("name") or "?")
+    api_base = source.get("api_base")
+    if not (isinstance(api_base, str) and api_base) or not model_ids:
+        return model_ids
+    try:
+        ttl_days = float(source.get("probe_ttl_days") or DEFAULT_PROBE_TTL_DAYS)
+    except (TypeError, ValueError):
+        ttl_days = DEFAULT_PROBE_TTL_DAYS
+    try:
+        parallelism = int(source.get("probe_parallelism") or DEFAULT_PROBE_PARALLELISM)
+    except (TypeError, ValueError):
+        parallelism = DEFAULT_PROBE_PARALLELISM
+    results = _load_probe_cache(name, ttl_days * 86400.0)
+    # Known-alive models ride the cache; dead and inconclusive ones are
+    # re-probed every cycle so recovered models come back without a rebuild.
+    to_probe = [model_id for model_id in model_ids if results.get(model_id) != "alive"]
+    if to_probe:
+        timeout = float(source.get("probe_timeout_seconds") or DEFAULT_PROBE_TIMEOUT_SECONDS)
+        workers = max(1, min(max(1, parallelism), len(to_probe)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            statuses = list(
+                pool.map(
+                    lambda model_id: _probe_model_status(source, token, model_id, timeout),
+                    to_probe,
+                )
+            )
+        for model_id, verdict in zip(to_probe, statuses):
+            results[model_id] = verdict
+        alive_now = sum(1 for verdict in statuses if verdict == "alive")
+        dead_now = sum(1 for verdict in statuses if verdict == "dead")
+        log(
+            f"source {name} liveness probe: checked {len(to_probe)} "
+            f"(alive={alive_now} dead={dead_now} "
+            f"inconclusive={len(to_probe) - alive_now - dead_now}, "
+            f"cached-alive reused={len(model_ids) - len(to_probe)})"
+        )
+    dead = [model_id for model_id in model_ids if results.get(model_id) == "dead"]
+    alive_total = sum(1 for model_id in model_ids if results.get(model_id) == "alive")
+    if dead and alive_total == 0:
+        # Everything probed either died or stayed inconclusive: this is the
+        # signature of an upstream brownout (or auth breakage) returning 404
+        # for healthy models too, so keep the full list rather than emptying
+        # the provider from the picker.
+        log(
+            f"source {name} probe brownout: 0 alive with {len(dead)} dead hits; "
+            "keeping full catalog order this cycle"
+        )
+        return model_ids
+    _save_probe_cache(name, results)
+    if dead:
+        log(
+            f"source {name} pruning {len(dead)} dead models from the sync set: "
+            f"{', '.join(dead[:10])}"
+        )
+    return [model_id for model_id in model_ids if results.get(model_id) != "dead"]
+
+
 def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
     api_key_env = source.get("api_key_env")
     token = os.environ.get(api_key_env, "") if isinstance(api_key_env, str) else ""
@@ -213,9 +349,11 @@ def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
         if model_id.endswith("/*"):
             continue
         model_ids.append(model_id)
-        if len(model_ids) >= limit:
-            break
-    return model_ids
+    if source.get("probe"):
+        # Probe the full catalog first, then apply the budget: "top N" must
+        # mean the first N that actually answer, not the first N listed.
+        model_ids = probe_source_models(source, token, model_ids)
+    return model_ids[:limit]
 
 
 def desired_deployments(document: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], set[str]]:

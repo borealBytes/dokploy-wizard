@@ -12,6 +12,8 @@ import pytest
 
 from dokploy_wizard.litellm.model_sync import (
     MODEL_SYNC_CONSUMER_WILDCARD,
+    MODEL_SYNC_DEFAULT_PROBE_TTL_DAYS,
+    MODEL_SYNC_NVIDIA_MAX_MODELS_DEFAULT,
     MODEL_SYNC_OPENCODE_GO_MAX_MODELS,
     MODEL_SYNC_OPENROUTER_MAX_MODELS,
     MODEL_SYNC_OPENROUTER_MAX_RANKED_FREE,
@@ -526,3 +528,219 @@ def test_sidecar_healthcheck_requires_fresh_success_marker(
 
     (state_dir / "last_success").write_text(json.dumps({"ts": 0}), encoding="utf-8")
     assert sidecar.run_healthcheck() == 1
+
+
+# --- NVIDIA liveness probe + top-N cap -------------------------------------
+
+_NVIDIA_CATALOG = [
+    "meta/live-one",
+    "bigcode/dead-one",
+    "deepseek/live-two",
+    "nvidia/dead-two",
+    "mistral/weird",
+    "qwen/live-three",
+    "ibm/live-four",
+]
+
+
+def _nvidia_document(max_models: int = 3, probe: object = True) -> dict:
+    source: dict = {
+        "name": "nvidia",
+        "alias_prefix": "sync/nvidia",
+        "list_url": "https://integrate.api.nvidia.com/v1/models",
+        "api_key_env": "LITELLM_NVIDIA_API_KEY",
+        "api_base": "https://integrate.api.nvidia.com/v1",
+        "model_ref_template": "openai/{model}",
+        "max_models": max_models,
+    }
+    if probe is not None:
+        source["probe"] = probe
+        source["probe_ttl_days"] = 7
+    return {"interval_minutes": 360, "max_models_per_provider": 50, "sources": [source]}
+
+
+def _nvidia_transport(probe_calls: list, *, dead: set, errors: set, catalog=None):
+    from urllib.error import HTTPError
+
+    def fake_http_json(method, url, *, token=None, payload=None, timeout=30):
+        if url.endswith("/v1/models"):
+            return {"data": [{"id": model} for model in (catalog or _NVIDIA_CATALOG)]}
+        if url.endswith("/model/info"):
+            return {"data": []}
+        if url.endswith("/chat/completions"):
+            model = payload["model"]
+            probe_calls.append(model)
+            assert payload["max_tokens"] == 1
+            if model in dead:
+                raise HTTPError(url, 404, "Not Found", {}, None)
+            if model in errors:
+                raise RuntimeError("connection reset")
+            return {"choices": [{"message": {"content": "ok"}}]}
+        return {}
+
+    return fake_http_json
+
+
+def _created_aliases(calls) -> set:
+    return {
+        call[2]["model_name"]
+        for call in calls
+        if call[1].endswith("/model/new")
+    }
+
+
+def _capture_creates(sidecar, base_fake):
+    calls: list = []
+
+    def fake_http_json(method, url, *, token=None, payload=None, timeout=30):
+        calls.append((method, url, payload))
+        return base_fake(method, url, token=token, payload=payload, timeout=timeout)
+
+    sidecar.http_json = fake_http_json
+    return calls
+
+
+def test_nvidia_source_declares_probe_and_cap() -> None:
+    env = {"LITELLM_NVIDIA_API_KEY": "nv-key"}
+    creds = {"nvidia_api_key_env": "LITELLM_NVIDIA_API_KEY"}
+
+    nvidia = build_model_sync_sources(env, creds)[0]
+    assert nvidia["probe"] is True
+    assert nvidia["max_models"] == MODEL_SYNC_NVIDIA_MAX_MODELS_DEFAULT
+    assert nvidia["probe_ttl_days"] == MODEL_SYNC_DEFAULT_PROBE_TTL_DAYS
+
+    overridden = build_model_sync_sources(
+        {
+            "LITELLM_NVIDIA_API_KEY": "nv-key",
+            "LITELLM_MODEL_SYNC_NVIDIA_PROBE": "0",
+            "LITELLM_MODEL_SYNC_NVIDIA_MAX_MODELS": "5",
+            "LITELLM_MODEL_SYNC_PROBE_TTL_DAYS": "2",
+        },
+        creds,
+    )[0]
+    assert overridden["probe"] is False
+    assert overridden["max_models"] == 5
+    assert overridden["probe_ttl_days"] == 2
+
+
+def test_sidecar_probe_drops_dead_models_and_caps_survivors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LITELLM_NVIDIA_API_KEY", "nv-upstream-key")
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    probes: list = []
+    calls = _capture_creates(
+        sidecar,
+        _nvidia_transport(probes, dead={"bigcode/dead-one", "nvidia/dead-two"}, errors={"mistral/weird"}),
+    )
+
+    summary = sidecar.sync_once(_nvidia_document(max_models=3))
+
+    assert set(probes) == set(_NVIDIA_CATALOG)
+    # Dead models never sync; inconclusive (non-404 failures) are kept; the
+    # budget then applies to the surviving set in catalog order.
+    assert _created_aliases(calls) == {
+        "sync/nvidia/meta/live-one",
+        "sync/nvidia/deepseek/live-two",
+        "sync/nvidia/mistral/weird",
+    }
+    assert summary["created"] == 3
+
+
+def test_sidecar_probe_cache_skips_known_alive_reprobes_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LITELLM_NVIDIA_API_KEY", "nv-upstream-key")
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    probes_first: list = []
+    sidecar.http_json = _nvidia_transport(
+        probes_first, dead={"bigcode/dead-one", "nvidia/dead-two"}, errors={"mistral/weird"}
+    )
+    sidecar.sync_once(_nvidia_document(max_models=3))
+    assert set(probes_first) == set(_NVIDIA_CATALOG)
+
+    probes_second: list = []
+    sidecar.http_json = _nvidia_transport(
+        probes_second, dead={"bigcode/dead-one"}, errors={"mistral/weird"}
+    )
+    calls = _capture_creates(
+        sidecar,
+        _nvidia_transport(probes_second, dead={"bigcode/dead-one"}, errors={"mistral/weird"}),
+    )
+    sidecar.sync_once(_nvidia_document(max_models=4))
+
+    # Known-alive models ride the cache; dead and inconclusive ones re-probe
+    # every cycle so recovered models return without waiting for TTL expiry.
+    assert set(probes_second) == {"bigcode/dead-one", "nvidia/dead-two", "mistral/weird"}
+    assert "sync/nvidia/nvidia/dead-two" in _created_aliases(calls)
+
+
+def test_sidecar_probe_cache_expiry_forces_full_reprobe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LITELLM_NVIDIA_API_KEY", "nv-upstream-key")
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    sidecar.http_json = _nvidia_transport([], dead=set(), errors=set())
+    sidecar.sync_once(_nvidia_document(max_models=3))
+
+    cache_path = tmp_path / "state" / "probe-cache-nvidia.json"
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    cache["checked_at"] -= 8 * 86400  # beyond the 7-day TTL
+    cache_path.write_text(json.dumps(cache), encoding="utf-8")
+
+    probes: list = []
+    sidecar.http_json = _nvidia_transport(probes, dead=set(), errors=set())
+    sidecar.sync_once(_nvidia_document(max_models=3))
+    assert set(probes) == set(_NVIDIA_CATALOG)
+
+
+def test_sidecar_probe_brownout_keeps_full_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LITELLM_NVIDIA_API_KEY", "nv-upstream-key")
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    probes: list = []
+    # Upstream brownout: everything 404s, including models that work fine.
+    calls = _capture_creates(sidecar, _nvidia_transport(probes, dead=set(_NVIDIA_CATALOG), errors=set()))
+
+    sidecar.sync_once(_nvidia_document(max_models=3))
+
+    assert _created_aliases(calls) == {
+        "sync/nvidia/meta/live-one",
+        "sync/nvidia/bigcode/dead-one",
+        "sync/nvidia/deepseek/live-two",
+    }
+    # A brownout must not poison the cache: everything is re-probed next cycle.
+    probes_second: list = []
+    sidecar.http_json = _nvidia_transport(probes_second, dead=set(), errors=set())
+    sidecar.sync_once(_nvidia_document(max_models=3))
+    assert set(probes_second) == set(_NVIDIA_CATALOG)
+
+
+def test_sidecar_probe_disabled_skips_chat_probing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LITELLM_NVIDIA_API_KEY", "nv-upstream-key")
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    probes: list = []
+
+    def fake_http_json(method, url, *, token=None, payload=None, timeout=30):
+        if url.endswith("/chat/completions"):
+            probes.append(payload["model"])
+            return {"choices": []}
+        if url.endswith("/v1/models"):
+            return {"data": [{"id": model} for model in _NVIDIA_CATALOG]}
+        if url.endswith("/model/info"):
+            return {"data": []}
+        return {}
+
+    calls = _capture_creates(sidecar, fake_http_json)
+
+    sidecar.sync_once(_nvidia_document(max_models=3, probe=False))
+
+    assert probes == []
+    assert _created_aliases(calls) == {
+        "sync/nvidia/meta/live-one",
+        "sync/nvidia/bigcode/dead-one",
+        "sync/nvidia/deepseek/live-two",
+    }

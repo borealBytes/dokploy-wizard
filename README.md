@@ -698,7 +698,12 @@ LITELLM_MODEL_SYNC_ENABLED=1                # set to 0/false to disable the side
 LITELLM_MODEL_SYNC_INTERVAL_MINUTES=360     # sync loop interval (min 5)
 LITELLM_MODEL_SYNC_PROVIDERS=openrouter,opencode-go,nvidia  # subset of sources
 LITELLM_MODEL_SYNC_MAX_MODELS=50            # cap of new models registered per provider per cycle
+LITELLM_MODEL_SYNC_NVIDIA_PROBE=1           # set to 0 to skip the NVIDIA liveness probe
+LITELLM_MODEL_SYNC_NVIDIA_MAX_MODELS=20     # cap of live NVIDIA models kept in the picker
+LITELLM_MODEL_SYNC_PROBE_TTL_DAYS=7         # how long probe verdicts are cached
 ```
+
+NVIDIA's catalog lists models that have been quietly delisted (their chat endpoint 404s) plus embedding/utility models that never answer a chat request. For NVIDIA only (never the paid OpenRouter endpoints), the sidecar sends a 1-token chat completion to each catalog model and registers only the models that answer, capped at `LITELLM_MODEL_SYNC_NVIDIA_MAX_MODELS` (default: the first 20 that respond, in catalog order). Verdicts are cached for `LITELLM_MODEL_SYNC_PROBE_TTL_DAYS` (default 7); dead models are re-probed every cycle so recovered models return without a rebuild, and an upstream brownout that 404s everything falls back to keeping the full list rather than emptying the provider.
 
 ### AI env contract
 
