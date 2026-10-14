@@ -221,7 +221,7 @@ DOKPLOY_LITELLM_API_KEY="$AI_DEFAULT_API_KEY"
 DOKPLOY_LITELLM_DEFAULT_ALIAS="$HERMES_MODEL"
 HERMES_MODEL="$HERMES_MODEL"
 HERMES_INFERENCE_PROVIDER="$HERMES_INFERENCE_PROVIDER"
-DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="$DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON"
+DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON=\"$DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON\"
 ENVEOF
     chmod 600 /home/coder/.config/dokploy/model-refresh.env
     cat > /home/coder/.local/share/dokploy/model-refresh.py <<'PY'
@@ -253,15 +253,33 @@ def setting(name: str, default: str = "") -> str:
             value = os.environ.get(candidate, "").strip()
             if value:
                 return value
+    value = _env_file_value(name) or _env_file_value(LEGACY_ENV_NAMES.get(name, ""))
+    if value:
+        return value
+    return default
+
+
+def _restore_inner_quotes(value: str) -> str:
+    if value.startswith("[") and not value.startswith('["') and value != "[]":
+        # Shell/Terraform expansion strips inner double quotes from
+        # substituted JSON (both in heredocs and when sourcing the env
+        # file); restore them so list payloads stay parseable.
+        return '["' + value[1:-1].replace(",", '","') + '"]'
+    return value
+
+
+def _env_file_value(name: str) -> str:
+    if not name:
+        return ""
     try:
         with open(ENV_FILE, encoding="utf-8") as handle:
             for line in handle:
                 key, separator, raw_value = line.partition("=")
                 if separator and key.strip() == name:
-                    return raw_value.strip().strip('"')
+                    return _restore_inner_quotes(raw_value.strip().strip('"'))
     except OSError:
         pass
-    return default
+    return ""
 
 
 base_url = setting("DOKPLOY_LITELLM_BASE_URL").rstrip("/")
@@ -270,7 +288,14 @@ home = Path(os.environ.get("HERMES_HOME", "/home/coder/.hermes"))
 config_path = home / "config.yaml"
 provider = setting("HERMES_INFERENCE_PROVIDER", "dokploy-litellm") or "dokploy-litellm"
 default_model = setting("HERMES_MODEL")
-fallback_models = json.loads(setting("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]"))
+try:
+    fallback_models = json.loads(
+        _restore_inner_quotes(
+            setting("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]")
+        )
+    )
+except ValueError:
+    fallback_models = []
 
 if "--daemon" in sys.argv[1:]:
     while True:
@@ -812,7 +837,7 @@ DOKPLOY_LITELLM_API_KEY="$AI_DEFAULT_API_KEY"
 DOKPLOY_LITELLM_DEFAULT_ALIAS="$HERMES_MODEL"
 HERMES_MODEL="$HERMES_MODEL"
 HERMES_INFERENCE_PROVIDER="$HERMES_INFERENCE_PROVIDER"
-DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="$DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON"
+DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON=\"$DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON\"
 ENVEOF
 chmod 600 /home/coder/.config/dokploy/model-refresh.env
 if [ -f /home/coder/.local/share/dokploy/model-refresh.py ]; then

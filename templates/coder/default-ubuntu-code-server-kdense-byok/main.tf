@@ -444,7 +444,7 @@ DOKPLOY_LITELLM_API_KEY="$KDENSE_CENTRAL_LITELLM_API_KEY"
 DOKPLOY_LITELLM_DEFAULT_ALIAS="$KDENSE_COPILOT_DEFAULT_ALIAS"
 KDENSE_DEFAULT_MODEL="$KDENSE_DEFAULT_MODEL"
 KDENSE_EXPERT_MODEL="$KDENSE_EXPERT_MODEL"
-DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="$DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON"
+DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON=\"$DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON\"
 ENVEOF
     chmod 600 /home/coder/.config/dokploy/model-refresh.env
     cat > /home/coder/.local/share/dokploy/model-refresh.py <<'PY'
@@ -471,21 +471,46 @@ def setting(name: str, default: str = "") -> str:
             value = os.environ.get(candidate, "").strip()
             if value:
                 return value
+    value = _env_file_value(name) or _env_file_value(LEGACY_ENV_NAMES.get(name, ""))
+    if value:
+        return value
+    return default
+
+
+def _restore_inner_quotes(value: str) -> str:
+    if value.startswith("[") and not value.startswith('["') and value != "[]":
+        # Shell/Terraform expansion strips inner double quotes from
+        # substituted JSON (both in heredocs and when sourcing the env
+        # file); restore them so list payloads stay parseable.
+        return '["' + value[1:-1].replace(",", '","') + '"]'
+    return value
+
+
+def _env_file_value(name: str) -> str:
+    if not name:
+        return ""
     try:
         with open(ENV_FILE, encoding="utf-8") as handle:
             for line in handle:
                 key, separator, raw_value = line.partition("=")
                 if separator and key.strip() == name:
-                    return raw_value.strip().strip('"')
+                    return _restore_inner_quotes(raw_value.strip().strip('"'))
     except OSError:
         pass
-    return default
+    return ""
 
 
 base_url = setting("DOKPLOY_LITELLM_BASE_URL").rstrip("/")
 api_key = setting("DOKPLOY_LITELLM_API_KEY")
 default_alias = setting("DOKPLOY_LITELLM_DEFAULT_ALIAS")
-fallback_models = json.loads(setting("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]"))
+try:
+    fallback_models = json.loads(
+        _restore_inner_quotes(
+            setting("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]")
+        )
+    )
+except ValueError:
+    fallback_models = []
 kdense_models = [
     setting("KDENSE_DEFAULT_MODEL", ""),
     setting("KDENSE_EXPERT_MODEL", ""),

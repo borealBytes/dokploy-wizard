@@ -1420,7 +1420,16 @@ def _upsert_coder_secret(
 
 
 def _shell_double_quote_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    """Escape a substitution for templates' Terraform *quoted string* context.
+
+    Placeholders like ``VAR="__PLACEHOLDER__"`` are evaluated by Terraform's
+    string lexer before the startup script ever reaches bash, so a backslash
+    escape (``\\"``) would be consumed by Terraform and let embedded quotes
+    terminate the literal. Doubling dollars keeps generated ``${...}`` inert;
+    plain quotes are legal here (JSON fallback lists rely on it).
+    """
+
+    return value.replace("$", "$$")
 
 
 def _litellm_workspace_fallback_models_json(*, default_alias: str) -> str:
