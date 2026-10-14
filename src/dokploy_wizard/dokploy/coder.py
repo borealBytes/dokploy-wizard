@@ -41,7 +41,6 @@ from dokploy_wizard.dokploy.compose_noop import (
 )
 from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
 from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
-from dokploy_wizard.litellm.config_renderer import verified_opencode_go_chat_model_ids
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
 from dokploy_wizard.state import load_state_dir
@@ -77,7 +76,6 @@ _DEFAULT_HERMES_INFERENCE_PROVIDER = "dokploy-litellm"
 _DEFAULT_HERMES_MODEL = "opencode-go/deepseek-v4-flash"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_INTERNAL_PORT = 4000
-_DEFAULT_CODER_OPENROUTER_ALIAS_SAMPLE = "openrouter/minimax/minimax-m2.5:free"
 _COPILOT_BYOK_SETTING_KEY = "github.copilot.chat.customOAIModels"
 _COPILOT_BYOK_PROVIDER_LABEL = "Dokploy LiteLLM"
 _COPILOT_BYOK_CHAT_ONLY_LIMITATION = (
@@ -1426,10 +1424,14 @@ def _shell_double_quote_escape(value: str) -> str:
 
 
 def _litellm_workspace_fallback_models_json(*, default_alias: str) -> str:
-    model_ids = [default_alias]
-    model_ids.extend(f"opencode-go/{model_id}" for model_id in verified_opencode_go_chat_model_ids())
-    model_ids.append(_DEFAULT_CODER_OPENROUTER_ALIAS_SAMPLE)
-    return json.dumps(list(dict.fromkeys(model_ids)))
+    """Last-resort workspace model list when the gateway is unreachable at boot.
+
+    Everything else comes from the gateway's live /v1/models (which the sync
+    sidecar keeps authoritative), so baking pinned catalog samples here would
+    only resurrect stale aliases. The default alias route always exists.
+    """
+
+    return json.dumps([default_alias])
 
 
 def _copilot_byok_contract() -> dict[str, str]:

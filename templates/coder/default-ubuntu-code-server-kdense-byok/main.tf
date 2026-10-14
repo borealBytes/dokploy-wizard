@@ -437,21 +437,64 @@ PY
       exit 1
     fi
 
-    python3 - <<'PY'
+    mkdir -p /home/coder/.config/dokploy /home/coder/.local/share/dokploy
+    cat > /home/coder/.config/dokploy/model-refresh.env <<ENVEOF
+DOKPLOY_LITELLM_BASE_URL="$KDENSE_CENTRAL_LITELLM_BASE_URL"
+DOKPLOY_LITELLM_API_KEY="$KDENSE_CENTRAL_LITELLM_API_KEY"
+DOKPLOY_LITELLM_DEFAULT_ALIAS="$KDENSE_COPILOT_DEFAULT_ALIAS"
+KDENSE_DEFAULT_MODEL="$KDENSE_DEFAULT_MODEL"
+KDENSE_EXPERT_MODEL="$KDENSE_EXPERT_MODEL"
+DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="$DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON"
+ENVEOF
+    chmod 600 /home/coder/.config/dokploy/model-refresh.env
+    cat > /home/coder/.local/share/dokploy/model-refresh.py <<'PY'
 import json
 import os
+import subprocess
+import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-base_url = os.environ["KDENSE_CENTRAL_LITELLM_BASE_URL"].rstrip("/")
-api_key = os.environ.get("KDENSE_CENTRAL_LITELLM_API_KEY", "")
-default_alias = os.environ["KDENSE_COPILOT_DEFAULT_ALIAS"]
-fallback_models = json.loads(os.environ.get("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]"))
+ENV_FILE = "/home/coder/.config/dokploy/model-refresh.env"
+LEGACY_ENV_NAMES = {
+    "DOKPLOY_LITELLM_BASE_URL": "KDENSE_CENTRAL_LITELLM_BASE_URL",
+    "DOKPLOY_LITELLM_API_KEY": "KDENSE_CENTRAL_LITELLM_API_KEY",
+    "DOKPLOY_LITELLM_DEFAULT_ALIAS": "KDENSE_COPILOT_DEFAULT_ALIAS",
+}
+
+
+def setting(name: str, default: str = "") -> str:
+    for candidate in (name, LEGACY_ENV_NAMES.get(name, "")):
+        if candidate:
+            value = os.environ.get(candidate, "").strip()
+            if value:
+                return value
+    try:
+        with open(ENV_FILE, encoding="utf-8") as handle:
+            for line in handle:
+                key, separator, raw_value = line.partition("=")
+                if separator and key.strip() == name:
+                    return raw_value.strip().strip('"')
+    except OSError:
+        pass
+    return default
+
+
+base_url = setting("DOKPLOY_LITELLM_BASE_URL").rstrip("/")
+api_key = setting("DOKPLOY_LITELLM_API_KEY")
+default_alias = setting("DOKPLOY_LITELLM_DEFAULT_ALIAS")
+fallback_models = json.loads(setting("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]"))
 kdense_models = [
-    os.environ.get("KDENSE_DEFAULT_MODEL", ""),
-    os.environ.get("KDENSE_EXPERT_MODEL", ""),
+    setting("KDENSE_DEFAULT_MODEL", ""),
+    setting("KDENSE_EXPERT_MODEL", ""),
 ]
+
+if "--daemon" in sys.argv[1:]:
+    while True:
+        time.sleep(1800)
+        subprocess.run([sys.executable, __file__], check=False)
 
 
 def fetch_model_ids() -> list[str]:
@@ -459,23 +502,33 @@ def fetch_model_ids() -> list[str]:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            payload = json.load(response)
-    except (OSError, ValueError, urllib.error.URLError):
-        return []
     ids: list[str] = []
-    for item in payload.get("data", []):
-        if not isinstance(item, dict):
-            continue
-        model_id = item.get("id")
-        if isinstance(model_id, str) and model_id.strip() and not model_id.strip().endswith("/*"):
-            ids.append(model_id.strip())
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.load(response)
+        except (OSError, ValueError, urllib.error.URLError):
+            payload = {"data": []}
+        ids = []
+        for item in payload.get("data", []):
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("id")
+            if isinstance(model_id, str) and model_id.strip() and not model_id.strip().endswith("/*"):
+                ids.append(model_id.strip())
+        if ids or attempt == 3:
+            return ids
+        time.sleep(10)
     return ids
 
 
+fetched_model_ids = fetch_model_ids()
+if not fetched_model_ids and Path("/home/coder/.config/opencode/opencode.json").exists():
+    # Gateway unreachable during a background refresh; keep the last good list.
+    raise SystemExit(0)
+
 model_ids = []
-for candidate in [default_alias, *kdense_models, *fetch_model_ids(), *fallback_models]:
+for candidate in [default_alias, *kdense_models, *fetched_model_ids, *fallback_models]:
     if isinstance(candidate, str) and candidate.strip():
         model_ids.append(candidate.strip())
 model_ids = list(dict.fromkeys(model_ids))
@@ -552,6 +605,11 @@ Path("/home/coder/.pi/agent/models.json").write_text(
     encoding="utf-8",
 )
 PY
+
+    sh -c 'set -a; . /home/coder/.config/dokploy/model-refresh.env; set +a; exec python3 /home/coder/.local/share/dokploy/model-refresh.py' || true
+    if ! pgrep -f 'model-refresh.py --daemon' >/dev/null 2>&1; then
+      setsid nohup python3 /home/coder/.local/share/dokploy/model-refresh.py --daemon >/dev/null 2>&1 < /dev/null &
+    fi
 
     normalize_model_for_gateway() {
       model="$1"

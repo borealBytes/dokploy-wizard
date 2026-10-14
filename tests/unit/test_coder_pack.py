@@ -41,15 +41,16 @@ def _expected_coder_fallback_models_json_escaped() -> str:
     return coder_module._shell_double_quote_escape(_expected_coder_fallback_models_json())
 
 
-def test_coder_litellm_fallback_models_json_uses_full_concrete_aliases() -> None:
+def test_coder_litellm_fallback_models_json_is_minimal_default_alias() -> None:
     aliases = json.loads(_expected_coder_fallback_models_json())
 
-    assert aliases[0] == "opencode-go/deepseek-v4-flash"
-    assert "opencode-go/deepseek-v4-flash" in aliases
-    assert "opencode-go/minimax-m2.7" in aliases
-    assert "openrouter/minimax/minimax-m2.5:free" in aliases
+    # The workspace fetches the full live model set from /v1/models at boot; the
+    # baked fallback is only the always-present default alias route. Stale
+    # hardcoded samples (e.g. retired openrouter free slugs) must not reappear.
+    assert aliases == ["opencode-go/deepseek-v4-flash"]
     assert "deepseek-v4-flash" not in aliases
     assert "minimax/minimax-m2.5:free" not in aliases
+    assert "opencode-go/minimax-m2.7" not in aliases
     assert "opencode-go/*" not in aliases
 
 
@@ -159,6 +160,13 @@ def test_every_template_installs_pi_and_opencode_and_preseeds_litellm(template_d
     assert '"npm": "@ai-sdk/openai-compatible"' in template
     assert '"api": "openai-completions"' in template
     assert "DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON" in template
+    # Every template persists a self-contained refresher and a background daemon
+    # so the model picker tracks the live gateway, not just boot time.
+    assert "cat > /home/coder/.config/dokploy/model-refresh.env <<ENVEOF" in template
+    assert "cat > /home/coder/.local/share/dokploy/model-refresh.py <<'PY'" in template
+    assert "def setting(name: str, default: str" in template
+    assert 'if "--daemon" in sys.argv[1:]' in template
+    assert "model-refresh.py --daemon" in template
 
 
 def test_base_copilot_byok_template_settings() -> None:
@@ -200,8 +208,10 @@ def test_kdense_copilot_byok_uses_central_gateway() -> None:
     assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"' in template
     assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"' in template
     assert 'export KDENSE_COPILOT_DEFAULT_ALIAS="__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__/__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__"' in template
-    assert 'base_url = os.environ["KDENSE_CENTRAL_LITELLM_BASE_URL"].rstrip("/")' in template
-    assert 'api_key = os.environ.get("KDENSE_CENTRAL_LITELLM_API_KEY", "")' in template
+    assert 'base_url = setting("DOKPLOY_LITELLM_BASE_URL").rstrip("/")' in template
+    assert 'KDENSE_CENTRAL_LITELLM_API_KEY="$${KDENSE_OPENCODE_GO_API_KEY:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY}"' in template
+    assert 'api_key = setting("DOKPLOY_LITELLM_API_KEY")' in template
+    assert '"DOKPLOY_LITELLM_API_KEY": "KDENSE_CENTRAL_LITELLM_API_KEY"' in template
     assert 'KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"' in template
     assert 'append_env OPENROUTER_API_KEY ' not in template
     assert 'append_env NVIDIA_API_KEY ' not in template
@@ -424,14 +434,15 @@ def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
     assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
     assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
     assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
-    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
+    assert 'timeout=15' in template
+    assert 'for attempt in range(4):' in template
     assert 'payload = json.load(response)' in template
     assert 'except (OSError, ValueError, urllib.error.URLError):' in template
-    assert 'return []' in template
+    assert 'payload = {"data": []}' in template
     assert 'model_id = item.get("id")' in template
     assert 'and not normalized.endswith("/*")' in template
     assert 'and not normalized.startswith("openai/")' in template
-    assert 'model_ids = list(dict.fromkeys(fetch_model_ids() + fallback_models))' in template
+    assert 'model_ids = list(dict.fromkeys(fetched_model_ids + fallback_models))' in template
     assert '"npm": "@ai-sdk/openai-compatible"' in template
     assert '"options": {"baseURL": base_url, "apiKey": api_key}' in template
     assert '"models": {model_id: {} for model_id in model_ids}' in template
@@ -468,10 +479,11 @@ def test_default_opencode_web_template_includes_web_app() -> None:
     assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
     assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
     assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
-    assert 'with urllib.request.urlopen(request, timeout=5) as response:' in template
+    assert 'timeout=15' in template
+    assert 'for attempt in range(4):' in template
     assert 'payload = json.load(response)' in template
     assert 'payload = {"data": []}' in template
-    assert 'model_ids = list(dict.fromkeys(model_ids + fallback_models))' in template
+    assert 'model_ids = list(dict.fromkeys(fetched_model_ids + fallback_models))' in template
     assert '"npm": "@ai-sdk/openai-compatible"' in template
     assert '"options": {"baseURL": base_url, "apiKey": api_key}' in template
     assert '"models": {model_id: {} for model_id in model_ids}' in template
