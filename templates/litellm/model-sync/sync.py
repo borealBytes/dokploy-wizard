@@ -19,6 +19,13 @@ Environment:
   MODEL_SYNC_STATE_DIR         writable directory for run markers (default /state)
   MODEL_SYNC_INTERVAL_MINUTES  minutes between sync cycles (default 360)
   MODEL_SYNC_ONCE              set to 1 to run a single cycle and exit
+  MODEL_SYNC_CONSUMER_KEYS_FILE
+                              JSON map of consumer name -> virtual key token
+                              (written by the wizard into the state volume).
+                              When present each cycle also refreshes those
+                              keys' model_access lists so /v1/models exposes
+                              the current sync/* set explicitly. Touching the
+                              file triggers an early cycle.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ import sys
 import time
 from typing import Any
 from urllib import request
+from urllib.parse import quote
 
 SOURCES_FILE = os.environ.get("MODEL_SYNC_SOURCES_FILE", "/app/sources.json")
 STATE_DIR = os.environ.get("MODEL_SYNC_STATE_DIR", "/state")
@@ -39,6 +47,9 @@ MODEL_SYNC_ONCE = os.environ.get("MODEL_SYNC_ONCE", "0") == "1"
 HEALTHCHECK_GRACE_SECONDS = 900
 MANAGED_BY = "dokploy-wizard-model-sync"
 ALIAS_PREFIX = "sync"
+SYNC_WILDCARD = "sync/*"
+CONSUMER_KEYS_FILE = os.environ.get("MODEL_SYNC_CONSUMER_KEYS_FILE", "/state/consumer-keys.json")
+CYCLE_POLL_SECONDS = 30.0
 USER_AGENT = "dokploy-wizard-model-sync/1"
 REQUEST_TIMEOUT_SECONDS = 30
 DEFAULT_MAX_MODELS_PER_PROVIDER = 50
@@ -185,7 +196,9 @@ def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
     limit = max_models
     source_max = source.get("max_models")
     if isinstance(source_max, (int, float)) and int(source_max) > 0:
-        limit = min(limit, int(source_max))
+        # A source's own budget fully overrides the global per-provider cap so
+        # catalogs the operator wants in full (e.g. OpenCode Go) are not cut.
+        limit = int(source_max)
     ranked = _ranked_catalog_model_ids(source, payload)
     if ranked is not None:
         return ranked[:limit]
@@ -280,6 +293,75 @@ def delete_deployment(model_id: Any) -> None:
     http_json("POST", f"{GATEWAY_URL}/model/delete", token=MASTER_KEY, payload={"id": model_id})
 
 
+def load_consumer_keys() -> dict[str, str]:
+    """Read the wizard-pushed consumer key tokens ({consumer: token}).
+
+    Missing or malformed files simply disable key reconciliation; the wizard
+    re-pushes the file after every key rotation and an early cycle follows.
+    """
+
+    try:
+        with open(CONSUMER_KEYS_FILE, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        log(f"consumer keys unreadable: {type(exc).__name__}: {exc}")
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(consumer): token.strip()
+        for consumer, token in raw.items()
+        if isinstance(token, str) and token.strip()
+    }
+
+
+def _key_models_payload(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    info = payload.get("info")
+    for container in (payload, info if isinstance(info, dict) else {}):
+        models = container.get("models")
+        if isinstance(models, list):
+            return [str(model) for model in models if isinstance(model, str) and model.strip()]
+    return []
+
+
+def reconcile_consumer_key(consumer: str, token: str, desired_aliases: list[str]) -> bool:
+    """Merge the current sync/* alias set into one consumer key's allowlist.
+
+    LiteLLM does not expand the sync/* wildcard on /v1/models for keys, so
+    consumers that seed their model pickers from that endpoint only see the
+    synced set when it is listed explicitly. Non-sync entries and the wildcard
+    itself are preserved; stale sync/* names from previous rotations are
+    dropped. Returns True when the key was updated.
+    """
+
+    info_url = f"{GATEWAY_URL}/key/info?key={quote(token, safe='')}"
+    payload = http_json("GET", info_url, token=MASTER_KEY)
+    models = _key_models_payload(payload)
+    if not models:
+        log(f"key reconcile {consumer}: no allowlist visible via /key/info; leaving key alone")
+        return False
+    desired = set(desired_aliases)
+    retained = [
+        model
+        for model in models
+        if not model.startswith(f"{ALIAS_PREFIX}/") or model == SYNC_WILDCARD or model in desired
+    ]
+    merged = retained + [alias for alias in desired_aliases if alias not in retained]
+    if merged == models:
+        return False
+    http_json(
+        "POST",
+        f"{GATEWAY_URL}/key/update",
+        token=MASTER_KEY,
+        payload={"key": token, "model_access": merged},
+    )
+    return True
+
+
 def sync_once(document: dict[str, Any]) -> dict[str, Any]:
     deployments, ok_sources = desired_deployments(document)
     existing = gateway_model_names()
@@ -313,12 +395,26 @@ def sync_once(document: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:
             prune_errors += 1
             log(f"prune {name} failed: {type(exc).__name__}: {exc}")
+    key_reconciled = 0
+    key_errors = 0
+    consumer_keys = load_consumer_keys()
+    if consumer_keys and deployments:
+        desired_aliases = sorted(deployments)
+        for consumer, token in sorted(consumer_keys.items()):
+            try:
+                if reconcile_consumer_key(consumer, token, desired_aliases):
+                    key_reconciled += 1
+            except Exception as exc:
+                key_errors += 1
+                log(f"key reconcile {consumer} failed: {type(exc).__name__}: {exc}")
     return {
         "desired": len(deployments),
         "created": created,
         "pruned": pruned,
         "create_errors": create_errors,
         "prune_errors": prune_errors,
+        "key_reconciled": key_reconciled,
+        "key_errors": key_errors,
         "sources_ok": sorted(ok_sources),
     }
 
@@ -332,13 +428,29 @@ def write_marker(name: str, payload: dict[str, Any]) -> None:
         log(f"marker write failed ({name}): {exc}")
 
 
-def sleep_between_cycles() -> None:
+def consumer_keys_mtime() -> float:
+    try:
+        return os.path.getmtime(CONSUMER_KEYS_FILE)
+    except OSError:
+        return 0.0
+
+
+def wait_for_next_cycle(trigger_baseline: float) -> float:
+    """Sleep between cycles, waking early when the wizard pushes new tokens.
+
+    Returns the refreshed trigger baseline (interval expiry) or a negative
+    sentinel when the consumer-keys file changed and a cycle should run now.
+    """
+
     deadline = time.monotonic() + max(INTERVAL_MINUTES, 1) * 60
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return
-        time.sleep(min(30.0, remaining))
+            return trigger_baseline
+        time.sleep(min(CYCLE_POLL_SECONDS, remaining))
+        current = consumer_keys_mtime()
+        if current > trigger_baseline:
+            return -1.0
 
 
 def run_healthcheck() -> int:
@@ -360,12 +472,14 @@ def main() -> int:
     if "--healthcheck" in sys.argv[1:]:
         return run_healthcheck()
     log(f"starting gateway={GATEWAY_URL} interval_minutes={INTERVAL_MINUTES:g}")
+    trigger_baseline = consumer_keys_mtime()
     while True:
         try:
             summary = sync_once(load_document())
             log(
                 "cycle done desired={desired} created={created} pruned={pruned}"
-                " create_errors={create_errors} prune_errors={prune_errors}".format(**summary)
+                " create_errors={create_errors} prune_errors={prune_errors}"
+                " key_reconciled={key_reconciled} key_errors={key_errors}".format(**summary)
             )
             write_marker("last_success", {"ts": int(time.time()), **summary})
         except Exception as exc:
@@ -376,7 +490,12 @@ def main() -> int:
             )
         if MODEL_SYNC_ONCE:
             return 0
-        sleep_between_cycles()
+        refreshed = wait_for_next_cycle(trigger_baseline)
+        if refreshed < 0:
+            log("consumer keys file updated; running early cycle")
+            trigger_baseline = consumer_keys_mtime()
+        else:
+            trigger_baseline = refreshed
 
 
 if __name__ == "__main__":

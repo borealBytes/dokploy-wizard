@@ -64,21 +64,11 @@ from dokploy_wizard.verification import ServiceVerificationResult
 
 from .fake_dokploy import FakeDokployApiClient
 
+# Only the default OpenCode Go alias is a static config route now; the rest of
+# the catalog is autosynced under sync/opencode-go/* and not part of static
+# advisor fallbacks.
 _EXPECTED_OPENCODE_GO_CHAT_FALLBACKS = (
-    "opencode-go/minimax-m2.7",
-    "opencode-go/minimax-m2.5",
-    "opencode-go/kimi-k2.6",
-    "opencode-go/kimi-k2.5",
-    "opencode-go/glm-5.1",
-    "opencode-go/glm-5",
-    "opencode-go/deepseek-v4-pro",
     "opencode-go/deepseek-v4-flash",
-    "opencode-go/qwen3.6-plus",
-    "opencode-go/qwen3.5-plus",
-    "opencode-go/mimo-v2-pro",
-    "opencode-go/mimo-v2-omni",
-    "opencode-go/mimo-v2.5-pro",
-    "opencode-go/mimo-v2.5",
 )
 
 

@@ -12,6 +12,7 @@ import pytest
 
 from dokploy_wizard.litellm.model_sync import (
     MODEL_SYNC_CONSUMER_WILDCARD,
+    MODEL_SYNC_OPENCODE_GO_MAX_MODELS,
     MODEL_SYNC_OPENROUTER_MAX_MODELS,
     MODEL_SYNC_OPENROUTER_MAX_RANKED_FREE,
     MODEL_SYNC_OPENROUTER_MAX_RANKED_PAID,
@@ -67,6 +68,7 @@ def test_sources_cover_configured_providers_only() -> None:
     assert opencode_go["list_url"] == "https://opencode.ai/zen/go/v1/models"
     assert opencode_go["api_base"] == "https://opencode.ai/zen/go/v1"
     assert opencode_go["model_ref_template"] == "openai/{model}"
+    assert opencode_go["max_models"] == MODEL_SYNC_OPENCODE_GO_MAX_MODELS
     assert opencode_go["extra_headers"] == dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS)
     assert model_sync_enabled(env, creds) is True
 
@@ -423,6 +425,91 @@ def test_sidecar_ranked_total_cap_and_fallback(
         "deepseek/deepseek-v4-flash:free",
         "z-ai/glm-5.3",
     ]
+
+
+def test_sidecar_source_budget_overrides_global_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+
+    def fake_http_json(method: str, url: str, *, token: str | None = None, payload: dict | None = None):
+        return {"data": [{"id": f"model-{index}"} for index in range(5)]}
+
+    sidecar.http_json = fake_http_json
+    source = {
+        "name": "opencode-go",
+        "alias_prefix": "sync/opencode-go",
+        "list_url": "https://opencode.ai/zen/go/v1/models",
+        "model_ref_template": "openai/{model}",
+        "max_models": 100,
+    }
+    assert len(sidecar.source_model_ids(source, 2)) == 5
+
+
+def test_sidecar_refreshes_consumer_key_allowlists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LITELLM_OPENROUTER_API_KEY", "or-upstream-key")
+    keys_path = tmp_path / "state" / "consumer-keys.json"
+    keys_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MODEL_SYNC_CONSUMER_KEYS_FILE", str(keys_path))
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    keys_path.write_text(json.dumps({"coder-hermes": "sk-consumer-1"}), encoding="utf-8")
+
+    calls: list[tuple[str, str, dict | None]] = []
+
+    current_models = [
+        "opencode-go/deepseek-v4-flash",
+        "sync/*",
+        "sync/openrouter/stale/gone-model",
+    ]
+
+    def fake_http_json(method: str, url: str, *, token: str | None = None, payload: dict | None = None):
+        calls.append((method, url, payload))
+        if url.endswith("/api/v1/models"):
+            return {"data": [{"id": "deepseek/new-thing"}, {"id": "wild/*"}]}
+        if url.endswith("/model/info"):
+            return {"data": []}
+        if url.startswith("http://litellm:4000/key/info"):
+            assert url.endswith("key=sk-consumer-1")
+            return {"info": {"models": list(current_models)}}
+        if url.endswith("/key/update"):
+            current_models[:] = payload["model_access"]
+        return {}
+
+    sidecar.http_json = fake_http_json
+
+    summary = sidecar.sync_once(_sidecar_document())
+
+    assert summary["key_reconciled"] == 1
+    assert summary["key_errors"] == 0
+    update = next(call for call in calls if call[1].endswith("/key/update"))
+    # The stale sync alias is dropped, the wildcard and static route survive,
+    # and the freshly created alias is appended.
+    assert update[2]["model_access"] == [
+        "opencode-go/deepseek-v4-flash",
+        "sync/*",
+        "sync/openrouter/deepseek/new-thing",
+    ]
+
+    calls.clear()
+    summary_again = sidecar.sync_once(_sidecar_document())
+    assert summary_again["key_reconciled"] == 0
+
+
+def test_sidecar_skips_key_reconcile_without_consumer_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LITELLM_OPENROUTER_API_KEY", "or-upstream-key")
+    monkeypatch.setenv("MODEL_SYNC_CONSUMER_KEYS_FILE", str(tmp_path / "absent.json"))
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    sidecar.http_json, calls = _sidecar_transport(_sidecar_document(), [])
+
+    summary = sidecar.sync_once(_sidecar_document())
+
+    assert summary["key_reconciled"] == 0
+    assert summary["key_errors"] == 0
+    assert not [call for call in calls if call[1].endswith("/key/update")]
 
 
 def test_sidecar_healthcheck_requires_fresh_success_marker(

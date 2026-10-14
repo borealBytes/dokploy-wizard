@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from collections.abc import Mapping
@@ -347,9 +348,8 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
     assert re.search(r"source: wizard-stack-shared-litellm-config-[0-9a-f]{12}", compose)
     assert "target: /app/config.yaml" in compose
     assert 'api_key: "os.environ/LITELLM_LOCAL_API_KEY"' in compose
-    assert 'model_name: "opencode-go/minimax-m2.7"' in compose
     assert 'model_name: "opencode-go/deepseek-v4-flash"' in compose
-    assert 'model_name: "opencode-go/mimo-v2.5"' in compose
+    assert 'model_name: "opencode-go/minimax-m2.7"' not in compose
     assert 'model_name: "openrouter/hunter-alpha"' in compose
     assert '      LITELLM_OPENCODE_GO_API_KEY: "${LITELLM_OPENCODE_GO_API_KEY:?LITELLM_OPENCODE_GO_API_KEY is required}"' in compose
     assert (
@@ -406,11 +406,12 @@ def test_rendered_litellm_local_model_disables_system_role_for_vllm_templates() 
         compose,
         "local-model.internal/unsloth-active",
     )
-    opencode_block = _embedded_litellm_model_block(compose, "opencode-go/deepseek-v4-flash")
+    # A non-OpenCode-Go default provider means no static Go alias route at all;
+    # the sidecar exposes the full Go catalog under sync/opencode-go/* instead.
+    assert 'model_name: "opencode-go/deepseek-v4-flash"' not in compose
     openrouter_block = _embedded_litellm_model_block(compose, "openrouter/hunter-alpha")
 
     assert "supports_system_message: false" in local_block
-    assert "supports_system_message" not in opencode_block
     assert "supports_system_message" not in openrouter_block
     assert "SECRET" not in compose
 
@@ -458,7 +459,7 @@ def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
     )
     assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "litellm-opencode-key"
     assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "litellm-openrouter-key"
-    assert 'model_name: "opencode-go/minimax-m2.7"' in compose
+    assert 'model_name: "opencode-go/deepseek-v4-flash"' in compose
     assert 'model_name: "openrouter/google/gemma-4-31b-it:free"' in compose
 
 
@@ -789,6 +790,38 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
 
     assert matching_backend.validate_litellm_virtual_keys() is True
     assert drifted_backend.validate_litellm_virtual_keys() is False
+
+    # The sync sidecar appends explicit sync/* aliases to consumer keys for
+    # /v1/models visibility; such keys are still valid (wizard list is a floor).
+    sidecar_expanded_records = tuple(
+        LiteLLMVirtualKeyRecord(
+            key=record.key,
+            key_alias=record.key_alias,
+            team_id=record.team_id,
+            models=(
+                (*record.models, "sync/openrouter/deepseek/deepseek-v4-flash")
+                if record.key_alias == "openclaw"
+                else record.models
+            ),
+            metadata=record.metadata,
+        )
+        for record in matching_records
+    )
+    sidecar_expanded_backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists={
+            "openclaw": ("local-model.internal/unsloth-active",)
+        },
+        litellm_admin_api=_FakeLiteLLMAdminApi(
+            {"status": "connected", "db": "connected"},
+            keys=sidecar_expanded_records,
+        ),
+    )
+    assert sidecar_expanded_backend.validate_litellm_virtual_keys() is True
 
 
 def test_shared_core_find_container_name_prefers_exact_manual_name(
@@ -1908,3 +1941,65 @@ def test_consumer_virtual_keys_receive_sync_wildcard() -> None:
         allowlists, litellm_env={**_MODEL_SYNC_ENV, "LITELLM_MODEL_SYNC_ENABLED": "0"}
     )
     assert all("sync/*" not in models for models in disabled.values())
+
+
+def test_push_model_sync_consumer_keys_writes_state_file_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_cmd: list[str] = []
+    captured_input: list[str] = []
+
+    def fake_run(
+        cmd: list[str],
+        *args: object,
+        input: str | None = None,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        captured_cmd.extend(cmd)
+        captured_input.append(input or "")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.shared_core.subprocess.run", fake_run)
+
+    assert shared_core_module._push_model_sync_consumer_keys(
+        "sync-container", {"coder-hermes": "sk-1", "surfsense": "sk-2"}
+    )
+    assert captured_cmd[:3] == ["docker", "exec", "sync-container"]
+    assert json.loads(captured_input[0]) == {"coder-hermes": "sk-1", "surfsense": "sk-2"}
+    shell = " ".join(captured_cmd)
+    assert "consumer-keys.json.tmp" in shell and "mv" in shell
+
+
+def test_push_model_sync_consumer_keys_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.shared_core.subprocess.run", fake_run)
+
+    assert not shared_core_module._push_model_sync_consumer_keys("sync-container", {"a": "sk-a"})
+
+
+def test_model_sync_first_cycle_completed_polls_healthcheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results = iter([1, 1, 0])
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert cmd[-3:] == ["python3", "/app/model_sync.py", "--healthcheck"]
+        return subprocess.CompletedProcess(args=cmd, returncode=next(results), stdout="", stderr="")
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.shared_core.subprocess.run", fake_run)
+    sleeps: list[float] = []
+
+    assert shared_core_module._model_sync_first_cycle_completed(
+        "sync-container", attempts=5, delay_seconds=5.0, sleep_fn=sleeps.append
+    )
+    assert sleeps == [5.0, 5.0]
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.shared_core.subprocess.run",
+        lambda cmd, *a, **k: subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=""),
+    )
+    assert not shared_core_module._model_sync_first_cycle_completed(
+        "sync-container", attempts=2, delay_seconds=0.0, sleep_fn=lambda _s: None
+    )

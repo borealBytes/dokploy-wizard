@@ -929,7 +929,7 @@ def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults()
         "LITELLM_LOCAL_MODEL",
         "LITELLM_LOCAL_API_KEY",
         "LITELLM_OPENCODE_GO_API_KEY",
-        "LITELLM_OPENCODE_GO_WILDCARD",
+
         "LITELLM_NVIDIA_API_KEY",
         "NVIDIA_BASE_URL",
     )

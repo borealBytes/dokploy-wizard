@@ -2,9 +2,12 @@
 
 The autosync sidecar runs beside the shared-core LiteLLM service, polls the
 configured model catalog sources (OpenRouter, OpenCode Zen, NVIDIA), and
-registers newly published models through the LiteLLM admin API. This module
-renders the sidecar's source document, exposes the shared gating rules, and
-loads the sidecar script text that is mounted into the container.
+registers newly published models through the LiteLLM admin API. Each cycle
+also refreshes consumer virtual-key allowlists with the explicit sync/* set,
+because /v1/models does not expand the sync/* wildcard and workspace tooling
+seeds its model picker from that endpoint. This module renders the sidecar's
+source document, exposes the shared gating rules, and loads the sidecar script
+text that is mounted into the container.
 """
 
 from __future__ import annotations
@@ -45,6 +48,9 @@ _OPENROUTER_RANKINGS_URL = "https://openrouter.ai/api/frontend/v1/rankings/model
 MODEL_SYNC_OPENROUTER_MAX_MODELS = 30
 MODEL_SYNC_OPENROUTER_MAX_RANKED_PAID = 20
 MODEL_SYNC_OPENROUTER_MAX_RANKED_FREE = 10
+# OpenCode Go is consumed in full whenever a key is configured: the catalog is
+# curated upstream and small, so no ranking slice or env model list applies.
+MODEL_SYNC_OPENCODE_GO_MAX_MODELS = 100
 _OPENCODE_GO_BASE_URL_DEFAULT = "https://opencode.ai/zen/go/v1"
 _NVIDIA_BASE_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
 
@@ -119,6 +125,7 @@ def build_model_sync_sources(
                     "api_key_env": opencode_go_api_key_env,
                     "api_base": base_url,
                     "model_ref_template": "openai/{model}",
+                    "max_models": MODEL_SYNC_OPENCODE_GO_MAX_MODELS,
                     "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
                 }
             )

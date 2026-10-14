@@ -672,8 +672,8 @@ The operator env file stays flat. `.install.env` contains only key=value pairs. 
 The generated LiteLLM config enforces a strict precedence:
 
 1. `local-model.internal/unsloth-active` — a private OpenAI-compatible endpoint, when `LITELLM_LOCAL_BASE_URL` is configured
-2. `opencode-go/*` — explicit OpenCode Go aliases covering the OpenCode Go provider fleet
-3. `openrouter/*` — explicit OpenRouter aliases, each declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS`
+2. `opencode-go/<AI_DEFAULT_MODEL>` — the resolved default alias route, so the workspace default and `dokploy-ai` key resolve the moment LiteLLM boots; the rest of the OpenCode Go fleet arrives via autosync (see below), not from a pinned list
+3. `openrouter/*` — explicit OpenRouter aliases, each declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS` (optional manual extras; the synced set covers the popular models automatically)
 
 OpenRouter wildcard routes are not allowed. The config renderer rejects `openrouter/*` or broad `*` aliases.
 
@@ -681,15 +681,15 @@ SurfSense receives the same approved alias list through its generated LiteLLM vi
 
 ### Model autosync
 
-Besides the explicit aliases above, the wizard runs a model autosync sidecar beside the LiteLLM service so newly published provider models appear without a wizard rerun. The sidecar (`<stack-name>-shared-litellm-sync`) loops on a schedule, polls the model catalogs of every upstream provider whose key is configured (OpenRouter, OpenCode Go/Zen, NVIDIA), and registers models the gateway does not expose yet through the LiteLLM admin API. For OpenRouter the sidecar tracks the public weekly leaderboard instead of an arbitrary catalog slice: the top 20 paid (standard-variant) models plus the top 10 `:free` models, so the synced set stays a curated ~30 frontier picks that reshuffle automatically as popularity changes.
+Besides the explicit aliases above, the wizard runs a model autosync sidecar beside the LiteLLM service so newly published provider models appear without a wizard rerun. The sidecar (`<stack-name>-shared-litellm-sync`) runs a full cycle the moment it boots, then repeats on a schedule, polling the model catalogs of every upstream provider whose key is configured (OpenRouter, OpenCode Go/Zen, NVIDIA), and registers models the gateway does not expose yet through the LiteLLM admin API. For OpenRouter the sidecar tracks the public weekly leaderboard instead of an arbitrary catalog slice: the top 20 paid (standard-variant) models plus the top 10 `:free` models, so the synced set stays a curated ~30 frontier picks that reshuffle automatically as popularity changes. OpenCode Go needs no configuration at all: whenever `LITELLM_OPENCODE_GO_API_KEY` is set, the entire live catalog is synced in full (no env model list is consulted).
 
 How autosynced models behave:
 
 - Autosynced deployments are named `sync/<source>/<model-id>`, so they never collide with the explicit config-file aliases.
 - Deployments created by autosync are tagged internally; when a source drops a model, only wizard-created `sync/...` deployments are pruned. Config-file aliases and models you added yourself in the admin UI are never touched.
-- Consumer virtual keys carry a `sync/*` wildcard, so autosynced models are immediately callable from OpenClaw, My Farm Advisor, SurfSense, Coder Hermes, and Coder K-Dense. `dokploy-ai` stays restricted to the resolved default alias.
+- Consumer virtual keys carry a `sync/*` wildcard, so autosynced models are immediately callable from OpenClaw, My Farm Advisor, SurfSense, Coder Hermes, and Coder K-Dense. `dokploy-ai` stays restricted to the resolved default alias. Each cycle the sidecar also refreshes each consumer key's allowlist with the explicit current `sync/*` names, because LiteLLM's `/v1/models` does not expand wildcards and workspace tooling seeds its model picker from that endpoint.
 - Rendered LiteLLM config sets `general_settings.store_model_in_db` so admin-API-registered models survive proxy restarts.
-- Coder workspaces resolve their model lists live from the gateway at boot, so autosynced models show up in OpenCode, Pi, and Copilot BYOK on the next workspace start.
+- Coder workspaces resolve their model lists live from the gateway at boot and re-run the same fetch from a background refresher every 30 minutes, so autosynced models appear in OpenCode, Pi, Hermes, and Copilot BYOK within one rotation cycle — even in long-running workspaces. If the gateway is briefly unreachable during a refresh, the last good model list is kept.
 
 Autosync is on whenever at least one upstream provider key is configured. Optional env knobs:
 

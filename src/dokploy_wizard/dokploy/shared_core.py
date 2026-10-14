@@ -561,6 +561,45 @@ class DokploySharedCoreBackend:
                 )
             except DokployApiError as error:
                 raise SharedCoreError(str(error)) from error
+        self._reconcile_model_sync_visibility()
+
+    def _reconcile_model_sync_visibility(self) -> None:
+        """Hand consumer key tokens to the sync sidecar and await its cycle.
+
+        LiteLLM's /v1/models does not expand the sync/* wildcard, so the
+        sidecar needs the consumer tokens to list the active sync/* aliases
+        explicitly on each key; workspace tooling seeds model pickers from
+        /v1/models at boot and must see the full, current set. Blocking on the
+        first successful cycle guarantees a same-run workspace starts fresh.
+        """
+
+        litellm_plan = self._plan.litellm
+        if litellm_plan is None or self._litellm_generated_keys is None:
+            return
+        if not model_sync_enabled(
+            self._litellm_env, _build_litellm_upstream_creds(self._litellm_env)
+        ):
+            return
+        sync_container = _wait_for_container_name(
+            model_sync_service_name(litellm_plan.service_name),
+            attempts=10,
+            delay_seconds=3.0,
+        )
+        if sync_container is None:
+            return
+        consumer_keys = {
+            consumer: key
+            for consumer, key in self._litellm_generated_keys.virtual_keys.items()
+            if consumer != "dokploy-ai" and key
+        }
+        if not consumer_keys or not _push_model_sync_consumer_keys(sync_container, consumer_keys):
+            return
+        _model_sync_first_cycle_completed(
+            sync_container,
+            attempts=40,
+            delay_seconds=5.0,
+            sleep_fn=self._sleep_fn,
+        )
 
     def _shared_core_runtime_ready_for_noop(self) -> bool:
         postgres_allocations = [
@@ -608,7 +647,10 @@ class DokploySharedCoreBackend:
             expected_models = tuple(
                 dict.fromkeys(self._litellm_consumer_model_allowlists.get(consumer, ()))
             )
-            if record.models != expected_models:
+            # The sync sidecar appends the explicit current sync/* alias set to
+            # consumer keys (for /v1/models visibility); treat the wizard's own
+            # allowlist as the floor, not the exact expected value.
+            if not set(expected_models) <= set(record.models):
                 return False
         return True
 
@@ -1939,6 +1981,55 @@ def _redis_is_ready(container_name: str) -> bool:
         text=True,
     )
     return result.returncode == 0 and result.stdout.strip() == "PONG"
+
+
+def _push_model_sync_consumer_keys(container_name: str, consumer_keys: Mapping[str, str]) -> bool:
+    """Deliver consumer key tokens to the sync sidecar via its state volume.
+
+    Virtual keys are minted after the compose stack is first deployed, so the
+    tokens cannot ride in as compose env on a fresh install. Writing them into
+    the sidecar's state directory (which the sidecar watches by mtime) lets it
+    reconcile key allowlists without redeploying anything.
+    """
+
+    payload = json.dumps(dict(sorted(consumer_keys.items())))
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            container_name,
+            "sh",
+            "-lc",
+            "umask 077; cat > /state/consumer-keys.json.tmp"
+            " && mv /state/consumer-keys.json.tmp /state/consumer-keys.json",
+        ],
+        input=payload,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _model_sync_first_cycle_completed(
+    container_name: str,
+    *,
+    attempts: int,
+    delay_seconds: float,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> bool:
+    for attempt in range(attempts):
+        result = subprocess.run(
+            ["docker", "exec", container_name, "python3", "/app/model_sync.py", "--healthcheck"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return True
+        if attempt < attempts - 1:
+            sleep_fn(delay_seconds)
+    return False
 
 
 def _postgres_password_for_allocation(allocation: SharedPostgresAllocation) -> str:

@@ -20,28 +20,10 @@ DEFAULT_LOCAL_ALIAS = DEFAULT_LOCAL_CANONICAL_ALIAS
 DEFAULT_LOCAL_MODEL = "openai/unsloth-active"
 DEFAULT_LOCAL_API_KEY = "sk-no-key-required"
 DEFAULT_OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
+# Mirrors the wizard-wide AI default model so the default alias route exists
+# even when AI_DEFAULT_* are left unset.
+_DEFAULT_OPENCODE_GO_MODEL = "deepseek-v4-flash"
 _NVIDIA_MODEL_SETTINGS_RESOURCE = "nvidia_model_settings.json"
-
-_VERIFIED_OPENCODE_GO_CHAT_MODEL_IDS: tuple[str, ...] = (
-    "minimax-m2.7",
-    "minimax-m2.5",
-    "kimi-k2.6",
-    "kimi-k2.5",
-    "glm-5.1",
-    "glm-5",
-    "deepseek-v4-pro",
-    "deepseek-v4-flash",
-    "qwen3.6-plus",
-    "qwen3.5-plus",
-    "mimo-v2-pro",
-    "mimo-v2-omni",
-    "mimo-v2.5-pro",
-    "mimo-v2.5",
-)
-
-
-def verified_opencode_go_chat_model_ids() -> tuple[str, ...]:
-    return _VERIFIED_OPENCODE_GO_CHAT_MODEL_IDS
 
 
 def build_litellm_config(
@@ -62,7 +44,7 @@ def build_litellm_config(
         legacy_env_names=("OPENCODE_GO_API_KEY",),
     )
     opencode_go_base_url = _opencode_go_base_url(flat_env)
-    opencode_go_model_ids = verified_opencode_go_chat_model_ids()
+    opencode_go_model_ids = _opencode_go_static_model_ids(flat_env)
 
     openrouter_api_key_env = _provider_api_key_env(
         flat_env,
@@ -234,6 +216,23 @@ def _opencode_go_base_url(flat_env: Mapping[str, str]) -> str:
         or _optional(flat_env, "OPENCODE_GO_BASE_URL")
         or DEFAULT_OPENCODE_GO_BASE_URL
     )
+
+
+def _opencode_go_static_model_ids(flat_env: Mapping[str, str]) -> tuple[str, ...]:
+    """Static OpenCode Go routes: only the resolved default model.
+
+    The full Go catalog is autosynced by the sidecar as sync/opencode-go/*.
+    A pinned env/code list here would go stale against the live catalog, so
+    the single exception is the default alias route: it must exist the moment
+    LiteLLM boots because workspace defaults and the dokploy-ai key point at
+    it before the first sync cycle completes.
+    """
+
+    provider = _optional(flat_env, "AI_DEFAULT_PROVIDER")
+    if provider is not None and provider != "opencode-go":
+        return ()
+    model = _optional(flat_env, "AI_DEFAULT_MODEL") or _DEFAULT_OPENCODE_GO_MODEL
+    return (model.removeprefix("opencode-go/"),)
 
 
 def _local_alias(flat_env: Mapping[str, str]) -> str:
