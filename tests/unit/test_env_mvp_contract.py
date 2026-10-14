@@ -177,8 +177,10 @@ def test_minimal_env_contract_key_categories_are_explicit_and_secret_free() -> N
 def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> None:
     install_min_keys, model_shape, safe_values = _load_install_min_env_shape()
     active_packs = safe_values["PACKS"].split(",")
-    required_proof_packs = ["nextcloud", "my-farm-advisor", "seaweedfs", "coder"]
-    optional_proof_packs = {"surfsense"}
+    # The minimal class-proof stack is Coder plus the shared services it needs
+    # and SeaweedFS object storage; heavier packs stay opt-in.
+    required_proof_packs = ["seaweedfs", "coder"]
+    optional_proof_packs = {"surfsense", "nextcloud", "my-farm-advisor"}
 
     assert active_packs[: len(required_proof_packs)] == required_proof_packs
     assert len(active_packs) == len(set(active_packs))
