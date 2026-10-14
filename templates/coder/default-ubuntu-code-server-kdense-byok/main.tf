@@ -303,7 +303,7 @@ resource "coder_script" "kdense_bootstrap" {
     fi
 
     if ! command -v opencode >/dev/null 2>&1; then
-      if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then
+      if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/v2/install | bash; then
         if [ ! -x /home/coder/.opencode/bin/opencode ]; then
           echo "OpenCode installer did not produce a usable binary" >&2
           exit 1

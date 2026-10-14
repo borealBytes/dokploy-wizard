@@ -150,7 +150,7 @@ _TEMPLATE_DIRS_WITH_PI_AND_OPENCODE = (
 def test_every_template_installs_pi_and_opencode_and_preseeds_litellm(template_dir: str) -> None:
     template = Path(f"templates/coder/{template_dir}/main.tf").read_text(encoding="utf-8")
 
-    assert "curl -fsSL https://opencode.ai/install" in template
+    assert "curl -fsSL https://opencode.ai/v2/install" in template
     assert "pnpm add -g @earendil-works/pi-coding-agent" in template
     assert "command -v pi" in template
     assert "pi --version" in template
@@ -391,7 +391,7 @@ def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
     assert "apt-get install -y curl git ca-certificates wget btop" in template
     assert "if ! command -v opencode >/dev/null 2>&1; then" in template
     assert (
-        "if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then"
+        "if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/v2/install | bash; then"
         in template
     )
     assert "if [ ! -x /home/coder/.opencode/bin/opencode ]; then" in template
@@ -453,7 +453,7 @@ def test_default_opencode_web_template_includes_web_app() -> None:
     assert "apt-get install -y curl git ca-certificates wget btop" in template
     assert "if ! command -v opencode >/dev/null 2>&1; then" in template
     assert (
-        "if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then"
+        "if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/v2/install | bash; then"
         in template
     )
     assert "if [ ! -x /home/coder/.opencode/bin/opencode ]; then" in template
