@@ -489,12 +489,15 @@ PY
     OPENCODE_WEB_PORT=4096
 
     # opencode serve mints a random server password every boot, which kills
-    # browser pairings on every restart. A stable per-workspace password (kept
-    # in the persistent home volume) lets one pairing survive rebuilds.
+    # browser pairings on every restart. The wizard seeds a stable password
+    # (the stack admin password) into the persistent home volume; browsers
+    # connect with server URL + this password, and the pairing survives
+    # rebuilds. Override per workspace by editing the file and restarting
+    # the serve process.
     OPENCODE_SERVER_PW_FILE=/home/coder/.local/share/dokploy/opencode-server-password
     if [ ! -s "$OPENCODE_SERVER_PW_FILE" ]; then
       mkdir -p "$(dirname "$OPENCODE_SERVER_PW_FILE")"
-      (umask 077 && head -c 32 /dev/urandom | base64 | tr -d '=+/' | head -c 43) > "$OPENCODE_SERVER_PW_FILE"
+      printf '%s' "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__" > "$OPENCODE_SERVER_PW_FILE"
     fi
     export OPENCODE_SERVER_PASSWORD="$(cat "$OPENCODE_SERVER_PW_FILE")"
 

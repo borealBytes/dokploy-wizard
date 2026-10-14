@@ -277,6 +277,9 @@ class DokployCoderBackend:
                     ),
                     "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": f"https://{self._hostname}",
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                    "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": _shell_double_quote_escape(
+                        self._admin_password or "ChangeMeSoon"
+                    ),
                 },
             ),
             (

@@ -84,10 +84,12 @@ def test_consolidated_template_serves_opencode_web_and_classic_hermes_with_cors_
     ).read_text(encoding="utf-8")
 
     assert 'nohup opencode serve --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT"' in template
-    # A stable per-workspace serve password keeps browser pairings alive
-    # across rebuilds (serve otherwise randomizes the password every boot).
+    # A stable serve password (seeded from the stack admin password) keeps
+    # browser connections alive across rebuilds; serve otherwise randomizes
+    # the password every boot.
     assert "OPENCODE_SERVER_PASSWORD=\"$(cat \"$OPENCODE_SERVER_PW_FILE\")\"" in template
     assert "/home/coder/.local/share/dokploy/opencode-server-password" in template
+    assert "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__" in template
     # opencode serve v2 has no base-path support: the app must ride the coder
     # wildcard host at an origin root, never behind a mounted-path proxy.
     assert "subdomain    = true" in template
@@ -1200,6 +1202,7 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
     consolidated_replacements = template_replacements_by_name[coder_module._default_template_name()]
     hermes_legacy_replacements = template_replacements_by_name[coder_module._default_hermes_template_name()]
     assert consolidated_replacements["__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"] == "https://coder.example.com"
+    assert consolidated_replacements["__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__"] == "ChangeMeSoon"
     assert consolidated_replacements["__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__"] == "wizard-stack-shared"
     assert consolidated_replacements["__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"] == (
         _expected_coder_fallback_models_json_escaped()
@@ -1320,6 +1323,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     consolidated_replacements = template_replacements_by_name[coder_module._default_template_name()]
     hermes_legacy_replacements = template_replacements_by_name[coder_module._default_hermes_template_name()]
     assert consolidated_replacements["__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"] == "https://coder.example.com"
+    assert consolidated_replacements["__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__"] == "ChangeMeSoon"
     assert consolidated_replacements["__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__"] == "wizard-stack-shared"
     assert consolidated_replacements["__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"] == (
         _expected_coder_fallback_models_json_escaped()
