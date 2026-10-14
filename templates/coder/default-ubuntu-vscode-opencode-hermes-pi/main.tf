@@ -488,6 +488,16 @@ PY
 
     OPENCODE_WEB_PORT=4096
 
+    # opencode serve mints a random server password every boot, which kills
+    # browser pairings on every restart. A stable per-workspace password (kept
+    # in the persistent home volume) lets one pairing survive rebuilds.
+    OPENCODE_SERVER_PW_FILE=/home/coder/.local/share/dokploy/opencode-server-password
+    if [ ! -s "$OPENCODE_SERVER_PW_FILE" ]; then
+      mkdir -p "$(dirname "$OPENCODE_SERVER_PW_FILE")"
+      (umask 077 && head -c 32 /dev/urandom | base64 | tr -d '=+/' | head -c 43) > "$OPENCODE_SERVER_PW_FILE"
+    fi
+    export OPENCODE_SERVER_PASSWORD="$(cat "$OPENCODE_SERVER_PW_FILE")"
+
     nohup opencode serve --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT" >/tmp/opencode-web.log 2>&1 &
 
     NESQ_DIR=/home/coder/.cache/hermes-webui-src

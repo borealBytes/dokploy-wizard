@@ -84,6 +84,10 @@ def test_consolidated_template_serves_opencode_web_and_classic_hermes_with_cors_
     ).read_text(encoding="utf-8")
 
     assert 'nohup opencode serve --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT"' in template
+    # A stable per-workspace serve password keeps browser pairings alive
+    # across rebuilds (serve otherwise randomizes the password every boot).
+    assert "OPENCODE_SERVER_PASSWORD=\"$(cat \"$OPENCODE_SERVER_PW_FILE\")\"" in template
+    assert "/home/coder/.local/share/dokploy/opencode-server-password" in template
     # opencode serve v2 has no base-path support: the app must ride the coder
     # wildcard host at an origin root, never behind a mounted-path proxy.
     assert "subdomain    = true" in template
