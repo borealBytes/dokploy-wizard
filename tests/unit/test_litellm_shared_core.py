@@ -1964,7 +1964,7 @@ def test_push_model_sync_consumer_keys_writes_state_file_atomically(
     assert shared_core_module._push_model_sync_consumer_keys(
         "sync-container", {"coder-hermes": "sk-1", "surfsense": "sk-2"}
     )
-    assert captured_cmd[:3] == ["docker", "exec", "sync-container"]
+    assert captured_cmd[:4] == ["docker", "exec", "-i", "sync-container"]
     assert json.loads(captured_input[0]) == {"coder-hermes": "sk-1", "surfsense": "sk-2"}
     shell = " ".join(captured_cmd)
     assert "consumer-keys.json.tmp" in shell and "mv" in shell

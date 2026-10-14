@@ -1997,6 +1997,7 @@ def _push_model_sync_consumer_keys(container_name: str, consumer_keys: Mapping[s
         [
             "docker",
             "exec",
+            "-i",
             container_name,
             "sh",
             "-lc",

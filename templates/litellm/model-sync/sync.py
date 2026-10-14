@@ -353,11 +353,13 @@ def reconcile_consumer_key(consumer: str, token: str, desired_aliases: list[str]
     merged = retained + [alias for alias in desired_aliases if alias not in retained]
     if merged == models:
         return False
+    # Pinned LiteLLM reads the allowlist off `models` in /key/update and
+    # silently ignores `model_access`; send both for version tolerance.
     http_json(
         "POST",
         f"{GATEWAY_URL}/key/update",
         token=MASTER_KEY,
-        payload={"key": token, "model_access": merged},
+        payload={"key": token, "models": merged, "model_access": merged},
     )
     return True
 

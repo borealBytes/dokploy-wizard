@@ -474,7 +474,7 @@ def test_sidecar_refreshes_consumer_key_allowlists(
             assert url.endswith("key=sk-consumer-1")
             return {"info": {"models": list(current_models)}}
         if url.endswith("/key/update"):
-            current_models[:] = payload["model_access"]
+            current_models[:] = payload["models"]
         return {}
 
     sidecar.http_json = fake_http_json
@@ -486,7 +486,7 @@ def test_sidecar_refreshes_consumer_key_allowlists(
     update = next(call for call in calls if call[1].endswith("/key/update"))
     # The stale sync alias is dropped, the wildcard and static route survive,
     # and the freshly created alias is appended.
-    assert update[2]["model_access"] == [
+    assert update[2]["models"] == [
         "opencode-go/deepseek-v4-flash",
         "sync/*",
         "sync/openrouter/deepseek/new-thing",
