@@ -6,16 +6,36 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from dokploy_wizard.host_prereqs import (
+    APT_LOCK_RETRY_DELAY_SECONDS,
     APT_LOCK_TIMEOUT_SECONDS,
     DOCKER_APT_PACKAGES,
     DOCKER_APT_REPOSITORY_URL,
     DOCKER_APT_SOURCE_PATH,
+    UbuntuAptHostPrerequisiteBackend,
     _apt_get_command,
     _docker_apt_source_line,
     assess_host_prerequisites,
     remediate_host_prerequisites,
 )
 from dokploy_wizard.preflight import HostFacts
+from dokploy_wizard.state import RawEnvInput, StateValidationError
+
+
+@dataclass
+class FakeRun:
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+
+
+def _lock_failure() -> FakeRun:
+    return FakeRun(
+        1,
+        stderr=(
+            "E: Could not get lock /var/lib/apt/lists/lock. "
+            "It is held by process 1136 (apt-get)"
+        ),
+    )
 
 
 @dataclass
@@ -121,6 +141,54 @@ def test_apt_get_command_uses_dpkg_lock_timeout() -> None:
         "-y",
         "docker-ce",
     )
+
+
+def test_privileged_command_retries_until_first_boot_apt_lock_releases(monkeypatch) -> None:  # noqa: E501
+    failures = iter(
+        [
+            _lock_failure(),
+            _lock_failure(),
+        ]
+    )
+
+    def fake_run(*args, **kwargs):
+        try:
+            return next(failures)
+        except StopIteration:
+            return FakeRun(0, stdout="", stderr="")
+
+    slept: list[float] = []
+    monkeypatch.setattr("dokploy_wizard.host_prereqs.subprocess.run", fake_run)
+    monkeypatch.setattr("dokploy_wizard.host_prereqs._sleep_for_lock_retry", slept.append)
+
+    backend = UbuntuAptHostPrerequisiteBackend(
+        RawEnvInput(format_version=1, values={"HOST_PREREQ_DOCKER_INSTALLED": "true"})
+    )
+    backend.install_packages(("curl",))
+
+    assert slept == [APT_LOCK_RETRY_DELAY_SECONDS, APT_LOCK_RETRY_DELAY_SECONDS]
+
+
+def test_privileged_command_does_not_retry_non_lock_failures(monkeypatch) -> None:
+    calls: list[object] = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(args)
+        return FakeRun(100, stderr="E: Some repository returned a 404")
+
+    monkeypatch.setattr("dokploy_wizard.host_prereqs.subprocess.run", fake_run)
+
+    backend = UbuntuAptHostPrerequisiteBackend(
+        RawEnvInput(format_version=1, values={"HOST_PREREQ_DOCKER_INSTALLED": "true"})
+    )
+    try:
+        backend.install_packages(("curl",))
+    except StateValidationError:
+        pass
+    else:
+        raise AssertionError("expected StateValidationError")
+
+    assert len(calls) == 1
 
 
 def _host_facts(*, docker_installed: bool, docker_daemon_reachable: bool) -> HostFacts:

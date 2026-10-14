@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -19,6 +20,12 @@ from dokploy_wizard.state import RawEnvInput, StateValidationError
 
 APT_INSTALL_PREFIX = "sudo apt-get update && sudo apt-get install -y"
 APT_LOCK_TIMEOUT_SECONDS = "600"
+# Ubuntu 24.04's apt ignores DPkg::Lock::Timeout for /var/lib/apt/lists/lock
+# (failing instantly against first-boot unattended-upgrade runs), so lock
+# contention is retried here until the competing apt job finishes.
+APT_LOCK_RETRY_ATTEMPTS = 20
+APT_LOCK_RETRY_DELAY_SECONDS = 15.0
+_APT_LOCK_MARKERS = ("could not get lock", "unable to lock")
 UBUNTU_BASELINE_PACKAGES = ("git", "curl", "ca-certificates")
 DOCKER_APT_PACKAGES = (
     "docker-ce",
@@ -190,24 +197,30 @@ class UbuntuAptHostPrerequisiteBackend:
         failure_detail: str,
         input_text: str | None = None,
     ) -> None:
-        result = subprocess.run(
-            list(_privileged_command(command)),
-            check=False,
-            capture_output=True,
-            input=input_text,
-            text=True,
-        )
-        if result.returncode == 0:
-            return
-
-        combined_output = "\n".join(
-            part.strip() for part in (result.stderr, result.stdout) if part.strip()
-        )
-        if _looks_like_privilege_failure(combined_output):
-            raise StateValidationError(
-                "Baseline host prerequisite remediation requires apt/systemd privileges; "
-                "rerun dokploy-wizard install as root or with sudo."
+        argv = list(_privileged_command(command))
+        for attempt in range(APT_LOCK_RETRY_ATTEMPTS):
+            result = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                input=input_text,
+                text=True,
             )
+            if result.returncode == 0:
+                return
+
+            combined_output = "\n".join(
+                part.strip() for part in (result.stderr, result.stdout) if part.strip()
+            )
+            if _looks_like_privilege_failure(combined_output):
+                raise StateValidationError(
+                    "Baseline host prerequisite remediation requires apt/systemd privileges; "
+                    "rerun dokploy-wizard install as root or with sudo."
+                )
+            if _looks_like_lock_contention(combined_output) and attempt < APT_LOCK_RETRY_ATTEMPTS - 1:
+                _sleep_for_lock_retry(APT_LOCK_RETRY_DELAY_SECONDS)
+                continue
+            break
 
         detail = combined_output or f"command exited with status {result.returncode}"
         raise StateValidationError(
@@ -483,3 +496,12 @@ def _looks_like_privilege_failure(output: str) -> bool:
             "a terminal is required",
         )
     )
+
+
+def _looks_like_lock_contention(output: str) -> bool:
+    normalized = output.lower()
+    return any(marker in normalized for marker in _APT_LOCK_MARKERS)
+
+
+def _sleep_for_lock_retry(delay_seconds: float) -> None:
+    time.sleep(delay_seconds)
