@@ -402,7 +402,9 @@ def _resolve_resource(
                 )
             raise SharedCoreError(
                 f"Ownership ledger resource '{resource_type}' no longer matches the desired "
-                "shared-core naming convention."
+                "shared-core naming convention "
+                f"(expected service name '{service_name}', ledger backend resolves id "
+                f"'{owned_resource.resource_id}' to '{existing.resource_name}')."
             )
         return (
             SharedCoreManagedResource(
