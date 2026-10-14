@@ -38,6 +38,13 @@ _MODEL_SYNC_TEMPLATE_DIR = (
     Path(__file__).resolve().parents[3] / "templates" / "litellm" / "model-sync"
 )
 _OPENROUTER_CATALOG_URL = "https://openrouter.ai/api/v1/models"
+_OPENROUTER_RANKINGS_URL = "https://openrouter.ai/api/frontend/v1/rankings/models"
+# OpenRouter registrations track the public weekly leaderboard: the top paid
+# (standard-variant) models plus the top free-variant models, capped so the
+# picker stays human-scale instead of a 400-model firehose.
+MODEL_SYNC_OPENROUTER_MAX_MODELS = 30
+MODEL_SYNC_OPENROUTER_MAX_RANKED_PAID = 20
+MODEL_SYNC_OPENROUTER_MAX_RANKED_FREE = 10
 _OPENCODE_GO_BASE_URL_DEFAULT = "https://opencode.ai/zen/go/v1"
 _NVIDIA_BASE_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
 
@@ -89,8 +96,12 @@ def build_model_sync_sources(
                     "name": "openrouter",
                     "alias_prefix": f"{MODEL_SYNC_ALIAS_PREFIX}/openrouter",
                     "list_url": _OPENROUTER_CATALOG_URL,
+                    "rankings_url": _OPENROUTER_RANKINGS_URL,
                     "api_key_env": openrouter_api_key_env,
                     "model_ref_template": "openrouter/{model}",
+                    "max_models": MODEL_SYNC_OPENROUTER_MAX_MODELS,
+                    "max_ranked_paid": MODEL_SYNC_OPENROUTER_MAX_RANKED_PAID,
+                    "max_ranked_free": MODEL_SYNC_OPENROUTER_MAX_RANKED_FREE,
                 }
             )
 

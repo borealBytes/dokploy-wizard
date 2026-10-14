@@ -4,6 +4,9 @@
 Polls the configured model catalog sources (OpenRouter, OpenCode Zen, NVIDIA),
 registers models the gateway does not expose yet through the LiteLLM admin
 API, and prunes managed deployments that disappeared from their source.
+Sources that declare a rankings_url (OpenRouter) register the leaderboard's
+top paid (standard-variant) models followed by the top ":free" variants
+instead of an arbitrary catalog slice.
 
 Managed deployments are tagged with model_info.metadata.managed_by, so only
 wizard-created deployments are ever pruned. Config-file models and
@@ -39,6 +42,9 @@ ALIAS_PREFIX = "sync"
 USER_AGENT = "dokploy-wizard-model-sync/1"
 REQUEST_TIMEOUT_SECONDS = 30
 DEFAULT_MAX_MODELS_PER_PROVIDER = 50
+OPENROUTER_RANKINGS_METRIC_FIELD = "rankingMetricValue"
+DEFAULT_MAX_RANKED_PAID = 20
+DEFAULT_MAX_RANKED_FREE = 10
 
 
 def log(message: str) -> None:
@@ -74,10 +80,115 @@ def load_document() -> dict[str, Any]:
     return document
 
 
+def _chat_catalog_by_variant(catalog: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    """Index a chat-capable catalog by canonical slug for leaderboard joins.
+
+    Returns (paid_by_slug, free_by_slug): paid maps to the plain base id
+    (no variant suffix), free maps to the ":free" variant id. Entries with
+    other variants (":batch", ":extended", ...) are not joinable.
+    """
+
+    paid_by_slug: dict[str, str] = {}
+    free_by_slug: dict[str, str] = {}
+    for item in catalog.get("data", []) or []:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id", "")).strip()
+        if not model_id or model_id.endswith("/*"):
+            continue
+        architecture = item.get("architecture") or {}
+        outputs = architecture.get("output_modalities") or []
+        if outputs and "text" not in outputs:
+            continue
+        slug = str(item.get("canonical_slug") or model_id).strip()
+        if ":" not in model_id:
+            paid_by_slug.setdefault(slug, model_id)
+        elif model_id.endswith(":free"):
+            free_by_slug.setdefault(slug, model_id)
+    return paid_by_slug, free_by_slug
+
+
+def _ranked_catalog_model_ids(source: dict[str, Any], catalog: dict[str, Any]) -> list[str] | None:
+    """Order OpenRouter-style catalogs by the public weekly leaderboard.
+
+    Returns the top standard-variant ("paid") callable ids followed by the
+    top ":free"-variant callable ids, each block ordered by weekly tokens
+    processed. Ranked entries with no joinable chat catalog id are skipped.
+    Returns None when no usable leaderboard data exists so the caller can
+    fall back to plain catalog order.
+    """
+
+    rankings_url = source.get("rankings_url")
+    if not (isinstance(rankings_url, str) and rankings_url):
+        return None
+    paid_by_slug, free_by_slug = _chat_catalog_by_variant(catalog)
+    try:
+        payload = http_json("GET", rankings_url)
+    except Exception as exc:
+        log(
+            f"source {source.get('name') or '?'} rankings fetch failed: "
+            f"{type(exc).__name__}: {exc}; using catalog order"
+        )
+        return None
+    paid_totals: dict[str, float] = {}
+    free_totals: dict[str, float] = {}
+    for row in payload.get("data", []) or []:
+        if not isinstance(row, dict):
+            continue
+        slug = row.get("model_permaslug")
+        if not isinstance(slug, str) or not slug.strip():
+            continue
+        slug = slug.strip()
+        try:
+            value = float(row.get(OPENROUTER_RANKINGS_METRIC_FIELD) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        variant = str(row.get("variant") or "").strip().lower()
+        if variant == "free":
+            free_totals[slug] = free_totals.get(slug, 0.0) + value
+        elif variant == "standard" or not variant:
+            paid_totals[slug] = paid_totals.get(slug, 0.0) + value
+    if not paid_totals and not free_totals:
+        log(f"source {source.get('name') or '?'} rankings empty; using catalog order")
+        return None
+
+    def _top(totals: dict[str, float], index: dict[str, str], limit: int) -> list[str]:
+        picked: list[str] = []
+        for slug in sorted(totals, key=lambda name: -totals[name]):
+            if totals[slug] <= 0:
+                continue
+            model_id = index.get(slug)
+            if model_id is None:
+                continue
+            if model_id in picked:
+                continue
+            picked.append(model_id)
+            if len(picked) >= limit:
+                break
+        return picked
+
+    def _limit(source_key: str, default_limit: int) -> int:
+        raw = source.get(source_key)
+        if isinstance(raw, (int, float)) and int(raw) > 0:
+            return int(raw)
+        return default_limit
+
+    ranked = _top(paid_totals, paid_by_slug, _limit("max_ranked_paid", DEFAULT_MAX_RANKED_PAID))
+    free_ids = _top(free_totals, free_by_slug, _limit("max_ranked_free", DEFAULT_MAX_RANKED_FREE))
+    return ranked + [model_id for model_id in free_ids if model_id not in ranked]
+
+
 def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
     api_key_env = source.get("api_key_env")
     token = os.environ.get(api_key_env, "") if isinstance(api_key_env, str) else ""
     payload = http_json("GET", source["list_url"], token=token or None)
+    limit = max_models
+    source_max = source.get("max_models")
+    if isinstance(source_max, (int, float)) and int(source_max) > 0:
+        limit = min(limit, int(source_max))
+    ranked = _ranked_catalog_model_ids(source, payload)
+    if ranked is not None:
+        return ranked[:limit]
     model_ids: list[str] = []
     for item in payload.get("data", []) or []:
         if not isinstance(item, dict):
@@ -89,7 +200,7 @@ def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
         if model_id.endswith("/*"):
             continue
         model_ids.append(model_id)
-        if len(model_ids) >= max_models:
+        if len(model_ids) >= limit:
             break
     return model_ids
 

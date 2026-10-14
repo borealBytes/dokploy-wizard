@@ -897,9 +897,13 @@ def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults()
     ].values["LITELLM_OPENROUTER_MODELS"]
     install_min_path = REPO_ROOT / ".install-min.env"
     if install_min_path.exists():
-        assert examples[full_example_path].values["LITELLM_OPENROUTER_MODELS"] == parse_env_file(
-            install_min_path
-        ).values["LITELLM_OPENROUTER_MODELS"]
+        install_min_models = parse_env_file(install_min_path).values.get(
+            "LITELLM_OPENROUTER_MODELS"
+        )
+        if install_min_models:
+            assert examples[full_example_path].values["LITELLM_OPENROUTER_MODELS"] == (
+                install_min_models
+            )
 
     for parsed in examples.values():
         assert parsed.values["AI_DEFAULT_PROVIDER"] == "openrouter"

@@ -12,6 +12,9 @@ import pytest
 
 from dokploy_wizard.litellm.model_sync import (
     MODEL_SYNC_CONSUMER_WILDCARD,
+    MODEL_SYNC_OPENROUTER_MAX_MODELS,
+    MODEL_SYNC_OPENROUTER_MAX_RANKED_FREE,
+    MODEL_SYNC_OPENROUTER_MAX_RANKED_PAID,
     OPENCODE_GO_GATEWAY_EXTRA_HEADERS,
     build_model_sync_sources,
     model_sync_enabled,
@@ -55,6 +58,10 @@ def test_sources_cover_configured_providers_only() -> None:
     openrouter = sources[0]
     assert openrouter["alias_prefix"] == "sync/openrouter"
     assert openrouter["list_url"] == "https://openrouter.ai/api/v1/models"
+    assert openrouter["rankings_url"] == "https://openrouter.ai/api/frontend/v1/rankings/models"
+    assert openrouter["max_models"] == MODEL_SYNC_OPENROUTER_MAX_MODELS
+    assert openrouter["max_ranked_paid"] == MODEL_SYNC_OPENROUTER_MAX_RANKED_PAID
+    assert openrouter["max_ranked_free"] == MODEL_SYNC_OPENROUTER_MAX_RANKED_FREE
     assert openrouter["model_ref_template"] == "openrouter/{model}"
     opencode_go = sources[1]
     assert opencode_go["list_url"] == "https://opencode.ai/zen/go/v1/models"
@@ -288,6 +295,134 @@ def test_sidecar_keeps_models_when_source_fetch_fails(
     assert summary["created"] == 0
     assert summary["pruned"] == 0
     assert summary["sources_ok"] == []
+
+
+_RANKED_CATALOG = {
+    "data": [
+        {
+            "id": "deepseek/deepseek-v4-flash",
+            "canonical_slug": "deepseek/deepseek-v4-flash-20260423",
+            "architecture": {"output_modalities": ["text"]},
+        },
+        {
+            "id": "deepseek/deepseek-v4-flash:free",
+            "canonical_slug": "deepseek/deepseek-v4-flash-20260423",
+            "architecture": {"output_modalities": ["text"]},
+        },
+        {
+            "id": "z-ai/glm-5.3",
+            "canonical_slug": "z-ai/glm-5.3-20260816",
+            "architecture": {"output_modalities": ["text"]},
+        },
+        {
+            "id": "openai/gpt-6-luna:batch",
+            "canonical_slug": "openai/gpt-6-luna-20260922",
+            "architecture": {"output_modalities": ["text"]},
+        },
+        {
+            "id": "anthropic/visionary-pro",
+            "canonical_slug": "anthropic/visionary-pro-20260101",
+            "architecture": {"output_modalities": ["image"]},
+        },
+        {
+            "id": "xiaomi/mimo-v2.6-flash:free",
+            "canonical_slug": "xiaomi/mimo-v2.6-flash-20260921",
+            "architecture": {"output_modalities": ["text"]},
+        },
+        {
+            "id": "tencent/hy4-preview",
+            "canonical_slug": "tencent/hy4-preview-20260827",
+            "architecture": {"output_modalities": ["text"]},
+        },
+    ]
+}
+
+
+def _ranked_source(**overrides: object) -> dict:
+    source: dict = {
+        "name": "openrouter",
+        "alias_prefix": "sync/openrouter",
+        "list_url": "https://openrouter.ai/api/v1/models",
+        "rankings_url": "https://openrouter.ai/api/frontend/v1/rankings/models",
+        "api_key_env": "LITELLM_OPENROUTER_API_KEY",
+        "model_ref_template": "openrouter/{model}",
+        "max_models": 30,
+        "max_ranked_paid": 3,
+        "max_ranked_free": 2,
+    }
+    source.update(overrides)
+    return source
+
+
+def _ranked_rows() -> dict:
+    return {
+        "data": [
+            {"model_permaslug": "openai/gpt-6-luna-20260922", "variant": "standard", "rankingMetricValue": 35},
+            {"model_permaslug": "deepseek/deepseek-v4-flash-20260423", "variant": "standard", "rankingMetricValue": 25},
+            {"model_permaslug": "deepseek/deepseek-v4-flash-20260423", "variant": "standard", "rankingMetricValue": 15},
+            {"model_permaslug": "anthropic/visionary-pro-20260101", "variant": "standard", "rankingMetricValue": 33},
+            {"model_permaslug": "z-ai/glm-5.3-20260816", "variant": "standard", "rankingMetricValue": 30},
+            {"model_permaslug": "tencent/hy4-preview-20260827", "variant": "standard", "rankingMetricValue": 10},
+            {"model_permaslug": "xiaomi/mimo-v2.6-flash-20260921", "variant": "free", "rankingMetricValue": 20},
+            {"model_permaslug": "deepseek/deepseek-v4-flash-20260423", "variant": "free", "rankingMetricValue": 5},
+        ]
+    }
+
+
+def _ranked_transport(monkeypatch: pytest.MonkeyPatch, rankings: dict | Exception):
+    monkeypatch.setenv("LITELLM_OPENROUTER_API_KEY", "or-upstream-key")
+
+    calls: list[tuple[str, str, str | None]] = []
+
+    def fake_http_json(method: str, url: str, *, token: str | None = None, payload: dict | None = None):
+        calls.append((method, url, token))
+        if url.endswith("/api/frontend/v1/rankings/models"):
+            if isinstance(rankings, Exception):
+                raise rankings
+            return rankings
+        return _RANKED_CATALOG
+
+    return fake_http_json, calls
+
+
+def test_sidecar_ranks_openrouter_models_paid_then_free_by_leaderboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    sidecar.http_json, calls = _ranked_transport(monkeypatch, _ranked_rows())
+
+    model_ids = sidecar.source_model_ids(_ranked_source(), 50)
+
+    assert model_ids == [
+        "deepseek/deepseek-v4-flash",
+        "z-ai/glm-5.3",
+        "tencent/hy4-preview",
+        "xiaomi/mimo-v2.6-flash:free",
+        "deepseek/deepseek-v4-flash:free",
+    ]
+    rankings_call = next(call for call in calls if call[1].endswith("/rankings/models"))
+    assert rankings_call[2] is None
+
+
+def test_sidecar_ranked_total_cap_and_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    sidecar.http_json, _calls = _ranked_transport(monkeypatch, _ranked_rows())
+    assert sidecar.source_model_ids(_ranked_source(max_models=2), 50) == [
+        "deepseek/deepseek-v4-flash",
+        "z-ai/glm-5.3",
+    ]
+
+    sidecar.http_json, _calls2 = _ranked_transport(
+        monkeypatch, RuntimeError("rankings offline")
+    )
+    fallback = sidecar.source_model_ids(_ranked_source(max_models=3), 50)
+    assert fallback == [
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-flash:free",
+        "z-ai/glm-5.3",
+    ]
 
 
 def test_sidecar_healthcheck_requires_fresh_success_marker(
