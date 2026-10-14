@@ -211,6 +211,9 @@ def test_every_template_installs_pi_and_opencode_and_preseeds_litellm(template_d
     assert 'if "--daemon" in sys.argv[1:]' in template
     assert "model-refresh.py --daemon" in template
     assert "def _restore_inner_quotes" in template
+    # The fallback reader must reject valid-but-not-list JSON (a quote-mangled
+    # payload parses as a bare string and used to leak single-char models).
+    assert "def _parse_fallback_models" in template
 
 
 def test_base_copilot_byok_template_settings() -> None:

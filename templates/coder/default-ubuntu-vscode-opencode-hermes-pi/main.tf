@@ -294,14 +294,24 @@ home = Path(os.environ.get("HERMES_HOME", "/home/coder/.hermes"))
 config_path = home / "config.yaml"
 provider = setting("HERMES_INFERENCE_PROVIDER", "dokploy-litellm") or "dokploy-litellm"
 default_model = setting("HERMES_MODEL")
-try:
-    fallback_models = json.loads(
-        _restore_inner_quotes(
-            setting("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]")
-        )
-    )
-except ValueError:
-    fallback_models = []
+def _parse_fallback_models(raw, _depth=0):
+    if not raw or _depth > 3:
+        return []
+    try:
+        value = json.loads(_restore_inner_quotes(raw))
+    except ValueError:
+        return []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str) and item.strip()]
+    if isinstance(value, str):
+        # Terraform/shell quote-stripping can leave a JSON *string* wrapping the
+        # list text; unwrap and reparse instead of iterating it character-wise.
+        return _parse_fallback_models(value, _depth + 1)
+    return []
+
+fallback_models = _parse_fallback_models(
+    setting("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "")
+)
 
 if "--daemon" in sys.argv[1:]:
     while True:
