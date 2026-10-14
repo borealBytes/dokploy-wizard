@@ -706,18 +706,11 @@ def _resolve_dns_records(
             resource_ids[hostname] = compatible_record.record_id
             continue
         if existing_records:
-            if hostname in degradable_conflict_hostnames:
-                notes.append(
-                    "Skipped optional Coder DNS for "
-                    f"'{hostname}' because Cloudflare already has an incompatible CNAME. "
-                    "The wizard did not adopt, overwrite, delete, or retarget that unowned "
-                    "record; explicit service hostnames continue to be reconciled. "
-                    "Coder public URLs that depend on this hostname remain unavailable until "
-                    "an operator removes or retargets the conflicting CNAME."
-                )
-                continue
             stale_tunnel_record = _select_safe_stale_tunnel_record(existing_records, dns_target)
             if stale_tunnel_record is not None:
+                # A wizard-created tunnel CNAME pointing at a stale tunnel is
+                # the wizard's to retarget — including the optional coder
+                # wildcard, which subdomain app routing depends on.
                 if dry_run:
                     updated_record = CloudflareDnsRecord(
                         record_id=stale_tunnel_record.record_id,
@@ -744,6 +737,16 @@ def _resolve_dns_records(
                     )
                 )
                 resource_ids[hostname] = updated_record.record_id
+                continue
+            if hostname in degradable_conflict_hostnames:
+                notes.append(
+                    "Skipped optional Coder DNS for "
+                    f"'{hostname}' because Cloudflare already has an incompatible CNAME. "
+                    "The wizard did not adopt, overwrite, delete, or retarget that unowned "
+                    "record; explicit service hostnames continue to be reconciled. "
+                    "Coder public URLs that depend on this hostname remain unavailable until "
+                    "an operator removes or retargets the conflicting CNAME."
+                )
                 continue
             raise CloudflareError(
                 f"Cloudflare already has a conflicting CNAME record for '{hostname}' in the "

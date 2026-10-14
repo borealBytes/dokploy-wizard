@@ -84,7 +84,11 @@ def test_consolidated_template_serves_opencode_web_and_classic_hermes_with_cors_
     ).read_text(encoding="utf-8")
 
     assert 'nohup opencode serve --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT"' in template
-    assert "/tmp/opencode-mounted-proxy.mjs" in template
+    # opencode serve v2 has no base-path support: the app must ride the coder
+    # wildcard host at an origin root, never behind a mounted-path proxy.
+    assert "subdomain    = true" in template
+    assert "/tmp/opencode-mounted-proxy.mjs" not in template
+    assert "OPENCODE_PROXY_PORT" not in template
     # The CSRF gate must trust the public Coder origin or POSTs 403 silently.
     assert 'export HERMES_PUBLIC_ORIGIN="__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"' in template
     assert 'HERMES_WEBUI_ALLOWED_ORIGINS="$HERMES_PUBLIC_ORIGIN"' in template
