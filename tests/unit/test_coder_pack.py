@@ -83,12 +83,17 @@ def test_consolidated_template_serves_opencode_web_and_classic_hermes_with_cors_
         "templates/coder/default-ubuntu-vscode-opencode-hermes-pi/main.tf"
     ).read_text(encoding="utf-8")
 
-    assert 'nohup opencode web --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT"' in template
+    assert 'nohup opencode serve --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT"' in template
     assert "/tmp/opencode-mounted-proxy.mjs" in template
     # The CSRF gate must trust the public Coder origin or POSTs 403 silently.
     assert 'export HERMES_PUBLIC_ORIGIN="__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"' in template
     assert 'HERMES_WEBUI_ALLOWED_ORIGINS="$HERMES_PUBLIC_ORIGIN"' in template
     assert "HERMES_WEBUI_TRUST_FORWARDED_HOST=1" in template
+    # The model refresher daemon must also be (re)started by the workspace
+    # bootstrap supervisor, with a visible log: envd-killed background children
+    # silently dropped the boot-only daemon on the consolidated template.
+    bootstrap_section = template.split("HERMES_BOOTSTRAP_SCRIPT=", 1)[1]
+    assert "model-refresh.py --daemon >>/tmp/model-refresh-daemon.log" in bootstrap_section
 
 
 def test_copilot_byok_contract_documents_official_chat_only_scope() -> None:

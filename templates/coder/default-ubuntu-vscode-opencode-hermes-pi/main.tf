@@ -473,13 +473,13 @@ PY
 
     sh -c 'set -a; . /home/coder/.config/dokploy/model-refresh.env; set +a; exec python3 /home/coder/.local/share/dokploy/model-refresh.py' || true
     if ! pgrep -f 'model-refresh.py --daemon' >/dev/null 2>&1; then
-      setsid nohup python3 /home/coder/.local/share/dokploy/model-refresh.py --daemon >/dev/null 2>&1 < /dev/null &
+      setsid nohup python3 /home/coder/.local/share/dokploy/model-refresh.py --daemon >>/tmp/model-refresh-daemon.log 2>&1 < /dev/null &
     fi
 
     OPENCODE_WEB_PORT=4096
     OPENCODE_PROXY_PORT=4097
 
-    nohup opencode web --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT" >/tmp/opencode-web.log 2>&1 &
+    nohup opencode serve --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT" >/tmp/opencode-web.log 2>&1 &
 
     cat >/tmp/opencode-mounted-proxy.mjs <<'JS'
 import http from "node:http";
@@ -1017,6 +1017,10 @@ fi
 
 pkill -f "node /tmp/coder-mounted-proxy.mjs" >/dev/null 2>&1 || true
 nohup env TARGET_PORT=$HERMES_WEBUI_PORT PROXY_PORT=$HERMES_WEBUI_PROXY_PORT node /tmp/coder-mounted-proxy.mjs >/tmp/hermes-webui-proxy.log 2>&1 &
+
+if ! pgrep -f 'model-refresh.py --daemon' >/dev/null 2>&1; then
+  setsid nohup python3 /home/coder/.local/share/dokploy/model-refresh.py --daemon >>/tmp/model-refresh-daemon.log 2>&1 < /dev/null &
+fi
 
 wait_for_http "http://127.0.0.1:$HERMES_WEBUI_PORT/health" 60 || true
 SH
