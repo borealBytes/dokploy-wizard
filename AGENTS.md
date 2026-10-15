@@ -52,6 +52,19 @@ To deploy to a fresh remote VPS, use the remote helper:
   --env-file ./.install.env
 ```
 
+### Agent runtime guidance (timeouts)
+
+Remote `proof`, `install`, and `modify` runs are long. A cold first install on a
+fresh VPS routinely takes 10-20 minutes (Docker image pulls dominate) and can
+take up to 60 minutes on slow links. Agents must NOT cancel or retry these
+commands on a short tool timeout: pass a timeout of at least 3,600,000 ms, or
+run the command in the background and wait for the completion notification. A
+`still running ... waiting for output` progress line means the wizard is
+healthy, not stuck. Re-running an interrupted install is safe but wasteful; if
+a run failed at the Dokploy bootstrap health check, remove the half-built
+bootstrap on the host first (`docker service rm dokploy dokploy-postgres`)
+before retrying, or the preflight port check will reject port 3000.
+
 What the helper does:
 
 1. Packages the repo.

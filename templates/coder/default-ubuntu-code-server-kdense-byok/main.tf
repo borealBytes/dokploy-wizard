@@ -303,7 +303,7 @@ resource "coder_script" "kdense_bootstrap" {
     fi
 
     if ! command -v opencode >/dev/null 2>&1; then
-      if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then
+      if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/v2/install | bash; then
         if [ ! -x /home/coder/.opencode/bin/opencode ]; then
           echo "OpenCode installer did not produce a usable binary" >&2
           exit 1
@@ -369,6 +369,27 @@ PY
       NPM_CONFIG_PREFIX=/home/coder/.local npm install -g @google/gemini-cli
     fi
 
+    # Pi coding agent, installed on every wizard-managed workspace
+    $_SUDO corepack enable
+    $_SUDO corepack prepare pnpm@10.27.0 --activate
+
+    export PNPM_HOME=/home/coder/.local/share/pnpm
+    export PATH="$PNPM_HOME/bin:$PATH"
+    mkdir -p "$PNPM_HOME/bin"
+    touch /home/coder/.bashrc /home/coder/.profile
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile
+
+    if ! command -v pi >/dev/null 2>&1; then
+      pnpm add -g @earendil-works/pi-coding-agent
+    fi
+
+    command -v pi
+    pi --version
+    bash -lc 'command -v pi && pi --version'
+
     export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"
     export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"
     export KDENSE_COPILOT_DEFAULT_ALIAS="__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__/__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__"
@@ -416,21 +437,99 @@ PY
       exit 1
     fi
 
-    python3 - <<'PY'
+    mkdir -p /home/coder/.config/dokploy /home/coder/.local/share/dokploy
+    cat > /home/coder/.config/dokploy/model-refresh.env <<ENVEOF
+DOKPLOY_LITELLM_BASE_URL="$KDENSE_CENTRAL_LITELLM_BASE_URL"
+DOKPLOY_LITELLM_API_KEY="$KDENSE_CENTRAL_LITELLM_API_KEY"
+DOKPLOY_LITELLM_DEFAULT_ALIAS="$KDENSE_COPILOT_DEFAULT_ALIAS"
+KDENSE_DEFAULT_MODEL="$KDENSE_DEFAULT_MODEL"
+KDENSE_EXPERT_MODEL="$KDENSE_EXPERT_MODEL"
+DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON=\"$DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON\"
+ENVEOF
+    chmod 600 /home/coder/.config/dokploy/model-refresh.env
+    cat > /home/coder/.local/share/dokploy/model-refresh.py <<'PY'
 import json
 import os
+import subprocess
+import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-base_url = os.environ["KDENSE_CENTRAL_LITELLM_BASE_URL"].rstrip("/")
-api_key = os.environ.get("KDENSE_CENTRAL_LITELLM_API_KEY", "")
-default_alias = os.environ["KDENSE_COPILOT_DEFAULT_ALIAS"]
-fallback_models = json.loads(os.environ.get("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]"))
+ENV_FILE = "/home/coder/.config/dokploy/model-refresh.env"
+LEGACY_ENV_NAMES = {
+    "DOKPLOY_LITELLM_BASE_URL": "KDENSE_CENTRAL_LITELLM_BASE_URL",
+    "DOKPLOY_LITELLM_API_KEY": "KDENSE_CENTRAL_LITELLM_API_KEY",
+    "DOKPLOY_LITELLM_DEFAULT_ALIAS": "KDENSE_COPILOT_DEFAULT_ALIAS",
+}
+
+
+def setting(name: str, default: str = "") -> str:
+    for candidate in (name, LEGACY_ENV_NAMES.get(name, "")):
+        if candidate:
+            value = os.environ.get(candidate, "").strip()
+            if value:
+                return value
+    value = _env_file_value(name) or _env_file_value(LEGACY_ENV_NAMES.get(name, ""))
+    if value:
+        return value
+    return default
+
+
+def _restore_inner_quotes(value: str) -> str:
+    if value.startswith("[") and not value.startswith('["') and value != "[]":
+        # Shell/Terraform expansion strips inner double quotes from
+        # substituted JSON (both in heredocs and when sourcing the env
+        # file); restore them so list payloads stay parseable.
+        return '["' + value[1:-1].replace(",", '","') + '"]'
+    return value
+
+
+def _env_file_value(name: str) -> str:
+    if not name:
+        return ""
+    try:
+        with open(ENV_FILE, encoding="utf-8") as handle:
+            for line in handle:
+                key, separator, raw_value = line.partition("=")
+                if separator and key.strip() == name:
+                    return _restore_inner_quotes(raw_value.strip().strip('"'))
+    except OSError:
+        pass
+    return ""
+
+
+base_url = setting("DOKPLOY_LITELLM_BASE_URL").rstrip("/")
+api_key = setting("DOKPLOY_LITELLM_API_KEY")
+default_alias = setting("DOKPLOY_LITELLM_DEFAULT_ALIAS")
+def _parse_fallback_models(raw, _depth=0):
+    if not raw or _depth > 3:
+        return []
+    try:
+        value = json.loads(_restore_inner_quotes(raw))
+    except ValueError:
+        return []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str) and item.strip()]
+    if isinstance(value, str):
+        # Terraform/shell quote-stripping can leave a JSON *string* wrapping the
+        # list text; unwrap and reparse instead of iterating it character-wise.
+        return _parse_fallback_models(value, _depth + 1)
+    return []
+
+fallback_models = _parse_fallback_models(
+    setting("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "")
+)
 kdense_models = [
-    os.environ.get("KDENSE_DEFAULT_MODEL", ""),
-    os.environ.get("KDENSE_EXPERT_MODEL", ""),
+    setting("KDENSE_DEFAULT_MODEL", ""),
+    setting("KDENSE_EXPERT_MODEL", ""),
 ]
+
+if "--daemon" in sys.argv[1:]:
+    while True:
+        time.sleep(1800)
+        subprocess.run([sys.executable, __file__], check=False)
 
 
 def fetch_model_ids() -> list[str]:
@@ -438,23 +537,33 @@ def fetch_model_ids() -> list[str]:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            payload = json.load(response)
-    except (OSError, ValueError, urllib.error.URLError):
-        return []
     ids: list[str] = []
-    for item in payload.get("data", []):
-        if not isinstance(item, dict):
-            continue
-        model_id = item.get("id")
-        if isinstance(model_id, str) and model_id.strip() and not model_id.strip().endswith("/*"):
-            ids.append(model_id.strip())
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.load(response)
+        except (OSError, ValueError, urllib.error.URLError):
+            payload = {"data": []}
+        ids = []
+        for item in payload.get("data", []):
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("id")
+            if isinstance(model_id, str) and model_id.strip() and not model_id.strip().endswith("/*"):
+                ids.append(model_id.strip())
+        if ids or attempt == 3:
+            return ids
+        time.sleep(10)
     return ids
 
 
+fetched_model_ids = fetch_model_ids()
+if not fetched_model_ids and Path("/home/coder/.config/opencode/opencode.json").exists():
+    # Gateway unreachable during a background refresh; keep the last good list.
+    raise SystemExit(0)
+
 model_ids = []
-for candidate in [default_alias, *kdense_models, *fetch_model_ids(), *fallback_models]:
+for candidate in [default_alias, *kdense_models, *fetched_model_ids, *fallback_models]:
     if isinstance(candidate, str) and candidate.strip():
         model_ids.append(candidate.strip())
 model_ids = list(dict.fromkeys(model_ids))
@@ -497,7 +606,45 @@ for settings_path in [
         settings = {}
     settings["github.copilot.chat.customOAIModels"] = custom_models
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+Path("/home/coder/.config/opencode").mkdir(parents=True, exist_ok=True)
+opencode_config = {
+    "provider": {
+        "litellm": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": base_url, "apiKey": api_key},
+            "models": {model_id: {} for model_id in model_ids},
+        }
+    },
+    "model": default_alias,
+}
+Path("/home/coder/.config/opencode/opencode.json").write_text(
+    json.dumps(opencode_config, indent=2) + "\n",
+    encoding="utf-8",
+)
+
+Path("/home/coder/.pi/agent").mkdir(parents=True, exist_ok=True)
+pi_models_config = {
+    "providers": {
+        "litellm": {
+            "name": "LiteLLM",
+            "baseUrl": base_url,
+            "api": "openai-completions",
+            "apiKey": api_key,
+            "models": [{"id": model_id, "name": model_id} for model_id in model_ids],
+        }
+    }
+}
+Path("/home/coder/.pi/agent/models.json").write_text(
+    json.dumps(pi_models_config, indent=2) + "\n",
+    encoding="utf-8",
+)
 PY
+
+    sh -c 'set -a; . /home/coder/.config/dokploy/model-refresh.env; set +a; exec python3 /home/coder/.local/share/dokploy/model-refresh.py' || true
+    if ! pgrep -f 'model-refresh.py --daemon' >/dev/null 2>&1; then
+      setsid nohup python3 /home/coder/.local/share/dokploy/model-refresh.py --daemon >/dev/null 2>&1 < /dev/null &
+    fi
 
     normalize_model_for_gateway() {
       model="$1"

@@ -11,33 +11,19 @@ from dokploy_wizard.litellm.model_catalog import (
     ModelCostMetadata,
     build_model_catalog,
 )
+from dokploy_wizard.litellm.model_sync import (
+    OPENCODE_GO_GATEWAY_EXTRA_HEADERS,
+    model_sync_enabled,
+)
 
 DEFAULT_LOCAL_ALIAS = DEFAULT_LOCAL_CANONICAL_ALIAS
 DEFAULT_LOCAL_MODEL = "openai/unsloth-active"
 DEFAULT_LOCAL_API_KEY = "sk-no-key-required"
 DEFAULT_OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
+# Mirrors the wizard-wide AI default model so the default alias route exists
+# even when AI_DEFAULT_* are left unset.
+_DEFAULT_OPENCODE_GO_MODEL = "deepseek-v4-flash"
 _NVIDIA_MODEL_SETTINGS_RESOURCE = "nvidia_model_settings.json"
-
-_VERIFIED_OPENCODE_GO_CHAT_MODEL_IDS: tuple[str, ...] = (
-    "minimax-m2.7",
-    "minimax-m2.5",
-    "kimi-k2.6",
-    "kimi-k2.5",
-    "glm-5.1",
-    "glm-5",
-    "deepseek-v4-pro",
-    "deepseek-v4-flash",
-    "qwen3.6-plus",
-    "qwen3.5-plus",
-    "mimo-v2-pro",
-    "mimo-v2-omni",
-    "mimo-v2.5-pro",
-    "mimo-v2.5",
-)
-
-
-def verified_opencode_go_chat_model_ids() -> tuple[str, ...]:
-    return _VERIFIED_OPENCODE_GO_CHAT_MODEL_IDS
 
 
 def build_litellm_config(
@@ -58,7 +44,7 @@ def build_litellm_config(
         legacy_env_names=("OPENCODE_GO_API_KEY",),
     )
     opencode_go_base_url = _opencode_go_base_url(flat_env)
-    opencode_go_model_ids = verified_opencode_go_chat_model_ids()
+    opencode_go_model_ids = _opencode_go_static_model_ids(flat_env)
 
     openrouter_api_key_env = _provider_api_key_env(
         flat_env,
@@ -134,6 +120,7 @@ def build_litellm_config(
                         "model": entry.upstream_target,
                         "api_base": opencode_go_base_url,
                         "api_key": _env_ref(opencode_go_api_key_env),
+                        "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
                     },
                 }
             )
@@ -160,7 +147,7 @@ def build_litellm_config(
                     "LITELLM_NVIDIA_API_KEY"
                 )
             litellm_params: dict[str, object] = {
-                "model": entry.upstream_target,
+                "model": _nvidia_litellm_model_ref(entry.upstream_target),
                 "api_base": nvidia_base_url,
                 "api_key": _env_ref(nvidia_api_key_env),
             }
@@ -186,7 +173,20 @@ def build_litellm_config(
             route_entry["model_info"] = model_info
         model_list.append(route_entry)
 
-    return {"model_list": model_list, "litellm_settings": {"drop_params": True}}
+    general_settings: dict[str, object] = {
+        # Forward client-supplied provider headers (real OpenCode session ids
+        # from OpenCode/Pi/Hermes clients) to upstreams; the static
+        # x-opencode-session extra_headers remain as the guaranteed fallback.
+        "forward_client_headers_to_llm_api": True,
+    }
+    if model_sync_enabled(flat_env, upstream_creds):
+        general_settings["store_model_in_db"] = True
+    config: dict[str, object] = {
+        "model_list": model_list,
+        "litellm_settings": {"drop_params": True},
+        "general_settings": general_settings,
+    }
+    return config
 
 
 def render_litellm_config_yaml(config: Mapping[str, object]) -> str:
@@ -199,12 +199,40 @@ def _nvidia_base_url(flat_env: Mapping[str, str]) -> str | None:
     )
 
 
+def _nvidia_litellm_model_ref(upstream_target: str) -> str:
+    # The pinned LiteLLM proxy cannot parse the bare `nvidia/` model prefix
+    # for DB-backed deployments (it raises "LLM Provider NOT provided" and
+    # silently drops the deployment from the router). The NVIDIA integrate
+    # API is OpenAI-compatible, so route those models as `openai/` targets
+    # with the explicit api_base; consumer-facing aliases keep `nvidia/`.
+    if upstream_target.startswith("nvidia/"):
+        return "openai/" + upstream_target.removeprefix("nvidia/")
+    return upstream_target
+
+
 def _opencode_go_base_url(flat_env: Mapping[str, str]) -> str:
     return (
         _optional(flat_env, "AI_DEFAULT_BASE_URL")
         or _optional(flat_env, "OPENCODE_GO_BASE_URL")
         or DEFAULT_OPENCODE_GO_BASE_URL
     )
+
+
+def _opencode_go_static_model_ids(flat_env: Mapping[str, str]) -> tuple[str, ...]:
+    """Static OpenCode Go routes: only the resolved default model.
+
+    The full Go catalog is autosynced by the sidecar as sync/opencode-go/*.
+    A pinned env/code list here would go stale against the live catalog, so
+    the single exception is the default alias route: it must exist the moment
+    LiteLLM boots because workspace defaults and the dokploy-ai key point at
+    it before the first sync cycle completes.
+    """
+
+    provider = _optional(flat_env, "AI_DEFAULT_PROVIDER")
+    if provider is not None and provider != "opencode-go":
+        return ()
+    model = _optional(flat_env, "AI_DEFAULT_MODEL") or _DEFAULT_OPENCODE_GO_MODEL
+    return (model.removeprefix("opencode-go/"),)
 
 
 def _local_alias(flat_env: Mapping[str, str]) -> str:

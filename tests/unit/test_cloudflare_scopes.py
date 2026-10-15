@@ -415,7 +415,7 @@ def test_networking_reuses_compatible_unowned_coder_wildcard_dns() -> None:
     } >= {("*.example.com", "reuse_existing", "dns-wildcard")}
 
 
-def test_networking_degrades_conflicting_unowned_coder_wildcard_dns() -> None:
+def test_networking_retargets_conflicting_stale_tunnel_coder_wildcard_dns() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -473,19 +473,24 @@ def test_networking_degrades_conflicting_unowned_coder_wildcard_dns() -> None:
     }
     assert ("dokploy.example.com", "reuse_existing", "dns-dokploy") in planned
     assert ("coder.example.com", "reuse_existing", "dns-coder") in planned
-    assert not any(record.hostname == "*.example.com" for record in phase.result.dns_records)
+    # A tunnel CNAME stranded on another tunnel is retargeted: coder subdomain
+    # app routing depends on the wildcard record pointing at the active tunnel.
+    assert ("*.example.com", "update_existing", "dns-wildcard") in planned
     assert phase.dns_resource_ids == {
         "coder.example.com": "dns-coder",
         "dokploy.example.com": "dns-dokploy",
+        "*.example.com": "dns-wildcard",
     }
-    assert any(
-        "Skipped optional Coder DNS" in note
-        and "did not adopt, overwrite, delete, or retarget" in note
-        for note in phase.result.notes
-    )
+    assert (
+        "zone-123",
+        "dns-wildcard",
+        "*.example.com",
+        "tunnel-123.cfargotunnel.com",
+        True,
+    ) in backend.dns_record_updates
 
 
-def test_networking_retargets_stale_coder_control_dns_and_degrades_wildcard_dns() -> None:
+def test_networking_retargets_stale_coder_control_dns_and_wildcard_dns() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -543,28 +548,31 @@ def test_networking_retargets_stale_coder_control_dns_and_degrades_wildcard_dns(
     }
     assert ("dokploy.example.com", "reuse_existing", "dns-dokploy") in planned
     assert ("coder.example.com", "update_existing", "dns-coder") in planned
-    assert not any(record.hostname == "*.example.com" for record in phase.result.dns_records)
+    assert ("*.example.com", "update_existing", "dns-wildcard") in planned
     assert phase.dns_resource_ids == {
         "coder.example.com": "dns-coder",
         "dokploy.example.com": "dns-dokploy",
+        "*.example.com": "dns-wildcard",
     }
-    assert backend.dns_record_updates == [
+    assert set(backend.dns_record_updates) == {
         (
             "zone-123",
             "dns-coder",
             "coder.example.com",
             "tunnel-123.cfargotunnel.com",
             True,
-        )
-    ]
-    assert any(
-        "Skipped optional Coder DNS for '*.example.com'" in note
-        and "explicit service hostnames continue to be reconciled" in note
-        for note in phase.result.notes
-    )
+        ),
+        (
+            "zone-123",
+            "dns-wildcard",
+            "*.example.com",
+            "tunnel-123.cfargotunnel.com",
+            True,
+        ),
+    }
 
 
-def test_networking_degrades_stale_nested_coder_wildcard_dns() -> None:
+def test_networking_retargets_stale_nested_coder_wildcard_dns() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -617,16 +625,24 @@ def test_networking_degrades_stale_nested_coder_wildcard_dns() -> None:
         backend=backend,
     )
 
-    assert not any(
-        record.hostname == "*.coder.example.com" for record in phase.result.dns_records
-    )
-    assert backend.dns_record_updates == []
-    assert "*.coder.example.com" not in phase.dns_resource_ids
-    assert any(
-        "Skipped optional Coder DNS for '*.coder.example.com'" in note
-        and "did not adopt, overwrite, delete, or retarget" in note
-        for note in phase.result.notes
-    )
+    assert (
+        "*.coder.example.com",
+        "update_existing",
+        "dns-nested-wildcard",
+    ) in {
+        (record.hostname, record.action, record.record_id)
+        for record in phase.result.dns_records
+    }
+    assert backend.dns_record_updates == [
+        (
+            "zone-123",
+            "dns-nested-wildcard",
+            "*.coder.example.com",
+            "tunnel-123.cfargotunnel.com",
+            True,
+        )
+    ]
+    assert phase.dns_resource_ids["*.coder.example.com"] == "dns-nested-wildcard"
 
 
 def test_networking_retargets_stale_dokploy_tunnel_cname() -> None:

@@ -1306,16 +1306,21 @@ def _run_lifecycle_flow(
         coder_backend=coder_backend,
         openclaw_backend=openclaw_backend,
     )
+    # Dokploy API auth must be prepared even for noop plans: the phases still
+    # execute (ledger validation), and without auth the backends silently
+    # downgrade to the offline shell mock, producing bogus naming mismatches.
+    raw_env = _ensure_dokploy_api_auth(
+        env_file=env_file,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        bootstrap_backend=backend,
+        dry_run=dry_run,
+        require_real_dokploy_auth=require_real_dokploy_auth,
+    )
+    desired_state = resolve_desired_state(raw_env)
     if lifecycle_plan.mode != "noop":
-        raw_env = _ensure_dokploy_api_auth(
-            env_file=env_file,
-            raw_env=raw_env,
-            desired_state=desired_state,
-            bootstrap_backend=backend,
-            dry_run=dry_run,
-            require_real_dokploy_auth=require_real_dokploy_auth,
-        )
-        desired_state = resolve_desired_state(raw_env)
+        # Mutation-endpoint qualification only matters when this run mutates;
+        # noop plans just re-validate ledger state against the (now real) backends.
         _qualify_dokploy_mutation_auth(
             raw_env=raw_env,
             desired_state=desired_state,
@@ -2038,7 +2043,7 @@ def _build_nextcloud_backend(
     ):
         return ShellNextcloudBackend(raw_env)
     admin_user = raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
-    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon")
+    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD)
     nexa_enabled = _has_openclaw_nexa_env(raw_env)
     advisor_workspace_mounts = _build_nextcloud_advisor_workspace_mounts(
         raw_env=raw_env,
@@ -2167,7 +2172,7 @@ def _build_moodle_backend(
         stack_name=desired_state.stack_name,
         hostname=hostname,
         admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
-        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
         smtp_host=None if mail_relay is None else mail_relay.service_name,
@@ -2212,7 +2217,7 @@ def _build_docuseal_backend(
         stack_name=desired_state.stack_name,
         hostname=hostname,
         admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
-        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
         smtp_host=None if mail_relay is None else mail_relay.service_name,
@@ -2297,7 +2302,7 @@ def _build_coder_backend(
         hostname=hostname,
         wildcard_hostname=wildcard_hostname,
         admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
-        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
         ai_default_provider=ai_default_provider,
@@ -2359,7 +2364,7 @@ def _build_surfsense_backend(
         postgres=allocation.postgres,
         redis=allocation.redis,
         admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
-        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD),
         litellm_model=_surfsense_litellm_model(
             raw_env=raw_env,
             shared_core_plan=desired_state.shared_core,
@@ -2456,10 +2461,10 @@ def _build_openclaw_backend(
         openclaw_internal_hostname=_openclaw_internal_hostname(raw_env, desired_state),
         openclaw_gateway_password=_advisor_env_optional(raw_env, "OPENCLAW_GATEWAY_PASSWORD")
         or _advisor_env_optional(raw_env, "ADVISOR_GATEWAY_PASSWORD")
-        or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD),
         my_farm_gateway_password=_advisor_env_optional(raw_env, "MY_FARM_ADVISOR_GATEWAY_PASSWORD")
         or _advisor_env_optional(raw_env, "ADVISOR_GATEWAY_PASSWORD")
-        or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", "ChangeMeSoon"),
+        or raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD),
         trusted_proxy_emails=desired_state.cloudflare_access_otp_emails,
         openclaw_primary_model=openclaw_primary_model,
         openclaw_fallback_models=openclaw_fallback_models,
@@ -2960,6 +2965,8 @@ def _ensure_dokploy_api_auth(
     require_real_dokploy_auth: bool,
 ) -> RawEnvInput:
     values = dict(raw_env.values)
+    if values.get("DOKPLOY_MOCK_API_MODE") == "true":
+        return raw_env
     admin_email, admin_password = _resolve_dokploy_admin_auth(values)
     if admin_email is not None and admin_password is not None:
         values["DOKPLOY_ADMIN_PASSWORD"] = admin_password

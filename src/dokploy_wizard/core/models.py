@@ -261,6 +261,31 @@ class PackSharedAllocation:
 
 
 @dataclass(frozen=True)
+class SharedModelSyncPlan:
+    """Sidecar registration for the LiteLLM model autosync loop.
+
+    The sidecar runs as an auxiliary service of the LiteLLM shared-core
+    compose app; the plan entry lets live-drift inspection treat its
+    containers as wizard-owned instead of manual collisions.
+    """
+
+    service_name: str
+
+    def __post_init__(self) -> None:
+        _ensure_non_empty(self.service_name, "service_name")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"service_name": self.service_name}
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> SharedModelSyncPlan:
+        service_name = payload.get("service_name")
+        if not isinstance(service_name, str):
+            raise ValueError("SharedModelSyncPlan.service_name must be a string.")
+        return cls(service_name=service_name)
+
+
+@dataclass(frozen=True)
 class SharedCorePlan:
     network_name: str
     postgres: SharedPostgresServicePlan | None
@@ -268,6 +293,7 @@ class SharedCorePlan:
     allocations: tuple[PackSharedAllocation, ...]
     mail_relay: SharedMailRelayServicePlan | None = None
     litellm: SharedLiteLLMServicePlan | None = None
+    model_sync: SharedModelSyncPlan | None = None
 
     def __post_init__(self) -> None:
         _ensure_non_empty(self.network_name, "network_name")
@@ -282,6 +308,7 @@ class SharedCorePlan:
         return {
             "allocations": [allocation.to_dict() for allocation in self.allocations],
             "litellm": None if self.litellm is None else self.litellm.to_dict(),
+            "model_sync": None if self.model_sync is None else self.model_sync.to_dict(),
             "network_name": self.network_name,
             "mail_relay": None if self.mail_relay is None else self.mail_relay.to_dict(),
             "postgres": None if self.postgres is None else self.postgres.to_dict(),
@@ -313,10 +340,18 @@ class SharedCorePlan:
             if not isinstance(item, dict):
                 raise ValueError("SharedCorePlan allocation entries must be objects.")
             allocations.append(PackSharedAllocation.from_dict(item))
+        model_sync_payload = payload.get("model_sync")
+        if model_sync_payload is not None and not isinstance(model_sync_payload, dict):
+            raise ValueError("SharedCorePlan.model_sync must be an object or null.")
         return cls(
             network_name=network_name,
             litellm=(
                 None if litellm_payload is None else SharedLiteLLMServicePlan.from_dict(litellm_payload)
+            ),
+            model_sync=(
+                None
+                if model_sync_payload is None
+                else SharedModelSyncPlan.from_dict(model_sync_payload)
             ),
             mail_relay=(
                 None

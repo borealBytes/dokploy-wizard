@@ -257,6 +257,9 @@ Model behavior inside SurfSense:
 - SurfSense model labels are rendered as `LiteLLM - <alias>`, so users see the gateway-backed alias they are selecting.
 - Local private model traffic goes through LiteLLM when `LITELLM_LOCAL_BASE_URL` is configured. The wizard-generated LiteLLM config includes the compatibility setting needed for local chat templates that reject non-leading system messages.
 - OpenCode Go aliases also go through LiteLLM when `LITELLM_OPENCODE_GO_API_KEY` is set.
+  The gateway sends the `x-opencode-session` routing header and a dedicated User-Agent
+  on every OpenCode Go request (required by the OpenCode Go API), and forwards
+  per-conversation session headers when clients provide their own.
 - SurfSense never receives raw OpenRouter, NVIDIA, OpenCode Go, or local upstream provider keys.
 
 ### Coder
@@ -270,14 +273,20 @@ On first successful bootstrap the wizard:
 
   | Template | What it provides |
   |---|---|
-  | `ubuntu-vscode` | Base Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `opencode`, `zellij`, `pi` CLI |
+  | `ubuntu-vscode` | Base Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `zellij` |
   | `ubuntu-vscode-opencode-web` | OpenCode Web (browser-based IDE) |
-  | `ubuntu-vscode-openwork` | OpenWork (AI-assisted workspace) |
   | `ubuntu-vscode-kdense-byok` | K-Dense BYOK (Bring Your Own Key for local model inference) |
   | `ubuntu-vscode-hermes` | Hermes (on-device AI assistant) |
-  | `ubuntu-vscode-pi-web` | Pi CLI plus clickable Pi Web UI (Coder app, not a public Dokploy pack) |
+
+Every wizard-managed template installs the OpenCode CLI and the Pi coding agent
+(`@earendil-works/pi-coding-agent`) and pre-seeds OpenCode, Pi, and VS Code
+Copilot BYOK with the full alias list resolved from the wizard-managed LiteLLM
+gateway, so agents are pre-wired on first boot instead of waiting for manual
+provider setup.
 
 - creates a default workspace for the operator
+
+Removed templates are retired automatically on the next wizard rerun or modify.
 
 That default template installs:
 
@@ -286,6 +295,7 @@ That default template installs:
 - `wget`
 - `btop`
 - `opencode`
+- `pi` (Pi coding agent CLI)
 - `zellij`
 
 The workspace home directory lives on a per-workspace Docker volume. The control plane state lives in shared-core Postgres.
@@ -317,7 +327,7 @@ Future architecture options:
 
 Operational note:
 
-- Hermes, OpenCode Web, and OpenWork are already path-based Coder apps in this repo.
+- Hermes and OpenCode Web are already path-based Coder apps in this repo.
 - K-Dense BYOK is the current outlier that uses `subdomain = true` and benefits the most from proper wildcard app routing.
 
 ### SeaweedFS
@@ -649,9 +659,9 @@ Primary consumers today are:
 - My Farm Advisor
 - SurfSense
 - Coder Hermes and Coder K-Dense
-- Coder OpenCode Web and OpenWork through generated template gateway defaults
+- Coder OpenCode Web through generated template gateway defaults
 
-Those services use internal gateway config or wizard-managed virtual keys. They should not receive raw OpenRouter, NVIDIA, OpenCode Go, local model, or other upstream provider keys directly when the wizard-managed LiteLLM path is in use. Pi Web UI remains the exception because its browser-local provider-key flow is intentionally unchanged and this repo does not control a Pi scoped-models endpoint.
+Those services use internal gateway config or wizard-managed virtual keys. They should not receive raw OpenRouter, NVIDIA, OpenCode Go, local model, or other upstream provider keys directly when the wizard-managed LiteLLM path is in use.
 
 ### Flat env inputs
 
@@ -662,12 +672,41 @@ The operator env file stays flat. `.install.env` contains only key=value pairs. 
 The generated LiteLLM config enforces a strict precedence:
 
 1. `local-model.internal/unsloth-active` — a private OpenAI-compatible endpoint, when `LITELLM_LOCAL_BASE_URL` is configured
-2. `opencode-go/*` — explicit OpenCode Go aliases covering the OpenCode Go provider fleet
-3. `openrouter/*` — explicit OpenRouter aliases, each declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS`
+2. `opencode-go/<AI_DEFAULT_MODEL>` — the resolved default alias route, so the workspace default and `dokploy-ai` key resolve the moment LiteLLM boots; the rest of the OpenCode Go fleet arrives via autosync (see below), not from a pinned list
+3. `openrouter/*` — explicit OpenRouter aliases, each declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS` (optional manual extras; the synced set covers the popular models automatically)
 
 OpenRouter wildcard routes are not allowed. The config renderer rejects `openrouter/*` or broad `*` aliases.
 
 SurfSense receives the same approved alias list through its generated LiteLLM virtual key. Inside SurfSense, model labels are displayed as `LiteLLM - <alias>`. That keeps the user-facing choice clear while keeping upstream keys at LiteLLM.
+
+### Model autosync
+
+Besides the explicit aliases above, the wizard runs a model autosync sidecar beside the LiteLLM service so newly published provider models appear without a wizard rerun. The sidecar (`<stack-name>-shared-litellm-sync`) runs a full cycle the moment it boots, then repeats on a schedule, polling the model catalogs of every upstream provider whose key is configured (OpenRouter, OpenCode Go/Zen, NVIDIA), and registers models the gateway does not expose yet through the LiteLLM admin API. For OpenRouter the sidecar tracks the public weekly leaderboard instead of an arbitrary catalog slice: the top 20 paid (standard-variant) models plus the top 10 `:free` models, so the synced set stays a curated ~30 frontier picks that reshuffle automatically as popularity changes. OpenCode Go needs no configuration at all: whenever `LITELLM_OPENCODE_GO_API_KEY` is set, the entire live catalog is synced in full (no env model list is consulted).
+
+How autosynced models behave:
+
+- Autosynced deployments are named `sync/<source>/<model-id>`, so they never collide with the explicit config-file aliases.
+- Deployments created by autosync are tagged internally; when a source drops a model, only wizard-created `sync/...` deployments are pruned. Config-file aliases and models you added yourself in the admin UI are never touched.
+- Consumer virtual keys carry a `sync/*` wildcard, so autosynced models are immediately callable from OpenClaw, My Farm Advisor, SurfSense, Coder Hermes, and Coder K-Dense. `dokploy-ai` stays restricted to the resolved default alias. Each cycle the sidecar also refreshes each consumer key's allowlist with the explicit current `sync/*` names, because LiteLLM's `/v1/models` does not expand wildcards and workspace tooling seeds its model picker from that endpoint.
+- Rendered LiteLLM config sets `general_settings.store_model_in_db` so admin-API-registered models survive proxy restarts.
+- Coder workspaces resolve their model lists live from the gateway at boot and re-run the same fetch from a background refresher roughly every 12 hours — retrying every 5 minutes after any failed refresh until the gateway is reachable again — so autosynced models appear in OpenCode, Pi, Hermes, and Copilot BYOK even in long-running workspaces. If the gateway is briefly unreachable during a refresh, the last good model list is kept.
+
+Autosync is on whenever at least one upstream provider key is configured. Optional env knobs:
+
+```bash
+LITELLM_MODEL_SYNC_ENABLED=1                # set to 0/false to disable the sidecar
+LITELLM_MODEL_SYNC_INTERVAL_MINUTES=360     # sync loop interval (min 5)
+LITELLM_MODEL_SYNC_PROVIDERS=openrouter,opencode-go,nvidia  # subset of sources
+LITELLM_MODEL_SYNC_MAX_MODELS=50            # cap of new models registered per provider per cycle
+LITELLM_MODEL_SYNC_NVIDIA_PROBE=1           # set to 0 to skip the NVIDIA liveness probe
+LITELLM_MODEL_SYNC_NVIDIA_FREE_ONLY=1       # set to 0 to also sync paid NVIDIA endpoints
+LITELLM_MODEL_SYNC_NVIDIA_MAX_MODELS=20     # cap of live NVIDIA models kept in the picker
+LITELLM_MODEL_SYNC_PROBE_TTL_DAYS=7         # how long probe verdicts are cached
+```
+
+NVIDIA's catalog lists models that have been quietly delisted (their chat endpoint 404s), embedding/utility models that never answer a chat request, and paid endpoints that bill per token. For NVIDIA only, the sidecar first filters the catalog down to free-tier models using the [models.dev](https://models.dev) pricing registry (the same registry OpenCode consumes), then chat-probes only those free candidates with a 1-token completion — so no paid completion is ever sent. Clean 404s are dropped, everything else is kept, and the per-source budget applies to the survivors so the picker gets the first N models that actually answer (default: the first 20 free models that respond, in catalog order). Verdicts are cached for `LITELLM_MODEL_SYNC_PROBE_TTL_DAYS` (default 7); dead models are re-probed every cycle so recovered models return without a rebuild, and an upstream brownout that 404s everything falls back to keeping the full list rather than emptying the provider. Set `LITELLM_MODEL_SYNC_NVIDIA_FREE_ONLY=0` to sync paid endpoints as well.
+
+Free-verified NVIDIA aliases get a `:free` tail (unless the model name already says free), and every workspace model picker — OpenCode, Pi — prices models from the models.dev registry in dollars per million tokens, shown as `(in:$0.59/out:$0.79)` or `(free)` next to each model name so users can see what they are selecting. Models the registry does not know are listed without a price claim.
 
 ### AI env contract
 
@@ -697,7 +736,7 @@ The wizard auto-generates stable virtual keys for each consumer:
 - Coder Hermes
 - Coder K-Dense
 
-OpenCode Web and OpenWork inherit wizard-managed LiteLLM defaults through the shared Coder AI gateway env during template bootstrap rather than receiving their own dedicated LiteLLM virtual-key consumer records. Pi Web UI is still a browser-local surface and is not centrally model-restricted. Pi Web UI does not receive a wizard-managed virtual key.
+OpenCode Web inherits wizard-managed LiteLLM defaults through the shared Coder AI gateway env during template bootstrap rather than receiving its own dedicated LiteLLM virtual-key consumer record.
 
 These keys are generated once and reused across reruns and modify operations. They are stored in the wizard state directory, not written back into `.install.env`. If you need to rotate a key, that is a future operator action, not something that happens silently on reinstall.
 
@@ -740,7 +779,7 @@ This keeps admin verification aligned with the intended trust boundary: public a
 
 ### Migration from direct provider envs
 
-If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, wizard-managed server-side consumers receive LiteLLM virtual keys or inherited LiteLLM gateway defaults instead of raw upstream provider keys. SurfSense follows this model: it gets only its restricted LiteLLM virtual key and approved aliases. Upstream secrets terminate at the LiteLLM proxy. Pi Web UI remains the exception because its browser-local provider-key flow is intentionally unchanged.
+If you previously set direct provider keys like `MY_FARM_ADVISOR_OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, those values are still accepted as upstream inputs for LiteLLM config generation. After cutover, wizard-managed server-side consumers receive LiteLLM virtual keys or inherited LiteLLM gateway defaults instead of raw upstream provider keys. SurfSense follows this model: it gets only its restricted LiteLLM virtual key and approved aliases. Upstream secrets terminate at the LiteLLM proxy.
 
 ### Validation
 

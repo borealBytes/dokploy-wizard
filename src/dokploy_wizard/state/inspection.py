@@ -377,19 +377,26 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
         )
     if desired_state.shared_core.litellm is not None:
         litellm_service_name = desired_state.shared_core.litellm.service_name
-        candidates.append(
-            {
-                "aliases": ("shared-litellm", "litellm"),
-                "hostname": None,
-                "managed_container_labels": {
-                    "com.docker.compose.service": litellm_service_name,
-                },
-                "port": str(4000),
-                "expected_service_name": litellm_service_name,
-                "pack": "shared-core",
-                "scope": f"stack:{desired_state.stack_name}:shared-litellm",
-            }
-        )
+        litellm_candidate: dict[str, Any] = {
+            "aliases": ("shared-litellm", "litellm"),
+            "hostname": None,
+            "managed_container_labels": {
+                "com.docker.compose.service": litellm_service_name,
+            },
+            "port": str(4000),
+            "expected_service_name": litellm_service_name,
+            "pack": "shared-core",
+            "scope": f"stack:{desired_state.stack_name}:shared-litellm",
+        }
+        model_sync_plan = desired_state.shared_core.model_sync
+        if model_sync_plan is not None:
+            litellm_candidate["expected_auxiliary_compose_services"] = frozenset(
+                {model_sync_plan.service_name}
+            )
+            litellm_candidate["managed_compose_project_prefix"] = (
+                f"{desired_state.stack_name}-shared-"
+            )
+        candidates.append(litellm_candidate)
     if "openclaw" in desired_state.enabled_packs:
         candidates.append(
             {

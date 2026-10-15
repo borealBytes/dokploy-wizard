@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from dokploy_wizard.core.models import SharedCorePlan
 from dokploy_wizard.packs.catalog import (
     get_mutable_pack_env_keys,
     get_mutable_pack_resource_keys,
@@ -544,6 +545,13 @@ def classify_modify_request(
         and existing_desired.shared_core.to_dict() != requested_desired.shared_core.to_dict()
     ):
         phases_to_run.add("shared_core")
+    elif _model_sync_projection_drift_only(
+        existing_desired.shared_core, requested_desired.shared_core
+    ):
+        # A wizard upgrade added or removed the model-sync sidecar projection
+        # with identical env input; the idempotent shared_core phase applies
+        # or prunes the sidecar service inside the existing compose app.
+        phases_to_run.add("shared_core")
     if set(removed_packs) & _LITELLM_CONSUMER_PHASES:
         phases_to_run.add("shared_core")
     phases_to_run.update(_hostname_change_phases(existing_desired, requested_desired))
@@ -558,6 +566,11 @@ def classify_modify_request(
 
     applicable_phases = applicable_phases_for(requested_desired)
     completed_intersection = set(existing_applied.completed_steps) & set(applicable_phases)
+    if set(applicable_phases) - completed_intersection - phases_to_run:
+        # A previous lifecycle run stopped before finishing (for example a
+        # failed install phase); modify must finish the unfinished tail even
+        # when the requested change itself only touches other phases.
+        phases_to_run.update(set(applicable_phases) - completed_intersection)
     preserved_phases = tuple(
         phase
         for phase in applicable_phases
@@ -757,6 +770,14 @@ def _sorted_reasons(changed_keys: set[str], phases_to_run: set[str]) -> tuple[st
 
 def _access_enabled(desired_state: DesiredState) -> bool:
     return bool({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs))
+
+
+def _model_sync_projection_drift_only(
+    existing: SharedCorePlan, requested: SharedCorePlan
+) -> bool:
+    if existing.model_sync == requested.model_sync:
+        return False
+    return replace(existing, model_sync=None) == replace(requested, model_sync=None)
 
 
 def _desired_diff_is_only_litellm_projection(

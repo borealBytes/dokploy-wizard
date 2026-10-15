@@ -6,7 +6,11 @@ from dataclasses import replace
 
 import pytest
 
-from dokploy_wizard.lifecycle import LifecyclePlan, classify_modify_request
+from dokploy_wizard.lifecycle import (
+    LifecyclePlan,
+    applicable_phases_for,
+    classify_modify_request,
+)
 from dokploy_wizard.packs.catalog import (
     get_mutable_pack_env_keys,
     get_mutable_pack_resource_keys,
@@ -1225,3 +1229,45 @@ def test_modify_openclaw_internal_hostname_reconciles_networking_and_openclaw_on
     assert "OPENCLAW_INTERNAL_SUBDOMAIN" in plan.reasons[0]
     assert plan.start_phase == "openclaw"
     assert plan.phases_to_run == ("openclaw",)
+
+
+def test_modify_schedules_shared_core_for_projection_drift_and_unfinished_tail() -> None:
+    raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,coder,surfsense",
+            "LITELLM_OPENROUTER_API_KEY": "or-key",
+        }
+    )
+    requested_desired = resolve_desired_state(raw)
+    assert requested_desired.shared_core.model_sync is not None
+
+    # Simulates a wizard upgrade that added the model-sync projection while
+    # the operator env stayed identical: the persisted desired state lacks
+    # model_sync, and the previous install stopped before surfsense applied.
+    existing_desired = replace(
+        requested_desired,
+        shared_core=replace(requested_desired.shared_core, model_sync=None),
+    )
+    applicable = applicable_phases_for(requested_desired)
+    assert applicable[-1] == "surfsense"
+    completed = tuple(phase for phase in applicable if phase != "surfsense")
+    existing_applied = AppliedStateCheckpoint(
+        format_version=1,
+        desired_state_fingerprint=existing_desired.fingerprint(),
+        completed_steps=completed,
+    )
+
+    plan = classify_modify_request(
+        existing_raw=raw,
+        existing_desired=existing_desired,
+        existing_applied=existing_applied,
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert plan.phases_to_run == ("shared_core", "surfsense")
+    assert "coder" in plan.preserved_phases

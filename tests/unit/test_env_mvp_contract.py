@@ -68,10 +68,11 @@ _OPTIONAL_COMMENTED_KEYS = frozenset(
         "LITELLM_LOCAL_API_KEY",
         "LITELLM_NVIDIA_API_KEY",
         "LITELLM_NVIDIA_BASE_URL",
+        "LITELLM_OPENROUTER_MODELS",
     }
 )
-_DEFAULT_AI_PROVIDER = "openrouter"
-_DEFAULT_AI_MODEL = "deepseek/deepseek-v4-flash:free"
+_DEFAULT_AI_PROVIDER = "opencode-go"
+_DEFAULT_AI_MODEL = "deepseek-v4-flash"
 
 
 def _repo_root():
@@ -145,7 +146,7 @@ def _farm_litellm_env(**overrides: str) -> RawEnvInput:
 
 
 def test_minimal_env_contract_key_categories_are_explicit_and_secret_free() -> None:
-    install_min_keys, model_shape, _safe_values = _load_install_min_env_shape()
+    install_min_keys, _model_shape, _safe_values = _load_install_min_env_shape()
     categorized_keys = (
         _ALWAYS_REQUIRED_KEYS
         | _LIVE_BOOTSTRAP_REQUIRED_KEYS
@@ -165,27 +166,26 @@ def test_minimal_env_contract_key_categories_are_explicit_and_secret_free() -> N
     assert {
         "AI_DEFAULT_PROVIDER",
         "AI_DEFAULT_MODEL",
-        "LITELLM_OPENROUTER_MODELS",
     } <= install_min_keys
-    assert model_shape["LITELLM_OPENROUTER_MODELS"] == (True, True)
     assert _ALWAYS_REQUIRED_KEYS <= categorized_keys
     assert _GENERATED_STATE_BACKED_KEYS.isdisjoint(_LIVE_BOOTSTRAP_REQUIRED_KEYS)
-    assert _DEFAULT_AI_PROVIDER == "openrouter"
-    assert _DEFAULT_AI_MODEL == "deepseek/deepseek-v4-flash:free"
+    assert _DEFAULT_AI_PROVIDER == "opencode-go"
+    assert _DEFAULT_AI_MODEL == "deepseek-v4-flash"
 
 
 def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> None:
-    install_min_keys, model_shape, safe_values = _load_install_min_env_shape()
+    install_min_keys, _model_shape, safe_values = _load_install_min_env_shape()
     active_packs = safe_values["PACKS"].split(",")
-    required_proof_packs = ["nextcloud", "my-farm-advisor", "seaweedfs", "coder"]
-    optional_proof_packs = {"surfsense"}
+    # The minimal class-proof stack is Coder plus the shared services it needs
+    # and SeaweedFS object storage; heavier packs stay opt-in.
+    required_proof_packs = ["seaweedfs", "coder"]
+    optional_proof_packs = {"surfsense", "nextcloud", "my-farm-advisor"}
 
     assert active_packs[: len(required_proof_packs)] == required_proof_packs
     assert len(active_packs) == len(set(active_packs))
     assert set(active_packs).issubset(set(required_proof_packs) | optional_proof_packs)
     assert safe_values["AI_DEFAULT_PROVIDER"] == _DEFAULT_AI_PROVIDER
     assert safe_values["AI_DEFAULT_MODEL"] == _DEFAULT_AI_MODEL
-    assert model_shape["LITELLM_OPENROUTER_MODELS"] == (True, True)
     assert _GENERATED_STATE_BACKED_KEYS.isdisjoint(install_min_keys)
     assert "MY_FARM_ADVISOR_CHANNELS" not in install_min_keys
 

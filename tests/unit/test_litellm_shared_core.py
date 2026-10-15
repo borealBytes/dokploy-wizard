@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from collections.abc import Mapping
@@ -347,9 +348,8 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
     assert re.search(r"source: wizard-stack-shared-litellm-config-[0-9a-f]{12}", compose)
     assert "target: /app/config.yaml" in compose
     assert 'api_key: "os.environ/LITELLM_LOCAL_API_KEY"' in compose
-    assert 'model_name: "opencode-go/minimax-m2.7"' in compose
     assert 'model_name: "opencode-go/deepseek-v4-flash"' in compose
-    assert 'model_name: "opencode-go/mimo-v2.5"' in compose
+    assert 'model_name: "opencode-go/minimax-m2.7"' not in compose
     assert 'model_name: "openrouter/hunter-alpha"' in compose
     assert '      LITELLM_OPENCODE_GO_API_KEY: "${LITELLM_OPENCODE_GO_API_KEY:?LITELLM_OPENCODE_GO_API_KEY is required}"' in compose
     assert (
@@ -359,7 +359,18 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
     assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "opencode-go-upstream-key"
     assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "farm-openrouter-upstream-key"
     assert env_specs["LITELLM_LOCAL_API_KEY"].target_services == ("wizard-stack-shared-litellm",)
-    assert env_specs["LITELLM_MASTER_KEY"].target_services == ("wizard-stack-shared-litellm",)
+    assert env_specs["LITELLM_MASTER_KEY"].target_services == (
+        "wizard-stack-shared-litellm",
+        "wizard-stack-shared-litellm-sync",
+    )
+    assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].target_services == (
+        "wizard-stack-shared-litellm",
+        "wizard-stack-shared-litellm-sync",
+    )
+    assert env_specs["LITELLM_OPENROUTER_API_KEY"].target_services == (
+        "wizard-stack-shared-litellm",
+        "wizard-stack-shared-litellm-sync",
+    )
     assert env_specs["LITELLM_SALT_KEY"].target_services == ("wizard-stack-shared-litellm",)
     assert env_specs["WIZARD_STACK_LITELLM_POSTGRES_PASSWORD"].target_services == (
         "wizard-stack-shared-postgres",
@@ -395,11 +406,12 @@ def test_rendered_litellm_local_model_disables_system_role_for_vllm_templates() 
         compose,
         "local-model.internal/unsloth-active",
     )
-    opencode_block = _embedded_litellm_model_block(compose, "opencode-go/deepseek-v4-flash")
+    # A non-OpenCode-Go default provider means no static Go alias route at all;
+    # the sidecar exposes the full Go catalog under sync/opencode-go/* instead.
+    assert 'model_name: "opencode-go/deepseek-v4-flash"' not in compose
     openrouter_block = _embedded_litellm_model_block(compose, "openrouter/hunter-alpha")
 
     assert "supports_system_message: false" in local_block
-    assert "supports_system_message" not in opencode_block
     assert "supports_system_message" not in openrouter_block
     assert "SECRET" not in compose
 
@@ -447,7 +459,7 @@ def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
     )
     assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "litellm-opencode-key"
     assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "litellm-openrouter-key"
-    assert 'model_name: "opencode-go/minimax-m2.7"' in compose
+    assert 'model_name: "opencode-go/deepseek-v4-flash"' in compose
     assert 'model_name: "openrouter/google/gemma-4-31b-it:free"' in compose
 
 
@@ -778,6 +790,38 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
 
     assert matching_backend.validate_litellm_virtual_keys() is True
     assert drifted_backend.validate_litellm_virtual_keys() is False
+
+    # The sync sidecar appends explicit sync/* aliases to consumer keys for
+    # /v1/models visibility; such keys are still valid (wizard list is a floor).
+    sidecar_expanded_records = tuple(
+        LiteLLMVirtualKeyRecord(
+            key=record.key,
+            key_alias=record.key_alias,
+            team_id=record.team_id,
+            models=(
+                (*record.models, "sync/openrouter/deepseek/deepseek-v4-flash")
+                if record.key_alias == "openclaw"
+                else record.models
+            ),
+            metadata=record.metadata,
+        )
+        for record in matching_records
+    )
+    sidecar_expanded_backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists={
+            "openclaw": ("local-model.internal/unsloth-active",)
+        },
+        litellm_admin_api=_FakeLiteLLMAdminApi(
+            {"status": "connected", "db": "connected"},
+            keys=sidecar_expanded_records,
+        ),
+    )
+    assert sidecar_expanded_backend.validate_litellm_virtual_keys() is True
 
 
 def test_shared_core_find_container_name_prefers_exact_manual_name(
@@ -1803,3 +1847,159 @@ def test_verify_dokploy_ai_provider_fails_on_test_connection_error_without_leaki
     assert "test_connection_error" in result.detail
     assert "fetch failed" in result.detail
     assert generated.virtual_keys["dokploy-ai"] not in result.detail
+
+
+_MODEL_SYNC_ENV = {
+    "LITELLM_OPENROUTER_API_KEY": "openrouter-upstream-key",
+    "LITELLM_OPENCODE_GO_API_KEY": "opencode-go-upstream-key",
+    "LITELLM_NVIDIA_API_KEY": "nvidia-upstream-key",
+    "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
+}
+
+
+def test_rendered_compose_includes_model_sync_sidecar() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(plan, {}, dict(_MODEL_SYNC_ENV))
+    compose = rendered.compose_file
+
+    assert "  wizard-stack-shared-litellm-sync:\n" in compose
+    assert "image: python:3.12-alpine3.20" in compose
+    assert 'LITELLM_GATEWAY_URL: "http://wizard-stack-shared-litellm:4000"' in compose
+    assert 'MODEL_SYNC_INTERVAL_MINUTES: "360"' in compose
+    assert "target: /app/model_sync.py" in compose
+    assert "target: /app/sources.json" in compose
+    assert re.search(r"source: wizard-stack-shared-litellm-sync-sources-[0-9a-f]{12}", compose)
+    assert re.search(r"source: wizard-stack-shared-litellm-sync-script-[0-9a-f]{12}", compose)
+    assert "wizard-stack-shared-litellm-sync-state:/state" in compose
+    assert "condition: service_healthy" in compose
+    assert '"CMD", "python3", "/app/model_sync.py", "--healthcheck"' in compose
+    assert "store_model_in_db: true" in compose
+    assert '"alias_prefix": "sync/openrouter"' in compose
+    assert '"alias_prefix": "sync/opencode-go"' in compose
+    assert '"alias_prefix": "sync/nvidia"' in compose
+    assert "openrouter-upstream-key" not in compose
+
+
+def test_rendered_compose_model_sync_disabled_by_env() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(
+        plan, {}, {**_MODEL_SYNC_ENV, "LITELLM_MODEL_SYNC_ENABLED": "0"}
+    )
+    compose = rendered.compose_file
+
+    assert "wizard-stack-shared-litellm-sync" not in compose
+    assert "store_model_in_db" not in compose
+
+
+def test_rendered_compose_model_sync_absent_without_provider_keys() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(plan, {}, {})
+    compose = rendered.compose_file
+
+    assert "wizard-stack-shared-litellm-sync" not in compose
+    assert "store_model_in_db" not in compose
+
+
+def test_rendered_compose_model_sync_honors_provider_subset_and_interval() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(
+        plan,
+        {},
+        {
+            "LITELLM_OPENROUTER_API_KEY": "openrouter-upstream-key",
+            "LITELLM_OPENCODE_GO_API_KEY": "opencode-go-upstream-key",
+            "LITELLM_MODEL_SYNC_PROVIDERS": "openrouter",
+            "LITELLM_MODEL_SYNC_INTERVAL_MINUTES": "30",
+        },
+    )
+    compose = rendered.compose_file
+
+    assert 'MODEL_SYNC_INTERVAL_MINUTES: "30"' in compose
+    assert '"alias_prefix": "sync/openrouter"' in compose
+    assert '"alias_prefix": "sync/opencode-go"' not in compose
+
+
+def test_consumer_virtual_keys_receive_sync_wildcard() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+    allowlists = build_litellm_consumer_model_allowlists(flat_env=dict(_MODEL_SYNC_ENV), plan=plan)
+
+    key_lists = shared_core_module._litellm_key_model_allowlists(
+        allowlists, litellm_env=dict(_MODEL_SYNC_ENV)
+    )
+
+    assert all(consumer in key_lists for consumer in allowlists)
+    assert key_lists["openclaw"][-1] == "sync/*"
+    assert key_lists["surfsense"][-1] == "sync/*"
+    assert "sync/*" not in key_lists["dokploy-ai"]
+    assert "sync/*" not in allowlists["openclaw"]
+
+    disabled = shared_core_module._litellm_key_model_allowlists(
+        allowlists, litellm_env={**_MODEL_SYNC_ENV, "LITELLM_MODEL_SYNC_ENABLED": "0"}
+    )
+    assert all("sync/*" not in models for models in disabled.values())
+
+
+def test_push_model_sync_consumer_keys_writes_state_file_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_cmd: list[str] = []
+    captured_input: list[str] = []
+
+    def fake_run(
+        cmd: list[str],
+        *args: object,
+        input: str | None = None,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        captured_cmd.extend(cmd)
+        captured_input.append(input or "")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.shared_core.subprocess.run", fake_run)
+
+    assert shared_core_module._push_model_sync_consumer_keys(
+        "sync-container", {"coder-hermes": "sk-1", "surfsense": "sk-2"}
+    )
+    assert captured_cmd[:4] == ["docker", "exec", "-i", "sync-container"]
+    assert json.loads(captured_input[0]) == {"coder-hermes": "sk-1", "surfsense": "sk-2"}
+    shell = " ".join(captured_cmd)
+    assert "consumer-keys.json.tmp" in shell and "mv" in shell
+
+
+def test_push_model_sync_consumer_keys_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.shared_core.subprocess.run", fake_run)
+
+    assert not shared_core_module._push_model_sync_consumer_keys("sync-container", {"a": "sk-a"})
+
+
+def test_model_sync_first_cycle_completed_polls_healthcheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results = iter([1, 1, 0])
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert cmd[-3:] == ["python3", "/app/model_sync.py", "--healthcheck"]
+        return subprocess.CompletedProcess(args=cmd, returncode=next(results), stdout="", stderr="")
+
+    monkeypatch.setattr("dokploy_wizard.dokploy.shared_core.subprocess.run", fake_run)
+    sleeps: list[float] = []
+
+    assert shared_core_module._model_sync_first_cycle_completed(
+        "sync-container", attempts=5, delay_seconds=5.0, sleep_fn=sleeps.append
+    )
+    assert sleeps == [5.0, 5.0]
+
+    monkeypatch.setattr(
+        "dokploy_wizard.dokploy.shared_core.subprocess.run",
+        lambda cmd, *a, **k: subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=""),
+    )
+    assert not shared_core_module._model_sync_first_cycle_completed(
+        "sync-container", attempts=2, delay_seconds=0.0, sleep_fn=lambda _s: None
+    )

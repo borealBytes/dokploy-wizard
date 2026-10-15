@@ -897,9 +897,13 @@ def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults()
     ].values["LITELLM_OPENROUTER_MODELS"]
     install_min_path = REPO_ROOT / ".install-min.env"
     if install_min_path.exists():
-        assert examples[full_example_path].values["LITELLM_OPENROUTER_MODELS"] == parse_env_file(
-            install_min_path
-        ).values["LITELLM_OPENROUTER_MODELS"]
+        install_min_models = parse_env_file(install_min_path).values.get(
+            "LITELLM_OPENROUTER_MODELS"
+        )
+        if install_min_models:
+            assert examples[full_example_path].values["LITELLM_OPENROUTER_MODELS"] == (
+                install_min_models
+            )
 
     for parsed in examples.values():
         assert parsed.values["AI_DEFAULT_PROVIDER"] == "openrouter"
@@ -925,7 +929,7 @@ def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults()
         "LITELLM_LOCAL_MODEL",
         "LITELLM_LOCAL_API_KEY",
         "LITELLM_OPENCODE_GO_API_KEY",
-        "LITELLM_OPENCODE_GO_WILDCARD",
+
         "LITELLM_NVIDIA_API_KEY",
         "NVIDIA_BASE_URL",
     )
@@ -1476,6 +1480,83 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     assert not any(entry["live_name"] == runtime_container for entry in unknown_entries)
     assert report["summary"]["wizard_managed"] == 12
     assert report["summary"]["manual_collision"] == 0
+
+
+def test_build_live_drift_report_treats_model_sync_sidecar_as_managed_litellm_auxiliary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
+            "STACK_NAME": "openmerge",
+            "ROOT_DOMAIN": "openmerge.me",
+            "PACKS": "",
+            "LITELLM_OPENROUTER_API_KEY": "or-key",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+    assert desired_state.shared_core.model_sync is not None
+    litellm_service = desired_state.shared_core.litellm.service_name
+    sync_service = desired_state.shared_core.model_sync.service_name
+    assert sync_service == f"{litellm_service}-sync"
+    project = "openmerge-shared-zz1234"
+
+    ownership_ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                "shared_core_litellm",
+                "svc-shared-litellm",
+                f"stack:{desired_state.stack_name}:shared-litellm",
+            ),
+        ),
+    )
+
+    monkeypatch.setattr(inspection_module, "_docker_cli_available", lambda: True)
+    monkeypatch.setattr(inspection_module, "_list_docker_services", lambda: ())
+    monkeypatch.setattr(
+        inspection_module,
+        "_list_docker_containers",
+        lambda: (
+            {
+                "name": f"{project}-{litellm_service}-1",
+                "status": "Up 45 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": litellm_service,
+                    "com.docker.compose.project": project,
+                },
+            },
+            {
+                "name": f"{project}-{sync_service}-1",
+                "status": "Up 43 minutes (healthy)",
+                "labels": {
+                    "com.docker.compose.service": sync_service,
+                    "com.docker.compose.project": project,
+                },
+            },
+        ),
+    )
+    monkeypatch.setattr(inspection_module, "_list_service_task_statuses", lambda service_name: ())
+    monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", (tmp_path,))
+
+    report = inspection_module.build_live_drift_report(
+        desired_state=desired_state,
+        ownership_ledger=ownership_ledger,
+    )
+
+    assert report["summary"]["manual_collision"] == 0
+    assert report["summary"]["unknown_unmanaged"] == 0
+    assert all(
+        entry.get("live_name") != f"{project}-{sync_service}-1" for entry in report["entries"]
+    )
+    managed = [
+        entry for entry in report["entries"] if entry["classification"] == "wizard_managed"
+    ]
+    assert any(
+        entry["health"] == "healthy" and litellm_service in entry["live_name"]
+        for entry in managed
+    )
 
 
 def test_build_live_drift_report_does_not_match_seaweedfs_alias_by_random_substring(

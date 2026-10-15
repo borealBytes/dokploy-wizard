@@ -56,7 +56,7 @@ resource "coder_agent" "main" {
 
     # OpenCode, skip if already installed
     if ! command -v opencode >/dev/null 2>&1; then
-      if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash; then
+      if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/v2/install | bash; then
         if [ ! -x /home/coder/.opencode/bin/opencode ]; then
           echo "OpenCode installer did not produce a usable binary" >&2
           exit 1
@@ -86,6 +86,27 @@ resource "coder_agent" "main" {
       curl -fsSL https://deb.nodesource.com/setup_24.x | $_SUDO -E bash -
       $_SUDO apt-get install -y nodejs
     fi
+
+    # Pi coding agent, installed on every wizard-managed workspace
+    $_SUDO corepack enable
+    $_SUDO corepack prepare pnpm@10.27.0 --activate
+
+    export PNPM_HOME=/home/coder/.local/share/pnpm
+    export PATH="$PNPM_HOME/bin:$PATH"
+    mkdir -p "$PNPM_HOME/bin"
+    touch /home/coder/.bashrc /home/coder/.profile
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc
+    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile
+    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile
+
+    if ! command -v pi >/dev/null 2>&1; then
+      pnpm add -g @earendil-works/pi-coding-agent
+    fi
+
+    command -v pi
+    pi --version
+    bash -lc 'command -v pi && pi --version'
 
     export HERMES_HOME=/home/coder/.hermes
     export HERMES_INSTALL_DIR=/home/coder/.hermes/hermes-agent
@@ -193,9 +214,22 @@ resource "coder_agent" "main" {
     hermes config set terminal.backend local
     hermes config set terminal.cwd /home/coder
 
-    python3 - <<'PY'
+    mkdir -p /home/coder/.config/dokploy /home/coder/.local/share/dokploy
+    cat > /home/coder/.config/dokploy/model-refresh.env <<ENVEOF
+DOKPLOY_LITELLM_BASE_URL="$AI_DEFAULT_BASE_URL"
+DOKPLOY_LITELLM_API_KEY="$AI_DEFAULT_API_KEY"
+DOKPLOY_LITELLM_DEFAULT_ALIAS="$HERMES_MODEL"
+HERMES_MODEL="$HERMES_MODEL"
+HERMES_INFERENCE_PROVIDER="$HERMES_INFERENCE_PROVIDER"
+DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON=\"$DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON\"
+ENVEOF
+    chmod 600 /home/coder/.config/dokploy/model-refresh.env
+    cat > /home/coder/.local/share/dokploy/model-refresh.py <<'PY'
 import json
 import os
+import subprocess
+import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -205,35 +239,115 @@ try:
 except ImportError:
     yaml = None
 
+ENV_FILE = "/home/coder/.config/dokploy/model-refresh.env"
+LEGACY_ENV_NAMES = {
+    "DOKPLOY_LITELLM_BASE_URL": "AI_DEFAULT_BASE_URL",
+    "DOKPLOY_LITELLM_API_KEY": "AI_DEFAULT_API_KEY",
+    "DOKPLOY_LITELLM_DEFAULT_ALIAS": "HERMES_MODEL",
+}
+
+
+def setting(name: str, default: str = "") -> str:
+    for candidate in (name, LEGACY_ENV_NAMES.get(name, "")):
+        if candidate:
+            value = os.environ.get(candidate, "").strip()
+            if value:
+                return value
+    value = _env_file_value(name) or _env_file_value(LEGACY_ENV_NAMES.get(name, ""))
+    if value:
+        return value
+    return default
+
+
+def _restore_inner_quotes(value: str) -> str:
+    if value.startswith("[") and not value.startswith('["') and value != "[]":
+        # Shell/Terraform expansion strips inner double quotes from
+        # substituted JSON (both in heredocs and when sourcing the env
+        # file); restore them so list payloads stay parseable.
+        return '["' + value[1:-1].replace(",", '","') + '"]'
+    return value
+
+
+def _env_file_value(name: str) -> str:
+    if not name:
+        return ""
+    try:
+        with open(ENV_FILE, encoding="utf-8") as handle:
+            for line in handle:
+                key, separator, raw_value = line.partition("=")
+                if separator and key.strip() == name:
+                    return _restore_inner_quotes(raw_value.strip().strip('"'))
+    except OSError:
+        pass
+    return ""
+
+
+base_url = setting("DOKPLOY_LITELLM_BASE_URL").rstrip("/")
+api_key = setting("DOKPLOY_LITELLM_API_KEY")
 home = Path(os.environ.get("HERMES_HOME", "/home/coder/.hermes"))
 config_path = home / "config.yaml"
-base_url = os.environ["AI_DEFAULT_BASE_URL"].rstrip("/")
-api_key = os.environ.get("AI_DEFAULT_API_KEY", "")
-provider = os.environ.get("HERMES_INFERENCE_PROVIDER", "dokploy-litellm") or "dokploy-litellm"
-default_model = os.environ["HERMES_MODEL"]
-fallback_models = json.loads(os.environ.get("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]"))
+provider = setting("HERMES_INFERENCE_PROVIDER", "dokploy-litellm") or "dokploy-litellm"
+default_model = setting("HERMES_MODEL")
+def _parse_fallback_models(raw, _depth=0):
+    if not raw or _depth > 3:
+        return []
+    try:
+        value = json.loads(_restore_inner_quotes(raw))
+    except ValueError:
+        return []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str) and item.strip()]
+    if isinstance(value, str):
+        # Terraform/shell quote-stripping can leave a JSON *string* wrapping the
+        # list text; unwrap and reparse instead of iterating it character-wise.
+        return _parse_fallback_models(value, _depth + 1)
+    return []
 
-headers = {"Accept": "application/json"}
-if api_key:
-    headers["Authorization"] = f"Bearer {api_key}"
-request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
-try:
-    with urllib.request.urlopen(request, timeout=5) as response:
-        payload = json.load(response)
-except (OSError, ValueError, urllib.error.URLError):
-    payload = {"data": []}
+fallback_models = _parse_fallback_models(
+    setting("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "")
+)
 
-model_ids = []
-for item in payload.get("data", []):
-    if not isinstance(item, dict):
-        continue
-    model_id = item.get("id")
-    if not isinstance(model_id, str):
-        continue
-    normalized = model_id.strip()
-    if normalized and "/" in normalized and not normalized.endswith("/*") and not normalized.startswith("openai/"):
-        model_ids.append(normalized)
+if "--daemon" in sys.argv[1:]:
+    while True:
+        time.sleep(1800)
+        subprocess.run([sys.executable, __file__], check=False)
 
+
+def fetch_model_ids() -> list[str]:
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+    model_ids = []
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.load(response)
+        except (OSError, ValueError, urllib.error.URLError):
+            payload = {"data": []}
+
+        model_ids = []
+        for item in payload.get("data", []):
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("id")
+            if not isinstance(model_id, str):
+                continue
+            normalized = model_id.strip()
+            if normalized and "/" in normalized and not normalized.endswith("/*") and not normalized.startswith("openai/"):
+                model_ids.append(normalized)
+        if model_ids or attempt == 3:
+            return model_ids
+        time.sleep(10)
+    return model_ids
+
+
+fetched_model_ids = fetch_model_ids()
+if not fetched_model_ids and Path("/home/coder/.config/opencode/opencode.json").exists():
+    # Gateway unreachable during a background refresh; keep the last good list.
+    raise SystemExit(0)
+
+model_ids = fetched_model_ids
 for model_id in fallback_models:
     if isinstance(model_id, str) and model_id.strip():
         model_ids.append(model_id.strip())
@@ -326,7 +440,45 @@ def write_vscode_copilot_byok_settings(raw_base_url: str, raw_api_key: str, ids:
 
 write_vscode_copilot_byok_settings(base_url, api_key, model_ids)
 
+Path("/home/coder/.config/opencode").mkdir(parents=True, exist_ok=True)
+opencode_config = {
+    "provider": {
+        "litellm": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": base_url, "apiKey": api_key},
+            "models": {model_id: {} for model_id in model_ids},
+        }
+    },
+    "model": default_model,
+}
+Path("/home/coder/.config/opencode/opencode.json").write_text(
+    json.dumps(opencode_config, indent=2) + "\n",
+    encoding="utf-8",
+)
+
+Path("/home/coder/.pi/agent").mkdir(parents=True, exist_ok=True)
+pi_models_config = {
+    "providers": {
+        "litellm": {
+            "name": "LiteLLM",
+            "baseUrl": base_url,
+            "api": "openai-completions",
+            "apiKey": api_key,
+            "models": [{"id": model_id, "name": model_id} for model_id in model_ids],
+        }
+    }
+}
+Path("/home/coder/.pi/agent/models.json").write_text(
+    json.dumps(pi_models_config, indent=2) + "\n",
+    encoding="utf-8",
+)
+
 PY
+
+    sh -c 'set -a; . /home/coder/.config/dokploy/model-refresh.env; set +a; exec python3 /home/coder/.local/share/dokploy/model-refresh.py' || true
+    if ! pgrep -f 'model-refresh.py --daemon' >/dev/null 2>&1; then
+      setsid nohup python3 /home/coder/.local/share/dokploy/model-refresh.py --daemon >/dev/null 2>&1 < /dev/null &
+    fi
 
     if ! command -v hermes-web-ui >/dev/null 2>&1; then
       npm install -g hermes-web-ui
@@ -689,140 +841,19 @@ upsert_env API_SERVER_KEY "$API_SERVER_KEY"
 upsert_env HERMES_WEBUI_SKIP_ONBOARDING "1"
 upsert_env HERMES_WEBUI_DEFAULT_MODEL "$HERMES_MODEL"
 
-python3 - <<'PY'
-import json
-import os
-import urllib.error
-import urllib.request
-from pathlib import Path
-
-try:
-    import yaml
-except ImportError:
-    yaml = None
-
-home = Path(os.environ.get("HERMES_HOME", "/home/coder/.hermes"))
-config_path = home / "config.yaml"
-base_url = os.environ["AI_DEFAULT_BASE_URL"].rstrip("/")
-api_key = os.environ.get("AI_DEFAULT_API_KEY", "")
-provider = os.environ.get("HERMES_INFERENCE_PROVIDER", "dokploy-litellm") or "dokploy-litellm"
-default_model = os.environ["HERMES_MODEL"]
-fallback_models = json.loads(os.environ.get("DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON", "[]"))
-
-headers = {"Accept": "application/json"}
-if api_key:
-    headers["Authorization"] = f"Bearer {api_key}"
-request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
-try:
-    with urllib.request.urlopen(request, timeout=5) as response:
-        payload = json.load(response)
-except (OSError, ValueError, urllib.error.URLError):
-    payload = {"data": []}
-
-model_ids = []
-for item in payload.get("data", []):
-    if not isinstance(item, dict):
-        continue
-    model_id = item.get("id")
-    if not isinstance(model_id, str):
-        continue
-    normalized = model_id.strip()
-    if normalized and "/" in normalized and not normalized.endswith("/*") and not normalized.startswith("openai/"):
-        model_ids.append(normalized)
-
-for model_id in fallback_models:
-    if isinstance(model_id, str) and model_id.strip():
-        model_ids.append(model_id.strip())
-if default_model not in model_ids:
-    model_ids.insert(0, default_model)
-model_ids = list(dict.fromkeys(model_ids))
-
-config = {}
-if config_path.exists():
-    try:
-        if yaml is not None:
-            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        else:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-    except Exception:
-        config = {}
-if not isinstance(config, dict):
-    config = {}
-
-config["model"] = {
-    "provider": provider,
-    "default": default_model,
-    "base_url": base_url,
-}
-providers = config.setdefault("providers", {})
-if not isinstance(providers, dict):
-    providers = {}
-    config["providers"] = providers
-providers[provider] = {
-    "name": "Dokploy LiteLLM",
-    "base_url": base_url,
-    "api_key": api_key,
-    "model": default_model,
-    "default_model": default_model,
-    "transport": "chat_completions",
-    "models": {model_id: {} for model_id in model_ids},
-    "discover_models": False,
-}
-
-home.mkdir(parents=True, exist_ok=True)
-if yaml is not None:
-    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-else:
-    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-# Official Copilot BYOK is intentionally chat/agent-only; inline completions stay on Copilot-managed models.
-def _copilot_byok_openai_base_url(raw_base_url: str) -> str:
-    normalized = raw_base_url.rstrip("/")
-    if normalized.endswith("/v1") or normalized.endswith("/v1/chat/completions"):
-        return normalized
-    return f"{normalized}/v1"
-
-
-def _copilot_byok_custom_models(raw_base_url: str, raw_api_key: str, ids: list[str]) -> dict[str, dict[str, object]]:
-    url = _copilot_byok_openai_base_url(raw_base_url)
-    return {
-        model_id: {
-            "name": f"Dokploy LiteLLM: {model_id}",
-            "model": model_id,
-            "url": url,
-            "apiKey": raw_api_key,
-            "keyStorage": "dokploy-litellm",
-            "requiresAPIKey": bool(raw_api_key),
-            "toolCalling": True,
-            "vision": False,
-            "thinking": False,
-            "maxInputTokens": 131072,
-            "maxOutputTokens": 8192,
-        }
-        for model_id in ids
-    }
-
-
-def write_vscode_copilot_byok_settings(raw_base_url: str, raw_api_key: str, ids: list[str]) -> None:
-    settings_paths = [
-        Path("/home/coder/.local/share/code-server/User/settings.json"),
-        Path("/home/coder/.config/code-server/User/settings.json"),
-    ]
-    custom_models = _copilot_byok_custom_models(raw_base_url, raw_api_key, ids)
-    for settings_path in settings_paths:
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
-        except (OSError, ValueError):
-            settings = {}
-        if not isinstance(settings, dict):
-            settings = {}
-        settings["github.copilot.chat.customOAIModels"] = custom_models
-        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-
-
-write_vscode_copilot_byok_settings(base_url, api_key, model_ids)
-
-PY
+cat > /home/coder/.config/dokploy/model-refresh.env <<ENVEOF
+DOKPLOY_LITELLM_BASE_URL="$AI_DEFAULT_BASE_URL"
+DOKPLOY_LITELLM_API_KEY="$AI_DEFAULT_API_KEY"
+DOKPLOY_LITELLM_DEFAULT_ALIAS="$HERMES_MODEL"
+HERMES_MODEL="$HERMES_MODEL"
+HERMES_INFERENCE_PROVIDER="$HERMES_INFERENCE_PROVIDER"
+DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON=\"$DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON\"
+ENVEOF
+chmod 600 /home/coder/.config/dokploy/model-refresh.env
+if [ -f /home/coder/.local/share/dokploy/model-refresh.py ]; then
+  # Refresh tool configs from the live gateway using the shared refresher script.
+  sh -c 'set -a; . /home/coder/.config/dokploy/model-refresh.env; set +a; exec python3 /home/coder/.local/share/dokploy/model-refresh.py' || true
+fi
 
 if [ "$HERMES_TEMPLATE_API_KEY" = "$HERMES_TEMPLATE_API_KEY_PLACEHOLDER" ] && [ -z "$${AI_DEFAULT_API_KEY:-}" ]; then
   echo "AI_DEFAULT_API_KEY is required for the Hermes workspace template" >&2
