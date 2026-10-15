@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from datetime import date
@@ -125,6 +126,26 @@ def test_consolidated_template_picker_advertises_per_model_costs() -> None:
     # so the 30-minute daemon pass does not refetch the whole catalog.
     assert '"User-Agent": "dokploy-wizard/model-refresh"' in template
     assert "MODELS_DEV_CACHE" in template
+
+
+def test_consolidated_template_refresher_avoids_terraform_interpolations() -> None:
+    template = Path(
+        "templates/coder/default-ubuntu-vscode-opencode-hermes-pi/main.tf"
+    ).read_text(encoding="utf-8")
+
+    match = re.search(
+        r"cat > /home/coder/\.local/share/dokploy/model-refresh\.py <<'PY'\n(.*?)\nPY\n",
+        template,
+        re.S,
+    )
+    assert match is not None
+    # Terraform interpolates dollar-brace expressions inside the surrounding
+    # heredoc even when the inner shell heredoc is quoted, so every literal
+    # interpolation in the script must use the double-dollar escape or
+    # 'coder templates push' dies at terraform init.
+    script = match.group(1).replace("$${", "")
+    assert "${" not in script
+    assert "%{" not in script
     # The model refresher daemon must also be (re)started by the workspace
     # bootstrap supervisor, with a visible log: envd-killed background children
     # silently dropped the boot-only daemon on the consolidated template.

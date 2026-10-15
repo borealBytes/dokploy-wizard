@@ -526,8 +526,8 @@ def _fmt_price(value):
 def _model_label(model_id, cost):
     if cost["input"] == 0 and cost["output"] == 0:
         return model_id + " (free)"
-    # "$${" is the Terraform escape for a literal "${"; this script lives
-    # inside a TF heredoc that interpolates dollar-brace expressions.
+    # The dollar-dollar prefix is Terraform's escape for a literal dollar-
+    # brace; this script lives inside a TF heredoc that interpolates them.
     return model_id + f" (in:$${_fmt_price(cost['input'])}/out:$${_fmt_price(cost['output'])})"
 
 
