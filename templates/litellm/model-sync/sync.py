@@ -11,6 +11,10 @@ Sources that declare "probe": true (NVIDIA) are liveness-checked with a
 1-token chat completion before the per-source budget is applied: models the
 provider 404s are dropped, everything else is kept, verdicts are cached under
 the state dir for probe_ttl_days, and dead models are re-probed every cycle.
+Sources that declare "free_only": true are first intersected with the free
+models of their free_catalog_url pricing registry; when that filter succeeds,
+surviving aliases gain the source's "alias_suffix" (":free") unless the model
+name already says free.
 
 Managed deployments are tagged with model_info.metadata.managed_by, so only
 wizard-created deployments are ever pruned. Config-file models and
@@ -396,6 +400,7 @@ def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
                     f"{len(model_ids)} -> {len(kept)} (registry lists {len(free_ids)} free)"
                 )
                 model_ids = kept
+                source["_free_verified"] = True
             else:
                 log(
                     f"source {source.get('name') or '?'} free-tier filter matched nothing "
@@ -422,6 +427,10 @@ def desired_deployments(document: dict[str, Any]) -> tuple[dict[str, dict[str, A
         ok_sources.add(name)
         prefix = str(source.get("alias_prefix", f"{ALIAS_PREFIX}/{name}"))
         template = str(source.get("model_ref_template", "{model}"))
+        # Only label aliases as free when the pricing registry actually
+        # verified them this cycle; a failed registry fetch (fail-open) must
+        # not slap ":free" on endpoints that may bill.
+        suffix = str(source.get("alias_suffix") or "") if source.get("_free_verified") else ""
         for model_id in model_ids:
             params: dict[str, Any] = {"model": template.format(model=model_id)}
             api_base = source.get("api_base")
@@ -442,7 +451,10 @@ def desired_deployments(document: dict[str, Any]) -> tuple[dict[str, dict[str, A
                 params["extra_headers"] = {
                     str(key): str(value) for key, value in extra_headers.items()
                 }
-            deployments[f"{prefix}/{model_id}"] = {"params": params, "source": name}
+            alias = f"{prefix}/{model_id}"
+            if suffix and "free" not in model_id.lower():
+                alias += suffix
+            deployments[alias] = {"params": params, "source": name}
     return deployments, ok_sources
 
 

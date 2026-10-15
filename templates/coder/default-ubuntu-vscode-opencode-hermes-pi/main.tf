@@ -446,13 +446,121 @@ def write_vscode_copilot_byok_settings(raw_base_url: str, raw_api_key: str, ids:
 
 write_vscode_copilot_byok_settings(base_url, api_key, model_ids)
 
+# Cost hints for the pickers: models.dev prices every model in dollars per
+# million input/output tokens, and gateway aliases map back onto that
+# registry through their sync/ (or provider) prefix. The registry is cached
+# daily so the 30-minute daemon pass does not refetch the full catalog.
+MODELS_DEV_URL = "https://models.dev/api.json"
+MODELS_DEV_CACHE = Path("/home/coder/.cache/dokploy-models-dev.json")
+ALIAS_PROVIDERS = {
+    "sync/nvidia/": "nvidia",
+    "sync/openrouter/": "openrouter",
+    "opencode-go/": "opencode-go",
+    "opencode/": "opencode",
+    "nvidia/": "nvidia",
+}
+
+
+def _registry_costs():
+    cache = None
+    try:
+        if time.time() - MODELS_DEV_CACHE.stat().st_mtime < 86400:
+            cache = json.loads(MODELS_DEV_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = None
+    if cache is None:
+        try:
+            # models.dev (Cloudflare) rejects the default Python-urllib agent.
+            request = urllib.request.Request(
+                MODELS_DEV_URL,
+                headers={"Accept": "application/json", "User-Agent": "dokploy-wizard/model-refresh"},
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                cache = json.load(response)
+            MODELS_DEV_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            MODELS_DEV_CACHE.write_text(json.dumps(cache), encoding="utf-8")
+        except Exception:
+            try:
+                cache = json.loads(MODELS_DEV_CACHE.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cache = {}
+    costs = {}
+    if not isinstance(cache, dict):
+        return costs
+    for provider_key, block in cache.items():
+        block_models = block.get("models") if isinstance(block, dict) else None
+        if not isinstance(block_models, dict):
+            continue
+        for model_id, meta in block_models.items():
+            cost = meta.get("cost") if isinstance(meta, dict) else None
+            if not isinstance(cost, dict):
+                continue
+            try:
+                entry = {
+                    "input": float(cost.get("input", 0) or 0),
+                    "output": float(cost.get("output", 0) or 0),
+                }
+            except (TypeError, ValueError):
+                continue
+            costs[f"{provider_key}/{model_id}"] = entry
+    return costs
+
+
+def _cost_for(alias, costs):
+    if alias.endswith(":free"):
+        return {"input": 0, "output": 0}
+    for prefix, provider_key in ALIAS_PROVIDERS.items():
+        if alias.startswith(prefix):
+            return costs.get(provider_key + "/" + alias[len(prefix):])
+    return None
+
+
+registry_costs = _registry_costs()
+
+
+def _fmt_price(value):
+    text = ("%.6f" % value).rstrip("0").rstrip(".")
+    return text if text else "0"
+
+
+def _model_label(model_id, cost):
+    if cost["input"] == 0 and cost["output"] == 0:
+        return model_id + " (free)"
+    return model_id + f" (in:${_fmt_price(cost['input'])}/out:${_fmt_price(cost['output'])})"
+
+
+def _priced_models():
+    entries = {}
+    for model_id in model_ids:
+        cost = _cost_for(model_id, registry_costs)
+        if not cost:
+            entries[model_id] = {}
+            continue
+        entries[model_id] = {"name": _model_label(model_id, cost), "cost": cost}
+    return entries
+
+
+def _pi_model_entry(model_id):
+    entry = {"id": model_id, "name": model_id}
+    cost = _cost_for(model_id, registry_costs)
+    if cost:
+        entry["name"] = _model_label(model_id, cost)
+        entry["cost"] = {
+            "input": cost["input"],
+            "output": cost["output"],
+            "cacheRead": 0,
+            "cacheWrite": 0,
+        }
+    return entry
+
+
 Path("/home/coder/.config/opencode").mkdir(parents=True, exist_ok=True)
 opencode_config = {
     "provider": {
         "litellm": {
             "npm": "@ai-sdk/openai-compatible",
             "options": {"baseURL": base_url, "apiKey": api_key},
-            "models": {model_id: {} for model_id in model_ids},
+            "models": _priced_models(),
         }
     },
     "model": default_model,
@@ -470,7 +578,7 @@ pi_models_config = {
             "baseUrl": base_url,
             "api": "openai-completions",
             "apiKey": api_key,
-            "models": [{"id": model_id, "name": model_id} for model_id in model_ids],
+            "models": [_pi_model_entry(model_id) for model_id in model_ids],
         }
     }
 }

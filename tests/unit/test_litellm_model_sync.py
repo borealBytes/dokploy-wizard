@@ -611,6 +611,7 @@ def test_nvidia_source_declares_probe_and_cap() -> None:
     assert nvidia["free_only"] is True
     assert nvidia["free_catalog_url"] == "https://models.dev/api.json"
     assert nvidia["free_catalog_provider"] == "nvidia"
+    assert nvidia["alias_suffix"] == ":free"
 
     overridden = build_model_sync_sources(
         {
@@ -756,6 +757,7 @@ _FREE_CATALOG = {
         "models": {
             "meta/live-one": {"cost": {"input": 0, "output": 0}},
             "deepseek/live-two": {"cost": {"input": 0, "output": 0}},
+            "meta/free-named": {"cost": {"input": 0, "output": 0}},
             "qwen/paid": {"cost": {"input": 0.002, "output": 0.006}},
             "ibm/paid": {"cost": {"input": 0.001, "output": 0.003}},
             "mistral/dead-free": {"cost": {"input": 0, "output": 0}},
@@ -782,6 +784,7 @@ def _free_nvidia_document(max_models: int = 5) -> dict:
                 "free_only": True,
                 "free_catalog_url": "https://models.dev/api.json",
                 "free_catalog_provider": "nvidia",
+                "alias_suffix": ":free",
             }
         ],
     }
@@ -793,6 +796,7 @@ def _free_filter_transport(probe_calls: list, *, dead: set, registry_fail: bool 
         "qwen/paid",
         "deepseek/live-two",
         "ibm/paid",
+        "meta/free-named",
         "mistral/dead-free",
     ]
 
@@ -840,10 +844,18 @@ def test_sidecar_free_only_filter_drops_paid_models_before_probing(
     sidecar.sync_once(_free_nvidia_document(max_models=5))
 
     # Paid endpoints never reach the picker and are never chat-probed.
-    assert set(probes) == {"meta/live-one", "deepseek/live-two", "mistral/dead-free"}
+    assert set(probes) == {
+        "meta/live-one",
+        "deepseek/live-two",
+        "meta/free-named",
+        "mistral/dead-free",
+    }
+    # Free-verified aliases carry a ":free" tail unless the name already
+    # says free, so pickers advertise the zero cost.
     assert _created_aliases(calls) == {
-        "sync/nvidia/meta/live-one",
-        "sync/nvidia/deepseek/live-two",
+        "sync/nvidia/meta/live-one:free",
+        "sync/nvidia/deepseek/live-two:free",
+        "sync/nvidia/meta/free-named",
     }
 
 
@@ -860,12 +872,14 @@ def test_sidecar_free_registry_failure_keeps_full_catalog(
     sidecar.sync_once(_free_nvidia_document(max_models=5))
 
     # Registry unreachable -> fail open: nothing is silently dropped, the
-    # liveness probe still gates the result.
+    # liveness probe still gates the result, and no ":free" label is claimed
+    # because free tier was never verified.
     assert set(probes) == {
         "meta/live-one",
         "qwen/paid",
         "deepseek/live-two",
         "ibm/paid",
+        "meta/free-named",
         "mistral/dead-free",
     }
     assert _created_aliases(calls) == {
@@ -873,5 +887,5 @@ def test_sidecar_free_registry_failure_keeps_full_catalog(
         "sync/nvidia/qwen/paid",
         "sync/nvidia/deepseek/live-two",
         "sync/nvidia/ibm/paid",
-        "sync/nvidia/mistral/dead-free",
+        "sync/nvidia/meta/free-named",
     }

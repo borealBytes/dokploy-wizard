@@ -198,6 +198,9 @@ def build_model_sync_sources(
                     "free_only": model_sync_nvidia_free_only(flat_env),
                     "free_catalog_url": _NVIDIA_FREE_CATALOG_URL,
                     "free_catalog_provider": "nvidia",
+                    # Free-verified aliases get a ":free" tail so pickers show
+                    # what the model actually costs the operator: nothing.
+                    "alias_suffix": ":free",
                 }
             )
 

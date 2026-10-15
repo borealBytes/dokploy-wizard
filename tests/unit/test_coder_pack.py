@@ -99,6 +99,30 @@ def test_consolidated_template_serves_opencode_web_and_classic_hermes_with_cors_
     assert 'export HERMES_PUBLIC_ORIGIN="__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"' in template
     assert 'HERMES_WEBUI_ALLOWED_ORIGINS="$HERMES_PUBLIC_ORIGIN"' in template
     assert "HERMES_WEBUI_TRUST_FORWARDED_HOST=1" in template
+
+
+def test_consolidated_template_picker_advertises_per_model_costs() -> None:
+    template = Path(
+        "templates/coder/default-ubuntu-vscode-opencode-hermes-pi/main.tf"
+    ).read_text(encoding="utf-8")
+
+    # Pickers price models from models.dev (dollars per million tokens, the
+    # unit opencode's UI bills in), mapping gateway aliases back to registry
+    # entries through their sync/provider prefix; ":free" aliases are always
+    # priced at zero and shown as "(free)".
+    assert 'MODELS_DEV_URL = "https://models.dev/api.json"' in template
+    assert '"sync/nvidia/": "nvidia",' in template
+    assert '"sync/openrouter/": "openrouter",' in template
+    assert '"opencode-go/": "opencode-go",' in template
+    assert 'if alias.endswith(":free"):' in template
+    assert "(in:${_fmt_price(cost['input'])}/out:${_fmt_price(cost['output'])})" in template
+    assert '"models": _priced_models(),' in template
+    assert '"models": [_pi_model_entry(model_id) for model_id in model_ids],' in template
+    # models.dev (Cloudflare) rejects the default Python-urllib agent, so the
+    # refresher must identify itself, and the registry must be cached daily
+    # so the 30-minute daemon pass does not refetch the whole catalog.
+    assert '"User-Agent": "dokploy-wizard/model-refresh"' in template
+    assert "MODELS_DEV_CACHE" in template
     # The model refresher daemon must also be (re)started by the workspace
     # bootstrap supervisor, with a visible log: envd-killed background children
     # silently dropped the boot-only daemon on the consolidated template.
