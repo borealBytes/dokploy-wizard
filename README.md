@@ -689,7 +689,7 @@ How autosynced models behave:
 - Deployments created by autosync are tagged internally; when a source drops a model, only wizard-created `sync/...` deployments are pruned. Config-file aliases and models you added yourself in the admin UI are never touched.
 - Consumer virtual keys carry a `sync/*` wildcard, so autosynced models are immediately callable from OpenClaw, My Farm Advisor, SurfSense, Coder Hermes, and Coder K-Dense. `dokploy-ai` stays restricted to the resolved default alias. Each cycle the sidecar also refreshes each consumer key's allowlist with the explicit current `sync/*` names, because LiteLLM's `/v1/models` does not expand wildcards and workspace tooling seeds its model picker from that endpoint.
 - Rendered LiteLLM config sets `general_settings.store_model_in_db` so admin-API-registered models survive proxy restarts.
-- Coder workspaces resolve their model lists live from the gateway at boot and re-run the same fetch from a background refresher every 30 minutes, so autosynced models appear in OpenCode, Pi, Hermes, and Copilot BYOK within one rotation cycle — even in long-running workspaces. If the gateway is briefly unreachable during a refresh, the last good model list is kept.
+- Coder workspaces resolve their model lists live from the gateway at boot and re-run the same fetch from a background refresher roughly every 12 hours — retrying every 5 minutes after any failed refresh until the gateway is reachable again — so autosynced models appear in OpenCode, Pi, Hermes, and Copilot BYOK even in long-running workspaces. If the gateway is briefly unreachable during a refresh, the last good model list is kept.
 
 Autosync is on whenever at least one upstream provider key is configured. Optional env knobs:
 

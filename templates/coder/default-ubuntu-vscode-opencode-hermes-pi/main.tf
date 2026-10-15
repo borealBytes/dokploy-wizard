@@ -314,9 +314,13 @@ fallback_models = _parse_fallback_models(
 )
 
 if "--daemon" in sys.argv[1:]:
+    # The boot-time refresh already ran before the daemon starts, so the first
+    # steady-state wait is the full interval. A failed refresh (gateway down)
+    # retries after 5 minutes and returns to the slow cadence once healed.
+    time.sleep(43200)
     while True:
-        time.sleep(1800)
-        subprocess.run([sys.executable, __file__], check=False)
+        refresh_rc = subprocess.run([sys.executable, __file__], check=False).returncode
+        time.sleep(300 if refresh_rc else 43200)
 
 
 def fetch_model_ids() -> list[str]:
@@ -350,8 +354,9 @@ def fetch_model_ids() -> list[str]:
 
 fetched_model_ids = fetch_model_ids()
 if not fetched_model_ids and Path("/home/coder/.config/opencode/opencode.json").exists():
-    # Gateway unreachable during a background refresh; keep the last good list.
-    raise SystemExit(0)
+    # Gateway unreachable during a background refresh; keep the last good list
+    # and exit non-zero so the daemon schedules a fast retry.
+    raise SystemExit(3)
 
 model_ids = fetched_model_ids
 for model_id in fallback_models:
@@ -449,7 +454,7 @@ write_vscode_copilot_byok_settings(base_url, api_key, model_ids)
 # Cost hints for the pickers: models.dev prices every model in dollars per
 # million input/output tokens, and gateway aliases map back onto that
 # registry through their sync/ (or provider) prefix. The registry is cached
-# daily so the 30-minute daemon pass does not refetch the full catalog.
+# daily so the daemon's twice-daily pass does not refetch the full catalog.
 MODELS_DEV_URL = "https://models.dev/api.json"
 MODELS_DEV_CACHE = Path("/home/coder/.cache/dokploy-models-dev.json")
 ALIAS_PROVIDERS = {
@@ -588,6 +593,10 @@ Path("/home/coder/.pi/agent/models.json").write_text(
     json.dumps(pi_models_config, indent=2) + "\n",
     encoding="utf-8",
 )
+
+# Signal gateway-fetch failure (exit 3) so the daemon backoffs to its fast
+# retry; the config writes above still reflect best-effort state.
+raise SystemExit(0 if fetched_model_ids else 3)
 
 PY
 

@@ -123,9 +123,14 @@ def test_consolidated_template_picker_advertises_per_model_costs() -> None:
     assert '"models": [_pi_model_entry(model_id) for model_id in model_ids],' in template
     # models.dev (Cloudflare) rejects the default Python-urllib agent, so the
     # refresher must identify itself, and the registry must be cached daily
-    # so the 30-minute daemon pass does not refetch the whole catalog.
+    # so the daemon's twice-daily pass does not refetch the whole catalog.
     assert '"User-Agent": "dokploy-wizard/model-refresh"' in template
     assert "MODELS_DEV_CACHE" in template
+    # Steady-state picker refresh is twice-daily; failed refreshes retry on a
+    # 5-minute heal-loop instead of idling until the next cadence pass.
+    assert "time.sleep(43200)" in template
+    assert "time.sleep(300 if refresh_rc else 43200)" in template
+    assert "raise SystemExit(0 if fetched_model_ids else 3)" in template
 
 
 def test_consolidated_template_refresher_avoids_terraform_interpolations() -> None:
