@@ -608,18 +608,23 @@ def test_nvidia_source_declares_probe_and_cap() -> None:
     assert nvidia["probe"] is True
     assert nvidia["max_models"] == MODEL_SYNC_NVIDIA_MAX_MODELS_DEFAULT
     assert nvidia["probe_ttl_days"] == MODEL_SYNC_DEFAULT_PROBE_TTL_DAYS
+    assert nvidia["free_only"] is True
+    assert nvidia["free_catalog_url"] == "https://models.dev/api.json"
+    assert nvidia["free_catalog_provider"] == "nvidia"
 
     overridden = build_model_sync_sources(
         {
             "LITELLM_NVIDIA_API_KEY": "nv-key",
             "LITELLM_MODEL_SYNC_NVIDIA_PROBE": "0",
             "LITELLM_MODEL_SYNC_NVIDIA_MAX_MODELS": "5",
+            "LITELLM_MODEL_SYNC_NVIDIA_FREE_ONLY": "0",
             "LITELLM_MODEL_SYNC_PROBE_TTL_DAYS": "2",
         },
         creds,
     )[0]
     assert overridden["probe"] is False
     assert overridden["max_models"] == 5
+    assert overridden["free_only"] is False
     assert overridden["probe_ttl_days"] == 2
 
 
@@ -743,4 +748,130 @@ def test_sidecar_probe_disabled_skips_chat_probing(
         "sync/nvidia/meta/live-one",
         "sync/nvidia/bigcode/dead-one",
         "sync/nvidia/deepseek/live-two",
+    }
+
+
+_FREE_CATALOG = {
+    "nvidia": {
+        "models": {
+            "meta/live-one": {"cost": {"input": 0, "output": 0}},
+            "deepseek/live-two": {"cost": {"input": 0, "output": 0}},
+            "qwen/paid": {"cost": {"input": 0.002, "output": 0.006}},
+            "ibm/paid": {"cost": {"input": 0.001, "output": 0.003}},
+            "mistral/dead-free": {"cost": {"input": 0, "output": 0}},
+        }
+    }
+}
+
+
+def _free_nvidia_document(max_models: int = 5) -> dict:
+    return {
+        "interval_minutes": 360,
+        "max_models_per_provider": 50,
+        "sources": [
+            {
+                "name": "nvidia",
+                "alias_prefix": "sync/nvidia",
+                "list_url": "https://integrate.api.nvidia.com/v1/models",
+                "api_key_env": "LITELLM_NVIDIA_API_KEY",
+                "api_base": "https://integrate.api.nvidia.com/v1",
+                "model_ref_template": "openai/{model}",
+                "max_models": max_models,
+                "probe": True,
+                "probe_ttl_days": 7,
+                "free_only": True,
+                "free_catalog_url": "https://models.dev/api.json",
+                "free_catalog_provider": "nvidia",
+            }
+        ],
+    }
+
+
+def _free_filter_transport(probe_calls: list, *, dead: set, registry_fail: bool = False):
+    catalog = [
+        "meta/live-one",
+        "qwen/paid",
+        "deepseek/live-two",
+        "ibm/paid",
+        "mistral/dead-free",
+    ]
+
+    def fake_http_json(method, url, *, token=None, payload=None, timeout=30):
+        if url.endswith("/v1/models"):
+            return {"data": [{"id": model} for model in catalog]}
+        if url.endswith("/api.json"):
+            if registry_fail:
+                raise RuntimeError("registry unreachable")
+            return _FREE_CATALOG
+        if url.endswith("/model/info"):
+            return {"data": []}
+        if url.endswith("/chat/completions"):
+            model = payload["model"]
+            probe_calls.append(model)
+            if model in dead:
+                from urllib.error import HTTPError
+
+                raise HTTPError(url, 404, "Not Found", {}, None)
+            return {"choices": [{"message": {"content": "ok"}}]}
+        return {}
+
+    return fake_http_json
+
+
+def _capture_sidecar(sidecar, base_fake):
+    calls: list = []
+
+    def fake_http_json(method, url, *, token=None, payload=None, timeout=30):
+        calls.append((method, url, payload))
+        return base_fake(method, url, token=token, payload=payload, timeout=timeout)
+
+    sidecar.http_json = fake_http_json
+    return calls
+
+
+def test_sidecar_free_only_filter_drops_paid_models_before_probing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LITELLM_NVIDIA_API_KEY", "nv-upstream-key")
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    probes: list = []
+    calls = _capture_sidecar(sidecar, _free_filter_transport(probes, dead={"mistral/dead-free"}))
+
+    sidecar.sync_once(_free_nvidia_document(max_models=5))
+
+    # Paid endpoints never reach the picker and are never chat-probed.
+    assert set(probes) == {"meta/live-one", "deepseek/live-two", "mistral/dead-free"}
+    assert _created_aliases(calls) == {
+        "sync/nvidia/meta/live-one",
+        "sync/nvidia/deepseek/live-two",
+    }
+
+
+def test_sidecar_free_registry_failure_keeps_full_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LITELLM_NVIDIA_API_KEY", "nv-upstream-key")
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    probes: list = []
+    calls = _capture_sidecar(
+        sidecar, _free_filter_transport(probes, dead=set(), registry_fail=True)
+    )
+
+    sidecar.sync_once(_free_nvidia_document(max_models=5))
+
+    # Registry unreachable -> fail open: nothing is silently dropped, the
+    # liveness probe still gates the result.
+    assert set(probes) == {
+        "meta/live-one",
+        "qwen/paid",
+        "deepseek/live-two",
+        "ibm/paid",
+        "mistral/dead-free",
+    }
+    assert _created_aliases(calls) == {
+        "sync/nvidia/meta/live-one",
+        "sync/nvidia/qwen/paid",
+        "sync/nvidia/deepseek/live-two",
+        "sync/nvidia/ibm/paid",
+        "sync/nvidia/mistral/dead-free",
     }

@@ -62,6 +62,11 @@ _NVIDIA_BASE_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
 # re-probed every cycle.
 MODEL_SYNC_NVIDIA_MAX_MODELS_DEFAULT = 20
 MODEL_SYNC_DEFAULT_PROBE_TTL_DAYS = 7
+# models.dev is the registry OpenCode itself consumes: per-model pricing in
+# the same org/model id form NVIDIA's /models list uses, which lets the sync
+# keep only zero-cost (free-tier) NVIDIA endpoints before probing, so no paid
+# chat completion is ever sent.
+_NVIDIA_FREE_CATALOG_URL = "https://models.dev/api.json"
 
 
 def model_sync_service_name(litellm_service_name: str) -> str:
@@ -99,6 +104,13 @@ def model_sync_max_models_per_provider(flat_env: Mapping[str, str]) -> int:
 
 def model_sync_nvidia_probe_enabled(flat_env: Mapping[str, str]) -> bool:
     raw = _optional(flat_env, "LITELLM_MODEL_SYNC_NVIDIA_PROBE")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in _MODEL_SYNC_DISABLED_VALUES
+
+
+def model_sync_nvidia_free_only(flat_env: Mapping[str, str]) -> bool:
+    raw = _optional(flat_env, "LITELLM_MODEL_SYNC_NVIDIA_FREE_ONLY")
     if raw is None:
         return True
     return raw.strip().lower() not in _MODEL_SYNC_DISABLED_VALUES
@@ -183,6 +195,9 @@ def build_model_sync_sources(
                     "max_models": model_sync_nvidia_max_models(flat_env),
                     "probe": model_sync_nvidia_probe_enabled(flat_env),
                     "probe_ttl_days": model_sync_probe_ttl_days(flat_env),
+                    "free_only": model_sync_nvidia_free_only(flat_env),
+                    "free_catalog_url": _NVIDIA_FREE_CATALOG_URL,
+                    "free_catalog_provider": "nvidia",
                 }
             )
 

@@ -265,6 +265,39 @@ def _probe_model_status(
         return "unknown"
 
 
+def _free_model_ids(source: dict[str, Any]) -> set[str] | None:
+    """Free-tier model ids from the models.dev registry, or None on failure.
+
+    NVIDIA's servable /models list mixes free and paid endpoints, and a paid
+    chat hit spends credits. models.dev (the registry OpenCode itself ships)
+    carries per-model pricing keyed in the same org/model form, so the sync
+    keeps only zero-cost endpoints before anything gets probed.
+    """
+
+    url = source.get("free_catalog_url")
+    if not (isinstance(url, str) and url):
+        return None
+    provider = str(source.get("free_catalog_provider") or "nvidia")
+    try:
+        payload = http_json("GET", url)
+    except Exception as exc:
+        log(f"source {provider} free-catalog fetch failed: {type(exc).__name__}: {exc}; keeping full list")
+        return None
+    models = ((payload.get(provider) or {}).get("models") or {}) if isinstance(payload, dict) else {}
+    free: set[str] = set()
+    for model_id, meta in models.items():
+        if not isinstance(meta, dict):
+            continue
+        cost = meta.get("cost") or {}
+        try:
+            paid = any(float(cost.get(field) or 0) > 0 for field in ("input", "output"))
+        except (TypeError, ValueError):
+            paid = True
+        if not paid:
+            free.add(str(model_id))
+    return free or None
+
+
 def probe_source_models(source: dict[str, Any], token: str, model_ids: list[str]) -> list[str]:
     """Drop models the provider 404s on chat completion, keep everything else."""
 
@@ -349,6 +382,21 @@ def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
         if model_id.endswith("/*"):
             continue
         model_ids.append(model_id)
+    if source.get("free_only"):
+        free_ids = _free_model_ids(source)
+        if free_ids is not None:
+            kept = [model_id for model_id in model_ids if model_id in free_ids]
+            if kept:
+                log(
+                    f"source {source.get('name') or '?'} free-tier filter: "
+                    f"{len(model_ids)} -> {len(kept)} (registry lists {len(free_ids)} free)"
+                )
+                model_ids = kept
+            else:
+                log(
+                    f"source {source.get('name') or '?'} free-tier filter matched nothing "
+                    f"(registry drift?); keeping full catalog order"
+                )
     if source.get("probe"):
         # Probe the full catalog first, then apply the budget: "top N" must
         # mean the first N that actually answer, not the first N listed.
