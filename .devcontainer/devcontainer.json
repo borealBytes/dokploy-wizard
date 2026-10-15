@@ -1,5 +1,5 @@
 {
   "name": "Dokploy Wizard",
-  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
   "postCreateCommand": "python -m pip install --upgrade uv && uv sync --extra dev"
 }
