@@ -526,7 +526,9 @@ def _fmt_price(value):
 def _model_label(model_id, cost):
     if cost["input"] == 0 and cost["output"] == 0:
         return model_id + " (free)"
-    return model_id + f" (in:${_fmt_price(cost['input'])}/out:${_fmt_price(cost['output'])})"
+    # "$${" is the Terraform escape for a literal "${"; this script lives
+    # inside a TF heredoc that interpolates dollar-brace expressions.
+    return model_id + f" (in:$${_fmt_price(cost['input'])}/out:$${_fmt_price(cost['output'])})"
 
 
 def _priced_models():

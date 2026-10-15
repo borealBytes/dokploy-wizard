@@ -115,7 +115,9 @@ def test_consolidated_template_picker_advertises_per_model_costs() -> None:
     assert '"sync/openrouter/": "openrouter",' in template
     assert '"opencode-go/": "opencode-go",' in template
     assert 'if alias.endswith(":free"):' in template
-    assert "(in:${_fmt_price(cost['input'])}/out:${_fmt_price(cost['output'])})" in template
+    # "$${" is Terraform's escape for a literal "${": this script sits in a
+    # TF heredoc that would otherwise interpolate the f-string braces.
+    assert "(in:$${_fmt_price(cost['input'])}/out:$${_fmt_price(cost['output'])})" in template
     assert '"models": _priced_models(),' in template
     assert '"models": [_pi_model_entry(model_id) for model_id in model_ids],' in template
     # models.dev (Cloudflare) rejects the default Python-urllib agent, so the
