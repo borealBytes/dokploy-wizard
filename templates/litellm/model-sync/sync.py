@@ -281,9 +281,13 @@ def _free_model_ids(source: dict[str, Any]) -> set[str] | None:
     try:
         payload = http_json("GET", url)
     except Exception as exc:
-        log(f"source {provider} free-catalog fetch failed: {type(exc).__name__}: {exc}; keeping full list")
+        log(
+            f"source {provider} free-catalog fetch failed: "
+            f"{type(exc).__name__}: {exc}; keeping full list"
+        )
         return None
-    models = ((payload.get(provider) or {}).get("models") or {}) if isinstance(payload, dict) else {}
+    provider_block = payload.get(provider) if isinstance(payload, dict) else None
+    models = provider_block.get("models") or {} if isinstance(provider_block, dict) else {}
     free: set[str] = set()
     for model_id, meta in models.items():
         if not isinstance(meta, dict):
