@@ -154,7 +154,12 @@ def _alias_has_active_upstream(alias: str, values: dict[str, str]) -> bool:
     if provider_slug == "opencode-go":
         return _optional_value(values, "LITELLM_OPENCODE_GO_API_KEY") is not None
     if provider_slug == "nvidia":
-        return _litellm_nvidia_upstream_configured(values) and any(
+        if not _litellm_nvidia_upstream_configured(values):
+            return False
+        # The AI default alias is auto-pinned into the rendered config (see
+        # config_renderer._nvidia_default_alias_route), so it has an active
+        # upstream even without a manual LITELLM_NVIDIA_MODELS entry.
+        return alias == _ai_default_alias(values) or any(
             route_alias == alias for route_alias, _target in _parse_litellm_nvidia_models(values)
         )
     return True
@@ -190,7 +195,6 @@ def _litellm_nvidia_upstream_configured(values: dict[str, str]) -> bool:
     return (
         _optional_value(values, "LITELLM_NVIDIA_API_KEY") is not None
         and _litellm_nvidia_base_url(values) is not None
-        and bool(_parse_litellm_nvidia_models(values))
     )
 
 

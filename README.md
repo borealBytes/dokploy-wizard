@@ -674,6 +674,7 @@ The generated LiteLLM config enforces a strict precedence:
 1. `local-model.internal/unsloth-active` — a private OpenAI-compatible endpoint, when `LITELLM_LOCAL_BASE_URL` is configured
 2. `opencode-go/<AI_DEFAULT_MODEL>` — the resolved default alias route, so the workspace default and `dokploy-ai` key resolve the moment LiteLLM boots; the rest of the OpenCode Go fleet arrives via autosync (see below), not from a pinned list
 3. `openrouter/*` — explicit OpenRouter aliases, each declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS` (optional manual extras; the synced set covers the popular models automatically)
+4. `nvidia/<AI_DEFAULT_MODEL>` — when `AI_DEFAULT_PROVIDER=nvidia`, the resolved default alias route is auto-pinned from `AI_DEFAULT_*` (same boot-time guarantee as the OpenCode Go default route); `LITELLM_NVIDIA_MODELS` adds optional manual aliases on top, and the live NVIDIA free-endpoint fleet arrives via autosync (see below), not from a pinned list
 
 OpenRouter wildcard routes are not allowed. The config renderer rejects `openrouter/*` or broad `*` aliases.
 
@@ -681,7 +682,7 @@ SurfSense receives the same approved alias list through its generated LiteLLM vi
 
 ### Model autosync
 
-Besides the explicit aliases above, the wizard runs a model autosync sidecar beside the LiteLLM service so newly published provider models appear without a wizard rerun. The sidecar (`<stack-name>-shared-litellm-sync`) runs a full cycle the moment it boots, then repeats on a schedule, polling the model catalogs of every upstream provider whose key is configured (OpenRouter, OpenCode Go/Zen, NVIDIA), and registers models the gateway does not expose yet through the LiteLLM admin API. For OpenRouter the sidecar tracks the public weekly leaderboard instead of an arbitrary catalog slice: the top 20 paid (standard-variant) models plus the top 10 `:free` models, so the synced set stays a curated ~30 frontier picks that reshuffle automatically as popularity changes. OpenCode Go needs no configuration at all: whenever `LITELLM_OPENCODE_GO_API_KEY` is set, the entire live catalog is synced in full (no env model list is consulted).
+Besides the explicit aliases above, the wizard runs a model autosync sidecar beside the LiteLLM service so newly published provider models appear without a wizard rerun. The sidecar (`<stack-name>-shared-litellm-sync`) runs a full cycle the moment it boots, then repeats on a schedule, polling the model catalogs of every upstream provider whose key is configured (OpenRouter, OpenCode Go/Zen, NVIDIA), and registers models the gateway does not expose yet through the LiteLLM admin API. For OpenRouter the sidecar tracks the public weekly leaderboard instead of an arbitrary catalog slice: the top 20 paid (standard-variant) models plus the top 10 `:free` models, so the synced set stays a curated ~30 frontier picks that reshuffle automatically as popularity changes. OpenCode Go needs no configuration at all: whenever `LITELLM_OPENCODE_GO_API_KEY` is set, the entire live catalog is synced in full (no env model list is consulted). NVIDIA likewise needs no env model list: `LITELLM_NVIDIA_API_KEY` plus `LITELLM_NVIDIA_BASE_URL` are the only required inputs, and `LITELLM_NVIDIA_MODELS` stays optional manual aliases layered on top of the synced free set.
 
 How autosynced models behave:
 

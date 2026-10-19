@@ -341,7 +341,7 @@ def _validate_litellm_nvidia_env(values: dict[str, str]) -> None:
         return
     missing = sorted(
         key
-        for key in ("LITELLM_NVIDIA_API_KEY", "LITELLM_NVIDIA_BASE_URL", "LITELLM_NVIDIA_MODELS")
+        for key in ("LITELLM_NVIDIA_API_KEY", "LITELLM_NVIDIA_BASE_URL")
         if not _has_configured_value(values, key)
     )
     if "LITELLM_NVIDIA_BASE_URL" in missing and _has_configured_value(values, "NVIDIA_BASE_URL"):
@@ -349,9 +349,8 @@ def _validate_litellm_nvidia_env(values: dict[str, str]) -> None:
     if missing:
         joined = ", ".join(missing)
         raise StateValidationError(
-            "NVIDIA LiteLLM routing requires LITELLM_NVIDIA_API_KEY, "
-            "LITELLM_NVIDIA_BASE_URL, and LITELLM_NVIDIA_MODELS raw model IDs or "
-            f"alias=model pairs. Missing: {joined}."
+            "NVIDIA LiteLLM routing requires LITELLM_NVIDIA_API_KEY and "
+            f"LITELLM_NVIDIA_BASE_URL. Missing: {joined}."
         )
 
 
@@ -395,11 +394,9 @@ def _canonical_ai_default_provider(provider: str) -> str:
 
 
 def _litellm_nvidia_configured(values: dict[str, str]) -> bool:
-    return (
-        _has_configured_value(values, "LITELLM_NVIDIA_API_KEY")
-        and _litellm_nvidia_base_url(values) is not None
-        and bool(parse_litellm_nvidia_models(values))
-    )
+    return _has_configured_value(values, "LITELLM_NVIDIA_API_KEY") and _litellm_nvidia_base_url(
+        values
+    ) is not None
 
 
 def _resolve_dokploy_api_url(values: dict[str, str]) -> str | None:
@@ -660,7 +657,7 @@ def _validate_my_farm_advisor_env(
         "AI_DEFAULT_PROVIDER and AI_DEFAULT_MODEL, both OPENCODE_GO_API_KEY and "
         "OPENCODE_GO_BASE_URL, LITELLM_OPENROUTER_API_KEY with LITELLM_OPENROUTER_MODELS, "
         "LITELLM_OPENCODE_GO_API_KEY, LITELLM_NVIDIA_API_KEY with "
-        "LITELLM_NVIDIA_BASE_URL and LITELLM_NVIDIA_MODELS, or LITELLM_LOCAL_BASE_URL "
+        "LITELLM_NVIDIA_BASE_URL, or LITELLM_LOCAL_BASE_URL "
         "for LiteLLM canonical local "
         "mode. Empty strings count as unset."
     )

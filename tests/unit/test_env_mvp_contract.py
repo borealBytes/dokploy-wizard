@@ -540,6 +540,38 @@ def test_litellm_nvidia_models_accept_user_style_raw_model_ids() -> None:
     assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
 
 
+def test_litellm_nvidia_env_is_valid_without_manual_model_list() -> None:
+    raw_env = _farm_litellm_env(
+        MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
+        MY_FARM_ADVISOR_NVIDIA_API_KEY="",
+        ANTHROPIC_API_KEY="",
+        AI_DEFAULT_API_KEY="",
+        AI_DEFAULT_BASE_URL="",
+        LITELLM_LOCAL_BASE_URL="",
+        LITELLM_LOCAL_MODEL="",
+        LITELLM_LOCAL_API_KEY="",
+        LITELLM_NVIDIA_API_KEY="fake-nvidia-key",
+        LITELLM_NVIDIA_BASE_URL="https://integrate.api.nvidia.example.com/v1",
+        LITELLM_NVIDIA_MODELS="",
+        AI_DEFAULT_PROVIDER="nvidia",
+        AI_DEFAULT_MODEL="moonshotai/kimi-k2.6",
+    )
+
+    assert env_module.parse_litellm_nvidia_models(raw_env.values) == ()
+    assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
+
+
+def test_litellm_nvidia_routing_without_base_url_raises() -> None:
+    with pytest.raises(StateValidationError, match="LITELLM_NVIDIA_BASE_URL"):
+        resolve_desired_state(
+            _farm_litellm_env(
+                LITELLM_NVIDIA_API_KEY="fake-nvidia-key",
+                LITELLM_NVIDIA_BASE_URL="",
+                LITELLM_NVIDIA_MODELS="",
+            )
+        )
+
+
 def test_ai_default_provider_requires_model_name() -> None:
     with pytest.raises(StateValidationError, match="AI_DEFAULT_MODEL"):
         resolve_desired_state(
