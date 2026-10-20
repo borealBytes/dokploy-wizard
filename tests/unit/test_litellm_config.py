@@ -324,6 +324,44 @@ def test_render_litellm_config_yaml_includes_new_model_aliases_only() -> None:
     assert 'model_name: "minimax/minimax-m2.5:free"' not in rendered_yaml
 
 
+def test_build_litellm_config_auto_pins_nvidia_default_alias_route() -> None:
+    # LITELLM_NVIDIA_MODELS is optional. When the AI default points at NVIDIA,
+    # the renderer pins the default alias itself so the workspace default
+    # resolves the moment LiteLLM boots, before the first autosync cycle.
+    config = build_litellm_config(
+        {
+            "LITELLM_NVIDIA_API_KEY": "fake-nvidia-key",
+            "LITELLM_NVIDIA_BASE_URL": "https://integrate.api.nvidia.example.com/v1",
+            "AI_DEFAULT_PROVIDER": "nvidia",
+            "AI_DEFAULT_MODEL": "moonshotai/kimi-k2.6",
+        },
+        {},
+    )
+
+    model_list = _model_list(config)
+
+    assert [entry["model_name"] for entry in model_list] == ["nvidia/moonshotai/kimi-k2.6"]
+    params = model_list[0]["litellm_params"]
+    assert params["model"] == "openai/moonshotai/kimi-k2.6"
+    assert params["api_base"] == "https://integrate.api.nvidia.example.com/v1"
+    assert params["api_key"] == "os.environ/LITELLM_NVIDIA_API_KEY"
+
+
+def test_build_litellm_config_nvidia_default_dedupes_with_manual_alias() -> None:
+    config = build_litellm_config(
+        {
+            "LITELLM_NVIDIA_API_KEY": "fake-nvidia-key",
+            "LITELLM_NVIDIA_BASE_URL": "https://integrate.api.nvidia.example.com/v1",
+            "LITELLM_NVIDIA_MODELS": "moonshotai/kimi-k2.6",
+            "AI_DEFAULT_PROVIDER": "nvidia",
+            "AI_DEFAULT_MODEL": "moonshotai/kimi-k2.6",
+        },
+        {},
+    )
+
+    assert [entry["model_name"] for entry in _model_list(config)] == ["nvidia/moonshotai/kimi-k2.6"]
+
+
 def test_build_litellm_config_still_allows_optional_nvidia_route() -> None:
     config = build_litellm_config(
         {

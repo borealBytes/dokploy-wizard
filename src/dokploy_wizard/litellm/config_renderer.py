@@ -81,6 +81,9 @@ def build_litellm_config(
     )
     nvidia_base_url = _nvidia_base_url(flat_env)
     nvidia_alias_targets = dict(_parse_nvidia_models(flat_env, "LITELLM_NVIDIA_MODELS"))
+    default_nvidia_route = _nvidia_default_alias_route(flat_env)
+    if default_nvidia_route is not None:
+        nvidia_alias_targets.setdefault(default_nvidia_route[0], default_nvidia_route[1])
 
     catalog = build_model_catalog(
         local_alias=local_alias,
@@ -208,6 +211,26 @@ def _nvidia_litellm_model_ref(upstream_target: str) -> str:
     if upstream_target.startswith("nvidia/"):
         return "openai/" + upstream_target.removeprefix("nvidia/")
     return upstream_target
+
+
+def _nvidia_default_alias_route(flat_env: Mapping[str, str]) -> tuple[str, str] | None:
+    """Static pin for the NVIDIA default alias route.
+
+    The live NVIDIA catalog is autosynced by the sidecar as sync/nvidia/*.
+    A pinned env/code list here would go stale against the live catalog, so
+    the single exception is the default alias route: it must exist the moment
+    LiteLLM boots because workspace defaults point at it before the first
+    sync cycle completes. It is derived from AI_DEFAULT_* so operators do not
+    have to repeat the default model in LITELLM_NVIDIA_MODELS.
+    """
+
+    provider = _optional(flat_env, "AI_DEFAULT_PROVIDER")
+    if provider is None or provider.strip().lower() != "nvidia":
+        return None
+    model = _optional(flat_env, "AI_DEFAULT_MODEL")
+    if model is None:
+        return None
+    return (_normalize_nvidia_ref(model), _normalize_raw_nvidia_target(model))
 
 
 def _opencode_go_base_url(flat_env: Mapping[str, str]) -> str:
