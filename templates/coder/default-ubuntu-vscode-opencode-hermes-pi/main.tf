@@ -100,10 +100,19 @@ resource "coder_agent" "main" {
     export PATH="$PNPM_HOME/bin:$PATH"
     mkdir -p "$PNPM_HOME/bin"
     touch /home/coder/.bashrc /home/coder/.profile
-    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc
-    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc
-    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile
-    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile
+    append_rc_line() {
+      line="$1"
+      for rc_file in /home/coder/.bashrc /home/coder/.profile; do
+        grep -qxF "$line" "$rc_file" 2>/dev/null || echo "$line" >> "$rc_file"
+      done
+    }
+    append_rc_line 'export PNPM_HOME=/home/coder/.local/share/pnpm'
+    # Single-quoted on purpose. Double-quoted, $PNPM_HOME and $PATH expanded in the
+    # setup shell, so the guard never matched its own output and every workspace
+    # start appended another absolute copy of the build PATH to both rc files.
+    append_rc_line 'export PATH="$PNPM_HOME/bin:$PATH"'
+    # npm global prefix bin: where the Hermes installer lands its binary.
+    append_rc_line 'export PATH="/home/coder/.local/bin:$PATH"'
 
     if ! command -v pi >/dev/null 2>&1; then
       pnpm add -g @earendil-works/pi-coding-agent
@@ -135,6 +144,15 @@ resource "coder_agent" "main" {
       echo "Hermes installer did not produce a usable binary" >&2
       exit 1
     fi
+
+    # Nothing read an rc file that added the npm prefix bin, so `hermes` resolved in
+    # this setup script only: VS Code terminals and any process that does not inherit
+    # the agent environment got "command not found". The rc lines above cover login
+    # and interactive shells; the symlink covers the rest, including bash's
+    # non-interactive path which returns before the appended exports.
+    HERMES_BIN="$(command -v hermes)"
+    $_SUDO ln -sf "$HERMES_BIN" /usr/local/bin/hermes || true
+    bash -lc 'command -v hermes' >/dev/null
 
     mkdir -p "$HERMES_HOME" /home/coder/.cache /home/coder/.local/bin
 
