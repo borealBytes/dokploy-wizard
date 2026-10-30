@@ -75,6 +75,25 @@ def test_root_mvp_env_applicable_phases_follow_required_order_and_keep_coder() -
     )
 
 
+def test_cloudflare_access_phase_does_not_require_the_advisor_packs() -> None:
+    def phases(**overrides: str) -> tuple[str, ...]:
+        values = {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,coder",
+        }
+        values.update(overrides)
+        return applicable_phases_for(
+            resolve_desired_state(RawEnvInput(format_version=1, values=values))
+        )
+
+    # Nothing to gate until the operator asks for OTP recipients...
+    assert "cloudflare_access" not in phases()
+    # ...and once they do, the phase must run on a stack with no advisor pack at all.
+    # The LiteLLM admin hostname is an Access target by itself.
+    assert "cloudflare_access" in phases(CLOUDFLARE_ACCESS_OTP_EMAILS="owner@example.com")
+
+
 def test_validate_completed_steps_accepts_required_new_prefix_for_root_mvp_env() -> None:
     raw_env = _load_root_env()
     applicable_phases = applicable_phases_for(resolve_desired_state(raw_env))

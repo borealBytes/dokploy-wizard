@@ -740,6 +740,13 @@ class FakeDokployApiClient:
 
 def _owned_dns_records() -> dict[str, CloudflareDnsRecord]:
     return {
+        "litellm.example.com": CloudflareDnsRecord(
+            record_id="dns-litellm.example.com",
+            name="litellm.example.com",
+            record_type="CNAME",
+            content="nextcloud-tunnel.cfargotunnel.com",
+            proxied=True,
+        ),
         "dokploy.example.com": CloudflareDnsRecord(
             record_id="dns-dokploy.example.com",
             name="dokploy.example.com",
@@ -1564,6 +1571,7 @@ def test_install_reconciles_nextcloud_pair_and_persists_runtime_ledger(tmp_path:
     } == {
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
+        ("cloudflare_dns_record", "zone:zone-123:litellm.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:nextcloud.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:office.example.com"),

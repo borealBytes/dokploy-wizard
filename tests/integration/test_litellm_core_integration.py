@@ -609,6 +609,7 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
     } == {
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
+        ("cloudflare_dns_record", "zone:zone-123:litellm.example.com"),
         ("shared_core_litellm", "stack:wizard-stack:shared-litellm"),
         ("shared_core_network", "stack:wizard-stack:shared-network"),
         ("shared_core_postgres", "stack:wizard-stack:shared-postgres"),

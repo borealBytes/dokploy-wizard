@@ -70,6 +70,7 @@ _OPTIONAL_COMMENTED_KEYS = frozenset(
         "LITELLM_NVIDIA_BASE_URL",
         "LITELLM_OPENROUTER_MODELS",
         "LITELLM_ADMIN_SUBDOMAIN",
+        "CLOUDFLARE_ACCESS_OTP_EMAILS",
     }
 )
 _DEFAULT_AI_PROVIDER = "opencode-go"
@@ -258,6 +259,32 @@ def test_subdomain_defaults_are_optional_and_overrides_are_honored() -> None:
     assert override_state.hostnames["dokploy"] == "control.example.com"
     assert override_state.dokploy_url == "https://control.example.com"
     assert override_state.hostnames["my-farm-advisor"] == "advisor.example.com"
+
+
+def test_cloudflare_access_otp_emails_do_not_require_the_advisor_packs() -> None:
+    # Access also gates the LiteLLM admin hostname, so any stack can ask for it. The key
+    # used to be rejected outright when no advisor pack was installed, which left the
+    # admin UI as the one public hostname nobody could put in front of a sign-in page.
+    explicit = resolve_desired_state(
+        _farm_litellm_env(
+            PACKS="seaweedfs,coder",
+            CLOUDFLARE_ACCESS_OTP_EMAILS="owner@example.com",
+        )
+    )
+    assert explicit.cloudflare_access_otp_emails == ("owner@example.com",)
+
+    # The implicit default from the stack admin email stays with the advisor packs.
+    implicit = resolve_desired_state(
+        _farm_litellm_env(DOKPLOY_ADMIN_EMAIL="owner@example.com")
+    )
+    assert implicit.cloudflare_access_otp_emails == ("owner@example.com",)
+    quiet = resolve_desired_state(
+        _farm_litellm_env(
+            PACKS="seaweedfs,coder",
+            DOKPLOY_ADMIN_EMAIL="owner@example.com",
+        )
+    )
+    assert quiet.cloudflare_access_otp_emails == ()
 
 
 def test_public_examples_do_not_make_default_subdomains_active_inputs() -> None:

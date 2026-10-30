@@ -779,6 +779,12 @@ def _sorted_reasons(changed_keys: set[str], phases_to_run: set[str]) -> tuple[st
 
 
 def _access_enabled(desired_state: DesiredState) -> bool:
+    # Gate on the operator's intent, not only on which packs are installed: the hostnames
+    # Access protects come from _access_target_hostnames (advisor hosts plus the LiteLLM
+    # admin hostname), and the advisor packs are not the only way to need it. The pack
+    # check stays because those packs imply Access even without an explicit email list.
+    if desired_state.cloudflare_access_otp_emails:
+        return True
     return bool({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs))
 
 

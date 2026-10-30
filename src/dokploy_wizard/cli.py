@@ -71,6 +71,7 @@ from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.networking import (
     CloudflareApiBackend,
     CloudflareError,
+    resolve_litellm_admin_hostname,
 )
 from dokploy_wizard.packs.coder import CoderBackend, CoderError, ShellCoderBackend
 from dokploy_wizard.packs.docuseal import (
@@ -1932,6 +1933,11 @@ def _build_shared_core_backend(
             litellm_consumer_model_allowlists=build_litellm_consumer_model_allowlists(
                 flat_env=dict(raw_env.values),
                 plan=desired_state.shared_core,
+            ),
+            # The admin hostname is the only way in from outside, and Traefik will not
+            # route a hostname it has no rule for, so the compose service needs it.
+            litellm_admin_hostname=resolve_litellm_admin_hostname(
+                raw_env=raw_env, desired_state=desired_state
             ),
             state_dir=state_dir,
             litellm_admin_api=(

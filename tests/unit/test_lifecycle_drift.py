@@ -695,7 +695,13 @@ def test_validate_preserved_phases_rejects_stale_tunnel_ingress() -> None:
         ),
         list_dns_records=lambda zone_id, **kwargs: (
             CloudflareDnsRecord(
-                record_id="dns-1" if kwargs["hostname"] == "dokploy.openmerge.me" else "dns-2",
+                record_id=(
+                "dns-1"
+                if kwargs["hostname"] == "dokploy.openmerge.me"
+                else "dns-3"
+                if kwargs["hostname"] == "litellm.openmerge.me"
+                else "dns-2"
+            ),
                 name=kwargs["hostname"],
                 record_type="CNAME",
                 content=kwargs.get("content")
@@ -744,6 +750,11 @@ def test_validate_preserved_phases_rejects_stale_tunnel_ingress() -> None:
                         resource_type="cloudflare_dns_record",
                         resource_id="dns-2",
                         scope="zone:zone-123:headscale.openmerge.me",
+                    ),
+                    OwnedResource(
+                        resource_type="cloudflare_dns_record",
+                        resource_id="dns-3",
+                        scope="zone:zone-123:litellm.openmerge.me",
                     ),
                 ),
             ),

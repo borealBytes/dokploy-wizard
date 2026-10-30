@@ -502,7 +502,8 @@ def test_install_non_dry_run_reconciles_networking_and_persists_ledger(tmp_path:
     assert summary["networking"]["outcome"] == "applied"
     assert summary["networking"]["tunnel"]["action"] == "create"
     assert networking_backend.create_tunnel_calls == 1
-    assert networking_backend.create_dns_calls == 2
+    # dokploy, coder, and the LiteLLM admin hostname
+    assert networking_backend.create_dns_calls == 3
     assert loaded_state.applied_state is not None
     assert loaded_state.applied_state.completed_steps == (
         "preflight",
@@ -518,6 +519,7 @@ def test_install_non_dry_run_reconciles_networking_and_persists_ledger(tmp_path:
     } == {
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
+        ("cloudflare_dns_record", "zone:zone-123:litellm.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
         ("shared_core_network", "stack:wizard-stack:shared-network"),
         ("shared_core_postgres", "stack:wizard-stack:shared-postgres"),
@@ -543,6 +545,13 @@ def test_install_rerun_uses_ledger_owned_networking_resources(tmp_path: Path) ->
     second_networking_backend = FakeCloudflareBackend(
         existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-created", name="wizard-stack-tunnel"),
         dns_records={
+            "litellm.example.com": CloudflareDnsRecord(
+                record_id="dns-litellm.example.com",
+                name="litellm.example.com",
+                record_type="CNAME",
+                content="tunnel-created.cfargotunnel.com",
+                proxied=True,
+            ),
             "dokploy.example.com": CloudflareDnsRecord(
                 record_id="dns-dokploy.example.com",
                 name="dokploy.example.com",

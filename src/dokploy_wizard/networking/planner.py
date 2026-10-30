@@ -109,18 +109,28 @@ def reconcile_networking(
         dns_target=dns_target,
     )
 
+    # The LiteLLM admin hostname is not part of the desired hostnames, so it has to be
+    # published here explicitly: DNS alone is not enough, and in the default
+    # wildcard-off mode nothing else would ever create the record.
+    litellm_admin_hostname = resolve_litellm_admin_hostname(
+        raw_env=raw_env, desired_state=desired_state
+    )
     dns_records, dns_resource_ids, dns_notes = _resolve_dns_records(
         dry_run=dry_run,
         zone_id=credentials.zone_id,
         dns_target=dns_target,
-        hostnames=tuple(sorted(_public_hostnames(desired_state).values())),
+        hostnames=tuple(
+            sorted(_public_hostnames(desired_state, litellm_admin_hostname=litellm_admin_hostname).values())
+        ),
         degradable_conflict_hostnames=_degradable_dns_conflict_hostnames(desired_state),
         ownership_ledger=ownership_ledger,
         backend=backend,
     )
     notes.extend(dns_notes)
 
-    ingress_rules = _build_tunnel_ingress(desired_state)
+    ingress_rules = _build_tunnel_ingress(
+        desired_state, litellm_admin_hostname=litellm_admin_hostname
+    )
     notes.append(
         "Planned "
         f"{len(ingress_rules) - 1} Cloudflare Tunnel ingress route(s) "
@@ -803,8 +813,10 @@ def _derive_outcome(tunnel_action: str, dns_records: tuple[PlannedDnsRecord, ...
     return "already_present"
 
 
-def _build_tunnel_ingress(desired_state: DesiredState) -> tuple[dict[str, object], ...]:
-    public_hostnames = _public_hostnames(desired_state)
+def _build_tunnel_ingress(
+    desired_state: DesiredState, *, litellm_admin_hostname: str | None = None
+) -> tuple[dict[str, object], ...]:
+    public_hostnames = _public_hostnames(desired_state, litellm_admin_hostname=litellm_admin_hostname)
     ingress: list[dict[str, object]] = [
         {
             "hostname": public_hostnames["dokploy"],
@@ -920,12 +932,17 @@ def _find_certificate_pack_for_hostname(
     return None
 
 
-def _public_hostnames(desired_state: DesiredState) -> dict[str, str]:
-    return {
+def _public_hostnames(
+    desired_state: DesiredState, *, litellm_admin_hostname: str | None = None
+) -> dict[str, str]:
+    hostnames = {
         key: hostname
         for key, hostname in desired_state.hostnames.items()
         if key not in _NON_PUBLIC_HOSTNAME_KEYS
     }
+    if litellm_admin_hostname is not None:
+        hostnames[_LITELLM_ADMIN_ACCESS_KEY] = litellm_admin_hostname
+    return hostnames
 
 
 def _resolve_connector(

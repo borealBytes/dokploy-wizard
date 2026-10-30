@@ -54,7 +54,8 @@ def test_cli_install_same_host_completed_state_returns_explicit_noop_without_mut
             "CLOUDFLARE_MOCK_EXISTING_TUNNEL_ID",
             "lifecycle-stack-tunnel",
         )
-        + "\nCLOUDFLARE_MOCK_EXISTING_HOSTNAMES=dokploy.example.com,headscale.example.com"
+        + "\nCLOUDFLARE_MOCK_EXISTING_HOSTNAMES=dokploy.example.com,headscale.example.com,"
+        "litellm.example.com"
         + "\nHEADSCALE_MOCK_EXISTING_SERVICE_ID=lifecycle-stack-headscale\n",
     )
     _seed_lifecycle_state(state_dir, env_path=rerun_env)
@@ -77,6 +78,11 @@ def test_cli_install_same_host_completed_state_returns_explicit_noop_without_mut
                     "cloudflare_dns_record",
                     "headscale-example-com",
                     "zone:zone-123:headscale.example.com",
+                ),
+                OwnedResource(
+                    "cloudflare_dns_record",
+                    "litellm-example-com",
+                    "zone:zone-123:litellm.example.com",
                 ),
                 OwnedResource(
                     "shared_core_network",

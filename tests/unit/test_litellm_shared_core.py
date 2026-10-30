@@ -310,6 +310,43 @@ def test_reconcile_reuses_desired_network_when_ledger_points_to_stale_name() -> 
     ).resource_id == desired_network.resource_id
 
 
+def test_rendered_compose_routes_the_admin_hostname_through_traefik() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(
+        plan,
+        {},
+        {},
+        litellm_admin_hostname="litellm.example.com",
+    )
+    compose = rendered.compose_file
+    assert plan.litellm is not None
+    service = plan.litellm.service_name
+
+    # Traefik answers 404 for a hostname with no rule, and a proxy 404 looks exactly
+    # like a dead service to anyone standing outside the box.
+    assert '      traefik.enable: "true"\n' in compose
+    assert f'      traefik.http.routers.{service}.rule: "Host(`litellm.example.com`)"\n' in compose
+    assert f'      traefik.http.routers.{service}.entrypoints: "websecure"\n' in compose
+    assert f'      traefik.http.routers.{service}.tls: "true"\n' in compose
+    # The tunnel terminates TLS and talks plain HTTP to Traefik's listener, so the app
+    # has to be told it is behind https or LiteLLM builds http:// redirects.
+    assert (
+        f"      traefik.http.middlewares.{service}-forwarded-https.headers"
+        '.customrequestheaders.X-Forwarded-Proto: "https"\n' in compose
+    )
+    assert f'      traefik.http.services.{service}.loadbalancer.server.port: "4000"\n' in compose
+
+
+def test_rendered_compose_publishes_no_route_without_an_admin_hostname() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    compose = _render_compose_file(plan, {}, {}).compose_file
+
+    # No router is better than a router on a hostname nobody asked for.
+    assert "traefik" not in compose
+
+
 def test_rendered_compose_gives_the_litellm_admin_ui_the_stack_admin_credentials() -> None:
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
 

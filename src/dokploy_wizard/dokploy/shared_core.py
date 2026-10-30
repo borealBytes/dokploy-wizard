@@ -141,6 +141,7 @@ class DokploySharedCoreBackend:
         litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
         litellm_consumer_model_allowlists: dict[str, tuple[str, ...]] | None = None,
         litellm_admin_api: LiteLLMAdminApi | None = None,
+        litellm_admin_hostname: str | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
         state_dir: Path = Path(".dokploy-wizard-state"),
     ) -> None:
@@ -153,6 +154,7 @@ class DokploySharedCoreBackend:
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
         self._allocation_provisioner = allocation_provisioner
+        self._litellm_admin_hostname = litellm_admin_hostname
         self._litellm_generated_keys = litellm_generated_keys
         self._litellm_consumer_model_allowlists = _litellm_key_model_allowlists(
             litellm_consumer_model_allowlists or {},
@@ -412,6 +414,7 @@ class DokploySharedCoreBackend:
             self._mail_relay_config,
             self._litellm_env,
             self._litellm_generated_keys,
+            litellm_admin_hostname=self._litellm_admin_hostname,
         )
         reconcile_title = "dokploy-wizard shared core reconcile"
         try:
@@ -1019,6 +1022,8 @@ def _render_compose_file(
     mail_relay_config: dict[str, str],
     litellm_env: dict[str, str] | None = None,
     litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
+    *,
+    litellm_admin_hostname: str | None = None,
 ) -> RenderedCompose:
     litellm_env = litellm_env or {}
     env_specs: list[DokployEnvSpec] = []
@@ -1211,6 +1216,27 @@ def _render_compose_file(
                 f'      UI_PASSWORD: "{_required_placeholder("LITELLM_UI_PASSWORD")}"\n'
             )
         )
+        service_name = plan.litellm.service_name
+        # Dokploy's Traefik serves 404 for any hostname it has no rule for, and a 404 at
+        # the proxy is indistinguishable from a dead service to anyone outside the box.
+        # The DNS record and the Cloudflare Access application mean nothing until a router
+        # exists, so the admin hostname gets one, on the same entrypoint, TLS posture, and
+        # forwarded-header middleware the other hostnames on this box use.
+        admin_route_lines = (
+            ""
+            if litellm_admin_hostname is None
+            else (
+                "    labels:\n"
+                '      traefik.enable: "true"\n'
+                f'      traefik.http.routers.{service_name}.entrypoints: "websecure"\n'
+                f'      traefik.http.routers.{service_name}.rule: "Host(`{litellm_admin_hostname}`)"\n'
+                f'      traefik.http.routers.{service_name}.tls: "true"\n'
+                f'      traefik.http.routers.{service_name}.middlewares: "{service_name}-forwarded-https"\n'
+                f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Proto: "https"\n'
+                f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Port: "443"\n'
+                f'      traefik.http.services.{service_name}.loadbalancer.server.port: "4000"\n'
+            )
+        )
         litellm_block = (
             f"  {plan.litellm.service_name}:\n"
             f"    image: {litellm_image}:{litellm_tag}\n"
@@ -1225,6 +1251,7 @@ def _render_compose_file(
             f"{salt_key_lines}"
             f"{ui_redirect_lines}"
             f"{ui_credential_lines}"
+            f"{admin_route_lines}"
             "    configs:\n"
             f"      - source: {config_name}\n"
             "        target: /app/config.yaml\n"

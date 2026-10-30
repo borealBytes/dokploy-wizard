@@ -309,6 +309,15 @@ def test_networking_reuses_existing_tunnel_and_dns_when_scopes_are_valid() -> No
                     proxied=True,
                 ),
             ),
+            "litellm.example.com": (
+                CloudflareDnsRecord(
+                    record_id="dns-3",
+                    name="litellm.example.com",
+                    record_type="CNAME",
+                    content="tunnel-123.cfargotunnel.com",
+                    proxied=True,
+                ),
+            ),
         },
     )
 
@@ -324,6 +333,7 @@ def test_networking_reuses_existing_tunnel_and_dns_when_scopes_are_valid() -> No
     assert phase.result.tunnel.action == "reuse_existing"
     assert phase.result.tunnel.dns_target == "tunnel-123.cfargotunnel.com"
     assert [record.action for record in phase.result.dns_records] == [
+        "reuse_existing",
         "reuse_existing",
         "reuse_existing",
     ]
@@ -479,6 +489,9 @@ def test_networking_retargets_conflicting_stale_tunnel_coder_wildcard_dns() -> N
     assert phase.dns_resource_ids == {
         "coder.example.com": "dns-coder",
         "dokploy.example.com": "dns-dokploy",
+        # The LiteLLM admin hostname is wizard-owned too, so it gets a record of its
+        # own instead of relying on whichever wildcard happens to exist.
+        "litellm.example.com": "created-litellm.example.com",
         "*.example.com": "dns-wildcard",
     }
     assert (
@@ -552,6 +565,9 @@ def test_networking_retargets_stale_coder_control_dns_and_wildcard_dns() -> None
     assert phase.dns_resource_ids == {
         "coder.example.com": "dns-coder",
         "dokploy.example.com": "dns-dokploy",
+        # The LiteLLM admin hostname is wizard-owned too, so it gets a record of its
+        # own instead of relying on whichever wildcard happens to exist.
+        "litellm.example.com": "created-litellm.example.com",
         "*.example.com": "dns-wildcard",
     }
     assert set(backend.dns_record_updates) == {

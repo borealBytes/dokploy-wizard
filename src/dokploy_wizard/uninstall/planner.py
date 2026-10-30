@@ -541,18 +541,20 @@ def _cloudflare_access_complete(
 ) -> bool:
     if not desired_state.cloudflare_access_otp_emails:
         return True
-    if not ({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs)):
-        return True
     if not _has_resource_type(resources_by_type, ACCESS_OTP_PROVIDER_RESOURCE_TYPE):
         return False
-    advisor_hosts = [
+    gated_hosts = [
         key
         for key in ("openclaw", "my-farm-advisor")
         if key in desired_state.enabled_packs and key in desired_state.hostnames
     ]
+    if desired_state.shared_core.litellm is not None:
+        # The LiteLLM admin hostname is Access-gated even with no advisor pack
+        # installed, and it accounts for one application and one policy of its own.
+        gated_hosts.append("litellm-admin")
     return len(resources_by_type.get(ACCESS_APPLICATION_RESOURCE_TYPE, ())) >= len(
-        advisor_hosts
-    ) and len(resources_by_type.get(ACCESS_POLICY_RESOURCE_TYPE, ())) >= len(advisor_hosts)
+        gated_hosts
+    ) and len(resources_by_type.get(ACCESS_POLICY_RESOURCE_TYPE, ())) >= len(gated_hosts)
 
 
 def _headscale_complete(
