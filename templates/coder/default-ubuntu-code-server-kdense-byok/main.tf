@@ -978,10 +978,26 @@ const server = http.createServer((req, res) => {
     },
   );
   upstream.on("error", (error) => {
+    if (res.headersSent) {
+      // Mid-stream failure after bytes started flowing: the status line is gone.
+      res.destroy();
+      return;
+    }
     res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
     res.end(`Proxy error: $${error.message}`);
   });
   req.pipe(upstream);
+  // Coder's agent drops the downstream socket whenever a tab closes or an SSE
+  // stream is interrupted, and nothing on that path touches the upstream request:
+  // Node's pipe() does not destroy its source either. Without an explicit teardown
+  // the upstream keeps streaming into a dead socket, and the target's
+  // per-connection worker model turns those zombie streams into worker exhaustion
+  // and a blanket 503 for every later request.
+  const teardownUpstream = () => {
+    if (!upstream.destroyed) upstream.destroy();
+  };
+  res.on("close", teardownUpstream);
+  req.on("aborted", teardownUpstream);
 });
 
 server.on("upgrade", (req, socket, head) => {
@@ -1004,8 +1020,19 @@ server.on("upgrade", (req, socket, head) => {
     socket.pipe(upstream).pipe(socket);
   });
   upstream.on("error", () => socket.destroy());
+  // WebSocket pairs must die together, or a dead browser socket leaves the
+  // upstream socket half-open for the same reason as the request path above.
+  socket.on("error", () => upstream.destroy());
+  socket.on("close", () => upstream.destroy());
+  upstream.on("close", () => socket.destroy());
 });
 
+// Long-lived SSE and WebSocket connections are the reason this proxy exists, so
+// the 300s default request timeout must not fire mid-stream; idle keep-alive
+// sockets are still reaped.
+server.requestTimeout = 0;
+server.keepAliveTimeout = 30000;
+server.headersTimeout = 60000;
 server.listen(PROXY_PORT, "127.0.0.1");
 JS
 
