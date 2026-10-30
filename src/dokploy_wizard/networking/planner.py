@@ -45,6 +45,9 @@ ACCESS_POLICY_RESOURCE_TYPE = "cloudflare_access_policy"
 
 _NON_PUBLIC_HOSTNAME_KEYS = {"openclaw-internal"}
 _LITELLM_ADMIN_ACCESS_KEY = "litellm-admin"
+# Cloudflare ships each account with an unnamed One-time PIN provider, so this is only the
+# name the wizard gives the provider it creates and the label it shows operators.
+_ACCESS_OTP_PROVIDER_NAME = "One-time PIN login"
 _LITELLM_ADMIN_SUBDOMAIN_ENV_KEY = "LITELLM_ADMIN_SUBDOMAIN"
 _LITELLM_ADMIN_DEFAULT_SUBDOMAIN = "litellm"
 _LITELLM_INTERNAL_PORT = 4000
@@ -227,7 +230,10 @@ def reconcile_cloudflare_access(
                 otp_provider=None,
                 applications=(),
                 policies=(),
-                notes=("Cloudflare Access hardening is not enabled for advisor hostnames.",),
+                notes=(
+                    "Cloudflare Access hardening is not enabled: no OTP recipients are "
+                    "configured, so no hostname is gated.",
+                ),
             ),
             provider_resource_id=None,
             application_resource_ids={},
@@ -299,7 +305,9 @@ def reconcile_cloudflare_access(
             otp_provider=PlannedAccessIdentityProvider(
                 action=provider_action,
                 provider_id=provider.provider_id,
-                name=provider.name,
+                # Account for the unnamed built-in provider so operator-facing output
+                # never shows a blank login method name.
+                name=provider.name or _ACCESS_OTP_PROVIDER_NAME,
             ),
             applications=tuple(apps),
             policies=tuple(policies),
@@ -413,7 +421,7 @@ def _resolve_access_identity_provider(
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
 ) -> tuple[CloudflareAccessIdentityProvider, str]:
-    provider_name = "One-time PIN login"
+    provider_name = _ACCESS_OTP_PROVIDER_NAME
     owned_provider = _find_owned_access_resource(
         ownership_ledger,
         resource_type=ACCESS_OTP_PROVIDER_RESOURCE_TYPE,
@@ -426,9 +434,12 @@ def _resolve_access_identity_provider(
                 "Ownership ledger says the Cloudflare Access OTP provider exists, "
                 "but the account-scoped endpoint did not find it."
             )
-        if provider.name != provider_name or provider.provider_type != "onetimepin":
+        if provider.provider_type != "onetimepin":
+            # The name is not compared: the provider Cloudflare ships by default is
+            # unnamed, and an owned provider that is still a One-time PIN method is the
+            # same login method regardless of what it is labelled.
             raise CloudflareError(
-                "Ownership ledger Access OTP provider no longer matches the desired configuration."
+                "Ownership ledger Access OTP provider is no longer a One-time PIN provider."
             )
         return provider, "reuse_owned"
     provider = backend.find_access_identity_provider_by_name(account_id, provider_name)

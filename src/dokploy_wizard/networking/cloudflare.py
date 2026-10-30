@@ -534,11 +534,20 @@ class CloudflareApiBackend:
         providers = payload.get("result")
         if not isinstance(providers, list):
             raise CloudflareError("Cloudflare returned an invalid Access identity-provider list.")
+        unnamed_otp: CloudflareAccessIdentityProvider | None = None
         for item in providers:
             provider = _parse_access_identity_provider(item)
-            if provider.name == name and provider.provider_type == "onetimepin":
+            if provider.provider_type != "onetimepin":
+                continue
+            if provider.name == name:
                 return provider
-        return None
+            if provider.name == "" and unnamed_otp is None:
+                unnamed_otp = provider
+        # Cloudflare creates one unnamed One-time PIN provider per account and it cannot
+        # be deleted, so it is the OTP login method whether or not it carries the name
+        # this wizard would have given it. Returning it stops the next step from adding a
+        # second OTP provider to the same account.
+        return unnamed_otp
 
     def create_access_identity_provider(
         self, account_id: str, name: str
@@ -828,7 +837,12 @@ def _parse_access_identity_provider(payload: dict[str, Any]) -> CloudflareAccess
     provider_type = result.get("type")
     if not isinstance(provider_id, str) or provider_id == "":
         raise CloudflareError("Cloudflare Access identity provider payload is missing a valid id.")
-    if not isinstance(name, str) or name == "":
+    if name is None:
+        name = ""
+    if not isinstance(name, str):
+        # An empty name is not a malformed payload: Cloudflare ships every account with
+        # one unnamed One-time PIN provider, and refusing to read it failed the whole
+        # Access phase on a real account the wizard had never touched.
         raise CloudflareError(
             "Cloudflare Access identity provider payload is missing a valid name."
         )

@@ -202,8 +202,13 @@ class FakeCloudflareBackend:
     def find_access_identity_provider_by_name(
         self, account_id: str, name: str
     ) -> CloudflareAccessIdentityProvider | None:
-        if self.access_provider is not None and self.access_provider.name == name:
-            return self.access_provider
+        provider = self.access_provider
+        if provider is None or provider.provider_type != "onetimepin":
+            return None
+        # Mirrors the live backend: Cloudflare's built-in One-time PIN provider is
+        # unnamed, and it is the account's OTP login method.
+        if provider.name in {name, ""}:
+            return provider
         return None
 
     def create_access_identity_provider(
@@ -1249,6 +1254,67 @@ def _desired_state() -> DesiredState:
         my_farm_advisor_replicas=None,
         shared_core=build_shared_core_plan("wizard-stack", ()),
     )
+
+
+def test_find_access_identity_provider_reads_the_unnamed_builtin_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live payload shape for the provider Cloudflare creates on every account."""
+    backend = CloudflareApiBackend(_raw_env())
+    requested: list[str] = []
+
+    def _fake_request_json(**kwargs: object) -> dict[str, object]:
+        requested.append(str(kwargs["path"]))
+        return {
+            "success": True,
+            "result": [{"id": "otp-builtin", "name": "", "type": "onetimepin"}],
+        }
+
+    monkeypatch.setattr(backend, "_request_json", _fake_request_json)
+
+    provider = backend.find_access_identity_provider_by_name("account-123", "One-time PIN login")
+
+    assert provider is not None
+    assert provider.provider_id == "otp-builtin"
+    assert provider.provider_type == "onetimepin"
+    # Reading is enough: a second OTP provider on the same account would put two
+    # One-time PIN login methods behind the same application.
+    assert requested == ["/accounts/account-123/access/identity_providers"]
+
+
+def test_access_phase_reuses_the_builtin_provider_and_names_it_for_operators() -> None:
+    desired = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_OPENCLAW": "true",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+            },
+        )
+    )
+    backend = FakeCloudflareBackend(
+        access_provider=CloudflareAccessIdentityProvider(
+            provider_id="otp-builtin",
+            name="",
+            provider_type="onetimepin",
+        )
+    )
+
+    phase = reconcile_cloudflare_access(
+        dry_run=False,
+        raw_env=_raw_env(),
+        desired_state=desired,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert phase.result.otp_provider is not None
+    assert phase.result.otp_provider.action == "reuse_existing"
+    assert phase.result.otp_provider.provider_id == "otp-builtin"
+    # Operator-facing output should never show a blank login method.
+    assert phase.result.otp_provider.name == "One-time PIN login"
 
 
 def test_resolve_desired_state_defaults_access_email_to_dokploy_admin_for_openclaw() -> None:
