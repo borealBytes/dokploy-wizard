@@ -410,7 +410,7 @@ class DokployCoderBackend:
                     raise
                 note = (
                     f"Skipped optional Coder template '{template_name}': "
-                    f"{_safe_progress_reason(str(e))}"
+                    f"{_safe_progress_reason(str(e), limit=1200)}"
                 )
                 _emit_coder_progress(note)
                 notes.append(note)
@@ -1241,7 +1241,7 @@ def _seed_template(
         )
     except CoderError as e:
         _emit_coder_progress(
-            f"Coder template '{template_name}' push failed: {_safe_progress_reason(str(e))}"
+            f"Coder template '{template_name}' push failed: {_safe_progress_reason(str(e), limit=1200)}"
         )
         raise
     _emit_coder_progress(f"Finished Coder template '{template_name}' push.")
@@ -1256,7 +1256,11 @@ def _safe_progress_reason(reason: str, *, limit: int = 360) -> str:
     safe = " ".join(redact_text(reason).split())
     if len(safe) <= limit:
         return safe
-    return f"{safe[: limit - 1]}…"
+    # Clip the middle, not the end. A terraform diagnosis arrives after the banner and
+    # the streamed log, so a head-only clip reliably threw away the one line that said
+    # what was wrong and kept only "exit status 1".
+    keep = max(1, (limit - 4) // 2)
+    return f"{safe[:keep]} … {safe[-keep:]}"
 
 
 def _template_version_name(*, template_dir: Path, replacements: dict[str, str] | None) -> str:

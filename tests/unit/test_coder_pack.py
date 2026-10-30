@@ -670,6 +670,18 @@ def test_retired_template_names_cover_removed_templates() -> None:
     )
 
 
+def test_safe_progress_reason_keeps_the_terraform_diagnosis_when_clipping() -> None:
+    # The CLI prints its banner and streaming log first and the actual reason last, so
+    # clipping the head used to leave "exit status 1" and throw away the diagnosis.
+    reason = "PLAN START " + ("streamed output " * 80) + "Error: Invalid value for variable: webapp.port must be an integer"
+
+    clipped = coder_module._safe_progress_reason(reason, limit=200)
+
+    assert len(clipped) <= 200
+    assert "Invalid value for variable" in clipped
+    assert "PLAN START" in clipped
+
+
 def test_seeded_template_names_fit_coder_name_limit() -> None:
     # Coder rejects an over-long name only after packaging the template, and a failed
     # push for a non-default template is a note rather than a failed install. That
@@ -1839,7 +1851,10 @@ def test_ensure_application_ready_skips_optional_template_push_failure(
     assert "sk-secret" not in skipped_note
     assert "session-123" not in skipped_note
     assert "<REDACTED>" in skipped_note
-    assert len(skipped_note) < 460
+    # The note stays bounded so a failed push cannot bloat the state file, but a
+    # terraform diagnosis has to survive it: the reason arrives at the end of the CLI's
+    # output, after the banner and the streamed plan.
+    assert len(skipped_note) < 1400
 
 
 def test_ensure_application_ready_keeps_base_template_push_failure_required(
