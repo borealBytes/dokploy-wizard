@@ -126,11 +126,24 @@ unusable until the sidecar's first cycle.
 | PATH | plain `docker exec -it` terminal: `command -v hermes` | system PATH fix |
 | Model selection | sidecar logs + `GET /v1/models` with a consumer key + `GET /key` allowlists | no broken aliases, default resolves and answers |
 
+### A3b. Measured on the test box (drove fixes not in the original plan)
+
+| Finding | Evidence | Action |
+|---|---|---|
+| Traefik answers **404 for any hostname it has no rule for**, which is indistinguishable from a dead service | `Host(litellm.example-rootsite.com)` → 404 while dokploy/coder → 200; the LiteLLM service was already on `dokploy-network` with an alias, only the router was missing | Compose renders the router + `X-Forwarded-Proto/Port` middleware for the admin hostname; the hostname also gets its own DNS record and tunnel ingress rule instead of riding on Coder's wildcard |
+| Cloudflare ships every account with **one unnamed `onetimepin` provider** that cannot be deleted | `GET /accounts/<id>/access/identity_providers` → `{"id":"c27b128b-…","name":"","type":"onetimepin"}` | Reading a nameless provider is valid; finding by name falls back to it so a second OTP provider is never created |
+| `browser_only` is **not an accepted app type** any more | `POST /access/apps` → `12130 app type is missing or invalid` | Keep `self_hosted` |
+| Whether Access challenges or denies **depends on the request headers** | bare `Accept: text/html` → 403; the same URL with `User-Agent` + `Sec-Fetch-Mode: navigate` → 200 (the Access sign-in page) | The public check asserts "never an unauthenticated 200" from a bare client, so it passes today; a browser-based probe would need to distinguish the Access page from LiteLLM's UI |
+| Coder caps names at **32 characters** and reports it only after packaging | `template name "ubuntu-vscode-opencode-hermes-desktop" is invalid: must be <= 32 characters` | Renamed to `ubuntu-vscode-hermes-desktop`; checked before push, and the seed list is pinned to the limit by test |
+| A **failed push of a non-default template is a note**, and the required-template check only runs in `proof` | modify finished green with the template absent | `proof` remains the gate for required templates; the name guard removes the failure mode we hit |
+| `cloudflare_access` was only reachable through the advisor packs | the box had **zero** Access applications | The phase runs on OTP intent, the env key is accepted on any stack, and the uninstall ledger counts the admin hostname's app and policy |
+
 ### A7. `.install-min-testing.env` follow-ups (file is gitignored via `.install*.env`)
 
 | Item | Fix |
 |---|---|
 | `AI_DEFAULT_MODEL=sync/opencode-go/deepseek-v4.1-flash` | use bare `deepseek-v4.1-flash` (see A4), or drop it and let `AI_DEFAULT_MODEL_PATTERN` drive selection |
+| `CLOUDFLARE_ACCESS_OTP_EMAILS` and `LITELLM_ADMIN_SUBDOMAIN` | added so the box exercises the Access application and the admin hostname; `CODER_WILDCARD_SUBDOMAIN` stays unset, which is fine because the coder pack defaults the wildcard to `*.root` |
 | `LITELLM_LOCAL_API_KEY=not-needed` uncommented while `LITELLM_LOCAL_MODEL`/`LITELLM_LOCAL_BASE_URL` are commented | make the local block consistently on or off |
 | sglang-over-Tailscale facts | `LITELLM_LOCAL_BASE_URL` (tailscale host/IP + sglang port + `/v1`) and `LITELLM_LOCAL_MODEL` (served model id) — example form is `http://<host>.ts.net:<port>/v1` |
 | Cloudflare token | verify read-only: token verify, DNS read/write on zone `11111111…`, account Cloudflare One/tunnel, Access apps, and `Zone → SSL and Certificates → Edit` only if a nested wildcard is ever used |
@@ -316,4 +329,5 @@ link, and `AGENTS.md`'s pack list + focused-modules block. Leave
 | `.install-min-testing.env` Cloudflare token scope check | not yet run |
 | sglang-over-Tailscale base URL + served model for `LITELLM_LOCAL_*` | user must supply (or approve `tailscale ip`/port discovery) |
 | Newest `litellm/litellm:*-stable` tag + CVE list for the pinned `v1.83.14-stable` | PR B, operator-approved bump |
-| Whether `*.example-rootsite.com` resolves and is tunneled | check before flipping the default template |
+| Whether `*.example-rootsite.com` resolves and is tunneled | resolved: the record and the tunnel rule exist, and `wildcard_access_url` reports `*.example-rootsite.com` |
+| Admin hostname reachable end to end | resolved: internal `/ui` answers 200 through the redirect to `/ui/`, `/` redirects to `/ui`, `/docs` answers 200, and the public hostname puts the Access sign-in page in front |
