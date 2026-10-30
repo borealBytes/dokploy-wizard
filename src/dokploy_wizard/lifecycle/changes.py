@@ -78,7 +78,11 @@ _SUPPORTED_HOSTNAME_KEYS = {
     "SURFSENSE_SUBDOMAIN",
     "SURFSENSE_API_SUBDOMAIN",
     "SURFSENSE_ZERO_SUBDOMAIN",
+    "LITELLM_ADMIN_SUBDOMAIN",
 }
+# The LiteLLM admin hostname is derived from this key on demand instead of being
+# modeled as a desired hostname, so it has no entry in _HOSTNAME_PHASES.
+_LITELLM_ADMIN_HOSTNAME_ENV_KEYS = frozenset({"LITELLM_ADMIN_SUBDOMAIN"})
 _SUPPORTED_ENABLEMENT_KEYS = {
     "PACKS",
     "ENABLE_HEADSCALE",
@@ -555,6 +559,12 @@ def classify_modify_request(
     if set(removed_packs) & _LITELLM_CONSUMER_PHASES:
         phases_to_run.add("shared_core")
     phases_to_run.update(_hostname_change_phases(existing_desired, requested_desired))
+    if effective_changed_keys & _LITELLM_ADMIN_HOSTNAME_ENV_KEYS:
+        # networking publishes the DNS record and the Access application for the admin
+        # hostname, and shared_core re-renders the LiteLLM service that advertises it.
+        phases_to_run.update({"networking", _LITELLM_PHASE})
+        if _access_enabled(requested_desired):
+            phases_to_run.add("cloudflare_access")
     phases_to_run.update(_new_pack_phases(existing_desired, requested_desired))
     phases_to_run.update(_removed_pack_phases(existing_desired, requested_desired))
 

@@ -1180,6 +1180,102 @@ def test_modify_openclaw_gateway_token_change_uses_pack_mutable_contract() -> No
     assert plan.phases_to_run == ("openclaw",)
 
 
+def test_modify_litellm_admin_hostname_reconciles_networking_and_shared_core() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,coder",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,coder",
+            "LITELLM_ADMIN_SUBDOMAIN": "ai-gateway",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "seaweedfs",
+                "coder",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert "LITELLM_ADMIN_SUBDOMAIN" in plan.reasons[0]
+    # The admin hostname is not in desired hostnames, so the key alone has to reach
+    # both the phase that publishes its DNS record and the service that advertises it.
+    assert plan.phases_to_run == ("networking", "shared_core")
+    assert plan.start_phase == "networking"
+
+
+def test_modify_litellm_admin_hostname_reapplies_cloudflare_access_when_enabled() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+            "LITELLM_ADMIN_SUBDOMAIN": "litellm",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_OPENCLAW": "true",
+            "OPENCLAW_CHANNELS": "telegram",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+            "LITELLM_ADMIN_SUBDOMAIN": "ai-gateway",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "openclaw",
+                "cloudflare_access",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert "cloudflare_access" in plan.phases_to_run
+    assert plan.phases_to_run == ("networking", "shared_core", "cloudflare_access")
+
+
 def test_modify_openclaw_internal_hostname_reconciles_networking_and_openclaw_only() -> None:
     existing_raw = _raw(
         {
