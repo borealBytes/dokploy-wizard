@@ -283,6 +283,36 @@ class DokployCoderBackend:
                 },
             ),
             (
+                _default_hermes_desktop_template_name(),
+                _default_hermes_desktop_template_dir(),
+                {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": _shell_double_quote_escape(
+                        self._hermes_inference_provider
+                    ),
+                    "__DOKPLOY_WIZARD_HERMES_MODEL__": _shell_double_quote_escape(
+                        self._hermes_model
+                    ),
+                    "__DOKPLOY_WIZARD_HERMES_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                    "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": f"https://{self._hostname}",
+                    # The official webapp pins the one hostname it will serve, and it is a
+                    # Coder app subdomain (<slug>--<workspace>--<user>.<suffix>), so the
+                    # template needs the wildcard suffix, not the Coder origin.
+                    "__DOKPLOY_WIZARD_CODER_WILDCARD_SUFFIX__": _wildcard_suffix(
+                        self._wildcard_hostname
+                    ),
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                    "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__": _shell_double_quote_escape(
+                        self._admin_password or "ChangeMeSoon"
+                    ),
+                },
+            ),
+            (
                 _base_template_name(),
                 _base_template_dir(),
                 {
@@ -1050,6 +1080,19 @@ def _default_template_name() -> str:
     return "ubuntu-vscode-opencode-hermes-pi"
 
 
+def _default_hermes_desktop_template_dir() -> Path:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "templates"
+        / "coder"
+        / "default-ubuntu-vscode-opencode-hermes-desktop"
+    )
+
+
+def _default_hermes_desktop_template_name() -> str:
+    return "ubuntu-vscode-opencode-hermes-desktop"
+
+
 def _base_template_dir() -> Path:
     return (
         Path(__file__).resolve().parents[3] / "templates" / "coder" / "default-ubuntu-code-server"
@@ -1114,6 +1157,7 @@ def _default_workspace_name(hostname: str, *, today: date | None = None) -> str:
 def _required_template_names() -> tuple[str, ...]:
     return (
         _default_template_name(),
+        _default_hermes_desktop_template_name(),
         _base_template_name(),
         _default_opencode_web_template_name(),
         _default_kdense_byok_template_name(),

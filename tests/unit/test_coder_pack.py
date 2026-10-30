@@ -249,6 +249,7 @@ _TEMPLATE_DIRS_WITH_PI_AND_OPENCODE = (
     "default-ubuntu-code-server-kdense-byok",
     "default-ubuntu-code-server-hermes",
     "default-ubuntu-vscode-opencode-hermes-pi",
+    "default-ubuntu-vscode-opencode-hermes-desktop",
 )
 
 
@@ -650,12 +651,13 @@ def test_default_opencode_web_template_includes_web_app() -> None:
 def test_required_template_names_cover_only_remaining_templates() -> None:
     assert coder_module._required_template_names() == (
         coder_module._default_template_name(),
+        coder_module._default_hermes_desktop_template_name(),
         coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
         coder_module._default_hermes_template_name(),
     )
-    assert len(coder_module._required_template_names()) == 5
+    assert len(coder_module._required_template_names()) == 6
 
 
 def test_retired_template_names_cover_removed_templates() -> None:
@@ -1359,6 +1361,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
 
     assert template_push_calls == [
         coder_module._default_template_name(),
+        coder_module._default_hermes_desktop_template_name(),
         coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
@@ -1367,6 +1370,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     assert ensure_workspace_calls == []
     assert notes == (
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
@@ -1623,6 +1627,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     assert notes == (
         "Provisioned initial Coder admin for 'admin@example.com'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
@@ -1713,6 +1718,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
 
     expected_template_names = {
         coder_module._default_template_name(),
+        coder_module._default_hermes_desktop_template_name(),
         coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
@@ -1730,6 +1736,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     assert first_notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
@@ -2717,6 +2724,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         ),
         (
             "wizard-stack-coder-container",
+            str(coder_module._default_hermes_desktop_template_dir()),
+            coder_module._default_hermes_desktop_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
             str(coder_module._base_template_dir()),
             coder_module._base_template_name(),
         ),
@@ -2742,6 +2754,12 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "coder.example.com",
             "session-123",
             coder_module._default_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
+            "coder.example.com",
+            "session-123",
+            coder_module._default_hermes_desktop_template_name(),
         ),
         (
             "wizard-stack-coder-container",
@@ -2792,6 +2810,19 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
+    assert template_replacements_by_name[coder_module._default_hermes_desktop_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
+        # The official webapp is pinned to one hostname, which is a Coder app
+        # subdomain, so the template needs the wildcard suffix and the sign-in password.
+        "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": "https://coder.example.com",
+        "__DOKPLOY_WIZARD_CODER_WILDCARD_SUFFIX__": "coder.example.com",
+        "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__": "ChangeMeSoon",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name
     assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
     assert ensure_workspace_calls == [
@@ -2814,6 +2845,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
