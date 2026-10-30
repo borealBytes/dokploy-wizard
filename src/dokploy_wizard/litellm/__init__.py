@@ -13,7 +13,9 @@ from .qa_harness import (
     LiteLLMAdminQaCheck,
     LiteLLMAdminQaHarness,
     LiteLLMAdminQaHarnessError,
+    LiteLLMAdminUiCheckError,
     build_litellm_admin_qa_harness,
+    verify_internal_litellm_admin_ui,
     verify_public_litellm_admin_access,
 )
 
@@ -25,6 +27,7 @@ __all__ = [
     "LiteLLMAdminQaCheck",
     "LiteLLMAdminQaHarness",
     "LiteLLMAdminQaHarnessError",
+    "LiteLLMAdminUiCheckError",
     "LiteLLMGatewayManager",
     "LiteLLMReadinessError",
     "LiteLLMTeamRecord",
@@ -32,5 +35,6 @@ __all__ = [
     "build_litellm_admin_qa_harness",
     "build_litellm_config",
     "render_litellm_config_yaml",
+    "verify_internal_litellm_admin_ui",
     "verify_public_litellm_admin_access",
 ]

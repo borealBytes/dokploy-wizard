@@ -1199,6 +1199,18 @@ def _render_compose_file(
             f'      LITELLM_SALT_KEY: "{_required_placeholder("LITELLM_SALT_KEY")}"\n'
             f'      SALT_KEY: "{_required_placeholder("LITELLM_SALT_KEY")}"\n'
         )
+        # Root serves Swagger, which is what an operator who just types the hostname
+        # lands on; the admin UI is the surface they wanted. Keep the docs reachable at
+        # their own path instead of losing them to the redirect.
+        ui_redirect_lines = '      ROOT_REDIRECT_URL: "/ui"\n      DOCS_URL: "/docs"\n'
+        ui_credential_lines = (
+            ""
+            if _litellm_ui_credentials(litellm_env) is None
+            else (
+                f'      UI_USERNAME: "{_required_placeholder("LITELLM_UI_USERNAME")}"\n'
+                f'      UI_PASSWORD: "{_required_placeholder("LITELLM_UI_PASSWORD")}"\n'
+            )
+        )
         litellm_block = (
             f"  {plan.litellm.service_name}:\n"
             f"    image: {litellm_image}:{litellm_tag}\n"
@@ -1211,6 +1223,8 @@ def _render_compose_file(
             f"{provider_env_lines}"
             f"{master_key_lines}"
             f"{salt_key_lines}"
+            f"{ui_redirect_lines}"
+            f"{ui_credential_lines}"
             "    configs:\n"
             f"      - source: {config_name}\n"
             "        target: /app/config.yaml\n"
@@ -1447,6 +1461,28 @@ def _litellm_env_specs(
             ),
         )
     )
+    ui_credentials = _litellm_ui_credentials(litellm_env)
+    if ui_credentials is not None:
+        ui_username, ui_password = ui_credentials
+        specs.extend(
+            (
+                _shared_core_env_spec(
+                    name="LITELLM_UI_USERNAME",
+                    value=ui_username,
+                    owner="shared-core-litellm",
+                    target_services=(service_name,),
+                    source="operator-input",
+                    sensitive=False,
+                ),
+                _shared_core_env_spec(
+                    name="LITELLM_UI_PASSWORD",
+                    value=ui_password,
+                    owner="shared-core-litellm",
+                    target_services=(service_name,),
+                    source="operator-input",
+                ),
+            )
+        )
     if generated_keys is not None:
         for consumer, virtual_key in sorted(generated_keys.virtual_keys.items()):
             specs.append(
@@ -1480,6 +1516,21 @@ def _litellm_salt_key_value(
     return _optional_value(litellm_env, "LITELLM_SALT_KEY") or _shared_core_generated_secret(
         "litellm-salt-key"
     )
+
+
+def _litellm_ui_credentials(litellm_env: dict[str, str]) -> tuple[str, str] | None:
+    """Credentials for LiteLLM's own admin UI, which are the stack admin credentials.
+
+    Every other app on this box is reached with the Dokploy admin email and password,
+    and LiteLLM would otherwise ask for its master key as the UI password: one more
+    secret per box to remember for no benefit. Returns None when either is absent so
+    the compose block does not reference env placeholders nothing will fill.
+    """
+    username = _optional_value(litellm_env, "DOKPLOY_ADMIN_EMAIL")
+    password = _optional_value(litellm_env, "DOKPLOY_ADMIN_PASSWORD")
+    if username is None or password is None:
+        return None
+    return username, password
 
 
 def _litellm_secret_ref_candidates(env_name: str) -> tuple[str, ...]:

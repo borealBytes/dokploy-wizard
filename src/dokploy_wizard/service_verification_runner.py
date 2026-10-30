@@ -10,6 +10,10 @@ from typing import Any, Callable, Literal
 from dokploy_wizard import cli
 from dokploy_wizard.bootstrap import LOCAL_HEALTH_URL
 from dokploy_wizard.dokploy import openclaw as openclaw_module
+from dokploy_wizard.litellm import (
+    LiteLLMAdminUiCheckError,
+    verify_internal_litellm_admin_ui,
+)
 from dokploy_wizard.packs.surfsense import SurfSenseResourceRecord
 from dokploy_wizard.state import (
     RawEnvInput,
@@ -111,6 +115,8 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
     results: list[ServiceVerificationResult] = [
         _verify_shared_core(shared_core_backend=shared_core_backend),
     ]
+    if desired_state.shared_core.litellm is not None:
+        results.append(_verify_litellm_admin_ui())
     if "nextcloud" in desired_state.enabled_packs:
         results.append(
             _verify_backend_method(
@@ -223,6 +229,34 @@ def _verify_shared_core(*, shared_core_backend: Any) -> ServiceVerificationResul
             if passed
             else "Shared core Postgres, Redis, or LiteLLM readiness checks failed."
         ),
+    )
+
+
+_LITELLM_ADMIN_UI_URL = "http://127.0.0.1:4000/ui"
+
+
+def _verify_litellm_admin_ui() -> ServiceVerificationResult:
+    """Ask LiteLLM's own admin UI whether it is serving, from inside the stack.
+
+    The public hostname cannot answer that question: Cloudflare Access returns a 302
+    challenge whether the UI is healthy or completely broken. The LiteLLM port is
+    published on loopback and this runner executes on the host, so the request reaches
+    the service without Access in the path.
+    """
+    try:
+        verify_internal_litellm_admin_ui(_LITELLM_ADMIN_UI_URL)
+    except LiteLLMAdminUiCheckError as error:
+        return make_verification_result(
+            service_name="litellm-admin-ui",
+            tier="app",
+            passed=False,
+            detail=f"{error} Sign in at https://litellm.<root-domain>/ui once it serves.",
+        )
+    return make_verification_result(
+        service_name="litellm-admin-ui",
+        tier="app",
+        passed=True,
+        detail=f"LiteLLM admin UI answered 200 at {_LITELLM_ADMIN_UI_URL}.",
     )
 
 

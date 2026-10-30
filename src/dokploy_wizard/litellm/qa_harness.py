@@ -18,12 +18,17 @@ from dokploy_wizard.state import DesiredState, RawEnvInput, parse_env_file, reso
 _ACCESS_ALLOWED_STATUSES = (302, 401, 403)
 _CURL_IMAGE = "curlimages/curl:8.7.1"
 _READINESS_PATH = "/health/readiness"
+_ADMIN_UI_PATH = "/ui"
 _CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 _SMOKE_MODEL = DEFAULT_LOCAL_CANONICAL_ALIAS
 
 
 class LiteLLMAdminAccessCheckError(RuntimeError):
     """Raised when the public LiteLLM admin route is not Access-protected."""
+
+
+class LiteLLMAdminUiCheckError(RuntimeError):
+    """Raised when LiteLLM's own admin UI is not serving."""
 
 
 class LiteLLMAdminQaHarnessError(RuntimeError):
@@ -43,6 +48,7 @@ class LiteLLMAdminQaCheck:
 class LiteLLMAdminQaHarness:
     admin_url: str
     internal_url: str
+    internal_ui_url: str
     checks: tuple[LiteLLMAdminQaCheck, ...]
 
 
@@ -56,10 +62,15 @@ def build_litellm_admin_qa_harness(
         )
 
     internal_url = f"http://{desired_state.shared_core.litellm.service_name}:4000{_READINESS_PATH}"
+    internal_ui_url = f"http://{desired_state.shared_core.litellm.service_name}:4000{_ADMIN_UI_PATH}"
     admin_url = f"https://{admin_hostname}"
     shared_network_command = _shared_network_readiness_command(
         stack_name=desired_state.stack_name,
         internal_url=internal_url,
+    )
+    shared_network_ui_command = _shared_network_readiness_command(
+        stack_name=desired_state.stack_name,
+        internal_url=internal_ui_url,
     )
     checks = [
         LiteLLMAdminQaCheck(
@@ -68,6 +79,16 @@ def build_litellm_admin_qa_harness(
             command=None,
             success_criteria="Anonymous request returns a Cloudflare Access challenge/deny status (302/401/403).",
             failure_criteria="Public admin must never return unauthenticated 200.",
+        ),
+        LiteLLMAdminQaCheck(
+            name="admin-ui-serving",
+            shell_command=shlex.join(shared_network_ui_command),
+            command=shared_network_ui_command,
+            success_criteria="LiteLLM's own admin UI answers 200 from inside the shared network.",
+            failure_criteria=(
+                "Admin UI request failed: the UI is not serving even though the "
+                "gateway may answer readiness."
+            ),
         ),
         LiteLLMAdminQaCheck(
             name="shared-network-readiness",
@@ -122,6 +143,7 @@ def build_litellm_admin_qa_harness(
     return LiteLLMAdminQaHarness(
         admin_url=admin_url,
         internal_url=internal_url,
+        internal_ui_url=internal_ui_url,
         checks=tuple(checks),
     )
 
@@ -158,6 +180,40 @@ def verify_public_litellm_admin_access(
         )
     raise LiteLLMAdminAccessCheckError(
         f"LiteLLM public admin access returned unexpected status {status}; expected one of {_ACCESS_ALLOWED_STATUSES}."
+    )
+
+
+def verify_internal_litellm_admin_ui(
+    url: str,
+    *,
+    request_fn: Callable[[request.Request], object] | None = None,
+) -> None:
+    """Require LiteLLM's own admin UI to answer 200.
+
+    /health/readiness passes while the UI bundle fails to serve, so "the gateway is
+    up" and "the operator can sign in" are different facts. This request must be made
+    from inside the stack: from outside, Cloudflare Access answers 302 whether the UI
+    works or not, which is exactly the ambiguity the public check cannot resolve.
+    """
+    req = request.Request(url=url, method="GET", headers={"Accept": "text/html"})
+    sender = request_fn or _default_internal_request
+    try:
+        response = sender(req)
+    except error.HTTPError as exc:
+        raise LiteLLMAdminUiCheckError(
+            f"LiteLLM admin UI returned unexpected status {exc.code}; expected 200."
+        ) from exc
+    except error.URLError as exc:
+        raise LiteLLMAdminUiCheckError(f"LiteLLM admin UI check failed: {exc.reason}.") from exc
+
+    status = getattr(response, "status", None)
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
+    if status == 200:
+        return
+    raise LiteLLMAdminUiCheckError(
+        f"LiteLLM admin UI returned status {status}; expected 200 from inside the stack."
     )
 
 
@@ -282,6 +338,12 @@ class _NoRedirectHandler(request.HTTPRedirectHandler):
 def _default_public_request(req: request.Request) -> object:
     opener = request.build_opener(_NoRedirectHandler())
     return opener.open(req, timeout=30)
+
+
+def _default_internal_request(req: request.Request) -> object:
+    # Redirects are followed on purpose: the public check needs to see the Access
+    # challenge itself, but inside the stack only the final answer matters.
+    return request.urlopen(req, timeout=30)
 
 
 if __name__ == "__main__":

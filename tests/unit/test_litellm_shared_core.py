@@ -310,6 +310,32 @@ def test_reconcile_reuses_desired_network_when_ledger_points_to_stale_name() -> 
     ).resource_id == desired_network.resource_id
 
 
+def test_rendered_compose_gives_the_litellm_admin_ui_the_stack_admin_credentials() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(
+        plan,
+        {},
+        {
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "stack-admin-password",
+        },
+    )
+    compose = rendered.compose_file
+    env_specs = {spec.name: spec for spec in rendered.env_specs}
+
+    # Same login as every other app on the box, rather than the master key.
+    assert 'UI_USERNAME: "${LITELLM_UI_USERNAME:?LITELLM_UI_USERNAME is required}"' in compose
+    assert 'UI_PASSWORD: "${LITELLM_UI_PASSWORD:?LITELLM_UI_PASSWORD is required}"' in compose
+    assert env_specs["LITELLM_UI_USERNAME"].value == "admin@example.com"
+    assert env_specs["LITELLM_UI_PASSWORD"].value == "stack-admin-password"
+    assert env_specs["LITELLM_UI_PASSWORD"].variable.sensitive is True
+    # The username is an email address, not a secret: it shows up in log lines and
+    # operator notes, and marking it sensitive makes the deploy output useless.
+    assert env_specs["LITELLM_UI_USERNAME"].variable.sensitive is False
+    assert env_specs["LITELLM_UI_PASSWORD"].target_services == ("wizard-stack-shared-litellm",)
+
+
 def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs() -> None:
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
 
@@ -345,6 +371,15 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
     assert 'LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}"' in compose
     assert 'SALT_KEY: "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}"' in compose
     assert "healthcheck:\n" in compose
+    # Root serves Swagger; send operators to the admin UI and keep the docs reachable.
+    assert 'ROOT_REDIRECT_URL: "/ui"' in compose
+    assert 'DOCS_URL: "/docs"' in compose
+    # No admin credentials in this env, so the UI login stays unset rather than
+    # referencing placeholders that nothing would fill.
+    assert "UI_USERNAME" not in compose
+    assert "UI_PASSWORD" not in compose
+    assert "LITELLM_UI_USERNAME" not in env_specs
+    assert "LITELLM_UI_PASSWORD" not in env_specs
     assert re.search(r"source: wizard-stack-shared-litellm-config-[0-9a-f]{12}", compose)
     assert "target: /app/config.yaml" in compose
     assert 'api_key: "os.environ/LITELLM_LOCAL_API_KEY"' in compose
