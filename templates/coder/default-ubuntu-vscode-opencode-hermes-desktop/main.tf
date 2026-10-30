@@ -31,7 +31,12 @@ data "docker_network" "shared" {
 }
 
 locals {
-  username = data.coder_workspace_owner.me.name
+  username            = data.coder_workspace_owner.me.name
+  hermes_desktop_slug = "hermes-desktop"
+  # Coder routes subdomain apps as <slug>--<workspace>--<owner>.<wildcard suffix>, and
+  # the official webapp only accepts the one outside hostname it is configured with.
+  # Both sides are computed from these locals so they cannot drift apart.
+  hermes_desktop_host = "${local.hermes_desktop_slug}--${data.coder_workspace.me.name}--${local.username}.__DOKPLOY_WIZARD_CODER_WILDCARD_SUFFIX__"
 }
 
 # Storage boundary for this default workspace template:
@@ -963,6 +968,9 @@ export API_SERVER_PORT="$${API_SERVER_PORT:-8642}"
 export API_SERVER_KEY="$${API_SERVER_KEY:-hermes-local-api-key}"
 export HERMES_WEBUI_PORT="$${HERMES_WEBUI_PORT:-8787}"
 export HERMES_WEBUI_PROXY_PORT="$${HERMES_WEBUI_PROXY_PORT:-8788}"
+export HERMES_WEBAPP_PORT="$${HERMES_WEBAPP_PORT:-9120}"
+export HERMES_WEBAPP_PUBLIC_URL="https://${local.hermes_desktop_host}"
+export HERMES_WEBAPP_BASIC_AUTH_USERNAME="hermes"
 
 wait_for_http() {
   url="$1"
@@ -1014,6 +1022,19 @@ upsert_env API_SERVER_ENABLED "$API_SERVER_ENABLED"
 upsert_env API_SERVER_HOST "$API_SERVER_HOST"
 upsert_env API_SERVER_PORT "$API_SERVER_PORT"
 upsert_env API_SERVER_KEY "$API_SERVER_KEY"
+upsert_env_if_unset() {
+  key="$1"
+  value="$2"
+  file="$HERMES_HOME/.env"
+  if [ -f "$file" ]; then
+    existing=$(grep "^$${key}=" "$file" | tail -1 | cut -d= -f2-)
+    if [ -n "$existing" ]; then
+      return 0
+    fi
+  fi
+  upsert_env "$key" "$value"
+}
+
 upsert_env HERMES_WEBUI_SKIP_ONBOARDING "1"
 upsert_env HERMES_WEBUI_DEFAULT_MODEL "$HERMES_MODEL"
 
@@ -1060,10 +1081,59 @@ else
   git -C "$NESQ_DIR" reset --hard origin/master
 fi
 
+# Hermes Desktop webapp: served by the gateway on $HERMES_WEBAPP_PORT. The gateway
+# reads webapp.* once at start, so all of this happens before it is launched.
+hermes config set webapp.enabled true
+hermes config set webapp.host 0.0.0.0
+hermes config set webapp.port "$HERMES_WEBAPP_PORT"
+hermes config set webapp.public_url "$HERMES_WEBAPP_PUBLIC_URL"
+
+# A gated webapp fails closed: without a sign-in provider the gateway serves native
+# clients only and 9120 never answers, so the basic-auth trio is written every boot
+# rather than conditionally. Loopback-only access would otherwise hand out single-use
+# 60-second links, which no browser tile can survive.
+upsert_env_if_unset HERMES_DASHBOARD_BASIC_AUTH_USERNAME "$HERMES_WEBAPP_BASIC_AUTH_USERNAME"
+upsert_env_if_unset HERMES_DASHBOARD_BASIC_AUTH_PASSWORD "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__"
+# An empty secret mints a new signing key on every boot and logs every session out on
+# each restart, so the first boot's secret is kept for the life of the volume.
+upsert_env_if_unset HERMES_DASHBOARD_BASIC_AUTH_SECRET "$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
+chmod 600 "$HERMES_HOME/.env"
+
+# The bundle needs npm and several minutes, and the checkout is unchanged until the
+# hermes version moves, so rebuild only when that version changes. Tracked in the
+# persistent home volume, not /tmp.
+HERMES_WEBAPP_BUILD_MARKER=/home/coder/.local/share/dokploy/hermes-webapp-bundle-version
+mkdir -p "$(dirname "$HERMES_WEBAPP_BUILD_MARKER")"
+HERMES_WEBAPP_VERSION="$(hermes --version 2>/dev/null | head -1 | tr -cd '[:alnum:]._-')"
+if [ ! -s "$HERMES_WEBAPP_BUILD_MARKER" ] || [ "$(cat "$HERMES_WEBAPP_BUILD_MARKER" 2>/dev/null)" != "$HERMES_WEBAPP_VERSION" ]; then
+  echo "building Hermes Desktop webapp bundle (version $${HERMES_WEBAPP_VERSION:-unknown})"
+  if hermes webapp --build-only >/tmp/hermes-webapp-build.log 2>&1; then
+    printf '%s' "$HERMES_WEBAPP_VERSION" >"$HERMES_WEBAPP_BUILD_MARKER"
+  else
+    # Upstream drift can move the build; the community WebUI tile is the safety net, so
+    # a failed bundle build costs the official tile instead of the workspace.
+    echo "hermes webapp --build-only failed; see /tmp/hermes-webapp-build.log" >&2
+    tail -20 /tmp/hermes-webapp-build.log >&2 || true
+  fi
+fi
+
 if ! wait_for_http "http://127.0.0.1:$API_SERVER_PORT/health" 1; then
   nohup hermes gateway >/tmp/hermes-gateway.log 2>&1 &
   wait_for_http "http://127.0.0.1:$API_SERVER_PORT/health" 300 || true
+elif ! wait_for_http "http://127.0.0.1:$HERMES_WEBAPP_PORT/health" 1; then
+  # A gateway started before this template enabled the webapp will not pick the config
+  # up by itself; it has one restart, and only when 9120 is what is missing.
+  echo "gateway is up but the webapp port is closed; restarting the gateway once"
+  pkill -f "hermes gateway" >/dev/null 2>&1 || true
+  sleep 2
+  nohup hermes gateway >/tmp/hermes-gateway.log 2>&1 &
+  wait_for_http "http://127.0.0.1:$API_SERVER_PORT/health" 300 || true
 fi
+
+# Host pinning and the sign-in gate both fail in ways that look like a dead port, so
+# report what the gateway itself thinks.
+wait_for_http "http://127.0.0.1:$HERMES_WEBAPP_PORT/health" 120 || true
+hermes webapp --status 2>&1 | sed 's/^/[hermes webapp] /' || true
 
 if ! wait_for_http "http://127.0.0.1:$HERMES_WEBUI_PORT/health" 1; then
   nohup env HERMES_HOME="$HERMES_HOME" HERMES_WEBUI_ALLOWED_ORIGINS="$HERMES_PUBLIC_ORIGIN" HERMES_WEBUI_TRUST_FORWARDED_HOST=1 HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR HERMES_WEBUI_STATE_DIR="$HERMES_HOME/webui" HERMES_WEBUI_SKIP_ONBOARDING=1 HERMES_WEBUI_DEFAULT_MODEL="$HERMES_MODEL" PYTHONPATH="$HERMES_INSTALL_DIR:$${PYTHONPATH:-}" python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install >/tmp/hermes-webui.log 2>&1 &
@@ -1232,10 +1302,32 @@ resource "coder_app" "opencode" {
   }
 }
 
+resource "coder_app" "hermes_desktop" {
+  agent_id     = coder_agent.main.id
+  slug         = local.hermes_desktop_slug
+  display_name = "Hermes Desktop (Web)"
+  icon         = "https://raw.githubusercontent.com/NousResearch/hermes-agent/refs/heads/main/apps/desktop/assets/icon.png"
+  # Subdomain app: the webapp answers only for its own public hostname, so it cannot
+  # be mounted under /apps/<slug> the way the path-mounted community WebUI is.
+  url          = "http://localhost:9120"
+  share        = "owner"
+  subdomain    = true
+  # The webapp sends frame-ancestors 'none', so an embedded iframe can only ever show
+  # a blank frame; Coder must open it in its own tab.
+  open_in      = "new-tab"
+  order        = 3
+
+  healthcheck {
+    url       = "http://localhost:9120/health"
+    interval  = 5
+    threshold = 60
+  }
+}
+
 resource "coder_app" "hermes_webui" {
   agent_id     = coder_agent.main.id
   slug         = "hermes-webui"
-  display_name = "Hermes"
+  display_name = "Hermes WebUI (Community)"
   icon         = "https://raw.githubusercontent.com/nesquena/hermes-webui/refs/heads/master/static/favicon.svg"
   url          = "http://localhost:8788"
   share        = "owner"
