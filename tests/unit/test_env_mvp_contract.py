@@ -81,6 +81,18 @@ def _repo_root():
     return Path(__file__).resolve().parents[2]
 
 
+def _install_min_env_path():
+    """Use the operator's local minimal env when present, else the shipped example.
+
+    ``.install-min.env`` is gitignored, so a clean checkout only ships
+    ``.install-min.env.example`` — and that example is what a new operator actually
+    copies, so it is the artifact whose shape these contract tests must pin.
+    """
+    root = _repo_root()
+    operator_env = root / ".install-min.env"
+    return operator_env if operator_env.exists() else root / ".install-min.env.example"
+
+
 def _load_install_min_env_shape() -> tuple[
     frozenset[str], dict[str, tuple[bool, bool]], dict[str, str]
 ]:
@@ -88,7 +100,7 @@ def _load_install_min_env_shape() -> tuple[
     model_shape: dict[str, tuple[bool, bool]] = {}
     safe_values: dict[str, str] = {}
     safe_value_keys = {"PACKS", "AI_DEFAULT_PROVIDER", "AI_DEFAULT_MODEL"}
-    for raw_line in (_repo_root() / ".install-min.env").read_text(encoding="utf-8").splitlines():
+    for raw_line in _install_min_env_path().read_text(encoding="utf-8").splitlines():
         stripped = raw_line.strip()
         if stripped == "" or stripped.startswith("#") or "=" not in stripped:
             continue

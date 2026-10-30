@@ -242,7 +242,7 @@ def assess_host_prerequisites(
             missing_packages=(),
             docker_bootstrap_required=False,
             checks=(os_check,),
-            notes=("Baseline apt remediation is only supported for Ubuntu 24.04 hosts.",),
+            notes=("Baseline apt remediation is supported for Ubuntu 24.04 LTS and newer hosts.",),
         )
 
     checks = [os_check]
@@ -271,7 +271,7 @@ def assess_host_prerequisites(
             missing_packages=(),
             docker_bootstrap_required=False,
             checks=tuple(checks),
-            notes=("Baseline Ubuntu 24.04 host prerequisites are already satisfied.",),
+            notes=("Baseline Ubuntu host prerequisites are already satisfied.",),
         )
 
     notes = []
@@ -323,7 +323,7 @@ def _os_support_check(host_facts: HostFacts) -> HostPrerequisiteCheck:
             status="fail",
             detail=(
                 f"unsupported host OS '{host_facts.distribution_id} {host_facts.version_id}'; "
-                f"expected Ubuntu {SUPPORTED_OS_VERSION} LTS"
+                f"expected Ubuntu {SUPPORTED_OS_VERSION} LTS or newer"
             ),
         )
     if not _is_supported_ubuntu_version(host_facts.version_id):
@@ -332,13 +332,16 @@ def _os_support_check(host_facts: HostFacts) -> HostPrerequisiteCheck:
             status="fail",
             detail=(
                 f"unsupported Ubuntu version '{host_facts.version_id}'; "
-                f"expected {SUPPORTED_OS_VERSION}"
+                f"expected {SUPPORTED_OS_VERSION} or newer"
             ),
         )
     return HostPrerequisiteCheck(
         name="os_support",
         status="pass",
-        detail=f"Ubuntu {SUPPORTED_OS_VERSION} host detected for apt-backed prerequisite checks.",
+        detail=(
+            f"Ubuntu {host_facts.version_id} host detected for apt-backed prerequisite checks "
+            f"(baseline {SUPPORTED_OS_VERSION} LTS or newer)."
+        ),
     )
 
 

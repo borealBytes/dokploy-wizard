@@ -80,6 +80,16 @@ from dokploy_wizard.state import (
 from dokploy_wizard.state import inspection as inspection_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _install_min_env_path() -> Path:
+    """The operator's minimal env when present, else the shipped example.
+
+    ``.install-min.env`` is gitignored, so tests that read it must fall back to
+    ``.install-min.env.example`` to stay runnable on a clean checkout.
+    """
+    operator_env = REPO_ROOT / ".install-min.env"
+    return operator_env if operator_env.exists() else REPO_ROOT / ".install-min.env.example"
 CLI = REPO_ROOT / "bin" / "dokploy-wizard"
 FIXTURES_DIR = REPO_ROOT / "fixtures"
 
@@ -895,7 +905,7 @@ def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults()
     assert examples[full_example_path].values["LITELLM_OPENROUTER_MODELS"] == examples[
         farm_example_path
     ].values["LITELLM_OPENROUTER_MODELS"]
-    install_min_path = REPO_ROOT / ".install-min.env"
+    install_min_path = _install_min_env_path()
     if install_min_path.exists():
         install_min_models = parse_env_file(install_min_path).values.get(
             "LITELLM_OPENROUTER_MODELS"
@@ -978,7 +988,7 @@ def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults()
         "".join(chr(code) for code in (116, 117, 120, 100, 101, 115, 107, 116, 111, 112, 46, 116, 97, 105, 108, 98, 49, 50, 97, 97, 53, 46, 116, 115, 46, 110, 101, 116)),
         "local-model.internal",
     ]
-    install_min_values = parse_env_file(REPO_ROOT / ".install-min.env").values
+    install_min_values = parse_env_file(_install_min_env_path()).values
     for key in ("ROOT_DOMAIN", "TAILSCALE_HOSTNAME"):
         private_value = install_min_values.get(key, "")
         if private_value and private_value != "example.com":
@@ -5476,7 +5486,7 @@ def test_install_leaves_supported_host_prerequisites_as_idempotent_noop(
     assert summary["host_prerequisites"]["assessment"]["outcome"] == "noop"
     assert summary["host_prerequisites"]["assessment"]["missing_packages"] == []
     assert summary["host_prerequisites"]["assessment"]["notes"] == [
-        "Baseline Ubuntu 24.04 host prerequisites are already satisfied."
+        "Baseline Ubuntu host prerequisites are already satisfied."
     ]
     assert summary["host_prerequisites"]["assessment"]["docker_bootstrap_required"] is False
     assert [check["name"] for check in summary["host_prerequisites"]["assessment"]["checks"]] == [

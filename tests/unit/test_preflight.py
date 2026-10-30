@@ -15,6 +15,7 @@ from dokploy_wizard.preflight import (
     CORE_PROFILE,
     FULL_PACK_SET_PROFILE,
     PreflightError,
+    _is_supported_ubuntu_version,
     collect_host_facts,
     derive_required_profile,
     run_preflight,
@@ -41,7 +42,7 @@ def test_supported_core_host_passes_preflight_with_local_advisory() -> None:
         "/var/snap/docker/common/var-lib-docker",
     }
     assert tuple((check.name, check.status, check.detail) for check in report.checks[:3]) == (
-        ("os_support", "pass", "Ubuntu 24.04 host detected."),
+        ("os_support", "pass", "Ubuntu 24.04 host detected (baseline 24.04 LTS or newer)."),
         ("docker_installed", "pass", "Docker CLI is available."),
         ("docker_daemon", "pass", "Docker daemon responded successfully."),
     )
@@ -64,6 +65,62 @@ def test_ubuntu_24_04_patch_release_with_suffix_is_supported() -> None:
 
     assert report.checks[0].name == "os_support"
     assert report.checks[0].status == "pass"
+
+
+@pytest.mark.parametrize(
+    ("version_id", "expected"),
+    [
+        ("24.04", True),
+        ("24.04.2 LTS", True),
+        ("24.10", True),
+        ("25.10", True),
+        ("26.04", True),
+        ("26.04.1 LTS", True),
+        ("28.04 LTS", True),
+        ("22.04", False),
+        ("20.04", False),
+        ("23.10", False),
+        ("", False),
+        ("n/a", False),
+        ("24", False),
+    ],
+)
+def test_is_supported_ubuntu_version_accepts_baseline_and_every_newer_release(
+    version_id: str,
+    expected: bool,
+) -> None:
+    assert _is_supported_ubuntu_version(version_id) is expected
+
+
+def test_newer_lts_release_passes_preflight_with_a_lts_or_later_check() -> None:
+    raw_env = parse_env_file(FIXTURES_DIR / "core-low-resource.env")
+    desired_state = resolve_desired_state(raw_env)
+    values = dict(raw_env.values)
+    values["HOST_OS_VERSION_ID"] = "26.04.1 LTS"
+    host_facts = collect_host_facts(
+        type(raw_env)(format_version=raw_env.format_version, values=values)
+    )
+
+    report = run_preflight(desired_state, host_facts)
+
+    os_check = report.checks[0]
+    assert os_check.name == "os_support"
+    assert os_check.status == "pass"
+    assert "26.04.1 LTS" in os_check.detail
+    assert "baseline 24.04 LTS or newer" in os_check.detail
+
+
+def test_ubuntu_release_below_the_baseline_is_rejected() -> None:
+    raw_env = parse_env_file(FIXTURES_DIR / "core-low-resource.env")
+    desired_state = resolve_desired_state(raw_env)
+    values = dict(raw_env.values)
+    values["HOST_OS_VERSION_ID"] = "22.04"
+    host_facts = collect_host_facts(
+        type(raw_env)(format_version=raw_env.format_version, values=values)
+    )
+
+    with pytest.raises(PreflightError, match="expected 24.04 or newer"):
+        run_preflight(desired_state, host_facts)
 
 
 def test_disk_override_can_include_explicit_storage_path(tmp_path: Path) -> None:
