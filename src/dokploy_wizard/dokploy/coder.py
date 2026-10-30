@@ -83,6 +83,9 @@ _COPILOT_BYOK_CHAT_ONLY_LIMITATION = (
     "inline completions still use Copilot-managed models."
 )
 _CODER_STATE_REQUIRED_FOR_MODIFY = frozenset({"applied-state.json", "ownership-ledger.json"})
+# Coder enforces this on templates, workspaces, and agent names alike, and the CLI only
+# says so after the template has already been packaged and the push attempted.
+_CODER_MAX_NAME_LENGTH = 32
 
 
 
@@ -1085,12 +1088,12 @@ def _default_hermes_desktop_template_dir() -> Path:
         Path(__file__).resolve().parents[3]
         / "templates"
         / "coder"
-        / "default-ubuntu-vscode-opencode-hermes-desktop"
+        / "default-ubuntu-vscode-hermes-desktop"
     )
 
 
 def _default_hermes_desktop_template_name() -> str:
-    return "ubuntu-vscode-opencode-hermes-desktop"
+    return "ubuntu-vscode-hermes-desktop"
 
 
 def _base_template_dir() -> Path:
@@ -1149,7 +1152,7 @@ def _default_workspace_name(hostname: str, *, today: date | None = None) -> str:
     root_token = re.sub(r"[^a-z0-9]+", "", root_domain.lower())
     effective_date = (today or date.today()).isoformat()
     suffix = f"-workspace-{effective_date}"
-    max_root_length = max(1, 32 - len(suffix))
+    max_root_length = max(1, _CODER_MAX_NAME_LENGTH - len(suffix))
     normalized_root = (root_token or "workspace")[:max_root_length]
     return f"{normalized_root}{suffix}"
 
@@ -1172,6 +1175,15 @@ def _retired_template_names() -> tuple[str, ...]:
     )
 
 
+def _ensure_template_name_length(template_name: str) -> None:
+    if len(template_name) > _CODER_MAX_NAME_LENGTH:
+        raise CoderError(
+            f"Coder template name '{template_name}' is {len(template_name)} characters; "
+            f"Coder accepts at most {_CODER_MAX_NAME_LENGTH}, so no workspace can ever "
+            "be created from it."
+        )
+
+
 def _seed_template(
     *,
     container_name: str,
@@ -1181,6 +1193,7 @@ def _seed_template(
     template_dir: Path,
     replacements: dict[str, str] | None,
 ) -> bool:
+    _ensure_template_name_length(template_name)
     _emit_coder_progress(f"Checking Coder template '{template_name}'.")
     desired_version_name = _template_version_name(
         template_dir=template_dir,

@@ -249,7 +249,7 @@ _TEMPLATE_DIRS_WITH_PI_AND_OPENCODE = (
     "default-ubuntu-code-server-kdense-byok",
     "default-ubuntu-code-server-hermes",
     "default-ubuntu-vscode-opencode-hermes-pi",
-    "default-ubuntu-vscode-opencode-hermes-desktop",
+    "default-ubuntu-vscode-hermes-desktop",
 )
 
 
@@ -668,6 +668,32 @@ def test_retired_template_names_cover_removed_templates() -> None:
     assert set(coder_module._retired_template_names()).isdisjoint(
         coder_module._required_template_names()
     )
+
+
+def test_seeded_template_names_fit_coder_name_limit() -> None:
+    # Coder rejects an over-long name only after packaging the template, and a failed
+    # push for a non-default template is a note rather than a failed install. That
+    # combination silently cost the Hermes Desktop template on a box that reported a
+    # clean modify, so the limit is checked here and at push time.
+    names = {
+        coder_module._default_template_name(),
+        coder_module._default_hermes_desktop_template_name(),
+        coder_module._base_template_name(),
+        coder_module._default_opencode_web_template_name(),
+        coder_module._default_kdense_byok_template_name(),
+        coder_module._default_hermes_template_name(),
+        *coder_module._retired_template_names(),
+    }
+    limit = coder_module._CODER_MAX_NAME_LENGTH
+    assert {name for name in names if len(name) > limit} == set()
+    # Template directories are named after their template, so a rename cannot drift.
+    assert (
+        coder_module._default_hermes_desktop_template_dir().name
+        == f"default-{coder_module._default_hermes_desktop_template_name()}"
+    )
+
+    with pytest.raises(coder_module.CoderError, match="at most 32"):
+        coder_module._ensure_template_name_length("ubuntu-vscode-opencode-hermes-desktop")
 
 
 def test_retire_removed_templates_deletes_only_retired_templates(monkeypatch) -> None:
@@ -1370,7 +1396,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     assert ensure_workspace_calls == []
     assert notes == (
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-desktop'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
@@ -1627,7 +1653,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     assert notes == (
         "Provisioned initial Coder admin for 'admin@example.com'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-desktop'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
@@ -1736,7 +1762,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     assert first_notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-desktop'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
@@ -2845,7 +2871,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-desktop'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",

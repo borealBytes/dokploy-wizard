@@ -27,7 +27,7 @@ Base for all three branches: `origin/main` at `3275c73` (PR #12 added
 
 ## PR A — `feature/hermes-desktop-webapp`
 
-Goal: a new Coder template `ubuntu-vscode-opencode-hermes-desktop` that runs the
+Goal: a new Coder template `ubuntu-vscode-hermes-desktop` that runs the
 official Hermes Desktop **webapp** as the primary chat tile, plus the three
 production fixes from the handoff, plus pattern-based model defaults.
 
@@ -70,7 +70,7 @@ production fixes from the handoff, plus pattern-based model defaults.
 | 1 | `fix(coder): tear down proxy upstream when the client disconnects` | `res.on("close")` + `req.on("aborted")` → destroy `upstream`/`upstreamRes` and pair sockets on the upgrade path. **Not** `req.on("close")` — Node 18+ fires that on normal body completion. Applied to `-pi` and the new clone |
 | 2 | `fix(coder): put hermes on the system PATH` | idempotent `~/.local/bin` lines in `.bashrc` **and** `.profile` (pnpm's idiom), plus `ln -sf ~/.local/bin/hermes /usr/local/bin/hermes` mirroring the opencode symlink at `:73` |
 | 3 | `feat(coder): add the Hermes WebUI watchdog` | `~/.local/bin/hermes-webui-watchdog` (curl `/health`, restart, log to `/tmp/hermes-webui-watchdog.log`), registered idempotently in Hermes' 2-minute cron |
-| 4 | `feat(coder): add the ubuntu-vscode-opencode-hermes-desktop template` | clone of `-pi`; `_default_hermes_desktop_template_dir/_name()` accessors, added to `_required_template_names()`, replacement-token tuple beside `-pi` at `coder.py:260`, new wildcard-suffix token |
+| 4 | `feat(coder): add the ubuntu-vscode-hermes-desktop template` | clone of `-pi`; `_default_hermes_desktop_template_dir/_name()` accessors, added to `_required_template_names()`, replacement-token tuple beside `-pi` at `coder.py:260`, new wildcard-suffix token |
 | 5 | `feat(coder): serve the Hermes Desktop webapp with basic-auth sign-in` | `webapp.*` config, `dashboard.basic_auth`, `hermes webapp --build-only` in the background bootstrap script (never the Terraform path), gateway restart, `webapp --status` logged, both tiles |
 | 6 | `feat(litellm): select the default model by pattern in the model-sync sidecar` | `AI_DEFAULT_MODEL_PATTERN` (default `deepseek*flash*`), version-tuple ranking (`v4.10 > v4.1 > v4`, no string compare) then upstream recency then catalog order; `sync/default-chat` promoted only after a real completion probe; promote-then-retire with its **own** rule because `sync_once`'s prune loop keys on `sync/<source>/…` segments and would drop a single-segment name during a total source outage; boot-time static route kept until the alias is confirmed; every consumer key allowlists it |
 | 7 | `fix(litellm): stop exposing models that cannot answer` | probe floor `max_tokens >= 16`; min-token/context 400s = inconclusive, not dead; permanent (403/404/unsupported) drops the alias, transient (429/503/timeout) keeps and re-probes; extend probing to the OpenRouter ranked/free slice; keep OpenCode Go's honest list plus a chat-modality check |
@@ -296,7 +296,7 @@ link, and `AGENTS.md`'s pack list + focused-modules block. Leave
 |---|---|
 | 503 repro detail | restart fixes it; fails "live while other apps work"; also "stopped after lots of chats" |
 | Template naming | new dir named for the desktop web app, not "-pi" |
-| Where to build | `ubuntu-vscode-opencode-hermes-desktop` cloned from `-pi`, "all the fixes and extras" |
+| Where to build | `ubuntu-vscode-hermes-desktop` cloned from `-pi`, "all the fixes and extras" |
 | Official surface | gateway-served Desktop **webapp**, must "just work in a tab with full functionality" |
 | Tile wiring | Coder subdomain app |
 | Webapp sign-in | bundled username/password provider seeded from the stack admin password |
