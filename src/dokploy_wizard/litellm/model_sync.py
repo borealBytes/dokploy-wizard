@@ -55,6 +55,7 @@ _MODEL_SYNC_DISABLED_VALUES = {"0", "false", "no", "off"}
 _MODEL_SYNC_TEMPLATE_DIR = (
     Path(__file__).resolve().parents[3] / "templates" / "litellm" / "model-sync"
 )
+_OPENROUTER_CHAT_BASE_URL = "https://openrouter.ai/api/v1"
 _OPENROUTER_CATALOG_URL = "https://openrouter.ai/api/v1/models"
 _OPENROUTER_RANKINGS_URL = "https://openrouter.ai/api/frontend/v1/rankings/models"
 # OpenRouter registrations track the public weekly leaderboard: the top paid
@@ -115,6 +116,20 @@ def model_sync_max_models_per_provider(flat_env: Mapping[str, str]) -> int:
     except ValueError:
         return MODEL_SYNC_DEFAULT_MAX_MODELS_PER_PROVIDER
     return max(1, parsed)
+
+
+def model_sync_openrouter_probe_enabled(flat_env: Mapping[str, str]) -> bool:
+    """Whether to chat-probe OpenRouter's free ranked models before listing them.
+
+    Free rows are the ones providers delist out from under a stack, and a delisted
+    alias still shows in the picker and then fails on the first message. Only free
+    rows are probed, so the check never costs a paid completion.
+    """
+
+    raw = _optional(flat_env, "LITELLM_MODEL_SYNC_OPENROUTER_PROBE")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in _MODEL_SYNC_DISABLED_VALUES
 
 
 def model_sync_nvidia_probe_enabled(flat_env: Mapping[str, str]) -> bool:
@@ -230,6 +245,11 @@ def build_model_sync_sources(
                     "max_models": MODEL_SYNC_OPENROUTER_MAX_MODELS,
                     "max_ranked_paid": MODEL_SYNC_OPENROUTER_MAX_RANKED_PAID,
                     "max_ranked_free": MODEL_SYNC_OPENROUTER_MAX_RANKED_FREE,
+                    # Probe base, not api_base: the aliases are routed by LiteLLM's
+                    # provider prefix and must keep doing so.
+                    "probe_base": _OPENROUTER_CHAT_BASE_URL,
+                    "probe": model_sync_openrouter_probe_enabled(flat_env),
+                    "probe_free_only": True,
                 }
             )
 

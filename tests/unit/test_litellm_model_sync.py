@@ -638,10 +638,12 @@ def _nvidia_document(max_models: int = 3, probe: object = True) -> dict:
     return {"interval_minutes": 360, "max_models_per_provider": 50, "sources": [source]}
 
 
-def _nvidia_transport(probe_calls: list, *, dead: set, errors: set, catalog=None):
+def _nvidia_transport(probe_calls: list, *, dead: set, errors: set, catalog=None, forbidden=None):
     from urllib.error import HTTPError
 
-    def fake_http_json(method, url, *, token=None, payload=None, timeout=30):
+    forbidden = forbidden or set()
+
+    def fake_http_json(method, url, *, token=None, payload=None, timeout=30, headers=None):
         if url.endswith("/v1/models"):
             return {"data": [{"id": model} for model in (catalog or _NVIDIA_CATALOG)]}
         if url.endswith("/model/info"):
@@ -649,7 +651,11 @@ def _nvidia_transport(probe_calls: list, *, dead: set, errors: set, catalog=None
         if url.endswith("/chat/completions"):
             model = payload["model"]
             probe_calls.append(model)
-            assert payload["max_tokens"] == 1
+            # A one-token probe is refused outright by some endpoints, and the refusal
+            # is about the request, not the model.
+            assert payload["max_tokens"] >= 16
+            if model in forbidden:
+                raise HTTPError(url, 403, "Forbidden", {}, None)
             if model in dead:
                 raise HTTPError(url, 404, "Not Found", {}, None)
             if model in errors:
@@ -1273,4 +1279,110 @@ def test_default_chat_alias_is_retired_when_the_feature_is_turned_off(
     assert result["retired"] == 1
     assert deleted == ["dep-default"]
 
+class _ProbeError(Exception):
+    def __init__(self, code: int | None) -> None:
+        super().__init__(f"probe failed: {code}")
+        self.code = code
 
+
+def test_liveness_probe_treats_only_permanent_answers_as_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Pruning is destructive, so the verdict table has to be deliberate: 404 is an
+    # unknown model and 403 is a model this key may not use, both permanent for the
+    # stack. 429 and 5xx are a busy provider, and 400 is what several providers return
+    # for a request shape they dislike; none of those may empty the picker.
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    source = {"api_base": "https://example.test/v1"}
+
+    def verdict_for(exc: object) -> str:
+        def fake_http_json(method, url, **kwargs):  # type: ignore[no-untyped-def]
+            raise exc
+
+        sidecar.http_json = fake_http_json
+        return sidecar._probe_model_status(source, "token", "some-model", 1.0)
+
+    assert verdict_for(_ProbeError(404)) == "dead"
+    assert verdict_for(_ProbeError(403)) == "dead"
+    assert verdict_for(_ProbeError(429)) == "unknown"
+    assert verdict_for(_ProbeError(503)) == "unknown"
+    assert verdict_for(_ProbeError(400)) == "unknown"
+    assert verdict_for(RuntimeError("connection reset")) == "unknown"
+
+
+def test_probe_never_asks_a_paid_model_to_prove_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    probed: list[str] = []
+
+    def fake_http_json(method, url, **kwargs):  # type: ignore[no-untyped-def]
+        probed.append(str(kwargs.get("payload", {}).get("model")))
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    sidecar.http_json = fake_http_json
+    ranked = [
+        "anthropic/claude-opus-4.7",
+        "google/gemma-4-31b-it:free",
+        "deepseek/deepseek-v4-flash",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+    ]
+
+    kept = sidecar._probe_in_order(
+        {"name": "openrouter", "api_base": "https://example.test/v1", "probe": True,
+         "probe_free_only": True},
+        "or-key",
+        ranked,
+    )
+
+    assert kept == ranked  # nothing died
+    assert probed == ["google/gemma-4-31b-it:free", "nvidia/nemotron-3-ultra-550b-a55b:free"]
+
+
+def test_probe_drops_a_delisted_free_model_and_keeps_the_ranking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # This is the failure an operator actually sees: the catalog still lists a free
+    # model the provider has delisted, so it sits in the picker and 404s on first use.
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+
+    def fake_http_json(method, url, **kwargs):  # type: ignore[no-untyped-def]
+        if kwargs.get("payload", {}).get("model") == "deepseek/gone:free":
+            raise _ProbeError(404)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    sidecar.http_json = fake_http_json
+
+    kept = sidecar._probe_in_order(
+        {"name": "openrouter", "api_base": "https://example.test/v1", "probe": True,
+         "probe_free_only": True, "probe_ttl_days": 0},
+        "or-key",
+        ["a:free", "deepseek/gone:free", "b:free", "paid/model"],
+    )
+
+    assert kept == ["a:free", "b:free", "paid/model"]
+
+
+def test_openrouter_source_is_probed_through_its_own_base() -> None:
+    # An api_base would land in every litellm_params built from the source and repoint
+    # deployments that route correctly today, so the probe reads a separate key.
+    sources = build_model_sync_sources(
+        {"LITELLM_OPENROUTER_API_KEY": "or-key", "LITELLM_MODEL_SYNC_PROVIDERS": "openrouter"},
+        {"openrouter_api_key_env": "LITELLM_OPENROUTER_API_KEY"},
+    )
+    source = sources[0]
+
+    assert source["probe"] is True
+    assert source["probe_free_only"] is True
+    assert str(source["probe_base"]).endswith("/v1")
+    assert "api_base" not in source
+
+    off = build_model_sync_sources(
+        {
+            "LITELLM_OPENROUTER_API_KEY": "or-key",
+            "LITELLM_MODEL_SYNC_PROVIDERS": "openrouter",
+            "LITELLM_MODEL_SYNC_OPENROUTER_PROBE": "false",
+        },
+        {"openrouter_api_key_env": "LITELLM_OPENROUTER_API_KEY"},
+    )
+    assert off[0]["probe"] is False

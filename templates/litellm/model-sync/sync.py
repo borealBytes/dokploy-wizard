@@ -78,6 +78,8 @@ DEFAULT_CHAT_ALIAS = "sync/default-chat"
 DEFAULT_CHAT_PROBE_MAX_TOKENS = 16
 DEFAULT_CHAT_PROBE_TIMEOUT_SECONDS = 20.0
 DEFAULT_CHAT_MAX_CANDIDATES = 12
+# Floor for liveness probes; see _probe_model_status.
+PROBE_MAX_TOKENS = 16
 
 
 def log(message: str) -> None:
@@ -253,21 +255,44 @@ def _save_probe_cache(source_name: str, results: dict[str, str]) -> None:
         log(f"source {source_name} probe cache save failed: {type(exc).__name__}: {exc}")
 
 
+def _probe_base(source: dict[str, Any]) -> str:
+    """Where to send liveness probes for this source.
+
+    `probe_base` exists apart from `api_base` because adding an api_base to a source
+    also writes it into every deployment built from it. OpenRouter's aliases are
+    routed by LiteLLM's provider prefix and need no base at all, so giving the probe
+    one must not quietly repoint a working deployment.
+    """
+
+    for key in ("probe_base", "api_base"):
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().rstrip("/")
+    return ""
+
+
 def _probe_model_status(
     source: dict[str, Any], token: str, model_id: str, timeout: float
 ) -> str:
-    """Chat-probe one model: alive on 2xx, dead on a clean 404, else unknown.
+    """Chat-probe one model: alive on 2xx, dead on 403/404, else unknown.
 
-    The probe is a 1-token chat completion, which also filters embedding,
+    The probe is a short chat completion, which also filters embedding,
     transcription, and utility models (they reject chat requests) without
     counting as dead so an inconclusive answer never prunes a working model.
+
+    max_tokens is 16, not 1: some endpoints reject a one-token completion outright
+    ("max_tokens must be >= N"), and that is a floor complaint about the request,
+    not a verdict about the model. Only answers that waiting cannot fix count as
+    dead - an unknown model (404) and a model this key may not use (403). 400s
+    (delisted-without-404 providers), 429s, and 5xx all stay inconclusive, because
+    pruning on them would empty the picker during a brownout.
     """
 
-    api_base = str(source.get("api_base", "")).rstrip("/")
+    api_base = _probe_base(source)
     payload: dict[str, Any] = {
         "model": model_id,
         "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 1,
+        "max_tokens": PROBE_MAX_TOKENS,
     }
     try:
         http_json(
@@ -279,7 +304,7 @@ def _probe_model_status(
         )
         return "alive"
     except Exception as exc:  # noqa: BLE001 - any transport failure must not sink the cycle
-        if getattr(exc, "code", None) == 404:
+        if getattr(exc, "code", None) in (403, 404):
             return "dead"
         return "unknown"
 
@@ -321,12 +346,35 @@ def _free_model_ids(source: dict[str, Any]) -> set[str] | None:
     return free or None
 
 
+def _probe_in_order(source: dict[str, Any], token: str, model_ids: list[str]) -> list[str]:
+    """Drop dead models from a ranked list without disturbing the ranking.
+
+    When the source is probe-free-only, the free rows are the only ones sent a
+    request: a paid model is never billed just to decide whether the picker shows
+    it, and a free row is the one that gets delisted without notice.
+    """
+
+    if source.get("probe_free_only"):
+        targets = [model_id for model_id in model_ids if model_id.endswith(":free")]
+        if not targets:
+            return model_ids
+    else:
+        targets = model_ids
+    survivors = set(probe_source_models(source, token, targets))
+    dropped = [model_id for model_id in targets if model_id not in survivors]
+    if dropped:
+        log(
+            f"source {source.get('name') or '?'} dropped {len(dropped)} "
+            f"delisted model(s) from the ranked list"
+        )
+    return [model_id for model_id in model_ids if model_id not in set(dropped)]
+
+
 def probe_source_models(source: dict[str, Any], token: str, model_ids: list[str]) -> list[str]:
     """Drop models the provider 404s on chat completion, keep everything else."""
 
     name = str(source.get("name") or "?")
-    api_base = source.get("api_base")
-    if not (isinstance(api_base, str) and api_base) or not model_ids:
+    if not _probe_base(source) or not model_ids:
         return model_ids
     try:
         ttl_days = float(source.get("probe_ttl_days") or DEFAULT_PROBE_TTL_DAYS)
@@ -393,6 +441,8 @@ def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
         limit = int(source_max)
     ranked = _ranked_catalog_model_ids(source, payload)
     if ranked is not None:
+        if source.get("probe"):
+            ranked = _probe_in_order(source, token, ranked)
         return ranked[:limit]
     model_ids: list[str] = []
     for item in payload.get("data", []) or []:
