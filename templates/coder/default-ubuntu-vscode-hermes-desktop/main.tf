@@ -1312,9 +1312,11 @@ resource "coder_app" "hermes_desktop" {
   url          = "http://localhost:9120"
   share        = "owner"
   subdomain    = true
-  # The webapp sends frame-ancestors 'none', so an embedded iframe can only ever show
-  # a blank frame; Coder must open it in its own tab.
-  open_in      = "new-tab"
+  # The webapp sends frame-ancestors 'none', so an embedded iframe can only ever show a
+  # blank frame. The provider accepts "window", "tab", and "slim-window" and rejects a
+  # plan with anything else, so this must be one of those words rather than a description
+  # of the intent.
+  open_in      = "tab"
   order        = 3
 
   healthcheck {

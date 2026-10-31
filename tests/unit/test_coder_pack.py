@@ -670,6 +670,30 @@ def test_retired_template_names_cover_removed_templates() -> None:
     )
 
 
+def test_coder_app_open_in_values_are_ones_the_provider_accepts() -> None:
+    # The provider validates open_in during template import, so a value it does not
+    # know costs a remote deploy cycle to discover: terraform plan fails and the
+    # template silently never arrives.
+    accepted = {"", "window", "tab", "slim-window"}
+    used_by_template: dict[str, list[str]] = {}
+    for template_dir in sorted(Path("templates/coder").iterdir()):
+        manifest = template_dir / "main.tf"
+        if not manifest.is_file():
+            continue
+        used = re.findall(r'open_in\s*=\s*"([^"]*)"', manifest.read_text(encoding="utf-8"))
+        if used:
+            used_by_template[template_dir.name] = used
+
+    offenders = {
+        name: [value for value in values if value not in accepted]
+        for name, values in used_by_template.items()
+        if any(value not in accepted for value in values)
+    }
+    assert offenders == {}
+    # Self-check: the scan has to see the tile this exists to protect.
+    assert used_by_template["default-ubuntu-vscode-hermes-desktop"] == ["tab"]
+
+
 def test_safe_progress_reason_keeps_the_terraform_diagnosis_when_clipping() -> None:
     # The CLI prints its banner and streaming log first and the actual reason last, so
     # clipping the head used to leave "exit status 1" and throw away the diagnosis.

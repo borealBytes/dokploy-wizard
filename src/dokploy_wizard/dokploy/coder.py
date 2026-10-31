@@ -408,11 +408,17 @@ class DokployCoderBackend:
             except CoderError as e:
                 if template_name == _default_template_name():
                     raise
+                # The operator sees the diagnosis; the state file keeps a bounded note.
+                # Terraform's reason arrives at the end of a long stream, so the note
+                # that survives into state is the one that has to be wide enough.
+                _emit_coder_progress(
+                    f"Skipped optional Coder template '{template_name}': "
+                    f"{_safe_progress_reason(str(e), limit=6000)}"
+                )
                 note = (
                     f"Skipped optional Coder template '{template_name}': "
                     f"{_safe_progress_reason(str(e), limit=1200)}"
                 )
-                _emit_coder_progress(note)
                 notes.append(note)
                 continue
             if seeded:
@@ -1241,7 +1247,7 @@ def _seed_template(
         )
     except CoderError as e:
         _emit_coder_progress(
-            f"Coder template '{template_name}' push failed: {_safe_progress_reason(str(e), limit=1200)}"
+            f"Coder template '{template_name}' push failed: {_safe_progress_reason(str(e), limit=6000)}"
         )
         raise
     _emit_coder_progress(f"Finished Coder template '{template_name}' push.")
