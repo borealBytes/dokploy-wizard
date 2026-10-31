@@ -228,6 +228,9 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
             "AI_DEFAULT_BASE_URL",
             "AI_DEFAULT_PROVIDER",
             "AI_DEFAULT_MODEL",
+            # The pattern drives the sidecar's sync/default-chat selection, so it is
+            # operator-tunable on the same footing as AI_DEFAULT_MODEL itself.
+            "AI_DEFAULT_MODEL_PATTERN",
             "LITELLM_OPENCODE_GO_API_KEY",
             "LITELLM_OPENROUTER_API_KEY",
             "LITELLM_OPENROUTER_MODELS",

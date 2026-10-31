@@ -1933,6 +1933,9 @@ def _build_shared_core_backend(
             litellm_consumer_model_allowlists=build_litellm_consumer_model_allowlists(
                 flat_env=dict(raw_env.values),
                 plan=desired_state.shared_core,
+                # Virtual-key allowlists, so the sidecar's default alias is usable from
+                # the first boot rather than only after the sidecar's first cycle.
+                include_default_chat_alias=True,
             ),
             # The admin hostname is the only way in from outside, and Traefik will not
             # route a hostname it has no rule for, so the compose service needs it.

@@ -23,6 +23,21 @@ MODEL_SYNC_DEFAULT_INTERVAL_MINUTES = 360
 MODEL_SYNC_MIN_INTERVAL_MINUTES = 5
 MODEL_SYNC_DEFAULT_MAX_MODELS_PER_PROVIDER = 50
 MODEL_SYNC_DEFAULT_PROVIDERS = ("openrouter", "opencode-go", "nvidia")
+# One stable alias for "the model an agent gets when the operator did not name one".
+# The provider half stays an explicit operator choice; only the model is picked, from
+# the live catalog, by pattern. That way a rename upstream costs a sync cycle instead
+# of a stack rebuild, while a stack that wants a specific model still names one.
+MODEL_SYNC_DEFAULT_CHAT_ALIAS = "sync/default-chat"
+MODEL_SYNC_DEFAULT_CHAT_PATTERN_ENV_KEY = "AI_DEFAULT_MODEL_PATTERN"
+MODEL_SYNC_DEFAULT_CHAT_PATTERN = "deepseek*flash*"
+# AI_DEFAULT_PROVIDER values that map onto a sync source; anything else (a local
+# endpoint, an unsupported provider) leaves the alias uncreated.
+_DEFAULT_CHAT_PROVIDER_SOURCES = {
+    "openrouter": "openrouter",
+    "opencode-go": "opencode-go",
+    "nvidia": "nvidia",
+}
+_DEFAULT_AI_DEFAULT_PROVIDER = "opencode-go"
 
 # OpenCode Go rejects requests without a stable session id (x-opencode-session)
 # and a non-generic user agent. The gateway injects both on every OpenCode Go
@@ -127,6 +142,63 @@ def model_sync_nvidia_max_models(flat_env: Mapping[str, str]) -> int:
     return max(1, parsed)
 
 
+def model_sync_default_chat_pattern(flat_env: Mapping[str, str]) -> str | None:
+    """The pattern sync/default-chat must match, or None when the alias is off.
+
+    Unset takes the shipped default. An explicit empty value turns the alias off.
+    A pattern with no literal text ("*", "**") is treated as off too: it matches the
+    whole catalog, which means it selects nothing and the name would lie.
+    """
+
+    raw = flat_env.get(MODEL_SYNC_DEFAULT_CHAT_PATTERN_ENV_KEY)
+    pattern = MODEL_SYNC_DEFAULT_CHAT_PATTERN if raw is None else raw.strip()
+    if not pattern:
+        return None
+    if not any(segment.strip() for segment in pattern.split("*")):
+        return None
+    return pattern
+
+
+def build_default_chat_config(flat_env: Mapping[str, str]) -> dict[str, str] | None:
+    """The sidecar's default-chat block for the provider the operator chose."""
+
+    provider = (
+        _optional(flat_env, "AI_DEFAULT_PROVIDER") or _DEFAULT_AI_DEFAULT_PROVIDER
+    ).strip().lower()
+    source_name = _DEFAULT_CHAT_PROVIDER_SOURCES.get(provider)
+    if source_name is None:
+        return None
+    pattern = model_sync_default_chat_pattern(flat_env)
+    if pattern is None:
+        return None
+    return {
+        "pattern": pattern,
+        "alias": MODEL_SYNC_DEFAULT_CHAT_ALIAS,
+        "source": source_name,
+    }
+
+
+def model_sync_default_chat_alias(
+    flat_env: Mapping[str, str], upstream_creds: Mapping[str, object]
+) -> str | None:
+    """The default-chat alias to pre-authorize on consumer keys, when it can exist.
+
+    Consumer allowlists are explicit names, so an alias a key does not list is
+    invisible to that consumer until the sidecar's first cycle merges it in. Listing
+    it at deploy time removes that window, and it is only listed when the provider it
+    would point at is actually being synced.
+    """
+
+    config = build_default_chat_config(flat_env)
+    if config is None:
+        return None
+    if not model_sync_enabled(flat_env, upstream_creds):
+        return None
+    sources = build_model_sync_sources(flat_env, upstream_creds)
+    synced = {str(source.get("name")) for source in sources}
+    return config["alias"] if config["source"] in synced else None
+
+
 def model_sync_probe_ttl_days(flat_env: Mapping[str, str]) -> int:
     raw = _optional(flat_env, "LITELLM_MODEL_SYNC_PROBE_TTL_DAYS")
     if raw is None:
@@ -203,6 +275,21 @@ def build_model_sync_sources(
                     "alias_suffix": ":free",
                 }
             )
+
+    default_chat = build_default_chat_config(flat_env)
+    if default_chat is not None:
+        sources = [
+            {
+                **source,
+                "default_chat": {
+                    "pattern": default_chat["pattern"],
+                    "alias": default_chat["alias"],
+                },
+            }
+            if source.get("name") == default_chat["source"]
+            else source
+            for source in sources
+        ]
 
     return tuple(sources)
 

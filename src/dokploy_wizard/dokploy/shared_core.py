@@ -56,6 +56,7 @@ from dokploy_wizard.litellm.model_catalog import (
 )
 from dokploy_wizard.litellm.model_sync import (
     MODEL_SYNC_CONSUMER_WILDCARD,
+    model_sync_default_chat_alias,
     model_sync_enabled,
     model_sync_interval_minutes,
     model_sync_script_text,
@@ -1654,6 +1655,7 @@ def build_litellm_consumer_model_allowlists(
     *,
     flat_env: dict[str, str],
     plan: SharedCorePlan,
+    include_default_chat_alias: bool = False,
 ) -> dict[str, tuple[str, ...]]:
     if plan.litellm is None:
         return {}
@@ -1663,10 +1665,23 @@ def build_litellm_consumer_model_allowlists(
         config=config,
         plan=plan,
     )
-    return {
-        consumer: projection_catalog.fallback_alias_order_for(consumer)
-        for consumer in _litellm_consumers()
-    }
+    # The default-chat alias is chosen by the sidecar at runtime, so it cannot come
+    # from the projection catalog; consumer keys are explicit lists, so a name missing
+    # here is a name no consumer can use until the sidecar's first cycle merges it in.
+    # Only the key path asks for it: the same builder also feeds pack fallback chains,
+    # and an alias nobody configured belongs at the end of a runtime failover list.
+    default_chat_alias = (
+        model_sync_default_chat_alias(flat_env, _build_litellm_upstream_creds(flat_env))
+        if include_default_chat_alias
+        else None
+    )
+    allowlists: dict[str, tuple[str, ...]] = {}
+    for consumer in _litellm_consumers():
+        aliases = projection_catalog.fallback_alias_order_for(consumer)
+        if default_chat_alias is not None and default_chat_alias not in aliases:
+            aliases = (*aliases, default_chat_alias)
+        allowlists[consumer] = aliases
+    return allowlists
 
 
 def _build_litellm_consumer_projection_catalog(

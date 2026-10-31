@@ -259,6 +259,10 @@ _LITELLM_SHARED_CONFIG_ENV_KEYS = {
     "AI_DEFAULT_BASE_URL",
     "AI_DEFAULT_PROVIDER",
     "AI_DEFAULT_MODEL",
+    # The pattern is rendered into the model-sync sources document, so a change has to
+    # re-push shared core config the same way a key change does; the Coder templates
+    # bake the literal AI_DEFAULT_MODEL and are unaffected either way.
+    "AI_DEFAULT_MODEL_PATTERN",
     "LITELLM_OPENCODE_GO_API_KEY",
     "LITELLM_OPENROUTER_API_KEY",
     "LITELLM_NVIDIA_API_KEY",

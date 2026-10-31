@@ -591,6 +591,7 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "AI_DEFAULT_API_KEY",
         "AI_DEFAULT_BASE_URL",
         "AI_DEFAULT_MODEL",
+        "AI_DEFAULT_MODEL_PATTERN",
         "AI_DEFAULT_PROVIDER",
         "ANTHROPIC_API_KEY",
         "CF_ACCOUNT_ID",

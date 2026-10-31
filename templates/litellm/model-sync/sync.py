@@ -38,8 +38,10 @@ Environment:
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -68,6 +70,14 @@ DEFAULT_MAX_RANKED_FREE = 10
 DEFAULT_PROBE_TTL_DAYS = 7
 DEFAULT_PROBE_TIMEOUT_SECONDS = 8.0
 DEFAULT_PROBE_PARALLELISM = 6
+# The operator-facing default model: one stable alias whose upstream target is chosen
+# from the live catalog by pattern, so a rename upstream costs a cycle, not a stack
+# rebuild. It lives at sync/<name> depth exactly like a provider alias, but its target
+# is resolved by selection rather than by the source's model list.
+DEFAULT_CHAT_ALIAS = "sync/default-chat"
+DEFAULT_CHAT_PROBE_MAX_TOKENS = 16
+DEFAULT_CHAT_PROBE_TIMEOUT_SECONDS = 20.0
+DEFAULT_CHAT_MAX_CANDIDATES = 12
 
 
 def log(message: str) -> None:
@@ -82,11 +92,16 @@ def http_json(
     token: str | None = None,
     payload: dict[str, Any] | None = None,
     timeout: float = REQUEST_TIMEOUT_SECONDS,
+    headers: dict[str, Any] | None = None,
 ) -> Any:
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = request.Request(url, method=method, data=body)
     req.add_header("Accept", "application/json")
     req.add_header("User-Agent", USER_AGENT)
+    for name, value in (headers or {}).items():
+        # Explicit headers win over the defaults: a source's own User-Agent is the
+        # one its endpoint accepts.
+        req.add_header(str(name), str(value))
     if body is not None:
         req.add_header("Content-Type", "application/json")
     if token:
@@ -413,6 +428,28 @@ def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
     return model_ids[:limit]
 
 
+def deployment_params(source: dict[str, Any], model_id: str) -> dict[str, Any]:
+    """litellm_params for one alias target of this source."""
+
+    template = str(source.get("model_ref_template", "{model}"))
+    params: dict[str, Any] = {"model": template.format(model=model_id)}
+    api_base = source.get("api_base")
+    if isinstance(api_base, str) and api_base:
+        params["api_base"] = api_base
+    api_key_env = source.get("api_key_env")
+    if isinstance(api_key_env, str) and api_key_env:
+        # The admin API does not resolve os.environ/ references for DB-stored
+        # deployments (unlike config-file models), so the sidecar resolves the key
+        # from its own environment and sends the literal value; the reference form
+        # is only a fallback.
+        resolved_key = os.environ.get(api_key_env)
+        params["api_key"] = resolved_key if resolved_key else f"os.environ/{api_key_env}"
+    extra_headers = source.get("extra_headers")
+    if isinstance(extra_headers, dict) and extra_headers:
+        params["extra_headers"] = {str(key): str(value) for key, value in extra_headers.items()}
+    return params
+
+
 def desired_deployments(document: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], set[str]]:
     max_models = int(document.get("max_models_per_provider", DEFAULT_MAX_MODELS_PER_PROVIDER))
     deployments: dict[str, dict[str, Any]] = {}
@@ -426,36 +463,215 @@ def desired_deployments(document: dict[str, Any]) -> tuple[dict[str, dict[str, A
             continue
         ok_sources.add(name)
         prefix = str(source.get("alias_prefix", f"{ALIAS_PREFIX}/{name}"))
-        template = str(source.get("model_ref_template", "{model}"))
         # Only label aliases as free when the pricing registry actually
         # verified them this cycle; a failed registry fetch (fail-open) must
         # not slap ":free" on endpoints that may bill.
         suffix = str(source.get("alias_suffix") or "") if source.get("_free_verified") else ""
         for model_id in model_ids:
-            params: dict[str, Any] = {"model": template.format(model=model_id)}
-            api_base = source.get("api_base")
-            if isinstance(api_base, str) and api_base:
-                params["api_base"] = api_base
-            api_key_env = source.get("api_key_env")
-            if isinstance(api_key_env, str) and api_key_env:
-                # The admin API does not resolve os.environ/ references for
-                # DB-stored deployments (unlike config-file models), so the
-                # sidecar resolves the key from its own environment and sends
-                # the literal value; the reference form is only a fallback.
-                resolved_key = os.environ.get(api_key_env)
-                params["api_key"] = (
-                    resolved_key if resolved_key else f"os.environ/{api_key_env}"
-                )
-            extra_headers = source.get("extra_headers")
-            if isinstance(extra_headers, dict) and extra_headers:
-                params["extra_headers"] = {
-                    str(key): str(value) for key, value in extra_headers.items()
-                }
+            params = deployment_params(source, model_id)
             alias = f"{prefix}/{model_id}"
             if suffix and "free" not in model_id.lower():
                 alias += suffix
             deployments[alias] = {"params": params, "source": name}
     return deployments, ok_sources
+
+
+_VERSION_TOKEN_RE = re.compile(r"(?<![\d.])(\d+(?:\.\d+)+|\d+)(?![\d.])")
+
+
+def version_rank(model_id: str) -> tuple[int, ...]:
+    """Comparable version tuple, so v4.10 outranks v4.1 outranks v4.
+
+    String comparison gets this backwards ("v4.10" < "v4.2"), which would hand the
+    default alias to an older model every cycle. The longest dotted numeric run is the
+    version; a bare number is still comparable so ids like "glm-4" rank sensibly.
+    """
+
+    runs = [match.group(1) for match in _VERSION_TOKEN_RE.finditer(model_id)]
+    if not runs:
+        return (0,)
+    best = max(runs, key=lambda run: (run.count("."), len(run)))
+    parts = tuple(int(part) for part in best.split("."))
+    # A longer tuple is a more specific version of the same line: 4.1 must outrank 4.
+    return parts
+
+
+def pattern_matches(pattern: str, model_id: str) -> bool:
+    """Glob match, case-insensitive: "deepseek*flash*" means deepseek, then flash."""
+
+    return fnmatch.fnmatch(model_id.lower().strip(), pattern.lower().strip())
+
+
+def default_chat_candidates(source: dict[str, Any], token: str, pattern: str) -> list[str]:
+    """Catalog ids matching the pattern, newest version first, catalog order on ties."""
+
+    payload = http_json("GET", source["list_url"], token=token or None)
+    ids: list[str] = []
+    for item in payload.get("data", []) or []:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id")
+        if not isinstance(model_id, str) or not model_id.strip():
+            continue
+        model_id = model_id.strip()
+        if model_id.endswith("/*") or not pattern_matches(pattern, model_id):
+            continue
+        ids.append(model_id)
+    # sort is stable, so equal versions keep the order the provider listed them in
+    # (providers list newest first, which is the recency tiebreak the plan asks for).
+    ids.sort(key=version_rank, reverse=True)
+    return ids[:DEFAULT_CHAT_MAX_CANDIDATES]
+
+
+def default_chat_probe(source: dict[str, Any], token: str, model_id: str) -> str:
+    """alive | dead | inconclusive for one candidate, from a real completion.
+
+    max_tokens is 16, not 1: some endpoints reject a 1-token request outright, and
+    that rejection is a floor complaint, not a dead model. Only answers that cannot
+    be fixed by waiting (unknown model, no access) count as dead.
+    """
+
+    api_base = str(source.get("api_base", "")).rstrip("/")
+    if not api_base:
+        return "inconclusive"
+    payload: dict[str, Any] = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": DEFAULT_CHAT_PROBE_MAX_TOKENS,
+    }
+    headers = source.get("extra_headers")
+    try:
+        http_json(
+            "POST",
+            f"{api_base}/chat/completions",
+            token=token or None,
+            payload=payload,
+            timeout=DEFAULT_CHAT_PROBE_TIMEOUT_SECONDS,
+            headers=headers if isinstance(headers, dict) else None,
+        )
+        return "alive"
+    except Exception as exc:  # noqa: BLE001 - a probe must never sink the cycle
+        code = getattr(exc, "code", None)
+        if code in (403, 404):
+            return "dead"
+        return "inconclusive"
+
+
+def resolve_default_chat(
+    document: dict[str, Any], existing: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Point sync/default-chat at the best candidate that actually answers.
+
+    Promote happens before retire: the new target is registered first and the stale
+    ones are deleted only afterwards, so there is never a moment when the alias has
+    no working upstream. Nothing is retired on an inconclusive cycle — a provider
+    brownout must not move the default off a target that was working minutes ago.
+    """
+
+    for source in document.get("sources", []) or []:
+        config = source.get("default_chat")
+        if not isinstance(config, dict):
+            continue
+        alias = str(config.get("alias") or DEFAULT_CHAT_ALIAS)
+        pattern = str(config.get("pattern") or "")
+        source_name = str(source.get("name") or "?")
+        if not pattern:
+            continue
+        api_key_env = source.get("api_key_env")
+        token = os.environ.get(api_key_env, "") if isinstance(api_key_env, str) else ""
+        try:
+            candidates = default_chat_candidates(source, token, pattern)
+        except Exception as exc:  # noqa: BLE001 - catalog outages are routine
+            log(f"default-chat catalog fetch failed for {source_name}: {exc}")
+            return {"status": "catalog-error", "source": source_name, "alias": alias}
+        if not candidates:
+            log(f"default-chat pattern {pattern!r} matched nothing in {source_name}")
+            return {"status": "no-match", "source": source_name, "alias": alias, "pattern": pattern}
+        winner: str | None = None
+        probed: list[dict[str, str]] = []
+        for model_id in candidates:
+            verdict = default_chat_probe(source, token, model_id)
+            probed.append({"model": model_id, "verdict": verdict})
+            if verdict == "alive":
+                winner = model_id
+                break
+        if winner is None:
+            log(
+                f"default-chat: no candidate confirmed alive ({len(candidates)} probed); "
+                f"keeping the current target"
+            )
+            return {
+                "status": "unconfirmed",
+                "source": source_name,
+                "alias": alias,
+                "probed": probed,
+            }
+        current = existing.get(alias) or {}
+        current_targets = {
+            str(entry.get("target"))
+            for entry in current.get("targets", [])
+            if entry.get("target")
+        }
+        params = deployment_params(source, winner)
+        if current_targets == {str(params["model"])}:
+            return {
+                "status": "confirmed",
+                "source": source_name,
+                "alias": alias,
+                "target": params["model"],
+                "changed": False,
+            }
+        try:
+            create_deployment(
+                alias,
+                {"params": params, "source": source_name},
+            )
+        except Exception as exc:  # noqa: BLE001 - the previous target still stands
+            log(f"default-chat promote to {winner} failed: {type(exc).__name__}: {exc}")
+            return {
+                "status": "promote-failed",
+                "source": source_name,
+                "alias": alias,
+                "target": params["model"],
+                "error": str(exc),
+            }
+        retired = 0
+        for entry in current.get("targets", []):
+            if str(entry.get("target")) == str(params["model"]):
+                continue
+            if not entry.get("id"):
+                continue
+            try:
+                delete_deployment(entry["id"])
+                retired += 1
+            except Exception as exc:  # noqa: BLE001 - a stale extra target is harmless
+                log(f"default-chat retire failed: {type(exc).__name__}: {exc}")
+        log(f"default-chat {alias} -> {params['model']} (retired {retired} stale target(s))")
+        return {
+            "status": "confirmed",
+            "source": source_name,
+            "alias": alias,
+            "target": params["model"],
+            "changed": True,
+            "retired": retired,
+        }
+    # No source carries a default-chat block: the operator turned the feature off (or
+    # picked a provider with no synced catalog). A leftover alias would keep answering
+    # with a model nobody selected any more, so it is retired here — the source prune
+    # loop can never reach it because its name is one segment deep.
+    leftover = existing.get(DEFAULT_CHAT_ALIAS) or {}
+    retired = 0
+    for entry in leftover.get("targets", []):
+        if not entry.get("id"):
+            continue
+        try:
+            delete_deployment(entry["id"])
+            retired += 1
+        except Exception as exc:  # noqa: BLE001 - a stuck row is not worth a retry loop
+            log(f"default-chat retire-after-disable failed: {type(exc).__name__}: {exc}")
+    if retired:
+        log(f"default-chat disabled: retired {retired} stale deployment(s)")
+    return {"status": "disabled", "retired": retired}
 
 
 def gateway_model_names() -> dict[str, dict[str, Any]]:
@@ -471,10 +687,17 @@ def gateway_model_names() -> dict[str, dict[str, Any]]:
         info = info if isinstance(info, dict) else {}
         metadata = info.get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
-        models[name] = {
-            "id": info.get("id"),
-            "managed_by": metadata.get("managed_by"),
-        }
+        entry = models.setdefault(name, {"id": None, "managed_by": None, "targets": []})
+        # One alias can carry several deployments (LiteLLM load-balances them), so the
+        # target list is kept alongside the first id: retiring a stale default target
+        # needs every id that is not the winner, not just the first one.
+        entry["managed_by"] = metadata.get("managed_by") or entry["managed_by"]
+        if entry["id"] is None:
+            entry["id"] = info.get("id")
+        params = item.get("litellm_params")
+        target = params.get("model") if isinstance(params, dict) else None
+        if info.get("id"):
+            entry["targets"].append({"id": info.get("id"), "target": target})
     return models
 
 
@@ -550,7 +773,12 @@ def reconcile_consumer_key(consumer: str, token: str, desired_aliases: list[str]
     retained = [
         model
         for model in models
-        if not model.startswith(f"{ALIAS_PREFIX}/") or model == SYNC_WILDCARD or model in desired
+        if not model.startswith(f"{ALIAS_PREFIX}/")
+        # The wildcard and the default alias are wizard-owned names that cost nothing
+        # to keep; dropping them during a provider brownout would take a working
+        # default off every consumer key until the next confirmed cycle.
+        or model in {SYNC_WILDCARD, DEFAULT_CHAT_ALIAS}
+        or model in desired
     ]
     merged = retained + [alias for alias in desired_aliases if alias not in retained]
     if merged == models:
@@ -566,24 +794,24 @@ def reconcile_consumer_key(consumer: str, token: str, desired_aliases: list[str]
     return True
 
 
-def sync_once(document: dict[str, Any]) -> dict[str, Any]:
-    deployments, ok_sources = desired_deployments(document)
-    existing = gateway_model_names()
-    created = 0
-    create_errors = 0
-    for alias, entry in deployments.items():
-        if alias in existing:
-            continue
-        try:
-            create_deployment(alias, entry)
-            created += 1
-        except Exception as exc:
-            create_errors += 1
-            log(f"create {alias} failed: {type(exc).__name__}: {exc}")
+def _prune_deployments(
+    existing: dict[str, dict[str, Any]],
+    *,
+    deployments: dict[str, dict[str, Any]],
+    ok_sources: set[str],
+) -> tuple[int, int]:
+    """Delete wizard aliases whose source stopped reporting them. Returns
+    (pruned, prune_errors)."""
+
     pruned = 0
     prune_errors = 0
     for name, meta in existing.items():
         if not name.startswith(f"{ALIAS_PREFIX}/"):
+            continue
+        if name == DEFAULT_CHAT_ALIAS:
+            # Managed by selection, which retires its own stale targets. The source
+            # rule below would otherwise drop it whenever its provider hiccuped: the
+            # name is one segment deep, so source_name resolves to "".
             continue
         if meta.get("managed_by") != MANAGED_BY:
             continue
@@ -599,11 +827,36 @@ def sync_once(document: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:
             prune_errors += 1
             log(f"prune {name} failed: {type(exc).__name__}: {exc}")
+    return pruned, prune_errors
+
+
+def sync_once(document: dict[str, Any]) -> dict[str, Any]:
+    deployments, ok_sources = desired_deployments(document)
+    existing = gateway_model_names()
+    default_chat = resolve_default_chat(document, existing)
+    default_alias = default_chat.get("alias") if default_chat.get("status") == "confirmed" else None
+    created = 0
+    create_errors = 0
+    for alias, entry in deployments.items():
+        if alias in existing:
+            continue
+        try:
+            create_deployment(alias, entry)
+            created += 1
+        except Exception as exc:
+            create_errors += 1
+            log(f"create {alias} failed: {type(exc).__name__}: {exc}")
+    pruned, prune_errors = _prune_deployments(
+        existing, deployments=deployments, ok_sources=ok_sources
+    )
     key_reconciled = 0
     key_errors = 0
     consumer_keys = load_consumer_keys()
-    if consumer_keys and deployments:
-        desired_aliases = sorted(deployments)
+    if consumer_keys and (deployments or default_alias):
+        # The default alias has to be on every consumer key: allowlists are explicit
+        # names, so an alias a key does not list is invisible to that consumer's
+        # picker even when it is the model the consumer is configured to ask for.
+        desired_aliases = sorted(set(deployments) | ({default_alias} if default_alias else set()))
         for consumer, token in sorted(consumer_keys.items()):
             try:
                 if reconcile_consumer_key(consumer, token, desired_aliases):
@@ -611,8 +864,10 @@ def sync_once(document: dict[str, Any]) -> dict[str, Any]:
             except Exception as exc:
                 key_errors += 1
                 log(f"key reconcile {consumer} failed: {type(exc).__name__}: {exc}")
+    write_marker("default-chat.json", default_chat)
     return {
         "desired": len(deployments),
+        "default_chat": default_chat,
         "created": created,
         "pruned": pruned,
         "create_errors": create_errors,
