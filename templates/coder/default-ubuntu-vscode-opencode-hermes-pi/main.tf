@@ -632,7 +632,10 @@ PY
     # rebuilds. Override per workspace by editing the file and restarting
     # the serve process.
     OPENCODE_SERVER_PW_FILE=/home/coder/.local/share/dokploy/opencode-server-password
-    if [ ! -s "$OPENCODE_SERVER_PW_FILE" ]; then
+    # A released build shipped this file holding an unreplaced replacement token, because
+    # an unreplaced token breaks no Terraform plan: it silently became the serve password.
+    # Rewrite exactly those files; a password someone chose by hand is left alone.
+    if [ ! -s "$OPENCODE_SERVER_PW_FILE" ] || grep -q '__DOKPLOY_WIZARD_' "$OPENCODE_SERVER_PW_FILE"; then
       mkdir -p "$(dirname "$OPENCODE_SERVER_PW_FILE")"
       printf '%s' "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__" > "$OPENCODE_SERVER_PW_FILE"
     fi

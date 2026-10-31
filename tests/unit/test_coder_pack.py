@@ -680,6 +680,19 @@ def test_retired_template_names_cover_removed_templates() -> None:
     )
 
 
+def test_stable_serve_password_self_heals_a_placeholder_left_by_an_older_build() -> None:
+    # A replacement token that is never replaced does not fail a plan: the literal
+    # string becomes the password, which is exactly what one released build shipped
+    # (the stored file was 43 bytes, the length of the token). Workspaces keep that
+    # file across rebuilds, so the block has to recognize and rewrite it.
+    for name in (
+        "default-ubuntu-vscode-hermes-desktop",
+        "default-ubuntu-vscode-opencode-hermes-pi",
+    ):
+        template = Path(f"templates/coder/{name}/main.tf").read_text(encoding="utf-8")
+        assert "grep -q '__DOKPLOY_WIZARD_' \"$OPENCODE_SERVER_PW_FILE\"" in template
+
+
 def test_hermes_desktop_template_drives_commands_the_cli_actually_ships() -> None:
     # An earlier version of this block drove `hermes webapp` with `webapp.*` config
     # keys. Neither exists on the installed CLI (v0.22.5): it answered
