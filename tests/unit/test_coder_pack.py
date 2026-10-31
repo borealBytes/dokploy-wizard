@@ -56,9 +56,15 @@ def test_coder_litellm_fallback_models_json_is_minimal_default_alias() -> None:
 
 
 def test_consolidated_default_template_is_the_workspace_default() -> None:
-    assert coder_module._default_template_name() == "ubuntu-vscode-opencode-hermes-pi"
-    assert coder_module._default_template_dir().name == "default-ubuntu-vscode-opencode-hermes-pi"
+    # The default is the Hermes Desktop clone: the same consolidated surface (VS Code,
+    # OpenCode, Pi, the community WebUI) plus the official webapp tile. The predecessor
+    # is still pushed, because workspaces built from it must keep receiving versions
+    # rather than freezing on the one they were created with.
+    assert coder_module._default_template_name() == "ubuntu-vscode-hermes-desktop"
+    assert coder_module._default_template_dir().name == "default-ubuntu-vscode-hermes-desktop"
     assert coder_module._default_template_dir().is_dir()
+    assert coder_module._opencode_hermes_pi_template_name() in coder_module._required_template_names()
+    assert coder_module._opencode_hermes_pi_template_dir().is_dir()
     assert coder_module._base_template_name() == "ubuntu-vscode"
     assert "ubuntu-vscode" in coder_module._required_template_names()
 
@@ -651,13 +657,17 @@ def test_default_opencode_web_template_includes_web_app() -> None:
 def test_required_template_names_cover_only_remaining_templates() -> None:
     assert coder_module._required_template_names() == (
         coder_module._default_template_name(),
-        coder_module._default_hermes_desktop_template_name(),
+        coder_module._opencode_hermes_pi_template_name(),
         coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
         coder_module._default_hermes_template_name(),
     )
-    assert len(coder_module._required_template_names()) == 6
+    names = coder_module._required_template_names()
+    assert len(names) == 6
+    # The default is now the template the desktop accessor names, so a list that
+    # naively includes both would push the same template twice every run.
+    assert len(set(names)) == len(names)
 
 
 def test_retired_template_names_cover_removed_templates() -> None:
@@ -750,7 +760,7 @@ def test_seeded_template_names_fit_coder_name_limit() -> None:
     # clean modify, so the limit is checked here and at push time.
     names = {
         coder_module._default_template_name(),
-        coder_module._default_hermes_desktop_template_name(),
+        coder_module._opencode_hermes_pi_template_name(),
         coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
@@ -1360,15 +1370,21 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
     assert consolidated_replacements["__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"] == (
         _expected_coder_fallback_models_json_escaped()
     )
-    assert {
-        key: value
-        for key, value in consolidated_replacements.items()
-        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
-    } == {
-        key: value
-        for key, value in hermes_legacy_replacements.items()
-        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
+    # The two templates have to agree on how Hermes reaches the gateway. The keys are
+    # named rather than filtered by prefix because the default template now carries a
+    # Hermes key the legacy one never had; a prefix filter turns that into a failure
+    # with no explanation attached.
+    hermes_wiring_keys = (
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__",
+        "__DOKPLOY_WIZARD_HERMES_BASE_URL__",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__",
+    )
+    assert {key: consolidated_replacements[key] for key in hermes_wiring_keys} == {
+        key: hermes_legacy_replacements[key] for key in hermes_wiring_keys
     }
+    assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" in consolidated_replacements
+    assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" not in hermes_legacy_replacements
     assert template_replacements_by_name[coder_module._base_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
@@ -1460,7 +1476,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
 
     assert template_push_calls == [
         coder_module._default_template_name(),
-        coder_module._default_hermes_desktop_template_name(),
+        coder_module._opencode_hermes_pi_template_name(),
         coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
@@ -1468,8 +1484,8 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     ]
     assert ensure_workspace_calls == []
     assert notes == (
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
@@ -1483,15 +1499,21 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     assert consolidated_replacements["__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"] == (
         _expected_coder_fallback_models_json_escaped()
     )
-    assert {
-        key: value
-        for key, value in consolidated_replacements.items()
-        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
-    } == {
-        key: value
-        for key, value in hermes_legacy_replacements.items()
-        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
+    # The two templates have to agree on how Hermes reaches the gateway. The keys are
+    # named rather than filtered by prefix because the default template now carries a
+    # Hermes key the legacy one never had; a prefix filter turns that into a failure
+    # with no explanation attached.
+    hermes_wiring_keys = (
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__",
+        "__DOKPLOY_WIZARD_HERMES_BASE_URL__",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__",
+    )
+    assert {key: consolidated_replacements[key] for key in hermes_wiring_keys} == {
+        key: hermes_legacy_replacements[key] for key in hermes_wiring_keys
     }
+    assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" in consolidated_replacements
+    assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" not in hermes_legacy_replacements
     assert template_replacements_by_name[coder_module._base_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
@@ -1725,8 +1747,8 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     ]
     assert notes == (
         "Provisioned initial Coder admin for 'admin@example.com'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
@@ -1817,7 +1839,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
 
     expected_template_names = {
         coder_module._default_template_name(),
-        coder_module._default_hermes_desktop_template_name(),
+        coder_module._opencode_hermes_pi_template_name(),
         coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
@@ -1834,8 +1856,8 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     ]
     assert first_notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
@@ -2826,8 +2848,8 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         ),
         (
             "wizard-stack-coder-container",
-            str(coder_module._default_hermes_desktop_template_dir()),
-            coder_module._default_hermes_desktop_template_name(),
+            str(coder_module._opencode_hermes_pi_template_dir()),
+            coder_module._opencode_hermes_pi_template_name(),
         ),
         (
             "wizard-stack-coder-container",
@@ -2861,7 +2883,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "wizard-stack-coder-container",
             "coder.example.com",
             "session-123",
-            coder_module._default_hermes_desktop_template_name(),
+            coder_module._opencode_hermes_pi_template_name(),
         ),
         (
             "wizard-stack-coder-container",
@@ -2922,7 +2944,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         # app hostname itself and the dashboard accepts any Host (measured on the box),
         # so this template gets the Coder origin for the community WebUI and nothing more.
         "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": "https://coder.example.com",
+        # Both tokens: the clone kept the opencode serve password from its parent and
+        # added the webapp sign-in password. An unreplaced token fails nothing — it
+        # silently becomes the literal password.
         "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__": "ChangeMeSoon",
+        "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": "ChangeMeSoon",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name
@@ -2946,8 +2972,8 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     ]
     assert notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
+        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
