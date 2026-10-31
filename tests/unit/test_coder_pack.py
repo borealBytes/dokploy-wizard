@@ -718,11 +718,25 @@ def test_hermes_desktop_template_drives_commands_the_cli_actually_ships() -> Non
     # Turned on through the gateway's own config surface, which it reads only at start.
     assert "hermes config set webapp.enabled true" in template
     assert 'hermes config set webapp.port "$HERMES_WEBAPP_PORT"' in template
-    # The bind stays loopback and the public URL names the tile's HTTPS origin: with no
-    # public_url the listener treats a loopback bind as local-only and serves the app
-    # with no sign-in, and through Coder's proxy the request does arrive from loopback.
+    # The bind stays loopback. The public URL must name the TILE's own origin — the
+    # webapp 400s every request whose Host names anything else, and through Coder's
+    # proxy that Host is the subdomain route <slug>--<workspace>--<owner>.<suffix>.
+    # The Coder admin origin is the wrong answer here even though it is a real
+    # hostname of the same stack: that mismatch was a live outage (400 on every path).
     assert "hermes config set webapp.host 127.0.0.1" in template
-    assert 'hermes config set webapp.public_url "$HERMES_PUBLIC_ORIGIN"' in template
+    assert 'hermes config set webapp.public_url "$HERMES_WEBAPP_ORIGIN"' in template
+    assert 'webapp.public_url "$HERMES_PUBLIC_ORIGIN"' not in template
+    # The tile origin is composed from the wildcard suffix; an unusable suffix renders
+    # an empty origin and the template must then CLEAR public_url (a stale value from
+    # an earlier boot would otherwise 400 the tile again), never leave it guessed.
+    assert 'hermes_wildcard_suffix = "__DOKPLOY_WIZARD_CODER_WILDCARD_SUFFIX__"' in template
+    assert (
+        'hermes_desktop_origin  = local.hermes_wildcard_suffix == "" ? "" : '
+        '"https://${local.hermes_desktop_slug}--${data.coder_workspace.me.name}'
+        '--${local.username}.${local.hermes_wildcard_suffix}"'
+    ) in template
+    assert 'if [ -n "$HERMES_WEBAPP_ORIGIN" ]; then' in template
+    assert 'hermes config set webapp.public_url ""' in template
 
     # The old dashboard is gone from this path, not layered behind the new UI. The one
     # mention left is the comment that says it is not the dashboard; the auth env keys
@@ -758,6 +772,18 @@ def test_hermes_desktop_template_drives_commands_the_cli_actually_ships() -> Non
     assert "healthy_dashboard()" not in template
     assert "start_dashboard()" not in template
     assert '"http://127.0.0.1:\\$1/health"' in template  # the community WebUI keeps /health
+
+
+def test_safe_wildcard_suffix_refuses_anything_unusable() -> None:
+    # The value lands in a startup script and becomes part of a public URL the webapp
+    # will answer to; a suffix that cannot be trusted must render as "" (no gate)
+    # rather than a hostname the route will never carry.
+    assert coder_module._safe_wildcard_suffix("*.coder.example.com") == "coder.example.com"
+    assert coder_module._safe_wildcard_suffix("coder.example.com") == ""
+    assert coder_module._safe_wildcard_suffix("") == ""
+    assert coder_module._safe_wildcard_suffix("*.") == ""
+    assert coder_module._safe_wildcard_suffix("*.coder.example.com:3000") == ""
+    assert coder_module._safe_wildcard_suffix('*.evil"; reboot; #') == ""
 
 
 def test_desktop_hermes_channel_is_defaulted_and_sanitised() -> None:
@@ -3008,6 +3034,9 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         # installs the channel that carries it. Only this one: an unreleased channel is
         # not a decision to make on behalf of the other Hermes templates.
         "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__": "main",
+        # The webapp's Host validation means the tile must know its own hostname,
+        # which is a subdomain of the Coder wildcard suffix.
+        "__DOKPLOY_WIZARD_CODER_WILDCARD_SUFFIX__": "coder.example.com",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name

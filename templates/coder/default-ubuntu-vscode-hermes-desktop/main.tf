@@ -33,9 +33,16 @@ data "docker_network" "shared" {
 locals {
   username            = data.coder_workspace_owner.me.name
   hermes_desktop_slug = "hermes-desktop"
-  # The webapp needs no outside hostname of its own: Coder routes subdomain apps as
-  # <slug>--<workspace>--<owner>.<wildcard suffix> by itself, and the dashboard answers
-  # for any Host header (measured on the box), so no name has to be pinned in advance.
+  # The webapp does NOT answer for any Host header: it validates Host against the
+  # bound hostname plus the single hostname named by webapp.public_url (measured on
+  # the box: every request naming another host is a 400 "Invalid Host header").
+  # Coder routes subdomain apps as <slug>--<workspace>--<owner>.<wildcard suffix>,
+  # so the tile's own origin is computed below and handed to the webapp as its
+  # public_url. The wildcard suffix arrives as a token; when it cannot be trusted
+  # the origin is empty and the template leaves public_url unset (loopback bind,
+  # no sign-in gate of its own) rather than naming a host the proxy never sends.
+  hermes_wildcard_suffix = "__DOKPLOY_WIZARD_CODER_WILDCARD_SUFFIX__"
+  hermes_desktop_origin  = local.hermes_wildcard_suffix == "" ? "" : "https://${local.hermes_desktop_slug}--${data.coder_workspace.me.name}--${local.username}.${local.hermes_wildcard_suffix}"
 }
 
 # Storage boundary for this default workspace template:
@@ -138,6 +145,9 @@ resource "coder_agent" "main" {
     export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__"
     export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"
     export HERMES_PUBLIC_ORIGIN="__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"
+    # The webapp's own HTTPS origin: the subdomain route Coder gives this app, not the
+    # Coder admin origin. Empty when the wildcard suffix cannot be trusted.
+    export HERMES_WEBAPP_ORIGIN="${local.hermes_desktop_origin}"
 
     if ! command -v hermes >/dev/null 2>&1; then
       HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup --channel "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__"
@@ -956,6 +966,7 @@ export HERMES_TEMPLATE_API_KEY="$${HERMES_TEMPLATE_API_KEY:-__DOKPLOY_WIZARD_HER
 export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="$${HERMES_TEMPLATE_API_KEY_PLACEHOLDER:-__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__}"
 export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="$${DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON:-__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__}"
 export HERMES_PUBLIC_ORIGIN="$${HERMES_PUBLIC_ORIGIN:-__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__}"
+export HERMES_WEBAPP_ORIGIN="$${HERMES_WEBAPP_ORIGIN:-${local.hermes_desktop_origin}}"
 export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"
 export HERMES_MODEL="$${HERMES_MODEL:-$HERMES_TEMPLATE_MODEL}"
 export OPENAI_API_BASE="$${OPENAI_API_BASE:-$HERMES_TEMPLATE_BASE_URL}"
@@ -1132,16 +1143,28 @@ chmod 600 "$HERMES_HOME/.env"
 # The gateway reads webapp.* and its sign-in providers only when it starts, so these are
 # written before anything starts, on every boot.
 #
-# The bind stays loopback and public_url names the tile's HTTPS origin. Measured on this
-# stack: a loopback bind with no public_url is treated as local-only and served the app
-# with NO sign-in, and through Coder's proxy the browser's request does arrive from
-# loopback, so the tile would be open to anyone the route reaches. Naming the public URL
-# engages the gate: an unauthenticated / then answers 302 -> /login.
+# The bind stays loopback and public_url names the tile's own HTTPS origin — the
+# subdomain route Coder gives this app, computed in locals above. Both halves matter
+# and both were measured on this stack:
+# - Host is validated: every request whose Host names anything other than the bound
+#   hostname or public_url is answered 400 "Invalid Host header". Through Coder's proxy
+#   the browser's Host IS the tile hostname, so naming the Coder admin origin here
+#   fails every request, which is why this is not "$HERMES_PUBLIC_ORIGIN".
+# - With no public_url a loopback bind reads as local-only and the app serves with NO
+#   sign-in, so an empty HERMES_WEBAPP_ORIGIN (no usable wildcard suffix) deliberately
+#   leaves the gate disengaged: open-behind-Coder beats a tile that answers 400.
+# Naming the tile origin engages the gate: an unauthenticated / answers 302 -> /login.
 if [ "$HERMES_WEBAPP_CAPABLE" = "1" ]; then
   hermes config set webapp.enabled true
   hermes config set webapp.host 127.0.0.1
   hermes config set webapp.port "$HERMES_WEBAPP_PORT"
-  hermes config set webapp.public_url "$HERMES_PUBLIC_ORIGIN"
+  if [ -n "$HERMES_WEBAPP_ORIGIN" ]; then
+    hermes config set webapp.public_url "$HERMES_WEBAPP_ORIGIN"
+  else
+    # Cleared, not left alone: a public_url from an earlier boot can name a host this
+    # route no longer answers for, and that stale value would 400 every request.
+    hermes config set webapp.public_url ""
+  fi
 fi
 
 # The renderer build is npm and several minutes, and the checkout only changes when the

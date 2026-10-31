@@ -279,6 +279,12 @@ On first successful bootstrap the wizard:
   | `ubuntu-vscode-hermes` | Hermes (on-device AI assistant) |
   | `ubuntu-vscode-hermes-desktop` | Hermes with the official Desktop webapp as its own tile, beside the community WebUI |
 
+The Desktop tile's perimeter is layered: the gateway listens only on `127.0.0.1` with no
+published port, the Coder app is `share = "owner"`, and public HTTPS sits behind
+Cloudflare Access; the webapp's own sign-in additionally gates the tile on its
+subdomain hostname and engages only when that hostname can be derived from the Coder
+wildcard setting.
+
 Every wizard-managed template installs the OpenCode CLI and the Pi coding agent
 (`@earendil-works/pi-coding-agent`) and pre-seeds OpenCode, Pi, and VS Code
 Copilot BYOK with the full alias list resolved from the wizard-managed LiteLLM
