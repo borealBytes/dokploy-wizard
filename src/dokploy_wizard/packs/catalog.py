@@ -224,6 +224,9 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         mutable_env_keys=(
             "HERMES_INFERENCE_PROVIDER",
             "HERMES_MODEL",
+            # Which Hermes build the Desktop workspace installs; the browser-hosted
+            # Desktop the tile serves exists only on the newer channel.
+            "HERMES_DESKTOP_CHANNEL",
             "AI_DEFAULT_API_KEY",
             "AI_DEFAULT_BASE_URL",
             "AI_DEFAULT_PROVIDER",

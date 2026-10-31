@@ -596,6 +596,7 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "ANTHROPIC_API_KEY",
         "CF_ACCOUNT_ID",
         "DATA_MODE",
+        "HERMES_DESKTOP_CHANNEL",
         "HERMES_INFERENCE_PROVIDER",
         "HERMES_MODEL",
         "LITELLM_NVIDIA_API_KEY",

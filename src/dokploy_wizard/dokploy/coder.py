@@ -74,6 +74,11 @@ _DEFAULT_AI_DEFAULT_PROVIDER = "opencode-go"
 _DEFAULT_AI_DEFAULT_MODEL = "deepseek-v4.1-flash"
 _DEFAULT_HERMES_INFERENCE_PROVIDER = "dokploy-litellm"
 _DEFAULT_HERMES_MODEL = "opencode-go/deepseek-v4.1-flash"
+# The Hermes Desktop tile serves the browser-hosted Desktop, which merged upstream on
+# 2026-10-25 and has not shipped in a release yet, so that workspace tracks the channel
+# carrying it. Anything older has no `hermes webapp` at all.
+_DEFAULT_HERMES_DESKTOP_CHANNEL = "main"
+_HERMES_CHANNEL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_INTERNAL_PORT = 4000
 _COPILOT_BYOK_SETTING_KEY = "github.copilot.chat.customOAIModels"
@@ -106,6 +111,7 @@ class DokployCoderBackend:
         ai_default_model: str = _DEFAULT_AI_DEFAULT_MODEL,
         hermes_inference_provider: str = _DEFAULT_HERMES_INFERENCE_PROVIDER,
         hermes_model: str = _DEFAULT_HERMES_MODEL,
+        hermes_desktop_channel: str = _DEFAULT_HERMES_DESKTOP_CHANNEL,
         ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
         ai_default_api_key: str | None = None,
         state_dir: Path = Path(".dokploy-wizard-state"),
@@ -125,6 +131,7 @@ class DokployCoderBackend:
             hermes_inference_provider.strip() or _DEFAULT_HERMES_INFERENCE_PROVIDER
         )
         self._hermes_model = _normalize_hermes_model_ref(hermes_model)
+        self._hermes_desktop_channel = _normalize_hermes_channel(hermes_desktop_channel)
         self._ai_default_base_url = ai_default_base_url
         self._ai_default_api_key = ai_default_api_key
         self._state_dir = state_dir
@@ -288,6 +295,12 @@ class DokployCoderBackend:
                     # one more thing to lose.
                     "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__": _shell_double_quote_escape(
                         self._admin_password or "ChangeMeSoon"
+                    ),
+                    # Only this template needs the newer channel: the Webapp artifact it
+                    # serves does not exist on the release channel, and the other Hermes
+                    # templates stay on their proven build.
+                    "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__": _shell_double_quote_escape(
+                        self._hermes_desktop_channel
                     ),
                 },
             ),
@@ -775,6 +788,21 @@ def _litellm_internal_base_url(stack_name: str) -> str:
 def _litellm_virtual_key_ref(consumer: str) -> str:
     normalized = consumer.strip().replace("-", "_").upper()
     return f"$${{LITELLM_VIRTUAL_KEY_{normalized}}}"
+
+
+def _normalize_hermes_channel(value: str) -> str:
+    """The update channel name, or the default.
+
+    The value is interpolated into an installer argument and a startup script, so it is
+    a name from the release archive (`stable`, `main`, ...) and nothing that needs shell
+    quoting. A nonsense name would be refused by the installer at workspace boot, minutes
+    later and far from the env file, so it is corrected here instead.
+    """
+
+    candidate = value.strip()
+    if not _HERMES_CHANNEL_PATTERN.fullmatch(candidate):
+        return _DEFAULT_HERMES_DESKTOP_CHANNEL
+    return candidate
 
 
 def _normalize_hermes_model_ref(model_ref: str) -> str:

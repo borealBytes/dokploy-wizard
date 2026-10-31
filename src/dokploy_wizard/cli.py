@@ -2318,6 +2318,9 @@ def _build_coder_backend(
         ai_default_model=ai_default_model,
         hermes_inference_provider=raw_env.values.get("HERMES_INFERENCE_PROVIDER", "dokploy-litellm"),
         hermes_model=hermes_model,
+        # Empty is the normal case and the backend resolves it to the channel that
+        # ships the Desktop webapp, so the default lives in exactly one place.
+        hermes_desktop_channel=raw_env.values.get("HERMES_DESKTOP_CHANNEL", ""),
         ai_default_base_url=_shared_ai_default_base_url(raw_env),
         ai_default_api_key=litellm_generated_keys.virtual_keys["coder-hermes"],
         state_dir=state_dir,

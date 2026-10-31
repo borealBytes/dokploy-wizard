@@ -703,18 +703,45 @@ def test_hermes_desktop_template_drives_commands_the_cli_actually_ships() -> Non
         "templates/coder/default-ubuntu-vscode-hermes-desktop/main.tf"
     ).read_text(encoding="utf-8")
 
-    assert "hermes webapp" not in template
-    assert "hermes config set webapp." not in template
+    # The artifact is the Desktop renderer the gateway hosts in a browser, not the
+    # dashboard bundle. These two dists are different builds of different apps, and
+    # serving the wrong one is the exact regression this guard exists for: it looks
+    # healthy, signs in fine, and renders the old UI.
+    # Judged on executable lines only: the comments name the dashboard bundle to say
+    # this is not it, and a guard that bans the words would ban the explanation.
+    code = "\n".join(line for line in template.splitlines() if not line.lstrip().startswith("#"))
+    assert "hermes webapp --build-only" in template
+    assert "apps/desktop/dist-webapp" in template
+    assert "hermes_cli/web_dist" not in code
+    assert "npm run build" not in code
 
-    # The webapp is `hermes dashboard`, bound by flag rather than by config.
-    assert 'hermes dashboard --host 0.0.0.0 --port "$HERMES_WEBAPP_PORT"' in template
-    assert "hermes dashboard --status" in template
-    # A wedged listener holds the port, and pkill cannot see the process: it runs
-    # behind a python launcher whose cmdline never contains "hermes dashboard".
-    assert "hermes dashboard --stop" in template
-    # The documented pre-build for --skip-build, and the path the server reads.
-    assert "npm run build" in template
-    assert "hermes_cli/web_dist" in template
+    # Turned on through the gateway's own config surface, which it reads only at start.
+    assert "hermes config set webapp.enabled true" in template
+    assert 'hermes config set webapp.port "$HERMES_WEBAPP_PORT"' in template
+    # The bind stays loopback and the public URL names the tile's HTTPS origin: with no
+    # public_url the listener treats a loopback bind as local-only and serves the app
+    # with no sign-in, and through Coder's proxy the request does arrive from loopback.
+    assert "hermes config set webapp.host 127.0.0.1" in template
+    assert 'hermes config set webapp.public_url "$HERMES_PUBLIC_ORIGIN"' in template
+
+    # The old dashboard is gone from this path, not layered behind the new UI. The one
+    # mention left is the comment that says it is not the dashboard; the auth env keys
+    # keep the CLI's own HERMES_DASHBOARD_* names and stay.
+    assert "hermes dashboard" not in code
+    assert 'hermes dashboard --host' not in template
+    assert "hermes dashboard --stop" not in template
+    assert "hermes dashboard --status" not in template
+    assert 'slug         = "hermes-dashboard"' not in template
+
+    # Version floor: the command does not exist on the release channel, so the template
+    # pins the channel at install time and repairs an older checkout before serving.
+    assert "if ! hermes webapp --help >/dev/null 2>&1; then" in template
+    assert 'hermes update --set-channel "$HERMES_DESKTOP_CHANNEL"' in template
+    assert 'hermes update --channel "$HERMES_DESKTOP_CHANNEL"' in template
+    assert '--channel "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__"' in template
+    # A build still without the artifact serves nothing rather than the old UI.
+    assert "HERMES WEBAPP UNAVAILABLE" in template
+    assert 'if [ "$HERMES_WEBAPP_CAPABLE" = "1" ]; then' in template
 
     # /health answers 302 -> /login once the sign-in gate is on, so both the tile
     # healthcheck and the watchdog have to use the endpoint that answers unsigned.
@@ -726,8 +753,23 @@ def test_hermes_desktop_template_drives_commands_the_cli_actually_ships() -> Non
     assert 'upsert_env HERMES_DASHBOARD_BASIC_AUTH_USERNAME' in template
     assert 'upsert_env_if_unset HERMES_DASHBOARD_BASIC_AUTH_USERNAME' not in template
     assert 'url       = "http://localhost:9120/api/health"' in template
-    assert "healthy_dashboard()" in template
+    assert "healthy_webapp()" in template
+    assert "restart_gateway_for_webapp()" in template
+    assert "healthy_dashboard()" not in template
+    assert "start_dashboard()" not in template
     assert '"http://127.0.0.1:\\$1/health"' in template  # the community WebUI keeps /health
+
+
+def test_desktop_hermes_channel_is_defaulted_and_sanitised() -> None:
+    # An operator who never heard of the channel still gets a working tile, and a typo
+    # must not become a broken workspace boot minutes later at install time, far from
+    # the env file that caused it.
+    assert coder_module._DEFAULT_HERMES_DESKTOP_CHANNEL == "main"
+    assert coder_module._normalize_hermes_channel("") == "main"
+    assert coder_module._normalize_hermes_channel("  main  ") == "main"
+    assert coder_module._normalize_hermes_channel("stable") == "stable"
+    assert coder_module._normalize_hermes_channel("main; rm -rf /") == "main"
+    assert coder_module._normalize_hermes_channel('main"') == "main"
 
 
 def test_coder_app_open_in_values_are_ones_the_provider_accepts() -> None:
@@ -2962,6 +3004,10 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         # silently becomes the literal password.
         "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__": "ChangeMeSoon",
         "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": "ChangeMeSoon",
+        # The browser-hosted Desktop has not shipped in a release, so this template
+        # installs the channel that carries it. Only this one: an unreleased channel is
+        # not a decision to make on behalf of the other Hermes templates.
+        "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__": "main",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name

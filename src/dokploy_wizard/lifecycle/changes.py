@@ -243,6 +243,9 @@ _OUTBOUND_MAIL_ENV_KEYS = {
 _CODER_RUNTIME_ENV_KEYS = {
     "HERMES_INFERENCE_PROVIDER",
     "HERMES_MODEL",
+    # Which Hermes build the Desktop workspace installs is what decides whether the
+    # browser-hosted Desktop exists at all, so a change has to re-push the template.
+    "HERMES_DESKTOP_CHANNEL",
     "AI_DEFAULT_API_KEY",
     "AI_DEFAULT_BASE_URL",
     "AI_DEFAULT_PROVIDER",

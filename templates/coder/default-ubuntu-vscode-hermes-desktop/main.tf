@@ -140,7 +140,7 @@ resource "coder_agent" "main" {
     export HERMES_PUBLIC_ORIGIN="__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"
 
     if ! command -v hermes >/dev/null 2>&1; then
-      HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup
+      HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup --channel "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__"
     fi
 
     export PATH="/home/coder/.local/bin:$PATH"
@@ -992,7 +992,7 @@ wait_for_http() {
 }
 
 if ! command -v hermes >/dev/null 2>&1; then
-  HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup
+  HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup --channel "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__"
 fi
 
 export PATH="/home/coder/.local/bin:$PATH"
@@ -1087,10 +1087,34 @@ else
   git -C "$NESQ_DIR" reset --hard origin/master
 fi
 
-# Hermes Desktop webapp: `hermes dashboard`, its own web server beside the gateway
-# (v0.22.5 measured: `webapp` is not one of its subcommands, and `webapp.host`/
-# `webapp.port` are not config keys — the CLI stores them with a warning it never reads).
-# Bind and port come from CLI flags; the build output is hermes_cli/web_dist.
+# Hermes Desktop webapp: the Desktop app's own renderer, served by the gateway on this
+# port so it runs in a browser. It is NOT `hermes dashboard`: the dashboard is the admin
+# panel, a different bundle (hermes_cli/web_dist) whose chat tab is a terminal over a
+# PTY. Nothing in this template puts the dashboard on the tile port.
+#
+# The browser-hosted Desktop merged upstream on 2026-10-25, after the newest published
+# release, so the workspace installs the channel that carries it. A build without the
+# command is repaired before anything is served, because the failure this block exists
+# to prevent is the tile quietly serving the old dashboard again.
+HERMES_DESKTOP_CHANNEL="$${HERMES_DESKTOP_CHANNEL:-__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__}"
+if ! hermes webapp --help >/dev/null 2>&1; then
+  echo "installed Hermes build has no 'hermes webapp'; moving onto channel $HERMES_DESKTOP_CHANNEL"
+  # --set-channel moves the checkout onto the channel AND records it for this install,
+  # so a later `hermes update` cannot pull the workspace back onto a release that
+  # predates the Webapp. If that persisted without moving, ask for the move explicitly.
+  hermes update --set-channel "$HERMES_DESKTOP_CHANNEL" --yes --no-gateway-restart >/tmp/hermes-webapp-update.log 2>&1 || true
+  if ! hermes webapp --help >/dev/null 2>&1; then
+    hermes update --channel "$HERMES_DESKTOP_CHANNEL" --yes --no-gateway-restart >>/tmp/hermes-webapp-update.log 2>&1 || true
+  fi
+fi
+# An older hermes stores webapp.* keys with a warning it never reads, so config and
+# build are skipped rather than writing keys into a build that ignores them: an
+# unhealthy tile with a reason beats a healthy tile lying about what it serves.
+HERMES_WEBAPP_CAPABLE=1
+if ! hermes webapp --help >/dev/null 2>&1; then
+  HERMES_WEBAPP_CAPABLE=0
+  echo "HERMES WEBAPP UNAVAILABLE: 'hermes webapp' is still missing after the channel update; serving nothing on $HERMES_WEBAPP_PORT rather than the dashboard" >&2
+fi
 
 # A gated dashboard fails closed: on a non-loopback bind it always requires a sign-in
 # provider, so the basic-auth trio is written every boot rather than conditionally.
@@ -1105,18 +1129,34 @@ upsert_env_if_unset HERMES_DASHBOARD_BASIC_AUTH_PASSWORD "__DOKPLOY_WIZARD_HERME
 upsert_env_if_unset HERMES_DASHBOARD_BASIC_AUTH_SECRET "$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
 chmod 600 "$HERMES_HOME/.env"
 
-# The bundle needs npm and several minutes, and the checkout is unchanged until the
-# hermes version moves, so rebuild only when that version changes. Tracked in the
-# persistent home volume, not /tmp.
-HERMES_WEBAPP_DIST="$HERMES_HOME/hermes-agent/hermes_cli/web_dist"
+# The gateway reads webapp.* and its sign-in providers only when it starts, so these are
+# written before anything starts, on every boot.
+#
+# The bind stays loopback and public_url names the tile's HTTPS origin. Measured on this
+# stack: a loopback bind with no public_url is treated as local-only and served the app
+# with NO sign-in, and through Coder's proxy the browser's request does arrive from
+# loopback, so the tile would be open to anyone the route reaches. Naming the public URL
+# engages the gate: an unauthenticated / then answers 302 -> /login.
+if [ "$HERMES_WEBAPP_CAPABLE" = "1" ]; then
+  hermes config set webapp.enabled true
+  hermes config set webapp.host 127.0.0.1
+  hermes config set webapp.port "$HERMES_WEBAPP_PORT"
+  hermes config set webapp.public_url "$HERMES_PUBLIC_ORIGIN"
+fi
+
+# The renderer build is npm and several minutes, and the checkout only changes when the
+# Hermes version moves, so rebuild only when that version changes. Tracked in the
+# persistent home volume, not /tmp. The artifact is apps/desktop/dist-webapp (stamped
+# with hermes-build.json); it is the directory the gateway serves.
+HERMES_WEBAPP_DIST="$HERMES_HOME/hermes-agent/apps/desktop/dist-webapp"
 HERMES_WEBAPP_BUILD_MARKER=/home/coder/.local/share/dokploy/hermes-webapp-bundle-version
 mkdir -p "$(dirname "$HERMES_WEBAPP_BUILD_MARKER")"
 HERMES_WEBAPP_VERSION="$(hermes --version 2>/dev/null | head -1 | tr -cd '[:alnum:]._-')"
-if [ ! -s "$HERMES_WEBAPP_BUILD_MARKER" ] || [ "$(cat "$HERMES_WEBAPP_BUILD_MARKER" 2>/dev/null)" != "$HERMES_WEBAPP_VERSION" ]; then
+if [ "$HERMES_WEBAPP_CAPABLE" = "1" ] && { [ ! -s "$HERMES_WEBAPP_BUILD_MARKER" ] || [ "$(cat "$HERMES_WEBAPP_BUILD_MARKER" 2>/dev/null)" != "$HERMES_WEBAPP_VERSION" ]; }; then
   echo "building Hermes Desktop webapp bundle (version $${HERMES_WEBAPP_VERSION:-unknown})"
-  # The documented pre-build for --skip-build. It is seconds, not minutes: the
-  # checkout ships node_modules and vite only bundles the sources.
-  if (cd "$HERMES_HOME/hermes-agent/web" && npm run build) >/tmp/hermes-webapp-build.log 2>&1; then
+  # Upstream's own build entry point: receipt-based, so it rebuilds when the renderer
+  # sources changed and costs nothing when they did not.
+  if hermes webapp --build-only >/tmp/hermes-webapp-build.log 2>&1; then
     printf '%s' "$HERMES_WEBAPP_VERSION" >"$HERMES_WEBAPP_BUILD_MARKER"
   else
     # Upstream drift can move the build; the community WebUI tile is the safety net, so
@@ -1131,31 +1171,29 @@ if ! wait_for_http "http://127.0.0.1:$API_SERVER_PORT/health" 1; then
   wait_for_http "http://127.0.0.1:$API_SERVER_PORT/health" 300 || true
 fi
 
-# The webapp is a separate process from the gateway, so it is started on its own and
-# its absence costs only this tile. --skip-build is dropped when the bundle is missing,
-# because then the dashboard's own build step is the only way to serve anything.
-HERMES_DASHBOARD_SKIP_BUILD="--skip-build"
-if [ ! -d "$HERMES_WEBAPP_DIST" ]; then
-  HERMES_DASHBOARD_SKIP_BUILD=""
-  echo "no webapp bundle at $HERMES_WEBAPP_DIST; letting hermes dashboard build it"
-fi
-if ! wait_for_http "http://127.0.0.1:$HERMES_WEBAPP_PORT$HERMES_WEBAPP_HEALTH_PATH" 1; then
-  # A process that holds the port without answering would make the new one fail to bind,
-  # so clear the field with the CLI's own stop first. pkill cannot match this process:
-  # it runs behind a python launcher wrapper, and --stop scans for the real cmdlines.
-  hermes dashboard --stop >/dev/null 2>&1 || true
-  nohup hermes dashboard --host 0.0.0.0 --port "$HERMES_WEBAPP_PORT" $HERMES_DASHBOARD_SKIP_BUILD --no-open \
-    >/tmp/hermes-dashboard.log 2>&1 &
+# The webapp rides the gateway's own listener: there is no separate server process to
+# start, and the gateway is already brought up above for its API port.
+if [ "$HERMES_WEBAPP_CAPABLE" = "1" ]; then
+  if ! hermes webapp --status >/tmp/hermes-webapp-status.log 2>&1; then
+    # rc=1 means this listener is not serving the Webapp, and upstream names its reasons
+    # (off, or a gateway that started before it was turned on). Its own restart is the
+    # remedy: it reloads webapp.* and brings the listener onto this version. Left in the
+    # background, because on a cold boot the gateway is still coming up and the wait
+    # below is what has to prove the tile is really served.
+    nohup hermes gateway restart >/tmp/hermes-gateway-restart.log 2>&1 &
+  fi
 fi
 
 # A bind that refuses the port and a sign-in gate that redirects every probe both look
 # like a dead tile, so report what the process itself claims. The status line carries
 # the whole interpreter invocation, which is hundreds of characters of noise.
-wait_for_http "http://127.0.0.1:$HERMES_WEBAPP_PORT$HERMES_WEBAPP_HEALTH_PATH" 120 || true
+# /api/health answers 200 without sign-in on the gateway listener, which is why both
+# this wait and the tile healthcheck use it; / is a 302 to /login once the gate is on.
+wait_for_http "http://127.0.0.1:$HERMES_WEBAPP_PORT$HERMES_WEBAPP_HEALTH_PATH" 300 || true
 # The sign-in form appears before anything in the workspace is readable, so the
 # username is stated in the startup output Coder shows while the workspace boots.
 echo "Hermes Desktop webapp: sign in as '$HERMES_WEBAPP_BASIC_AUTH_USERNAME' with your stack admin password"
-hermes dashboard --status 2>&1 | sed -n '1,2p' | cut -c1-160 | sed 's/^/[hermes dashboard] /' || true
+hermes webapp --status 2>&1 | sed -n '1,2p' | cut -c1-160 | sed 's/^/[hermes webapp] /' || true
 
 if ! wait_for_http "http://127.0.0.1:$HERMES_WEBUI_PORT/health" 1; then
   nohup env HERMES_HOME="$HERMES_HOME" HERMES_WEBUI_ALLOWED_ORIGINS="$HERMES_PUBLIC_ORIGIN" HERMES_WEBUI_TRUST_FORWARDED_HOST=1 HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR HERMES_WEBUI_STATE_DIR="$HERMES_HOME/webui" HERMES_WEBUI_SKIP_ONBOARDING=1 HERMES_WEBUI_DEFAULT_MODEL="$HERMES_MODEL" PYTHONPATH="$HERMES_INSTALL_DIR:$${PYTHONPATH:-}" python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install >/tmp/hermes-webui.log 2>&1 &
@@ -1191,7 +1229,6 @@ HERMES_WEBUI_PORT="$HERMES_WEBUI_PORT"
 HERMES_WEBUI_PROXY_PORT="$HERMES_WEBUI_PROXY_PORT"
 HERMES_WEBAPP_PORT="$HERMES_WEBAPP_PORT"
 HERMES_WEBAPP_HEALTH_PATH="$HERMES_WEBAPP_HEALTH_PATH"
-HERMES_WEBAPP_DIST="$HERMES_WEBAPP_DIST"
 API_SERVER_PORT="$API_SERVER_PORT"
 WEBUI_SRC=/home/coder/.cache/hermes-webui-src
 PROXY_SCRIPT=/tmp/coder-mounted-proxy.mjs
@@ -1210,9 +1247,10 @@ healthy() {
   curl -fsS --max-time 5 "http://127.0.0.1:\$1/health" >/dev/null 2>&1
 }
 
-healthy_dashboard() {
-  # /health on the dashboard answers 302 -> /login once the sign-in gate is on, so
-  # judging it by /health would restart a perfectly healthy server every cycle.
+healthy_webapp() {
+  # /api/health answers 200 with no sign-in on the gateway listener; / is a 302 to
+  # /login once the gate is on, and judging by / would restart a healthy listener
+  # every cycle.
   curl -fsS --max-time 5 "http://127.0.0.1:\$HERMES_WEBAPP_PORT\$HERMES_WEBAPP_HEALTH_PATH" \
     >/dev/null 2>&1
 }
@@ -1247,16 +1285,11 @@ start_webui() {
   nohup env HERMES_HOME="\$HERMES_HOME" HERMES_WEBUI_ALLOWED_ORIGINS="\$HERMES_PUBLIC_ORIGIN" HERMES_WEBUI_TRUST_FORWARDED_HOST=1 HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=\$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=\$HERMES_INSTALL_DIR HERMES_WEBUI_STATE_DIR="\$HERMES_HOME/webui" HERMES_WEBUI_SKIP_ONBOARDING=1 HERMES_WEBUI_DEFAULT_MODEL="\$HERMES_MODEL" PYTHONPATH="\$HERMES_INSTALL_DIR" python3 "\$WEBUI_SRC/bootstrap.py" --no-browser --skip-agent-install >>/tmp/hermes-webui.log 2>&1 &
 }
 
-start_dashboard() {
-  log "reviving hermes dashboard on port \$HERMES_WEBAPP_PORT"
-  # --skip-build only when the bundle exists: without a bundle the dashboard's own
-  # build step is the only thing that can serve the UI.
-  dashboard_skip_build="--skip-build"
-  if [ ! -d "\$HERMES_WEBAPP_DIST" ]; then
-    dashboard_skip_build=""
-  fi
-  nohup hermes dashboard --host 0.0.0.0 --port "\$HERMES_WEBAPP_PORT" \$dashboard_skip_build --no-open \
-    >>/tmp/hermes-dashboard.log 2>&1 &
+restart_gateway_for_webapp() {
+  log "restarting hermes gateway so it serves the Desktop webapp on port \$HERMES_WEBAPP_PORT"
+  # The Webapp rides the gateway listener and its config is read only at start, so the
+  # gateway's own restart is the fix; there is no separate process to bring back.
+  nohup hermes gateway restart >>/tmp/hermes-gateway-restart.log 2>&1 &
 }
 
 start_proxy() {
@@ -1274,12 +1307,11 @@ run_checks() {
     pkill -f "hermes-webui-src/bootstrap.py" >/dev/null 2>&1 || true
     start_webui
   fi
-  if ! healthy_dashboard && ! took_cooldown dashboard; then
-    # Stop through the CLI rather than pkill: the server runs behind a python launcher
-    # wrapper, so its command line never contains the string "hermes dashboard"; --stop
-    # scans the process table for dashboard|serve cmdlines and SIGTERMs those.
-    hermes dashboard --stop >/dev/null 2>&1 || true
-    start_dashboard
+  # Only when the gateway itself is answering: if its API port is down, the gateway
+  # branch above already owns bringing it back, and restarting from here too would
+  # start the shared gateway twice.
+  if ! healthy_webapp && healthy "\$API_SERVER_PORT" && ! took_cooldown webapp; then
+    restart_gateway_for_webapp
   fi
   # The proxy answers /health only by forwarding upstream, so judge it by process.
   if [ -f "\$PROXY_SCRIPT" ] && ! pgrep -f "node \$PROXY_SCRIPT" >/dev/null 2>&1 \
