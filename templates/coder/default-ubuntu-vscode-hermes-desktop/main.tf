@@ -969,7 +969,11 @@ export HERMES_WEBUI_PORT="$${HERMES_WEBUI_PORT:-8787}"
 export HERMES_WEBUI_PROXY_PORT="$${HERMES_WEBUI_PROXY_PORT:-8788}"
 export HERMES_WEBAPP_PORT="$${HERMES_WEBAPP_PORT:-9120}"
 export HERMES_WEBAPP_HEALTH_PATH="/api/health"
-export HERMES_WEBAPP_BASIC_AUTH_USERNAME="hermes"
+# The sign-in name is the owner's Coder username, not a fixed word: the login page
+# appears before any workspace file is readable, so "Invalid username or password"
+# with a name nobody could guess is a dead end. The password is the stack admin
+# password the operator already uses for LiteLLM and Dokploy.
+export HERMES_WEBAPP_BASIC_AUTH_USERNAME="${local.username}"
 
 wait_for_http() {
   url="$1"
@@ -1088,7 +1092,10 @@ fi
 # A gated dashboard fails closed: on a non-loopback bind it always requires a sign-in
 # provider, so the basic-auth trio is written every boot rather than conditionally.
 # The trio is read from $HERMES_HOME/.env, which hermes loads into its environment.
-upsert_env_if_unset HERMES_DASHBOARD_BASIC_AUTH_USERNAME "$HERMES_WEBAPP_BASIC_AUTH_USERNAME"
+# Rewritten every boot (not if-unset): the name is derived from the workspace owner,
+# so a volume built when this was a fixed word has to follow the owner's name. The
+# password and signing secret below are the opposite case and stay as they are.
+upsert_env HERMES_DASHBOARD_BASIC_AUTH_USERNAME "$HERMES_WEBAPP_BASIC_AUTH_USERNAME"
 upsert_env_if_unset HERMES_DASHBOARD_BASIC_AUTH_PASSWORD "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__"
 # An empty secret mints a new signing key on every boot and logs every session out on
 # each restart, so the first boot's secret is kept for the life of the volume.
@@ -1142,6 +1149,9 @@ fi
 # like a dead tile, so report what the process itself claims. The status line carries
 # the whole interpreter invocation, which is hundreds of characters of noise.
 wait_for_http "http://127.0.0.1:$HERMES_WEBAPP_PORT$HERMES_WEBAPP_HEALTH_PATH" 120 || true
+# The sign-in form appears before anything in the workspace is readable, so the
+# username is stated in the startup output Coder shows while the workspace boots.
+echo "Hermes Desktop webapp: sign in as '$HERMES_WEBAPP_BASIC_AUTH_USERNAME' with your stack admin password"
 hermes dashboard --status 2>&1 | sed -n '1,2p' | cut -c1-160 | sed 's/^/[hermes dashboard] /' || true
 
 if ! wait_for_http "http://127.0.0.1:$HERMES_WEBUI_PORT/health" 1; then

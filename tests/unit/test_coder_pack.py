@@ -696,6 +696,12 @@ def test_hermes_desktop_template_drives_commands_the_cli_actually_ships() -> Non
     # /health answers 302 -> /login once the sign-in gate is on, so both the tile
     # healthcheck and the watchdog have to use the endpoint that answers unsigned.
     assert 'HERMES_WEBAPP_HEALTH_PATH="/api/health"' in template
+    # The sign-in name has to be guessable: the login page appears before any
+    # workspace file is readable. It is the owner's Coder username, rewritten every
+    # boot so volumes built when it was a fixed word follow the owner.
+    assert 'export HERMES_WEBAPP_BASIC_AUTH_USERNAME="${local.username}"' in template
+    assert 'upsert_env HERMES_DASHBOARD_BASIC_AUTH_USERNAME' in template
+    assert 'upsert_env_if_unset HERMES_DASHBOARD_BASIC_AUTH_USERNAME' not in template
     assert 'url       = "http://localhost:9120/api/health"' in template
     assert "healthy_dashboard()" in template
     assert '"http://127.0.0.1:\\$1/health"' in template  # the community WebUI keeps /health
