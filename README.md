@@ -277,6 +277,7 @@ On first successful bootstrap the wizard:
   | `ubuntu-vscode-opencode-web` | OpenCode Web (browser-based IDE) |
   | `ubuntu-vscode-kdense-byok` | K-Dense BYOK (Bring Your Own Key for local model inference) |
   | `ubuntu-vscode-hermes` | Hermes (on-device AI assistant) |
+  | `ubuntu-vscode-hermes-desktop` | Hermes with the official Desktop webapp as its own tile, beside the community WebUI |
 
 Every wizard-managed template installs the OpenCode CLI and the Pi coding agent
 (`@earendil-works/pi-coding-agent`) and pre-seeds OpenCode, Pi, and VS Code
@@ -689,6 +690,7 @@ How autosynced models behave:
 - Autosynced deployments are named `sync/<source>/<model-id>`, so they never collide with the explicit config-file aliases.
 - Deployments created by autosync are tagged internally; when a source drops a model, only wizard-created `sync/...` deployments are pruned. Config-file aliases and models you added yourself in the admin UI are never touched.
 - Consumer virtual keys carry a `sync/*` wildcard, so autosynced models are immediately callable from OpenClaw, My Farm Advisor, SurfSense, Coder Hermes, and Coder K-Dense. `dokploy-ai` stays restricted to the resolved default alias. Each cycle the sidecar also refreshes each consumer key's allowlist with the explicit current `sync/*` names, because LiteLLM's `/v1/models` does not expand wildcards and workspace tooling seeds its model picker from that endpoint.
+- `sync/default-chat` is a stable alias whose upstream is *selected* rather than listed: the sidecar matches `AI_DEFAULT_MODEL_PATTERN` against the provider's live catalog, ranks matches by version number, and promotes the newest one that answers a real completion request. Upstream renames therefore cost a sync cycle instead of a reinstall, and a client can name `sync/default-chat` and never move. The new target is registered before the old one is retired, so there is no window with no working upstream; when nothing confirms (a brownout, a catalog outage) the current target stays put. Set `AI_DEFAULT_MODEL_PATTERN=` to empty to turn the alias off, which also deletes it.
 - Rendered LiteLLM config sets `general_settings.store_model_in_db` so admin-API-registered models survive proxy restarts.
 - Coder workspaces resolve their model lists live from the gateway at boot and re-run the same fetch from a background refresher roughly every 12 hours — retrying every 5 minutes after any failed refresh until the gateway is reachable again — so autosynced models appear in OpenCode, Pi, Hermes, and Copilot BYOK even in long-running workspaces. If the gateway is briefly unreachable during a refresh, the last good model list is kept.
 
@@ -715,10 +717,18 @@ The preferred way to select the default model is with `AI_DEFAULT_PROVIDER` and 
 
 ```bash
 AI_DEFAULT_PROVIDER=openrouter
-AI_DEFAULT_MODEL=deepseek/deepseek-v4-flash:free
+AI_DEFAULT_MODEL=deepseek/deepseek-v4.1-flash
 ```
 
-Together these resolve to the canonical alias `openrouter/deepseek/deepseek-v4-flash:free`. If you omit them, the wizard falls back to legacy `ADVISOR_MODEL_PROVIDER` and `ADVISOR_MODEL_NAME`.
+Together these resolve to the canonical alias `openrouter/deepseek/deepseek-v4.1-flash`. If you omit them, the wizard falls back to legacy `ADVISOR_MODEL_PROVIDER` and `ADVISOR_MODEL_NAME`.
+
+`AI_DEFAULT_MODEL` is a single name, and providers rename models. When the named model disappears, the alias is pruned and a stack that baked the name keeps pointing at nothing while every health check stays green. `AI_DEFAULT_MODEL_PATTERN` is the alternative for anything you would rather not re-point by hand:
+
+```bash
+AI_DEFAULT_MODEL_PATTERN=deepseek*flash*   # empty value turns the alias off
+```
+
+The pattern is matched against the provider catalog for `AI_DEFAULT_PROVIDER` (it has no effect on a provider with no synced catalog) and published as `sync/default-chat`, so agents can be configured once with a name that keeps working through renames. `AI_DEFAULT_MODEL` stays a literal name either way, and it stays the model the templates bake.
 
 For LiteLLM upstream API keys, the canonical names are `LITELLM_OPENROUTER_API_KEY` and `LITELLM_OPENCODE_GO_API_KEY`. The older bare keys `OPENROUTER_API_KEY` and `OPENCODE_GO_API_KEY` are still accepted as compatibility fallbacks. The old alias `local/unsloth-active` is also resolved to the canonical alias when it appears in legacy env values.
 
