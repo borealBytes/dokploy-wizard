@@ -302,14 +302,6 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__": _shell_double_quote_escape(
                         self._hermes_desktop_channel
                     ),
-                    # The webapp validates the Host header against the single hostname its
-                    # public_url names, and a subdomain app is reached as
-                    # <slug>--<workspace>--<owner>.<this suffix>, so the template builds
-                    # the tile's own origin from it. Naming some other host (the Coder
-                    # admin origin, say) makes every proxied request a 400.
-                    "__DOKPLOY_WIZARD_CODER_WILDCARD_SUFFIX__": _safe_wildcard_suffix(
-                        self._wildcard_hostname
-                    ),
                 },
             ),
             (
@@ -834,28 +826,6 @@ def _wildcard_suffix(wildcard_hostname: str) -> str:
     if not wildcard_hostname.startswith("*."):
         raise CoderError("Coder wildcard hostname must start with '*.'")
     return wildcard_hostname.removeprefix("*.")
-
-
-_HOSTNAME_PATTERN = re.compile(r"[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*")
-
-
-def _safe_wildcard_suffix(wildcard_hostname: str) -> str:
-    """The wildcard's suffix when it is a plain hostname, else "".
-
-    The value is baked into a startup script, so it must carry no shell
-    metacharacters, and the template treats "" as "the tile origin cannot be
-    computed": the webapp then gets no public_url and trusts its loopback bind
-    instead of naming a hostname the proxy will never send — a wrong public_url
-    fails every request with a 400, which is worse than no sign-in gate of its
-    own behind the Coder and Cloudflare perimeter.
-    """
-    try:
-        suffix = _wildcard_suffix(wildcard_hostname)
-    except CoderError:
-        return ""
-    if not _HOSTNAME_PATTERN.fullmatch(suffix):
-        return ""
-    return suffix
 
 
 def _render_compose_file(

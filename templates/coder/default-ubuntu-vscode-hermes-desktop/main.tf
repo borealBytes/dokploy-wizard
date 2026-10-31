@@ -33,16 +33,14 @@ data "docker_network" "shared" {
 locals {
   username            = data.coder_workspace_owner.me.name
   hermes_desktop_slug = "hermes-desktop"
-  # The webapp does NOT answer for any Host header: it validates Host against the
-  # bound hostname plus the single hostname named by webapp.public_url (measured on
-  # the box: every request naming another host is a 400 "Invalid Host header").
-  # Coder routes subdomain apps as <slug>--<workspace>--<owner>.<wildcard suffix>,
-  # so the tile's own origin is computed below and handed to the webapp as its
-  # public_url. The wildcard suffix arrives as a token; when it cannot be trusted
-  # the origin is empty and the template leaves public_url unset (loopback bind,
-  # no sign-in gate of its own) rather than naming a host the proxy never sends.
-  hermes_wildcard_suffix = "__DOKPLOY_WIZARD_CODER_WILDCARD_SUFFIX__"
-  hermes_desktop_origin  = local.hermes_wildcard_suffix == "" ? "" : "https://${local.hermes_desktop_slug}--${data.coder_workspace.me.name}--${local.username}.${local.hermes_wildcard_suffix}"
+  # The webapp gets no hostname of its own: the gateway binds 127.0.0.1 with
+  # webapp.public_url empty, which upstream treats as local-only (no sign-in gate),
+  # and a loopback front (bootstrap below) makes the proxied Coder requests look like
+  # a local browser. Declaring a public_url instead would re-engage a second sign-in:
+  # upstream ties public_url to auth in the branch this listener takes, and the
+  # credential it then demands is the one-use link from `hermes webapp`, which a
+  # single-click Coder tile cannot chase. The perimeter is Coder share=owner plus
+  # Cloudflare Access; the webapp needs to trust no public hostname at all.
 }
 
 # Storage boundary for this default workspace template:
@@ -145,9 +143,6 @@ resource "coder_agent" "main" {
     export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__"
     export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"
     export HERMES_PUBLIC_ORIGIN="__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"
-    # The webapp's own HTTPS origin: the subdomain route Coder gives this app, not the
-    # Coder admin origin. Empty when the wildcard suffix cannot be trusted.
-    export HERMES_WEBAPP_ORIGIN="${local.hermes_desktop_origin}"
 
     if ! command -v hermes >/dev/null 2>&1; then
       HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup --channel "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__"
@@ -966,7 +961,7 @@ export HERMES_TEMPLATE_API_KEY="$${HERMES_TEMPLATE_API_KEY:-__DOKPLOY_WIZARD_HER
 export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="$${HERMES_TEMPLATE_API_KEY_PLACEHOLDER:-__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__}"
 export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="$${DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON:-__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__}"
 export HERMES_PUBLIC_ORIGIN="$${HERMES_PUBLIC_ORIGIN:-__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__}"
-export HERMES_WEBAPP_ORIGIN="$${HERMES_WEBAPP_ORIGIN:-${local.hermes_desktop_origin}}"
+export HERMES_WEBAPP_INTERNAL_PORT="$${HERMES_WEBAPP_INTERNAL_PORT:-9121}"
 export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"
 export HERMES_MODEL="$${HERMES_MODEL:-$HERMES_TEMPLATE_MODEL}"
 export OPENAI_API_BASE="$${OPENAI_API_BASE:-$HERMES_TEMPLATE_BASE_URL}"
@@ -1143,28 +1138,19 @@ chmod 600 "$HERMES_HOME/.env"
 # The gateway reads webapp.* and its sign-in providers only when it starts, so these are
 # written before anything starts, on every boot.
 #
-# The bind stays loopback and public_url names the tile's own HTTPS origin — the
-# subdomain route Coder gives this app, computed in locals above. Both halves matter
-# and both were measured on this stack:
-# - Host is validated: every request whose Host names anything other than the bound
-#   hostname or public_url is answered 400 "Invalid Host header". Through Coder's proxy
-#   the browser's Host IS the tile hostname, so naming the Coder admin origin here
-#   fails every request, which is why this is not "$HERMES_PUBLIC_ORIGIN".
-# - With no public_url a loopback bind reads as local-only and the app serves with NO
-#   sign-in, so an empty HERMES_WEBAPP_ORIGIN (no usable wildcard suffix) deliberately
-#   leaves the gate disengaged: open-behind-Coder beats a tile that answers 400.
-# Naming the tile origin engages the gate: an unauthenticated / answers 302 -> /login.
+# Loopback bind on the INTERNAL port, public_url always empty: that is the one shape
+# upstream serves without a sign-in gate (gateway/run_api.py engages auth whenever
+# webapp.public_url names a host, with no exception for this listener). The webapp
+# still validates Host, and while loopback-bound it accepts only loopback names —
+# which is exactly what the front below sends it. Cleared on every boot rather than
+# left alone: a public_url surviving from an earlier design would silently re-arm
+# both the gate and the Host rejection, and the tile would spend the boot answering
+# 302 and 400 to a browser that only wants to open.
 if [ "$HERMES_WEBAPP_CAPABLE" = "1" ]; then
   hermes config set webapp.enabled true
   hermes config set webapp.host 127.0.0.1
-  hermes config set webapp.port "$HERMES_WEBAPP_PORT"
-  if [ -n "$HERMES_WEBAPP_ORIGIN" ]; then
-    hermes config set webapp.public_url "$HERMES_WEBAPP_ORIGIN"
-  else
-    # Cleared, not left alone: a public_url from an earlier boot can name a host this
-    # route no longer answers for, and that stale value would 400 every request.
-    hermes config set webapp.public_url ""
-  fi
+  hermes config set webapp.port "$HERMES_WEBAPP_INTERNAL_PORT"
+  hermes config set webapp.public_url ""
 fi
 
 # The renderer build is npm and several minutes, and the checkout only changes when the
@@ -1207,16 +1193,76 @@ if [ "$HERMES_WEBAPP_CAPABLE" = "1" ]; then
   fi
 fi
 
-# A bind that refuses the port and a sign-in gate that redirects every probe both look
-# like a dead tile, so report what the process itself claims. The status line carries
-# the whole interpreter invocation, which is hundreds of characters of noise.
-# /api/health answers 200 without sign-in on the gateway listener, which is why both
-# this wait and the tile healthcheck use it; / is a 302 to /login once the gate is on.
+# The tile's front: a stateless loopback forwarder that owns the tile port and hands
+# requests to the webapp looking like a local browser — Host rewritten to the bound
+# address, Origin dropped, forwarded-for headers dropped. The webapp validates Host on
+# HTTP and revalidates Host and Origin on the WebSocket upgrade (web_server_boundary.py
+# measures both against the bind while auth is off), so a proxied request carrying the
+# tile hostname would be refused on every path; after the front it is refused on none.
+# No credentials, no cookies, no UX: the perimeter stays Coder share=owner plus
+# Cloudflare Access, and the webapp never learns it has a public hostname at all.
+if [ "$HERMES_WEBAPP_CAPABLE" = "1" ]; then
+  HERMES_WEBAPP_FRONT_FILE=/home/coder/.local/share/dokploy/hermes-webapp-front.mjs
+  mkdir -p "$(dirname "$HERMES_WEBAPP_FRONT_FILE")"
+  cat >"$HERMES_WEBAPP_FRONT_FILE" <<'MJS'
+#!/usr/bin/env node
+// hermes-webapp-front: presents the Desktop webapp on the tile port. Loopback in,
+// loopback out; rewrites what the upstream boundary check looks at and nothing else.
+import http from "node:http";
+import net from "node:net";
+const BACKEND_PORT = Number.parseInt(process.env.HERMES_WEBAPP_INTERNAL_PORT || "9121", 10);
+const FRONT_PORT = Number.parseInt(process.env.PROXY_PORT || "9120", 10);
+const BACKEND_HOST = `127.0.0.1:$${BACKEND_PORT}`;
+function proxiedHeaders(req) {
+  const headers = { ...req.headers, host: BACKEND_HOST };
+  delete headers.origin;
+  delete headers["x-forwarded-for"];
+  delete headers["x-forwarded-host"];
+  delete headers["x-forwarded-proto"];
+  return headers;
+}
+const server = http.createServer((req, res) => {
+  const up = http.request(
+    { host: "127.0.0.1", port: BACKEND_PORT, path: req.url, method: req.method, headers: proxiedHeaders(req) },
+    (ur) => { res.writeHead(ur.statusCode || 502, ur.headers); ur.pipe(res); },
+  );
+  up.on("error", () => {
+    if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
+    res.end('{"detail":"hermes webapp backend unavailable"}');
+  });
+  req.pipe(up);
+});
+server.on("upgrade", (req, socket, head) => {
+  const headers = proxiedHeaders(req);
+  const raw = Object.entries(headers)
+    .map(([k, v]) => `$${k}: $${Array.isArray(v) ? v.join(", ") : v}`)
+    .join("\r\n");
+  const upstream = net.connect(BACKEND_PORT, "127.0.0.1", () => {
+    upstream.write(`$${req.method} $${req.url} HTTP/1.1\r\n$${raw}\r\n\r\n`);
+    if (head && head.length) upstream.write(head);
+    upstream.pipe(socket);
+    socket.pipe(upstream);
+  });
+  upstream.on("error", () => socket.destroy());
+  socket.on("error", () => upstream.destroy());
+});
+server.listen(FRONT_PORT, "127.0.0.1", () => console.log(`[hermes-webapp-front] 127.0.0.1:$${FRONT_PORT} -> $${BACKEND_HOST}`));
+MJS
+  # Bracketed pattern: a shell whose argv carries this script must not match its own kill.
+  pkill -f "hermes-webapp-front[.]mjs" >/dev/null 2>&1 || true
+  nohup env HERMES_WEBAPP_INTERNAL_PORT="$HERMES_WEBAPP_INTERNAL_PORT" PROXY_PORT="$HERMES_WEBAPP_PORT" node "$HERMES_WEBAPP_FRONT_FILE" >/tmp/hermes-webapp-front.log 2>&1 &
+fi
+
+# A dead front and a bind that refuses the port both look like a dead tile from
+# outside, so report what the process itself claims. The status line carries the whole
+# interpreter invocation, which is hundreds of characters of noise. /api/health is the
+# endpoint the webapp answers without a session, reached here through the front, which
+# is why both this wait and the tile healthcheck use it: they then prove the whole
+# chain the browser will traverse, not just one process of it.
 wait_for_http "http://127.0.0.1:$HERMES_WEBAPP_PORT$HERMES_WEBAPP_HEALTH_PATH" 300 || true
-# The sign-in form appears before anything in the workspace is readable, so the
-# username is stated in the startup output Coder shows while the workspace boots.
-echo "Hermes Desktop webapp: sign in as '$HERMES_WEBAPP_BASIC_AUTH_USERNAME' with your stack admin password"
+echo "Hermes Desktop webapp: no sign-in of its own; open it from the Coder tile (perimeter: Coder login + Cloudflare Access)"
 hermes webapp --status 2>&1 | sed -n '1,2p' | cut -c1-160 | sed 's/^/[hermes webapp] /' || true
+# end-webapp-bootstrap-block
 
 if ! wait_for_http "http://127.0.0.1:$HERMES_WEBUI_PORT/health" 1; then
   nohup env HERMES_HOME="$HERMES_HOME" HERMES_WEBUI_ALLOWED_ORIGINS="$HERMES_PUBLIC_ORIGIN" HERMES_WEBUI_TRUST_FORWARDED_HOST=1 HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR HERMES_WEBUI_STATE_DIR="$HERMES_HOME/webui" HERMES_WEBUI_SKIP_ONBOARDING=1 HERMES_WEBUI_DEFAULT_MODEL="$HERMES_MODEL" PYTHONPATH="$HERMES_INSTALL_DIR:$${PYTHONPATH:-}" python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install >/tmp/hermes-webui.log 2>&1 &
@@ -1251,10 +1297,12 @@ HERMES_PUBLIC_ORIGIN="$HERMES_PUBLIC_ORIGIN"
 HERMES_WEBUI_PORT="$HERMES_WEBUI_PORT"
 HERMES_WEBUI_PROXY_PORT="$HERMES_WEBUI_PROXY_PORT"
 HERMES_WEBAPP_PORT="$HERMES_WEBAPP_PORT"
+HERMES_WEBAPP_INTERNAL_PORT="$HERMES_WEBAPP_INTERNAL_PORT"
 HERMES_WEBAPP_HEALTH_PATH="$HERMES_WEBAPP_HEALTH_PATH"
 API_SERVER_PORT="$API_SERVER_PORT"
 WEBUI_SRC=/home/coder/.cache/hermes-webui-src
 PROXY_SCRIPT=/tmp/coder-mounted-proxy.mjs
+WEBAPP_FRONT=/home/coder/.local/share/dokploy/hermes-webapp-front.mjs
 BOOTSTRAP_PID_FILE=/tmp/hermes-workspace-bootstrap.pid
 STATE_DIR=/tmp/hermes-webui-watchdog
 RESTART_COOLDOWN_SECONDS=120
@@ -1271,10 +1319,15 @@ healthy() {
 }
 
 healthy_webapp() {
-  # /api/health answers 200 with no sign-in on the gateway listener; / is a 302 to
-  # /login once the gate is on, and judging by / would restart a healthy listener
-  # every cycle.
+  # The tile port is the whole chain the browser traverses: front and webapp listener.
+  # /api/health answers unsigned on the listener and the front passes it through, so
+  # this fails when either half dies.
   curl -fsS --max-time 5 "http://127.0.0.1:\$HERMES_WEBAPP_PORT\$HERMES_WEBAPP_HEALTH_PATH" \
+    >/dev/null 2>&1
+}
+
+healthy_webapp_backend() {
+  curl -fsS --max-time 5 "http://127.0.0.1:\$HERMES_WEBAPP_INTERNAL_PORT\$HERMES_WEBAPP_HEALTH_PATH" \
     >/dev/null 2>&1
 }
 
@@ -1308,11 +1361,18 @@ start_webui() {
   nohup env HERMES_HOME="\$HERMES_HOME" HERMES_WEBUI_ALLOWED_ORIGINS="\$HERMES_PUBLIC_ORIGIN" HERMES_WEBUI_TRUST_FORWARDED_HOST=1 HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=\$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=\$HERMES_INSTALL_DIR HERMES_WEBUI_STATE_DIR="\$HERMES_HOME/webui" HERMES_WEBUI_SKIP_ONBOARDING=1 HERMES_WEBUI_DEFAULT_MODEL="\$HERMES_MODEL" PYTHONPATH="\$HERMES_INSTALL_DIR" python3 "\$WEBUI_SRC/bootstrap.py" --no-browser --skip-agent-install >>/tmp/hermes-webui.log 2>&1 &
 }
 
+start_webapp_front() {
+  log "reviving Desktop webapp front on port \$HERMES_WEBAPP_PORT"
+  nohup env HERMES_WEBAPP_INTERNAL_PORT="\$HERMES_WEBAPP_INTERNAL_PORT" PROXY_PORT="\$HERMES_WEBAPP_PORT" node "\$WEBAPP_FRONT" >>/tmp/hermes-webapp-front.log 2>&1 &
+}
+
 restart_gateway_for_webapp() {
-  log "restarting hermes gateway so it serves the Desktop webapp on port \$HERMES_WEBAPP_PORT"
+  log "restarting hermes gateway so it serves the Desktop webapp on port \$HERMES_WEBAPP_INTERNAL_PORT"
   # The Webapp rides the gateway listener and its config is read only at start, so the
-  # gateway's own restart is the fix; there is no separate process to bring back.
+  # gateway's own restart is the fix. The front is stateless and starts beside it:
+  # answering 502 while the listener warms up is what the front is for.
   nohup hermes gateway restart >>/tmp/hermes-gateway-restart.log 2>&1 &
+  start_webapp_front
 }
 
 start_proxy() {
@@ -1334,7 +1394,14 @@ run_checks() {
   # branch above already owns bringing it back, and restarting from here too would
   # start the shared gateway twice.
   if ! healthy_webapp && healthy "\$API_SERVER_PORT" && ! took_cooldown webapp; then
-    restart_gateway_for_webapp
+    if healthy_webapp_backend; then
+      # Only the front died: the listener answers on its internal port, and restarting
+      # the gateway would drop every session the webapp holds for no reason.
+      pkill -f "hermes-webapp-front[.]mjs" >/dev/null 2>&1 || true
+      start_webapp_front
+    else
+      restart_gateway_for_webapp
+    fi
   fi
   # The proxy answers /health only by forwarding upstream, so judge it by process.
   if [ -f "\$PROXY_SCRIPT" ] && ! pgrep -f "node \$PROXY_SCRIPT" >/dev/null 2>&1 \
@@ -1413,8 +1480,9 @@ resource "coder_app" "hermes_desktop" {
   slug         = local.hermes_desktop_slug
   display_name = "Hermes Desktop (Web)"
   icon         = "https://raw.githubusercontent.com/NousResearch/hermes-agent/refs/heads/main/apps/desktop/assets/icon.png"
-  # Subdomain app: the webapp answers only for its own public hostname, so it cannot
-  # be mounted under /apps/<slug> the way the path-mounted community WebUI is.
+  # Subdomain app: the Desktop renderer is a root-path SPA with no base-path support,
+  # so it rides the Coder wildcard route rather than a /apps/<slug> mount. The port
+  # named here is the loopback front, never the webapp listener itself.
   url          = "http://localhost:9120"
   share        = "owner"
   subdomain    = true
@@ -1425,8 +1493,9 @@ resource "coder_app" "hermes_desktop" {
   order        = 3
 
   healthcheck {
-    # /health answers 302 -> /login once the sign-in gate is on, which reads as an
-    # unhealthy app; /api/health is the endpoint that answers without a session.
+    # /api/health is the endpoint the webapp answers without a session; the request
+    # reaches it through the loopback front, so a dead front or a dead listener both
+    # read unhealthy here, and only a live chain reads healthy.
     url       = "http://localhost:9120/api/health"
     interval  = 5
     threshold = 60
