@@ -303,12 +303,6 @@ class DokployCoderBackend:
                         self._ai_default_api_key or ""
                     ),
                     "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": f"https://{self._hostname}",
-                    # The official webapp pins the one hostname it will serve, and it is a
-                    # Coder app subdomain (<slug>--<workspace>--<user>.<suffix>), so the
-                    # template needs the wildcard suffix, not the Coder origin.
-                    "__DOKPLOY_WIZARD_CODER_WILDCARD_SUFFIX__": _wildcard_suffix(
-                        self._wildcard_hostname
-                    ),
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
                     "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__": _shell_double_quote_escape(
                         self._admin_password or "ChangeMeSoon"

@@ -670,6 +670,37 @@ def test_retired_template_names_cover_removed_templates() -> None:
     )
 
 
+def test_hermes_desktop_template_drives_commands_the_cli_actually_ships() -> None:
+    # An earlier version of this block drove `hermes webapp` with `webapp.*` config
+    # keys. Neither exists on the installed CLI (v0.22.5): it answered
+    # "'webapp' is not a `hermes` command" and stored the keys with a warning that it
+    # "may not read" them — which it does not. Everything asserted here was read off
+    # the box: --help, the plugin's own error text, and the served endpoints.
+    template = Path(
+        "templates/coder/default-ubuntu-vscode-hermes-desktop/main.tf"
+    ).read_text(encoding="utf-8")
+
+    assert "hermes webapp" not in template
+    assert "hermes config set webapp." not in template
+
+    # The webapp is `hermes dashboard`, bound by flag rather than by config.
+    assert 'hermes dashboard --host 0.0.0.0 --port "$HERMES_WEBAPP_PORT"' in template
+    assert "hermes dashboard --status" in template
+    # A wedged listener holds the port, and pkill cannot see the process: it runs
+    # behind a python launcher whose cmdline never contains "hermes dashboard".
+    assert "hermes dashboard --stop" in template
+    # The documented pre-build for --skip-build, and the path the server reads.
+    assert "npm run build" in template
+    assert "hermes_cli/web_dist" in template
+
+    # /health answers 302 -> /login once the sign-in gate is on, so both the tile
+    # healthcheck and the watchdog have to use the endpoint that answers unsigned.
+    assert 'HERMES_WEBAPP_HEALTH_PATH="/api/health"' in template
+    assert 'url       = "http://localhost:9120/api/health"' in template
+    assert "healthy_dashboard()" in template
+    assert '"http://127.0.0.1:\\$1/health"' in template  # the community WebUI keeps /health
+
+
 def test_coder_app_open_in_values_are_ones_the_provider_accepts() -> None:
     # The provider validates open_in during template import, so a value it does not
     # know costs a remote deploy cycle to discover: terraform plan fails and the
@@ -2881,10 +2912,10 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4-flash",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
-        # The official webapp is pinned to one hostname, which is a Coder app
-        # subdomain, so the template needs the wildcard suffix and the sign-in password.
+        # The webapp needs no hostname token: Coder's subdomain app routing derives the
+        # app hostname itself and the dashboard accepts any Host (measured on the box),
+        # so this template gets the Coder origin for the community WebUI and nothing more.
         "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": "https://coder.example.com",
-        "__DOKPLOY_WIZARD_CODER_WILDCARD_SUFFIX__": "coder.example.com",
         "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__": "ChangeMeSoon",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
