@@ -22,7 +22,7 @@ DEFAULT_LOCAL_API_KEY = "sk-no-key-required"
 DEFAULT_OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 # Mirrors the wizard-wide AI default model so the default alias route exists
 # even when AI_DEFAULT_* are left unset.
-_DEFAULT_OPENCODE_GO_MODEL = "deepseek-v4-flash"
+_DEFAULT_OPENCODE_GO_MODEL = "deepseek-v4.1-flash"
 _NVIDIA_MODEL_SETTINGS_RESOURCE = "nvidia_model_settings.json"
 
 

@@ -72,7 +72,7 @@ from dokploy_wizard.state.models import (
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 _DOKPLOY_AI_PROVIDER_NAME = "Dokploy Wizard LiteLLM"
-_DEFAULT_REMOTE_MODEL_ALIAS = "opencode-go/deepseek-v4-flash"
+_DEFAULT_REMOTE_MODEL_ALIAS = "opencode-go/deepseek-v4.1-flash"
 
 
 class DokploySharedCoreApi(Protocol):

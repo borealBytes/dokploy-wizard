@@ -34,7 +34,7 @@ from .fake_dokploy import FakeDokployApiClient
 
 def _expected_coder_fallback_models_json() -> str:
     return coder_module._litellm_workspace_fallback_models_json(
-        default_alias="opencode-go/deepseek-v4-flash"
+        default_alias="opencode-go/deepseek-v4.1-flash"
     )
 
 
@@ -48,8 +48,8 @@ def test_coder_litellm_fallback_models_json_is_minimal_default_alias() -> None:
     # The workspace fetches the full live model set from /v1/models at boot; the
     # baked fallback is only the always-present default alias route. Stale
     # hardcoded samples (e.g. retired openrouter free slugs) must not reappear.
-    assert aliases == ["opencode-go/deepseek-v4-flash"]
-    assert "deepseek-v4-flash" not in aliases
+    assert aliases == ["opencode-go/deepseek-v4.1-flash"]
+    assert "deepseek-v4.1-flash" not in aliases
     assert "minimax/minimax-m2.5:free" not in aliases
     assert "opencode-go/minimax-m2.7" not in aliases
     assert "opencode-go/*" not in aliases
@@ -180,7 +180,7 @@ def test_copilot_byok_settings_json_contains_litellm_models() -> None:
 
     custom_models = settings["github.copilot.chat.customOAIModels"]
     assert "local-model.internal/unsloth-active" in custom_models
-    assert "opencode-go/deepseek-v4-flash" in custom_models
+    assert "opencode-go/deepseek-v4.1-flash" in custom_models
     default_model = custom_models["local-model.internal/unsloth-active"]
     assert default_model["name"] == "Dokploy LiteLLM: local-model.internal/unsloth-active"
     assert default_model["url"] == "http://wizard-stack-shared-litellm:4000/v1"
@@ -976,7 +976,7 @@ def test_default_kdense_byok_template_includes_upstream_parameterized_stack() ->
     assert 'clone["id"] = "openai/" + option_value[len("openrouter/"):]' in template
     assert 'clone["provider"] = "OpenCode Go"' in template
     assert "option_value.removeprefix(\"openrouter/\")" in template
-    assert '"id": "openai/deepseek-v4-flash"' not in template
+    assert '"id": "openai/deepseek-v4.1-flash"' not in template
     assert "KDENSE_SETUP_STAMP=/home/coder/.cache/kdense-byok-setup-rev" in template
     assert "KDENSE_SETUP_KEY=v11-central-litellm-only" in template
     assert (
@@ -1372,7 +1372,7 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
     assert template_replacements_by_name[coder_module._base_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1380,7 +1380,7 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1388,7 +1388,7 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1495,7 +1495,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     assert template_replacements_by_name[coder_module._base_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1503,7 +1503,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1719,7 +1719,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     assert secret_sync_calls == [
         (
                 "dokploy-litellm",
-                "opencode-go/deepseek-v4-flash",
+                "opencode-go/deepseek-v4.1-flash",
                 "http://wizard-stack-shared-litellm:4000",
         )
     ]
@@ -2891,7 +2891,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -2899,7 +2899,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -2907,7 +2907,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -2915,7 +2915,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert template_replacements_by_name[coder_module._default_hermes_desktop_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
         # The webapp needs no hostname token: Coder's subdomain app routing derives the
@@ -2940,7 +2940,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         (
             "wizard-stack-coder-container",
             "dokploy-litellm",
-            "opencode-go/deepseek-v4-flash",
+            "opencode-go/deepseek-v4.1-flash",
             None,
         )
     ]

@@ -2735,7 +2735,7 @@ def _shared_ai_default_model(raw_env: RawEnvInput) -> str:
     provider = _shared_ai_default_provider(raw_env)
     value = raw_env.values.get("AI_DEFAULT_MODEL")
     if value is None or value.strip() == "":
-        return "deepseek-v4-flash"
+        return "deepseek-v4.1-flash"
     normalized = value.strip()
     prefix = f"{provider}/"
     if normalized.startswith(prefix):

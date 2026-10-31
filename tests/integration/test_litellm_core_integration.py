@@ -56,7 +56,7 @@ from tests.integration.test_openclaw_pack import (
 # Static OpenCode Go routes are just the default alias; the full catalog is
 # autosynced under sync/opencode-go/*.
 _EXPECTED_OPENCODE_GO_CHAT_ALIASES = (
-    "opencode-go/deepseek-v4-flash",
+    "opencode-go/deepseek-v4.1-flash",
 )
 
 
@@ -347,8 +347,8 @@ def test_build_litellm_config_integrates_all_supported_provider_types() -> None:
         "api_base": "http://local-model.internal:61434/v1",
         "api_key": "sk-no-key-required",
     }
-    assert entries["opencode-go/deepseek-v4-flash"]["litellm_params"] == {
-        "model": "openai/deepseek-v4-flash",
+    assert entries["opencode-go/deepseek-v4.1-flash"]["litellm_params"] == {
+        "model": "openai/deepseek-v4.1-flash",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
         "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
@@ -381,7 +381,7 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
     allowlists = build_litellm_consumer_model_allowlists(
         flat_env=_litellm_route_env(
             MY_FARM_ADVISOR_PRIMARY_MODEL="nvidia/kimi-k2.5",
-            MY_FARM_ADVISOR_FALLBACK_MODELS="opencode-go/deepseek-v4-flash",
+            MY_FARM_ADVISOR_FALLBACK_MODELS="opencode-go/deepseek-v4.1-flash",
             OPENCLAW_PRIMARY_MODEL="openrouter/hunter-alpha",
             OPENCLAW_FALLBACK_MODELS="opencode-go/mimo-v2.5",
         ),
@@ -403,7 +403,7 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
         "openclaw": shared_models,
         "surfsense": shared_models,
     }
-    assert "opencode-go/deepseek-v4-flash" in allowlists["my-farm-advisor"]
+    assert "opencode-go/deepseek-v4.1-flash" in allowlists["my-farm-advisor"]
 
 
 def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases() -> None:
@@ -471,7 +471,7 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
         "surfsense": shared_models,
     }
     assert "opencode-go/*" not in allowlists["openclaw"]
-    assert "opencode-go/deepseek-v4-flash" in allowlists["openclaw"]
+    assert "opencode-go/deepseek-v4.1-flash" in allowlists["openclaw"]
     assert "opencode-go/text-embedding-3-large" not in allowlists["openclaw"]
     assert "opencode-go/dall-e-3" not in allowlists["openclaw"]
     assert "opencode-go/whisper-1" not in allowlists["openclaw"]

@@ -71,9 +71,9 @@ class _ComposeLocator:
 
 
 _DEFAULT_AI_DEFAULT_PROVIDER = "opencode-go"
-_DEFAULT_AI_DEFAULT_MODEL = "deepseek-v4-flash"
+_DEFAULT_AI_DEFAULT_MODEL = "deepseek-v4.1-flash"
 _DEFAULT_HERMES_INFERENCE_PROVIDER = "dokploy-litellm"
-_DEFAULT_HERMES_MODEL = "opencode-go/deepseek-v4-flash"
+_DEFAULT_HERMES_MODEL = "opencode-go/deepseek-v4.1-flash"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_INTERNAL_PORT = 4000
 _COPILOT_BYOK_SETTING_KEY = "github.copilot.chat.customOAIModels"

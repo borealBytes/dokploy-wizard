@@ -330,7 +330,7 @@ def test_sidecar_applies_source_extra_headers(
         calls.append((method, url, payload))
         if url.endswith("/v1/models"):
             assert token == "zen-upstream-key"
-            return {"data": [{"id": "deepseek-v4-flash"}]}
+            return {"data": [{"id": "deepseek-v4.1-flash"}]}
         if url.endswith("/model/info"):
             return {"data": []}
         return {}
@@ -341,9 +341,9 @@ def test_sidecar_applies_source_extra_headers(
 
     assert summary["created"] == 1
     create = next(call for call in calls if call[1].endswith("/model/new"))
-    assert create[2]["model_name"] == "sync/opencode-go/deepseek-v4-flash"
+    assert create[2]["model_name"] == "sync/opencode-go/deepseek-v4.1-flash"
     assert create[2]["litellm_params"] == {
-        "model": "openai/deepseek-v4-flash",
+        "model": "openai/deepseek-v4.1-flash",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "zen-upstream-key",
         "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
@@ -383,13 +383,13 @@ def test_sidecar_keeps_models_when_source_fetch_fails(
 _RANKED_CATALOG = {
     "data": [
         {
-            "id": "deepseek/deepseek-v4-flash",
-            "canonical_slug": "deepseek/deepseek-v4-flash-20260423",
+            "id": "deepseek/deepseek-v4.1-flash",
+            "canonical_slug": "deepseek/deepseek-v4.1-flash-20260423",
             "architecture": {"output_modalities": ["text"]},
         },
         {
-            "id": "deepseek/deepseek-v4-flash:free",
-            "canonical_slug": "deepseek/deepseek-v4-flash-20260423",
+            "id": "deepseek/deepseek-v4.1-flash:free",
+            "canonical_slug": "deepseek/deepseek-v4.1-flash-20260423",
             "architecture": {"output_modalities": ["text"]},
         },
         {
@@ -441,13 +441,13 @@ def _ranked_rows() -> dict:
     return {
         "data": [
             {"model_permaslug": "openai/gpt-6-luna-20260922", "variant": "standard", "rankingMetricValue": 35},
-            {"model_permaslug": "deepseek/deepseek-v4-flash-20260423", "variant": "standard", "rankingMetricValue": 25},
-            {"model_permaslug": "deepseek/deepseek-v4-flash-20260423", "variant": "standard", "rankingMetricValue": 15},
+            {"model_permaslug": "deepseek/deepseek-v4.1-flash-20260423", "variant": "standard", "rankingMetricValue": 25},
+            {"model_permaslug": "deepseek/deepseek-v4.1-flash-20260423", "variant": "standard", "rankingMetricValue": 15},
             {"model_permaslug": "anthropic/visionary-pro-20260101", "variant": "standard", "rankingMetricValue": 33},
             {"model_permaslug": "z-ai/glm-5.3-20260816", "variant": "standard", "rankingMetricValue": 30},
             {"model_permaslug": "tencent/hy4-preview-20260827", "variant": "standard", "rankingMetricValue": 10},
             {"model_permaslug": "xiaomi/mimo-v2.6-flash-20260921", "variant": "free", "rankingMetricValue": 20},
-            {"model_permaslug": "deepseek/deepseek-v4-flash-20260423", "variant": "free", "rankingMetricValue": 5},
+            {"model_permaslug": "deepseek/deepseek-v4.1-flash-20260423", "variant": "free", "rankingMetricValue": 5},
         ]
     }
 
@@ -477,11 +477,11 @@ def test_sidecar_ranks_openrouter_models_paid_then_free_by_leaderboard(
     model_ids = sidecar.source_model_ids(_ranked_source(), 50)
 
     assert model_ids == [
-        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4.1-flash",
         "z-ai/glm-5.3",
         "tencent/hy4-preview",
         "xiaomi/mimo-v2.6-flash:free",
-        "deepseek/deepseek-v4-flash:free",
+        "deepseek/deepseek-v4.1-flash:free",
     ]
     rankings_call = next(call for call in calls if call[1].endswith("/rankings/models"))
     assert rankings_call[2] is None
@@ -493,7 +493,7 @@ def test_sidecar_ranked_total_cap_and_fallback(
     sidecar = _load_sidecar(tmp_path, monkeypatch)
     sidecar.http_json, _calls = _ranked_transport(monkeypatch, _ranked_rows())
     assert sidecar.source_model_ids(_ranked_source(max_models=2), 50) == [
-        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4.1-flash",
         "z-ai/glm-5.3",
     ]
 
@@ -502,8 +502,8 @@ def test_sidecar_ranked_total_cap_and_fallback(
     )
     fallback = sidecar.source_model_ids(_ranked_source(max_models=3), 50)
     assert fallback == [
-        "deepseek/deepseek-v4-flash",
-        "deepseek/deepseek-v4-flash:free",
+        "deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-v4.1-flash:free",
         "z-ai/glm-5.3",
     ]
 
@@ -540,7 +540,7 @@ def test_sidecar_refreshes_consumer_key_allowlists(
     calls: list[tuple[str, str, dict | None]] = []
 
     current_models = [
-        "opencode-go/deepseek-v4-flash",
+        "opencode-go/deepseek-v4.1-flash",
         "sync/*",
         "sync/openrouter/stale/gone-model",
     ]
@@ -568,7 +568,7 @@ def test_sidecar_refreshes_consumer_key_allowlists(
     # The stale sync alias is dropped, the wildcard and static route survive,
     # and the freshly created alias is appended.
     assert update[2]["models"] == [
-        "opencode-go/deepseek-v4-flash",
+        "opencode-go/deepseek-v4.1-flash",
         "sync/*",
         "sync/openrouter/deepseek/new-thing",
     ]
@@ -1044,17 +1044,19 @@ class _HttpError(Exception):
 @pytest.mark.parametrize(
     ("model_id", "expected"),
     [
-        ("deepseek-v4.10-flash", (4, 10)),
-        ("deepseek-v4.1-flash", (4, 1)),
-        ("deepseek-v4-flash", (4,)),
+        # Synthetic ids on purpose: a real model name here goes stale the moment the
+        # provider renames it, which is exactly what happened to the shipped default.
+        ("deepseek-v9.10-flash", (9, 10)),
+        ("deepseek-v9.1-flash", (9, 1)),
+        ("deepseek-v9-flash", (9,)),
         ("deepseek-flash", (0,)),
     ],
 )
 def test_version_rank_orders_by_numbers_not_characters(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_id: str, expected: tuple
 ) -> None:
-    # "v4.10" sorts below "v4.2" as a string, which would hand the default alias to an
-    # older model forever; the tuple comparison is what makes 4.10 outrank 4.2.
+    # "v9.10" sorts below "v9.2" as a string, which would hand the default alias to an
+    # older model forever; the tuple comparison is what makes 9.10 outrank 9.2.
     sidecar = _load_sidecar(tmp_path, monkeypatch)
 
     assert sidecar.version_rank(model_id) == expected
@@ -1068,9 +1070,9 @@ def test_default_chat_candidates_rank_newest_first_with_catalog_order_on_ties(
     sidecar.http_json, _calls = _selection_transport(
         monkeypatch,
         [
-            "deepseek-v4.1-flash",
-            "deepseek-v4.10-flash",
-            "deepseek-v4-flash",
+            "deepseek-v9.1-flash",
+            "deepseek-v9.10-flash",
+            "deepseek-v9-flash",
             "glm-4.6-air",  # does not match the pattern
             "kimi-k2",
         ],
@@ -1080,7 +1082,7 @@ def test_default_chat_candidates_rank_newest_first_with_catalog_order_on_ties(
         document["sources"][0], "go-key", "deepseek*flash*"
     )
 
-    assert candidates == ["deepseek-v4.10-flash", "deepseek-v4.1-flash", "deepseek-v4-flash"]
+    assert candidates == ["deepseek-v9.10-flash", "deepseek-v9.1-flash", "deepseek-v9-flash"]
 
 
 def test_default_chat_promotes_the_confirmed_model_before_retiring_the_old_one(

@@ -49,7 +49,7 @@ _RUNTIME_APP_ENV_KEYS = (
 )
 _DEFAULT_NVIDIA_PRIMARY_MODEL = "nvidia/moonshotai/kimi-k2.5"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
-_DEFAULT_REMOTE_FALLBACK_MODEL = "opencode-go/deepseek-v4-flash"
+_DEFAULT_REMOTE_FALLBACK_MODEL = "opencode-go/deepseek-v4.1-flash"
 _DEFAULT_DOKPLOY_ADMIN_EMAIL = "admin@example.com"
 _DEFAULT_MY_FARM_CHANNEL = "telegram"
 _OPENCLAW_RUNTIME_ENV_KEYS = tuple(

@@ -74,7 +74,7 @@ _OPTIONAL_COMMENTED_KEYS = frozenset(
     }
 )
 _DEFAULT_AI_PROVIDER = "opencode-go"
-_DEFAULT_AI_MODEL = "deepseek-v4-flash"
+_DEFAULT_AI_MODEL = "deepseek-v4.1-flash"
 
 
 def _repo_root():
@@ -184,7 +184,7 @@ def test_minimal_env_contract_key_categories_are_explicit_and_secret_free() -> N
     assert _ALWAYS_REQUIRED_KEYS <= categorized_keys
     assert _GENERATED_STATE_BACKED_KEYS.isdisjoint(_LIVE_BOOTSTRAP_REQUIRED_KEYS)
     assert _DEFAULT_AI_PROVIDER == "opencode-go"
-    assert _DEFAULT_AI_MODEL == "deepseek-v4-flash"
+    assert _DEFAULT_AI_MODEL == "deepseek-v4.1-flash"
 
 
 def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> None:
@@ -559,7 +559,7 @@ def test_litellm_nvidia_models_accept_user_style_raw_model_ids() -> None:
         LITELLM_NVIDIA_BASE_URL="https://integrate.api.nvidia.example.com/v1",
         LITELLM_NVIDIA_MODELS=(
             "moonshotai/kimi-k2.6,"
-            "deepseek-ai/deepseek-v4-flash,"
+            "deepseek-ai/deepseek-v4.1-flash,"
             "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
         ),
         AI_DEFAULT_PROVIDER="nvidia",
@@ -569,8 +569,8 @@ def test_litellm_nvidia_models_accept_user_style_raw_model_ids() -> None:
     assert env_module.parse_litellm_nvidia_models(raw_env.values) == (
         ("nvidia/moonshotai/kimi-k2.6", "nvidia/moonshotai/kimi-k2.6"),
         (
-            "nvidia/deepseek-ai/deepseek-v4-flash",
-            "nvidia/deepseek-ai/deepseek-v4-flash",
+            "nvidia/deepseek-ai/deepseek-v4.1-flash",
+            "nvidia/deepseek-ai/deepseek-v4.1-flash",
         ),
         (
             "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",

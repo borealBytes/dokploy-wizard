@@ -917,7 +917,7 @@ def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults()
 
     for parsed in examples.values():
         assert parsed.values["AI_DEFAULT_PROVIDER"] == "openrouter"
-        assert parsed.values["AI_DEFAULT_MODEL"] == "deepseek/deepseek-v4-flash:free"
+        assert parsed.values["AI_DEFAULT_MODEL"] == "deepseek/deepseek-v4.1-flash"
         assert "ENABLE_MY_FARM_ADVISOR" not in parsed.values
         resolve_desired_state(parsed)
 
@@ -2958,7 +2958,7 @@ def test_modify_shared_ai_defaults_rerun_only_selected_advisor_phases() -> None:
         ),
         requested_values=_farm_modify_values(
             AI_DEFAULT_PROVIDER="opencode-go",
-            AI_DEFAULT_MODEL="deepseek-v4-flash",
+            AI_DEFAULT_MODEL="deepseek-v4.1-flash",
         ),
     )
     both_advisors_plan = _classify_modify_plan(
@@ -3018,7 +3018,7 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
             SEAWEEDFS_SECRET_KEY="seaweed-secret",
             LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
             AI_DEFAULT_PROVIDER="opencode-go",
-            AI_DEFAULT_MODEL="deepseek-v4-flash",
+            AI_DEFAULT_MODEL="deepseek-v4.1-flash",
         ),
         requested_values=_farm_modify_values(
             ENABLE_OPENCLAW="true",
@@ -3028,7 +3028,7 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
             SEAWEEDFS_SECRET_KEY="seaweed-secret",
             LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-2",
             AI_DEFAULT_PROVIDER="opencode-go",
-            AI_DEFAULT_MODEL="deepseek-v4-flash",
+            AI_DEFAULT_MODEL="deepseek-v4.1-flash",
         ),
     )
 
@@ -3042,7 +3042,7 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
             LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
             LITELLM_OPENCODE_GO_WILDCARD="false",
             AI_DEFAULT_PROVIDER="opencode-go",
-            AI_DEFAULT_MODEL="deepseek-v4-flash",
+            AI_DEFAULT_MODEL="deepseek-v4.1-flash",
         ),
         requested_values=_farm_modify_values(
             ENABLE_OPENCLAW="true",
@@ -3053,7 +3053,7 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
             LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
             LITELLM_OPENCODE_GO_WILDCARD="true",
             AI_DEFAULT_PROVIDER="opencode-go",
-            AI_DEFAULT_MODEL="deepseek-v4-flash",
+            AI_DEFAULT_MODEL="deepseek-v4.1-flash",
         ),
     )
 
@@ -3537,7 +3537,7 @@ def test_guided_install_defaults_openclaw_to_telegram_when_matrix_disabled() -> 
             "y",  # openrouter key default yes
             "or-key",
             "",  # primary model default nvidia/moonshotai/kimi-k2.5
-            "",  # fallback model default opencode-go/deepseek-v4-flash
+            "",  # fallback model default opencode-go/deepseek-v4.1-flash
             "bot-token",
             "123456789",
             "n",  # my farm advisor default no
@@ -3559,7 +3559,7 @@ def test_guided_install_defaults_openclaw_to_telegram_when_matrix_disabled() -> 
     }
     assert selection.advisor_env == {
         "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
-        "OPENCLAW_FALLBACK_MODELS": "opencode-go/deepseek-v4-flash",
+        "OPENCLAW_FALLBACK_MODELS": "opencode-go/deepseek-v4.1-flash",
         "OPENCLAW_NVIDIA_API_KEY": "nv-key",
         "OPENCLAW_OPENROUTER_API_KEY": "or-key",
         "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
@@ -3607,7 +3607,7 @@ def test_guided_install_keeps_matrix_default_for_openclaw_when_matrix_enabled() 
     }
     assert selection.advisor_env["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
     assert selection.advisor_env["OPENCLAW_PRIMARY_MODEL"] == "nvidia/moonshotai/kimi-k2.5"
-    assert selection.advisor_env["OPENCLAW_FALLBACK_MODELS"] == "opencode-go/deepseek-v4-flash"
+    assert selection.advisor_env["OPENCLAW_FALLBACK_MODELS"] == "opencode-go/deepseek-v4.1-flash"
     assert "OPENCLAW_TELEGRAM_BOT_TOKEN" not in selection.advisor_env
 
 

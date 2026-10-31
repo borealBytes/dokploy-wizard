@@ -793,7 +793,7 @@ def test_modify_coder_hermes_env_change_reruns_coder() -> None:
             "ENABLE_CODER": "true",
             "AI_DEFAULT_API_KEY": "old-key",
             "HERMES_INFERENCE_PROVIDER": "opencode-go",
-            "HERMES_MODEL": "deepseek-v4-flash",
+            "HERMES_MODEL": "deepseek-v4.1-flash",
             "AI_DEFAULT_BASE_URL": "https://opencode.ai/zen/go/v1",
         }
     )
@@ -941,15 +941,15 @@ def test_modify_litellm_desired_only_local_alias_removal_reruns_consumers() -> N
             "ROOT_DOMAIN": "example.com",
             "PACKS": "coder,my-farm-advisor,nextcloud",
             "AI_DEFAULT_PROVIDER": "openrouter",
-            "AI_DEFAULT_MODEL": "deepseek/deepseek-v4-flash:free",
+            "AI_DEFAULT_MODEL": "deepseek/deepseek-v4.1-flash:free",
             "LITELLM_OPENROUTER_API_KEY": "sk-test-openrouter",
-            "LITELLM_OPENROUTER_MODELS": "deepseek/deepseek-v4-flash:free",
+            "LITELLM_OPENROUTER_MODELS": "deepseek/deepseek-v4.1-flash:free",
         }
     )
     requested_desired = resolve_desired_state(raw)
     assert requested_desired.shared_core.litellm is not None
     assert requested_desired.shared_core.litellm.default_model_alias_order == (
-        "openrouter/deepseek/deepseek-v4-flash:free",
+        "openrouter/deepseek/deepseek-v4.1-flash:free",
     )
 
     legacy_litellm = replace(

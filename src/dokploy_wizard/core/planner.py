@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from dokploy_wizard.dokploy.env_spec import DokployEnvSpec
 
 _DEFAULT_LITELLM_ALIAS_ORDER = (
-    "opencode-go/deepseek-v4-flash",
+    "opencode-go/deepseek-v4.1-flash",
     # PAUSED: OpenCode Go route — will re-enable later.
     # "opencode-go/*",
     # PAUSED: OpenRouter route — will re-enable later.
