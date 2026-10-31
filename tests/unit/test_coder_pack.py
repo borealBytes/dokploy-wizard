@@ -740,6 +740,16 @@ def test_hermes_desktop_template_drives_commands_the_cli_actually_ships() -> Non
     assert 'PROXY_PORT="$HERMES_WEBAPP_PORT"' in template
     assert "no sign-in of its own" in template
     assert "sign in as '" not in code
+    # The HTTP 200 that proves the boundary is happy is NOT the app opening: the
+    # Desktop bundle refuses to boot without its sessionStorage credential (the
+    # WEBAPP_LAUNCH_REQUIRED card), which a curl-only check cannot see. The front
+    # must hand the page the gateway's stored browser credential, and the listener's
+    # own trust-proxy patch (when applied) is signalled by the marker file.
+    assert 'hermes.webapp.session.v1' in template
+    assert "sessionStorage.setItem" in template
+    assert '"webapp", "session-token"' in template
+    assert "$HERMES_HOME/webapp/trust-proxy" in template
+    assert 'nohup env HERMES_HOME="$HERMES_HOME"' in template
 
     # The old dashboard is gone from this path, not layered behind the new UI. The one
     # mention left is the comment that says it is not the dashboard; the auth env keys

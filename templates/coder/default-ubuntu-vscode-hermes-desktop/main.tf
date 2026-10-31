@@ -1193,26 +1193,54 @@ if [ "$HERMES_WEBAPP_CAPABLE" = "1" ]; then
   fi
 fi
 
-# The tile's front: a stateless loopback forwarder that owns the tile port and hands
-# requests to the webapp looking like a local browser — Host rewritten to the bound
-# address, Origin dropped, forwarded-for headers dropped. The webapp validates Host on
-# HTTP and revalidates Host and Origin on the WebSocket upgrade (web_server_boundary.py
-# measures both against the bind while auth is off), so a proxied request carrying the
-# tile hostname would be refused on every path; after the front it is refused on none.
-# No credentials, no cookies, no UX: the perimeter stays Coder share=owner plus
-# Cloudflare Access, and the webapp never learns it has a public hostname at all.
+# The tile's front: a loopback forwarder that owns the tile port and hands requests to
+# the webapp looking like a local browser — Host rewritten to the bound address, Origin
+# dropped, forwarded-for headers dropped. The webapp validates Host on HTTP and
+# revalidates Host and Origin on the WebSocket upgrade (web_server_boundary.py measures
+# both against the bind while auth is off), so a proxied request carrying the tile
+# hostname would be refused on every path; after the front it is refused on none.
+#
+# It also signs the browser in — the part a curl-level proof misses. The Desktop bundle
+# keeps its credential in sessionStorage, normally placed there by the one-use launch
+# link from `hermes webapp` (browser-launch-session.ts raises WEBAPP_LAUNCH_REQUIRED
+# without it and renders a dead "Sign in to Hermes" card). A tile browser is already
+# authenticated upstream by Coder and cannot run that command, so the front reads the
+# gateway's stored browser credential from $HERMES_HOME/webapp/session-token and
+# injects the same sessionStorage grant into the entry page (text/html only, skipped
+# when the page already carries a grant, e.g. from the patched listener itself). The
+# perimeter argument is unchanged: the only reachable path to the listener is Coder
+# behind Cloudflare Access, which is exactly the browser this hands the credential to.
 if [ "$HERMES_WEBAPP_CAPABLE" = "1" ]; then
+  # Serve-side opt-in for the webapp's own trust-proxy patch (marker-only here; the
+  # patch itself lives in the Hermes checkout and may or may not be applied). With the
+  # patch present the listener injects the grant itself and the front stands down;
+  # without it the front injects. Either way the tile works after a rebuild.
+  mkdir -p "$HERMES_HOME/webapp"
+  printf '%s\n' "The Webapp on this loopback listener is reached through an authenticating proxy." \
+    "Its browsers are signed in by that proxy, so the page carries the browser credential." \
+    >"$HERMES_HOME/webapp/trust-proxy"
+  chmod 600 "$HERMES_HOME/webapp/trust-proxy"
+
   HERMES_WEBAPP_FRONT_FILE=/home/coder/.local/share/dokploy/hermes-webapp-front.mjs
   mkdir -p "$(dirname "$HERMES_WEBAPP_FRONT_FILE")"
   cat >"$HERMES_WEBAPP_FRONT_FILE" <<'MJS'
 #!/usr/bin/env node
 // hermes-webapp-front: presents the Desktop webapp on the tile port. Loopback in,
-// loopback out; rewrites what the upstream boundary check looks at and nothing else.
+// loopback out; rewrites what the upstream boundary check looks at, and hands the
+// browser the credential a launch link would have left there.
 import http from "node:http";
 import net from "node:net";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 const BACKEND_PORT = Number.parseInt(process.env.HERMES_WEBAPP_INTERNAL_PORT || "9121", 10);
 const FRONT_PORT = Number.parseInt(process.env.PROXY_PORT || "9120", 10);
 const BACKEND_HOST = `127.0.0.1:$${BACKEND_PORT}`;
+const SESSION_KEY = "hermes.webapp.session.v1";
+const TOKEN_FILE = process.env.HERMES_WEBAPP_TOKEN_FILE
+  || path.join(process.env.HERMES_HOME || path.join(os.homedir(), ".hermes"), "webapp", "session-token");
+
 function proxiedHeaders(req) {
   const headers = { ...req.headers, host: BACKEND_HOST };
   delete headers.origin;
@@ -1221,10 +1249,50 @@ function proxiedHeaders(req) {
   delete headers["x-forwarded-proto"];
   return headers;
 }
+
+function signInScript() {
+  let token = "";
+  try {
+    token = fs.readFileSync(TOKEN_FILE, "utf8").trim();
+  } catch {
+    return "";
+  }
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return "";
+  return `<script>/* authenticated upstream: sign this browser in */try{sessionStorage.setItem("$${SESSION_KEY}:"+JSON.stringify([location.origin,window.__HERMES_BASE_PATH__||""]),$${JSON.stringify(token)})}catch(e){}</script>`;
+}
+
+function injectSignIn(html) {
+  if (html.includes(SESSION_KEY)) return html;
+  const script = signInScript();
+  if (!script) return html;
+  const head = html.match(/<head[^>]*>/i);
+  return head ? html.slice(0, head.index + head[0].length) + script + html.slice(head.index + head[0].length)
+    : script + html;
+}
+
 const server = http.createServer((req, res) => {
   const up = http.request(
     { host: "127.0.0.1", port: BACKEND_PORT, path: req.url, method: req.method, headers: proxiedHeaders(req) },
-    (ur) => { res.writeHead(ur.statusCode || 502, ur.headers); ur.pipe(res); },
+    (ur) => {
+      const type = String(ur.headers["content-type"] || "");
+      const buffer = req.method !== "HEAD" && type.startsWith("text/html") && !ur.headers["content-encoding"];
+      if (!buffer) {
+        res.writeHead(ur.statusCode || 502, ur.headers);
+        ur.pipe(res);
+        return;
+      }
+      const chunks = [];
+      ur.on("data", (chunk) => chunks.push(chunk));
+      ur.on("end", () => {
+        const body = injectSignIn(Buffer.concat(chunks).toString("utf8"));
+        const headers = { ...ur.headers };
+        delete headers["content-length"];
+        delete headers.etag;
+        headers["content-length"] = Buffer.byteLength(body);
+        res.writeHead(ur.statusCode || 502, headers);
+        res.end(body);
+      });
+    },
   );
   up.on("error", () => {
     if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
@@ -1250,7 +1318,7 @@ server.listen(FRONT_PORT, "127.0.0.1", () => console.log(`[hermes-webapp-front] 
 MJS
   # Bracketed pattern: a shell whose argv carries this script must not match its own kill.
   pkill -f "hermes-webapp-front[.]mjs" >/dev/null 2>&1 || true
-  nohup env HERMES_WEBAPP_INTERNAL_PORT="$HERMES_WEBAPP_INTERNAL_PORT" PROXY_PORT="$HERMES_WEBAPP_PORT" node "$HERMES_WEBAPP_FRONT_FILE" >/tmp/hermes-webapp-front.log 2>&1 &
+  nohup env HERMES_HOME="$HERMES_HOME" HERMES_WEBAPP_INTERNAL_PORT="$HERMES_WEBAPP_INTERNAL_PORT" PROXY_PORT="$HERMES_WEBAPP_PORT" node "$HERMES_WEBAPP_FRONT_FILE" >/tmp/hermes-webapp-front.log 2>&1 &
 fi
 
 # A dead front and a bind that refuses the port both look like a dead tile from
@@ -1363,7 +1431,7 @@ start_webui() {
 
 start_webapp_front() {
   log "reviving Desktop webapp front on port \$HERMES_WEBAPP_PORT"
-  nohup env HERMES_WEBAPP_INTERNAL_PORT="\$HERMES_WEBAPP_INTERNAL_PORT" PROXY_PORT="\$HERMES_WEBAPP_PORT" node "\$WEBAPP_FRONT" >>/tmp/hermes-webapp-front.log 2>&1 &
+  nohup env HERMES_HOME="\$HERMES_HOME" HERMES_WEBAPP_INTERNAL_PORT="\$HERMES_WEBAPP_INTERNAL_PORT" PROXY_PORT="\$HERMES_WEBAPP_PORT" node "\$WEBAPP_FRONT" >>/tmp/hermes-webapp-front.log 2>&1 &
 }
 
 restart_gateway_for_webapp() {

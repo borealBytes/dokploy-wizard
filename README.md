@@ -281,9 +281,11 @@ On first successful bootstrap the wizard:
 
 The Desktop tile opens with no sign-in of its own: the gateway binds `127.0.0.1`,
 declares no public hostname (upstream ties a declared public URL to a second
-login flow), and a stateless loopback forwarder presents the tile port to Coder's
-proxy. The perimeter is: no published port, `127.0.0.1` bind, `share = "owner"` on
-the Coder app, and Cloudflare Access in front.
+login flow), and a loopback forwarder presents the tile port to Coder's proxy and
+hands the browser the gateway's stored credential the way the Desktop app itself
+would. The perimeter is: no published port, `127.0.0.1` bind, `share = "owner"` on
+the Coder app, and Cloudflare Access in front — the page carries the credential to
+exactly the browsers Coder has already authenticated.
 
 Every wizard-managed template installs the OpenCode CLI and the Pi coding agent
 (`@earendil-works/pi-coding-agent`) and pre-seeds OpenCode, Pi, and VS Code
