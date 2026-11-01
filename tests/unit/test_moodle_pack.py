@@ -727,13 +727,13 @@ def test_install_moodle_derives_admin_username_from_admin_email_local_part(
             user_name="wizard_stack_moodle",
             password_secret_ref="wizard-stack-moodle-postgres-password",
         ),
-        admin_email="Admin.Ops@example.com",
+        admin_email="Admin.Ops+Backup@example.com",
         admin_password="ChangeMeSoon",
     )
 
     assert len(commands) == 1
-    assert "--adminuser=adminuser_superior_ops" in commands[0]
-    assert "--adminuser=admin" not in commands[0]
+    assert "--adminuser=admin_ops_backup" in commands[0]
+    assert "--adminuser=admin " not in commands[0]
 
 
 def test_prepare_moodle_runtime_bootstraps_official_source_without_wiping_existing_docroot(
@@ -824,8 +824,8 @@ def test_repair_moodle_config_file_inserts_proxy_flags_before_setup_require(
 
 
 def test_moodle_admin_username_derivation_has_safe_fallback_for_invalid_local_part() -> None:
-    assert moodle_module._moodle_admin_username_from_email("Admin.Ops@example.com") == (
-        "adminuser_superior_ops"
+    assert moodle_module._moodle_admin_username_from_email("Admin.Ops+Backup@example.com") == (
+        "admin_ops_backup"
     )
     assert moodle_module._moodle_admin_username_from_email("...@example.com") == "admin"
 
