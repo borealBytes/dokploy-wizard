@@ -750,6 +750,13 @@ def test_hermes_desktop_template_drives_commands_the_cli_actually_ships() -> Non
     assert '"webapp", "session-token"' in template
     assert "$HERMES_HOME/webapp/trust-proxy" in template
     assert 'nohup env HERMES_HOME="$HERMES_HOME"' in template
+    # The entry page ships a CSP that allowlists inline scripts by sha256, so an
+    # injected <script> the header does not name is silently refused: the browser
+    # then shows the sign-in card even though curl sees the grant in the HTML.
+    # The front must extend script-src with its own hash.
+    assert "content-security-policy" in template
+    assert "createHash" in template and "sha256" in template
+    assert "allowInCsp" in template
 
     # The old dashboard is gone from this path, not layered behind the new UI. The one
     # mention left is the comment that says it is not the dashboard; the auth env keys

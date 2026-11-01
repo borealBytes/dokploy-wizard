@@ -1233,6 +1233,7 @@ import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 
 const BACKEND_PORT = Number.parseInt(process.env.HERMES_WEBAPP_INTERNAL_PORT || "9121", 10);
 const FRONT_PORT = Number.parseInt(process.env.PROXY_PORT || "9120", 10);
@@ -1258,13 +1259,32 @@ function signInScript() {
     return "";
   }
   if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return "";
-  return `<script>/* authenticated upstream: sign this browser in */try{sessionStorage.setItem("$${SESSION_KEY}:"+JSON.stringify([location.origin,window.__HERMES_BASE_PATH__||""]),$${JSON.stringify(token)})}catch(e){}</script>`;
+  return `/* authenticated upstream: sign this browser in */try{sessionStorage.setItem("$${SESSION_KEY}:"+JSON.stringify([location.origin,window.__HERMES_BASE_PATH__||""]),$${JSON.stringify(token)})}catch(e){}`;
 }
 
-function injectSignIn(html) {
+// The webapp serves its entry page with a CSP that allowlists inline scripts by
+// sha256. A patched listener injects inside a script block it hashes itself; a
+// front proxy injecting its own <script> must declare that script's hash in the
+// response's script-src directive, or the browser silently refuses it (which
+// reproduces the sign-in card the injection exists to remove).
+function allowInCsp(csp, scriptInner) {
+  if (!csp) return csp;
+  const hash = `'sha256-$${crypto.createHash("sha256").update(scriptInner, "utf8").digest("base64")}'`;
+  if (csp.includes(hash)) return csp;
+  let touched = false;
+  const out = csp.split(";").map((part) => {
+    if (/^\s*script-src\s/.test(part)) { touched = true; return `${part.trimEnd()} $${hash}`; }
+    return part;
+  });
+  return touched ? out.join(";") : csp;
+}
+
+function injectSignIn(html, headers) {
   if (html.includes(SESSION_KEY)) return html;
-  const script = signInScript();
-  if (!script) return html;
+  const inner = signInScript();
+  if (!inner) return html;
+  headers["content-security-policy"] = allowInCsp(headers["content-security-policy"], inner);
+  const script = `<script>$${inner}</script>`;
   const head = html.match(/<head[^>]*>/i);
   return head ? html.slice(0, head.index + head[0].length) + script + html.slice(head.index + head[0].length)
     : script + html;
@@ -1284,8 +1304,8 @@ const server = http.createServer((req, res) => {
       const chunks = [];
       ur.on("data", (chunk) => chunks.push(chunk));
       ur.on("end", () => {
-        const body = injectSignIn(Buffer.concat(chunks).toString("utf8"));
         const headers = { ...ur.headers };
+        const body = injectSignIn(Buffer.concat(chunks).toString("utf8"), headers);
         delete headers["content-length"];
         delete headers.etag;
         headers["content-length"] = Buffer.byteLength(body);
