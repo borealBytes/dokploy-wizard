@@ -1273,7 +1273,7 @@ function allowInCsp(csp, scriptInner) {
   if (csp.includes(hash)) return csp;
   let touched = false;
   const out = csp.split(";").map((part) => {
-    if (/^\s*script-src\s/.test(part)) { touched = true; return `${part.trimEnd()} $${hash}`; }
+    if (/^\s*script-src\s/.test(part)) { touched = true; return `$${part.trimEnd()} $${hash}`; }
     return part;
   });
   return touched ? out.join(";") : csp;

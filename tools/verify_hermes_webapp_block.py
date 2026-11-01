@@ -57,6 +57,21 @@ def main() -> int:
         lines, 'cat >"$HERMES_WEBAPP_FRONT_FILE" <<\'MJS\'', "MJS"
     ).replace("$${", "${")
 
+    # Terraform only sees `${`, never `${` inside a shell or JS body: every
+    # interpolation in these heredocs must be written `$${`. An unescaped one
+    # passes bash -n and node --check but kills `coder templates push`, so catch
+    # it here at the speed of a repo run instead of at the speed of a deploy.
+    for name, raw in (
+        ("bootstrap", _extract(lines, 'cat >"$HERMES_BOOTSTRAP_SCRIPT" <<\'SH\'', "SH")),
+        ("front js", _extract(lines, 'cat >"$HERMES_WEBAPP_FRONT_FILE" <<\'MJS\'', "MJS")),
+    ):
+        bad = re.findall(r"(?<!\$)\$\{[^\n]*", raw)
+        if bad:
+            print(f"[escape] {name}: FAIL: unescaped ${{ in heredoc: {bad[:2]}")
+            ok = False
+        else:
+            print(f"[escape] {name}: ok")
+
     ok = True
     with tempfile.TemporaryDirectory() as td:
         tmp = pathlib.Path(td)
