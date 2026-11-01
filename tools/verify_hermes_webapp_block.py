@@ -57,15 +57,20 @@ def main() -> int:
         lines, 'cat >"$HERMES_WEBAPP_FRONT_FILE" <<\'MJS\'', "MJS"
     ).replace("$${", "${")
 
-    # Terraform only sees `${`, never `${` inside a shell or JS body: every
-    # interpolation in these heredocs must be written `$${`. An unescaped one
-    # passes bash -n and node --check but kills `coder templates push`, so catch
-    # it here at the speed of a repo run instead of at the speed of a deploy.
+    # Terraform interpolates `${...}` inside these heredocs. Shell/JS bodies must
+    # write `$${` for anything that is not a Terraform reference -- an unescaped
+    # `\${part.trimEnd()}` passes bash -n and node --check but kills `coder
+    # templates push`, so reject any `${` that is not an escaped `$${` and does
+    # not close as a legitimate Terraform reference at once.
+    tf_ref = re.compile(r"\$\{(?:local|var|module|data|each|count)\.[A-Za-z0-9_\[\]().\"'-]*\}")
     for name, raw in (
         ("bootstrap", _extract(lines, 'cat >"$HERMES_BOOTSTRAP_SCRIPT" <<\'SH\'', "SH")),
         ("front js", _extract(lines, 'cat >"$HERMES_WEBAPP_FRONT_FILE" <<\'MJS\'', "MJS")),
     ):
-        bad = re.findall(r"(?<!\$)\$\{[^\n]*", raw)
+        bad = []
+        for m in re.finditer(r"(?<!\$)\$\{", raw):
+            if not tf_ref.match(raw, m.start()):
+                bad.append(raw[m.start() : m.start() + 40].splitlines()[0])
         if bad:
             print(f"[escape] {name}: FAIL: unescaped ${{ in heredoc: {bad[:2]}")
             ok = False
