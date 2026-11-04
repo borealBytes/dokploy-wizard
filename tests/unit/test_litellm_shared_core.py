@@ -132,15 +132,15 @@ def test_litellm_plan_exists_without_ai_packs() -> None:
         user_name="openmerge_litellm",
         password_secret_ref="openmerge-litellm-postgres-password",
     )
-    assert plan.litellm.default_model_alias_order == ("opencode-go/deepseek-v4-flash",)
+    assert plan.litellm.default_model_alias_order == ("opencode-go/deepseek-v4.1-flash",)
 
 
 def test_litellm_plan_uses_openrouter_default_without_local_upstream() -> None:
     values = {
         "AI_DEFAULT_PROVIDER": "openrouter",
-        "AI_DEFAULT_MODEL": "deepseek/deepseek-v4-flash:free",
+        "AI_DEFAULT_MODEL": "deepseek/deepseek-v4.1-flash:free",
         "LITELLM_OPENROUTER_API_KEY": "SECRET_TEST_OPENROUTER_PROVIDER_KEY",
-        "LITELLM_OPENROUTER_MODELS": "deepseek/deepseek-v4-flash:free",
+        "LITELLM_OPENROUTER_MODELS": "deepseek/deepseek-v4.1-flash:free",
     }
 
     plan = build_shared_core_plan(
@@ -152,18 +152,18 @@ def test_litellm_plan_uses_openrouter_default_without_local_upstream() -> None:
 
     assert plan.litellm is not None
     assert plan.litellm.default_model_alias_order == (
-        "openrouter/deepseek/deepseek-v4-flash:free",
+        "openrouter/deepseek/deepseek-v4.1-flash:free",
     )
     for aliases in allowlists.values():
         assert "local-model.internal/unsloth-active" not in aliases
     assert allowlists["my-farm-advisor"] == (
-        "openrouter/deepseek/deepseek-v4-flash:free",
+        "openrouter/deepseek/deepseek-v4.1-flash:free",
     )
     assert allowlists["openclaw"] == (
-        "openrouter/deepseek/deepseek-v4-flash:free",
+        "openrouter/deepseek/deepseek-v4.1-flash:free",
     )
     assert allowlists["dokploy-ai"] == (
-        "openrouter/deepseek/deepseek-v4-flash:free",
+        "openrouter/deepseek/deepseek-v4.1-flash:free",
     )
 
 
@@ -310,6 +310,69 @@ def test_reconcile_reuses_desired_network_when_ledger_points_to_stale_name() -> 
     ).resource_id == desired_network.resource_id
 
 
+def test_rendered_compose_routes_the_admin_hostname_through_traefik() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(
+        plan,
+        {},
+        {},
+        litellm_admin_hostname="litellm.example.com",
+    )
+    compose = rendered.compose_file
+    assert plan.litellm is not None
+    service = plan.litellm.service_name
+
+    # Traefik answers 404 for a hostname with no rule, and a proxy 404 looks exactly
+    # like a dead service to anyone standing outside the box.
+    assert '      traefik.enable: "true"\n' in compose
+    assert f'      traefik.http.routers.{service}.rule: "Host(`litellm.example.com`)"\n' in compose
+    assert f'      traefik.http.routers.{service}.entrypoints: "websecure"\n' in compose
+    assert f'      traefik.http.routers.{service}.tls: "true"\n' in compose
+    # The tunnel terminates TLS and talks plain HTTP to Traefik's listener, so the app
+    # has to be told it is behind https or LiteLLM builds http:// redirects.
+    assert (
+        f"      traefik.http.middlewares.{service}-forwarded-https.headers"
+        '.customrequestheaders.X-Forwarded-Proto: "https"\n' in compose
+    )
+    assert f'      traefik.http.services.{service}.loadbalancer.server.port: "4000"\n' in compose
+
+
+def test_rendered_compose_publishes_no_route_without_an_admin_hostname() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    compose = _render_compose_file(plan, {}, {}).compose_file
+
+    # No router is better than a router on a hostname nobody asked for.
+    assert "traefik" not in compose
+
+
+def test_rendered_compose_gives_the_litellm_admin_ui_the_stack_admin_credentials() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
+
+    rendered = _render_compose_file(
+        plan,
+        {},
+        {
+            "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+            "DOKPLOY_ADMIN_PASSWORD": "stack-admin-password",
+        },
+    )
+    compose = rendered.compose_file
+    env_specs = {spec.name: spec for spec in rendered.env_specs}
+
+    # Same login as every other app on the box, rather than the master key.
+    assert 'UI_USERNAME: "${LITELLM_UI_USERNAME:?LITELLM_UI_USERNAME is required}"' in compose
+    assert 'UI_PASSWORD: "${LITELLM_UI_PASSWORD:?LITELLM_UI_PASSWORD is required}"' in compose
+    assert env_specs["LITELLM_UI_USERNAME"].value == "admin@example.com"
+    assert env_specs["LITELLM_UI_PASSWORD"].value == "stack-admin-password"
+    assert env_specs["LITELLM_UI_PASSWORD"].variable.sensitive is True
+    # The username is an email address, not a secret: it shows up in log lines and
+    # operator notes, and marking it sensitive makes the deploy output useless.
+    assert env_specs["LITELLM_UI_USERNAME"].variable.sensitive is False
+    assert env_specs["LITELLM_UI_PASSWORD"].target_services == ("wizard-stack-shared-litellm",)
+
+
 def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs() -> None:
     plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
 
@@ -345,10 +408,19 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
     assert 'LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}"' in compose
     assert 'SALT_KEY: "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}"' in compose
     assert "healthcheck:\n" in compose
+    # Root serves Swagger; send operators to the admin UI and keep the docs reachable.
+    assert 'ROOT_REDIRECT_URL: "/ui"' in compose
+    assert 'DOCS_URL: "/docs"' in compose
+    # No admin credentials in this env, so the UI login stays unset rather than
+    # referencing placeholders that nothing would fill.
+    assert "UI_USERNAME" not in compose
+    assert "UI_PASSWORD" not in compose
+    assert "LITELLM_UI_USERNAME" not in env_specs
+    assert "LITELLM_UI_PASSWORD" not in env_specs
     assert re.search(r"source: wizard-stack-shared-litellm-config-[0-9a-f]{12}", compose)
     assert "target: /app/config.yaml" in compose
     assert 'api_key: "os.environ/LITELLM_LOCAL_API_KEY"' in compose
-    assert 'model_name: "opencode-go/deepseek-v4-flash"' in compose
+    assert 'model_name: "opencode-go/deepseek-v4.1-flash"' in compose
     assert 'model_name: "opencode-go/minimax-m2.7"' not in compose
     assert 'model_name: "openrouter/hunter-alpha"' in compose
     assert '      LITELLM_OPENCODE_GO_API_KEY: "${LITELLM_OPENCODE_GO_API_KEY:?LITELLM_OPENCODE_GO_API_KEY is required}"' in compose
@@ -408,7 +480,7 @@ def test_rendered_litellm_local_model_disables_system_role_for_vllm_templates() 
     )
     # A non-OpenCode-Go default provider means no static Go alias route at all;
     # the sidecar exposes the full Go catalog under sync/opencode-go/* instead.
-    assert 'model_name: "opencode-go/deepseek-v4-flash"' not in compose
+    assert 'model_name: "opencode-go/deepseek-v4.1-flash"' not in compose
     openrouter_block = _embedded_litellm_model_block(compose, "openrouter/hunter-alpha")
 
     assert "supports_system_message: false" in local_block
@@ -459,7 +531,7 @@ def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
     )
     assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "litellm-opencode-key"
     assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "litellm-openrouter-key"
-    assert 'model_name: "opencode-go/deepseek-v4-flash"' in compose
+    assert 'model_name: "opencode-go/deepseek-v4.1-flash"' in compose
     assert 'model_name: "openrouter/google/gemma-4-31b-it:free"' in compose
 
 
@@ -799,7 +871,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
             key_alias=record.key_alias,
             team_id=record.team_id,
             models=(
-                (*record.models, "sync/openrouter/deepseek/deepseek-v4-flash")
+                (*record.models, "sync/openrouter/deepseek/deepseek-v4.1-flash")
                 if record.key_alias == "openclaw"
                 else record.models
             ),
@@ -1269,7 +1341,7 @@ def test_ai_client_request_payloads_via_fake_request_fn() -> None:
 def test_ai_model_alias_default_with_no_env() -> None:
     from dokploy_wizard.dokploy.shared_core import _dokploy_ai_model_alias
 
-    assert _dokploy_ai_model_alias({}) == "opencode-go/deepseek-v4-flash"
+    assert _dokploy_ai_model_alias({}) == "opencode-go/deepseek-v4.1-flash"
 
 
 def test_ai_model_alias_custom_provider_with_dot_without_local_base_url_falls_back() -> None:
@@ -1279,7 +1351,7 @@ def test_ai_model_alias_custom_provider_with_dot_without_local_base_url_falls_ba
         "AI_DEFAULT_PROVIDER": "custom.example.internal",
         "AI_DEFAULT_MODEL": "agent-model",
     })
-    assert result == "opencode-go/deepseek-v4-flash"
+    assert result == "opencode-go/deepseek-v4.1-flash"
 
 
 def test_ai_model_alias_opencode_go_provider_uses_configured_alias() -> None:
@@ -1287,9 +1359,9 @@ def test_ai_model_alias_opencode_go_provider_uses_configured_alias() -> None:
 
     result = _dokploy_ai_model_alias({
         "AI_DEFAULT_PROVIDER": "opencode-go",
-        "AI_DEFAULT_MODEL": "deepseek-v4-flash",
+        "AI_DEFAULT_MODEL": "deepseek-v4.1-flash",
     })
-    assert result == "opencode-go/deepseek-v4-flash"
+    assert result == "opencode-go/deepseek-v4.1-flash"
 
 
 def test_ai_model_alias_openrouter_provider_uses_configured_alias() -> None:
@@ -1319,8 +1391,8 @@ def test_ai_model_alias_local_provider_maps_to_default_local() -> None:
 def test_ai_model_alias_partial_env_falls_back_to_default() -> None:
     from dokploy_wizard.dokploy.shared_core import _dokploy_ai_model_alias
 
-    assert _dokploy_ai_model_alias({"AI_DEFAULT_PROVIDER": "local"}) == "opencode-go/deepseek-v4-flash"
-    assert _dokploy_ai_model_alias({"AI_DEFAULT_MODEL": "model-x"}) == "opencode-go/deepseek-v4-flash"
+    assert _dokploy_ai_model_alias({"AI_DEFAULT_PROVIDER": "local"}) == "opencode-go/deepseek-v4.1-flash"
+    assert _dokploy_ai_model_alias({"AI_DEFAULT_MODEL": "model-x"}) == "opencode-go/deepseek-v4.1-flash"
 
 
 def test_ai_reconcile_creates_provider_when_missing() -> None:
@@ -1342,7 +1414,7 @@ def test_ai_reconcile_creates_provider_when_missing() -> None:
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(fake._ai_provider_creates[0], generated)
     )
-    assert fake._ai_provider_creates[0]["model"] == "opencode-go/deepseek-v4-flash"
+    assert fake._ai_provider_creates[0]["model"] == "opencode-go/deepseek-v4.1-flash"
     assert fake._ai_provider_creates[0]["isEnabled"] is True
 
 
@@ -1375,7 +1447,7 @@ def test_ai_reconcile_updates_provider_when_present() -> None:
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(update, generated)
     )
-    assert update["model"] == "opencode-go/deepseek-v4-flash"
+    assert update["model"] == "opencode-go/deepseek-v4.1-flash"
 
 
 def test_ai_reconcile_does_not_create_duplicate_on_repeat() -> None:
@@ -1402,10 +1474,10 @@ def test_ai_reconcile_uses_canonical_model_alias_not_bare() -> None:
 
     for create in fake._ai_provider_creates:
         assert create["model"] != "unsloth-active"
-        assert create["model"] == "opencode-go/deepseek-v4-flash"
+        assert create["model"] == "opencode-go/deepseek-v4.1-flash"
     for update in fake._ai_provider_updates:
         assert update["model"] != "unsloth-active"
-        assert update["model"] == "opencode-go/deepseek-v4-flash"
+        assert update["model"] == "opencode-go/deepseek-v4.1-flash"
 
 
 def test_ai_reconcile_skips_when_no_generated_keys() -> None:
@@ -1483,7 +1555,7 @@ def test_ai_reconcile_uses_custom_provider_alias() -> None:
     )
 
     assert len(fake._ai_provider_creates) == 1
-    assert fake._ai_provider_creates[0]["model"] == "opencode-go/deepseek-v4-flash"
+    assert fake._ai_provider_creates[0]["model"] == "opencode-go/deepseek-v4.1-flash"
     assert fake._ai_provider_creates[0]["apiUrl"] == "http://my-stack-shared-litellm:4000/v1"
 
 
@@ -1529,7 +1601,7 @@ def test_ai_reconcile_noops_when_existing_wizard_provider_matches() -> None:
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.virtual_keys["dokploy-ai"],
-            model="opencode-go/deepseek-v4-flash",
+            model="opencode-go/deepseek-v4.1-flash",
             is_enabled=True,
         )
     ]
@@ -1572,7 +1644,7 @@ def test_ai_reconcile_updates_disabled_or_drifted_wizard_provider() -> None:
     update = fake._ai_provider_updates[0]
     assert update["aiId"] == "ai-wizard-existing"
     assert update["apiUrl"] == "http://openmerge-shared-litellm:4000/v1"
-    assert update["model"] == "opencode-go/deepseek-v4-flash"
+    assert update["model"] == "opencode-go/deepseek-v4.1-flash"
     assert update["isEnabled"] is True
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(update, generated)
@@ -1666,7 +1738,7 @@ def test_verify_dokploy_ai_provider_reports_only_redacted_key_metadata() -> None
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=raw_key,
-            model="opencode-go/deepseek-v4-flash",
+            model="opencode-go/deepseek-v4.1-flash",
             is_enabled=True,
         )
     ]
@@ -1699,7 +1771,7 @@ def test_verify_dokploy_ai_provider_fails_when_provider_uses_master_key_without_
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.master_key,
-            model="opencode-go/deepseek-v4-flash",
+            model="opencode-go/deepseek-v4.1-flash",
             is_enabled=True,
         )
     ]
@@ -1728,7 +1800,7 @@ def test_verify_dokploy_ai_provider_fails_on_duplicate_wizard_provider() -> None
         name="Dokploy Wizard LiteLLM",
         api_url="http://openmerge-shared-litellm:4000/v1",
         api_key=generated.virtual_keys["dokploy-ai"],
-        model="opencode-go/deepseek-v4-flash",
+        model="opencode-go/deepseek-v4.1-flash",
         is_enabled=True,
     )
     fake._ai_providers = [
@@ -1792,7 +1864,7 @@ def test_verify_dokploy_ai_provider_runs_test_connection_when_available() -> Non
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.virtual_keys["dokploy-ai"],
-            model="opencode-go/deepseek-v4-flash",
+            model="opencode-go/deepseek-v4.1-flash",
             is_enabled=True,
         )
     ]
@@ -1809,7 +1881,7 @@ def test_verify_dokploy_ai_provider_runs_test_connection_when_available() -> Non
         (
             "http://openmerge-shared-litellm:4000/v1",
             generated.virtual_keys["dokploy-ai"],
-            "opencode-go/deepseek-v4-flash",
+            "opencode-go/deepseek-v4.1-flash",
         )
     ]
     assert generated.virtual_keys["dokploy-ai"] not in result.detail
@@ -1832,7 +1904,7 @@ def test_verify_dokploy_ai_provider_fails_on_test_connection_error_without_leaki
             name="Dokploy Wizard LiteLLM",
             api_url="http://openmerge-shared-litellm:4000/v1",
             api_key=generated.virtual_keys["dokploy-ai"],
-            model="opencode-go/deepseek-v4-flash",
+            model="opencode-go/deepseek-v4.1-flash",
             is_enabled=True,
         )
     ]

@@ -34,7 +34,7 @@ from .fake_dokploy import FakeDokployApiClient
 
 def _expected_coder_fallback_models_json() -> str:
     return coder_module._litellm_workspace_fallback_models_json(
-        default_alias="opencode-go/deepseek-v4-flash"
+        default_alias="opencode-go/deepseek-v4.1-flash"
     )
 
 
@@ -48,17 +48,23 @@ def test_coder_litellm_fallback_models_json_is_minimal_default_alias() -> None:
     # The workspace fetches the full live model set from /v1/models at boot; the
     # baked fallback is only the always-present default alias route. Stale
     # hardcoded samples (e.g. retired openrouter free slugs) must not reappear.
-    assert aliases == ["opencode-go/deepseek-v4-flash"]
-    assert "deepseek-v4-flash" not in aliases
+    assert aliases == ["opencode-go/deepseek-v4.1-flash"]
+    assert "deepseek-v4.1-flash" not in aliases
     assert "minimax/minimax-m2.5:free" not in aliases
     assert "opencode-go/minimax-m2.7" not in aliases
     assert "opencode-go/*" not in aliases
 
 
 def test_consolidated_default_template_is_the_workspace_default() -> None:
-    assert coder_module._default_template_name() == "ubuntu-vscode-opencode-hermes-pi"
-    assert coder_module._default_template_dir().name == "default-ubuntu-vscode-opencode-hermes-pi"
+    # The default is the Hermes Desktop clone: the same consolidated surface (VS Code,
+    # OpenCode, Pi, the community WebUI) plus the official webapp tile. The predecessor
+    # is still pushed, because workspaces built from it must keep receiving versions
+    # rather than freezing on the one they were created with.
+    assert coder_module._default_template_name() == "ubuntu-vscode-hermes-desktop"
+    assert coder_module._default_template_dir().name == "default-ubuntu-vscode-hermes-desktop"
     assert coder_module._default_template_dir().is_dir()
+    assert coder_module._opencode_hermes_pi_template_name() in coder_module._required_template_names()
+    assert coder_module._opencode_hermes_pi_template_dir().is_dir()
     assert coder_module._base_template_name() == "ubuntu-vscode"
     assert "ubuntu-vscode" in coder_module._required_template_names()
 
@@ -180,7 +186,7 @@ def test_copilot_byok_settings_json_contains_litellm_models() -> None:
 
     custom_models = settings["github.copilot.chat.customOAIModels"]
     assert "local-model.internal/unsloth-active" in custom_models
-    assert "opencode-go/deepseek-v4-flash" in custom_models
+    assert "opencode-go/deepseek-v4.1-flash" in custom_models
     default_model = custom_models["local-model.internal/unsloth-active"]
     assert default_model["name"] == "Dokploy LiteLLM: local-model.internal/unsloth-active"
     assert default_model["url"] == "http://wizard-stack-shared-litellm:4000/v1"
@@ -249,6 +255,7 @@ _TEMPLATE_DIRS_WITH_PI_AND_OPENCODE = (
     "default-ubuntu-code-server-kdense-byok",
     "default-ubuntu-code-server-hermes",
     "default-ubuntu-vscode-opencode-hermes-pi",
+    "default-ubuntu-vscode-hermes-desktop",
 )
 
 
@@ -650,12 +657,17 @@ def test_default_opencode_web_template_includes_web_app() -> None:
 def test_required_template_names_cover_only_remaining_templates() -> None:
     assert coder_module._required_template_names() == (
         coder_module._default_template_name(),
+        coder_module._opencode_hermes_pi_template_name(),
         coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
         coder_module._default_hermes_template_name(),
     )
-    assert len(coder_module._required_template_names()) == 5
+    names = coder_module._required_template_names()
+    assert len(names) == 6
+    # The default is now the template the desktop accessor names, so a list that
+    # naively includes both would push the same template twice every run.
+    assert len(set(names)) == len(names)
 
 
 def test_retired_template_names_cover_removed_templates() -> None:
@@ -666,6 +678,200 @@ def test_retired_template_names_cover_removed_templates() -> None:
     assert set(coder_module._retired_template_names()).isdisjoint(
         coder_module._required_template_names()
     )
+
+
+def test_stable_serve_password_self_heals_a_placeholder_left_by_an_older_build() -> None:
+    # A replacement token that is never replaced does not fail a plan: the literal
+    # string becomes the password, which is exactly what one released build shipped
+    # (the stored file was 43 bytes, the length of the token). Workspaces keep that
+    # file across rebuilds, so the block has to recognize and rewrite it.
+    for name in (
+        "default-ubuntu-vscode-hermes-desktop",
+        "default-ubuntu-vscode-opencode-hermes-pi",
+    ):
+        template = Path(f"templates/coder/{name}/main.tf").read_text(encoding="utf-8")
+        assert "grep -q '__DOKPLOY_WIZARD_' \"$OPENCODE_SERVER_PW_FILE\"" in template
+
+
+def test_hermes_desktop_template_drives_commands_the_cli_actually_ships() -> None:
+    # An earlier version of this block drove `hermes webapp` with `webapp.*` config
+    # keys. Neither exists on the installed CLI (v0.22.5): it answered
+    # "'webapp' is not a `hermes` command" and stored the keys with a warning that it
+    # "may not read" them — which it does not. Everything asserted here was read off
+    # the box: --help, the plugin's own error text, and the served endpoints.
+    template = Path(
+        "templates/coder/default-ubuntu-vscode-hermes-desktop/main.tf"
+    ).read_text(encoding="utf-8")
+
+    # The artifact is the Desktop renderer the gateway hosts in a browser, not the
+    # dashboard bundle. These two dists are different builds of different apps, and
+    # serving the wrong one is the exact regression this guard exists for: it looks
+    # healthy, signs in fine, and renders the old UI.
+    # Judged on executable lines only: the comments name the dashboard bundle to say
+    # this is not it, and a guard that bans the words would ban the explanation.
+    code = "\n".join(line for line in template.splitlines() if not line.lstrip().startswith("#"))
+    assert "hermes webapp --build-only" in template
+    assert "apps/desktop/dist-webapp" in template
+    assert "hermes_cli/web_dist" not in code
+    assert "npm run build" not in code
+
+    # Turned on through the gateway's own config surface, which it reads only at start.
+    assert "hermes config set webapp.enabled true" in template
+    assert "hermes config set webapp.host 127.0.0.1" in template
+    assert 'hermes config set webapp.port "$HERMES_WEBAPP_INTERNAL_PORT"' in template
+    # public_url must stay EMPTY. This is the whole "no second sign-in" contract, and
+    # it was paid for twice on the live box: upstream's webapp listener engages the
+    # auth gate whenever webapp.public_url names a host (gateway/run_api.py — the
+    # desktop-loopback exemption never runs for it), and the credential that gate
+    # wants is the one-use link from `hermes webapp`, which a tile click cannot
+    # chase. Both public-URL designs regressed the tile; this line is where they die.
+    assert 'hermes config set webapp.public_url ""' in template
+    assert 'webapp.public_url "$HERMES' not in template
+    assert "hermes_wildcard_suffix" not in template
+    # The tile port belongs to a stateless loopback front, because the webapp validates
+    # Host (HTTP middleware) and Host+Origin (WebSocket boundary) against its loopback
+    # bind while auth is off. The front's job is exactly those rewrites; anything with
+    # credentials or cookies in it here means the sign-in is creeping back.
+    assert 'export HERMES_WEBAPP_INTERNAL_PORT="$${HERMES_WEBAPP_INTERNAL_PORT:-9121}"' in template
+    assert "hermes-webapp-front.mjs" in template
+    assert 'server.on("upgrade"' in template
+    assert "delete headers.origin;" in template
+    assert "host: BACKEND_HOST" in template
+    assert 'PROXY_PORT="$HERMES_WEBAPP_PORT"' in template
+    assert "no sign-in of its own" in template
+    assert "sign in as '" not in code
+    # The HTTP 200 that proves the boundary is happy is NOT the app opening: the
+    # Desktop bundle refuses to boot without its sessionStorage credential (the
+    # WEBAPP_LAUNCH_REQUIRED card), which a curl-only check cannot see. The front
+    # must hand the page the gateway's stored browser credential, and the listener's
+    # own trust-proxy patch (when applied) is signalled by the marker file.
+    assert 'hermes.webapp.session.v1' in template
+    assert "sessionStorage.setItem" in template
+    assert '"webapp", "session-token"' in template
+    assert "$HERMES_HOME/webapp/trust-proxy" in template
+    assert 'nohup env HERMES_HOME="$HERMES_HOME"' in template
+    # The entry page ships a CSP that allowlists inline scripts by sha256, so an
+    # injected <script> the header does not name is silently refused: the browser
+    # then shows the sign-in card even though curl sees the grant in the HTML.
+    # The front must extend script-src with its own hash.
+    assert "content-security-policy" in template
+    assert "createHash" in template and "sha256" in template
+    assert "allowInCsp" in template
+
+    # The old dashboard is gone from this path, not layered behind the new UI. The one
+    # mention left is the comment that says it is not the dashboard; the auth env keys
+    # keep the CLI's own HERMES_DASHBOARD_* names and stay.
+    assert "hermes dashboard" not in code
+    assert 'hermes dashboard --host' not in template
+    assert "hermes dashboard --stop" not in template
+    assert "hermes dashboard --status" not in template
+    assert 'slug         = "hermes-dashboard"' not in template
+
+    # Version floor: the command does not exist on the release channel, so the template
+    # pins the channel at install time and repairs an older checkout before serving.
+    assert "if ! hermes webapp --help >/dev/null 2>&1; then" in template
+    assert 'hermes update --set-channel "$HERMES_DESKTOP_CHANNEL"' in template
+    assert 'hermes update --channel "$HERMES_DESKTOP_CHANNEL"' in template
+    assert '--channel "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__"' in template
+    # A build still without the artifact serves nothing rather than the old UI.
+    assert "HERMES WEBAPP UNAVAILABLE" in template
+    assert 'if [ "$HERMES_WEBAPP_CAPABLE" = "1" ]; then' in template
+
+    # /health answers 302 -> /login once the sign-in gate is on, so both the tile
+    # healthcheck and the watchdog have to use the endpoint that answers unsigned.
+    assert 'HERMES_WEBAPP_HEALTH_PATH="/api/health"' in template
+    # The sign-in name has to be guessable: the login page appears before any
+    # workspace file is readable. It is the owner's Coder username, rewritten every
+    # boot so volumes built when it was a fixed word follow the owner.
+    assert 'export HERMES_WEBAPP_BASIC_AUTH_USERNAME="${local.username}"' in template
+    assert 'upsert_env HERMES_DASHBOARD_BASIC_AUTH_USERNAME' in template
+    assert 'upsert_env_if_unset HERMES_DASHBOARD_BASIC_AUTH_USERNAME' not in template
+    assert 'url       = "http://localhost:9120/api/health"' in template
+    assert "healthy_webapp()" in template
+    assert "restart_gateway_for_webapp()" in template
+    # The tile port is the front; the internal port is the listener. Judging only the
+    # front would restart a healthy gateway when a dead front is the whole problem,
+    # and judging only the listener would call the tile healthy with a dead front.
+    assert "healthy_webapp_backend()" in template
+    assert "start_webapp_front()" in template
+    assert "WEBAPP_FRONT=/home/coder/.local/share/dokploy/hermes-webapp-front.mjs" in template
+    assert "healthy_dashboard()" not in template
+    assert "start_dashboard()" not in template
+    assert '"http://127.0.0.1:\\$1/health"' in template  # the community WebUI keeps /health
+
+
+def test_desktop_hermes_channel_is_defaulted_and_sanitised() -> None:
+    # An operator who never heard of the channel still gets a working tile, and a typo
+    # must not become a broken workspace boot minutes later at install time, far from
+    # the env file that caused it.
+    assert coder_module._DEFAULT_HERMES_DESKTOP_CHANNEL == "main"
+    assert coder_module._normalize_hermes_channel("") == "main"
+    assert coder_module._normalize_hermes_channel("  main  ") == "main"
+    assert coder_module._normalize_hermes_channel("stable") == "stable"
+    assert coder_module._normalize_hermes_channel("main; rm -rf /") == "main"
+    assert coder_module._normalize_hermes_channel('main"') == "main"
+
+
+def test_coder_app_open_in_values_are_ones_the_provider_accepts() -> None:
+    # The provider validates open_in during template import, so a value it does not
+    # know costs a remote deploy cycle to discover: terraform plan fails and the
+    # template silently never arrives.
+    accepted = {"", "window", "tab", "slim-window"}
+    used_by_template: dict[str, list[str]] = {}
+    for template_dir in sorted(Path("templates/coder").iterdir()):
+        manifest = template_dir / "main.tf"
+        if not manifest.is_file():
+            continue
+        used = re.findall(r'open_in\s*=\s*"([^"]*)"', manifest.read_text(encoding="utf-8"))
+        if used:
+            used_by_template[template_dir.name] = used
+
+    offenders = {
+        name: [value for value in values if value not in accepted]
+        for name, values in used_by_template.items()
+        if any(value not in accepted for value in values)
+    }
+    assert offenders == {}
+    # Self-check: the scan has to see the tile this exists to protect.
+    assert used_by_template["default-ubuntu-vscode-hermes-desktop"] == ["tab"]
+
+
+def test_safe_progress_reason_keeps_the_terraform_diagnosis_when_clipping() -> None:
+    # The CLI prints its banner and streaming log first and the actual reason last, so
+    # clipping the head used to leave "exit status 1" and throw away the diagnosis.
+    reason = "PLAN START " + ("streamed output " * 80) + "Error: Invalid value for variable: webapp.port must be an integer"
+
+    clipped = coder_module._safe_progress_reason(reason, limit=200)
+
+    assert len(clipped) <= 200
+    assert "Invalid value for variable" in clipped
+    assert "PLAN START" in clipped
+
+
+def test_seeded_template_names_fit_coder_name_limit() -> None:
+    # Coder rejects an over-long name only after packaging the template, and a failed
+    # push for a non-default template is a note rather than a failed install. That
+    # combination silently cost the Hermes Desktop template on a box that reported a
+    # clean modify, so the limit is checked here and at push time.
+    names = {
+        coder_module._default_template_name(),
+        coder_module._opencode_hermes_pi_template_name(),
+        coder_module._base_template_name(),
+        coder_module._default_opencode_web_template_name(),
+        coder_module._default_kdense_byok_template_name(),
+        coder_module._default_hermes_template_name(),
+        *coder_module._retired_template_names(),
+    }
+    limit = coder_module._CODER_MAX_NAME_LENGTH
+    assert {name for name in names if len(name) > limit} == set()
+    # Template directories are named after their template, so a rename cannot drift.
+    assert (
+        coder_module._default_hermes_desktop_template_dir().name
+        == f"default-{coder_module._default_hermes_desktop_template_name()}"
+    )
+
+    with pytest.raises(coder_module.CoderError, match="at most 32"):
+        coder_module._ensure_template_name_length("ubuntu-vscode-opencode-hermes-desktop")
 
 
 def test_retire_removed_templates_deletes_only_retired_templates(monkeypatch) -> None:
@@ -875,7 +1081,7 @@ def test_default_kdense_byok_template_includes_upstream_parameterized_stack() ->
     assert 'clone["id"] = "openai/" + option_value[len("openrouter/"):]' in template
     assert 'clone["provider"] = "OpenCode Go"' in template
     assert "option_value.removeprefix(\"openrouter/\")" in template
-    assert '"id": "openai/deepseek-v4-flash"' not in template
+    assert '"id": "openai/deepseek-v4.1-flash"' not in template
     assert "KDENSE_SETUP_STAMP=/home/coder/.cache/kdense-byok-setup-rev" in template
     assert "KDENSE_SETUP_KEY=v11-central-litellm-only" in template
     assert (
@@ -1259,19 +1465,25 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
     assert consolidated_replacements["__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"] == (
         _expected_coder_fallback_models_json_escaped()
     )
-    assert {
-        key: value
-        for key, value in consolidated_replacements.items()
-        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
-    } == {
-        key: value
-        for key, value in hermes_legacy_replacements.items()
-        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
+    # The two templates have to agree on how Hermes reaches the gateway. The keys are
+    # named rather than filtered by prefix because the default template now carries a
+    # Hermes key the legacy one never had; a prefix filter turns that into a failure
+    # with no explanation attached.
+    hermes_wiring_keys = (
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__",
+        "__DOKPLOY_WIZARD_HERMES_BASE_URL__",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__",
+    )
+    assert {key: consolidated_replacements[key] for key in hermes_wiring_keys} == {
+        key: hermes_legacy_replacements[key] for key in hermes_wiring_keys
     }
+    assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" in consolidated_replacements
+    assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" not in hermes_legacy_replacements
     assert template_replacements_by_name[coder_module._base_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1279,7 +1491,7 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1287,7 +1499,7 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1359,6 +1571,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
 
     assert template_push_calls == [
         coder_module._default_template_name(),
+        coder_module._opencode_hermes_pi_template_name(),
         coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
@@ -1366,6 +1579,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     ]
     assert ensure_workspace_calls == []
     assert notes == (
+        "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
@@ -1380,19 +1594,25 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     assert consolidated_replacements["__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"] == (
         _expected_coder_fallback_models_json_escaped()
     )
-    assert {
-        key: value
-        for key, value in consolidated_replacements.items()
-        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
-    } == {
-        key: value
-        for key, value in hermes_legacy_replacements.items()
-        if key.startswith("__DOKPLOY_WIZARD_HERMES_")
+    # The two templates have to agree on how Hermes reaches the gateway. The keys are
+    # named rather than filtered by prefix because the default template now carries a
+    # Hermes key the legacy one never had; a prefix filter turns that into a failure
+    # with no explanation attached.
+    hermes_wiring_keys = (
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__",
+        "__DOKPLOY_WIZARD_HERMES_BASE_URL__",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__",
+    )
+    assert {key: consolidated_replacements[key] for key in hermes_wiring_keys} == {
+        key: hermes_legacy_replacements[key] for key in hermes_wiring_keys
     }
+    assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" in consolidated_replacements
+    assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" not in hermes_legacy_replacements
     assert template_replacements_by_name[coder_module._base_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1400,7 +1620,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -1616,12 +1836,13 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     assert secret_sync_calls == [
         (
                 "dokploy-litellm",
-                "opencode-go/deepseek-v4-flash",
+                "opencode-go/deepseek-v4.1-flash",
                 "http://wizard-stack-shared-litellm:4000",
         )
     ]
     assert notes == (
         "Provisioned initial Coder admin for 'admin@example.com'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
@@ -1713,6 +1934,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
 
     expected_template_names = {
         coder_module._default_template_name(),
+        coder_module._opencode_hermes_pi_template_name(),
         coder_module._base_template_name(),
         coder_module._default_opencode_web_template_name(),
         coder_module._default_kdense_byok_template_name(),
@@ -1729,6 +1951,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     ]
     assert first_notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
@@ -1806,7 +2029,10 @@ def test_ensure_application_ready_skips_optional_template_push_failure(
     assert "sk-secret" not in skipped_note
     assert "session-123" not in skipped_note
     assert "<REDACTED>" in skipped_note
-    assert len(skipped_note) < 460
+    # The note stays bounded so a failed push cannot bloat the state file, but a
+    # terraform diagnosis has to survive it: the reason arrives at the end of the CLI's
+    # output, after the banner and the streamed plan.
+    assert len(skipped_note) < 1400
 
 
 def test_ensure_application_ready_keeps_base_template_push_failure_required(
@@ -2717,6 +2943,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         ),
         (
             "wizard-stack-coder-container",
+            str(coder_module._opencode_hermes_pi_template_dir()),
+            coder_module._opencode_hermes_pi_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
             str(coder_module._base_template_dir()),
             coder_module._base_template_name(),
         ),
@@ -2747,6 +2978,12 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "wizard-stack-coder-container",
             "coder.example.com",
             "session-123",
+            coder_module._opencode_hermes_pi_template_name(),
+        ),
+        (
+            "wizard-stack-coder-container",
+            "coder.example.com",
+            "session-123",
             coder_module._base_template_name(),
         ),
         (
@@ -2771,7 +3008,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -2779,7 +3016,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
@@ -2787,9 +3024,30 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4-flash",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4.1-flash",
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
+        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+    }
+    assert template_replacements_by_name[coder_module._default_hermes_desktop_template_name()] == {
+        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
+        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
+        "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4.1-flash",
+        "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
+        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
+        # The webapp needs no hostname token: Coder's subdomain app routing derives the
+        # app hostname itself and the dashboard accepts any Host (measured on the box),
+        # so this template gets the Coder origin for the community WebUI and nothing more.
+        "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": "https://coder.example.com",
+        # Both tokens: the clone kept the opencode serve password from its parent and
+        # added the webapp sign-in password. An unreplaced token fails nothing — it
+        # silently becomes the literal password.
+        "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__": "ChangeMeSoon",
+        "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": "ChangeMeSoon",
+        # The browser-hosted Desktop has not shipped in a release, so this template
+        # installs the channel that carries it. Only this one: an unreleased channel is
+        # not a decision to make on behalf of the other Hermes templates.
+        "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__": "main",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
     }
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name
@@ -2807,12 +3065,13 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         (
             "wizard-stack-coder-container",
             "dokploy-litellm",
-            "opencode-go/deepseek-v4-flash",
+            "opencode-go/deepseek-v4.1-flash",
             None,
         )
     ]
     assert notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
+        "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
         "Seeded default Coder template 'ubuntu-vscode'.",
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",

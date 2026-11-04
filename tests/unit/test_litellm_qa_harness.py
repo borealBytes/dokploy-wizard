@@ -12,7 +12,9 @@ from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.litellm.qa_harness import (
     LiteLLMAdminAccessCheckError,
+    LiteLLMAdminUiCheckError,
     build_litellm_admin_qa_harness,
+    verify_internal_litellm_admin_ui,
     verify_public_litellm_admin_access,
 )
 from dokploy_wizard.state import DesiredState, RawEnvInput
@@ -41,26 +43,31 @@ def test_build_litellm_admin_qa_harness_requires_access_challenge_and_internal_p
 
     assert harness.admin_url == "https://litellm.example.com"
     assert harness.internal_url == "http://wizard-stack-shared-litellm:4000/health/readiness"
+    assert harness.internal_ui_url == "http://wizard-stack-shared-litellm:4000/ui"
     assert [check.name for check in harness.checks] == [
         "public-admin-access",
+        "admin-ui-serving",
         "shared-network-readiness",
         "shared-network-chat-completion",
     ]
     assert "302/401/403" in harness.checks[0].success_criteria
     assert "must never return unauthenticated 200" in harness.checks[0].failure_criteria
     assert "https://litellm.example.com" in harness.checks[0].shell_command
+    # Readiness can pass while the UI bundle 404s, so the UI gets its own probe.
+    assert "http://wizard-stack-shared-litellm:4000/ui" in harness.checks[1].shell_command
     assert "docker run --rm --network wizard-stack-shared" in harness.checks[1].shell_command
-    assert "curlimages/curl:8.7.1" in harness.checks[1].shell_command
-    assert "http://wizard-stack-shared-litellm:4000/health/readiness" in harness.checks[1].shell_command
-    assert DEFAULT_LOCAL_CANONICAL_ALIAS in harness.checks[2].shell_command
-    assert DEFAULT_LOCAL_CANONICAL_ALIAS in harness.checks[2].success_criteria
-    assert DEFAULT_LOCAL_CANONICAL_ALIAS in harness.checks[2].failure_criteria
-    assert "/v1/chat/completions" in harness.checks[2].shell_command
-    assert "litellm-generated-keys.json" in harness.checks[2].shell_command
-    assert harness.checks[2].command == (
+    assert "http://wizard-stack-shared-litellm:4000/health/readiness" in harness.checks[2].shell_command
+    assert "docker run --rm --network wizard-stack-shared" in harness.checks[2].shell_command
+    assert "curlimages/curl:8.7.1" in harness.checks[2].shell_command
+    assert DEFAULT_LOCAL_CANONICAL_ALIAS in harness.checks[3].shell_command
+    assert DEFAULT_LOCAL_CANONICAL_ALIAS in harness.checks[3].success_criteria
+    assert DEFAULT_LOCAL_CANONICAL_ALIAS in harness.checks[3].failure_criteria
+    assert "/v1/chat/completions" in harness.checks[3].shell_command
+    assert "litellm-generated-keys.json" in harness.checks[3].shell_command
+    assert harness.checks[3].command == (
         "sh",
         "-lc",
-        harness.checks[2].shell_command,
+        harness.checks[3].shell_command,
     )
 
 
@@ -72,11 +79,12 @@ def test_build_litellm_admin_qa_harness_adds_tailnet_probe_when_tailscale_ssh_is
 
     assert [check.name for check in harness.checks] == [
         "public-admin-access",
+        "admin-ui-serving",
         "shared-network-readiness",
         "shared-network-chat-completion",
         "tailnet-host-readiness",
     ]
-    tailnet_check = harness.checks[3]
+    tailnet_check = harness.checks[4]
     assert "tailscale ssh wizard-tailnet" in tailnet_check.shell_command
     assert "docker run --rm --network wizard-stack-shared" in tailnet_check.shell_command
     assert "http://wizard-stack-shared-litellm:4000/health/readiness" in tailnet_check.shell_command
@@ -104,6 +112,44 @@ def test_verify_public_litellm_admin_access_rejects_unauthenticated_200() -> Non
         verify_public_litellm_admin_access(
             "https://litellm.example.com",
             request_fn=lambda _: _FakeResponse(status=200),
+        )
+
+
+def test_verify_internal_litellm_admin_ui_accepts_200() -> None:
+    verify_internal_litellm_admin_ui(
+        "http://wizard-stack-shared-litellm:4000/ui",
+        request_fn=lambda _: _FakeResponse(status=200),
+    )
+
+
+@pytest.mark.parametrize("status", (302, 401, 403, 404, 500))
+def test_verify_internal_litellm_admin_ui_rejects_anything_but_200(status: int) -> None:
+    # Inside the stack there is no Access challenge to excuse a non-200: 302 here
+    # means the UI itself is redirecting away from a broken install.
+    def _request(_: object) -> _FakeResponse:
+        raise error.HTTPError(
+            url="http://wizard-stack-shared-litellm:4000/ui",
+            code=status,
+            msg="not the UI",
+            hdrs=Message(),
+            fp=None,
+        )
+
+    with pytest.raises(LiteLLMAdminUiCheckError, match=f"{status}"):
+        verify_internal_litellm_admin_ui(
+            "http://wizard-stack-shared-litellm:4000/ui",
+            request_fn=_request,
+        )
+
+
+def test_verify_internal_litellm_admin_ui_reports_a_refused_connection() -> None:
+    def _request(_: object) -> _FakeResponse:
+        raise error.URLError(reason="connection refused")
+
+    with pytest.raises(LiteLLMAdminUiCheckError, match="connection refused"):
+        verify_internal_litellm_admin_ui(
+            "http://wizard-stack-shared-litellm:4000/ui",
+            request_fn=_request,
         )
 
 

@@ -12,6 +12,8 @@ import pytest
 
 from dokploy_wizard.litellm.model_sync import (
     MODEL_SYNC_CONSUMER_WILDCARD,
+    MODEL_SYNC_DEFAULT_CHAT_ALIAS,
+    MODEL_SYNC_DEFAULT_CHAT_PATTERN,
     MODEL_SYNC_DEFAULT_PROBE_TTL_DAYS,
     MODEL_SYNC_NVIDIA_MAX_MODELS_DEFAULT,
     MODEL_SYNC_OPENCODE_GO_MAX_MODELS,
@@ -19,7 +21,10 @@ from dokploy_wizard.litellm.model_sync import (
     MODEL_SYNC_OPENROUTER_MAX_RANKED_FREE,
     MODEL_SYNC_OPENROUTER_MAX_RANKED_PAID,
     OPENCODE_GO_GATEWAY_EXTRA_HEADERS,
+    build_default_chat_config,
     build_model_sync_sources,
+    model_sync_default_chat_alias,
+    model_sync_default_chat_pattern,
     model_sync_enabled,
     model_sync_interval_minutes,
     model_sync_max_models_per_provider,
@@ -43,6 +48,80 @@ def _load_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+# --- default-chat: the pattern side ---------------------------------------------------
+
+_GO_CREDS = {"opencode_go_api_key_env": "LITELLM_OPENCODE_GO_API_KEY"}
+_OR_CREDS = {"openrouter_api_key_env": "LITELLM_OPENROUTER_API_KEY"}
+_BOTH_CREDS = {**_GO_CREDS, **_OR_CREDS}
+_GO_ENV = {"LITELLM_OPENCODE_GO_API_KEY": "go-key"}
+_BOTH_ENV = {"LITELLM_OPENCODE_GO_API_KEY": "go-key", "LITELLM_OPENROUTER_API_KEY": "or-key"}
+
+
+def test_default_chat_pattern_is_shipped_default_or_explicit_or_off() -> None:
+    # Unset takes the shipped pattern, so a stack that never heard of this feature
+    # still gets a default model that tracks the catalog instead of a frozen name.
+    assert model_sync_default_chat_pattern({}) == MODEL_SYNC_DEFAULT_CHAT_PATTERN
+    assert model_sync_default_chat_pattern({"AI_DEFAULT_MODEL_PATTERN": "glm*air*"}) == "glm*air*"
+    # An explicit empty value is the operator turning it off.
+    assert model_sync_default_chat_pattern({"AI_DEFAULT_MODEL_PATTERN": ""}) is None
+    assert model_sync_default_chat_pattern({"AI_DEFAULT_MODEL_PATTERN": "   "}) is None
+    # "*" names nothing: it matches the whole catalog, so it is treated as off rather
+    # than silently making some arbitrary first row the stack's default model.
+    assert model_sync_default_chat_pattern({"AI_DEFAULT_MODEL_PATTERN": "*"}) is None
+    assert model_sync_default_chat_pattern({"AI_DEFAULT_MODEL_PATTERN": "**"}) is None
+
+
+def test_default_chat_targets_only_the_provider_the_operator_chose() -> None:
+    sources = build_model_sync_sources(_BOTH_ENV, _BOTH_CREDS)
+
+    # AI_DEFAULT_PROVIDER is unset in this env, so the shipped provider (opencode-go)
+    # is the one that carries the selection block.
+    by_name = {str(source["name"]): source for source in sources}
+    assert by_name["opencode-go"]["default_chat"] == {
+        "pattern": MODEL_SYNC_DEFAULT_CHAT_PATTERN,
+        "alias": MODEL_SYNC_DEFAULT_CHAT_ALIAS,
+    }
+    assert "default_chat" not in by_name["openrouter"]
+
+    openrouter = build_model_sync_sources(
+        {**_BOTH_ENV, "AI_DEFAULT_PROVIDER": "openrouter"}, _BOTH_CREDS
+    )
+    by_name = {str(source["name"]): source for source in openrouter}
+    assert by_name["openrouter"]["default_chat"]["alias"] == MODEL_SYNC_DEFAULT_CHAT_ALIAS
+    assert "default_chat" not in by_name["opencode-go"]
+
+    # A provider with no sync source (a local endpoint) gets no selection at all:
+    # there is no catalog to pick from, and inventing an alias nobody can route
+    # through is worse than none.
+    assert build_default_chat_config({"AI_DEFAULT_PROVIDER": "local"}) is None
+    local_sources = build_model_sync_sources(
+        {**_GO_ENV, "AI_DEFAULT_PROVIDER": "local", "LITELLM_MODEL_SYNC_PROVIDERS": "opencode-go"},
+        _GO_CREDS,
+    )
+    assert all("default_chat" not in source for source in local_sources)
+
+
+def test_default_chat_alias_needs_its_provider_to_actually_be_synced() -> None:
+    env = {**_BOTH_ENV, "AI_DEFAULT_PROVIDER": "opencode-go"}
+    assert model_sync_default_chat_alias(env, _BOTH_CREDS) == MODEL_SYNC_DEFAULT_CHAT_ALIAS
+
+    # The alias is only worth pre-authorizing when its provider is being synced:
+    # listing a name that can never exist on the gateway just adds a phantom row.
+    assert (
+        model_sync_default_chat_alias(
+            {**env, "LITELLM_MODEL_SYNC_PROVIDERS": "openrouter"}, _BOTH_CREDS
+        )
+        is None
+    )
+    assert (
+        model_sync_default_chat_alias({**env, "LITELLM_MODEL_SYNC_ENABLED": "false"}, _BOTH_CREDS)
+        is None
+    )
+    # The operator named opencode-go but only has an OpenRouter key, so the go source
+    # is never built and there is no catalog to select from: no alias to authorize.
+    assert model_sync_default_chat_alias(env, _OR_CREDS) is None
 
 
 def test_sources_cover_configured_providers_only() -> None:
@@ -251,7 +330,7 @@ def test_sidecar_applies_source_extra_headers(
         calls.append((method, url, payload))
         if url.endswith("/v1/models"):
             assert token == "zen-upstream-key"
-            return {"data": [{"id": "deepseek-v4-flash"}]}
+            return {"data": [{"id": "deepseek-v4.1-flash"}]}
         if url.endswith("/model/info"):
             return {"data": []}
         return {}
@@ -262,9 +341,9 @@ def test_sidecar_applies_source_extra_headers(
 
     assert summary["created"] == 1
     create = next(call for call in calls if call[1].endswith("/model/new"))
-    assert create[2]["model_name"] == "sync/opencode-go/deepseek-v4-flash"
+    assert create[2]["model_name"] == "sync/opencode-go/deepseek-v4.1-flash"
     assert create[2]["litellm_params"] == {
-        "model": "openai/deepseek-v4-flash",
+        "model": "openai/deepseek-v4.1-flash",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "zen-upstream-key",
         "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
@@ -304,13 +383,13 @@ def test_sidecar_keeps_models_when_source_fetch_fails(
 _RANKED_CATALOG = {
     "data": [
         {
-            "id": "deepseek/deepseek-v4-flash",
-            "canonical_slug": "deepseek/deepseek-v4-flash-20260423",
+            "id": "deepseek/deepseek-v4.1-flash",
+            "canonical_slug": "deepseek/deepseek-v4.1-flash-20260423",
             "architecture": {"output_modalities": ["text"]},
         },
         {
-            "id": "deepseek/deepseek-v4-flash:free",
-            "canonical_slug": "deepseek/deepseek-v4-flash-20260423",
+            "id": "deepseek/deepseek-v4.1-flash:free",
+            "canonical_slug": "deepseek/deepseek-v4.1-flash-20260423",
             "architecture": {"output_modalities": ["text"]},
         },
         {
@@ -362,13 +441,13 @@ def _ranked_rows() -> dict:
     return {
         "data": [
             {"model_permaslug": "openai/gpt-6-luna-20260922", "variant": "standard", "rankingMetricValue": 35},
-            {"model_permaslug": "deepseek/deepseek-v4-flash-20260423", "variant": "standard", "rankingMetricValue": 25},
-            {"model_permaslug": "deepseek/deepseek-v4-flash-20260423", "variant": "standard", "rankingMetricValue": 15},
+            {"model_permaslug": "deepseek/deepseek-v4.1-flash-20260423", "variant": "standard", "rankingMetricValue": 25},
+            {"model_permaslug": "deepseek/deepseek-v4.1-flash-20260423", "variant": "standard", "rankingMetricValue": 15},
             {"model_permaslug": "anthropic/visionary-pro-20260101", "variant": "standard", "rankingMetricValue": 33},
             {"model_permaslug": "z-ai/glm-5.3-20260816", "variant": "standard", "rankingMetricValue": 30},
             {"model_permaslug": "tencent/hy4-preview-20260827", "variant": "standard", "rankingMetricValue": 10},
             {"model_permaslug": "xiaomi/mimo-v2.6-flash-20260921", "variant": "free", "rankingMetricValue": 20},
-            {"model_permaslug": "deepseek/deepseek-v4-flash-20260423", "variant": "free", "rankingMetricValue": 5},
+            {"model_permaslug": "deepseek/deepseek-v4.1-flash-20260423", "variant": "free", "rankingMetricValue": 5},
         ]
     }
 
@@ -398,11 +477,11 @@ def test_sidecar_ranks_openrouter_models_paid_then_free_by_leaderboard(
     model_ids = sidecar.source_model_ids(_ranked_source(), 50)
 
     assert model_ids == [
-        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4.1-flash",
         "z-ai/glm-5.3",
         "tencent/hy4-preview",
         "xiaomi/mimo-v2.6-flash:free",
-        "deepseek/deepseek-v4-flash:free",
+        "deepseek/deepseek-v4.1-flash:free",
     ]
     rankings_call = next(call for call in calls if call[1].endswith("/rankings/models"))
     assert rankings_call[2] is None
@@ -414,7 +493,7 @@ def test_sidecar_ranked_total_cap_and_fallback(
     sidecar = _load_sidecar(tmp_path, monkeypatch)
     sidecar.http_json, _calls = _ranked_transport(monkeypatch, _ranked_rows())
     assert sidecar.source_model_ids(_ranked_source(max_models=2), 50) == [
-        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4.1-flash",
         "z-ai/glm-5.3",
     ]
 
@@ -423,8 +502,8 @@ def test_sidecar_ranked_total_cap_and_fallback(
     )
     fallback = sidecar.source_model_ids(_ranked_source(max_models=3), 50)
     assert fallback == [
-        "deepseek/deepseek-v4-flash",
-        "deepseek/deepseek-v4-flash:free",
+        "deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-v4.1-flash:free",
         "z-ai/glm-5.3",
     ]
 
@@ -461,7 +540,7 @@ def test_sidecar_refreshes_consumer_key_allowlists(
     calls: list[tuple[str, str, dict | None]] = []
 
     current_models = [
-        "opencode-go/deepseek-v4-flash",
+        "opencode-go/deepseek-v4.1-flash",
         "sync/*",
         "sync/openrouter/stale/gone-model",
     ]
@@ -489,7 +568,7 @@ def test_sidecar_refreshes_consumer_key_allowlists(
     # The stale sync alias is dropped, the wildcard and static route survive,
     # and the freshly created alias is appended.
     assert update[2]["models"] == [
-        "opencode-go/deepseek-v4-flash",
+        "opencode-go/deepseek-v4.1-flash",
         "sync/*",
         "sync/openrouter/deepseek/new-thing",
     ]
@@ -559,10 +638,12 @@ def _nvidia_document(max_models: int = 3, probe: object = True) -> dict:
     return {"interval_minutes": 360, "max_models_per_provider": 50, "sources": [source]}
 
 
-def _nvidia_transport(probe_calls: list, *, dead: set, errors: set, catalog=None):
+def _nvidia_transport(probe_calls: list, *, dead: set, errors: set, catalog=None, forbidden=None):
     from urllib.error import HTTPError
 
-    def fake_http_json(method, url, *, token=None, payload=None, timeout=30):
+    forbidden = forbidden or set()
+
+    def fake_http_json(method, url, *, token=None, payload=None, timeout=30, headers=None):
         if url.endswith("/v1/models"):
             return {"data": [{"id": model} for model in (catalog or _NVIDIA_CATALOG)]}
         if url.endswith("/model/info"):
@@ -570,7 +651,11 @@ def _nvidia_transport(probe_calls: list, *, dead: set, errors: set, catalog=None
         if url.endswith("/chat/completions"):
             model = payload["model"]
             probe_calls.append(model)
-            assert payload["max_tokens"] == 1
+            # A one-token probe is refused outright by some endpoints, and the refusal
+            # is about the request, not the model.
+            assert payload["max_tokens"] >= 16
+            if model in forbidden:
+                raise HTTPError(url, 403, "Forbidden", {}, None)
             if model in dead:
                 raise HTTPError(url, 404, "Not Found", {}, None)
             if model in errors:
@@ -889,3 +974,415 @@ def test_sidecar_free_registry_failure_keeps_full_catalog(
         "sync/nvidia/ibm/paid",
         "sync/nvidia/meta/free-named",
     }
+def _default_chat_document(**overrides: object) -> dict:
+    source = {
+        "name": "opencode-go",
+        "alias_prefix": "sync/opencode-go",
+        "list_url": "https://opencode.ai/zen/go/v1/models",
+        "api_key_env": "LITELLM_OPENCODE_GO_API_KEY",
+        "api_base": "https://opencode.ai/zen/go/v1",
+        "model_ref_template": "openai/{model}",
+        "max_models": 100,
+        "extra_headers": {"x-opencode-session": "gw", "User-Agent": "wizard/1"},
+        "default_chat": {"pattern": "deepseek*flash*", "alias": MODEL_SYNC_DEFAULT_CHAT_ALIAS},
+    }
+    document = {"interval_minutes": 360, "max_models_per_provider": 50, "sources": [source]}
+    document.update(overrides)
+    return document
+
+
+def _selection_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    model_ids: list[str],
+    *,
+    alive: set[str] | None = None,
+    dead: set[str] | None = None,
+) -> tuple[object, list[dict]]:
+    """Fake transport for the sidecar's catalog, probe, and admin calls."""
+
+    alive = alive or set()
+    dead = dead or set()
+    calls: list[dict] = []
+
+    def fake_http_json(
+        method: str,
+        url: str,
+        *,
+        token: object = None,
+        payload: object = None,
+        timeout: object = None,
+        headers: object = None,
+    ) -> dict:
+        calls.append(
+            {
+                "method": method,
+                "url": url,
+                "payload": payload,
+                "timeout": timeout,
+                "headers": headers,
+            }
+        )
+        if url.endswith("/models"):
+            return {"data": [{"id": model_id} for model_id in model_ids]}
+        if url.endswith("/chat/completions"):
+            model = str((payload or {}).get("model"))
+            if model in dead:
+                raise _HttpError(404)
+            if model not in alive:
+                raise _HttpError(429)
+            return {"choices": [{"message": {"content": "pong"}}]}
+        if url.endswith("/model/new"):
+            return {"info": {}}
+        if url.endswith("/model/delete"):
+            return {"info": {}}
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setenv("LITELLM_OPENCODE_GO_API_KEY", "go-key")
+    return fake_http_json, calls
+
+
+class _HttpError(Exception):
+    def __init__(self, code: int) -> None:
+        super().__init__(f"HTTP {code}")
+        self.code = code
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        # Synthetic ids on purpose: a real model name here goes stale the moment the
+        # provider renames it, which is exactly what happened to the shipped default.
+        ("deepseek-v9.10-flash", (9, 10)),
+        ("deepseek-v9.1-flash", (9, 1)),
+        ("deepseek-v9-flash", (9,)),
+        ("deepseek-flash", (0,)),
+    ],
+)
+def test_version_rank_orders_by_numbers_not_characters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_id: str, expected: tuple
+) -> None:
+    # "v9.10" sorts below "v9.2" as a string, which would hand the default alias to an
+    # older model forever; the tuple comparison is what makes 9.10 outrank 9.2.
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+
+    assert sidecar.version_rank(model_id) == expected
+
+
+def test_default_chat_candidates_rank_newest_first_with_catalog_order_on_ties(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    document = _default_chat_document()
+    sidecar.http_json, _calls = _selection_transport(
+        monkeypatch,
+        [
+            "deepseek-v9.1-flash",
+            "deepseek-v9.10-flash",
+            "deepseek-v9-flash",
+            "glm-4.6-air",  # does not match the pattern
+            "kimi-k2",
+        ],
+    )
+
+    candidates = sidecar.default_chat_candidates(
+        document["sources"][0], "go-key", "deepseek*flash*"
+    )
+
+    assert candidates == ["deepseek-v9.10-flash", "deepseek-v9.1-flash", "deepseek-v9-flash"]
+
+
+def test_default_chat_promotes_the_confirmed_model_before_retiring_the_old_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    document = _default_chat_document()
+    sidecar.http_json, calls = _selection_transport(
+        monkeypatch,
+        ["deepseek-v4.10-flash", "deepseek-v4.1-flash"],
+        # The newest model is rate limited (inconclusive) and the older one answers:
+        # the alias must land on the model that actually completes a request.
+        alive={"deepseek-v4.1-flash"},
+    )
+    existing = {
+        MODEL_SYNC_DEFAULT_CHAT_ALIAS: {
+            "id": "dep-old",
+            "managed_by": sidecar.MANAGED_BY,
+            "targets": [{"id": "dep-old", "target": "openai/deepseek-v3-flash"}],
+        }
+    }
+
+    result = sidecar.resolve_default_chat(document, existing)
+
+    assert result["status"] == "confirmed"
+    assert result["target"] == "openai/deepseek-v4.1-flash"
+    assert result["changed"] is True
+    assert result["retired"] == 1
+    created = [c for c in calls if c["url"].endswith("/model/new")]
+    deleted = [c for c in calls if c["url"].endswith("/model/delete")]
+    assert len(created) == 1
+    assert created[0]["payload"]["model_name"] == MODEL_SYNC_DEFAULT_CHAT_ALIAS
+    assert created[0]["payload"]["litellm_params"]["model"] == "openai/deepseek-v4.1-flash"
+    # Promote before retire: the new target is registered first so the alias never
+    # points at nothing while the switch happens.
+    assert calls.index(created[0]) < calls.index(deleted[0])
+    assert deleted[0]["payload"] == {"id": "dep-old"}
+
+
+def test_default_chat_probes_with_the_source_session_headers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # OpenCode Go rejects requests without its session header, so a probe that omits
+    # it reports every candidate as inconclusive and the alias never resolves.
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    document = _default_chat_document()
+    sidecar.http_json, calls = _selection_transport(
+        monkeypatch, ["deepseek-v4.1-flash"], alive={"deepseek-v4.1-flash"}
+    )
+
+    result = sidecar.resolve_default_chat(document, {})
+
+    assert result["status"] == "confirmed"
+    probes = [c for c in calls if c["url"].endswith("/chat/completions")]
+    assert probes
+    assert probes[0]["headers"]["x-opencode-session"] == "gw"
+    assert probes[0]["payload"]["max_tokens"] == sidecar.DEFAULT_CHAT_PROBE_MAX_TOKENS
+    assert probes[0]["payload"]["max_tokens"] >= 16
+
+
+def test_default_chat_keeps_the_current_target_when_nothing_confirms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    document = _default_chat_document()
+    sidecar.http_json, calls = _selection_transport(
+        monkeypatch, ["deepseek-v4.10-flash", "deepseek-v4.1-flash"], alive=set()
+    )
+    existing = {
+        MODEL_SYNC_DEFAULT_CHAT_ALIAS: {
+            "id": "dep-old",
+            "managed_by": sidecar.MANAGED_BY,
+            "targets": [{"id": "dep-old", "target": "openai/deepseek-v3-flash"}],
+        }
+    }
+
+    result = sidecar.resolve_default_chat(document, existing)
+
+    assert result["status"] == "unconfirmed"
+    # A brownout must not move the default off a target that was working, and it must
+    # not delete the alias either: that would take the default away from every client.
+    assert not [c for c in calls if c["url"].endswith("/model/delete")]
+    assert not [c for c in calls if c["url"].endswith("/model/new")]
+
+
+def test_default_chat_drops_a_model_the_provider_does_not_know(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    document = _default_chat_document()
+    sidecar.http_json, calls = _selection_transport(
+        monkeypatch,
+        ["deepseek-v4.10-flash", "deepseek-v4.1-flash"],
+        dead={"deepseek-v4.10-flash"},
+        alive={"deepseek-v4.1-flash"},
+    )
+
+    result = sidecar.resolve_default_chat(document, {})
+
+    assert result["target"] == "openai/deepseek-v4.1-flash"
+    probed = [c["payload"]["model"] for c in calls if c["url"].endswith("/chat/completions")]
+    assert probed == ["deepseek-v4.10-flash", "deepseek-v4.1-flash"]
+
+
+def test_default_chat_stays_put_when_the_alias_already_points_at_the_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    document = _default_chat_document()
+    sidecar.http_json, calls = _selection_transport(
+        monkeypatch, ["deepseek-v4.1-flash"], alive={"deepseek-v4.1-flash"}
+    )
+    existing = {
+        MODEL_SYNC_DEFAULT_CHAT_ALIAS: {
+            "id": "dep-1",
+            "managed_by": sidecar.MANAGED_BY,
+            "targets": [{"id": "dep-1", "target": "openai/deepseek-v4.1-flash"}],
+        }
+    }
+
+    result = sidecar.resolve_default_chat(document, existing)
+
+    assert result == {
+        "status": "confirmed",
+        "source": "opencode-go",
+        "alias": MODEL_SYNC_DEFAULT_CHAT_ALIAS,
+        "target": "openai/deepseek-v4.1-flash",
+        "changed": False,
+    }
+    assert not [c for c in calls if c["url"].endswith("/model/new")]
+    assert not [c for c in calls if c["url"].endswith("/model/delete")]
+
+
+def test_default_chat_is_never_touched_by_the_source_prune_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The prune loop keys on sync/<source>/... and the default alias is one segment
+    # deep, so the loop must leave it alone even when its provider is unhealthy; only
+    # selection may change it.
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    pruned: list[object] = []
+    sidecar.delete_deployment = lambda model_id: pruned.append(model_id)
+    existing = {
+        MODEL_SYNC_DEFAULT_CHAT_ALIAS: {
+            "id": "dep-default",
+            "managed_by": sidecar.MANAGED_BY,
+            "targets": [{"id": "dep-default", "target": "openai/deepseek-v4.1-flash"}],
+        },
+        "sync/openrouter/gone-model": {
+            "id": "dep-or",
+            "managed_by": sidecar.MANAGED_BY,
+            "targets": [{"id": "dep-or", "target": "openrouter/gone"}],
+        },
+    }
+
+    # Source "openrouter" is healthy but stopped reporting the model; "opencode-go"
+    # is down entirely. Neither may take the default alias with it.
+    pruned_count, _ = sidecar._prune_deployments(
+        existing, deployments={}, ok_sources={"openrouter"}
+    )
+
+    assert pruned == ["dep-or"]
+    assert pruned_count == 1
+
+
+def test_default_chat_alias_is_retired_when_the_feature_is_turned_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Turning the feature off removes the default_chat block from every source. The
+    # alias has to go with it, or consumers keep pointing at a model that nothing
+    # selects any more, and the prune loop cannot do it because of the name depth.
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    document = _default_chat_document()
+    document["sources"][0].pop("default_chat")
+    deleted: list[object] = []
+    sidecar.delete_deployment = lambda model_id: deleted.append(model_id)
+    existing = {
+        MODEL_SYNC_DEFAULT_CHAT_ALIAS: {
+            "id": "dep-default",
+            "managed_by": sidecar.MANAGED_BY,
+            "targets": [{"id": "dep-default", "target": "openai/deepseek-v4.1-flash"}],
+        }
+    }
+
+    result = sidecar.resolve_default_chat(document, existing)
+
+    assert result["status"] == "disabled"
+    assert result["retired"] == 1
+    assert deleted == ["dep-default"]
+
+class _ProbeError(Exception):
+    def __init__(self, code: int | None) -> None:
+        super().__init__(f"probe failed: {code}")
+        self.code = code
+
+
+def test_liveness_probe_treats_only_permanent_answers_as_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Pruning is destructive, so the verdict table has to be deliberate: 404 is an
+    # unknown model and 403 is a model this key may not use, both permanent for the
+    # stack. 429 and 5xx are a busy provider, and 400 is what several providers return
+    # for a request shape they dislike; none of those may empty the picker.
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    source = {"api_base": "https://example.test/v1"}
+
+    def verdict_for(exc: object) -> str:
+        def fake_http_json(method, url, **kwargs):  # type: ignore[no-untyped-def]
+            raise exc
+
+        sidecar.http_json = fake_http_json
+        return sidecar._probe_model_status(source, "token", "some-model", 1.0)
+
+    assert verdict_for(_ProbeError(404)) == "dead"
+    assert verdict_for(_ProbeError(403)) == "dead"
+    assert verdict_for(_ProbeError(429)) == "unknown"
+    assert verdict_for(_ProbeError(503)) == "unknown"
+    assert verdict_for(_ProbeError(400)) == "unknown"
+    assert verdict_for(RuntimeError("connection reset")) == "unknown"
+
+
+def test_probe_never_asks_a_paid_model_to_prove_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    probed: list[str] = []
+
+    def fake_http_json(method, url, **kwargs):  # type: ignore[no-untyped-def]
+        probed.append(str(kwargs.get("payload", {}).get("model")))
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    sidecar.http_json = fake_http_json
+    ranked = [
+        "anthropic/claude-opus-4.7",
+        "google/gemma-4-31b-it:free",
+        "deepseek/deepseek-v4-flash",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+    ]
+
+    kept = sidecar._probe_in_order(
+        {"name": "openrouter", "api_base": "https://example.test/v1", "probe": True,
+         "probe_free_only": True},
+        "or-key",
+        ranked,
+    )
+
+    assert kept == ranked  # nothing died
+    assert probed == ["google/gemma-4-31b-it:free", "nvidia/nemotron-3-ultra-550b-a55b:free"]
+
+
+def test_probe_drops_a_delisted_free_model_and_keeps_the_ranking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # This is the failure an operator actually sees: the catalog still lists a free
+    # model the provider has delisted, so it sits in the picker and 404s on first use.
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+
+    def fake_http_json(method, url, **kwargs):  # type: ignore[no-untyped-def]
+        if kwargs.get("payload", {}).get("model") == "deepseek/gone:free":
+            raise _ProbeError(404)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    sidecar.http_json = fake_http_json
+
+    kept = sidecar._probe_in_order(
+        {"name": "openrouter", "api_base": "https://example.test/v1", "probe": True,
+         "probe_free_only": True, "probe_ttl_days": 0},
+        "or-key",
+        ["a:free", "deepseek/gone:free", "b:free", "paid/model"],
+    )
+
+    assert kept == ["a:free", "b:free", "paid/model"]
+
+
+def test_openrouter_source_is_probed_through_its_own_base() -> None:
+    # An api_base would land in every litellm_params built from the source and repoint
+    # deployments that route correctly today, so the probe reads a separate key.
+    sources = build_model_sync_sources(
+        {"LITELLM_OPENROUTER_API_KEY": "or-key", "LITELLM_MODEL_SYNC_PROVIDERS": "openrouter"},
+        {"openrouter_api_key_env": "LITELLM_OPENROUTER_API_KEY"},
+    )
+    source = sources[0]
+
+    assert source["probe"] is True
+    assert source["probe_free_only"] is True
+    assert str(source["probe_base"]).endswith("/v1")
+    assert "api_base" not in source
+
+    off = build_model_sync_sources(
+        {
+            "LITELLM_OPENROUTER_API_KEY": "or-key",
+            "LITELLM_MODEL_SYNC_PROVIDERS": "openrouter",
+            "LITELLM_MODEL_SYNC_OPENROUTER_PROBE": "false",
+        },
+        {"openrouter_api_key_env": "LITELLM_OPENROUTER_API_KEY"},
+    )
+    assert off[0]["probe"] is False

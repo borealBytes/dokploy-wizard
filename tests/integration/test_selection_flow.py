@@ -320,7 +320,7 @@ def test_guided_install_prompt_collects_farm_runtime_values_with_shared_ai_defau
     }
     assert selection.advisor_env == {
         "ANTHROPIC_API_KEY": "anthropic-key",
-        "MY_FARM_ADVISOR_FALLBACK_MODELS": "opencode-go/deepseek-v4-flash",
+        "MY_FARM_ADVISOR_FALLBACK_MODELS": "opencode-go/deepseek-v4.1-flash",
         "MY_FARM_ADVISOR_GATEWAY_PASSWORD": "my-farm-ui-generated",
         "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN": "farm-bot-token",
         "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID": "123456789",
@@ -383,7 +383,7 @@ def test_guided_install_prompt_collects_openclaw_only_values() -> None:
         "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
     }
     assert selection.advisor_env == {
-        "OPENCLAW_FALLBACK_MODELS": "opencode-go/deepseek-v4-flash",
+        "OPENCLAW_FALLBACK_MODELS": "opencode-go/deepseek-v4.1-flash",
         "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
         "OPENCLAW_TELEGRAM_BOT_TOKEN": "openclaw-bot-token",
         "OPENCLAW_TELEGRAM_OWNER_USER_ID": "24680",
@@ -453,7 +453,7 @@ def test_guided_install_prompt_keeps_farm_channels_independent_from_openclaw() -
     assert selection.my_farm_advisor_channels == ("matrix",)
     assert selection.advisor_env["OPENCLAW_TELEGRAM_BOT_TOKEN"] == "openclaw-bot-token"
     assert "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN" not in selection.advisor_env
-    assert selection.advisor_env["MY_FARM_ADVISOR_FALLBACK_MODELS"] == "opencode-go/deepseek-v4-flash"
+    assert selection.advisor_env["MY_FARM_ADVISOR_FALLBACK_MODELS"] == "opencode-go/deepseek-v4.1-flash"
 
 
 @pytest.mark.skip(reason="Paused: non-local routes")

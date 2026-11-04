@@ -528,6 +528,7 @@ def test_install_reconciles_matrix_and_persists_runtime_ledger(tmp_path: Path) -
     } == {
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
+        ("cloudflare_dns_record", "zone:zone-123:litellm.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:matrix.example.com"),
         ("shared_core_litellm", "stack:matrix-stack:shared-litellm"),
@@ -630,6 +631,13 @@ def test_install_rerun_reuses_owned_matrix_resources(tmp_path: Path) -> None:
         networking_backend=FakeCloudflareBackend(
             existing_tunnel=CloudflareTunnel(tunnel_id="matrix-tunnel", name="matrix-stack-tunnel"),
             dns_records={
+                "litellm.example.com": CloudflareDnsRecord(
+                    record_id="dns-litellm.example.com",
+                    name="litellm.example.com",
+                    record_type="CNAME",
+                    content="matrix-tunnel.cfargotunnel.com",
+                    proxied=True,
+                ),
                 "dokploy.example.com": CloudflareDnsRecord(
                     record_id="dns-dokploy.example.com",
                     name="dokploy.example.com",

@@ -799,6 +799,7 @@ def test_install_reconciles_openclaw_and_persists_slot_ledger(tmp_path: Path) ->
     } == {
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
+        ("cloudflare_dns_record", "zone:zone-123:litellm.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:matrix.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:openclaw.example.com"),
         ("shared_core_litellm", "stack:openclaw-stack:shared-litellm"),
@@ -840,6 +841,13 @@ def test_install_rerun_reuses_owned_advisor_service(tmp_path: Path) -> None:
                 name="openclaw-stack-tunnel",
             ),
             dns_records={
+                "litellm.example.com": CloudflareDnsRecord(
+                    record_id="dns-litellm.example.com",
+                    name="litellm.example.com",
+                    record_type="CNAME",
+                    content="openclaw-tunnel.cfargotunnel.com",
+                    proxied=True,
+                ),
                 "dokploy.example.com": CloudflareDnsRecord(
                     record_id="dns-dokploy.example.com",
                     name="dokploy.example.com",

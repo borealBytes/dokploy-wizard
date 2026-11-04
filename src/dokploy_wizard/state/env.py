@@ -501,10 +501,6 @@ def _resolve_access_otp_emails(
             if admin_email != "" and "@" in admin_email:
                 return (admin_email,)
         return ()
-    if not ({"openclaw", "my-farm-advisor"} & set(enabled_packs)):
-        raise StateValidationError(
-            "CLOUDFLARE_ACCESS_OTP_EMAILS requires the openclaw or my-farm-advisor pack."
-        )
     items = tuple(sorted({item.strip().lower() for item in raw_value.split(",") if item.strip()}))
     invalid = [item for item in items if "@" not in item]
     if invalid:

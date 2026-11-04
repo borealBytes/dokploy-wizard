@@ -348,7 +348,7 @@ def _rendered():
         redis=_redis(),
         generated_secrets=_SURFSENSE_SECRETS,
         litellm_generated_keys=_LITELLM_KEYS,
-        litellm_model="opencode-go/deepseek-v4-flash",
+        litellm_model="opencode-go/deepseek-v4.1-flash",
     )
 
 
@@ -473,7 +473,7 @@ def test_surfsense_compose_uses_env_specs_for_generated_secrets_and_litellm_key_
     assert specs["SURFSENSE_SEARXNG_SECRET"].value == "SECRET_TEST_SURFSENSE_SEARXNG_SECRET"
     assert specs["SURFSENSE_LITELLM_VIRTUAL_KEY"].value == "SECRET_TEST_SURFSENSE_LITELLM_VIRTUAL_KEY"
     assert specs["SURFSENSE_LITELLM_BASE_URL"].value == "http://wizard-stack-shared-litellm:4000"
-    assert specs["SURFSENSE_LITELLM_MODEL"].value == "opencode-go/deepseek-v4-flash"
+    assert specs["SURFSENSE_LITELLM_MODEL"].value == "opencode-go/deepseek-v4.1-flash"
     assert "${SURFSENSE_LITELLM_VIRTUAL_KEY:?SURFSENSE_LITELLM_VIRTUAL_KEY is required}" in compose
     assert "${SURFSENSE_LITELLM_BASE_URL:?SURFSENSE_LITELLM_BASE_URL is required}/v1" in compose
 
@@ -497,7 +497,7 @@ def test_surfsense_global_llm_config_exposes_each_allowed_chat_model_without_emb
         litellm_model="local-model.internal/unsloth-active",
         litellm_models=(
             "local-model.internal/unsloth-active",
-            "opencode-go/deepseek-v4-flash",
+            "opencode-go/deepseek-v4.1-flash",
             "openrouter/hunter-alpha",
         ),
         embedding_model="sentence-transformers/all-MiniLM-L6-v2",
@@ -511,10 +511,10 @@ def test_surfsense_global_llm_config_exposes_each_allowed_chat_model_without_emb
     assert "id: -2" in compose
     assert "id: -3" in compose
     assert 'name: "LiteLLM - local-model.internal/unsloth-active"' in compose
-    assert 'name: "LiteLLM - opencode-go/deepseek-v4-flash"' in compose
+    assert 'name: "LiteLLM - opencode-go/deepseek-v4.1-flash"' in compose
     assert 'name: "LiteLLM - openrouter/hunter-alpha"' in compose
     assert "model_name: ${SURFSENSE_LITELLM_MODEL:?SURFSENSE_LITELLM_MODEL is required}" in compose
-    assert "model_name: opencode-go/deepseek-v4-flash" in compose
+    assert "model_name: opencode-go/deepseek-v4.1-flash" in compose
     assert "model_name: openrouter/hunter-alpha" in compose
     assert "Dokploy Wizard LiteLLM" not in compose
     assert "model_name: sentence-transformers/all-MiniLM-L6-v2" not in compose
@@ -863,7 +863,7 @@ def test_surfsense_desired_state_selection_and_env_spec_contract_rejects_upstrea
     assert specs["SURFSENSE_LITELLM_VIRTUAL_KEY"].owner == "surfsense"
     assert specs["SURFSENSE_LITELLM_VIRTUAL_KEY"].target_services == ()
     assert specs["SURFSENSE_LITELLM_BASE_URL"].sensitive is False
-    assert specs["SURFSENSE_LITELLM_MODEL"].value == "opencode-go/deepseek-v4-flash"
+    assert specs["SURFSENSE_LITELLM_MODEL"].value == "opencode-go/deepseek-v4.1-flash"
     assert specs["SURFSENSE_DATABASE_URL"].target_services == (
         "migrations",
         "backend",

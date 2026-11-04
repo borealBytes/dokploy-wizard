@@ -15,7 +15,11 @@ from dokploy_wizard.packs.catalog import get_pack_definition
 from dokploy_wizard.state import DesiredState, RawEnvInput, StateValidationError
 
 SUPPORTED_OS_ID = "ubuntu"
+# 24.04 LTS is the validated baseline, not a ceiling: a host image shipping a newer
+# Ubuntu (26.04 LTS and later) installs without a code change. The baseline stays
+# named because apt remediation and the Dokploy installer contract are validated there.
 SUPPORTED_OS_VERSION = "24.04"
+MINIMUM_SUPPORTED_UBUNTU_VERSION = (24, 4)
 REQUIRED_PORTS = (80, 443, 3000)
 
 
@@ -217,7 +221,7 @@ def _os_check(host_facts: HostFacts) -> PreflightCheck:
             status="fail",
             detail=(
                 f"unsupported host OS '{host_facts.distribution_id} {host_facts.version_id}'; "
-                f"expected Ubuntu {SUPPORTED_OS_VERSION} LTS"
+                f"expected Ubuntu {SUPPORTED_OS_VERSION} LTS or newer"
             ),
         )
     if not _is_supported_ubuntu_version(host_facts.version_id):
@@ -226,24 +230,37 @@ def _os_check(host_facts: HostFacts) -> PreflightCheck:
             status="fail",
             detail=(
                 f"unsupported Ubuntu version '{host_facts.version_id}'; "
-                f"expected {SUPPORTED_OS_VERSION}"
+                f"expected {SUPPORTED_OS_VERSION} or newer"
             ),
         )
     return PreflightCheck(
         name="os_support",
         status="pass",
-        detail=f"Ubuntu {SUPPORTED_OS_VERSION} host detected.",
+        detail=(
+            f"Ubuntu {host_facts.version_id} host detected "
+            f"(baseline {SUPPORTED_OS_VERSION} LTS or newer)."
+        ),
     )
 
 
 def _is_supported_ubuntu_version(version_id: str) -> bool:
-    normalized = version_id.strip()
-    if normalized == SUPPORTED_OS_VERSION:
-        return True
-    version_match = re.match(r"^(\d+\.\d+)(?:\.\d+)?(?:\s+.*)?$", normalized)
-    if version_match is None:
+    """Accept the 24.04 LTS baseline and every newer Ubuntu release.
+
+    ``VERSION_ID`` reaches us as ``24.04``, ``24.04.2``, or ``24.04.2 LTS``
+    depending on the image, so only the leading major.minor is meaningful and a
+    version we cannot parse stays unsupported rather than optimistically passing.
+    """
+    parsed = _parse_ubuntu_version(version_id)
+    if parsed is None:
         return False
-    return version_match.group(1) == SUPPORTED_OS_VERSION
+    return parsed >= MINIMUM_SUPPORTED_UBUNTU_VERSION
+
+
+def _parse_ubuntu_version(version_id: str) -> tuple[int, int] | None:
+    version_match = re.match(r"^\s*(\d+)\.(\d+)(?:\.\d+)?(?:\s+.*)?$", version_id)
+    if version_match is None:
+        return None
+    return int(version_match.group(1)), int(version_match.group(2))
 
 
 def _docker_installation_check(host_facts: HostFacts) -> PreflightCheck:

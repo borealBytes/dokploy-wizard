@@ -249,11 +249,13 @@ def test_litellm_admin_access_planned_without_advisor_packs() -> None:
     )
     assert any("https://litellm.example.com" in note for note in access_phase.result.notes)
     assert any("302/401/403" in note for note in access_phase.result.notes)
-    assert all(
-        record.hostname != "litellm.example.com" for record in networking_phase.result.dns_records
-    )
+    # An Access application on a hostname with no DNS record and no tunnel rule is a
+    # gate in front of nothing, so the admin hostname is published like any other.
+    assert "litellm.example.com" in {
+        record.hostname for record in networking_phase.result.dns_records
+    }
     _, _, ingress = backend.update_tunnel_configuration_calls[0]
-    assert all(rule.get("hostname") != "litellm.example.com" for rule in ingress)
+    assert "litellm.example.com" in {rule.get("hostname") for rule in ingress}
 
 
 def test_litellm_admin_access_uses_configured_subdomain() -> None:

@@ -61,7 +61,7 @@ def _write_remote_env(tmp_path: Path, *, packs: str) -> Path:
                 "ROOT_DOMAIN=openmerge.me",
                 f"PACKS={packs}",
                 "AI_DEFAULT_PROVIDER=openrouter",
-                "AI_DEFAULT_MODEL=deepseek/deepseek-v4-flash:free",
+                "AI_DEFAULT_MODEL=deepseek/deepseek-v4.1-flash:free",
             ]
         )
         + "\n",

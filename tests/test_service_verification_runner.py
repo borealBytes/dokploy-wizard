@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from dokploy_wizard.litellm import LiteLLMAdminUiCheckError
 from dokploy_wizard.service_verification_runner import (
     _merge_persisted_retry_keys,
+    _verify_litellm_admin_ui,
     _verify_surfsense_runtime,
     main,
     run_service_verification,
@@ -138,6 +140,10 @@ def test_run_service_verification_passes_state_dir_to_compose_builders(
         lambda **kwargs: type("Result", (), {"passed": True, "to_dict": lambda self: {}})(),
     )
     monkeypatch.setattr(
+        "dokploy_wizard.service_verification_runner._verify_litellm_admin_ui",
+        lambda: type("Result", (), {"passed": True, "to_dict": lambda self: {}})(),
+    )
+    monkeypatch.setattr(
         "dokploy_wizard.service_verification_runner._verify_backend_method",
         lambda **kwargs: type("Result", (), {"passed": True, "to_dict": lambda self: {}})(),
     )
@@ -244,3 +250,35 @@ def test_verify_surfsense_runtime_fails_on_backend_ready_failure() -> None:
     assert result.passed is False
     assert "public backend /ready" in result.detail
     assert "secret-123" not in result.detail
+
+
+def test_verify_litellm_admin_ui_reports_the_internal_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: dict[str, str] = {}
+
+    def _serves(url: str) -> None:
+        requested["url"] = url
+
+    monkeypatch.setattr(
+        "dokploy_wizard.service_verification_runner.verify_internal_litellm_admin_ui", _serves
+    )
+    passed = _verify_litellm_admin_ui()
+
+    assert passed.passed is True
+    assert "answered 200" in passed.detail
+    # The request must be the loopback-published port: the public hostname answers 302
+    # for a broken UI as readily as for a working one.
+    assert requested["url"] == "http://127.0.0.1:4000/ui"
+
+    def _broken(url: str) -> None:
+        raise LiteLLMAdminUiCheckError("LiteLLM admin UI returned status 404; expected 200.")
+
+    monkeypatch.setattr(
+        "dokploy_wizard.service_verification_runner.verify_internal_litellm_admin_ui", _broken
+    )
+    failed = _verify_litellm_admin_ui()
+
+    assert failed.passed is False
+    assert "404" in failed.detail
+    assert "/ui" in failed.detail

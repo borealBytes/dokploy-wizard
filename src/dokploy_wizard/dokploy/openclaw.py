@@ -46,7 +46,7 @@ from dokploy_wizard.state.models import ComposeArtifactHashState, LiteLLMGenerat
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 _DEFAULT_MODEL_PROVIDER = "opencode-go"
-_DEFAULT_MODEL_NAME = "deepseek-v4-flash"
+_DEFAULT_MODEL_NAME = "deepseek-v4.1-flash"
 _DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 _DEFAULT_NVIDIA_VISIBLE_DEVICES = "all"
 _DEFAULT_APP_PORT = 18789
@@ -118,8 +118,8 @@ _DEFAULT_LOCAL_MODEL_REF = "local-model.internal/unsloth-active"
 _DEFAULT_LOCAL_MODEL_BASE_URL = "http://local-model.internal:61434/v1"
 _DEFAULT_LOCAL_MODEL_API_KEY = "sk-no-key-required"
 _DEFAULT_AI_DEFAULT_PROVIDER_ID = "opencode-go"
-_DEFAULT_AI_DEFAULT_MODEL_ID = "deepseek-v4-flash"
-_DEFAULT_AI_DEFAULT_MODEL_REF = "opencode-go/deepseek-v4-flash"
+_DEFAULT_AI_DEFAULT_MODEL_ID = "deepseek-v4.1-flash"
+_DEFAULT_AI_DEFAULT_MODEL_REF = "opencode-go/deepseek-v4.1-flash"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_PROVIDER_ID = "ai-default"
 _DEFAULT_GENERAL_OPENCLAW_WORKSPACE_ROOT = "/home/node/.openclaw/workspace"

@@ -100,10 +100,19 @@ resource "coder_agent" "main" {
     export PATH="$PNPM_HOME/bin:$PATH"
     mkdir -p "$PNPM_HOME/bin"
     touch /home/coder/.bashrc /home/coder/.profile
-    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc
-    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc
-    grep -qxF "export PNPM_HOME=/home/coder/.local/share/pnpm" /home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile
-    grep -qxF "export PATH=\"$PNPM_HOME/bin:$PATH\"" /home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile
+    append_rc_line() {
+      line="$1"
+      for rc_file in /home/coder/.bashrc /home/coder/.profile; do
+        grep -qxF "$line" "$rc_file" 2>/dev/null || echo "$line" >> "$rc_file"
+      done
+    }
+    append_rc_line 'export PNPM_HOME=/home/coder/.local/share/pnpm'
+    # Single-quoted on purpose. Double-quoted, $PNPM_HOME and $PATH expanded in the
+    # setup shell, so the guard never matched its own output and every workspace
+    # start appended another absolute copy of the build PATH to both rc files.
+    append_rc_line 'export PATH="$PNPM_HOME/bin:$PATH"'
+    # npm global prefix bin: where the Hermes installer lands its binary.
+    append_rc_line 'export PATH="/home/coder/.local/bin:$PATH"'
 
     if ! command -v pi >/dev/null 2>&1; then
       pnpm add -g @earendil-works/pi-coding-agent
@@ -135,6 +144,15 @@ resource "coder_agent" "main" {
       echo "Hermes installer did not produce a usable binary" >&2
       exit 1
     fi
+
+    # Nothing read an rc file that added the npm prefix bin, so `hermes` resolved in
+    # this setup script only: VS Code terminals and any process that does not inherit
+    # the agent environment got "command not found". The rc lines above cover login
+    # and interactive shells; the symlink covers the rest, including bash's
+    # non-interactive path which returns before the appended exports.
+    HERMES_BIN="$(command -v hermes)"
+    $_SUDO ln -sf "$HERMES_BIN" /usr/local/bin/hermes || true
+    bash -lc 'command -v hermes' >/dev/null
 
     mkdir -p "$HERMES_HOME" /home/coder/.cache /home/coder/.local/bin
 
@@ -614,7 +632,10 @@ PY
     # rebuilds. Override per workspace by editing the file and restarting
     # the serve process.
     OPENCODE_SERVER_PW_FILE=/home/coder/.local/share/dokploy/opencode-server-password
-    if [ ! -s "$OPENCODE_SERVER_PW_FILE" ]; then
+    # A released build shipped this file holding an unreplaced replacement token, because
+    # an unreplaced token breaks no Terraform plan: it silently became the serve password.
+    # Rewrite exactly those files; a password someone chose by hand is left alone.
+    if [ ! -s "$OPENCODE_SERVER_PW_FILE" ] || grep -q '__DOKPLOY_WIZARD_' "$OPENCODE_SERVER_PW_FILE"; then
       mkdir -p "$(dirname "$OPENCODE_SERVER_PW_FILE")"
       printf '%s' "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__" > "$OPENCODE_SERVER_PW_FILE"
     fi
@@ -855,10 +876,26 @@ const server = http.createServer(async (req, res) => {
     },
   );
   upstream.on("error", (error) => {
+    if (res.headersSent) {
+      // Mid-stream failure after bytes started flowing: the status line is gone.
+      res.destroy();
+      return;
+    }
     res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
     res.end(`Proxy error: $${error.message}`);
   });
   req.pipe(upstream);
+  // Coder's agent drops the downstream socket whenever a tab closes or an SSE
+  // stream is interrupted, and nothing on that path touches the upstream request:
+  // Node's pipe() does not destroy its source either. Without an explicit teardown
+  // the upstream keeps streaming into a dead socket, and the target's
+  // per-connection worker model turns those zombie streams into worker exhaustion
+  // and a blanket 503 for every later request.
+  const teardownUpstream = () => {
+    if (!upstream.destroyed) upstream.destroy();
+  };
+  res.on("close", teardownUpstream);
+  req.on("aborted", teardownUpstream);
 });
 
 server.on("upgrade", (req, socket, head) => {
@@ -879,8 +916,19 @@ server.on("upgrade", (req, socket, head) => {
     socket.pipe(upstream).pipe(socket);
   });
   upstream.on("error", () => socket.destroy());
+  // WebSocket pairs must die together, or a dead browser socket leaves the
+  // upstream socket half-open for the same reason as the request path above.
+  socket.on("error", () => upstream.destroy());
+  socket.on("close", () => upstream.destroy());
+  upstream.on("close", () => socket.destroy());
 });
 
+// Long-lived SSE and WebSocket connections are the reason this proxy exists, so
+// the 300s default request timeout must not fire mid-stream; idle keep-alive
+// sockets are still reaped.
+server.requestTimeout = 0;
+server.keepAliveTimeout = 30000;
+server.headersTimeout = 60000;
 server.listen(PROXY_PORT, "127.0.0.1");
 JS
 
@@ -1032,6 +1080,118 @@ if ! pgrep -f 'model-refresh.py --daemon' >/dev/null 2>&1; then
 fi
 
 wait_for_http "http://127.0.0.1:$HERMES_WEBUI_PORT/health" 60 || true
+
+# The WebUI and its proxy die quietly: an upstream crash or a wedged stream takes
+# the process down and nothing brings it back, so the tile keeps answering 502
+# until someone rebuilds the workspace. Everything below is revived by one script.
+HERMES_WATCHDOG_SCRIPT=/home/coder/.local/share/dokploy/hermes-webui-watchdog.sh
+mkdir -p /home/coder/.local/share/dokploy
+cat >"$HERMES_WATCHDOG_SCRIPT" <<WDSH
+#!/usr/bin/env bash
+# Revives the Hermes gateway, WebUI, and Coder mounted proxy when they are down.
+# Cron runs it once a minute where a cron daemon is available; the bootstrap also
+# keeps a --supervise loop running, because the workspace container has no init to
+# start cron for us. Values baked in here come from the bootstrap environment.
+set -u
+
+HERMES_HOME="$HERMES_HOME"
+HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR"
+HERMES_MODEL="$HERMES_MODEL"
+HERMES_PUBLIC_ORIGIN="$HERMES_PUBLIC_ORIGIN"
+HERMES_WEBUI_PORT="$HERMES_WEBUI_PORT"
+HERMES_WEBUI_PROXY_PORT="$HERMES_WEBUI_PROXY_PORT"
+API_SERVER_PORT="$API_SERVER_PORT"
+WEBUI_SRC=/home/coder/.cache/hermes-webui-src
+PROXY_SCRIPT=/tmp/coder-mounted-proxy.mjs
+BOOTSTRAP_PID_FILE=/tmp/hermes-workspace-bootstrap.pid
+STATE_DIR=/tmp/hermes-webui-watchdog
+RESTART_COOLDOWN_SECONDS=120
+SUPERVISE_INTERVAL_SECONDS=60
+
+# Cron and supervise loops get neither the rc files nor the agent environment.
+PATH="\$PATH:/home/coder/.local/bin:/usr/local/bin"
+
+mkdir -p "\$STATE_DIR"
+log() { printf '%s %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$*"; }
+
+healthy() {
+  curl -fsS --max-time 5 "http://127.0.0.1:\$1/health" >/dev/null 2>&1
+}
+
+bootstrapping() {
+  # Cold starts clone and npm-install the WebUI for minutes. A port that is not
+  # answering yet is normal then, so never fight a bootstrap that is still running.
+  [ -f "\$BOOTSTRAP_PID_FILE" ] || return 1
+  bootstrap_pid=\$(cat "\$BOOTSTRAP_PID_FILE" 2>/dev/null || true)
+  [ -n "\$bootstrap_pid" ] && kill -0 "\$bootstrap_pid" 2>/dev/null
+}
+
+took_cooldown() {
+  # One restart per service per cooldown window, so a target that refuses to come
+  # back up cannot spin the box in a restart loop.
+  now=\$(date +%s)
+  last=\$(cat "\$STATE_DIR/\$1" 2>/dev/null || echo 0)
+  if [ \$((now - last)) -lt \$RESTART_COOLDOWN_SECONDS ]; then
+    return 0
+  fi
+  printf '%s' "\$now" > "\$STATE_DIR/\$1"
+  return 1
+}
+
+start_gateway() {
+  log "reviving hermes gateway"
+  nohup hermes gateway >>/tmp/hermes-gateway.log 2>&1 &
+}
+
+start_webui() {
+  log "reviving hermes webui on port \$HERMES_WEBUI_PORT"
+  nohup env HERMES_HOME="\$HERMES_HOME" HERMES_WEBUI_ALLOWED_ORIGINS="\$HERMES_PUBLIC_ORIGIN" HERMES_WEBUI_TRUST_FORWARDED_HOST=1 HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=\$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=\$HERMES_INSTALL_DIR HERMES_WEBUI_STATE_DIR="\$HERMES_HOME/webui" HERMES_WEBUI_SKIP_ONBOARDING=1 HERMES_WEBUI_DEFAULT_MODEL="\$HERMES_MODEL" PYTHONPATH="\$HERMES_INSTALL_DIR" python3 "\$WEBUI_SRC/bootstrap.py" --no-browser --skip-agent-install >>/tmp/hermes-webui.log 2>&1 &
+}
+
+start_proxy() {
+  log "reviving coder mounted proxy on port \$HERMES_WEBUI_PROXY_PORT"
+  nohup env TARGET_PORT=\$HERMES_WEBUI_PORT PROXY_PORT=\$HERMES_WEBUI_PROXY_PORT node "\$PROXY_SCRIPT" >>/tmp/hermes-webui-proxy.log 2>&1 &
+}
+
+run_checks() {
+  bootstrapping && return 0
+  if ! healthy "\$API_SERVER_PORT" && ! took_cooldown gateway; then
+    pkill -f "hermes gateway" >/dev/null 2>&1 || true
+    start_gateway
+  fi
+  if ! healthy "\$HERMES_WEBUI_PORT" && ! took_cooldown webui; then
+    pkill -f "hermes-webui-src/bootstrap.py" >/dev/null 2>&1 || true
+    start_webui
+  fi
+  # The proxy answers /health only by forwarding upstream, so judge it by process.
+  if [ -f "\$PROXY_SCRIPT" ] && ! pgrep -f "node \$PROXY_SCRIPT" >/dev/null 2>&1 \
+    && ! took_cooldown proxy; then
+    start_proxy
+  fi
+}
+
+case "\$*" in
+  --supervise)
+    while :; do
+      run_checks
+      sleep "\$SUPERVISE_INTERVAL_SECONDS"
+    done
+    ;;
+esac
+
+run_checks
+WDSH
+chmod 700 "$HERMES_WATCHDOG_SCRIPT"
+
+if command -v crontab >/dev/null 2>&1; then
+  { crontab -l 2>/dev/null | grep -vF "hermes-webui-watchdog.sh"
+    printf '* * * * * %s >>/tmp/hermes-webui-watchdog.log 2>&1\n' "$HERMES_WATCHDOG_SCRIPT"; } | crontab - \
+    || echo "cron entry not installed; the supervise loop covers this workspace" >&2
+fi
+
+if ! pgrep -f "hermes-webui-watchdog.sh --supervise" >/dev/null 2>&1; then
+  setsid nohup "$HERMES_WATCHDOG_SCRIPT" --supervise >>/tmp/hermes-webui-watchdog.log 2>&1 < /dev/null &
+fi
 SH
 
     chmod 700 "$HERMES_BOOTSTRAP_SCRIPT"

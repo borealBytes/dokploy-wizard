@@ -27,16 +27,16 @@ def test_build_litellm_config_omits_local_alias_when_local_base_url_absent() -> 
     config = build_litellm_config(
         {
             "AI_DEFAULT_PROVIDER": "openrouter",
-            "AI_DEFAULT_MODEL": "deepseek/deepseek-v4-flash:free",
+            "AI_DEFAULT_MODEL": "deepseek/deepseek-v4.1-flash:free",
             "LITELLM_OPENROUTER_API_KEY": "SECRET_TEST_OPENROUTER_PROVIDER_KEY",
-            "LITELLM_OPENROUTER_MODELS": "deepseek/deepseek-v4-flash:free",
+            "LITELLM_OPENROUTER_MODELS": "deepseek/deepseek-v4.1-flash:free",
         },
         {"openrouter_api_key_env": "LITELLM_OPENROUTER_API_KEY"},
     )
 
     model_names = [entry["model_name"] for entry in _model_list(config)]
 
-    assert model_names == ["openrouter/deepseek/deepseek-v4-flash:free"]
+    assert model_names == ["openrouter/deepseek/deepseek-v4.1-flash:free"]
     assert "local-model.internal/unsloth-active" not in model_names
 
 
@@ -152,16 +152,16 @@ def test_build_litellm_config_exposes_default_opencode_go_alias_only_when_key_pr
     # Only the default alias route is static; the full catalog is autosynced.
     assert model_names == [
         "local-model.internal/unsloth-active",
-        "opencode-go/deepseek-v4-flash",
+        "opencode-go/deepseek-v4.1-flash",
     ]
-    assert "deepseek-v4-flash" not in model_names
+    assert "deepseek-v4.1-flash" not in model_names
     assert "opencode-go/text-embedding-3-large" not in model_names
     assert "opencode-go/gpt-4.1-mini" not in model_names
     assert "opencode-go/minimax-m2.7" not in model_names
 
-    default_entry = _model_entry(config, "opencode-go/deepseek-v4-flash")
+    default_entry = _model_entry(config, "opencode-go/deepseek-v4.1-flash")
     assert default_entry["litellm_params"] == {
-        "model": "openai/deepseek-v4-flash",
+        "model": "openai/deepseek-v4.1-flash",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "os.environ/OPENCODE_GO_API_KEY",
         "extra_headers": _EXPECTED_OPENCODE_GO_GATEWAY_HEADERS,
@@ -199,10 +199,10 @@ def test_build_litellm_config_exposes_default_opencode_go_alias_with_default_bas
 
     assert model_names == [
         "local-model.internal/unsloth-active",
-        "opencode-go/deepseek-v4-flash",
+        "opencode-go/deepseek-v4.1-flash",
     ]
-    assert _model_entry(config, "opencode-go/deepseek-v4-flash")["litellm_params"] == {
-        "model": "openai/deepseek-v4-flash",
+    assert _model_entry(config, "opencode-go/deepseek-v4.1-flash")["litellm_params"] == {
+        "model": "openai/deepseek-v4.1-flash",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
         "extra_headers": _EXPECTED_OPENCODE_GO_GATEWAY_HEADERS,
@@ -228,10 +228,10 @@ def test_build_litellm_config_ignores_retired_opencode_go_wildcard_flag(
 
     assert model_names == [
         "local-model.internal/unsloth-active",
-        "opencode-go/deepseek-v4-flash",
+        "opencode-go/deepseek-v4.1-flash",
     ]
-    assert _model_entry(config, "opencode-go/deepseek-v4-flash")["litellm_params"] == {
-        "model": "openai/deepseek-v4-flash",
+    assert _model_entry(config, "opencode-go/deepseek-v4.1-flash")["litellm_params"] == {
+        "model": "openai/deepseek-v4.1-flash",
         "api_base": "https://opencode.ai/zen/go/v1",
         "api_key": "os.environ/LITELLM_OPENCODE_GO_API_KEY",
         "extra_headers": _EXPECTED_OPENCODE_GO_GATEWAY_HEADERS,
@@ -262,7 +262,7 @@ def test_build_litellm_config_forwards_client_session_headers_to_upstreams() -> 
     general_settings = config["general_settings"]
     assert isinstance(general_settings, dict)
     assert general_settings["forward_client_headers_to_llm_api"] is True
-    zen_params = _model_entry(config, "opencode-go/deepseek-v4-flash")["litellm_params"]
+    zen_params = _model_entry(config, "opencode-go/deepseek-v4.1-flash")["litellm_params"]
     assert zen_params["extra_headers"] == _EXPECTED_OPENCODE_GO_GATEWAY_HEADERS
 
 
@@ -287,7 +287,7 @@ def test_build_litellm_config_prefers_canonical_litellm_env_refs_for_non_local_r
     assert "openrouter/hunter-alpha" in model_names
     assert "openrouter/openai/gpt-4.1-mini" not in model_names
 
-    default_entry = _model_entry(config, "opencode-go/deepseek-v4-flash")
+    default_entry = _model_entry(config, "opencode-go/deepseek-v4.1-flash")
     assert default_entry["litellm_params"]["api_key"] == "os.environ/LITELLM_OPENCODE_GO_API_KEY"
 
     openrouter_entry = _model_entry(config, "openrouter/hunter-alpha")
@@ -315,7 +315,7 @@ def test_render_litellm_config_yaml_includes_new_model_aliases_only() -> None:
     rendered_yaml = render_litellm_config_yaml(config)
 
     assert 'model_name: "local-model.internal/unsloth-active"' in rendered_yaml
-    assert 'model_name: "opencode-go/deepseek-v4-flash"' in rendered_yaml
+    assert 'model_name: "opencode-go/deepseek-v4.1-flash"' in rendered_yaml
     assert 'model_name: "opencode-go/minimax-m2.7"' not in rendered_yaml
     assert 'model_name: "openrouter/minimax/minimax-m2.5:free"' in rendered_yaml
     assert 'model: "openai/*"' not in rendered_yaml
@@ -396,7 +396,7 @@ def test_build_litellm_config_uses_canonical_nvidia_env_from_flat_raw_models() -
             "LITELLM_NVIDIA_BASE_URL": "https://integrate.api.nvidia.example.com/v1",
             "LITELLM_NVIDIA_MODELS": (
                 "moonshotai/kimi-k2.6,"
-                "deepseek-ai/deepseek-v4-flash,"
+                "deepseek-ai/deepseek-v4.1-flash,"
                 "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
             ),
         },
@@ -407,7 +407,7 @@ def test_build_litellm_config_uses_canonical_nvidia_env_from_flat_raw_models() -
 
     assert [entry["model_name"] for entry in model_list] == [
         "nvidia/moonshotai/kimi-k2.6",
-        "nvidia/deepseek-ai/deepseek-v4-flash",
+        "nvidia/deepseek-ai/deepseek-v4.1-flash",
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     ]
     assert model_list[0]["litellm_params"] == {
@@ -421,7 +421,7 @@ def test_build_litellm_config_uses_canonical_nvidia_env_from_flat_raw_models() -
         "extra_body": {"chat_template_kwargs": {"thinking": True}},
     }
     assert model_list[1]["litellm_params"] == {
-        "model": "openai/deepseek-ai/deepseek-v4-flash",
+        "model": "openai/deepseek-ai/deepseek-v4.1-flash",
         "api_base": "https://integrate.api.nvidia.example.com/v1",
         "api_key": "os.environ/LITELLM_NVIDIA_API_KEY",
         "max_tokens": 16384,

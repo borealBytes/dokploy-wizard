@@ -393,7 +393,8 @@ def test_install_non_dry_run_persists_scaffold_and_marks_bootstrap_steps(tmp_pat
         "shared_core",
         "headscale",
     )
-    assert len(loaded_state.ownership_ledger.resources) == 7
+    # 7 stack resources plus the LiteLLM admin hostname's DNS record.
+    assert len(loaded_state.ownership_ledger.resources) == 8
     assert summary["networking"]["outcome"] == "applied"
     assert summary["shared_core"]["outcome"] == "applied"
     assert summary["headscale"]["outcome"] == "applied"
@@ -427,6 +428,15 @@ def test_install_reuses_existing_matching_state_and_detects_already_present(tmp_
             "headscale.example.com": CloudflareDnsRecord(
                 record_id="dns-headscale.example.com",
                 name="headscale.example.com",
+                record_type="CNAME",
+                content="bootstrap-tunnel.cfargotunnel.com",
+                proxied=True,
+            ),
+            # The first pass published the LiteLLM admin hostname, so the rerun has to
+            # see it as an existing record or the ownership ledger fails closed.
+            "litellm.example.com": CloudflareDnsRecord(
+                record_id="dns-litellm.example.com",
+                name="litellm.example.com",
                 record_type="CNAME",
                 content="bootstrap-tunnel.cfargotunnel.com",
                 proxied=True,

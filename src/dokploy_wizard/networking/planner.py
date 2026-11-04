@@ -45,6 +45,9 @@ ACCESS_POLICY_RESOURCE_TYPE = "cloudflare_access_policy"
 
 _NON_PUBLIC_HOSTNAME_KEYS = {"openclaw-internal"}
 _LITELLM_ADMIN_ACCESS_KEY = "litellm-admin"
+# Cloudflare ships each account with an unnamed One-time PIN provider, so this is only the
+# name the wizard gives the provider it creates and the label it shows operators.
+_ACCESS_OTP_PROVIDER_NAME = "One-time PIN login"
 _LITELLM_ADMIN_SUBDOMAIN_ENV_KEY = "LITELLM_ADMIN_SUBDOMAIN"
 _LITELLM_ADMIN_DEFAULT_SUBDOMAIN = "litellm"
 _LITELLM_INTERNAL_PORT = 4000
@@ -109,18 +112,28 @@ def reconcile_networking(
         dns_target=dns_target,
     )
 
+    # The LiteLLM admin hostname is not part of the desired hostnames, so it has to be
+    # published here explicitly: DNS alone is not enough, and in the default
+    # wildcard-off mode nothing else would ever create the record.
+    litellm_admin_hostname = resolve_litellm_admin_hostname(
+        raw_env=raw_env, desired_state=desired_state
+    )
     dns_records, dns_resource_ids, dns_notes = _resolve_dns_records(
         dry_run=dry_run,
         zone_id=credentials.zone_id,
         dns_target=dns_target,
-        hostnames=tuple(sorted(_public_hostnames(desired_state).values())),
+        hostnames=tuple(
+            sorted(_public_hostnames(desired_state, litellm_admin_hostname=litellm_admin_hostname).values())
+        ),
         degradable_conflict_hostnames=_degradable_dns_conflict_hostnames(desired_state),
         ownership_ledger=ownership_ledger,
         backend=backend,
     )
     notes.extend(dns_notes)
 
-    ingress_rules = _build_tunnel_ingress(desired_state)
+    ingress_rules = _build_tunnel_ingress(
+        desired_state, litellm_admin_hostname=litellm_admin_hostname
+    )
     notes.append(
         "Planned "
         f"{len(ingress_rules) - 1} Cloudflare Tunnel ingress route(s) "
@@ -217,7 +230,10 @@ def reconcile_cloudflare_access(
                 otp_provider=None,
                 applications=(),
                 policies=(),
-                notes=("Cloudflare Access hardening is not enabled for advisor hostnames.",),
+                notes=(
+                    "Cloudflare Access hardening is not enabled: no OTP recipients are "
+                    "configured, so no hostname is gated.",
+                ),
             ),
             provider_resource_id=None,
             application_resource_ids={},
@@ -289,7 +305,9 @@ def reconcile_cloudflare_access(
             otp_provider=PlannedAccessIdentityProvider(
                 action=provider_action,
                 provider_id=provider.provider_id,
-                name=provider.name,
+                # Account for the unnamed built-in provider so operator-facing output
+                # never shows a blank login method name.
+                name=provider.name or _ACCESS_OTP_PROVIDER_NAME,
             ),
             applications=tuple(apps),
             policies=tuple(policies),
@@ -403,7 +421,7 @@ def _resolve_access_identity_provider(
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
 ) -> tuple[CloudflareAccessIdentityProvider, str]:
-    provider_name = "One-time PIN login"
+    provider_name = _ACCESS_OTP_PROVIDER_NAME
     owned_provider = _find_owned_access_resource(
         ownership_ledger,
         resource_type=ACCESS_OTP_PROVIDER_RESOURCE_TYPE,
@@ -416,9 +434,12 @@ def _resolve_access_identity_provider(
                 "Ownership ledger says the Cloudflare Access OTP provider exists, "
                 "but the account-scoped endpoint did not find it."
             )
-        if provider.name != provider_name or provider.provider_type != "onetimepin":
+        if provider.provider_type != "onetimepin":
+            # The name is not compared: the provider Cloudflare ships by default is
+            # unnamed, and an owned provider that is still a One-time PIN method is the
+            # same login method regardless of what it is labelled.
             raise CloudflareError(
-                "Ownership ledger Access OTP provider no longer matches the desired configuration."
+                "Ownership ledger Access OTP provider is no longer a One-time PIN provider."
             )
         return provider, "reuse_owned"
     provider = backend.find_access_identity_provider_by_name(account_id, provider_name)
@@ -803,8 +824,10 @@ def _derive_outcome(tunnel_action: str, dns_records: tuple[PlannedDnsRecord, ...
     return "already_present"
 
 
-def _build_tunnel_ingress(desired_state: DesiredState) -> tuple[dict[str, object], ...]:
-    public_hostnames = _public_hostnames(desired_state)
+def _build_tunnel_ingress(
+    desired_state: DesiredState, *, litellm_admin_hostname: str | None = None
+) -> tuple[dict[str, object], ...]:
+    public_hostnames = _public_hostnames(desired_state, litellm_admin_hostname=litellm_admin_hostname)
     ingress: list[dict[str, object]] = [
         {
             "hostname": public_hostnames["dokploy"],
@@ -920,12 +943,17 @@ def _find_certificate_pack_for_hostname(
     return None
 
 
-def _public_hostnames(desired_state: DesiredState) -> dict[str, str]:
-    return {
+def _public_hostnames(
+    desired_state: DesiredState, *, litellm_admin_hostname: str | None = None
+) -> dict[str, str]:
+    hostnames = {
         key: hostname
         for key, hostname in desired_state.hostnames.items()
         if key not in _NON_PUBLIC_HOSTNAME_KEYS
     }
+    if litellm_admin_hostname is not None:
+        hostnames[_LITELLM_ADMIN_ACCESS_KEY] = litellm_admin_hostname
+    return hostnames
 
 
 def _resolve_connector(

@@ -609,6 +609,7 @@ def test_install_plans_and_persists_shared_core_once_for_nextcloud(tmp_path: Pat
     } == {
         ("cloudflare_tunnel", "account:account-123"),
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
+        ("cloudflare_dns_record", "zone:zone-123:litellm.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:nextcloud.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:office.example.com"),
@@ -651,6 +652,13 @@ def test_install_rerun_reuses_owned_shared_core_resources(tmp_path: Path) -> Non
                 name="nextcloud-stack-tunnel",
             ),
             dns_records={
+                "litellm.example.com": CloudflareDnsRecord(
+                    record_id="dns-litellm.example.com",
+                    name="litellm.example.com",
+                    record_type="CNAME",
+                    content="nextcloud-tunnel.cfargotunnel.com",
+                    proxied=True,
+                ),
                 "dokploy.example.com": CloudflareDnsRecord(
                     record_id="dns-dokploy.example.com",
                     name="dokploy.example.com",
@@ -735,6 +743,13 @@ def test_install_fails_closed_when_shared_core_owned_resource_drifted(tmp_path: 
                     name="nextcloud-stack-tunnel",
                 ),
                 dns_records={
+                    "litellm.example.com": CloudflareDnsRecord(
+                        record_id="dns-litellm.example.com",
+                        name="litellm.example.com",
+                        record_type="CNAME",
+                        content="nextcloud-tunnel.cfargotunnel.com",
+                        proxied=True,
+                    ),
                     "dokploy.example.com": CloudflareDnsRecord(
                         record_id="dns-dokploy.example.com",
                         name="dokploy.example.com",

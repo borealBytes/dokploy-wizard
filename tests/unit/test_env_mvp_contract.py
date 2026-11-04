@@ -69,16 +69,30 @@ _OPTIONAL_COMMENTED_KEYS = frozenset(
         "LITELLM_NVIDIA_API_KEY",
         "LITELLM_NVIDIA_BASE_URL",
         "LITELLM_OPENROUTER_MODELS",
+        "LITELLM_ADMIN_SUBDOMAIN",
+        "CLOUDFLARE_ACCESS_OTP_EMAILS",
     }
 )
 _DEFAULT_AI_PROVIDER = "opencode-go"
-_DEFAULT_AI_MODEL = "deepseek-v4-flash"
+_DEFAULT_AI_MODEL = "deepseek-v4.1-flash"
 
 
 def _repo_root():
     from pathlib import Path
 
     return Path(__file__).resolve().parents[2]
+
+
+def _install_min_env_path():
+    """Use the operator's local minimal env when present, else the shipped example.
+
+    ``.install-min.env`` is gitignored, so a clean checkout only ships
+    ``.install-min.env.example`` — and that example is what a new operator actually
+    copies, so it is the artifact whose shape these contract tests must pin.
+    """
+    root = _repo_root()
+    operator_env = root / ".install-min.env"
+    return operator_env if operator_env.exists() else root / ".install-min.env.example"
 
 
 def _load_install_min_env_shape() -> tuple[
@@ -88,7 +102,7 @@ def _load_install_min_env_shape() -> tuple[
     model_shape: dict[str, tuple[bool, bool]] = {}
     safe_values: dict[str, str] = {}
     safe_value_keys = {"PACKS", "AI_DEFAULT_PROVIDER", "AI_DEFAULT_MODEL"}
-    for raw_line in (_repo_root() / ".install-min.env").read_text(encoding="utf-8").splitlines():
+    for raw_line in _install_min_env_path().read_text(encoding="utf-8").splitlines():
         stripped = raw_line.strip()
         if stripped == "" or stripped.startswith("#") or "=" not in stripped:
             continue
@@ -170,7 +184,7 @@ def test_minimal_env_contract_key_categories_are_explicit_and_secret_free() -> N
     assert _ALWAYS_REQUIRED_KEYS <= categorized_keys
     assert _GENERATED_STATE_BACKED_KEYS.isdisjoint(_LIVE_BOOTSTRAP_REQUIRED_KEYS)
     assert _DEFAULT_AI_PROVIDER == "opencode-go"
-    assert _DEFAULT_AI_MODEL == "deepseek-v4-flash"
+    assert _DEFAULT_AI_MODEL == "deepseek-v4.1-flash"
 
 
 def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> None:
@@ -245,6 +259,32 @@ def test_subdomain_defaults_are_optional_and_overrides_are_honored() -> None:
     assert override_state.hostnames["dokploy"] == "control.example.com"
     assert override_state.dokploy_url == "https://control.example.com"
     assert override_state.hostnames["my-farm-advisor"] == "advisor.example.com"
+
+
+def test_cloudflare_access_otp_emails_do_not_require_the_advisor_packs() -> None:
+    # Access also gates the LiteLLM admin hostname, so any stack can ask for it. The key
+    # used to be rejected outright when no advisor pack was installed, which left the
+    # admin UI as the one public hostname nobody could put in front of a sign-in page.
+    explicit = resolve_desired_state(
+        _farm_litellm_env(
+            PACKS="seaweedfs,coder",
+            CLOUDFLARE_ACCESS_OTP_EMAILS="owner@example.com",
+        )
+    )
+    assert explicit.cloudflare_access_otp_emails == ("owner@example.com",)
+
+    # The implicit default from the stack admin email stays with the advisor packs.
+    implicit = resolve_desired_state(
+        _farm_litellm_env(DOKPLOY_ADMIN_EMAIL="owner@example.com")
+    )
+    assert implicit.cloudflare_access_otp_emails == ("owner@example.com",)
+    quiet = resolve_desired_state(
+        _farm_litellm_env(
+            PACKS="seaweedfs,coder",
+            DOKPLOY_ADMIN_EMAIL="owner@example.com",
+        )
+    )
+    assert quiet.cloudflare_access_otp_emails == ()
 
 
 def test_public_examples_do_not_make_default_subdomains_active_inputs() -> None:
@@ -519,7 +559,7 @@ def test_litellm_nvidia_models_accept_user_style_raw_model_ids() -> None:
         LITELLM_NVIDIA_BASE_URL="https://integrate.api.nvidia.example.com/v1",
         LITELLM_NVIDIA_MODELS=(
             "moonshotai/kimi-k2.6,"
-            "deepseek-ai/deepseek-v4-flash,"
+            "deepseek-ai/deepseek-v4.1-flash,"
             "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
         ),
         AI_DEFAULT_PROVIDER="nvidia",
@@ -529,8 +569,8 @@ def test_litellm_nvidia_models_accept_user_style_raw_model_ids() -> None:
     assert env_module.parse_litellm_nvidia_models(raw_env.values) == (
         ("nvidia/moonshotai/kimi-k2.6", "nvidia/moonshotai/kimi-k2.6"),
         (
-            "nvidia/deepseek-ai/deepseek-v4-flash",
-            "nvidia/deepseek-ai/deepseek-v4-flash",
+            "nvidia/deepseek-ai/deepseek-v4.1-flash",
+            "nvidia/deepseek-ai/deepseek-v4.1-flash",
         ),
         (
             "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",

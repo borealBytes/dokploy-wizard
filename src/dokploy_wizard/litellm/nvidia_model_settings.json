@@ -46,6 +46,18 @@
       }
     }
   },
+  "nvidia/deepseek-ai/deepseek-v4.1-flash": {
+    "max_tokens": 16384,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "stream": true,
+    "extra_body": {
+      "chat_template_kwargs": {
+        "thinking": true,
+        "reasoning_effort": "high"
+      }
+    }
+  },
   "nvidia/deepseek-ai/deepseek-v4-flash": {
     "max_tokens": 16384,
     "temperature": 1.0,

@@ -80,6 +80,16 @@ from dokploy_wizard.state import (
 from dokploy_wizard.state import inspection as inspection_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _install_min_env_path() -> Path:
+    """The operator's minimal env when present, else the shipped example.
+
+    ``.install-min.env`` is gitignored, so tests that read it must fall back to
+    ``.install-min.env.example`` to stay runnable on a clean checkout.
+    """
+    operator_env = REPO_ROOT / ".install-min.env"
+    return operator_env if operator_env.exists() else REPO_ROOT / ".install-min.env.example"
 CLI = REPO_ROOT / "bin" / "dokploy-wizard"
 FIXTURES_DIR = REPO_ROOT / "fixtures"
 
@@ -895,7 +905,7 @@ def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults()
     assert examples[full_example_path].values["LITELLM_OPENROUTER_MODELS"] == examples[
         farm_example_path
     ].values["LITELLM_OPENROUTER_MODELS"]
-    install_min_path = REPO_ROOT / ".install-min.env"
+    install_min_path = _install_min_env_path()
     if install_min_path.exists():
         install_min_models = parse_env_file(install_min_path).values.get(
             "LITELLM_OPENROUTER_MODELS"
@@ -907,7 +917,7 @@ def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults()
 
     for parsed in examples.values():
         assert parsed.values["AI_DEFAULT_PROVIDER"] == "openrouter"
-        assert parsed.values["AI_DEFAULT_MODEL"] == "deepseek/deepseek-v4-flash:free"
+        assert parsed.values["AI_DEFAULT_MODEL"] == "deepseek/deepseek-v4.1-flash"
         assert "ENABLE_MY_FARM_ADVISOR" not in parsed.values
         resolve_desired_state(parsed)
 
@@ -932,6 +942,7 @@ def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults()
 
         "LITELLM_NVIDIA_API_KEY",
         "NVIDIA_BASE_URL",
+        "LITELLM_ADMIN_SUBDOMAIN",
     )
     optional_commented_keys_by_example = {
         full_example_path: ("OPENCLAW_TELEGRAM_BOT_TOKEN", *shared_optional_commented_keys),
@@ -978,7 +989,7 @@ def test_install_env_examples_are_placeholder_only_and_use_openrouter_defaults()
         "".join(chr(code) for code in (116, 117, 120, 100, 101, 115, 107, 116, 111, 112, 46, 116, 97, 105, 108, 98, 49, 50, 97, 97, 53, 46, 116, 115, 46, 110, 101, 116)),
         "local-model.internal",
     ]
-    install_min_values = parse_env_file(REPO_ROOT / ".install-min.env").values
+    install_min_values = parse_env_file(_install_min_env_path()).values
     for key in ("ROOT_DOMAIN", "TAILSCALE_HOSTNAME"):
         private_value = install_min_values.get(key, "")
         if private_value and private_value != "example.com":
@@ -2947,7 +2958,7 @@ def test_modify_shared_ai_defaults_rerun_only_selected_advisor_phases() -> None:
         ),
         requested_values=_farm_modify_values(
             AI_DEFAULT_PROVIDER="opencode-go",
-            AI_DEFAULT_MODEL="deepseek-v4-flash",
+            AI_DEFAULT_MODEL="deepseek-v4.1-flash",
         ),
     )
     both_advisors_plan = _classify_modify_plan(
@@ -3007,7 +3018,7 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
             SEAWEEDFS_SECRET_KEY="seaweed-secret",
             LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
             AI_DEFAULT_PROVIDER="opencode-go",
-            AI_DEFAULT_MODEL="deepseek-v4-flash",
+            AI_DEFAULT_MODEL="deepseek-v4.1-flash",
         ),
         requested_values=_farm_modify_values(
             ENABLE_OPENCLAW="true",
@@ -3017,7 +3028,7 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
             SEAWEEDFS_SECRET_KEY="seaweed-secret",
             LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-2",
             AI_DEFAULT_PROVIDER="opencode-go",
-            AI_DEFAULT_MODEL="deepseek-v4-flash",
+            AI_DEFAULT_MODEL="deepseek-v4.1-flash",
         ),
     )
 
@@ -3031,7 +3042,7 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
             LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
             LITELLM_OPENCODE_GO_WILDCARD="false",
             AI_DEFAULT_PROVIDER="opencode-go",
-            AI_DEFAULT_MODEL="deepseek-v4-flash",
+            AI_DEFAULT_MODEL="deepseek-v4.1-flash",
         ),
         requested_values=_farm_modify_values(
             ENABLE_OPENCLAW="true",
@@ -3042,7 +3053,7 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
             LITELLM_OPENCODE_GO_API_KEY="opencode-go-key-1",
             LITELLM_OPENCODE_GO_WILDCARD="true",
             AI_DEFAULT_PROVIDER="opencode-go",
-            AI_DEFAULT_MODEL="deepseek-v4-flash",
+            AI_DEFAULT_MODEL="deepseek-v4.1-flash",
         ),
     )
 
@@ -3526,7 +3537,7 @@ def test_guided_install_defaults_openclaw_to_telegram_when_matrix_disabled() -> 
             "y",  # openrouter key default yes
             "or-key",
             "",  # primary model default nvidia/moonshotai/kimi-k2.5
-            "",  # fallback model default opencode-go/deepseek-v4-flash
+            "",  # fallback model default opencode-go/deepseek-v4.1-flash
             "bot-token",
             "123456789",
             "n",  # my farm advisor default no
@@ -3548,7 +3559,7 @@ def test_guided_install_defaults_openclaw_to_telegram_when_matrix_disabled() -> 
     }
     assert selection.advisor_env == {
         "OPENCLAW_GATEWAY_PASSWORD": "openclaw-ui-generated",
-        "OPENCLAW_FALLBACK_MODELS": "opencode-go/deepseek-v4-flash",
+        "OPENCLAW_FALLBACK_MODELS": "opencode-go/deepseek-v4.1-flash",
         "OPENCLAW_NVIDIA_API_KEY": "nv-key",
         "OPENCLAW_OPENROUTER_API_KEY": "or-key",
         "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
@@ -3596,7 +3607,7 @@ def test_guided_install_keeps_matrix_default_for_openclaw_when_matrix_enabled() 
     }
     assert selection.advisor_env["OPENCLAW_GATEWAY_PASSWORD"] == "openclaw-ui-generated"
     assert selection.advisor_env["OPENCLAW_PRIMARY_MODEL"] == "nvidia/moonshotai/kimi-k2.5"
-    assert selection.advisor_env["OPENCLAW_FALLBACK_MODELS"] == "opencode-go/deepseek-v4-flash"
+    assert selection.advisor_env["OPENCLAW_FALLBACK_MODELS"] == "opencode-go/deepseek-v4.1-flash"
     assert "OPENCLAW_TELEGRAM_BOT_TOKEN" not in selection.advisor_env
 
 
@@ -5476,7 +5487,7 @@ def test_install_leaves_supported_host_prerequisites_as_idempotent_noop(
     assert summary["host_prerequisites"]["assessment"]["outcome"] == "noop"
     assert summary["host_prerequisites"]["assessment"]["missing_packages"] == []
     assert summary["host_prerequisites"]["assessment"]["notes"] == [
-        "Baseline Ubuntu 24.04 host prerequisites are already satisfied."
+        "Baseline Ubuntu host prerequisites are already satisfied."
     ]
     assert summary["host_prerequisites"]["assessment"]["docker_bootstrap_required"] is False
     assert [check["name"] for check in summary["host_prerequisites"]["assessment"]["checks"]] == [

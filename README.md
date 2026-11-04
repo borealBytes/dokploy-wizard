@@ -277,6 +277,15 @@ On first successful bootstrap the wizard:
   | `ubuntu-vscode-opencode-web` | OpenCode Web (browser-based IDE) |
   | `ubuntu-vscode-kdense-byok` | K-Dense BYOK (Bring Your Own Key for local model inference) |
   | `ubuntu-vscode-hermes` | Hermes (on-device AI assistant) |
+  | `ubuntu-vscode-hermes-desktop` | Hermes with the official Desktop webapp as its own tile, beside the community WebUI |
+
+The Desktop tile opens with no sign-in of its own: the gateway binds `127.0.0.1`,
+declares no public hostname (upstream ties a declared public URL to a second
+login flow), and a loopback forwarder presents the tile port to Coder's proxy and
+hands the browser the gateway's stored credential the way the Desktop app itself
+would. The perimeter is: no published port, `127.0.0.1` bind, `share = "owner"` on
+the Coder app, and Cloudflare Access in front — the page carries the credential to
+exactly the browsers Coder has already authenticated.
 
 Every wizard-managed template installs the OpenCode CLI and the Pi coding agent
 (`@earendil-works/pi-coding-agent`) and pre-seeds OpenCode, Pi, and VS Code
@@ -689,6 +698,7 @@ How autosynced models behave:
 - Autosynced deployments are named `sync/<source>/<model-id>`, so they never collide with the explicit config-file aliases.
 - Deployments created by autosync are tagged internally; when a source drops a model, only wizard-created `sync/...` deployments are pruned. Config-file aliases and models you added yourself in the admin UI are never touched.
 - Consumer virtual keys carry a `sync/*` wildcard, so autosynced models are immediately callable from OpenClaw, My Farm Advisor, SurfSense, Coder Hermes, and Coder K-Dense. `dokploy-ai` stays restricted to the resolved default alias. Each cycle the sidecar also refreshes each consumer key's allowlist with the explicit current `sync/*` names, because LiteLLM's `/v1/models` does not expand wildcards and workspace tooling seeds its model picker from that endpoint.
+- `sync/default-chat` is a stable alias whose upstream is *selected* rather than listed: the sidecar matches `AI_DEFAULT_MODEL_PATTERN` against the provider's live catalog, ranks matches by version number, and promotes the newest one that answers a real completion request. Upstream renames therefore cost a sync cycle instead of a reinstall, and a client can name `sync/default-chat` and never move. The new target is registered before the old one is retired, so there is no window with no working upstream; when nothing confirms (a brownout, a catalog outage) the current target stays put. Set `AI_DEFAULT_MODEL_PATTERN=` to empty to turn the alias off, which also deletes it.
 - Rendered LiteLLM config sets `general_settings.store_model_in_db` so admin-API-registered models survive proxy restarts.
 - Coder workspaces resolve their model lists live from the gateway at boot and re-run the same fetch from a background refresher roughly every 12 hours — retrying every 5 minutes after any failed refresh until the gateway is reachable again — so autosynced models appear in OpenCode, Pi, Hermes, and Copilot BYOK even in long-running workspaces. If the gateway is briefly unreachable during a refresh, the last good model list is kept.
 
@@ -705,7 +715,7 @@ LITELLM_MODEL_SYNC_NVIDIA_MAX_MODELS=20     # cap of live NVIDIA models kept in 
 LITELLM_MODEL_SYNC_PROBE_TTL_DAYS=7         # how long probe verdicts are cached
 ```
 
-NVIDIA's catalog lists models that have been quietly delisted (their chat endpoint 404s), embedding/utility models that never answer a chat request, and paid endpoints that bill per token. For NVIDIA only, the sidecar first filters the catalog down to free-tier models using the [models.dev](https://models.dev) pricing registry (the same registry OpenCode consumes), then chat-probes only those free candidates with a 1-token completion — so no paid completion is ever sent. Clean 404s are dropped, everything else is kept, and the per-source budget applies to the survivors so the picker gets the first N models that actually answer (default: the first 20 free models that respond, in catalog order). Verdicts are cached for `LITELLM_MODEL_SYNC_PROBE_TTL_DAYS` (default 7); dead models are re-probed every cycle so recovered models return without a rebuild, and an upstream brownout that 404s everything falls back to keeping the full list rather than emptying the provider. Set `LITELLM_MODEL_SYNC_NVIDIA_FREE_ONLY=0` to sync paid endpoints as well.
+NVIDIA's catalog lists models that have been quietly delisted (their chat endpoint 404s), embedding/utility models that never answer a chat request, and paid endpoints that bill per token. For NVIDIA only, the sidecar first filters the catalog down to free-tier models using the [models.dev](https://models.dev) pricing registry (the same registry OpenCode consumes), then chat-probes only those free candidates with a short completion — so no paid completion is ever sent. OpenRouter's free ranked rows are probed the same way (set `LITELLM_MODEL_SYNC_OPENROUTER_PROBE=0` to stop that); paid rows are never probed at all, which is why a delisted free model is dropped from the picker while a paid one is listed unproven. A probe counts a model as dead only on an answer that waiting cannot fix — 404 (the provider does not know it) or 403 (this key may not use it); 400s, 429s, 5xx, and transport failures stay inconclusive and keep the model listed. The probe asks for 16 completion tokens rather than 1, because some endpoints refuse a one-token request outright and that refusal is about the request, not the model. Everything not counted as dead is kept, and the per-source budget applies to the survivors so the picker gets the first N models that actually answer (default: the first 20 free models that respond, in catalog order). Verdicts are cached for `LITELLM_MODEL_SYNC_PROBE_TTL_DAYS` (default 7); dead models are re-probed every cycle so recovered models return without a rebuild, and an upstream brownout that 404s everything falls back to keeping the full list rather than emptying the provider. Set `LITELLM_MODEL_SYNC_NVIDIA_FREE_ONLY=0` to sync paid endpoints as well.
 
 Free-verified NVIDIA aliases get a `:free` tail (unless the model name already says free), and every workspace model picker — OpenCode, Pi — prices models from the models.dev registry in dollars per million tokens, shown as `(in:$0.59/out:$0.79)` or `(free)` next to each model name so users can see what they are selecting. Models the registry does not know are listed without a price claim.
 
@@ -715,10 +725,18 @@ The preferred way to select the default model is with `AI_DEFAULT_PROVIDER` and 
 
 ```bash
 AI_DEFAULT_PROVIDER=openrouter
-AI_DEFAULT_MODEL=deepseek/deepseek-v4-flash:free
+AI_DEFAULT_MODEL=deepseek/deepseek-v4.1-flash
 ```
 
-Together these resolve to the canonical alias `openrouter/deepseek/deepseek-v4-flash:free`. If you omit them, the wizard falls back to legacy `ADVISOR_MODEL_PROVIDER` and `ADVISOR_MODEL_NAME`.
+Together these resolve to the canonical alias `openrouter/deepseek/deepseek-v4.1-flash`. If you omit them, the wizard falls back to legacy `ADVISOR_MODEL_PROVIDER` and `ADVISOR_MODEL_NAME`.
+
+`AI_DEFAULT_MODEL` is a single name, and providers rename models. When the named model disappears, the alias is pruned and a stack that baked the name keeps pointing at nothing while every health check stays green. `AI_DEFAULT_MODEL_PATTERN` is the alternative for anything you would rather not re-point by hand:
+
+```bash
+AI_DEFAULT_MODEL_PATTERN=deepseek*flash*   # empty value turns the alias off
+```
+
+The pattern is matched against the provider catalog for `AI_DEFAULT_PROVIDER` (it has no effect on a provider with no synced catalog) and published as `sync/default-chat`, so agents can be configured once with a name that keeps working through renames. `AI_DEFAULT_MODEL` stays a literal name either way, and it stays the model the templates bake.
 
 For LiteLLM upstream API keys, the canonical names are `LITELLM_OPENROUTER_API_KEY` and `LITELLM_OPENCODE_GO_API_KEY`. The older bare keys `OPENROUTER_API_KEY` and `OPENCODE_GO_API_KEY` are still accepted as compatibility fallbacks. The old alias `local/unsloth-active` is also resolved to the canonical alias when it appears in legacy env values.
 

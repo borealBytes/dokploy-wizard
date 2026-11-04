@@ -224,10 +224,16 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         mutable_env_keys=(
             "HERMES_INFERENCE_PROVIDER",
             "HERMES_MODEL",
+            # Which Hermes build the Desktop workspace installs; the browser-hosted
+            # Desktop the tile serves exists only on the newer channel.
+            "HERMES_DESKTOP_CHANNEL",
             "AI_DEFAULT_API_KEY",
             "AI_DEFAULT_BASE_URL",
             "AI_DEFAULT_PROVIDER",
             "AI_DEFAULT_MODEL",
+            # The pattern drives the sidecar's sync/default-chat selection, so it is
+            # operator-tunable on the same footing as AI_DEFAULT_MODEL itself.
+            "AI_DEFAULT_MODEL_PATTERN",
             "LITELLM_OPENCODE_GO_API_KEY",
             "LITELLM_OPENROUTER_API_KEY",
             "LITELLM_OPENROUTER_MODELS",

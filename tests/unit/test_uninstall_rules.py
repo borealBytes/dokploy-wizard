@@ -213,6 +213,73 @@ def test_compute_remaining_completed_steps_shrinks_after_runtime_delete() -> Non
     assert completed == ("preflight", "dokploy_bootstrap")
 
 
+def test_access_is_complete_only_when_the_admin_hostname_has_its_resources() -> None:
+    from dokploy_wizard.networking.planner import (
+        ACCESS_APPLICATION_RESOURCE_TYPE,
+        ACCESS_OTP_PROVIDER_RESOURCE_TYPE,
+        ACCESS_POLICY_RESOURCE_TYPE,
+    )
+    from dokploy_wizard.uninstall.planner import _cloudflare_access_complete
+
+    desired = resolve_desired_state(
+        _raw(
+            {
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+            }
+        )
+    )
+    provider = {
+        ACCESS_OTP_PROVIDER_RESOURCE_TYPE: [
+            OwnedResource(
+                ACCESS_OTP_PROVIDER_RESOURCE_TYPE,
+                "otp-1",
+                "account:one:access-otp-provider",
+            )
+        ]
+    }
+    def typed(resource_type: str, host: str) -> dict[str, list[OwnedResource]]:
+        return {
+            **provider,
+            resource_type: [
+                OwnedResource(resource_type, f"{resource_type}-1", f"account:one:{host}")
+            ]
+        }
+
+    # Nothing asked for OTP gating, so there is nothing to account for.
+    assert _cloudflare_access_complete(
+        resolve_desired_state(_raw({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})),
+        {},
+    )
+    # An OTP policy with no application is not a finished Access configuration, and the
+    # LiteLLM admin hostname is an application target even with no advisor pack.
+    assert not _cloudflare_access_complete(desired, provider)
+    assert not _cloudflare_access_complete(
+        desired, {**provider, **typed(ACCESS_APPLICATION_RESOURCE_TYPE, "access-app:litellm.example.com")}
+    )
+    assert _cloudflare_access_complete(
+        desired,
+        {
+            **provider,
+            ACCESS_APPLICATION_RESOURCE_TYPE: [
+                OwnedResource(
+                    ACCESS_APPLICATION_RESOURCE_TYPE,
+                    "app-1",
+                    "account:one:access-app:litellm.example.com",
+                )
+            ],
+            ACCESS_POLICY_RESOURCE_TYPE: [
+                OwnedResource(
+                    ACCESS_POLICY_RESOURCE_TYPE,
+                    "policy-1",
+                    "account:one:access-policy:litellm.example.com",
+                )
+            ],
+        },
+    )
+
+
 def test_build_pack_disable_plan_deletes_tailscale_node_even_without_pack_removal() -> None:
     existing = resolve_desired_state(
         RawEnvInput(

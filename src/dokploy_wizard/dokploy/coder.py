@@ -71,9 +71,14 @@ class _ComposeLocator:
 
 
 _DEFAULT_AI_DEFAULT_PROVIDER = "opencode-go"
-_DEFAULT_AI_DEFAULT_MODEL = "deepseek-v4-flash"
+_DEFAULT_AI_DEFAULT_MODEL = "deepseek-v4.1-flash"
 _DEFAULT_HERMES_INFERENCE_PROVIDER = "dokploy-litellm"
-_DEFAULT_HERMES_MODEL = "opencode-go/deepseek-v4-flash"
+_DEFAULT_HERMES_MODEL = "opencode-go/deepseek-v4.1-flash"
+# The Hermes Desktop tile serves the browser-hosted Desktop, which merged upstream on
+# 2026-10-25 and has not shipped in a release yet, so that workspace tracks the channel
+# carrying it. Anything older has no `hermes webapp` at all.
+_DEFAULT_HERMES_DESKTOP_CHANNEL = "main"
+_HERMES_CHANNEL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 _DEFAULT_LITELLM_INTERNAL_PORT = 4000
 _COPILOT_BYOK_SETTING_KEY = "github.copilot.chat.customOAIModels"
@@ -83,6 +88,9 @@ _COPILOT_BYOK_CHAT_ONLY_LIMITATION = (
     "inline completions still use Copilot-managed models."
 )
 _CODER_STATE_REQUIRED_FOR_MODIFY = frozenset({"applied-state.json", "ownership-ledger.json"})
+# Coder enforces this on templates, workspaces, and agent names alike, and the CLI only
+# says so after the template has already been packaged and the push attempted.
+_CODER_MAX_NAME_LENGTH = 32
 
 
 
@@ -103,6 +111,7 @@ class DokployCoderBackend:
         ai_default_model: str = _DEFAULT_AI_DEFAULT_MODEL,
         hermes_inference_provider: str = _DEFAULT_HERMES_INFERENCE_PROVIDER,
         hermes_model: str = _DEFAULT_HERMES_MODEL,
+        hermes_desktop_channel: str = _DEFAULT_HERMES_DESKTOP_CHANNEL,
         ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
         ai_default_api_key: str | None = None,
         state_dir: Path = Path(".dokploy-wizard-state"),
@@ -122,6 +131,7 @@ class DokployCoderBackend:
             hermes_inference_provider.strip() or _DEFAULT_HERMES_INFERENCE_PROVIDER
         )
         self._hermes_model = _normalize_hermes_model_ref(hermes_model)
+        self._hermes_desktop_channel = _normalize_hermes_channel(hermes_desktop_channel)
         self._ai_default_base_url = ai_default_base_url
         self._ai_default_api_key = ai_default_api_key
         self._state_dir = state_dir
@@ -280,6 +290,42 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": _shell_double_quote_escape(
                         self._admin_password or "ChangeMeSoon"
                     ),
+                    # The official webapp signs in with the same admin password: the
+                    # tile is opened in a browser, where a second distinct secret is
+                    # one more thing to lose.
+                    "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__": _shell_double_quote_escape(
+                        self._admin_password or "ChangeMeSoon"
+                    ),
+                    # Only this template needs the newer channel: the Webapp artifact it
+                    # serves does not exist on the release channel, and the other Hermes
+                    # templates stay on their proven build.
+                    "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__": _shell_double_quote_escape(
+                        self._hermes_desktop_channel
+                    ),
+                },
+            ),
+            (
+                _opencode_hermes_pi_template_name(),
+                _opencode_hermes_pi_template_dir(),
+                {
+                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
+                    "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": _shell_double_quote_escape(
+                        self._hermes_inference_provider
+                    ),
+                    "__DOKPLOY_WIZARD_HERMES_MODEL__": _shell_double_quote_escape(
+                        self._hermes_model
+                    ),
+                    "__DOKPLOY_WIZARD_HERMES_BASE_URL__": _shell_double_quote_escape(
+                        hermes_litellm_base_url
+                    ),
+                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
+                        self._ai_default_api_key or ""
+                    ),
+                    "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": f"https://{self._hostname}",
+                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                    "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": _shell_double_quote_escape(
+                        self._admin_password or "ChangeMeSoon"
+                    ),
                 },
             ),
             (
@@ -375,11 +421,17 @@ class DokployCoderBackend:
             except CoderError as e:
                 if template_name == _default_template_name():
                     raise
+                # The operator sees the diagnosis; the state file keeps a bounded note.
+                # Terraform's reason arrives at the end of a long stream, so the note
+                # that survives into state is the one that has to be wide enough.
+                _emit_coder_progress(
+                    f"Skipped optional Coder template '{template_name}': "
+                    f"{_safe_progress_reason(str(e), limit=6000)}"
+                )
                 note = (
                     f"Skipped optional Coder template '{template_name}': "
-                    f"{_safe_progress_reason(str(e))}"
+                    f"{_safe_progress_reason(str(e), limit=1200)}"
                 )
-                _emit_coder_progress(note)
                 notes.append(note)
                 continue
             if seeded:
@@ -738,6 +790,21 @@ def _litellm_virtual_key_ref(consumer: str) -> str:
     return f"$${{LITELLM_VIRTUAL_KEY_{normalized}}}"
 
 
+def _normalize_hermes_channel(value: str) -> str:
+    """The update channel name, or the default.
+
+    The value is interpolated into an installer argument and a startup script, so it is
+    a name from the release archive (`stable`, `main`, ...) and nothing that needs shell
+    quoting. A nonsense name would be refused by the installer at workspace boot, minutes
+    later and far from the env file, so it is corrected here instead.
+    """
+
+    candidate = value.strip()
+    if not _HERMES_CHANNEL_PATTERN.fullmatch(candidate):
+        return _DEFAULT_HERMES_DESKTOP_CHANNEL
+    return candidate
+
+
 def _normalize_hermes_model_ref(model_ref: str) -> str:
     normalized = model_ref.strip()
     if normalized in {"", "unsloth-active", "local/unsloth-active"}:
@@ -1038,6 +1105,18 @@ def _coder_container_name(service_name: str) -> str | None:
 
 
 def _default_template_dir() -> Path:
+    return _default_hermes_desktop_template_dir()
+
+
+def _default_template_name() -> str:
+    return _default_hermes_desktop_template_name()
+
+
+def _opencode_hermes_pi_template_name() -> str:
+    return "ubuntu-vscode-opencode-hermes-pi"
+
+
+def _opencode_hermes_pi_template_dir() -> Path:
     return (
         Path(__file__).resolve().parents[3]
         / "templates"
@@ -1046,8 +1125,17 @@ def _default_template_dir() -> Path:
     )
 
 
-def _default_template_name() -> str:
-    return "ubuntu-vscode-opencode-hermes-pi"
+def _default_hermes_desktop_template_dir() -> Path:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "templates"
+        / "coder"
+        / "default-ubuntu-vscode-hermes-desktop"
+    )
+
+
+def _default_hermes_desktop_template_name() -> str:
+    return "ubuntu-vscode-hermes-desktop"
 
 
 def _base_template_dir() -> Path:
@@ -1106,18 +1194,25 @@ def _default_workspace_name(hostname: str, *, today: date | None = None) -> str:
     root_token = re.sub(r"[^a-z0-9]+", "", root_domain.lower())
     effective_date = (today or date.today()).isoformat()
     suffix = f"-workspace-{effective_date}"
-    max_root_length = max(1, 32 - len(suffix))
+    max_root_length = max(1, _CODER_MAX_NAME_LENGTH - len(suffix))
     normalized_root = (root_token or "workspace")[:max_root_length]
     return f"{normalized_root}{suffix}"
 
 
 def _required_template_names() -> tuple[str, ...]:
-    return (
-        _default_template_name(),
-        _base_template_name(),
-        _default_opencode_web_template_name(),
-        _default_kdense_byok_template_name(),
-        _default_hermes_template_name(),
+    # dict.fromkeys rather than a set: the order is the push order, and the default is
+    # now the same template the desktop accessor names, so it would be pushed twice.
+    return tuple(
+        dict.fromkeys(
+            (
+                _default_template_name(),
+                _opencode_hermes_pi_template_name(),
+                _base_template_name(),
+                _default_opencode_web_template_name(),
+                _default_kdense_byok_template_name(),
+                _default_hermes_template_name(),
+            )
+        )
     )
 
 
@@ -1126,6 +1221,15 @@ def _retired_template_names() -> tuple[str, ...]:
         "ubuntu-vscode-openwork",
         "ubuntu-vscode-pi-web",
     )
+
+
+def _ensure_template_name_length(template_name: str) -> None:
+    if len(template_name) > _CODER_MAX_NAME_LENGTH:
+        raise CoderError(
+            f"Coder template name '{template_name}' is {len(template_name)} characters; "
+            f"Coder accepts at most {_CODER_MAX_NAME_LENGTH}, so no workspace can ever "
+            "be created from it."
+        )
 
 
 def _seed_template(
@@ -1137,6 +1241,7 @@ def _seed_template(
     template_dir: Path,
     replacements: dict[str, str] | None,
 ) -> bool:
+    _ensure_template_name_length(template_name)
     _emit_coder_progress(f"Checking Coder template '{template_name}'.")
     desired_version_name = _template_version_name(
         template_dir=template_dir,
@@ -1184,7 +1289,7 @@ def _seed_template(
         )
     except CoderError as e:
         _emit_coder_progress(
-            f"Coder template '{template_name}' push failed: {_safe_progress_reason(str(e))}"
+            f"Coder template '{template_name}' push failed: {_safe_progress_reason(str(e), limit=6000)}"
         )
         raise
     _emit_coder_progress(f"Finished Coder template '{template_name}' push.")
@@ -1199,7 +1304,11 @@ def _safe_progress_reason(reason: str, *, limit: int = 360) -> str:
     safe = " ".join(redact_text(reason).split())
     if len(safe) <= limit:
         return safe
-    return f"{safe[: limit - 1]}…"
+    # Clip the middle, not the end. A terraform diagnosis arrives after the banner and
+    # the streamed log, so a head-only clip reliably threw away the one line that said
+    # what was wrong and kept only "exit status 1".
+    keep = max(1, (limit - 4) // 2)
+    return f"{safe[:keep]} … {safe[-keep:]}"
 
 
 def _template_version_name(*, template_dir: Path, replacements: dict[str, str] | None) -> str:

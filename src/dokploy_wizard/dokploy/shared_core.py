@@ -56,6 +56,7 @@ from dokploy_wizard.litellm.model_catalog import (
 )
 from dokploy_wizard.litellm.model_sync import (
     MODEL_SYNC_CONSUMER_WILDCARD,
+    model_sync_default_chat_alias,
     model_sync_enabled,
     model_sync_interval_minutes,
     model_sync_script_text,
@@ -71,7 +72,7 @@ from dokploy_wizard.state.models import (
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 _DOKPLOY_AI_PROVIDER_NAME = "Dokploy Wizard LiteLLM"
-_DEFAULT_REMOTE_MODEL_ALIAS = "opencode-go/deepseek-v4-flash"
+_DEFAULT_REMOTE_MODEL_ALIAS = "opencode-go/deepseek-v4.1-flash"
 
 
 class DokploySharedCoreApi(Protocol):
@@ -141,6 +142,7 @@ class DokploySharedCoreBackend:
         litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
         litellm_consumer_model_allowlists: dict[str, tuple[str, ...]] | None = None,
         litellm_admin_api: LiteLLMAdminApi | None = None,
+        litellm_admin_hostname: str | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
         state_dir: Path = Path(".dokploy-wizard-state"),
     ) -> None:
@@ -153,6 +155,7 @@ class DokploySharedCoreBackend:
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
         self._allocation_provisioner = allocation_provisioner
+        self._litellm_admin_hostname = litellm_admin_hostname
         self._litellm_generated_keys = litellm_generated_keys
         self._litellm_consumer_model_allowlists = _litellm_key_model_allowlists(
             litellm_consumer_model_allowlists or {},
@@ -412,6 +415,7 @@ class DokploySharedCoreBackend:
             self._mail_relay_config,
             self._litellm_env,
             self._litellm_generated_keys,
+            litellm_admin_hostname=self._litellm_admin_hostname,
         )
         reconcile_title = "dokploy-wizard shared core reconcile"
         try:
@@ -1019,6 +1023,8 @@ def _render_compose_file(
     mail_relay_config: dict[str, str],
     litellm_env: dict[str, str] | None = None,
     litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
+    *,
+    litellm_admin_hostname: str | None = None,
 ) -> RenderedCompose:
     litellm_env = litellm_env or {}
     env_specs: list[DokployEnvSpec] = []
@@ -1199,6 +1205,39 @@ def _render_compose_file(
             f'      LITELLM_SALT_KEY: "{_required_placeholder("LITELLM_SALT_KEY")}"\n'
             f'      SALT_KEY: "{_required_placeholder("LITELLM_SALT_KEY")}"\n'
         )
+        # Root serves Swagger, which is what an operator who just types the hostname
+        # lands on; the admin UI is the surface they wanted. Keep the docs reachable at
+        # their own path instead of losing them to the redirect.
+        ui_redirect_lines = '      ROOT_REDIRECT_URL: "/ui"\n      DOCS_URL: "/docs"\n'
+        ui_credential_lines = (
+            ""
+            if _litellm_ui_credentials(litellm_env) is None
+            else (
+                f'      UI_USERNAME: "{_required_placeholder("LITELLM_UI_USERNAME")}"\n'
+                f'      UI_PASSWORD: "{_required_placeholder("LITELLM_UI_PASSWORD")}"\n'
+            )
+        )
+        service_name = plan.litellm.service_name
+        # Dokploy's Traefik serves 404 for any hostname it has no rule for, and a 404 at
+        # the proxy is indistinguishable from a dead service to anyone outside the box.
+        # The DNS record and the Cloudflare Access application mean nothing until a router
+        # exists, so the admin hostname gets one, on the same entrypoint, TLS posture, and
+        # forwarded-header middleware the other hostnames on this box use.
+        admin_route_lines = (
+            ""
+            if litellm_admin_hostname is None
+            else (
+                "    labels:\n"
+                '      traefik.enable: "true"\n'
+                f'      traefik.http.routers.{service_name}.entrypoints: "websecure"\n'
+                f'      traefik.http.routers.{service_name}.rule: "Host(`{litellm_admin_hostname}`)"\n'
+                f'      traefik.http.routers.{service_name}.tls: "true"\n'
+                f'      traefik.http.routers.{service_name}.middlewares: "{service_name}-forwarded-https"\n'
+                f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Proto: "https"\n'
+                f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Port: "443"\n'
+                f'      traefik.http.services.{service_name}.loadbalancer.server.port: "4000"\n'
+            )
+        )
         litellm_block = (
             f"  {plan.litellm.service_name}:\n"
             f"    image: {litellm_image}:{litellm_tag}\n"
@@ -1211,6 +1250,9 @@ def _render_compose_file(
             f"{provider_env_lines}"
             f"{master_key_lines}"
             f"{salt_key_lines}"
+            f"{ui_redirect_lines}"
+            f"{ui_credential_lines}"
+            f"{admin_route_lines}"
             "    configs:\n"
             f"      - source: {config_name}\n"
             "        target: /app/config.yaml\n"
@@ -1447,6 +1489,28 @@ def _litellm_env_specs(
             ),
         )
     )
+    ui_credentials = _litellm_ui_credentials(litellm_env)
+    if ui_credentials is not None:
+        ui_username, ui_password = ui_credentials
+        specs.extend(
+            (
+                _shared_core_env_spec(
+                    name="LITELLM_UI_USERNAME",
+                    value=ui_username,
+                    owner="shared-core-litellm",
+                    target_services=(service_name,),
+                    source="operator-input",
+                    sensitive=False,
+                ),
+                _shared_core_env_spec(
+                    name="LITELLM_UI_PASSWORD",
+                    value=ui_password,
+                    owner="shared-core-litellm",
+                    target_services=(service_name,),
+                    source="operator-input",
+                ),
+            )
+        )
     if generated_keys is not None:
         for consumer, virtual_key in sorted(generated_keys.virtual_keys.items()):
             specs.append(
@@ -1480,6 +1544,21 @@ def _litellm_salt_key_value(
     return _optional_value(litellm_env, "LITELLM_SALT_KEY") or _shared_core_generated_secret(
         "litellm-salt-key"
     )
+
+
+def _litellm_ui_credentials(litellm_env: dict[str, str]) -> tuple[str, str] | None:
+    """Credentials for LiteLLM's own admin UI, which are the stack admin credentials.
+
+    Every other app on this box is reached with the Dokploy admin email and password,
+    and LiteLLM would otherwise ask for its master key as the UI password: one more
+    secret per box to remember for no benefit. Returns None when either is absent so
+    the compose block does not reference env placeholders nothing will fill.
+    """
+    username = _optional_value(litellm_env, "DOKPLOY_ADMIN_EMAIL")
+    password = _optional_value(litellm_env, "DOKPLOY_ADMIN_PASSWORD")
+    if username is None or password is None:
+        return None
+    return username, password
 
 
 def _litellm_secret_ref_candidates(env_name: str) -> tuple[str, ...]:
@@ -1576,6 +1655,7 @@ def build_litellm_consumer_model_allowlists(
     *,
     flat_env: dict[str, str],
     plan: SharedCorePlan,
+    include_default_chat_alias: bool = False,
 ) -> dict[str, tuple[str, ...]]:
     if plan.litellm is None:
         return {}
@@ -1585,10 +1665,23 @@ def build_litellm_consumer_model_allowlists(
         config=config,
         plan=plan,
     )
-    return {
-        consumer: projection_catalog.fallback_alias_order_for(consumer)
-        for consumer in _litellm_consumers()
-    }
+    # The default-chat alias is chosen by the sidecar at runtime, so it cannot come
+    # from the projection catalog; consumer keys are explicit lists, so a name missing
+    # here is a name no consumer can use until the sidecar's first cycle merges it in.
+    # Only the key path asks for it: the same builder also feeds pack fallback chains,
+    # and an alias nobody configured belongs at the end of a runtime failover list.
+    default_chat_alias = (
+        model_sync_default_chat_alias(flat_env, _build_litellm_upstream_creds(flat_env))
+        if include_default_chat_alias
+        else None
+    )
+    allowlists: dict[str, tuple[str, ...]] = {}
+    for consumer in _litellm_consumers():
+        aliases = projection_catalog.fallback_alias_order_for(consumer)
+        if default_chat_alias is not None and default_chat_alias not in aliases:
+            aliases = (*aliases, default_chat_alias)
+        allowlists[consumer] = aliases
+    return allowlists
 
 
 def _build_litellm_consumer_projection_catalog(

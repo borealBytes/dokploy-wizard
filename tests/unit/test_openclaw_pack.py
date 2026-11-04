@@ -68,7 +68,7 @@ from .fake_dokploy import FakeDokployApiClient
 # the catalog is autosynced under sync/opencode-go/* and not part of static
 # advisor fallbacks.
 _EXPECTED_OPENCODE_GO_CHAT_FALLBACKS = (
-    "opencode-go/deepseek-v4-flash",
+    "opencode-go/deepseek-v4.1-flash",
 )
 
 
@@ -1855,7 +1855,7 @@ def test_openclaw_seeded_provider_models_keep_full_litellm_alias_ids() -> None:
         api_key="key-123",
         stack_name="wizard-stack",
         openclaw_fallback_models=(
-            "opencode-go/deepseek-v4-flash",
+            "opencode-go/deepseek-v4.1-flash",
             "openrouter/minimax/minimax-m2.5:free",
         ),
         client=api,
@@ -1879,15 +1879,15 @@ def test_openclaw_seeded_provider_models_keep_full_litellm_alias_ids() -> None:
         for model in provider["models"]
     ]
 
-    assert seeded["agents"]["defaults"]["model"]["primary"] == "ai-default/opencode-go/deepseek-v4-flash"
+    assert seeded["agents"]["defaults"]["model"]["primary"] == "ai-default/opencode-go/deepseek-v4.1-flash"
     assert seeded["agents"]["defaults"]["model"]["fallbacks"] == [
         "ai-default/openrouter/minimax/minimax-m2.5:free",
     ]
-    assert "opencode-go/deepseek-v4-flash" in provider_model_ids
-    assert "opencode-go/deepseek-v4-flash" in provider_model_ids
+    assert "opencode-go/deepseek-v4.1-flash" in provider_model_ids
+    assert "opencode-go/deepseek-v4.1-flash" in provider_model_ids
     assert "openrouter/minimax/minimax-m2.5:free" in provider_model_ids
     assert "unsloth-active" not in provider_model_ids
-    assert "deepseek-v4-flash" not in provider_model_ids
+    assert "deepseek-v4.1-flash" not in provider_model_ids
     assert "minimax/minimax-m2.5:free" not in provider_model_ids
     assert "opencode-go" not in seeded["models"]["providers"]
     assert "openrouter" not in seeded["models"]["providers"]
@@ -2091,7 +2091,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "nexa",
             "name": "Nexa",
             "model": {
-                "primary": "ai-default/opencode-go/deepseek-v4-flash",
+                "primary": "ai-default/opencode-go/deepseek-v4.1-flash",
                 "fallbacks": [],
             },
             "tools": {
@@ -2109,7 +2109,7 @@ def test_dokploy_openclaw_backend_wires_nexa_runtime_contract_and_workspace_surf
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "ai-default/opencode-go/deepseek-v4-flash",
+                "primary": "ai-default/opencode-go/deepseek-v4.1-flash",
                 "fallbacks": [],
             },
             "tools": {
@@ -2221,7 +2221,7 @@ def test_dokploy_openclaw_backend_seeds_telly_agent_for_telegram_channel_without
             "id": "telly",
             "name": "Telly",
             "model": {
-                "primary": "ai-default/opencode-go/deepseek-v4-flash",
+                "primary": "ai-default/opencode-go/deepseek-v4.1-flash",
                 "fallbacks": [],
             },
             "tools": {
@@ -2265,7 +2265,7 @@ def test_telly_uses_remote_default_without_local_litellm_upstream() -> None:
     telly = next(agent for agent in seeded["agents"]["list"] if agent["id"] == "telly")
 
     assert telly["model"] == {
-        "primary": "ai-default/opencode-go/deepseek-v4-flash",
+        "primary": "ai-default/opencode-go/deepseek-v4.1-flash",
         "fallbacks": [],
     }
     assert set(seeded["models"]["providers"]) == {"ai-default"}
@@ -2275,8 +2275,8 @@ def test_telly_uses_remote_default_without_local_litellm_upstream() -> None:
         "api": "openai-completions",
         "models": [
             {
-                "id": "opencode-go/deepseek-v4-flash",
-                "name": "opencode-go/deepseek-v4-flash",
+                "id": "opencode-go/deepseek-v4.1-flash",
+                "name": "opencode-go/deepseek-v4.1-flash",
                 "reasoning": True,
                 "input": ["text"],
                 "cost": {
@@ -2336,7 +2336,7 @@ def test_nexa_model_routing_uses_litellm_without_openrouter_secret(monkeypatch: 
     assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL"] == _required_placeholder("DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_BASE_URL")
     assert runtime_env["DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY"] == _required_placeholder("DOKPLOY_WIZARD_NEXA_PLANNER_NVIDIA_API_KEY")
     env_values = _env_payload_values(api.last_update_env)
-    assert env_values["DOKPLOY_WIZARD_NEXA_PLANNER_MODEL"] == "opencode-go/deepseek-v4-flash"
+    assert env_values["DOKPLOY_WIZARD_NEXA_PLANNER_MODEL"] == "opencode-go/deepseek-v4.1-flash"
     assert env_values["DOKPLOY_WIZARD_NEXA_PLANNER_LOCAL_BASE_URL"] == "http://wizard-stack-shared-litellm:4000"
     assert "or-key" not in runtime_env.values()
     assert "nv-key" not in runtime_env.values()

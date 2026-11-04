@@ -78,7 +78,11 @@ _SUPPORTED_HOSTNAME_KEYS = {
     "SURFSENSE_SUBDOMAIN",
     "SURFSENSE_API_SUBDOMAIN",
     "SURFSENSE_ZERO_SUBDOMAIN",
+    "LITELLM_ADMIN_SUBDOMAIN",
 }
+# The LiteLLM admin hostname is derived from this key on demand instead of being
+# modeled as a desired hostname, so it has no entry in _HOSTNAME_PHASES.
+_LITELLM_ADMIN_HOSTNAME_ENV_KEYS = frozenset({"LITELLM_ADMIN_SUBDOMAIN"})
 _SUPPORTED_ENABLEMENT_KEYS = {
     "PACKS",
     "ENABLE_HEADSCALE",
@@ -239,6 +243,9 @@ _OUTBOUND_MAIL_ENV_KEYS = {
 _CODER_RUNTIME_ENV_KEYS = {
     "HERMES_INFERENCE_PROVIDER",
     "HERMES_MODEL",
+    # Which Hermes build the Desktop workspace installs is what decides whether the
+    # browser-hosted Desktop exists at all, so a change has to re-push the template.
+    "HERMES_DESKTOP_CHANNEL",
     "AI_DEFAULT_API_KEY",
     "AI_DEFAULT_BASE_URL",
     "AI_DEFAULT_PROVIDER",
@@ -255,6 +262,10 @@ _LITELLM_SHARED_CONFIG_ENV_KEYS = {
     "AI_DEFAULT_BASE_URL",
     "AI_DEFAULT_PROVIDER",
     "AI_DEFAULT_MODEL",
+    # The pattern is rendered into the model-sync sources document, so a change has to
+    # re-push shared core config the same way a key change does; the Coder templates
+    # bake the literal AI_DEFAULT_MODEL and are unaffected either way.
+    "AI_DEFAULT_MODEL_PATTERN",
     "LITELLM_OPENCODE_GO_API_KEY",
     "LITELLM_OPENROUTER_API_KEY",
     "LITELLM_NVIDIA_API_KEY",
@@ -555,6 +566,12 @@ def classify_modify_request(
     if set(removed_packs) & _LITELLM_CONSUMER_PHASES:
         phases_to_run.add("shared_core")
     phases_to_run.update(_hostname_change_phases(existing_desired, requested_desired))
+    if effective_changed_keys & _LITELLM_ADMIN_HOSTNAME_ENV_KEYS:
+        # networking publishes the DNS record and the Access application for the admin
+        # hostname, and shared_core re-renders the LiteLLM service that advertises it.
+        phases_to_run.update({"networking", _LITELLM_PHASE})
+        if _access_enabled(requested_desired):
+            phases_to_run.add("cloudflare_access")
     phases_to_run.update(_new_pack_phases(existing_desired, requested_desired))
     phases_to_run.update(_removed_pack_phases(existing_desired, requested_desired))
 
@@ -769,6 +786,12 @@ def _sorted_reasons(changed_keys: set[str], phases_to_run: set[str]) -> tuple[st
 
 
 def _access_enabled(desired_state: DesiredState) -> bool:
+    # Gate on the operator's intent, not only on which packs are installed: the hostnames
+    # Access protects come from _access_target_hostnames (advisor hosts plus the LiteLLM
+    # admin hostname), and the advisor packs are not the only way to need it. The pack
+    # check stays because those packs imply Access even without an explicit email list.
+    if desired_state.cloudflare_access_otp_emails:
+        return True
     return bool({"openclaw", "my-farm-advisor"} & set(desired_state.enabled_packs))
 
 

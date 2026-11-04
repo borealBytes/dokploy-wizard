@@ -25,7 +25,7 @@ from dokploy_wizard.verification import redact_text
 _DEFAULT_SURFSENSE_VERSION = "0.0.25"
 _ZERO_IMAGE = "rocicorp/zero:1.4.0"
 _SEARXNG_IMAGE = "searxng/searxng:2026.3.13-3c1f68c59"
-_DEFAULT_LITELLM_MODEL = "opencode-go/deepseek-v4-flash"
+_DEFAULT_LITELLM_MODEL = "opencode-go/deepseek-v4.1-flash"
 _DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 _BACKEND_ENTRYPOINT = "/app/scripts/docker/entrypoint.sh"
 _BACKEND_READY_PATH = "/ready"
