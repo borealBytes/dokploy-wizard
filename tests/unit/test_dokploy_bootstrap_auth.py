@@ -6,6 +6,7 @@ import http.cookiejar
 import json
 from email.message import Message
 from io import BytesIO
+from typing import cast
 from urllib import error, request
 
 import pytest
@@ -27,7 +28,8 @@ def test_bootstrap_auth_creates_api_key_without_per_key_rate_limit() -> None:
         if req.full_url.endswith("/api/user.session"):
             return {"session": {"activeOrganizationId": "org-1"}}
         if req.full_url.endswith("/api/user.createApiKey"):
-            captured_payloads.append(json.loads(req.data.decode("utf-8")))
+            body = cast(bytes, req.data)
+            captured_payloads.append(json.loads(body.decode("utf-8")))
             return {"apiKey": "dokp-key-123"}
         raise AssertionError(req.full_url)
 

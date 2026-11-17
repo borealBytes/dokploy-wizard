@@ -774,10 +774,9 @@ def _http_error(
 def test_dokploy_client_retries_429_honoring_retry_after(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from dokploy_wizard.dokploy import client as client_module
 
     sleeps: list[float] = []
-    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
     attempts = 0
 
     def fake_request(req: request.Request) -> object:
@@ -804,7 +803,7 @@ def test_dokploy_client_gives_up_after_bounded_429_retries(
     from dokploy_wizard.dokploy import client as client_module
 
     sleeps: list[float] = []
-    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
     attempts = 0
 
     def fake_request(req: request.Request) -> object:
@@ -828,10 +827,9 @@ def test_dokploy_client_gives_up_after_bounded_429_retries(
 def test_dokploy_client_does_not_retry_non_429_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from dokploy_wizard.dokploy import client as client_module
 
     sleeps: list[float] = []
-    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
     attempts = 0
 
     def fake_request(req: request.Request) -> object:
