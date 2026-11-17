@@ -490,6 +490,7 @@ class DokployApiClient:
                     "model": model,
                     "isEnabled": is_enabled,
                 },
+                allow_scalar=True,
             )
         except DokployApiError as error:
             if self._ai_provider_create_session_fallback is None or not _is_unauthorized_error(
@@ -505,9 +506,19 @@ class DokployApiClient:
             )
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
-        if not isinstance(payload, dict):
-            raise DokployApiError("Dokploy ai.create response must be an object.")
-        return _parse_ai_provider(payload)
+        if isinstance(payload, dict):
+            return _parse_ai_provider(payload)
+        # Current upstream ai.create mutates the row and answers with an empty
+        # array (or a scalar), so the record itself must be recovered from
+        # ai.getAll. apiKey is never echoed back by upstream reads, so the
+        # recovery match ignores it.
+        return self._recover_ai_provider(
+            operation="ai.create",
+            name=name,
+            api_url=api_url,
+            model=model,
+            is_enabled=is_enabled,
+        )
 
     def ai_provider_update(
         self,
@@ -531,6 +542,7 @@ class DokployApiClient:
                     "model": model,
                     "isEnabled": is_enabled,
                 },
+                allow_scalar=True,
             )
         except DokployApiError as error:
             if self._ai_provider_update_session_fallback is None or not _is_unauthorized_error(
@@ -547,9 +559,42 @@ class DokployApiClient:
             )
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
-        if not isinstance(payload, dict):
-            raise DokployApiError("Dokploy ai.update response must be an object.")
-        return _parse_ai_provider(payload)
+        if isinstance(payload, dict):
+            return _parse_ai_provider(payload)
+        return self._recover_ai_provider(
+            operation="ai.update",
+            ai_id=ai_id,
+            name=name,
+            api_url=api_url,
+            model=model,
+            is_enabled=is_enabled,
+        )
+
+    def _recover_ai_provider(
+        self,
+        *,
+        operation: str,
+        name: str,
+        api_url: str,
+        model: str,
+        is_enabled: bool,
+        ai_id: str | None = None,
+    ) -> DokployAiProvider:
+        matches = [
+            provider
+            for provider in self.ai_providers_all()
+            if provider.name == name
+            and provider.api_url == api_url
+            and provider.model == model
+            and provider.is_enabled == is_enabled
+            and (ai_id is None or provider.ai_id == ai_id)
+        ]
+        if len(matches) != 1:
+            raise DokployApiError(
+                f"Dokploy {operation} succeeded but provider recovery found "
+                f"{len(matches)} matching records."
+            )
+        return matches[0]
 
     def ai_provider_delete(self, *, ai_id: str) -> None:
         try:

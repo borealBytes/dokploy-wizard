@@ -2259,3 +2259,148 @@ def test_model_sync_first_cycle_completed_polls_healthcheck(
     assert not shared_core_module._model_sync_first_cycle_completed(
         "sync-container", attempts=2, delay_seconds=0.0, sleep_fn=lambda _s: None
     )
+
+
+def _ai_row(
+    *,
+    ai_id: str,
+    name: str = "Dokploy Wizard LiteLLM",
+    model: str = "opencode-go/deepseek-v4.1-flash",
+) -> dict[str, object]:
+    return {
+        "aiId": ai_id,
+        "name": name,
+        "apiUrl": "http://openmerge-shared-litellm:4000/v1",
+        "model": model,
+        "isEnabled": True,
+    }
+
+
+def test_ai_provider_create_recovers_record_from_empty_mutation_response() -> None:
+    """Upstream ai.create answers [] after inserting the row; the client must
+    recover the record from ai.getAll instead of failing."""
+    from urllib import request
+
+    from dokploy_wizard.dokploy.client import DokployApiClient
+
+    calls: list[str] = []
+
+    def fake_request(req: object) -> object:
+        assert isinstance(req, request.Request)
+        path = req.full_url.removeprefix("http://dokploy.test")
+        calls.append(path)
+        if path == "/api/ai.create":
+            return []
+        return [_ai_row(ai_id="ai-real-1")]
+
+    client = DokployApiClient(
+        api_url="http://dokploy.test",
+        api_key="fake-key",
+        request_fn=fake_request,
+    )
+
+    provider = client.ai_provider_create(
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://openmerge-shared-litellm:4000/v1",
+        api_key="sk-ai-key",
+        model="opencode-go/deepseek-v4.1-flash",
+        is_enabled=True,
+    )
+
+    assert provider.ai_id == "ai-real-1"
+    assert provider.api_key == ""
+    assert calls == ["/api/ai.create", "/api/ai.getAll"]
+
+
+def test_ai_provider_create_recovers_record_from_scalar_mutation_response() -> None:
+    from urllib import request
+
+    from dokploy_wizard.dokploy.client import DokployApiClient
+
+    def fake_request(req: object) -> object:
+        assert isinstance(req, request.Request)
+        if req.full_url.endswith("/api/ai.create"):
+            return True
+        return [_ai_row(ai_id="ai-real-2")]
+
+    client = DokployApiClient(
+        api_url="http://dokploy.test",
+        api_key="fake-key",
+        request_fn=fake_request,
+    )
+
+    provider = client.ai_provider_create(
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://openmerge-shared-litellm:4000/v1",
+        api_key="sk-ai-key",
+        model="opencode-go/deepseek-v4.1-flash",
+        is_enabled=True,
+    )
+
+    assert provider.ai_id == "ai-real-2"
+
+
+def test_ai_provider_update_recovers_record_from_empty_mutation_response() -> None:
+    from urllib import request
+
+    from dokploy_wizard.dokploy.client import DokployApiClient
+
+    calls: list[str] = []
+
+    def fake_request(req: object) -> object:
+        assert isinstance(req, request.Request)
+        path = req.full_url.removeprefix("http://dokploy.test")
+        calls.append(path)
+        if path == "/api/ai.update":
+            return []
+        return [_ai_row(ai_id="ai-real-3")]
+
+    client = DokployApiClient(
+        api_url="http://dokploy.test",
+        api_key="fake-key",
+        request_fn=fake_request,
+    )
+
+    provider = client.ai_provider_update(
+        ai_id="ai-real-3",
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://openmerge-shared-litellm:4000/v1",
+        api_key="sk-ai-key",
+        model="opencode-go/deepseek-v4.1-flash",
+        is_enabled=True,
+    )
+
+    assert provider.ai_id == "ai-real-3"
+    assert calls == ["/api/ai.update", "/api/ai.getAll"]
+
+
+def test_ai_provider_mutation_recovery_requires_single_match() -> None:
+    from urllib import request
+
+    import pytest
+
+    from dokploy_wizard.dokploy.client import DokployApiClient, DokployApiError
+
+    rows = [_ai_row(ai_id="ai-dup-1"), _ai_row(ai_id="ai-dup-2")]
+
+    def fake_request(req: object) -> object:
+        assert isinstance(req, request.Request)
+        if req.full_url.endswith("/api/ai.create"):
+            return []
+        return rows
+
+    client = DokployApiClient(
+        api_url="http://dokploy.test",
+        api_key="fake-key",
+        request_fn=fake_request,
+    )
+
+    with pytest.raises(DokployApiError, match="recovery found 2 matching records"):
+
+        client.ai_provider_create(
+            name="Dokploy Wizard LiteLLM",
+            api_url="http://openmerge-shared-litellm:4000/v1",
+            api_key="sk-ai-key",
+            model="opencode-go/deepseek-v4.1-flash",
+            is_enabled=True,
+        )
