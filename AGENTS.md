@@ -65,6 +65,10 @@ To deploy to a fresh remote VPS, use the remote helper:
   --env-file ./.install.env
 ```
 
+The remote helper requires `paramiko`, and the shim execs `python3` directly. On
+machines where the system interpreter lacks paramiko, invoke it through the project
+venv: `uv run ./bin/dokploy-wizard-remote …`.
+
 ### Agent runtime guidance (timeouts)
 
 Remote `proof`, `install`, and `modify` runs are long. A cold first install on a
