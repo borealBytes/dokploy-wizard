@@ -249,6 +249,16 @@ duplicates; prune wizard-created leftovers.
   Remote was reset (`docker service rm dokploy dokploy-postgres`,
   `docker rm -f dokploy-traefik`, `rm -rf /root/dokploy-wizard`) so a fresh
   unthrottled key is created.
+- Attempt 3: hung 85+ minutes at `mutate-install` with heartbeats only. Cause
+  was the reset itself: removing the bootstrap **services** but not the
+  installer-created `dokploy` / `dokploy-postgres` **volumes** means the
+  reinstalled bootstrap generates a new Postgres password while the surviving
+  data volume keeps the old one — Dokploy crash-looped on
+  `password authentication failed for user "dokploy"` and the wizard waited on
+  its bootstrap health check. Full teardown (services + task containers + both
+  volumes) before attempt 4; AGENTS.md recovery note now spells this out.
+  Operator lesson: never pipe the remote helper through `tail` for live runs —
+  the pipe buffers everything and the run looks silent even while streaming.
 
 ## Verification matrix
 

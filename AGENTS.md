@@ -79,8 +79,14 @@ run the command in the background and wait for the completion notification. A
 `still running ... waiting for output` progress line means the wizard is
 healthy, not stuck. Re-running an interrupted install is safe but wasteful; if
 a run failed at the Dokploy bootstrap health check, remove the half-built
-bootstrap on the host first (`docker service rm dokploy dokploy-postgres`)
-before retrying, or the preflight port check will reject port 3000.
+bootstrap on the host first (`docker service rm dokploy dokploy-postgres`,
+then `docker rm -f` the draining task containers and `docker volume rm` the
+`dokploy` and `dokploy-postgres` volumes) before retrying. Leaving the old
+Postgres volume behind looks like a hang: the reinstalled bootstrap gets a new
+password, the surviving volume keeps the old one, and Dokploy crash-loops on
+`password authentication failed for user "dokploy"` while the wizard waits on
+its health check. A port-3000 preflight rejection means the old services were
+not fully removed.
 
 What the helper does:
 
