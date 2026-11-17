@@ -34,6 +34,19 @@ Use these commands from the repo root on a machine that already has the code and
 ./bin/dokploy-wizard modify --env-file ./.install.env --non-interactive
 ```
 
+### Upgrade (drift check / gated LiteLLM pin bump)
+
+```bash
+./bin/dokploy-wizard upgrade --env-file ./.install.env --check
+./bin/dokploy-wizard upgrade --env-file ./.install.env --litellm v1.84.0-stable --non-interactive --confirm-file fixtures/upgrade.confirm
+```
+
+`upgrade --check` is read-only. Apply snapshots state + dumps shared-core Postgres, writes the
+`litellm-image-pin.json` state pin (which outranks `LITELLM_IMAGE_TAG` on every later pass), and
+reuses the modify flow. Majors (bump or downgrade) need `--allow-major`. The remote helper mirrors
+this: `./bin/dokploy-wizard-remote upgrade --host <host> --password <password> --env-file ./.install.env
+[--check | --litellm <tag> --confirm-file <file>]`.
+
 ### Uninstall
 
 ```bash

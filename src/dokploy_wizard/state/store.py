@@ -22,6 +22,7 @@ from dokploy_wizard.state.models import (
     AppliedStateCheckpoint,
     DesiredState,
     LiteLLMGeneratedKeys,
+    LiteLLMImagePin,
     OwnershipLedger,
     RawEnvInput,
     SeaweedFsGeneratedSecrets,
@@ -46,6 +47,7 @@ INBOX_EVENTS_FILE = "inbox-events.json"
 JOB_QUEUE_FILE = "job-queue.json"
 OUTBOUND_DELIVERIES_FILE = "outbound-deliveries.json"
 LITELLM_GENERATED_KEYS_FILE = "litellm-generated-keys.json"
+LITELLM_IMAGE_PIN_FILE = "litellm-image-pin.json"
 SEAWEEDFS_GENERATED_SECRETS_FILE = "seaweedfs-generated-secrets.json"
 STATE_DOCUMENT_FILES = (
     RAW_INPUT_FILE,
@@ -469,6 +471,20 @@ def write_litellm_generated_keys(state_dir: Path, generated_keys: LiteLLMGenerat
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / LITELLM_GENERATED_KEYS_FILE
     _write_document(path, generated_keys.to_dict())
+    path.chmod(0o600)
+
+
+def load_litellm_image_pin(state_dir: Path) -> LiteLLMImagePin | None:
+    return _load_optional_document(
+        state_dir / LITELLM_IMAGE_PIN_FILE,
+        LiteLLMImagePin.from_dict,
+    )
+
+
+def write_litellm_image_pin(state_dir: Path, pin: LiteLLMImagePin) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / LITELLM_IMAGE_PIN_FILE
+    _write_document(path, pin.to_dict())
     path.chmod(0o600)
 
 

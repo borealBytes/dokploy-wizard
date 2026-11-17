@@ -459,6 +459,25 @@ Use this when you do not already have an env file. The wizard prompts for domain
 
 Uninstall is ledger-driven, and the retired advisor/research packs are still understood ledger entries: their resource types are kept as literals in the uninstall planner, so an older box that once ran them uninstalls cleanly without resurrecting the removed pack modules.
 
+### Upgrade
+
+```bash
+./bin/dokploy-wizard upgrade --env-file path/to/install.env --check
+./bin/dokploy-wizard upgrade --env-file path/to/install.env --litellm v1.84.0-stable --confirm-file fixtures/upgrade.confirm
+```
+
+`upgrade --check` compares each wizard-managed service's running image digest against the registry's current digest for the same tag (floating `:latest` labels lie, so digests are the truth), reports the newest LiteLLM stable tag, and lists Coder workspaces without restarting anything. Applying a `--litellm` tag is gated: it snapshots the wizard state directory, dumps the shared-core Postgres with `pg_dumpall`, writes the new tag into the state document `litellm-image-pin.json`, and forces exactly one shared-core redeploy. Later install/modify passes render that pin ahead of the `LITELLM_IMAGE_TAG` env value, so a plain rerun never reverts an approved bump. Major-version changes (bump or downgrade) are refused without `--allow-major`, and non-interactive apply requires `--confirm-file` with a typed line containing the word `upgrade`. Rollback is the inverse: rerun `upgrade --litellm <previous-tag>`; the snapshot keeps the pre-upgrade state copy and SQL dump for manual database rollback.
+
+The remote helper passes the same command through:
+
+```bash
+./bin/dokploy-wizard-remote upgrade \
+  --host <host> \
+  --password <redacted> \
+  --env-file ./.install.env \
+  --check
+```
+
 ## Fresh-VPS harness
 
 The repo also contains a real fresh-host validation harness:
@@ -520,6 +539,7 @@ pytest tests/test_cli.py -q
 - The ownership ledger is the uninstall authority.
 - Every wizard-managed pack (Nextcloud, Moodle, DocuSeal, SeaweedFS, Matrix, Headscale, Coder) is state-tracked and reconciled on rerun, not just manually drifted on one VPS.
 - Reruns and modify operations skip Dokploy update/deploy for services whose rendered compose hash matches the stored hash and whose verification checks pass. Changed compose or unhealthy services still redeploy normally.
+- The LiteLLM image tag resolves as: state pin (`litellm-image-pin.json`, written by `upgrade`) > `LITELLM_IMAGE`/`LITELLM_IMAGE_TAG` env > built-in default. Rotate it with `upgrade --litellm`, not by editing the env file behind the pin.
 
 ## Current caveats
 

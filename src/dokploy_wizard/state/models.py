@@ -634,6 +634,50 @@ class SeaweedFsGeneratedSecrets:
 
 
 @dataclass(frozen=True)
+class LiteLLMImagePin:
+    """Operator-approved LiteLLM image pin persisted in the state directory.
+
+    The `upgrade` command writes this document when an operator applies a tag bump,
+    and every later render (install/modify/upgrade) prefers it over the
+    `LITELLM_IMAGE_TAG` env value so a plain rerun never silently reverts the stack.
+    Rollback is the inverse: write the previous tag back and let modify redeploy.
+    """
+
+    format_version: int
+    image: str
+    tag: str
+    updated_at: str
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        if self.image == "" or self.tag == "" or self.updated_at == "":
+            msg = "LiteLLM image pin image, tag, and updated_at must be non-empty strings."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format_version": self.format_version,
+            "image": self.image,
+            "tag": self.tag,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> LiteLLMImagePin:
+        return cls(
+            format_version=_require_format_version(payload),
+            image=_require_string(payload, "image"),
+            tag=_require_string(payload, "tag"),
+            updated_at=_require_string(payload, "updated_at"),
+        )
+
+
+@dataclass(frozen=True)
 class AppliedStateCheckpoint:
     """Last known successfully applied state."""
 

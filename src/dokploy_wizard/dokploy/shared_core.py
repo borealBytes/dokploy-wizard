@@ -75,6 +75,8 @@ from dokploy_wizard.verification import ServiceVerificationResult, make_verifica
 _DOKPLOY_AI_PROVIDER_NAME = "Dokploy Wizard LiteLLM"
 _DOKPLOY_AI_PROVIDER_NAME_PREFIX = _DOKPLOY_AI_PROVIDER_NAME + " \u00b7 "
 _DEFAULT_REMOTE_MODEL_ALIAS = "opencode-go/deepseek-v4.1-flash"
+DEFAULT_LITELLM_IMAGE = "ghcr.io/berriai/litellm"
+DEFAULT_LITELLM_IMAGE_TAG = "v1.83.14-stable"
 
 
 class DokploySharedCoreApi(Protocol):
@@ -1331,8 +1333,14 @@ def _render_compose_file(
         volume_block += f"  {mail_volume}:\n"
     litellm_block = ""
     if plan.litellm is not None:
-        litellm_image = litellm_env.get("LITELLM_IMAGE", "ghcr.io/berriai/litellm").strip() or "ghcr.io/berriai/litellm"
-        litellm_tag = litellm_env.get("LITELLM_IMAGE_TAG", "v1.83.14-stable").strip() or "v1.83.14-stable"
+        litellm_image = (
+            litellm_env.get("LITELLM_IMAGE", DEFAULT_LITELLM_IMAGE).strip()
+            or DEFAULT_LITELLM_IMAGE
+        )
+        litellm_tag = (
+            litellm_env.get("LITELLM_IMAGE_TAG", DEFAULT_LITELLM_IMAGE_TAG).strip()
+            or DEFAULT_LITELLM_IMAGE_TAG
+        )
         upstream_creds = _build_litellm_upstream_creds(litellm_env)
         litellm_config_payload = build_litellm_config(litellm_env, upstream_creds)
         _use_litellm_env_refs(litellm_config_payload, litellm_env)

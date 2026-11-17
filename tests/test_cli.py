@@ -76,7 +76,12 @@ from dokploy_wizard.state import (
     write_target_state,
 )
 from dokploy_wizard.state import inspection as inspection_module
-from dokploy_wizard.state.models import STATE_FORMAT_VERSION, LiteLLMGeneratedKeys
+from dokploy_wizard.state.models import (
+    STATE_FORMAT_VERSION,
+    LiteLLMGeneratedKeys,
+    LiteLLMImagePin,
+)
+from dokploy_wizard.state.store import write_litellm_image_pin
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -5371,6 +5376,62 @@ def _nextcloud_backend_raw_env() -> RawEnvInput:
         "PACKS": "nextcloud",
     }
     return RawEnvInput(format_version=1, values=values)
+
+
+def _shared_core_backend_litellm_env(
+    monkeypatch: pytest.MonkeyPatch,
+    state_dir: Path,
+    extra_env: dict[str, str],
+) -> dict[str, Any]:
+    values = {**_nextcloud_backend_raw_env().values, **extra_env}
+    raw_env = RawEnvInput(format_version=1, values=values)
+    desired_state = resolve_desired_state(raw_env)
+    recorded: dict[str, Any] = {}
+
+    def record_backend(**kwargs: Any) -> object:
+        recorded.update(kwargs)
+        return cast(Any, object())
+
+    monkeypatch.setattr(cli, "DokploySharedCoreBackend", record_backend)
+    cli._build_shared_core_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+        litellm_generated_keys=None,
+    )
+    return dict(recorded["litellm_env"])
+
+
+def test_build_shared_core_backend_honors_state_pin_over_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    write_litellm_image_pin(
+        tmp_path,
+        LiteLLMImagePin(
+            format_version=STATE_FORMAT_VERSION,
+            image="ghcr.io/berriai/litellm",
+            tag="v1.84.0-stable",
+            updated_at="2026-11-17T00:00:00+00:00",
+        ),
+    )
+
+    litellm_env = _shared_core_backend_litellm_env(
+        monkeypatch, tmp_path, {"LITELLM_IMAGE_TAG": "v1.80.0-stable"}
+    )
+
+    # A plain modify/install pass must render the operator-approved pin, not
+    # the (possibly stale) env value, or the upgrade would silently revert.
+    assert litellm_env["LITELLM_IMAGE_TAG"] == "v1.84.0-stable"
+
+
+def test_build_shared_core_backend_without_pin_keeps_env_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    litellm_env = _shared_core_backend_litellm_env(
+        monkeypatch, tmp_path, {"LITELLM_IMAGE_TAG": "v1.80.0-stable"}
+    )
+
+    assert litellm_env["LITELLM_IMAGE_TAG"] == "v1.80.0-stable"
 
 
 def _capture_nextcloud_backend_kwargs(

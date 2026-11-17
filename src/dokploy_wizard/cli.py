@@ -146,6 +146,19 @@ from dokploy_wizard.uninstall import (
     collect_confirmation_lines,
     execute_uninstall_plan,
 )
+from dokploy_wizard.upgrade import (
+    DockerCliProbe,
+    HttpImageRegistry,
+    ImageRegistry,
+    RuntimeProbe,
+    UpgradeError,
+    apply_litellm_image_pin_to_env,
+    apply_litellm_pin,
+    build_upgrade_drift_report,
+    capture_upgrade_snapshot,
+    confirm_upgrade_apply,
+    resolve_litellm_bump_plan,
+)
 from dokploy_wizard.verification import (
     key_is_sensitive,
     redact_data,
@@ -316,6 +329,60 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the resolved desired state without writing files",
     )
     inspect_state_parser.set_defaults(handler=_handle_inspect_state)
+
+    upgrade_parser = subparsers.add_parser(
+        "upgrade",
+        help="report image drift and apply operator-approved stack upgrades",
+        description=(
+            "Compare running wizard-managed images against registry digests, and apply "
+            "an operator-approved LiteLLM image-pin bump. Apply snapshots wizard state "
+            "and dumps the shared-core database first; majors are refused without "
+            "--allow-major. Non-interactive apply requires --confirm-file."
+        ),
+    )
+    upgrade_parser.add_argument(
+        "--env-file",
+        type=Path,
+        required=True,
+        help="path to the reusable env file",
+    )
+    upgrade_parser.add_argument(
+        "--state-dir",
+        type=Path,
+        default=Path(".dokploy-wizard-state"),
+        help="directory containing persisted wizard state documents",
+    )
+    upgrade_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="print the drift report without snapshot or apply",
+    )
+    upgrade_parser.add_argument(
+        "--litellm",
+        metavar="TAG",
+        help="apply this LiteLLM image tag as the new state-backed pin",
+    )
+    upgrade_parser.add_argument(
+        "--allow-major",
+        action="store_true",
+        help="permit a LiteLLM major-version change (bump or downgrade)",
+    )
+    upgrade_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate the planned bump and print the report without snapshot or apply",
+    )
+    upgrade_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="disable interactive confirmation prompts",
+    )
+    upgrade_parser.add_argument(
+        "--confirm-file",
+        type=Path,
+        help="path to a file containing the typed 'upgrade' confirmation",
+    )
+    upgrade_parser.set_defaults(handler=_handle_upgrade)
 
     return parser
 
@@ -561,6 +628,40 @@ def _handle_modify(args: argparse.Namespace) -> int:
     except (
         OSError,
         StateValidationError,
+        PreflightError,
+        DokployBootstrapError,
+        CloudflareError,
+        SharedCoreError,
+        TailscaleError,
+        HeadscaleError,
+        CoderError,
+        LifecycleDriftError,
+        MatrixError,
+        NextcloudError,
+        SeaweedFsError,
+    ) as error:
+        raise SystemExit(_redacted_cli_error(error)) from error
+
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0
+
+
+def _handle_upgrade(args: argparse.Namespace) -> int:
+    try:
+        summary = run_upgrade_flow(
+            env_file=args.env_file,
+            state_dir=args.state_dir,
+            check=args.check,
+            litellm_tag=args.litellm,
+            allow_major=args.allow_major,
+            dry_run=args.dry_run,
+            non_interactive=args.non_interactive,
+            confirm_file=args.confirm_file,
+        )
+    except (
+        OSError,
+        StateValidationError,
+        UpgradeError,
         PreflightError,
         DokployBootstrapError,
         CloudflareError,
@@ -889,6 +990,90 @@ def run_modify_flow(
         prompt_for_memory_shortfall=False,
         enforce_live_run_contamination_check=enforce_live_run_contamination_check,
     )
+
+
+def run_upgrade_flow(
+    *,
+    env_file: Path,
+    state_dir: Path,
+    check: bool = False,
+    litellm_tag: str | None = None,
+    allow_major: bool = False,
+    dry_run: bool = False,
+    non_interactive: bool = False,
+    confirm_file: Path | None = None,
+    raw_env: RawEnvInput | None = None,
+    registry: ImageRegistry | None = None,
+    probe: RuntimeProbe | None = None,
+    modify_runner: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    loaded_state = load_state_dir(state_dir)
+    if not validate_existing_state(loaded_state):
+        raise StateValidationError(
+            "upgrade requires an installed wizard stack; run install first."
+        )
+    raw_env_input = raw_env or _load_install_raw_env(env_file, non_interactive=True)
+    desired_state = resolve_desired_state(raw_env_input)
+    registry_client = registry or HttpImageRegistry()
+    runtime_probe = probe or DockerCliProbe()
+
+    report: dict[str, Any] = {
+        "command": "upgrade",
+        "drift": build_upgrade_drift_report(
+            desired_state=desired_state,
+            litellm_env=dict(raw_env_input.values),
+            state_dir=state_dir,
+            registry=registry_client,
+            probe=runtime_probe,
+        ),
+        "mode": "check",
+    }
+    if check or litellm_tag is None:
+        if litellm_tag is not None:
+            report["detail"] = "--litellm ignored because --check was requested."
+        return report
+
+    plan = resolve_litellm_bump_plan(
+        desired_state=desired_state,
+        litellm_env=dict(raw_env_input.values),
+        state_dir=state_dir,
+        registry=registry_client,
+        target_tag=litellm_tag,
+        allow_major=allow_major,
+    )
+    report["plan"] = plan
+    if dry_run:
+        report["mode"] = "dry-run"
+        report["detail"] = (
+            "Dry run: validated the LiteLLM tag bump; nothing was snapshotted or applied."
+        )
+        return report
+
+    confirm_upgrade_apply(non_interactive=non_interactive, confirm_file=confirm_file)
+    snapshot = capture_upgrade_snapshot(
+        state_dir=state_dir,
+        desired_state=desired_state,
+        probe=runtime_probe,
+    )
+    apply_litellm_pin(state_dir=state_dir, plan=plan, desired_state=desired_state)
+    report["mode"] = "applied"
+    report["snapshot"] = snapshot
+    report["rollback"] = {
+        "command": f"upgrade --env-file <file> --state-dir <dir> --litellm {plan['previous_tag']}",
+        "detail": (
+            "Re-running upgrade with the previous tag restores the pin and forces the "
+            "same redeploy path; the snapshot keeps the pre-upgrade state copy and the "
+            "shared-core SQL dump for manual database rollback."
+        ),
+    }
+    report["modify"] = (modify_runner or run_modify_flow)(
+        env_file=env_file,
+        state_dir=state_dir,
+        dry_run=False,
+        raw_env=raw_env_input,
+        enforce_live_run_contamination_check=True,
+    )
+    return report
 
 
 def run_uninstall_flow(
@@ -1709,7 +1894,11 @@ def _build_shared_core_backend(
             api_key=api_key,
             stack_name=desired_state.stack_name,
             plan=desired_state.shared_core,
-            litellm_env=dict(raw_env.values),
+            # The state-backed pin (written by `upgrade --litellm`) overrides the
+            # env value here so every later pass renders the operator-approved tag.
+            litellm_env=apply_litellm_image_pin_to_env(
+                litellm_env=dict(raw_env.values), state_dir=state_dir
+            ),
             litellm_generated_keys=litellm_generated_keys,
             litellm_consumer_model_allowlists=build_litellm_consumer_model_allowlists(
                 flat_env=dict(raw_env.values),

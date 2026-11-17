@@ -164,6 +164,42 @@ Command name: `upgrade` (semantics include major-version gates; "update" underse
 Deferred follow-ons: O3 `versions.json` release manifest, O5 nightly throwaway-VPS
 proof, D2, DocuSeal/Moodle AI.
 
+### Group 3 implementation notes (landed 2026-11-17)
+
+Deviations from the planning table, with reasons:
+
+- Scope landed as O1 (drift report) + a **LiteLLM-only** apply. The per-service forced
+  re-pull ladder (packs, Postgres majors, Nextcloud `occ upgrade` chain) stays deferred:
+  every pack except LiteLLM floats on `:latest`-class tags where the honest answer is
+  "rerun modify re-pulls", and the Postgres/Nextcloud majors need restore/maintenance
+  machinery that deserves its own gate. `--litellm <tag>` is the one component the
+  wizard pins, so it is the one component with a real upgrade story.
+- Drift truth: `docker service inspect` refs (swarm services are what the wizard
+  creates) parsed into registry/repository/tag/digest, compared against anonymous
+  `Docker-Content-Digest` manifest fetches with bearer-challenge token exchange and
+  `Link`-rel=next tag pagination. Classes: `current`, `digest_stale`, `tag_only_ref`
+  (running ref carries no digest — floating tag, digest comparison impossible).
+- Pin resolution is exactly one chokepoint: `apply_litellm_image_pin_to_env` rewrites
+  `LITELLM_IMAGE`/`LITELLM_IMAGE_TAG` in `_build_shared_core_backend`, so install,
+  modify, and upgrade passes all render the state pin without teaching call sites
+  about the document. Precedence: pin > env > `DEFAULT_LITELLM_IMAGE(_TAG)`.
+- Apply sequence: typed confirmation (the word `upgrade`; `y`/`yes`/`ok`/`confirm`
+  rejected; non-interactive requires `--confirm-file`) → snapshot → pin write →
+  clear the shared-core compose artifact hash (key = `network_name`, e.g.
+  `<stack>-shared`) → reuse `run_modify_flow`. Clearing only that hash means exactly
+  one forced shared-core redeploy; every pack stays noop-skippable.
+- Snapshot: state-dir copytree excluding `snapshots/`, plus gzipped `pg_dumpall` via
+  `docker exec` (`-U postgres`, password = the deterministic
+  `_shared_core_generated_secret("<pg-service>-root-password")`), plus best-effort
+  `hermes backup` (note-only; absence or failure never blocks apply).
+- Major gate: `--allow-major` covers bump **and** downgrade, so the rollback command
+  (`upgrade --litellm <previous-tag>`) is subject to the same discipline as the bump.
+- Workspaces are report-only (`coder workspaces ls --output json` via exec); no
+  restart/recreate flags in this cut.
+- Remote helper gained an `upgrade` passthrough mirroring `modify` (bundle upload +
+  `_build_upgrade_command`); apply requires `--confirm-file`, which is uploaded with
+  the rest of the run artifacts.
+
 ## Group 4 — Default workspace name fix (A3b carryover)
 
 The date-stamped default workspace name makes every post-midnight `modify` create a

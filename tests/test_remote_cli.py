@@ -95,6 +95,7 @@ def test_help_lists_expected_subcommands() -> None:
     assert "install" in result.stdout
     assert "modify" in result.stdout
     assert "uninstall" in result.stdout
+    assert "upgrade" in result.stdout
     assert "inspect-state" in result.stdout
     assert "proof" in result.stdout
     assert result.stderr == ""
@@ -131,7 +132,7 @@ def test_remote_parser_defaults_match_contract() -> None:
 
 @pytest.mark.parametrize(
     "subcommand",
-    ["install", "modify", "uninstall", "inspect-state", "proof"],
+    ["install", "modify", "uninstall", "upgrade", "inspect-state", "proof"],
 )
 def test_remote_parser_accepts_verbose_for_each_subcommand(subcommand: str) -> None:
     remote_cli = import_remote_cli_module()
@@ -144,7 +145,7 @@ def test_remote_parser_accepts_verbose_for_each_subcommand(subcommand: str) -> N
 
 @pytest.mark.parametrize(
     "subcommand",
-    ["install", "modify", "uninstall", "inspect-state", "proof"],
+    ["install", "modify", "uninstall", "upgrade", "inspect-state", "proof"],
 )
 def test_remote_parser_accepts_quiet_remote_output_for_each_subcommand(
     subcommand: str,
@@ -322,7 +323,7 @@ def test_successful_lifecycle_expected_service_urls_omits_disabled_pack_links(
 
 @pytest.mark.parametrize(
     "subcommand",
-    ["install", "modify", "uninstall", "inspect-state", "proof"],
+    ["install", "modify", "uninstall", "upgrade", "inspect-state", "proof"],
 )
 def test_each_remote_subcommand_has_help(subcommand: str) -> None:
     assert CLI.exists(), f"expected remote CLI wrapper at {CLI}"
@@ -347,7 +348,7 @@ def test_missing_host_fails_without_echoing_password(tmp_path: Path) -> None:
     assert password not in result.stderr
 
 
-@pytest.mark.parametrize("subcommand", ["install", "modify", "proof"])
+@pytest.mark.parametrize("subcommand", ["install", "modify", "proof", "upgrade"])
 def test_lifecycle_commands_accept_positional_env_file(subcommand: str) -> None:
     remote_cli = import_remote_cli_module()
     parser = remote_cli.build_parser()
@@ -635,3 +636,123 @@ def test_non_verbose_progress_output_suppresses_remote_stream_lines() -> None:
     reporter.remote_output("mutate-install", "stdout", "normal install output")
 
     assert stream.getvalue() == ""
+
+
+class _RecordingRemoteTransport(_FakeRemoteTransport):
+    """Fake transport that also captures every command sent to the host."""
+
+    def __init__(self) -> None:
+        super().__init__(output_callback=None)
+        self.commands: list[tuple[str, str]] = []
+
+    def run(self, subcommand: str, command: str) -> None:
+        self.commands.append((subcommand, command))
+
+
+def _patch_recording_remote_run(
+    monkeypatch: pytest.MonkeyPatch,
+    remote_cli: ModuleType,
+) -> _RecordingRemoteTransport:
+    transport = _RecordingRemoteTransport()
+
+    monkeypatch.setattr(
+        remote_cli.ParamikoRemoteTransport,
+        "connect",
+        lambda **_kwargs: transport,
+    )
+    monkeypatch.setattr(remote_cli, "_upload_remote_bundle", lambda **_kwargs: None)
+    monkeypatch.setattr(remote_cli, "_extract_remote_bundle", lambda **_kwargs: None)
+    return transport
+
+
+def test_remote_upgrade_check_builds_read_only_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = _write_remote_env(tmp_path, packs="nextcloud,coder")
+    transport = _patch_recording_remote_run(monkeypatch, remote_cli)
+
+    exit_code = remote_cli.main(
+        [
+            "upgrade",
+            "--host",
+            "example.com",
+            "--password",
+            "super-secret-password",
+            "--env-file",
+            str(env_file),
+            "--check",
+        ]
+    )
+
+    assert exit_code == 0
+    assert [subcommand for subcommand, _ in transport.commands] == ["upgrade"]
+    command = transport.commands[0][1]
+    assert "./bin/dokploy-wizard upgrade" in command
+    assert "--check" in command
+    assert "--non-interactive" in command
+    assert "--litellm" not in command
+    assert "--confirm-file" not in command
+
+
+def test_remote_upgrade_apply_passes_tag_allow_major_and_uploaded_confirm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = _write_remote_env(tmp_path, packs="nextcloud,coder")
+    confirm_file = tmp_path / "upgrade.confirm"
+    confirm_file.write_text("upgrade the stack\n", encoding="utf-8")
+    transport = _patch_recording_remote_run(monkeypatch, remote_cli)
+
+    exit_code = remote_cli.main(
+        [
+            "upgrade",
+            "--host",
+            "example.com",
+            "--password",
+            "super-secret-password",
+            "--env-file",
+            str(env_file),
+            "--litellm",
+            "v1.84.0-stable",
+            "--allow-major",
+            "--confirm-file",
+            str(confirm_file),
+        ]
+    )
+
+    assert exit_code == 0
+    command = transport.commands[0][1]
+    assert "--litellm" in command and "v1.84.0-stable" in command
+    assert "--allow-major" in command
+    assert "--check" not in command
+    # The confirmation file is uploaded and referenced by its remote path.
+    assert f"--confirm-file {confirm_file}" in command
+
+
+def test_remote_upgrade_litellm_requires_confirm_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = _write_remote_env(tmp_path, packs="nextcloud,coder")
+
+    with pytest.raises(SystemExit) as exit_info:
+        remote_cli.main(
+            [
+                "upgrade",
+                "--host",
+                "example.com",
+                "--password",
+                "super-secret-password",
+                "--env-file",
+                str(env_file),
+                "--litellm",
+                "v1.84.0-stable",
+            ]
+        )
+
+    assert exit_info.value.code == 2
+    assert "--confirm-file" in capsys.readouterr().err
