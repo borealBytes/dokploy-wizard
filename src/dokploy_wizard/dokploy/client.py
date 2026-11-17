@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -26,9 +27,22 @@ AiProviderUpdateSessionFallbackFn = Callable[[str, str, str, str, str, bool], An
 AiProviderDeleteSessionFallbackFn = Callable[[str], Any]
 AiProviderTestConnectionSessionFallbackFn = Callable[[str, str, str], Any]
 
+_DOKPLOY_429_MAX_RETRIES = 3
+_DOKPLOY_429_FALLBACK_DELAY_SECONDS = 5.0
+_DOKPLOY_429_MAX_DELAY_SECONDS = 30.0
+
 
 class DokployApiError(RuntimeError):
     """Raised when Dokploy API requests fail."""
+
+
+def _retry_after_seconds(exc: error.HTTPError) -> float:
+    header = exc.headers.get("Retry-After") if exc.headers else None
+    try:
+        seconds = float(header)
+    except (TypeError, ValueError):
+        seconds = _DOKPLOY_429_FALLBACK_DELAY_SECONDS
+    return min(max(seconds, 0.5), _DOKPLOY_429_MAX_DELAY_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -587,15 +601,23 @@ class DokployApiClient:
             headers=headers,
             data=data,
         )
-        try:
-            response = self._request_fn(req)
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise DokployApiError(
-                f"Dokploy API request failed with status {exc.code}: {body or exc.reason}."
-            ) from exc
-        except error.URLError as exc:
-            raise DokployApiError(f"Dokploy API request failed: {exc.reason}.") from exc
+        for attempt in range(_DOKPLOY_429_MAX_RETRIES + 1):
+            try:
+                response = self._request_fn(req)
+                break
+            except error.HTTPError as exc:
+                if exc.code != 429 or attempt == _DOKPLOY_429_MAX_RETRIES:
+                    body = exc.read().decode("utf-8", errors="replace")
+                    raise DokployApiError(
+                        f"Dokploy API request failed with status {exc.code}: {body or exc.reason}."
+                    ) from exc
+                # Dokploy (better-auth) answers 429 with Retry-After when a
+                # limiter trips; a cold reconcile can burst through the core
+                # auth limiter and recover in seconds, so a small bounded
+                # backoff beats failing a whole install on a transient.
+                time.sleep(_retry_after_seconds(exc))
+            except error.URLError as exc:
+                raise DokployApiError(f"Dokploy API request failed: {exc.reason}.") from exc
         if isinstance(response, list):
             return response
         if isinstance(response, dict):

@@ -758,3 +758,94 @@ def test_dokploy_client_ai_provider_test_connection_requires_session_fallback() 
             api_key="sk-dokploy-ai",
             model="local/model",
         )
+
+
+def _http_error(
+    req: request.Request, code: int, *, retry_after: str | None = None
+) -> error.HTTPError:
+    headers = Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    return error.HTTPError(
+        req.full_url, code, "reason", headers, BytesIO(b'{"message":"Rate limit exceeded"}')
+    )
+
+
+def test_dokploy_client_retries_429_honoring_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dokploy_wizard.dokploy import client as client_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+    attempts = 0
+
+    def fake_request(req: request.Request) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _http_error(req, 429, retry_after="2")
+        return {"data": []}
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    assert client.list_projects() == ()
+    assert attempts == 2
+    assert sleeps == [2.0]
+
+
+def test_dokploy_client_gives_up_after_bounded_429_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dokploy_wizard.dokploy import client as client_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+    attempts = 0
+
+    def fake_request(req: request.Request) -> object:
+        nonlocal attempts
+        attempts += 1
+        raise _http_error(req, 429)
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    with pytest.raises(DokployApiError, match="status 429"):
+        client.list_projects()
+    assert attempts == 1 + client_module._DOKPLOY_429_MAX_RETRIES
+    # No Retry-After header: the bounded fallback delay applies per retry.
+    assert sleeps == [client_module._DOKPLOY_429_FALLBACK_DELAY_SECONDS] * 3
+
+
+def test_dokploy_client_does_not_retry_non_429_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dokploy_wizard.dokploy import client as client_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+    attempts = 0
+
+    def fake_request(req: request.Request) -> object:
+        nonlocal attempts
+        attempts += 1
+        raise _http_error(req, 500)
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    with pytest.raises(DokployApiError, match="status 500"):
+        client.list_projects()
+    assert attempts == 1
+    assert sleeps == []

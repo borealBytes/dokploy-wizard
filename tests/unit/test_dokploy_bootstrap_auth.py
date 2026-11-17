@@ -13,9 +13,35 @@ import pytest
 from dokploy_wizard.dokploy import DokployBootstrapAuthClient, DokployBootstrapAuthError
 
 
+def test_bootstrap_auth_creates_api_key_without_per_key_rate_limit() -> None:
+    # Self-hosted Dokploy forwards the create input to better-auth, whose
+    # api-key plugin defaults to a 10-requests-per-24h cap. The wizard must
+    # explicitly disable it (as Dokploy's own UI does) or a cold install is
+    # 429-exhausted by the mutation-auth qualify step.
+    captured_payloads: list[dict[str, object]] = []
+
+    def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
+        del jar
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            return {"ok": True}
+        if req.full_url.endswith("/api/user.session"):
+            return {"session": {"activeOrganizationId": "org-1"}}
+        if req.full_url.endswith("/api/user.createApiKey"):
+            captured_payloads.append(json.loads(req.data.decode("utf-8")))
+            return {"apiKey": "dokp-key-123"}
+        raise AssertionError(req.full_url)
+
+    result = DokployBootstrapAuthClient(
+        base_url="http://127.0.0.1:3000",
+        request_fn=fake_request,
+    ).ensure_api_key(admin_email="admin@example.com", admin_password="secret-123")
+
+    assert result.api_key == "dokp-key-123"
+    assert captured_payloads[0]["rateLimitEnabled"] is False
+
+
 def test_bootstrap_auth_signs_in_and_creates_api_key() -> None:
     seen: list[str] = []
-
     def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
         del jar
         seen.append(req.full_url)

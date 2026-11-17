@@ -64,6 +64,13 @@ class DokployBootstrapAuthClient:
             {
                 "name": key_name,
                 "metadata": {"organizationId": organization_id},
+                # Self-hosted Dokploy forwards this input verbatim to the
+                # better-auth api-key plugin, whose defaults cap a key at 10
+                # requests per 24h window. Dokploy's own UI disables the
+                # per-key limiter for the same reason; without this the
+                # wizard's key is 429-exhausted by mid-qualify on a cold
+                # install, and a modify pass can die on its own credentials.
+                "rateLimitEnabled": False,
             },
         )
         api_key = _extract_api_key(api_key_payload)
