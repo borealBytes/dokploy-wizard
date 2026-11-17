@@ -8,7 +8,6 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import cast
 
@@ -1382,7 +1381,11 @@ def test_hermes_template_uses_litellm_credentials(
         replacements: template_replacements_by_name.setdefault(template_name, replacements),
     )
     monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
-    monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
+    )
 
     backend.ensure_application_ready()
 
@@ -1452,7 +1455,11 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
         replacements: template_replacements_by_name.setdefault(template_name, replacements),
     )
     monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
-    monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
+    )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
 
     backend.ensure_application_ready()
@@ -1563,7 +1570,8 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     monkeypatch.setattr(
         coder_module,
         "_ensure_default_workspace",
-        lambda **kwargs: ensure_workspace_calls.append(kwargs),
+        lambda **kwargs: ensure_workspace_calls.append(kwargs)
+        or coder_module.DefaultWorkspaceOutcome(action="exists"),
     )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
 
@@ -1827,7 +1835,11 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     )
     monkeypatch.setattr(coder_module, "_copy_template_into_container", lambda **kwargs: None)
     monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
-    monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
+    )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
 
     notes = backend.ensure_application_ready()
@@ -1918,7 +1930,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     monkeypatch.setattr(
         coder_module,
         "_default_workspace_name",
-        lambda hostname: "openmergeme-workspace-2026-04-18",
+        lambda hostname: "openmergeme-workspace",
     )
     monkeypatch.setattr(coder_module, "_list_workspaces", lambda **kwargs: tuple(sorted(workspaces)))
 
@@ -1947,7 +1959,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     assert len(template_push_calls) == len(expected_template_names)
     assert all(version_name and version_name.startswith("dokploy-wizard-") for _, version_name in template_push_calls)
     assert created_workspaces == [
-        ("openmergeme-workspace-2026-04-18", coder_module._default_template_name())
+        ("openmergeme-workspace", coder_module._default_template_name())
     ]
     assert first_notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
@@ -1957,7 +1969,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
-        "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'admin@openmerge.me'.",
+        "Created default Coder workspace 'openmergeme-workspace' for 'admin@openmerge.me'.",
     )
     assert second_notes == ()
 
@@ -1995,7 +2007,40 @@ def _patch_coder_template_failure_bootstrap(
         lambda service_name: "wizard-stack-coder-container",
     )
     monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
-    monkeypatch.setattr(coder_module, "_ensure_default_workspace", lambda **kwargs: False)
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
+    )
+
+
+def test_ensure_application_ready_reports_default_workspace_adoption_and_pruning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _coder_backend_for_template_failure_tests()
+    _patch_coder_template_failure_bootstrap(monkeypatch, backend)
+    monkeypatch.setattr(
+        coder_module, "_seed_template", lambda *, template_name, **kwargs: False
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(
+            action="adopted",
+            adopted_from="openmergeme-workspace-2026-11-01",
+            pruned=("openmergeme-workspace-2026-10-31",),
+        ),
+    )
+
+    notes = backend.ensure_application_ready()
+
+    assert (
+        "Renamed legacy default Coder workspace 'openmergeme-workspace-2026-11-01' "
+        "to 'examplecom-workspace'."
+    ) in notes
+    assert (
+        "Pruned duplicate wizard-created Coder workspace 'openmergeme-workspace-2026-10-31'."
+    ) in notes
 
 
 def test_ensure_application_ready_skips_optional_template_push_failure(
@@ -2754,14 +2799,36 @@ def test_create_coder_first_user_persistent_404_raises_redacted_coder_error(
 
 
 def test_default_workspace_name_uses_domain_derived_coder_safe_pattern() -> None:
-    assert (
-        coder_module._default_workspace_name("coder.yourwebsite.com", today=date(2026, 4, 18))
-        == "yourwebsite-workspace-2026-04-18"
+    assert coder_module._default_workspace_name("coder.yourwebsite.com") == (
+        "yourwebsitecom-workspace"
     )
-    assert (
-        coder_module._default_workspace_name("coder.openmerge.me", today=date(2026, 4, 18))
-        == "openmergeme-workspace-2026-04-18"
+    assert coder_module._default_workspace_name("coder.openmerge.me") == "openmergeme-workspace"
+    # Stable across calls: no date component, so a post-midnight rerun cannot mint
+    # a second default workspace.
+    assert coder_module._default_workspace_name("coder.openmerge.me") == (
+        coder_module._default_workspace_name("coder.openmerge.me")
     )
+
+
+def test_legacy_default_workspace_names_recognizes_pre_stable_pattern() -> None:
+    names = (
+        "openmergeme-workspace-2026-10-31",
+        "openmergeme-workspace-2026-11-01",
+        "openmergeme-workspace",
+        "openmergeme-workspace-latest",
+        "somebody-else-workspace-2026-11-01",
+    )
+
+    assert coder_module._legacy_default_workspace_names("coder.openmerge.me", names) == (
+        "openmergeme-workspace-2026-10-31",
+        "openmergeme-workspace-2026-11-01",
+    )
+
+    # The legacy root was clamped to the 11 characters the dated suffix left room
+    # for; adoption must recognize the truncated form, not the full token.
+    assert coder_module._legacy_default_workspace_names(
+        "coder.yourwebsite.com", ("yourwebsite-workspace-2026-11-01",)
+    ) == ("yourwebsite-workspace-2026-11-01",)
 
 
 def test_ensure_default_workspace_creates_missing_workspace(
@@ -2790,17 +2857,19 @@ def test_ensure_default_workspace_creates_missing_workspace(
         container_name="wizard-stack-coder-container",
         hostname="coder.example.com",
         session_token="session-123",
-        workspace_name="examplecom-workspace-2026-04-18",
+        workspace_name="examplecom-workspace",
         template_name="ubuntu-vscode",
     )
 
-    assert created_workspace is True
+    assert created_workspace.action == "created"
+    assert created_workspace.adopted_from is None
+    assert created_workspace.pruned == ()
     assert created == [
         (
             "wizard-stack-coder-container",
             "coder.example.com",
             "session-123",
-            "examplecom-workspace-2026-04-18",
+            "examplecom-workspace",
             "ubuntu-vscode",
         )
     ]
@@ -2810,7 +2879,7 @@ def test_ensure_default_workspace_skips_existing_workspace(monkeypatch: pytest.M
     monkeypatch.setattr(
         coder_module,
         "_list_workspaces",
-        lambda **kwargs: ("examplecom-workspace-2026-04-18",),
+        lambda **kwargs: ("examplecom-workspace",),
     )
     create_calls: list[str] = []
     monkeypatch.setattr(
@@ -2823,12 +2892,200 @@ def test_ensure_default_workspace_skips_existing_workspace(monkeypatch: pytest.M
         container_name="wizard-stack-coder-container",
         hostname="coder.example.com",
         session_token="session-123",
-        workspace_name="examplecom-workspace-2026-04-18",
+        workspace_name="examplecom-workspace",
         template_name="ubuntu-vscode",
     )
 
-    assert created_workspace is False
+    assert created_workspace.action == "exists"
+    assert created_workspace.pruned == ()
     assert create_calls == []
+
+
+def test_ensure_default_workspace_adopts_newest_legacy_dated_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The post-midnight duplicate bug must converge, not mint a third stack."""
+
+    monkeypatch.setattr(
+        coder_module,
+        "_list_workspaces",
+        lambda **kwargs: (
+            "examplecom-workspace-2026-10-31",
+            "examplecom-workspace-2026-11-01",
+        ),
+    )
+    create_calls: list[str] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_create_default_workspace",
+        lambda **kwargs: create_calls.append("called"),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_workspace_template_name",
+        lambda **kwargs: "ubuntu-vscode",
+    )
+    renamed: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_rename_workspace",
+        lambda *, workspace_name, new_workspace_name, **kwargs: renamed.append(
+            (workspace_name, new_workspace_name)
+        ),
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_delete_workspace",
+        lambda *, workspace_name, **kwargs: deleted.append(workspace_name),
+    )
+
+    outcome = coder_module._ensure_default_workspace(
+        container_name="wizard-stack-coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        workspace_name="examplecom-workspace",
+        template_name="ubuntu-vscode",
+    )
+
+    assert deleted == ["examplecom-workspace-2026-10-31"]
+    # Newest date is adopted; the older duplicate is pruned; nothing is created.
+    assert outcome.action == "adopted"
+    assert outcome.adopted_from == "examplecom-workspace-2026-11-01"
+    assert outcome.pruned == ("examplecom-workspace-2026-10-31",)
+    assert renamed == [("examplecom-workspace-2026-11-01", "examplecom-workspace")]
+    assert create_calls == []
+
+
+def test_ensure_default_workspace_prunes_duplicates_when_stable_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        coder_module,
+        "_list_workspaces",
+        lambda **kwargs: (
+            "examplecom-workspace",
+            "examplecom-workspace-2026-10-31",
+            "examplecom-workspace-2026-11-01",
+        ),
+    )
+
+    def fake_template_name(*, workspace_name: str, **kwargs: object) -> str | None:
+        del workspace_name, kwargs
+        return "ubuntu-vscode"
+
+    monkeypatch.setattr(coder_module, "_workspace_template_name", fake_template_name)
+    create_calls: list[str] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_create_default_workspace",
+        lambda **kwargs: create_calls.append("called"),
+    )
+    renamed: list[str] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_rename_workspace",
+        lambda *, workspace_name, **kwargs: renamed.append(workspace_name),
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_delete_workspace",
+        lambda *, workspace_name, **kwargs: deleted.append(workspace_name),
+    )
+
+    outcome = coder_module._ensure_default_workspace(
+        container_name="wizard-stack-coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        workspace_name="examplecom-workspace",
+        template_name="ubuntu-vscode",
+    )
+
+    assert outcome.action == "exists"
+    assert outcome.pruned == ("examplecom-workspace-2026-10-31", "examplecom-workspace-2026-11-01")
+    assert deleted == ["examplecom-workspace-2026-10-31", "examplecom-workspace-2026-11-01"]
+    assert renamed == []
+    assert create_calls == []
+
+
+def test_ensure_default_workspace_leaves_foreign_template_legacy_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dated names the wizard did not seed (foreign template) are the user's."""
+
+    monkeypatch.setattr(
+        coder_module,
+        "_list_workspaces",
+        lambda **kwargs: ("examplecom-workspace-2026-10-31",),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_workspace_template_name",
+        lambda **kwargs: "my-custom-template",
+    )
+    create_calls: list[str] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_create_default_workspace",
+        lambda **kwargs: create_calls.append("called"),
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_delete_workspace",
+        lambda *, workspace_name, **kwargs: deleted.append(workspace_name),
+    )
+
+    outcome = coder_module._ensure_default_workspace(
+        container_name="wizard-stack-coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        workspace_name="examplecom-workspace",
+        template_name="ubuntu-vscode",
+    )
+
+    # Not adoptable, not prunable: create the stable workspace and leave it alone.
+    assert outcome.action == "created"
+    assert outcome.pruned == ()
+    assert deleted == []
+    assert create_calls == ["called"]
+
+
+def test_ensure_default_workspace_adopts_when_template_shape_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CLI output shape change must not resurrect the dated-duplicate bug."""
+
+    monkeypatch.setattr(
+        coder_module,
+        "_list_workspaces",
+        lambda **kwargs: ("examplecom-workspace-2026-11-01",),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_workspace_template_name",
+        lambda **kwargs: None,
+    )
+    renamed: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_rename_workspace",
+        lambda *, workspace_name, new_workspace_name, **kwargs: renamed.append(
+            (workspace_name, new_workspace_name)
+        ),
+    )
+
+    outcome = coder_module._ensure_default_workspace(
+        container_name="wizard-stack-coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        workspace_name="examplecom-workspace",
+        template_name="ubuntu-vscode",
+    )
+
+    assert outcome.action == "adopted"
+    assert renamed == [("examplecom-workspace-2026-11-01", "examplecom-workspace")]
 
 
 def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_credentials(
@@ -2922,12 +3179,12 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         template_name: ensure_workspace_calls.append(
             (container_name, hostname, session_token, workspace_name, template_name)
         )
-        or True,
+        or coder_module.DefaultWorkspaceOutcome(action="created"),
     )
     monkeypatch.setattr(
         coder_module,
         "_default_workspace_name",
-        lambda hostname: "openmergeme-workspace-2026-04-18",
+        lambda hostname: "openmergeme-workspace",
     )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
 
@@ -3057,7 +3314,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "wizard-stack-coder-container",
             "coder.example.com",
             "session-123",
-            "openmergeme-workspace-2026-04-18",
+            "openmergeme-workspace",
             coder_module._default_template_name(),
         )
     ]
@@ -3077,7 +3334,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
         "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes'.",
-        "Created default Coder workspace 'openmergeme-workspace-2026-04-18' for 'admin@openmerge.me'.",
+        "Created default Coder workspace 'openmergeme-workspace' for 'admin@openmerge.me'.",
     )
 
 

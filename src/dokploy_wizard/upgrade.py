@@ -567,11 +567,14 @@ def _build_workspace_section(*, probe: RuntimeProbe, desired_state: DesiredState
             "detail": f"Coder container for '{service_name}' was not found.",
             "workspaces": [],
         }
-    result = probe.exec(container_id, ("./coder", "workspaces", "ls", "--output", "json"))
+    result = probe.exec(container_id, ("/opt/coder", "list", "--output", "json"))
     if result is None or result[0] != 0:
         return {
             "available": False,
-            "detail": "coder workspaces ls could not run inside the Coder container.",
+            "detail": (
+                "coder list could not run inside the Coder container "
+                "(the CLI needs a session token; this section is report-only)."
+            ),
             "workspaces": [],
         }
     try:

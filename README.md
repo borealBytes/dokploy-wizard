@@ -162,7 +162,7 @@ What the wizard wires today:
 
 ### Coder
 
-Coder gets a seeded Ubuntu + VS Code template and a first default workspace.
+Coder gets a seeded Ubuntu + VS Code template and a first default workspace. The default workspace keeps a stable name (`<root-token>-workspace`, derived from the Coder hostname): an earlier date-stamped name made every post-midnight rerun mint a second full Hermes stack. On the first pass after the fix, an existing legacy date-stamped workspace on the default template is adopted by rename, and leftover wizard-created dated duplicates are pruned — dated names on templates the wizard did not seed are left alone.
 
 On first successful bootstrap the wizard:
 

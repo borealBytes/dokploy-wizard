@@ -208,6 +208,31 @@ would poison our own repeated-modify tests). Fix: adopt-or-name at first create 
 stable name, adopt an existing default-template workspace rather than minting dated
 duplicates; prune wizard-created leftovers.
 
+### Group 4 implementation notes (landed 2026-11-17)
+
+- `_default_workspace_name` is now date-free: `<root-token>-workspace` (root token =
+  hostname minus the `coder.` prefix, non-alphanumerics stripped, clamped to the 22
+  characters the stable suffix leaves inside Coder's 32-char name limit).
+- `_ensure_default_workspace` returns a `DefaultWorkspaceOutcome`
+  (`exists | created | adopted` + `adopted_from` + `pruned`). Legacy detection
+  (`_legacy_default_workspace_names`) mirrors the **old** truncation exactly: the
+  dated suffix consumed 21 of 32 characters, so legacy roots were clamped to 11 —
+  e.g. `coder.yourwebsite.com` adopted as `yourwebsite-workspace-YYYY-MM-DD` but
+  renames to `yourwebsitecom-workspace`.
+- Adoption: newest legacy match is renamed via `coder update --name --yes` (no third
+  stack minted). Pruning: remaining legacy matches are deleted via `coder delete
+  --yes` only after the stable workspace exists.
+- Blast-radius bound: only legacy-shaped names (`<legacy-root>-workspace-<ISO date>`)
+  are candidates, and only when `coder show` confirms the workspace sits on the
+  wizard-seeded default template. A foreign template on a legacy-shaped name is the
+  user's: left alone. An unresolvable template (CLI shape drift) is treated as
+  wizard-owned so the dedup can never silently stop converging.
+- Verification tolerates a legacy match as "default workspace present" (adoption
+  happens on the same pass; a hard miss would fight the in-flight rename).
+- Notes: `Renamed legacy default Coder workspace '<old>' to '<stable>'.` and
+  `Pruned duplicate wizard-created Coder workspace '<name>'.`; the second
+  `ensure_application_ready` pass is a true noop (flow-level idempotency test).
+
 ## Verification matrix
 
 | Scenario | Command | Proves |

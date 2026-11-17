@@ -14,10 +14,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Protocol
 from urllib import error as urlerror
@@ -452,19 +451,29 @@ class DokployCoderBackend:
             return tuple(notes)
         workspace_name = _default_workspace_name(self._hostname)
         try:
-            if _ensure_default_workspace(
+            outcome = _ensure_default_workspace(
                 container_name=container_name,
                 hostname=self._hostname,
                 session_token=session_token,
                 workspace_name=workspace_name,
                 template_name=_default_template_name(),
-            ):
+            )
+            if outcome.action == "created":
                 if first_user_provisioned:
                     notes.append(
                         f"Created default Coder workspace '{workspace_name}' for '{self._admin_email}'."
                     )
                 else:
                     notes.append(f"Created missing default Coder workspace '{workspace_name}'.")
+            elif outcome.action == "adopted":
+                notes.append(
+                    f"Renamed legacy default Coder workspace '{outcome.adopted_from}' "
+                    f"to '{workspace_name}'."
+                )
+            notes.extend(
+                f"Pruned duplicate wizard-created Coder workspace '{name}'."
+                for name in outcome.pruned
+            )
         except CoderError as e:
             notes.append(f"Skipped default workspace creation: {e}")
         return tuple(notes)
@@ -701,10 +710,16 @@ class DokployCoderBackend:
                     for template_name in _required_template_names()
                     if template_name not in template_names
                 ]
-                workspace_missing = workspace_name not in _list_workspaces(
+                workspace_names = _list_workspaces(
                     container_name=container_name,
                     hostname=self._hostname,
                     session_token=session_token,
+                )
+                # A legacy date-stamped default counts as present: reconcile adopts
+                # (renames) it into the stable name on the same pass, and a hard
+                # failure here would fight that in-flight adoption.
+                workspace_missing = workspace_name not in workspace_names and not (
+                    _legacy_default_workspace_names(self._hostname, workspace_names)
                 )
                 if not missing_templates and not workspace_missing:
                     break
@@ -1187,16 +1202,50 @@ def _default_hermes_template_name() -> str:
     return "ubuntu-vscode-hermes"
 
 
-def _default_workspace_name(hostname: str, *, today: date | None = None) -> str:
+_LEGACY_DEFAULT_WORKSPACE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_LEGACY_DEFAULT_WORKSPACE_SUFFIX = "-workspace-"
+_ISO_DATE_LENGTH = len("2026-04-18")
+
+
+def _default_workspace_root_token(hostname: str) -> str:
     root_domain = (
         hostname.split(".", 1)[1] if hostname.startswith("coder.") and "." in hostname else hostname
     )
-    root_token = re.sub(r"[^a-z0-9]+", "", root_domain.lower())
-    effective_date = (today or date.today()).isoformat()
-    suffix = f"-workspace-{effective_date}"
+    return re.sub(r"[^a-z0-9]+", "", root_domain.lower())
+
+
+def _default_workspace_name(hostname: str) -> str:
+    # Stable by design. The pre-Group-4 name embedded today's date, so every
+    # post-midnight rerun minted a second full Hermes stack. Legacy date-stamped
+    # names are adopted (renamed) or pruned by `_ensure_default_workspace`.
+    suffix = "-workspace"
     max_root_length = max(1, _CODER_MAX_NAME_LENGTH - len(suffix))
-    normalized_root = (root_token or "workspace")[:max_root_length]
+    normalized_root = (_default_workspace_root_token(hostname) or "workspace")[:max_root_length]
     return f"{normalized_root}{suffix}"
+
+
+def _legacy_default_workspace_names(
+    hostname: str, workspace_names: Sequence[str]
+) -> tuple[str, ...]:
+    """Wizard-created date-stamped names (the pre-Group-4 pattern), oldest first.
+
+    The prefix mirrors the old truncation exactly: the dated suffix consumed 21 of
+    the 32 allowed characters, so legacy roots were clamped to 11 characters.
+    """
+
+    legacy_max_root = max(
+        1, _CODER_MAX_NAME_LENGTH - len(_LEGACY_DEFAULT_WORKSPACE_SUFFIX) - _ISO_DATE_LENGTH
+    )
+    legacy_root = (_default_workspace_root_token(hostname) or "workspace")[:legacy_max_root]
+    prefix = f"{legacy_root}{_LEGACY_DEFAULT_WORKSPACE_SUFFIX}"
+    return tuple(
+        sorted(
+            name
+            for name in workspace_names
+            if name.startswith(prefix)
+            and _LEGACY_DEFAULT_WORKSPACE_DATE_RE.match(name[len(prefix) :])
+        )
+    )
 
 
 def _required_template_names() -> tuple[str, ...]:
@@ -1971,6 +2020,142 @@ def _create_default_workspace(
         )
 
 
+@dataclass(frozen=True)
+class DefaultWorkspaceOutcome:
+    """What `_ensure_default_workspace` did: ``exists``, ``created``, or ``adopted``.
+
+    ``adopted_from`` carries the legacy date-stamped name that was renamed to the
+    stable default name; ``pruned`` lists wizard-created date-stamped duplicates
+    that were deleted after the stable workspace was in place.
+    """
+
+    action: str
+    adopted_from: str | None = None
+    pruned: tuple[str, ...] = ()
+
+
+def _workspace_template_name(
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+    workspace_name: str,
+) -> str | None:
+    """Best-effort template name for a workspace; None when the CLI shape is unknown."""
+
+    del hostname
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "show",
+            workspace_name,
+            "--output",
+            "json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    direct = payload.get("template_name")
+    if isinstance(direct, str) and direct:
+        return direct
+    latest_build = payload.get("latest_build")
+    if isinstance(latest_build, dict):
+        build_template_name = latest_build.get("template_name")
+        if isinstance(build_template_name, str) and build_template_name:
+            return build_template_name
+        template = latest_build.get("template")
+        if isinstance(template, dict):
+            name = template.get("name")
+            if isinstance(name, str) and name:
+                return name
+    return None
+
+
+def _rename_workspace(
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+    workspace_name: str,
+    new_workspace_name: str,
+) -> None:
+    del hostname
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "update",
+            workspace_name,
+            "--name",
+            new_workspace_name,
+            "--yes",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise CoderError(
+            f"Unable to rename Coder workspace '{workspace_name}' to '{new_workspace_name}': "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+
+
+def _delete_workspace(
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+    workspace_name: str,
+) -> None:
+    del hostname
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "delete",
+            workspace_name,
+            "--yes",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise CoderError(
+            f"Unable to delete Coder workspace '{workspace_name}': "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+
+
 def _ensure_default_workspace(
     *,
     container_name: str,
@@ -1978,21 +2163,96 @@ def _ensure_default_workspace(
     session_token: str,
     workspace_name: str,
     template_name: str,
-) -> bool:
-    if workspace_name in _list_workspaces(
+) -> DefaultWorkspaceOutcome:
+    """Adopt-or-name the single default workspace and prune wizard-created duplicates.
+
+    The name is stable, so a rerun is a noop. An existing legacy date-stamped
+    workspace on the default template is adopted via rename instead of being
+    duplicated; leftover date-stamped duplicates on that template are pruned once
+    the stable workspace is in place. A legacy-shaped name on a foreign template
+    is left alone: the date shape is the wizard's own fingerprint, but a template
+    the wizard did not seed is the user's. A legacy name whose template cannot be
+    determined is still treated as wizard-created, so a CLI shape change can never
+    resurrect the dated-duplicate bug.
+    """
+
+    workspace_names = _list_workspaces(
         container_name=container_name,
         hostname=hostname,
         session_token=session_token,
-    ):
-        return False
-    _create_default_workspace(
+    )
+    legacy_names = _legacy_default_workspace_names(hostname, workspace_names)
+    adopted_from: str | None = None
+    if workspace_name in workspace_names:
+        action = "exists"
+    else:
+        action = "created"
+        for candidate in reversed(legacy_names):  # newest date first
+            if _workspace_is_wizard_owned(
+                container_name=container_name,
+                hostname=hostname,
+                session_token=session_token,
+                workspace_name=candidate,
+                template_name=template_name,
+            ):
+                _rename_workspace(
+                    container_name=container_name,
+                    hostname=hostname,
+                    session_token=session_token,
+                    workspace_name=candidate,
+                    new_workspace_name=workspace_name,
+                )
+                adopted_from = candidate
+                action = "adopted"
+                break
+        if action == "created":
+            _create_default_workspace(
+                container_name=container_name,
+                hostname=hostname,
+                session_token=session_token,
+                workspace_name=workspace_name,
+                template_name=template_name,
+            )
+    pruned: list[str] = []
+    for candidate in legacy_names:
+        if candidate == adopted_from:
+            continue
+        if _workspace_is_wizard_owned(
+            container_name=container_name,
+            hostname=hostname,
+            session_token=session_token,
+            workspace_name=candidate,
+            template_name=template_name,
+        ):
+            _delete_workspace(
+                container_name=container_name,
+                hostname=hostname,
+                session_token=session_token,
+                workspace_name=candidate,
+            )
+            pruned.append(candidate)
+    return DefaultWorkspaceOutcome(
+        action=action,
+        adopted_from=adopted_from,
+        pruned=tuple(pruned),
+    )
+
+
+def _workspace_is_wizard_owned(
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+    workspace_name: str,
+    template_name: str,
+) -> bool:
+    observed_template = _workspace_template_name(
         container_name=container_name,
         hostname=hostname,
         session_token=session_token,
         workspace_name=workspace_name,
-        template_name=template_name,
     )
-    return True
+    return observed_template is None or observed_template == template_name
 
 
 def _username_from_email(email: str) -> str:
