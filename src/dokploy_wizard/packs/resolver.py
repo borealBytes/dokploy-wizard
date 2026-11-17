@@ -13,8 +13,6 @@ from dokploy_wizard.packs.catalog import (
 )
 from dokploy_wizard.state.models import StateValidationError
 
-_DEFAULT_MY_FARM_ADVISOR_CHANNELS = ("telegram",)
-
 
 @dataclass(frozen=True)
 class ResolvedPackSelection:
@@ -22,8 +20,6 @@ class ResolvedPackSelection:
     enabled_packs: tuple[str, ...]
     enabled_features: tuple[str, ...]
     hostnames: dict[str, str]
-    openclaw_channels: tuple[str, ...]
-    my_farm_advisor_channels: tuple[str, ...]
 
 
 def has_explicit_pack_selection(values: Mapping[str, str]) -> bool:
@@ -64,32 +60,11 @@ def resolve_pack_selection(values: Mapping[str, str], *, root_domain: str) -> Re
             hostname_targets[fqdn] = hostname.key
             hostnames[hostname.key] = fqdn
 
-    openclaw_channels: tuple[str, ...] = ()
-    my_farm_advisor_channels: tuple[str, ...] = ()
-    if "openclaw" in enabled:
-        openclaw_channels = _validate_advisor_channels(
-            values, enabled, key="OPENCLAW_CHANNELS", pack_name="openclaw"
-        )
-    elif "OPENCLAW_CHANNELS" in values:
-        raise StateValidationError("OPENCLAW_CHANNELS requires the 'openclaw' pack.")
-    if "my-farm-advisor" in enabled:
-        my_farm_advisor_channels = _validate_advisor_channels(
-            values,
-            enabled,
-            key="MY_FARM_ADVISOR_CHANNELS",
-            pack_name="my-farm-advisor",
-            default_channels=_DEFAULT_MY_FARM_ADVISOR_CHANNELS,
-        )
-    elif "MY_FARM_ADVISOR_CHANNELS" in values:
-        raise StateValidationError("MY_FARM_ADVISOR_CHANNELS requires the 'my-farm-advisor' pack.")
-
     return ResolvedPackSelection(
         selected_packs=tuple(sorted(explicit_selected)),
         enabled_packs=tuple(sorted(enabled)),
         enabled_features=tuple(sorted(enabled_features)),
         hostnames=dict(sorted(hostnames.items())),
-        openclaw_channels=openclaw_channels,
-        my_farm_advisor_channels=my_farm_advisor_channels,
     )
 
 
@@ -167,31 +142,6 @@ def _validate_slots(enabled: set[str]) -> None:
 
 def _join_hostname(subdomain: str, root_domain: str) -> str:
     return f"{subdomain}.{root_domain}".lower()
-
-
-def _validate_advisor_channels(
-    values: Mapping[str, str],
-    enabled: set[str],
-    *,
-    key: str,
-    pack_name: str,
-    default_channels: tuple[str, ...] = (),
-) -> tuple[str, ...]:
-    channels = _get_csv(values, key)
-    if not channels:
-        channels = default_channels
-    supported_channels = {"telegram", "matrix"}
-    invalid_channels = sorted(channel for channel in channels if channel not in supported_channels)
-    if invalid_channels:
-        raise StateValidationError(
-            f"Unsupported {pack_name} channel selection(s): "
-            f"{invalid_channels}. Supported values are ['matrix', 'telegram']."
-        )
-    if "matrix" in channels and "matrix" not in enabled:
-        raise StateValidationError(
-            f"{key} may include 'matrix' only when the Matrix pack is enabled."
-        )
-    return channels
 
 
 def _get_csv(values: Mapping[str, str], key: str) -> tuple[str, ...]:

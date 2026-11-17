@@ -570,9 +570,6 @@ class FakeNextcloudBackend:
             ),
         )
 
-    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
-        del admin_user
-
 
 def test_install_plans_and_persists_shared_core_once_for_nextcloud(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"

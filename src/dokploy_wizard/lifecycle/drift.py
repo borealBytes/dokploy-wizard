@@ -33,21 +33,10 @@ from dokploy_wizard.packs.nextcloud import (
     NextcloudResourceRecord,
     reconcile_nextcloud,
 )
-from dokploy_wizard.packs.openclaw import (
-    OpenClawBackend,
-    OpenClawResourceRecord,
-    reconcile_my_farm_advisor,
-    reconcile_openclaw,
-)
 from dokploy_wizard.packs.seaweedfs import (
     SeaweedFsBackend,
     SeaweedFsResourceRecord,
     reconcile_seaweedfs,
-)
-from dokploy_wizard.packs.surfsense import (
-    SurfSenseBackend,
-    SurfSenseResourceRecord,
-    reconcile_surfsense,
 )
 from dokploy_wizard.state.models import DesiredState, OwnershipLedger, RawEnvInput
 from dokploy_wizard.tailscale import TailscaleBackend, reconcile_tailscale
@@ -97,8 +86,6 @@ def validate_preserved_phases(
     nextcloud_backend: NextcloudBackend,
     seaweedfs_backend: SeaweedFsBackend,
     coder_backend: CoderBackend,
-    openclaw_backend: OpenClawBackend,
-    surfsense_backend: SurfSenseBackend | None = None,
     moodle_backend: MoodleBackend | None = None,
     docuseal_backend: DocuSealBackend | None = None,
 ) -> DriftReport:
@@ -124,8 +111,6 @@ def validate_preserved_phases(
                 docuseal_backend=docuseal_backend,
                 seaweedfs_backend=seaweedfs_backend,
                 coder_backend=coder_backend,
-                openclaw_backend=openclaw_backend,
-                surfsense_backend=surfsense_backend,
             )
         )
     report = DriftReport(entries=tuple(entries))
@@ -155,8 +140,6 @@ def _validate_phase(
     nextcloud_backend: NextcloudBackend,
     seaweedfs_backend: SeaweedFsBackend,
     coder_backend: CoderBackend,
-    openclaw_backend: OpenClawBackend,
-    surfsense_backend: SurfSenseBackend | None = None,
     moodle_backend: MoodleBackend | None = None,
     docuseal_backend: DocuSealBackend | None = None,
 ) -> DriftEntry:
@@ -553,47 +536,6 @@ def _validate_phase(
                     detail="DocuSeal health check no longer passes for a preserved phase.",
                 )
             return DriftEntry(phase=phase, status="ok", detail="DocuSeal ownership remains aligned.")
-        if phase == "surfsense":
-            if surfsense_backend is None:
-                return DriftEntry(phase=phase, status="drift", detail="SurfSense backend is unavailable.")
-            surfsense = reconcile_surfsense(
-                dry_run=True,
-                desired_state=desired_state,
-                ownership_ledger=ownership_ledger,
-                backend=surfsense_backend,
-            ).result
-            if surfsense.outcome == "skipped":
-                return DriftEntry(phase=phase, status="ok", detail="SurfSense remains skipped.")
-            actions = {
-                resource.action
-                for resource in (surfsense.service, surfsense.persistent_data)
-                if resource is not None
-            }
-            if actions != {"reuse_owned"}:
-                return DriftEntry(
-                    phase=phase,
-                    status="drift",
-                    detail=f"SurfSense expected owned reuse, found actions {sorted(actions)}.",
-                )
-            if surfsense.health_check is None:
-                return DriftEntry(
-                    phase=phase,
-                    status="drift",
-                    detail="SurfSense health check metadata is missing for a preserved phase.",
-                )
-            if surfsense.service is None or not surfsense_backend.check_health(
-                service=SurfSenseResourceRecord(
-                    resource_id=surfsense.service.resource_id,
-                    resource_name=surfsense.service.resource_name,
-                ),
-                url=surfsense.health_check.url,
-            ):
-                return DriftEntry(
-                    phase=phase,
-                    status="drift",
-                    detail=f"SurfSense health check no longer passes for {surfsense.health_check.url!r}.",
-                )
-            return DriftEntry(phase=phase, status="ok", detail="SurfSense ownership remains aligned.")
         if phase == "seaweedfs":
             seaweedfs = reconcile_seaweedfs(
                 dry_run=True,
@@ -677,93 +619,6 @@ def _validate_phase(
                     detail=f"Coder health check no longer passes for {coder.health_check.url!r}.",
                 )
             return DriftEntry(phase=phase, status="ok", detail="Coder ownership remains aligned.")
-        if phase == "openclaw":
-            advisor = reconcile_openclaw(
-                dry_run=True,
-                desired_state=desired_state,
-                ownership_ledger=ownership_ledger,
-                backend=openclaw_backend,
-            ).result
-            if advisor.outcome == "skipped":
-                return DriftEntry(phase=phase, status="ok", detail="OpenClaw remains skipped.")
-            if advisor.service is None or advisor.service.action != "reuse_owned":
-                action = None if advisor.service is None else advisor.service.action
-                return DriftEntry(
-                    phase=phase,
-                    status="drift",
-                    detail=f"OpenClaw expected owned reuse, found action {action!r}.",
-                )
-            if advisor.health_check is None:
-                return DriftEntry(
-                    phase=phase,
-                    status="drift",
-                    detail="OpenClaw health check metadata is missing for a preserved phase.",
-                )
-            if not openclaw_backend.check_health(
-                service=OpenClawResourceRecord(
-                    resource_id=advisor.service.resource_id,
-                    resource_name=advisor.service.resource_name,
-                    replicas=desired_state.openclaw_replicas or 1,
-                ),
-                url=advisor.health_check.url,
-            ):
-                return DriftEntry(
-                    phase=phase,
-                    status="drift",
-                    detail=(
-                        f"OpenClaw health check no longer passes for {advisor.health_check.url!r}."
-                    ),
-                )
-            return DriftEntry(
-                phase=phase, status="ok", detail="OpenClaw ownership remains aligned."
-            )
-        if phase == "my-farm-advisor":
-            advisor = reconcile_my_farm_advisor(
-                dry_run=True,
-                desired_state=desired_state,
-                ownership_ledger=ownership_ledger,
-                backend=openclaw_backend,
-            ).result
-            if advisor.outcome == "skipped":
-                return DriftEntry(
-                    phase=phase, status="ok", detail="My Farm Advisor remains skipped."
-                )
-            if advisor.service is None or advisor.service.action != "reuse_owned":
-                action = None if advisor.service is None else advisor.service.action
-                return DriftEntry(
-                    phase=phase,
-                    status="drift",
-                    detail=f"My Farm Advisor expected owned reuse, found action {action!r}.",
-                )
-            if advisor.health_check is None:
-                return DriftEntry(
-                    phase=phase,
-                    status="drift",
-                    detail=(
-                        "My Farm Advisor health check metadata is missing for a preserved phase."
-                    ),
-                )
-            if not openclaw_backend.check_health(
-                service=OpenClawResourceRecord(
-                    resource_id=advisor.service.resource_id,
-                    resource_name=advisor.service.resource_name,
-                    replicas=desired_state.my_farm_advisor_replicas or 1,
-                ),
-                url=advisor.health_check.url,
-            ):
-                return DriftEntry(
-                    phase=phase,
-                    status="drift",
-                    detail=(
-                        f"My Farm Advisor health check no longer passes for "
-                        f"{advisor.health_check.url!r}."
-                    ),
-                )
-            return DriftEntry(
-                phase=phase,
-                status="ok",
-                detail="My Farm Advisor ownership remains aligned.",
-            )
     except RuntimeError as error:
         return DriftEntry(phase=phase, status="drift", detail=str(error))
     return DriftEntry(phase=phase, status="ok", detail=f"Phase '{phase}' validated.")

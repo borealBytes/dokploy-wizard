@@ -33,7 +33,7 @@ def _load_root_env() -> RawEnvInput:
         for key, value in raw_env.values.items()
         if key != "ENABLE_TAILSCALE" and not key.startswith("TAILSCALE_")
     }
-    values["PACKS"] = "nextcloud,openclaw,seaweedfs,coder"
+    values["PACKS"] = "nextcloud,moodle,seaweedfs,coder"
     return RawEnvInput(format_version=raw_env.format_version, values=values)
 
 
@@ -45,19 +45,17 @@ def test_phase_order_preserves_infra_prereqs_but_uses_required_mvp_pack_sequence
     assert _index("preflight") < _index("dokploy_bootstrap") < _index("networking")
     assert _index("networking") < _index("shared_core") < _index("seaweedfs")
     assert _index("seaweedfs") < _index("headscale") < _index("tailscale")
-    assert _index("tailscale") < _index("nextcloud") < _index("coder") < _index("openclaw")
-    assert _index("openclaw") < _index("my-farm-advisor")
-    assert _index("my-farm-advisor") < _index("surfsense")
-    assert _index("openclaw") < _index("cloudflare_access")
-    assert _index("my-farm-advisor") < _index("cloudflare_access")
-    assert _index("cloudflare_access") < _index("surfsense")
+    assert _index("tailscale") < _index("matrix") < _index("nextcloud") < _index("moodle")
+    assert _index("moodle") < _index("docuseal")
+    assert _index("docuseal") < _index("coder")
+    assert _index("coder") < _index("cloudflare_access")
 
 
 def test_root_mvp_env_applicable_phases_follow_required_order_and_keep_coder() -> None:
     raw_env = _load_root_env()
     desired_state = resolve_desired_state(raw_env)
 
-    assert raw_env.values["PACKS"] == "nextcloud,openclaw,seaweedfs,coder"
+    assert raw_env.values["PACKS"] == "nextcloud,moodle,seaweedfs,coder"
     assert "coder" in desired_state.enabled_packs
     assert desired_state.enable_tailscale is False
 
@@ -68,14 +66,13 @@ def test_root_mvp_env_applicable_phases_follow_required_order_and_keep_coder() -
         "shared_core",
         "seaweedfs",
         "nextcloud",
+        "moodle",
         "coder",
-        "openclaw",
-        "my-farm-advisor",
         "cloudflare_access",
     )
 
 
-def test_cloudflare_access_phase_does_not_require_the_advisor_packs() -> None:
+def test_cloudflare_access_phase_does_not_require_optional_packs() -> None:
     def phases(**overrides: str) -> tuple[str, ...]:
         values = {
             "STACK_NAME": "wizard-stack",
@@ -89,7 +86,7 @@ def test_cloudflare_access_phase_does_not_require_the_advisor_packs() -> None:
 
     # Nothing to gate until the operator asks for OTP recipients...
     assert "cloudflare_access" not in phases()
-    # ...and once they do, the phase must run on a stack with no advisor pack at all.
+    # ...and once they do, the phase must run on a stack with no optional pack at all.
     # The LiteLLM admin hostname is an Access target by itself.
     assert "cloudflare_access" in phases(CLOUDFLARE_ACCESS_OTP_EMAILS="owner@example.com")
 

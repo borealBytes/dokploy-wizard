@@ -8,7 +8,7 @@ from .fake_dokploy import ComposeMutationCounts, FakeDokployApiClient
 def test_fake_dokploy_lists_seeded_existing_service_for_already_present_paths() -> None:
     client = FakeDokployApiClient()
     client.seed_existing_service(
-        service_name="wizard-stack-my-farm-advisor",
+        service_name="wizard-stack-nextcloud",
         compose_id="cmp-existing",
         project_name="wizard-stack",
         status="done",
@@ -20,10 +20,10 @@ def test_fake_dokploy_lists_seeded_existing_service_for_already_present_paths() 
     assert len(projects) == 1
     assert projects[0].name == "wizard-stack"
     assert projects[0].environments[0].composes[0].compose_id == "cmp-existing"
-    assert projects[0].environments[0].composes[0].name == "wizard-stack-my-farm-advisor"
+    assert projects[0].environments[0].composes[0].name == "wizard-stack-nextcloud"
     assert projects[0].environments[0].composes[0].status == "done"
-    assert client.compose_id_for("wizard-stack-my-farm-advisor") == "cmp-existing"
-    client.assert_unchanged_service("wizard-stack-my-farm-advisor")
+    assert client.compose_id_for("wizard-stack-nextcloud") == "cmp-existing"
+    client.assert_unchanged_service("wizard-stack-nextcloud")
 
 
 def test_fake_dokploy_proves_zero_update_and_deploy_calls_for_unchanged_service() -> None:
@@ -65,29 +65,29 @@ def test_fake_dokploy_proves_single_update_deploy_pair_for_changed_service() -> 
 def test_fake_dokploy_tracks_mutations_per_service_independently() -> None:
     client = FakeDokployApiClient(project_name="wizard-stack")
 
-    farm = client.create_compose(
-        name="wizard-stack-my-farm-advisor",
+    moodle = client.create_compose(
+        name="wizard-stack-moodle",
         environment_id="env-1",
-        compose_file="farm-compose",
-        app_name="wizard-stack-my-farm-advisor",
+        compose_file="moodle-compose",
+        app_name="wizard-stack-moodle",
     )
     client.deploy_compose(
-        compose_id=farm.compose_id,
-        title="farm create",
-        description="Create farm compose app",
+        compose_id=moodle.compose_id,
+        title="moodle create",
+        description="Create moodle compose app",
     )
-    openclaw = client.create_compose(
-        name="wizard-stack-openclaw",
+    docuseal = client.create_compose(
+        name="wizard-stack-docuseal",
         environment_id="env-1",
-        compose_file="openclaw-compose",
-        app_name="wizard-stack-openclaw",
+        compose_file="docuseal-compose",
+        app_name="wizard-stack-docuseal",
     )
-    client.update_compose(compose_id=openclaw.compose_id, compose_file="openclaw-compose-v2")
+    client.update_compose(compose_id=docuseal.compose_id, compose_file="docuseal-compose-v2")
     client.deploy_compose(
-        compose_id=openclaw.compose_id,
-        title="openclaw update",
-        description="Update openclaw compose app",
+        compose_id=docuseal.compose_id,
+        title="docuseal update",
+        description="Update docuseal compose app",
     )
 
-    client.assert_mutation_counts("wizard-stack-my-farm-advisor", create=1, update=0, deploy=1)
-    client.assert_mutation_counts("wizard-stack-openclaw", create=1, update=1, deploy=1)
+    client.assert_mutation_counts("wizard-stack-moodle", create=1, update=0, deploy=1)
+    client.assert_mutation_counts("wizard-stack-docuseal", create=1, update=1, deploy=1)

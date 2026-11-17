@@ -33,23 +33,22 @@ from dokploy_wizard.packs.nextcloud import (
     ONLYOFFICE_SERVICE_RESOURCE_TYPE,
     ONLYOFFICE_VOLUME_RESOURCE_TYPE,
 )
-from dokploy_wizard.packs.openclaw import (
-    MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
-    OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
-    OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
-    OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
-    OPENCLAW_SERVICE_RESOURCE_TYPE,
-)
 from dokploy_wizard.packs.seaweedfs import (
     SEAWEEDFS_DATA_RESOURCE_TYPE,
     SEAWEEDFS_SERVICE_RESOURCE_TYPE,
 )
-from dokploy_wizard.packs.surfsense import (
-    SURFSENSE_DATA_RESOURCE_TYPE,
-    SURFSENSE_SERVICE_RESOURCE_TYPE,
-)
 from dokploy_wizard.state import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput
 from dokploy_wizard.tailscale import TAILSCALE_NODE_RESOURCE_TYPE
+
+# Resource types of retired packs, kept as literal strings so a box whose ledger
+# still names them can be uninstalled without resurrecting the pack modules.
+MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE = "my_farm_advisor_service"
+OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE = "openclaw_mem0_service"
+OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE = "openclaw_qdrant_service"
+OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE = "openclaw_runtime_service"
+OPENCLAW_SERVICE_RESOURCE_TYPE = "openclaw_service"
+SURFSENSE_DATA_RESOURCE_TYPE = "surfsense_data"
+SURFSENSE_SERVICE_RESOURCE_TYPE = "surfsense_service"
 
 
 class UninstallPlanningError(RuntimeError):

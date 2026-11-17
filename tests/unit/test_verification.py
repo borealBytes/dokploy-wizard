@@ -35,18 +35,18 @@ def test_service_verification_result_round_trips_with_optional_command() -> None
 
 def test_make_verification_result_redacts_detail_and_command() -> None:
     result = make_verification_result(
-        service_name="openclaw",
+        service_name="coder",
         tier="downstream",
         passed=False,
         detail=(
             "Authorization: Bearer sk-super-secret failed while using "
-            "OPENCLAW_GATEWAY_PASSWORD=hunter2"
+            "CODER_DB_PASSWORD=hunter2"
         ),
         evidence_command=(
             "curl",
             "-H",
             "Authorization: Bearer sk-super-secret",
-            "https://openclaw.example.com/health",
+            "https://coder.example.com/health",
         ),
     )
 
@@ -116,16 +116,16 @@ def test_redact_command_supports_pre_rendered_shell_text() -> None:
 
 def test_redact_dokploy_env_payload_masks_wizard_owned_assignment_values() -> None:
     raw = (
-        "# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
-        "key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:abc123\n"
-        "OPENCLAW_PROVIDER_API_KEY=SECRET_TEST_OPENCLAW_PROVIDER_VALUE\n"
+        "# dokploy-wizard-env marker=dokploy-wizard owner=nextcloud "
+        "key=NEXTCLOUD_SMTP_PASSWORD fingerprint=sha256:abc123\n"
+        "NEXTCLOUD_SMTP_PASSWORD=SECRET_TEST_NEXTCLOUD_SMTP_VALUE\n"
         "PUBLIC_SETTING=not-secret\n"
     )
 
     redacted = redact_dokploy_env_payload(raw)
 
-    assert "SECRET_TEST_OPENCLAW_PROVIDER_VALUE" not in redacted
-    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in redacted
+    assert "SECRET_TEST_NEXTCLOUD_SMTP_VALUE" not in redacted
+    assert "NEXTCLOUD_SMTP_PASSWORD=<REDACTED>" in redacted
     assert "fingerprint=sha256:abc123" in redacted
     assert "PUBLIC_SETTING=not-secret" in redacted
 
@@ -133,14 +133,14 @@ def test_redact_dokploy_env_payload_masks_wizard_owned_assignment_values() -> No
 def test_redacted_env_spec_metadata_omits_raw_values() -> None:
     spec = DokployEnvSpec(
         variable=DokployEnvVar(
-            name="OPENCLAW_PROVIDER_API_KEY",
-            value="SECRET_TEST_OPENCLAW_PROVIDER_VALUE",
+            name="DOCUSEAL_SMTP_PASSWORD",
+            value="SECRET_TEST_DOCUSEAL_SMTP_VALUE",
             sensitive=True,
             source="operator-input",
         ),
-        owner="openclaw",
-        target_services=("wizard-stack-openclaw",),
-        placeholder="${OPENCLAW_PROVIDER_API_KEY:?OPENCLAW_PROVIDER_API_KEY is required}",
+        owner="docuseal",
+        target_services=("wizard-stack-docuseal",),
+        placeholder="${DOCUSEAL_SMTP_PASSWORD:?DOCUSEAL_SMTP_PASSWORD is required}",
     )
 
     metadata = redacted_env_spec_metadata((spec,))
@@ -148,15 +148,15 @@ def test_redacted_env_spec_metadata_omits_raw_values() -> None:
     assert metadata == (
         {
             "dokploy_scope": "compose",
-            "name": "OPENCLAW_PROVIDER_API_KEY",
-            "owner": "openclaw",
+            "name": "DOCUSEAL_SMTP_PASSWORD",
+            "owner": "docuseal",
             "ownership_marker": "dokploy-wizard",
-            "placeholder": "${OPENCLAW_PROVIDER_API_KEY:?OPENCLAW_PROVIDER_API_KEY is required}",
+            "placeholder": "${DOCUSEAL_SMTP_PASSWORD:?DOCUSEAL_SMTP_PASSWORD is required}",
             "redacted_fingerprint": spec.redacted_fingerprint,
             "required": True,
             "sensitive": True,
             "source": "operator-input",
-            "target_services": ["wizard-stack-openclaw"],
+            "target_services": ["wizard-stack-docuseal"],
         },
     )
-    assert "SECRET_TEST_OPENCLAW_PROVIDER_VALUE" not in str(metadata)
+    assert "SECRET_TEST_DOCUSEAL_SMTP_VALUE" not in str(metadata)

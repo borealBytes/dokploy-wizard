@@ -80,7 +80,9 @@ def test_load_state_dir_rejects_mixed_version_applied_state(tmp_path: Path) -> N
         load_state_dir(tmp_path)
 
 
-def test_validate_existing_state_accepts_historical_seaweedfs_checkpoint(tmp_path: Path) -> None:
+def test_validate_existing_state_accepts_historical_checkpoint_with_unknown_fields(
+    tmp_path: Path,
+) -> None:
     fingerprint = "dc4bc86fdd3879263c3d9ebf075a71e3dad324f44cd42343bc8654d40e8b7e89"
 
     (tmp_path / "raw-input.json").write_text(
@@ -122,10 +124,9 @@ def test_validate_existing_state_accepts_historical_seaweedfs_checkpoint(tmp_pat
                 },
                 "seaweedfs_access_key": "seaweed-access",
                 "seaweedfs_secret_key": "seaweed-secret",
-                "openclaw_channels": ["matrix"],
-                "openclaw_replicas": 1,
-                "my_farm_advisor_channels": ["matrix"],
-                "my_farm_advisor_replicas": 1,
+                # Fields written by older wizard versions must not break loading.
+                "generated_secret_refs": ["openmerge-shared-litellm"],
+                "workspace_data_mode": "managed",
             }
         ),
         encoding="utf-8",
@@ -144,9 +145,10 @@ def test_validate_existing_state_accepts_historical_seaweedfs_checkpoint(tmp_pat
                     "headscale",
                     "matrix",
                     "nextcloud",
+                    "moodle",
+                    "docuseal",
+                    "coder",
                     "seaweedfs",
-                    "surfsense",
-                    "openclaw",
                 ],
             }
         ),
@@ -162,12 +164,22 @@ def test_validate_existing_state_accepts_historical_seaweedfs_checkpoint(tmp_pat
     assert validate_existing_state(loaded_state) is True
     assert loaded_state.applied_state is not None
     assert "seaweedfs" in loaded_state.applied_state.completed_steps
-    assert "surfsense" in loaded_state.applied_state.completed_steps
 
 
-def test_load_state_dir_sanitizes_legacy_disabled_openclaw_gateway_token(
+def test_load_state_dir_rejects_retired_completed_step_names_and_mispaired_credentials(
     tmp_path: Path,
 ) -> None:
+    # Historical checkpoints may name phases whose packs were retired; the state
+    # loader refuses them so operators rerun instead of resuming under a lost order.
+    (tmp_path / "raw-input.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "values": {"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"},
+            }
+        ),
+        encoding="utf-8",
+    )
     desired_payload = {
         "format_version": 1,
         "root_domain": "example.com",
@@ -175,11 +187,10 @@ def test_load_state_dir_sanitizes_legacy_disabled_openclaw_gateway_token(
         "dokploy_url": "https://dokploy.example.com",
         "dokploy_api_url": "http://127.0.0.1:3000",
         "enabled_features": ["dokploy"],
-        "selected_packs": ["my-farm-advisor"],
-        "enabled_packs": ["my-farm-advisor"],
+        "selected_packs": [],
+        "enabled_packs": [],
         "hostnames": {
             "dokploy": "dokploy.example.com",
-            "my-farm-advisor": "farm.example.com",
         },
         "enable_tailscale": False,
         "tailscale_hostname": None,
@@ -191,32 +202,42 @@ def test_load_state_dir_sanitizes_legacy_disabled_openclaw_gateway_token(
             "network_name": "wizard-stack-shared",
             "postgres": None,
             "redis": None,
-            "litellm": None,
-            "mail": None,
             "allocations": [],
         },
         "seaweedfs_access_key": None,
         "seaweedfs_secret_key": None,
-        "openclaw_gateway_token": "legacy-openclaw-token",
-        "openclaw_channels": [],
-        "openclaw_replicas": None,
-        "my_farm_advisor_channels": ["telegram"],
-        "my_farm_advisor_replicas": None,
     }
     (tmp_path / "desired-state.json").write_text(
         json.dumps(desired_payload),
         encoding="utf-8",
     )
+    (tmp_path / "applied-state.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "desired_state_fingerprint": "abc123",
+                "completed_steps": ["preflight", "dokploy_bootstrap", "openclaw"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "ownership-ledger.json").write_text(
+        json.dumps({"format_version": 1, "resources": []}),
+        encoding="utf-8",
+    )
 
+    with pytest.raises(StateValidationError, match="unsupported completed steps"):
+        validate_existing_state(load_state_dir(tmp_path))
+
+    # Strict from_dict validation still refuses credentials without their pack.
+    mispaired_payload = {
+        **desired_payload,
+        "enabled_packs": [],
+        "seaweedfs_access_key": "seaweed-access",
+        "seaweedfs_secret_key": "seaweed-secret",
+    }
     with pytest.raises(
         StateValidationError,
-        match="OpenClaw gateway token must be omitted when the OpenClaw pack is disabled",
+        match="SeaweedFS credentials must be omitted when the SeaweedFS pack is disabled",
     ):
-        DesiredState.from_dict(desired_payload)
-
-    loaded_state = load_state_dir(tmp_path)
-
-    assert loaded_state.desired_state is not None
-    assert loaded_state.desired_state.openclaw_gateway_token is None
-    assert loaded_state.desired_state.enabled_packs == ("my-farm-advisor",)
-    assert "openclaw" not in loaded_state.desired_state.enabled_packs
+        DesiredState.from_dict(mispaired_payload)

@@ -24,16 +24,6 @@ _ROUTE_SEARCH_DIRS = (
     Path("/opt/dokploy/traefik/dynamic"),
 )
 _ROUTE_FILE_PATTERNS = ("*.yaml", "*.yml", "*.toml")
-_SURFSENSE_AUXILIARY_COMPOSE_SERVICES = frozenset(
-    (
-        "frontend",
-        "zero-cache",
-        "searxng",
-        "celery_worker",
-        "celery_beat",
-        "migrations",
-    )
-)
 
 
 def build_live_drift_report(
@@ -397,67 +387,6 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 f"{desired_state.stack_name}-shared-"
             )
         candidates.append(litellm_candidate)
-    if "openclaw" in desired_state.enabled_packs:
-        candidates.append(
-            {
-                "aliases": ("openclaw", "advisor"),
-                "hostname": desired_state.hostnames.get("openclaw"),
-                "managed_container_labels": {
-                    "dokploy-wizard.slot": "openclaw_suite",
-                    "dokploy-wizard.variant": "openclaw",
-                },
-                "port": "18789",
-                "expected_service_name": f"{desired_state.stack_name}-openclaw",
-                "pack": "openclaw",
-                "scope": f"stack:{desired_state.stack_name}:openclaw",
-            }
-        )
-        candidates.extend(
-            (
-                {
-                    "aliases": ("mem0",),
-                    "hostname": None,
-                    "managed_container_labels": {"com.docker.compose.service": "mem0"},
-                    "port": str(8000),
-                    "expected_service_name": "mem0",
-                    "pack": "openclaw",
-                    "scope": f"stack:{desired_state.stack_name}:openclaw-sidecar:mem0",
-                },
-                {
-                    "aliases": ("qdrant",),
-                    "hostname": None,
-                    "managed_container_labels": {"com.docker.compose.service": "qdrant"},
-                    "port": str(6333),
-                    "expected_service_name": "qdrant",
-                    "pack": "openclaw",
-                    "scope": f"stack:{desired_state.stack_name}:openclaw-sidecar:qdrant",
-                },
-                {
-                    "aliases": ("nexa-runtime",),
-                    "hostname": None,
-                    "managed_container_labels": {"com.docker.compose.service": "nexa-runtime"},
-                    "port": None,
-                    "expected_service_name": "nexa-runtime",
-                    "pack": "openclaw",
-                    "scope": f"stack:{desired_state.stack_name}:openclaw-sidecar:nexa-runtime",
-                },
-            )
-        )
-    if "my-farm-advisor" in desired_state.enabled_packs:
-        candidates.append(
-            {
-                "aliases": ("my-farm-advisor", "my-farm", "farm-advisor"),
-                "hostname": desired_state.hostnames.get("my-farm-advisor"),
-                "managed_container_labels": {
-                    "dokploy-wizard.slot": "my-farm-advisor_suite",
-                    "dokploy-wizard.variant": "my-farm-advisor",
-                },
-                "port": "18789",
-                "expected_service_name": f"{desired_state.stack_name}-my-farm-advisor",
-                "pack": "my-farm-advisor",
-                "scope": f"stack:{desired_state.stack_name}:my-farm-advisor",
-            }
-        )
     if "nextcloud" in desired_state.enabled_packs:
         candidates.append(
             {
@@ -511,22 +440,6 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "expected_service_name": f"{desired_state.stack_name}-docuseal",
                 "pack": "docuseal",
                 "scope": f"stack:{desired_state.stack_name}:docuseal:service",
-            }
-        )
-    if "surfsense" in desired_state.enabled_packs:
-        candidates.append(
-            {
-                "aliases": (),
-                "expected_auxiliary_compose_services": _SURFSENSE_AUXILIARY_COMPOSE_SERVICES,
-                "hostname": None,
-                "managed_compose_project_prefix": f"{desired_state.stack_name}-surfsense-",
-                "managed_container_labels": {
-                    "com.docker.compose.service": "backend",
-                },
-                "port": None,
-                "expected_service_name": f"{desired_state.stack_name}-surfsense",
-                "pack": "surfsense",
-                "scope": f"stack:{desired_state.stack_name}:surfsense:service",
             }
         )
     if "coder" in desired_state.enabled_packs:
@@ -668,9 +581,6 @@ def _is_expected_auxiliary_container(*, container: dict[str, Any], candidate: di
     compose_service = labels.get("com.docker.compose.service")
     if not isinstance(compose_service, str) or compose_service == "":
         return False
-    expected_service_name = str(candidate.get("expected_service_name", ""))
-    if candidate.get("pack") == "openclaw" and compose_service == f"{expected_service_name}-public":
-        return True
     auxiliary_services = candidate.get("expected_auxiliary_compose_services")
     if (
         isinstance(auxiliary_services, frozenset)
@@ -846,14 +756,5 @@ def _route_file_candidates(desired_state: DesiredState) -> tuple[dict[str, str],
     if onlyoffice_hostname is not None:
         candidates.append(
             {"hostname": onlyoffice_hostname, "pack": "onlyoffice", "token": "onlyoffice"}
-        )
-    my_farm_hostname = desired_state.hostnames.get("my-farm-advisor")
-    if my_farm_hostname is not None:
-        candidates.append(
-            {
-                "hostname": my_farm_hostname,
-                "pack": "my-farm-advisor",
-                "token": "my-farm-advisor",
-            }
         )
     return tuple(candidates)

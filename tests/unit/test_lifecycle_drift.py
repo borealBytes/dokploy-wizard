@@ -25,11 +25,6 @@ from dokploy_wizard.packs.nextcloud.models import (
     OnlyofficeServiceRuntime,
     TalkRuntime,
 )
-from dokploy_wizard.packs.openclaw.models import (
-    OpenClawHealthCheck,
-    OpenClawManagedResource,
-    OpenClawResult,
-)
 from dokploy_wizard.packs.seaweedfs.models import (
     SeaweedFsHealthCheck,
     SeaweedFsManagedResource,
@@ -46,6 +41,43 @@ from dokploy_wizard.state import (
 _UNUSED_BACKEND = cast(Any, object())
 
 
+def _validate(
+    *,
+    raw_env: RawEnvInput,
+    desired_state: Any,
+    ownership_ledger: OwnershipLedger,
+    preserved_phases: tuple[str, ...],
+    bootstrap_backend: Any = _UNUSED_BACKEND,
+    tailscale_backend: Any = _UNUSED_BACKEND,
+    networking_backend: Any = _UNUSED_BACKEND,
+    shared_core_backend: Any = _UNUSED_BACKEND,
+    headscale_backend: Any = _UNUSED_BACKEND,
+    matrix_backend: Any = _UNUSED_BACKEND,
+    nextcloud_backend: Any = _UNUSED_BACKEND,
+    seaweedfs_backend: Any = _UNUSED_BACKEND,
+    coder_backend: Any = _UNUSED_BACKEND,
+    moodle_backend: Any | None = None,
+    docuseal_backend: Any | None = None,
+) -> Any:
+    return validate_preserved_phases(
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=ownership_ledger,
+        preserved_phases=preserved_phases,
+        bootstrap_backend=bootstrap_backend,
+        tailscale_backend=tailscale_backend,
+        networking_backend=networking_backend,
+        shared_core_backend=shared_core_backend,
+        headscale_backend=headscale_backend,
+        matrix_backend=matrix_backend,
+        nextcloud_backend=nextcloud_backend,
+        seaweedfs_backend=seaweedfs_backend,
+        coder_backend=coder_backend,
+        moodle_backend=moodle_backend,
+        docuseal_backend=docuseal_backend,
+    )
+
+
 def test_validate_preserved_phases_allows_legacy_cloudflare_access_ownership_gap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -55,7 +87,6 @@ def test_validate_preserved_phases_allows_legacy_cloudflare_access_ownership_gap
             values={
                 "STACK_NAME": "openmerge",
                 "ROOT_DOMAIN": "openmerge.me",
-                "ENABLE_OPENCLAW": "true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS": "admin@example.com",
             },
         )
@@ -78,21 +109,11 @@ def test_validate_preserved_phases_allows_legacy_cloudflare_access_ownership_gap
         ),
     )
 
-    report = validate_preserved_phases(
+    report = _validate(
         raw_env=raw_env,
         desired_state=desired_state,
         ownership_ledger=ownership_ledger,
         preserved_phases=("cloudflare_access",),
-        bootstrap_backend=_UNUSED_BACKEND,
-        tailscale_backend=_UNUSED_BACKEND,
-        networking_backend=_UNUSED_BACKEND,
-        shared_core_backend=_UNUSED_BACKEND,
-        headscale_backend=_UNUSED_BACKEND,
-        matrix_backend=_UNUSED_BACKEND,
-        nextcloud_backend=_UNUSED_BACKEND,
-        seaweedfs_backend=_UNUSED_BACKEND,
-        openclaw_backend=_UNUSED_BACKEND,
-        coder_backend=_UNUSED_BACKEND,
     )
 
     assert len(report.entries) == 1
@@ -111,7 +132,6 @@ def test_validate_preserved_phases_still_rejects_cloudflare_access_drift_when_ow
             values={
                 "STACK_NAME": "openmerge",
                 "ROOT_DOMAIN": "openmerge.me",
-                "ENABLE_OPENCLAW": "true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS": "admin@example.com",
             },
         )
@@ -125,8 +145,8 @@ def test_validate_preserved_phases_still_rejects_cloudflare_access_drift_when_ow
         resources=(
             OwnedResource(
                 resource_type="cloudflare_access_application",
-                resource_id="app-openclaw",
-                scope="account:account-123:access-app:openclaw.openmerge.me",
+                resource_id="app-litellm-admin",
+                scope="account:account-123:access-app:litellm.openmerge.me",
             ),
         ),
     )
@@ -144,21 +164,11 @@ def test_validate_preserved_phases_still_rejects_cloudflare_access_drift_when_ow
     )
 
     with pytest.raises(LifecycleDriftError, match="cloudflare_access"):
-        validate_preserved_phases(
+        _validate(
             raw_env=raw_env,
             desired_state=desired_state,
             ownership_ledger=ownership_ledger,
             preserved_phases=("cloudflare_access",),
-            bootstrap_backend=_UNUSED_BACKEND,
-            tailscale_backend=_UNUSED_BACKEND,
-            networking_backend=_UNUSED_BACKEND,
-            shared_core_backend=_UNUSED_BACKEND,
-            headscale_backend=_UNUSED_BACKEND,
-            matrix_backend=_UNUSED_BACKEND,
-            nextcloud_backend=_UNUSED_BACKEND,
-            seaweedfs_backend=_UNUSED_BACKEND,
-            openclaw_backend=_UNUSED_BACKEND,
-            coder_backend=_UNUSED_BACKEND,
         )
 
 
@@ -241,23 +251,14 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_nextcloud(
     nextcloud_backend = SimpleNamespace(check_health=lambda *, service, url: False)
 
     with pytest.raises(LifecycleDriftError, match="Nextcloud or OnlyOffice is no longer healthy"):
-        validate_preserved_phases(
+        _validate(
             raw_env=RawEnvInput(
                 format_version=1, values={"STACK_NAME": "openmerge", "ROOT_DOMAIN": "openmerge.me"}
             ),
             desired_state=desired_state,
             ownership_ledger=OwnershipLedger(format_version=1, resources=()),
             preserved_phases=("nextcloud",),
-            bootstrap_backend=_UNUSED_BACKEND,
-            tailscale_backend=_UNUSED_BACKEND,
-            networking_backend=_UNUSED_BACKEND,
-            shared_core_backend=_UNUSED_BACKEND,
-            headscale_backend=_UNUSED_BACKEND,
-            matrix_backend=_UNUSED_BACKEND,
             nextcloud_backend=nextcloud_backend,
-            seaweedfs_backend=_UNUSED_BACKEND,
-            openclaw_backend=_UNUSED_BACKEND,
-            coder_backend=_UNUSED_BACKEND,
         )
 
 
@@ -307,7 +308,7 @@ def test_validate_preserved_phases_rejects_invalid_shared_core_postgres_allocati
     )
 
     with pytest.raises(LifecycleDriftError, match="Shared-core Postgres allocations are not ready"):
-        validate_preserved_phases(
+        _validate(
             raw_env=RawEnvInput(
                 format_version=1, values={"STACK_NAME": "openmerge", "ROOT_DOMAIN": "openmerge.me"}
             ),
@@ -338,16 +339,7 @@ def test_validate_preserved_phases_rejects_invalid_shared_core_postgres_allocati
                 ),
             ),
             preserved_phases=("shared_core",),
-            bootstrap_backend=_UNUSED_BACKEND,
-            tailscale_backend=_UNUSED_BACKEND,
-            networking_backend=_UNUSED_BACKEND,
             shared_core_backend=shared_core_backend,
-            headscale_backend=_UNUSED_BACKEND,
-            matrix_backend=_UNUSED_BACKEND,
-            nextcloud_backend=_UNUSED_BACKEND,
-            seaweedfs_backend=_UNUSED_BACKEND,
-            openclaw_backend=_UNUSED_BACKEND,
-            coder_backend=_UNUSED_BACKEND,
         )
 
 
@@ -409,7 +401,7 @@ def test_litellm_rerun_preserves_keys_and_ownership(tmp_path: Path) -> None:
 
     assert second_keys == first_keys
 
-    report = validate_preserved_phases(
+    report = _validate(
         raw_env=RawEnvInput(
             format_version=1,
             values={"STACK_NAME": "openmerge", "ROOT_DOMAIN": "openmerge.me"},
@@ -436,16 +428,7 @@ def test_litellm_rerun_preserves_keys_and_ownership(tmp_path: Path) -> None:
             ),
         ),
         preserved_phases=("shared_core",),
-        bootstrap_backend=_UNUSED_BACKEND,
-        tailscale_backend=_UNUSED_BACKEND,
-        networking_backend=_UNUSED_BACKEND,
         shared_core_backend=shared_core_backend,
-        headscale_backend=_UNUSED_BACKEND,
-        matrix_backend=_UNUSED_BACKEND,
-        nextcloud_backend=_UNUSED_BACKEND,
-        seaweedfs_backend=_UNUSED_BACKEND,
-        openclaw_backend=_UNUSED_BACKEND,
-        coder_backend=_UNUSED_BACKEND,
     )
 
     assert len(report.entries) == 1
@@ -460,8 +443,7 @@ def test_validate_preserved_phases_rejects_stale_litellm_shared_core_config() ->
             values={
                 "STACK_NAME": "openmerge",
                 "ROOT_DOMAIN": "openmerge.me",
-                "ENABLE_MY_FARM_ADVISOR": "true",
-                "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+                "ENABLE_CODER": "true",
                 "AI_DEFAULT_API_KEY": "shared-key",
                 "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
             },
@@ -510,14 +492,13 @@ def test_validate_preserved_phases_rejects_stale_litellm_shared_core_config() ->
     )
 
     with pytest.raises(LifecycleDriftError, match="LiteLLM config no longer matches"):
-        validate_preserved_phases(
+        _validate(
             raw_env=RawEnvInput(
                 format_version=1,
                 values={
                     "STACK_NAME": "openmerge",
                     "ROOT_DOMAIN": "openmerge.me",
-                    "ENABLE_MY_FARM_ADVISOR": "true",
-                    "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
+                    "ENABLE_CODER": "true",
                     "AI_DEFAULT_API_KEY": "shared-key",
                     "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
                 },
@@ -544,16 +525,7 @@ def test_validate_preserved_phases_rejects_stale_litellm_shared_core_config() ->
                 ),
             ),
             preserved_phases=("shared_core",),
-            bootstrap_backend=_UNUSED_BACKEND,
-            tailscale_backend=_UNUSED_BACKEND,
-            networking_backend=_UNUSED_BACKEND,
             shared_core_backend=shared_core_backend,
-            headscale_backend=_UNUSED_BACKEND,
-            matrix_backend=_UNUSED_BACKEND,
-            nextcloud_backend=_UNUSED_BACKEND,
-            seaweedfs_backend=_UNUSED_BACKEND,
-            openclaw_backend=_UNUSED_BACKEND,
-            coder_backend=_UNUSED_BACKEND,
         )
 
 
@@ -564,7 +536,7 @@ def test_validate_preserved_phases_rejects_stale_litellm_virtual_keys() -> None:
             values={
                 "STACK_NAME": "openmerge",
                 "ROOT_DOMAIN": "openmerge.me",
-                "ENABLE_OPENCLAW": "true",
+                "ENABLE_CODER": "true",
                 "AI_DEFAULT_API_KEY": "shared-key",
                 "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
             },
@@ -614,13 +586,13 @@ def test_validate_preserved_phases_rejects_stale_litellm_virtual_keys() -> None:
     )
 
     with pytest.raises(LifecycleDriftError, match="LiteLLM virtual keys no longer match"):
-        validate_preserved_phases(
+        _validate(
             raw_env=RawEnvInput(
                 format_version=1,
                 values={
                     "STACK_NAME": "openmerge",
                     "ROOT_DOMAIN": "openmerge.me",
-                    "ENABLE_OPENCLAW": "true",
+                    "ENABLE_CODER": "true",
                     "AI_DEFAULT_API_KEY": "shared-key",
                     "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
                 },
@@ -647,16 +619,7 @@ def test_validate_preserved_phases_rejects_stale_litellm_virtual_keys() -> None:
                 ),
             ),
             preserved_phases=("shared_core",),
-            bootstrap_backend=_UNUSED_BACKEND,
-            tailscale_backend=_UNUSED_BACKEND,
-            networking_backend=_UNUSED_BACKEND,
             shared_core_backend=shared_core_backend,
-            headscale_backend=_UNUSED_BACKEND,
-            matrix_backend=_UNUSED_BACKEND,
-            nextcloud_backend=_UNUSED_BACKEND,
-            seaweedfs_backend=_UNUSED_BACKEND,
-            openclaw_backend=_UNUSED_BACKEND,
-            coder_backend=_UNUSED_BACKEND,
         )
 
 
@@ -721,7 +684,7 @@ def test_validate_preserved_phases_rejects_stale_tunnel_ingress() -> None:
     )
 
     with pytest.raises(LifecycleDriftError, match="Cloudflare tunnel ingress no longer matches"):
-        validate_preserved_phases(
+        _validate(
             raw_env=RawEnvInput(
                 format_version=1,
                 values={
@@ -759,20 +722,11 @@ def test_validate_preserved_phases_rejects_stale_tunnel_ingress() -> None:
                 ),
             ),
             preserved_phases=("networking",),
-            bootstrap_backend=_UNUSED_BACKEND,
-            tailscale_backend=_UNUSED_BACKEND,
             networking_backend=networking_backend,
-            shared_core_backend=_UNUSED_BACKEND,
-            headscale_backend=_UNUSED_BACKEND,
-            matrix_backend=_UNUSED_BACKEND,
-            nextcloud_backend=_UNUSED_BACKEND,
-            seaweedfs_backend=_UNUSED_BACKEND,
-            openclaw_backend=_UNUSED_BACKEND,
-            coder_backend=_UNUSED_BACKEND,
         )
 
 
-def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_openclaw(
+def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_coder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     desired_state = resolve_desired_state(
@@ -784,8 +738,7 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_ope
                 "ENABLE_SEAWEEDFS": "true",
                 "SEAWEEDFS_ACCESS_KEY": "key",
                 "SEAWEEDFS_SECRET_KEY": "secret",
-                "ENABLE_OPENCLAW": "true",
-                "OPENCLAW_CHANNELS": "telegram",
+                "ENABLE_CODER": "true",
             },
         )
     )
@@ -809,66 +762,45 @@ def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_ope
         ),
     )
     monkeypatch.setattr(
-        "dokploy_wizard.lifecycle.drift.reconcile_openclaw",
+        "dokploy_wizard.lifecycle.drift.reconcile_coder",
         lambda **_: SimpleNamespace(
-            result=OpenClawResult(
+            result=SimpleNamespace(
                 outcome="already_present",
-                enabled=True,
-                variant="openclaw",
-                hostname="openclaw.openmerge.me",
-                channels=("telegram",),
-                replicas=1,
-                template_path="template",
-                service=OpenClawManagedResource(
-                    "reuse_owned", "svc-openclaw", "openmerge-openclaw"
+                service=SimpleNamespace(
+                    action="reuse_owned",
+                    resource_id="svc-coder",
+                    resource_name="openmerge-coder",
                 ),
-                secret_refs=(),
-                health_check=OpenClawHealthCheck(
-                    url="https://openclaw.openmerge.me/health", passed=None
+                persistent_data=SimpleNamespace(
+                    action="reuse_owned",
+                    resource_id="vol-coder",
+                    resource_name="openmerge-coder-data",
                 ),
-                notes=(),
+                health_check=SimpleNamespace(url="https://coder.openmerge.me/healthz"),
             )
         ),
     )
     sea_backend = SimpleNamespace(check_health=lambda *, service, url: False)
-    openclaw_backend = SimpleNamespace(check_health=lambda *, service, url: False)
+    coder_backend = SimpleNamespace(check_health=lambda *, service, url: False)
 
     with pytest.raises(LifecycleDriftError, match="SeaweedFS health check no longer passes"):
-        validate_preserved_phases(
+        _validate(
             raw_env=RawEnvInput(
                 format_version=1, values={"STACK_NAME": "openmerge", "ROOT_DOMAIN": "openmerge.me"}
             ),
             desired_state=desired_state,
             ownership_ledger=OwnershipLedger(format_version=1, resources=()),
             preserved_phases=("seaweedfs",),
-            bootstrap_backend=_UNUSED_BACKEND,
-            tailscale_backend=_UNUSED_BACKEND,
-            networking_backend=_UNUSED_BACKEND,
-            shared_core_backend=_UNUSED_BACKEND,
-            headscale_backend=_UNUSED_BACKEND,
-            matrix_backend=_UNUSED_BACKEND,
-            nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=sea_backend,
-            openclaw_backend=_UNUSED_BACKEND,
-            coder_backend=_UNUSED_BACKEND,
         )
 
-    with pytest.raises(LifecycleDriftError, match="OpenClaw health check no longer passes"):
-        validate_preserved_phases(
+    with pytest.raises(LifecycleDriftError, match="Coder health check no longer passes"):
+        _validate(
             raw_env=RawEnvInput(
                 format_version=1, values={"STACK_NAME": "openmerge", "ROOT_DOMAIN": "openmerge.me"}
             ),
             desired_state=desired_state,
             ownership_ledger=OwnershipLedger(format_version=1, resources=()),
-            preserved_phases=("openclaw",),
-            bootstrap_backend=_UNUSED_BACKEND,
-            tailscale_backend=_UNUSED_BACKEND,
-            networking_backend=_UNUSED_BACKEND,
-            shared_core_backend=_UNUSED_BACKEND,
-            headscale_backend=_UNUSED_BACKEND,
-            matrix_backend=_UNUSED_BACKEND,
-            nextcloud_backend=_UNUSED_BACKEND,
-            seaweedfs_backend=_UNUSED_BACKEND,
-            openclaw_backend=openclaw_backend,
-            coder_backend=_UNUSED_BACKEND,
+            preserved_phases=("coder",),
+            coder_backend=coder_backend,
         )

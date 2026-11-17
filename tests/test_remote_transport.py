@@ -384,8 +384,8 @@ def test_verify_service_failures_bubble_through_proof(
     transport = make_fake_transport(
         failures={
             "verify-services": (
-                '{"entries":[{"detail":"OPENCLAW_VIRTUAL_KEY=<REDACTED>",'
-                '"service_id":"openclaw","status":"fail"}],"status":"fail"}'
+                '{"entries":[{"detail":"DOCUSEAL_SMTP_PASSWORD=<REDACTED>",'
+                '"service_id":"docuseal","status":"fail"}],"status":"fail"}'
             )
         }
     )
@@ -403,14 +403,14 @@ def test_remote_failures_redact_dokploy_env_payload_values(
     remote_transport_subject: ModuleType,
     make_fake_transport: Any,
 ) -> None:
-    sentinel = "SECRET_TEST_OPENCLAW_PROVIDER_VALUE"
+    sentinel = "SECRET_TEST_NEXTCLOUD_SMTP_VALUE"
     transport = make_fake_transport(
         failures={
             "inspect-state": (
                 "Dokploy API failed with env payload:\n"
-                "# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
-                "key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:abc123\n"
-                f"OPENCLAW_PROVIDER_API_KEY={sentinel}"
+                "# dokploy-wizard-env marker=dokploy-wizard owner=nextcloud "
+                "key=NEXTCLOUD_SMTP_PASSWORD fingerprint=sha256:abc123\n"
+                f"NEXTCLOUD_SMTP_PASSWORD={sentinel}"
             )
         }
     )
@@ -422,7 +422,7 @@ def test_remote_failures_redact_dokploy_env_payload_values(
     message = str(excinfo.value)
     assert "inspect-state" in message
     assert sentinel not in message
-    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in message
+    assert "NEXTCLOUD_SMTP_PASSWORD=<REDACTED>" in message
     assert "fingerprint=sha256:abc123" in message
 
 
@@ -430,7 +430,7 @@ def test_verbose_stream_buffer_redacts_multiline_env_payload_and_password(
     remote_transport_subject: ModuleType,
 ) -> None:
     password = "SuperSecretPassword123!"
-    env_secret = "SECRET_TEST_OPENCLAW_PROVIDER_VALUE"
+    env_secret = "SECRET_TEST_NEXTCLOUD_SMTP_VALUE"
     docker_pat = "ghp_SECRETTESTDOCKERPATVALUE"
     output: list[tuple[str, str, str]] = []
     buffer = remote_transport_subject._StreamLineBuffer(
@@ -443,17 +443,17 @@ def test_verbose_stream_buffer_redacts_multiline_env_payload_and_password(
     )
 
     buffer.feed(
-        b"# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
-        b"key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:abc123\n"
+        b"# dokploy-wizard-env marker=dokploy-wizard owner=nextcloud "
+        b"key=NEXTCLOUD_SMTP_PASSWORD fingerprint=sha256:abc123\n"
     )
-    buffer.feed(f"OPENCLAW_PROVIDER_API_KEY={env_secret}\n".encode())
+    buffer.feed(f"NEXTCLOUD_SMTP_PASSWORD={env_secret}\n".encode())
     buffer.feed(f"password={password}\nDOCKER_PAT={docker_pat}\n".encode())
 
     rendered = "\n".join(line for _subcommand, _stream_name, line in output)
     assert env_secret not in rendered
     assert password not in rendered
     assert docker_pat not in rendered
-    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in rendered
+    assert "NEXTCLOUD_SMTP_PASSWORD=<REDACTED>" in rendered
     assert "password=<REDACTED>" in rendered
     assert "DOCKER_PAT=<REDACTED>" in rendered
 

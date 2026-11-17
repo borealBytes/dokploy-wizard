@@ -26,58 +26,10 @@ class PromptSelection:
     seaweedfs_access_key: str | None
     seaweedfs_secret_key: str | None
     generated_secrets: dict[str, str]
-    advisor_env: dict[str, str]
-    openclaw_channels: tuple[str, ...]
-    my_farm_advisor_channels: tuple[str, ...]
 
 
-_RUNTIME_APP_ENV_KEYS = (
-    "OPENCLAW_GATEWAY_PASSWORD",
-    "OPENCLAW_OPENROUTER_API_KEY",
-    "OPENCLAW_NVIDIA_API_KEY",
-    "OPENCLAW_PRIMARY_MODEL",
-    "OPENCLAW_FALLBACK_MODELS",
-    "OPENCLAW_TELEGRAM_BOT_TOKEN",
-    "OPENCLAW_TELEGRAM_OWNER_USER_ID",
-    "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
-    "MY_FARM_ADVISOR_NVIDIA_API_KEY",
-    "MY_FARM_ADVISOR_PRIMARY_MODEL",
-    "MY_FARM_ADVISOR_FALLBACK_MODELS",
-    "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
-    "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
-    "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
-)
-_DEFAULT_NVIDIA_PRIMARY_MODEL = "nvidia/moonshotai/kimi-k2.5"
 _DEFAULT_AI_DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
-_DEFAULT_REMOTE_FALLBACK_MODEL = "opencode-go/deepseek-v4.1-flash"
 _DEFAULT_DOKPLOY_ADMIN_EMAIL = "admin@example.com"
-_DEFAULT_MY_FARM_CHANNEL = "telegram"
-_OPENCLAW_RUNTIME_ENV_KEYS = tuple(
-    key for key in _RUNTIME_APP_ENV_KEYS if key.startswith("OPENCLAW_")
-)
-_MY_FARM_ADVISOR_RUNTIME_ENV_KEYS = tuple(
-    key for key in _RUNTIME_APP_ENV_KEYS if key.startswith("MY_FARM_ADVISOR_")
-)
-_MY_FARM_ADVISOR_PACK_ONLY_ENV_KEYS = (
-    "ANTHROPIC_API_KEY",
-    "NVIDIA_BASE_URL",
-    "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
-    "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
-    "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
-    "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
-    "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
-    "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
-    "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
-    "TELEGRAM_ALLOWED_USERS",
-    "R2_BUCKET_NAME",
-    "R2_ENDPOINT",
-    "R2_ACCESS_KEY_ID",
-    "R2_SECRET_ACCESS_KEY",
-    "CF_ACCOUNT_ID",
-    "DATA_MODE",
-    "WORKSPACE_DATA_R2_RCLONE_MOUNT",
-    "WORKSPACE_DATA_R2_PREFIX",
-)
 
 
 @dataclass(frozen=True)
@@ -117,24 +69,6 @@ def apply_prompt_selection(raw_env: RawEnvInput, selection: PromptSelection) -> 
         updated_values["SEAWEEDFS_SECRET_KEY"] = selection.seaweedfs_secret_key
     else:
         updated_values.pop("SEAWEEDFS_SECRET_KEY", None)
-    if selection.openclaw_channels:
-        updated_values["OPENCLAW_CHANNELS"] = ",".join(selection.openclaw_channels)
-    elif "openclaw" in selection.disabled_packs:
-        updated_values.pop("OPENCLAW_CHANNELS", None)
-    if selection.my_farm_advisor_channels:
-        updated_values["MY_FARM_ADVISOR_CHANNELS"] = ",".join(selection.my_farm_advisor_channels)
-    elif "my-farm-advisor" in selection.disabled_packs:
-        updated_values.pop("MY_FARM_ADVISOR_CHANNELS", None)
-    if "openclaw" in selection.disabled_packs:
-        for key in _OPENCLAW_RUNTIME_ENV_KEYS:
-            updated_values.pop(key, None)
-        updated_values.pop("OPENCLAW_GATEWAY_TOKEN", None)
-    if "my-farm-advisor" in selection.disabled_packs:
-        for key in _MY_FARM_ADVISOR_RUNTIME_ENV_KEYS:
-            updated_values.pop(key, None)
-        for key in _MY_FARM_ADVISOR_PACK_ONLY_ENV_KEYS:
-            updated_values.pop(key, None)
-    updated_values.update(selection.advisor_env)
     return RawEnvInput(format_version=raw_env.format_version, values=updated_values)
 
 
@@ -143,7 +77,6 @@ def prompt_for_pack_selection(
     *,
     include_headscale_prompt: bool = True,
     headscale_default: bool = True,
-    shared_ai_default_configured: bool = False,
 ) -> PromptSelection:
     selected: list[str] = []
     disabled: list[str] = []
@@ -159,7 +92,6 @@ def prompt_for_pack_selection(
     seaweedfs_access_key: str | None = None
     seaweedfs_secret_key: str | None = None
     generated_secrets: dict[str, str] = {}
-    advisor_env: dict[str, str] = {}
     if _prompt_yes_no(prompt, "Enable SeaweedFS object storage? [Y/n]: ", default=True):
         selected.append("seaweedfs")
         seaweedfs_access_key = _generate_credential(prefix="seaweed")
@@ -167,283 +99,13 @@ def prompt_for_pack_selection(
         generated_secrets["SEAWEEDFS_ACCESS_KEY"] = seaweedfs_access_key
         generated_secrets["SEAWEEDFS_SECRET_KEY"] = seaweedfs_secret_key
 
-    openclaw_channels: tuple[str, ...] = ()
-    my_farm_advisor_channels: tuple[str, ...] = ()
-    if _prompt_yes_no(prompt, "Enable OpenClaw? [Y/n]: ", default=True):
-        selected.append("openclaw")
-        advisor_env.setdefault(
-            "OPENCLAW_GATEWAY_PASSWORD", _generate_credential(prefix="openclaw-ui")
-        )
-        generated_secrets.setdefault(
-            "OPENCLAW_GATEWAY_PASSWORD", advisor_env["OPENCLAW_GATEWAY_PASSWORD"]
-        )
-        default_openclaw_channel = "matrix" if "matrix" in selected else "telegram"
-        raw_channels = _prompt_default(
-            prompt,
-            "OpenClaw channels [telegram/matrix] "
-            f"(comma separated, default: {default_openclaw_channel}): ",
-            default=default_openclaw_channel,
-        )
-        openclaw_channels = tuple(
-            sorted({item.strip() for item in raw_channels.split(",") if item.strip()})
-        )
-        if "matrix" in openclaw_channels and "matrix" not in selected:
-            selected.append("matrix")
-        advisor_env.update(
-            _prompt_advisor_runtime_config(
-                prompt=prompt,
-                label="OpenClaw",
-                env_prefix="OPENCLAW",
-                shared_ai_default_configured=shared_ai_default_configured,
-            )
-        )
-        advisor_env.update(
-            _prompt_advisor_telegram_config(
-                prompt=prompt,
-                label="OpenClaw",
-                env_prefix="OPENCLAW",
-                channels=openclaw_channels,
-            )
-        )
-    else:
-        disabled.append("openclaw")
-    if _prompt_yes_no(prompt, "Enable My Farm Advisor? [y/N]: ", default=False):
-        selected.append("my-farm-advisor")
-        advisor_env.setdefault(
-            "MY_FARM_ADVISOR_GATEWAY_PASSWORD", _generate_credential(prefix="my-farm-ui")
-        )
-        generated_secrets.setdefault(
-            "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
-            advisor_env["MY_FARM_ADVISOR_GATEWAY_PASSWORD"],
-        )
-        raw_channels = _prompt_default(
-            prompt,
-            "My Farm Advisor channels [telegram/matrix] "
-            f"(comma separated, default: {_DEFAULT_MY_FARM_CHANNEL}): ",
-            default=_DEFAULT_MY_FARM_CHANNEL,
-        )
-        my_farm_advisor_channels = _parse_channel_list(raw_channels)
-        if "matrix" in my_farm_advisor_channels and "matrix" not in selected:
-            selected.append("matrix")
-        advisor_env.update(
-            _prompt_advisor_runtime_config(
-                prompt=prompt,
-                label="My Farm Advisor",
-                env_prefix="MY_FARM_ADVISOR",
-                shared_ai_default_configured=shared_ai_default_configured,
-            )
-        )
-        advisor_env.update(
-            _prompt_advisor_telegram_config(
-                prompt=prompt,
-                label="My Farm Advisor",
-                env_prefix="MY_FARM_ADVISOR",
-                channels=my_farm_advisor_channels,
-            )
-        )
-        advisor_env.update(_prompt_my_farm_advisor_runtime_extras(prompt=prompt))
-    else:
-        disabled.append("my-farm-advisor")
-
     return PromptSelection(
         selected_packs=tuple(sorted(selected)),
         disabled_packs=tuple(sorted(disabled)),
         seaweedfs_access_key=seaweedfs_access_key,
         seaweedfs_secret_key=seaweedfs_secret_key,
         generated_secrets=dict(sorted(generated_secrets.items())),
-        advisor_env=dict(sorted(advisor_env.items())),
-        openclaw_channels=openclaw_channels,
-        my_farm_advisor_channels=my_farm_advisor_channels,
     )
-
-
-def _prompt_advisor_runtime_config(
-    *,
-    prompt: PromptFn,
-    label: str,
-    env_prefix: str,
-    shared_ai_default_configured: bool,
-) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if _prompt_yes_no(
-        prompt,
-        f"Configure a separate NVIDIA API key for {label}? [{'y/N' if shared_ai_default_configured else 'Y/n'}]: ",
-        default=not shared_ai_default_configured,
-    ):
-        values[f"{env_prefix}_NVIDIA_API_KEY"] = _prompt_non_empty(
-            prompt, f"{label} NVIDIA API key: "
-        )
-    if _prompt_yes_no(
-        prompt,
-        f"Configure a separate OpenAI-compatible fallback API key for {label}? [{'y/N' if shared_ai_default_configured else 'Y/n'}]: ",
-        default=not shared_ai_default_configured,
-    ):
-        values[f"{env_prefix}_OPENROUTER_API_KEY"] = _prompt_non_empty(
-            prompt, f"{label} fallback API key: "
-        )
-    primary_default = (
-        _DEFAULT_NVIDIA_PRIMARY_MODEL if f"{env_prefix}_NVIDIA_API_KEY" in values else ""
-    )
-    primary_model = _prompt_optional(
-        prompt,
-        f"{label} primary model (provider/model; optional{f', default: {primary_default}' if primary_default else ''}): ",
-    )
-    if primary_model is None and primary_default:
-        primary_model = primary_default
-    if primary_model is not None:
-        values[f"{env_prefix}_PRIMARY_MODEL"] = primary_model
-    fallback_models = _prompt_optional(
-        prompt,
-        f"{label} backup models (comma separated provider/model refs, optional, default: {_DEFAULT_REMOTE_FALLBACK_MODEL}): ",
-    )
-    if fallback_models is None:
-        fallback_models = _DEFAULT_REMOTE_FALLBACK_MODEL
-    if fallback_models is not None:
-        values[f"{env_prefix}_FALLBACK_MODELS"] = ",".join(
-            item.strip() for item in fallback_models.split(",") if item.strip()
-        )
-    return values
-
-
-def _prompt_my_farm_advisor_runtime_extras(*, prompt: PromptFn) -> dict[str, str]:
-    values: dict[str, str] = {}
-    anthropic_api_key = _prompt_optional(
-        prompt,
-        "My Farm Advisor Anthropic API key (optional; press Enter to skip): ",
-    )
-    if anthropic_api_key is not None:
-        values["ANTHROPIC_API_KEY"] = anthropic_api_key
-    nvidia_base_url = _prompt_optional(
-        prompt,
-        "My Farm Advisor NVIDIA base URL override (optional; press Enter to skip): ",
-    )
-    if nvidia_base_url is not None:
-        values["NVIDIA_BASE_URL"] = nvidia_base_url
-    values.update(
-        _prompt_optional_key_values(
-            prompt,
-            (
-                (
-                    "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
-                    "Field operations Telegram bot token",
-                ),
-                (
-                    "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
-                    "Field operations Telegram bot pairing code",
-                ),
-                (
-                    "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
-                    "Field operations Telegram allowed users (comma separated user IDs/usernames)",
-                ),
-                (
-                    "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
-                    "Data pipeline Telegram bot token",
-                ),
-                (
-                    "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
-                    "Data pipeline Telegram bot pairing code",
-                ),
-                (
-                    "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
-                    "Data pipeline Telegram allowed users (comma separated user IDs/usernames)",
-                ),
-                (
-                    "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
-                    "Data pipeline bot allowlist (comma separated user IDs/usernames)",
-                ),
-                (
-                    "TELEGRAM_ALLOWED_USERS",
-                    "Global Telegram allowed users (comma separated user IDs/usernames)",
-                ),
-                (
-                    "OPENCLAW_TELEGRAM_GROUP_POLICY",
-                    "Telegram group policy override",
-                ),
-                ("TZ", "Timezone override (for example UTC or America/Chicago)"),
-                (
-                    "OPENCLAW_BOOTSTRAP_REFRESH",
-                    "Bootstrap refresh override (for example 1/0)",
-                ),
-                (
-                    "OPENCLAW_MEMORY_SEARCH_ENABLED",
-                    "Memory search override (for example 1/0)",
-                ),
-            ),
-        )
-    )
-    if _prompt_yes_no(
-        prompt,
-        "Configure optional My Farm Advisor R2/data settings? [y/N]: ",
-        default=False,
-    ):
-        values.update(
-            _prompt_optional_key_values(
-                prompt,
-                (
-                    ("R2_BUCKET_NAME", "R2 bucket name"),
-                    ("R2_ENDPOINT", "R2 endpoint URL (optional if you plan to use CF account ID)"),
-                    ("R2_ACCESS_KEY_ID", "R2 access key ID"),
-                    ("R2_SECRET_ACCESS_KEY", "R2 secret access key"),
-                    ("CF_ACCOUNT_ID", "Cloudflare account ID override for R2"),
-                    ("DATA_MODE", "Data mode override (for example r2)"),
-                    (
-                        "WORKSPACE_DATA_R2_RCLONE_MOUNT",
-                        "Enable workspace R2 rclone mount (for example 1/true)",
-                    ),
-                    (
-                        "WORKSPACE_DATA_R2_PREFIX",
-                        "Workspace data R2 prefix",
-                    ),
-                    (
-                        "OPENCLAW_SYNC_SKILLS_ON_START",
-                        "Sync skills on start override (for example 1/0)",
-                    ),
-                    (
-                        "OPENCLAW_SYNC_SKILLS_OVERWRITE",
-                        "Sync skills overwrite override (for example 1/0)",
-                    ),
-                    (
-                        "OPENCLAW_FORCE_SKILL_SYNC",
-                        "Force skill sync override (for example 1/0)",
-                    ),
-                ),
-            )
-        )
-    return values
-
-
-def _prompt_advisor_telegram_config(
-    *, prompt: PromptFn, label: str, env_prefix: str, channels: tuple[str, ...]
-) -> dict[str, str]:
-    if "telegram" not in channels:
-        return {}
-    values: dict[str, str] = {}
-    values[f"{env_prefix}_TELEGRAM_BOT_TOKEN"] = _prompt_non_empty(
-        prompt,
-        f"{label} Telegram bot token: ",
-    )
-    owner_id = _prompt_optional(
-        prompt,
-        f"{label} Telegram owner user ID (numeric sender id; @username resolves to id, optional): ",
-    )
-    if owner_id is not None:
-        values[f"{env_prefix}_TELEGRAM_OWNER_USER_ID"] = owner_id
-    return values
-
-
-def _prompt_optional_key_values(
-    prompt: PromptFn, fields: tuple[tuple[str, str], ...]
-) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for env_key, label in fields:
-        response = _prompt_optional(prompt, f"{label} (optional): ")
-        if response is not None:
-            values[env_key] = response
-    return values
-
-
-def _parse_channel_list(raw_channels: str) -> tuple[str, ...]:
-    return tuple(sorted({item.strip() for item in raw_channels.split(",") if item.strip()}))
 
 
 def prompt_for_initial_install_values(
@@ -536,7 +198,7 @@ def prompt_for_initial_install_values(
 
     ai_default_api_key = _prompt_optional(
         prompt,
-        "Default AI API key for Hermes, K-Dense BYOK, and advisor backup models (optional; press Enter to skip): ",
+        "Default AI API key for Hermes and K-Dense BYOK (optional; press Enter to skip): ",
     )
     ai_default_base_url = None
     if ai_default_api_key is not None:

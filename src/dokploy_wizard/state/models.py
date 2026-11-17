@@ -392,11 +392,6 @@ class DesiredState:
     hostnames: dict[str, str]
     seaweedfs_access_key: str | None
     seaweedfs_secret_key: str | None
-    openclaw_gateway_token: str | None
-    openclaw_channels: tuple[str, ...]
-    openclaw_replicas: int | None
-    my_farm_advisor_channels: tuple[str, ...]
-    my_farm_advisor_replicas: int | None
     shared_core: SharedCorePlan
 
     def __post_init__(self) -> None:
@@ -445,21 +440,6 @@ class DesiredState:
         if not set(self.selected_packs).issubset(self.enabled_packs):
             msg = "Selected packs must be a subset of enabled packs."
             raise StateValidationError(msg)
-        if sorted(self.openclaw_channels) != list(self.openclaw_channels):
-            msg = "OpenClaw channels must be stored in sorted order."
-            raise StateValidationError(msg)
-        if "openclaw" not in self.enabled_packs and self.openclaw_gateway_token is not None:
-            msg = "OpenClaw gateway token must be omitted when the OpenClaw pack is disabled."
-            raise StateValidationError(msg)
-        if sorted(self.my_farm_advisor_channels) != list(self.my_farm_advisor_channels):
-            msg = "My Farm Advisor channels must be stored in sorted order."
-            raise StateValidationError(msg)
-        if self.openclaw_replicas is not None and self.openclaw_replicas < 1:
-            msg = "OpenClaw replicas must be a positive integer when configured."
-            raise StateValidationError(msg)
-        if self.my_farm_advisor_replicas is not None and self.my_farm_advisor_replicas < 1:
-            msg = "My Farm Advisor replicas must be a positive integer when configured."
-            raise StateValidationError(msg)
         if any(value == "" for value in self.hostnames.values()):
             msg = "Desired hostnames must be non-empty strings."
             raise StateValidationError(msg)
@@ -483,11 +463,6 @@ class DesiredState:
             "hostnames": dict(sorted(self.hostnames.items())),
             "seaweedfs_access_key": self.seaweedfs_access_key,
             "seaweedfs_secret_key": self.seaweedfs_secret_key,
-            "openclaw_gateway_token": self.openclaw_gateway_token,
-            "openclaw_channels": list(self.openclaw_channels),
-            "openclaw_replicas": self.openclaw_replicas,
-            "my_farm_advisor_channels": list(self.my_farm_advisor_channels),
-            "my_farm_advisor_replicas": self.my_farm_advisor_replicas,
             "shared_core": self.shared_core.to_dict(),
         }
 
@@ -521,13 +496,6 @@ class DesiredState:
             hostnames=_require_string_map(payload, "hostnames"),
             seaweedfs_access_key=_require_optional_string(payload, "seaweedfs_access_key"),
             seaweedfs_secret_key=_require_optional_string(payload, "seaweedfs_secret_key"),
-            openclaw_gateway_token=_require_optional_string(payload, "openclaw_gateway_token"),
-            openclaw_channels=_require_string_list(payload, "openclaw_channels"),
-            openclaw_replicas=_require_optional_positive_int(payload, "openclaw_replicas"),
-            my_farm_advisor_channels=_require_string_list(payload, "my_farm_advisor_channels"),
-            my_farm_advisor_replicas=_require_optional_positive_int(
-                payload, "my_farm_advisor_replicas"
-            ),
             shared_core=_require_shared_core(payload, "shared_core"),
         )
 
@@ -567,9 +535,6 @@ LITELLM_CONSUMER_VIRTUAL_KEY_NAMES = (
     "coder-hermes",
     "coder-kdense",
     "dokploy-ai",
-    "my-farm-advisor",
-    "openclaw",
-    "surfsense",
 )
 
 LITELLM_GENERATED_MASTER_KEY_PREFIX = "sk-litellm-master"
@@ -577,17 +542,6 @@ LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES = {
     "coder-hermes": "sk-litellm-coder-hermes",
     "coder-kdense": "sk-litellm-coder-kdense",
     "dokploy-ai": "sk-litellm-dokploy-ai",
-    "my-farm-advisor": "sk-litellm-my-farm-advisor",
-    "openclaw": "sk-litellm-openclaw",
-    "surfsense": "sk-litellm-surfsense",
-}
-
-SURFSENSE_GENERATED_SECRET_PREFIXES = {
-    "db_password": "surfsense-db-password",
-    "jwt_secret": "surfsense-jwt-secret",
-    "searxng_secret": "surfsense-searxng-secret",
-    "secret_key": "surfsense-secret-key",
-    "zero_admin_password": "surfsense-zero-admin-password",
 }
 
 SEAWEEDFS_GENERATED_SECRET_PREFIXES = {
@@ -639,38 +593,6 @@ class LiteLLMGeneratedKeys:
             master_key=_require_string(payload, "master_key"),
             salt_key=_require_string(payload, "salt_key"),
             virtual_keys=_require_string_map(payload, "virtual_keys"),
-        )
-
-
-@dataclass(frozen=True)
-class SurfSenseGeneratedSecrets:
-    """Wizard-managed SurfSense runtime secrets persisted outside install.env."""
-
-    format_version: int
-    secrets: dict[str, str]
-
-    def __post_init__(self) -> None:
-        if self.format_version != STATE_FORMAT_VERSION:
-            msg = (
-                f"Unsupported format_version {self.format_version}; "
-                f"expected {STATE_FORMAT_VERSION}."
-            )
-            raise StateValidationError(msg)
-        if any(key == "" or value == "" for key, value in self.secrets.items()):
-            msg = "SurfSense generated secrets must use non-empty names and values."
-            raise StateValidationError(msg)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "format_version": self.format_version,
-            "secrets": dict(sorted(self.secrets.items())),
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> SurfSenseGeneratedSecrets:
-        return cls(
-            format_version=_require_format_version(payload),
-            secrets=_require_string_map(payload, "secrets"),
         )
 
 

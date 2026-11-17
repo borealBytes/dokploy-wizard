@@ -220,7 +220,7 @@ def test_successful_lifecycle_prints_expected_service_urls_for_enabled_service_l
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="my-farm-advisor,nextcloud,coder")
+    env_file = _write_remote_env(tmp_path, packs="docuseal,nextcloud,moodle,coder")
     _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -239,10 +239,13 @@ def test_successful_lifecycle_prints_expected_service_urls_for_enabled_service_l
     assert exit_code == 0
     assert "[remote] expected service URLs:" in stderr
     assert "ready for use" not in stderr
-    assert "[remote]   Dokploy: https://dokploy.openmerge.me/" in stderr
-    assert "[remote]   Nextcloud: https://nextcloud.openmerge.me/" in stderr
-    assert "[remote]   Coder: https://coder.openmerge.me/" in stderr
-    assert "[remote]   My Farm Advisor/Farm: https://farm.openmerge.me/" in stderr
+    dokploy_link = stderr.index("[remote]   Dokploy: https://dokploy.openmerge.me/")
+    nextcloud_link = stderr.index("[remote]   Nextcloud: https://nextcloud.openmerge.me/")
+    coder_link = stderr.index("[remote]   Coder: https://coder.openmerge.me/")
+    docuseal_link = stderr.index("[remote]   DocuSeal: https://docuseal.openmerge.me/")
+    moodle_link = stderr.index("[remote]   Moodle: https://moodle.openmerge.me/")
+    # Links print in the helper's fixed survivor order regardless of pack selection order.
+    assert dokploy_link < nextcloud_link < coder_link < docuseal_link < moodle_link
 
 
 @pytest.mark.parametrize(
@@ -261,7 +264,7 @@ def test_lifecycle_prints_expected_service_urls_before_long_mutation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="my-farm-advisor,nextcloud")
+    env_file = _write_remote_env(tmp_path, packs="docuseal,nextcloud")
     _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -314,7 +317,7 @@ def test_successful_lifecycle_expected_service_urls_omits_disabled_pack_links(
     assert "[remote]   Dokploy: https://dokploy.openmerge.me/" in stderr
     assert "[remote]   Nextcloud: https://nextcloud.openmerge.me/" in stderr
     assert "Coder:" not in stderr
-    assert "My Farm Advisor/Farm:" not in stderr
+    assert "DocuSeal:" not in stderr
 
 
 @pytest.mark.parametrize(
@@ -349,10 +352,10 @@ def test_lifecycle_commands_accept_positional_env_file(subcommand: str) -> None:
     remote_cli = import_remote_cli_module()
     parser = remote_cli.build_parser()
 
-    args = parser.parse_args([subcommand, "./.install-my-farm-advisor-min.env"])
+    args = parser.parse_args([subcommand, "./.install-min.env"])
     remote_cli._validate_args(parser, args)
 
-    assert str(args.env_file) == ".install-my-farm-advisor-min.env"
+    assert str(args.env_file) == ".install-min.env"
 
 
 def test_runtime_args_derive_host_and_password_from_positional_env_file(tmp_path: Path) -> None:
@@ -567,28 +570,28 @@ def test_create_repo_archive_excludes_local_env_backups(tmp_path: Path) -> None:
 def test_runtime_error_redaction_masks_env_payload_values() -> None:
     remote_cli = import_remote_cli_module()
     password = "super-secret-password"
-    sentinel = "SECRET_TEST_OPENCLAW_PROVIDER_VALUE"
+    sentinel = "SECRET_TEST_NEXTCLOUD_SMTP_VALUE"
 
     message = remote_cli._redact_runtime_message(
         (
             f"ssh failed with {password}\n"
-            "# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
-            "key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:def456\n"
-            f"OPENCLAW_PROVIDER_API_KEY={sentinel}"
+            "# dokploy-wizard-env marker=dokploy-wizard owner=nextcloud "
+            "key=NEXTCLOUD_SMTP_PASSWORD fingerprint=sha256:def456\n"
+            f"NEXTCLOUD_SMTP_PASSWORD={sentinel}"
         ),
         password=password,
     )
 
     assert password not in message
     assert sentinel not in message
-    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in message
+    assert "NEXTCLOUD_SMTP_PASSWORD=<REDACTED>" in message
     assert "fingerprint=sha256:def456" in message
 
 
 def test_verbose_progress_output_redacts_password_env_payload_and_docker_pat() -> None:
     remote_cli = import_remote_cli_module()
     password = "super-secret-password"
-    env_secret = "SECRET_TEST_OPENCLAW_PROVIDER_VALUE"
+    env_secret = "SECRET_TEST_NEXTCLOUD_SMTP_VALUE"
     docker_pat = "ghp_SECRETTESTDOCKERPATVALUE"
     stream = io.StringIO()
     reporter = remote_cli._RemoteProgressReporter(
@@ -601,13 +604,13 @@ def test_verbose_progress_output_redacts_password_env_payload_and_docker_pat() -
     reporter.remote_output(
         "mutate-install",
         "stdout",
-        "# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
-        "key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:def456",
+        "# dokploy-wizard-env marker=dokploy-wizard owner=nextcloud "
+        "key=NEXTCLOUD_SMTP_PASSWORD fingerprint=sha256:def456",
     )
     reporter.remote_output(
         "mutate-install",
         "stdout",
-        f"OPENCLAW_PROVIDER_API_KEY={env_secret}",
+        f"NEXTCLOUD_SMTP_PASSWORD={env_secret}",
     )
     reporter.remote_output("mutate-install", "stderr", f"DOCKER_PAT={docker_pat}")
 
@@ -615,7 +618,7 @@ def test_verbose_progress_output_redacts_password_env_payload_and_docker_pat() -
     assert password not in output
     assert env_secret not in output
     assert docker_pat not in output
-    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in output
+    assert "NEXTCLOUD_SMTP_PASSWORD=<REDACTED>" in output
     assert "DOCKER_PAT=<REDACTED>" in output
 
 

@@ -167,7 +167,7 @@ def test_modify_access_email_change_reruns_access_phase() -> None:
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
+            "ENABLE_CODER": "true",
             "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
         }
     )
@@ -175,7 +175,7 @@ def test_modify_access_email_change_reruns_access_phase() -> None:
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
+            "ENABLE_CODER": "true",
             "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com,ops@example.com",
         }
     )
@@ -193,7 +193,7 @@ def test_modify_access_email_change_reruns_access_phase() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "openclaw",
+                "coder",
                 "cloudflare_access",
             ),
         ),
@@ -202,8 +202,8 @@ def test_modify_access_email_change_reruns_access_phase() -> None:
         requested_desired=requested_desired,
     )
 
-    assert plan.start_phase == "openclaw"
-    assert plan.phases_to_run == ("openclaw", "cloudflare_access")
+    assert plan.start_phase == "cloudflare_access"
+    assert plan.phases_to_run == ("cloudflare_access",)
 
 
 def test_modify_rejects_legacy_checkpoint_contract_even_when_steps_match_old_prefix() -> None:
@@ -211,7 +211,7 @@ def test_modify_rejects_legacy_checkpoint_contract_even_when_steps_match_old_pre
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
+            "ENABLE_CODER": "true",
             "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
         }
     )
@@ -230,7 +230,7 @@ def test_modify_rejects_legacy_checkpoint_contract_even_when_steps_match_old_pre
                     "networking",
                     "cloudflare_access",
                     "shared_core",
-                    "openclaw",
+                    "coder",
                 ),
                 lifecycle_checkpoint_contract_version=1,
             ),
@@ -544,17 +544,15 @@ def test_modify_ignores_redundant_pack_enable_flags_when_packs_is_authoritative(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "my-farm-advisor",
-            "ENABLE_MY_FARM_ADVISOR": "true",
-            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
+            "PACKS": "coder",
+            "ENABLE_CODER": "true",
         }
     )
     requested_raw = _raw(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "my-farm-advisor",
-            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
+            "PACKS": "coder",
         }
     )
     existing_desired = resolve_desired_state(existing_raw)
@@ -571,8 +569,7 @@ def test_modify_ignores_redundant_pack_enable_flags_when_packs_is_authoritative(
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "my-farm-advisor",
-                "cloudflare_access",
+                "coder",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -580,22 +577,18 @@ def test_modify_ignores_redundant_pack_enable_flags_when_packs_is_authoritative(
         requested_desired=requested_desired,
     )
 
-    assert existing_desired.enabled_packs == requested_desired.enabled_packs == ("my-farm-advisor",)
+    assert existing_desired.enabled_packs == requested_desired.enabled_packs == ("coder",)
     assert plan.mode == "noop"
     assert plan.phases_to_run == ()
 
 
 def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
     assert get_mutable_pack_env_keys() == (
-        "ADVISOR_GATEWAY_PASSWORD",
         "AI_DEFAULT_API_KEY",
         "AI_DEFAULT_BASE_URL",
         "AI_DEFAULT_MODEL",
         "AI_DEFAULT_MODEL_PATTERN",
         "AI_DEFAULT_PROVIDER",
-        "ANTHROPIC_API_KEY",
-        "CF_ACCOUNT_ID",
-        "DATA_MODE",
         "HERMES_DESKTOP_CHANNEL",
         "HERMES_INFERENCE_PROVIDER",
         "HERMES_MODEL",
@@ -605,86 +598,11 @@ def test_modify_uses_explicit_pack_mutable_env_contract() -> None:
         "LITELLM_OPENCODE_GO_API_KEY",
         "LITELLM_OPENROUTER_API_KEY",
         "LITELLM_OPENROUTER_MODELS",
-        "MY_FARM_ADVISOR_CHANNELS",
-        "MY_FARM_ADVISOR_FALLBACK_MODELS",
-        "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
-        "MY_FARM_ADVISOR_NVIDIA_API_KEY",
-        "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
-        "MY_FARM_ADVISOR_PRIMARY_MODEL",
-        "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
-        "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
-        "NEXTCLOUD_OPENCLAW_RESCAN_CRON",
-        "NEXTCLOUD_OPENCLAW_RESCAN_TIMEZONE",
         "NVIDIA_BASE_URL",
-        "OPENCLAW_BOOTSTRAP_REFRESH",
-        "OPENCLAW_CHANNELS",
-        "OPENCLAW_FALLBACK_MODELS",
-        "OPENCLAW_FORCE_SKILL_SYNC",
-        "OPENCLAW_GATEWAY_PASSWORD",
-        "OPENCLAW_GATEWAY_TOKEN",
-        "OPENCLAW_MEMORY_SEARCH_ENABLED",
-        "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
-        "OPENCLAW_NEXA_AGENT_EMAIL",
-        "OPENCLAW_NEXA_AGENT_PASSWORD",
-        "OPENCLAW_NEXA_AGENT_USER_ID",
-        "OPENCLAW_NEXA_DEPLOYMENT_MODE",
-        "OPENCLAW_NEXA_EDITOR_EVENTS_SHARED_SECRET",
-        "OPENCLAW_NEXA_MEM0_API_KEY",
-        "OPENCLAW_NEXA_MEM0_BASE_URL",
-        "OPENCLAW_NEXA_MEM0_EMBEDDER_DIMENSIONS",
-        "OPENCLAW_NEXA_MEM0_EMBEDDER_MODEL",
-        "OPENCLAW_NEXA_MEM0_LLM_API_KEY",
-        "OPENCLAW_NEXA_MEM0_LLM_BASE_URL",
-        "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY",
-        "OPENCLAW_NEXA_MEM0_VECTOR_BACKEND",
-        "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL",
-        "OPENCLAW_NEXA_MEM0_VECTOR_DIMENSIONS",
-        "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL",
-        "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET",
-        "OPENCLAW_NEXA_PRESENCE_POLICY",
-        "OPENCLAW_NEXA_TALK_SHARED_SECRET",
-        "OPENCLAW_NEXA_TALK_SIGNING_SECRET",
-        "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD",
-        "OPENCLAW_NEXA_WEBDAV_AUTH_USER",
-        "OPENCLAW_NVIDIA_API_KEY",
-        "OPENCLAW_OPENROUTER_API_KEY",
-        "OPENCLAW_PRIMARY_MODEL",
-        "OPENCLAW_SYNC_SKILLS_ON_START",
-        "OPENCLAW_SYNC_SKILLS_OVERWRITE",
-        "OPENCLAW_TELEGRAM_BOT_TOKEN",
-        "OPENCLAW_TELEGRAM_GROUP_POLICY",
-        "OPENCLAW_TELEGRAM_OWNER_USER_ID",
         "OPENCODE_GO_API_KEY",
         "OPENCODE_GO_BASE_URL",
         "OUTBOUND_SMTP_FROM_ADDRESS",
         "OUTBOUND_SMTP_HOSTNAME",
-        "R2_ACCESS_KEY_ID",
-        "R2_BUCKET_NAME",
-        "R2_ENDPOINT",
-        "R2_SECRET_ACCESS_KEY",
-        "SURFSENSE_API_PUBLIC_URL",
-        "SURFSENSE_API_SUBDOMAIN",
-        "SURFSENSE_AUTH_TYPE",
-        "SURFSENSE_EMBEDDING_MODEL",
-        "SURFSENSE_ETL_SERVICE",
-        "SURFSENSE_FALLBACK_MODELS",
-        "SURFSENSE_FRONTEND_PUBLIC_URL",
-        "SURFSENSE_PRIMARY_MODEL",
-        "SURFSENSE_SUBDOMAIN",
-        "SURFSENSE_VERSION",
-        "SURFSENSE_ZERO_PUBLIC_URL",
-        "SURFSENSE_ZERO_SUBDOMAIN",
-        "TELEGRAM_ALLOWED_USERS",
-        "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
-        "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
-        "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
-        "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
-        "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
-        "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
-        "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
-        "TZ",
-        "WORKSPACE_DATA_R2_PREFIX",
-        "WORKSPACE_DATA_R2_RCLONE_MOUNT",
     )
 
 
@@ -693,7 +611,7 @@ def test_modify_accepts_canonical_nvidia_litellm_key_rotation_for_consumers() ->
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "coder,my-farm-advisor",
+            "PACKS": "coder",
             "AI_DEFAULT_PROVIDER": "nvidia",
             "AI_DEFAULT_MODEL": "moonshotai/kimi-k2.5",
             "LITELLM_NVIDIA_API_KEY": "old-fake-key",
@@ -726,8 +644,6 @@ def test_modify_accepts_canonical_nvidia_litellm_key_rotation_for_consumers() ->
                 "networking",
                 "shared_core",
                 "coder",
-                "my-farm-advisor",
-                "cloudflare_access",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -736,54 +652,8 @@ def test_modify_accepts_canonical_nvidia_litellm_key_rotation_for_consumers() ->
     )
 
     assert plan.mode == "modify"
-    assert plan.phases_to_run == ("shared_core", "coder", "my-farm-advisor")
+    assert plan.phases_to_run == ("shared_core", "coder")
     assert plan.initial_completed_steps == ("preflight", "dokploy_bootstrap", "networking")
-
-
-def test_modify_runs_nextcloud_when_nexa_service_account_fields_change() -> None:
-    existing_raw = RawEnvInput(
-        format_version=1,
-        values={
-            "STACK_NAME": "wizard-stack",
-            "ROOT_DOMAIN": "example.com",
-            "ENABLE_NEXTCLOUD": "true",
-            "ENABLE_OPENCLAW": "true",
-            "OPENCLAW_CHANNELS": "telegram",
-            "OPENCLAW_NEXA_AGENT_USER_ID": "nexa-agent",
-            "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa",
-            "OPENCLAW_NEXA_AGENT_PASSWORD": "ChangeMeSoon",
-        },
-    )
-    requested_raw = RawEnvInput(
-        format_version=1,
-        values={
-            **existing_raw.values,
-            "OPENCLAW_NEXA_AGENT_DISPLAY_NAME": "Nexa Runtime",
-        },
-    )
-
-    plan = classify_modify_request(
-        existing_raw=existing_raw,
-        existing_desired=resolve_desired_state(existing_raw),
-        existing_applied=AppliedStateCheckpoint(
-            format_version=1,
-            desired_state_fingerprint=resolve_desired_state(existing_raw).fingerprint(),
-            completed_steps=(
-                "preflight",
-                "dokploy_bootstrap",
-                "networking",
-                "shared_core",
-                "nextcloud",
-                "openclaw",
-            ),
-        ),
-        existing_ledger=OwnershipLedger(format_version=1, resources=()),
-        requested_raw=requested_raw,
-        requested_desired=resolve_desired_state(requested_raw),
-    )
-
-    assert "nextcloud" in plan.phases_to_run
-    assert "openclaw" in plan.phases_to_run
 
 
 def test_modify_coder_hermes_env_change_reruns_coder() -> None:
@@ -828,23 +698,70 @@ def test_modify_coder_hermes_env_change_reruns_coder() -> None:
     assert plan.phases_to_run == ("shared_core", "coder")
 
 
-def _classify_surfsense_modify(
+def test_modify_coder_opencode_go_key_rotation_reruns_shared_core_and_coder() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_CODER": "true",
+            "OPENCODE_GO_API_KEY": "token-a",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_CODER": "true",
+            "OPENCODE_GO_API_KEY": "token-b",
+        }
+    )
+
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "coder",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert "OPENCODE_GO_API_KEY" in plan.reasons[0]
+    assert plan.start_phase == "shared_core"
+    assert plan.phases_to_run == ("shared_core", "coder")
+
+
+def _classify_mail_pack_modify(
     *,
-    existing_values: dict[str, str],
-    requested_values: dict[str, str],
+    key: str,
+    old_value: str,
+    new_value: str,
 ) -> LifecyclePlan:
     existing_raw = _raw(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "surfsense",
-            **existing_values,
+            "PACKS": "docuseal,moodle",
+            key: old_value,
         }
     )
     requested_raw = _raw(
         {
             **existing_raw.values,
-            **requested_values,
+            key: new_value,
         }
     )
     existing_desired = resolve_desired_state(existing_raw)
@@ -861,7 +778,8 @@ def _classify_surfsense_modify(
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "surfsense",
+                "moodle",
+                "docuseal",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -873,66 +791,66 @@ def _classify_surfsense_modify(
 @pytest.mark.parametrize(
     ("key", "old_value", "new_value"),
     (
-        ("SURFSENSE_VERSION", "0.0.25", "0.0.26"),
+        ("OUTBOUND_SMTP_HOSTNAME", "mail.example.com", "smtp.example.com"),
         (
-            "SURFSENSE_FRONTEND_PUBLIC_URL",
-            "https://research.example.com",
-            "https://surfsense.example.com",
+            "OUTBOUND_SMTP_FROM_ADDRESS",
+            "DoNotReply@example.com",
+            "NoReply@example.com",
         ),
-        (
-            "SURFSENSE_API_PUBLIC_URL",
-            "https://research-api.example.com",
-            "https://surfsense-api.example.com",
-        ),
-        (
-            "SURFSENSE_ZERO_PUBLIC_URL",
-            "https://research-zero.example.com",
-            "https://surfsense-zero.example.com",
-        ),
-        ("SURFSENSE_AUTH_TYPE", "DISABLED", "OIDC"),
-        ("SURFSENSE_ETL_SERVICE", "DOCLING", "UNSTRUCTURED"),
-        ("SURFSENSE_EMBEDDING_MODEL", "text-embedding-3-small", "custom-embedding"),
     ),
 )
-def test_modify_surfsense_runtime_key_change_reruns_surfsense(
+def test_modify_outbound_mail_key_change_reruns_mail_relay_and_consumers(
     key: str, old_value: str, new_value: str
 ) -> None:
-    plan = _classify_surfsense_modify(
-        existing_values={key: old_value},
-        requested_values={key: new_value},
-    )
-
-    assert plan.mode == "modify"
-    assert plan.start_phase == "surfsense"
-    assert plan.phases_to_run == ("surfsense",)
-
-
-@pytest.mark.parametrize(
-    ("key", "old_value", "new_value"),
-    (
-        (
-            "SURFSENSE_PRIMARY_MODEL",
-            "local-model.internal/unsloth-active",
-            "openrouter/hunter-alpha",
-        ),
-        (
-            "SURFSENSE_FALLBACK_MODELS",
-            "openrouter/hunter-alpha",
-            "openrouter/healer-alpha,openrouter/sonoma-dusk-alpha",
-        ),
-    )
-)
-def test_modify_surfsense_model_key_change_reruns_litellm_and_surfsense(
-    key: str, old_value: str, new_value: str
-) -> None:
-    plan = _classify_surfsense_modify(
-        existing_values={key: old_value},
-        requested_values={key: new_value},
-    )
+    plan = _classify_mail_pack_modify(key=key, old_value=old_value, new_value=new_value)
 
     assert plan.mode == "modify"
     assert plan.start_phase == "shared_core"
-    assert plan.phases_to_run == ("shared_core", "surfsense")
+    assert plan.phases_to_run == ("shared_core", "moodle", "docuseal")
+
+
+def test_modify_enabling_matrix_adds_networking_shared_core_and_matrix_phases() -> None:
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "nextcloud",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "matrix,nextcloud",
+        }
+    )
+
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "nextcloud",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert "PACKS" in plan.reasons[0]
+    assert plan.phases_to_run == ("networking", "shared_core", "matrix")
+    assert "nextcloud" in plan.preserved_phases
 
 
 def test_modify_litellm_desired_only_local_alias_removal_reruns_consumers() -> None:
@@ -940,7 +858,7 @@ def test_modify_litellm_desired_only_local_alias_removal_reruns_consumers() -> N
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "coder,my-farm-advisor,nextcloud",
+            "PACKS": "coder,nextcloud",
             "AI_DEFAULT_PROVIDER": "openrouter",
             "AI_DEFAULT_MODEL": "deepseek/deepseek-v4.1-flash:free",
             "LITELLM_OPENROUTER_API_KEY": "sk-test-openrouter",
@@ -978,8 +896,6 @@ def test_modify_litellm_desired_only_local_alias_removal_reruns_consumers() -> N
                 "shared_core",
                 "nextcloud",
                 "coder",
-                "my-farm-advisor",
-                "cloudflare_access",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -991,7 +907,7 @@ def test_modify_litellm_desired_only_local_alias_removal_reruns_consumers() -> N
     assert plan.start_phase == "shared_core"
     assert plan.raw_equivalent is True
     assert plan.desired_equivalent is False
-    assert plan.phases_to_run == ("shared_core", "coder", "my-farm-advisor")
+    assert plan.phases_to_run == ("shared_core", "coder")
 
 
 def test_modify_rejects_arbitrary_desired_only_shared_core_drift() -> None:
@@ -1033,153 +949,9 @@ def test_modify_rejects_arbitrary_desired_only_shared_core_drift() -> None:
 
 
 def test_modify_uses_explicit_pack_mutable_resource_contract() -> None:
-    assert get_mutable_pack_resource_keys() == (
-        "MY_FARM_ADVISOR_REPLICAS",
-        "OPENCLAW_REPLICAS",
-    )
-
-
-def test_modify_openclaw_replicas_change_uses_pack_mutable_resource_contract() -> None:
-    existing_raw = _raw(
-        {
-            "STACK_NAME": "wizard-stack",
-            "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
-            "OPENCLAW_REPLICAS": "1",
-        }
-    )
-    requested_raw = _raw(
-        {
-            "STACK_NAME": "wizard-stack",
-            "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
-            "OPENCLAW_REPLICAS": "3",
-        }
-    )
-
-    existing_desired = resolve_desired_state(existing_raw)
-    requested_desired = resolve_desired_state(requested_raw)
-
-    plan = classify_modify_request(
-        existing_raw=existing_raw,
-        existing_desired=existing_desired,
-        existing_applied=AppliedStateCheckpoint(
-            format_version=1,
-            desired_state_fingerprint=existing_desired.fingerprint(),
-            completed_steps=(
-                "preflight",
-                "dokploy_bootstrap",
-                "networking",
-                "shared_core",
-                "openclaw",
-                "cloudflare_access",
-            ),
-        ),
-        existing_ledger=OwnershipLedger(format_version=1, resources=()),
-        requested_raw=requested_raw,
-        requested_desired=requested_desired,
-    )
-
-    assert plan.mode == "modify"
-    assert "OPENCLAW_REPLICAS" in plan.reasons[0]
-    assert plan.start_phase == "openclaw"
-    assert plan.phases_to_run == ("openclaw",)
-
-
-def test_modify_openclaw_channels_change_uses_pack_mutable_contract() -> None:
-    existing_raw = _raw(
-        {
-            "STACK_NAME": "wizard-stack",
-            "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
-            "OPENCLAW_CHANNELS": "telegram",
-        }
-    )
-    requested_raw = _raw(
-        {
-            "STACK_NAME": "wizard-stack",
-            "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
-            "OPENCLAW_CHANNELS": "matrix,telegram",
-            "ENABLE_MATRIX": "true",
-        }
-    )
-
-    existing_desired = resolve_desired_state(existing_raw)
-    requested_desired = resolve_desired_state(requested_raw)
-
-    plan = classify_modify_request(
-        existing_raw=existing_raw,
-        existing_desired=existing_desired,
-        existing_applied=AppliedStateCheckpoint(
-            format_version=1,
-            desired_state_fingerprint=existing_desired.fingerprint(),
-            completed_steps=(
-                "preflight",
-                "dokploy_bootstrap",
-                "networking",
-                "shared_core",
-                "openclaw",
-                "cloudflare_access",
-            ),
-        ),
-        existing_ledger=OwnershipLedger(format_version=1, resources=()),
-        requested_raw=requested_raw,
-        requested_desired=requested_desired,
-    )
-
-    assert plan.mode == "modify"
-    assert "OPENCLAW_CHANNELS" in plan.reasons[0]
-    assert plan.phases_to_run == ("networking", "shared_core", "matrix", "openclaw")
-
-
-def test_modify_openclaw_gateway_token_change_uses_pack_mutable_contract() -> None:
-    existing_raw = _raw(
-        {
-            "STACK_NAME": "wizard-stack",
-            "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
-            "OPENCLAW_CHANNELS": "telegram",
-            "OPENCLAW_GATEWAY_TOKEN": "token-a",
-        }
-    )
-    requested_raw = _raw(
-        {
-            "STACK_NAME": "wizard-stack",
-            "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
-            "OPENCLAW_CHANNELS": "telegram",
-            "OPENCLAW_GATEWAY_TOKEN": "token-b",
-        }
-    )
-
-    existing_desired = resolve_desired_state(existing_raw)
-    requested_desired = resolve_desired_state(requested_raw)
-
-    plan = classify_modify_request(
-        existing_raw=existing_raw,
-        existing_desired=existing_desired,
-        existing_applied=AppliedStateCheckpoint(
-            format_version=1,
-            desired_state_fingerprint=existing_desired.fingerprint(),
-            completed_steps=(
-                "preflight",
-                "dokploy_bootstrap",
-                "networking",
-                "shared_core",
-                "openclaw",
-                "cloudflare_access",
-            ),
-        ),
-        existing_ledger=OwnershipLedger(format_version=1, resources=()),
-        requested_raw=requested_raw,
-        requested_desired=requested_desired,
-    )
-
-    assert plan.mode == "modify"
-    assert "OPENCLAW_GATEWAY_TOKEN" in plan.reasons[0]
-    assert plan.start_phase == "openclaw"
-    assert plan.phases_to_run == ("openclaw",)
+    # No surviving pack exposes mutable replica knobs, so the resource-key contract
+    # is empty and any *_REPLICAS key stays an unsupported modify input.
+    assert get_mutable_pack_resource_keys() == ()
 
 
 def test_modify_litellm_admin_hostname_reconciles_networking_and_shared_core() -> None:
@@ -1234,8 +1006,7 @@ def test_modify_litellm_admin_hostname_reapplies_cloudflare_access_when_enabled(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
-            "OPENCLAW_CHANNELS": "telegram",
+            "ENABLE_CODER": "true",
             "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
             "LITELLM_ADMIN_SUBDOMAIN": "litellm",
         }
@@ -1244,8 +1015,7 @@ def test_modify_litellm_admin_hostname_reapplies_cloudflare_access_when_enabled(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
-            "OPENCLAW_CHANNELS": "telegram",
+            "ENABLE_CODER": "true",
             "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
             "LITELLM_ADMIN_SUBDOMAIN": "ai-gateway",
         }
@@ -1264,7 +1034,7 @@ def test_modify_litellm_admin_hostname_reapplies_cloudflare_access_when_enabled(
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "openclaw",
+                "coder",
                 "cloudflare_access",
             ),
         ),
@@ -1278,14 +1048,13 @@ def test_modify_litellm_admin_hostname_reapplies_cloudflare_access_when_enabled(
     assert plan.phases_to_run == ("networking", "shared_core", "cloudflare_access")
 
 
-def test_modify_openclaw_internal_hostname_reconciles_networking_and_openclaw_only() -> None:
+def test_modify_nextcloud_hostname_change_reconciles_networking_and_nextcloud_only() -> None:
     existing_raw = _raw(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
-            "OPENCLAW_CHANNELS": "telegram",
-            "OPENCLAW_INTERNAL_SUBDOMAIN": "openclaw-internal",
+            "ENABLE_NEXTCLOUD": "true",
+            "NEXTCLOUD_SUBDOMAIN": "cloud",
             "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
         }
     )
@@ -1293,9 +1062,8 @@ def test_modify_openclaw_internal_hostname_reconciles_networking_and_openclaw_on
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_OPENCLAW": "true",
-            "OPENCLAW_CHANNELS": "telegram",
-            "OPENCLAW_INTERNAL_SUBDOMAIN": "agent-openclaw",
+            "ENABLE_NEXTCLOUD": "true",
+            "NEXTCLOUD_SUBDOMAIN": "files",
             "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
         }
     )
@@ -1314,7 +1082,7 @@ def test_modify_openclaw_internal_hostname_reconciles_networking_and_openclaw_on
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "openclaw",
+                "nextcloud",
                 "cloudflare_access",
             ),
         ),
@@ -1324,9 +1092,9 @@ def test_modify_openclaw_internal_hostname_reconciles_networking_and_openclaw_on
     )
 
     assert plan.mode == "modify"
-    assert "OPENCLAW_INTERNAL_SUBDOMAIN" in plan.reasons[0]
-    assert plan.start_phase == "openclaw"
-    assert plan.phases_to_run == ("openclaw",)
+    assert "NEXTCLOUD_SUBDOMAIN" in plan.reasons[0]
+    assert plan.start_phase == "networking"
+    assert plan.phases_to_run == ("networking", "nextcloud")
 
 
 def test_modify_schedules_shared_core_for_projection_drift_and_unfinished_tail() -> None:
@@ -1334,7 +1102,7 @@ def test_modify_schedules_shared_core_for_projection_drift_and_unfinished_tail()
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "seaweedfs,coder,surfsense",
+            "PACKS": "seaweedfs,coder,nextcloud",
             "LITELLM_OPENROUTER_API_KEY": "or-key",
         }
     )
@@ -1343,14 +1111,14 @@ def test_modify_schedules_shared_core_for_projection_drift_and_unfinished_tail()
 
     # Simulates a wizard upgrade that added the model-sync projection while
     # the operator env stayed identical: the persisted desired state lacks
-    # model_sync, and the previous install stopped before surfsense applied.
+    # model_sync, and the previous install stopped before coder applied.
     existing_desired = replace(
         requested_desired,
         shared_core=replace(requested_desired.shared_core, model_sync=None),
     )
     applicable = applicable_phases_for(requested_desired)
-    assert applicable[-1] == "surfsense"
-    completed = tuple(phase for phase in applicable if phase != "surfsense")
+    assert applicable[-1] == "coder"
+    completed = tuple(phase for phase in applicable if phase != "coder")
     existing_applied = AppliedStateCheckpoint(
         format_version=1,
         desired_state_fingerprint=existing_desired.fingerprint(),
@@ -1367,5 +1135,5 @@ def test_modify_schedules_shared_core_for_projection_drift_and_unfinished_tail()
     )
 
     assert plan.mode == "modify"
-    assert plan.phases_to_run == ("shared_core", "surfsense")
-    assert "coder" in plan.preserved_phases
+    assert plan.phases_to_run == ("shared_core", "coder")
+    assert "nextcloud" in plan.preserved_phases

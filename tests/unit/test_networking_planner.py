@@ -219,7 +219,7 @@ class FakeCloudflareBackend:
         return policy
 
 
-def test_litellm_admin_access_planned_without_advisor_packs() -> None:
+def test_litellm_admin_access_planned_without_optional_packs() -> None:
     backend = FakeCloudflareBackend(
         existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel")
     )
@@ -349,10 +349,5 @@ def _desired_state(*, cloudflare_access_otp_emails: tuple[str, ...] = ("owner@ex
         hostnames={"dokploy": "dokploy.example.com"},
         seaweedfs_access_key=None,
         seaweedfs_secret_key=None,
-        openclaw_gateway_token=None,
-        openclaw_channels=(),
-        openclaw_replicas=None,
-        my_farm_advisor_channels=(),
-        my_farm_advisor_replicas=None,
         shared_core=build_shared_core_plan(stack_name="wizard-stack", enabled_packs=()),
     )

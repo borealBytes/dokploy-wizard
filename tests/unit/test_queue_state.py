@@ -33,7 +33,7 @@ def test_duplicate_ingress_event_and_job_collapse_by_idempotency(tmp_path: Path)
 
     first_job = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.talk.process_message",
+        job_type="nextcloud.talk.process_message",
         payload={"message_id": "msg-1"},
         idempotency_key="talk:evt-1",
         scope_key="talk-room:room-42",
@@ -42,7 +42,7 @@ def test_duplicate_ingress_event_and_job_collapse_by_idempotency(tmp_path: Path)
     )
     second_job = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.talk.process_message",
+        job_type="nextcloud.talk.process_message",
         payload={"message_id": "msg-1"},
         idempotency_key="talk:evt-1",
         scope_key="talk-room:room-42",
@@ -63,7 +63,7 @@ def test_retry_then_dead_letter_after_attempt_budget_is_exhausted(tmp_path: Path
     store = DurableQueueStore(tmp_path)
     enqueued = store.enqueue_job(
         queue="background",
-        job_type="nexa.onlyoffice.reconcile_saved_document",
+        job_type="nextcloud.onlyoffice.reconcile_saved_document",
         payload={"document_key": "doc-1"},
         idempotency_key="onlyoffice:doc-1:status:2",
         scope_key="document:doc-1",
@@ -110,7 +110,7 @@ def test_new_superseding_job_cancels_older_runnable_job(tmp_path: Path) -> None:
 
     old_job = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.onlyoffice.reconcile_saved_document",
+        job_type="nextcloud.onlyoffice.reconcile_saved_document",
         payload={"document_key": "doc-1", "status": 2},
         idempotency_key="onlyoffice:doc-1:version:171",
         scope_key="document:doc-1",
@@ -119,7 +119,7 @@ def test_new_superseding_job_cancels_older_runnable_job(tmp_path: Path) -> None:
     )
     new_job = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.onlyoffice.reconcile_saved_document",
+        job_type="nextcloud.onlyoffice.reconcile_saved_document",
         payload={"document_key": "doc-1", "status": 2},
         idempotency_key="onlyoffice:doc-1:version:172",
         scope_key="document:doc-1",
@@ -141,7 +141,7 @@ def test_new_superseding_job_does_not_cancel_older_leased_job(tmp_path: Path) ->
 
     old_job = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.onlyoffice.reconcile_saved_document",
+        job_type="nextcloud.onlyoffice.reconcile_saved_document",
         payload={"document_key": "doc-1", "status": 2},
         idempotency_key="onlyoffice:doc-1:version:171",
         scope_key="document:doc-1",
@@ -155,7 +155,7 @@ def test_new_superseding_job_does_not_cancel_older_leased_job(tmp_path: Path) ->
 
     new_job = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.onlyoffice.reconcile_saved_document",
+        job_type="nextcloud.onlyoffice.reconcile_saved_document",
         payload={"document_key": "doc-1", "status": 2},
         idempotency_key="onlyoffice:doc-1:version:172",
         scope_key="document:doc-1",
@@ -177,7 +177,7 @@ def test_scope_serialization_blocks_same_scope_until_current_lease_finishes(tmp_
     store = DurableQueueStore(tmp_path)
     first = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.talk.process_message",
+        job_type="nextcloud.talk.process_message",
         payload={"message_id": "msg-1"},
         idempotency_key="talk:evt-1",
         scope_key="talk-room:room-42",
@@ -185,7 +185,7 @@ def test_scope_serialization_blocks_same_scope_until_current_lease_finishes(tmp_
     )
     second = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.talk.process_message",
+        job_type="nextcloud.talk.process_message",
         payload={"message_id": "msg-2"},
         idempotency_key="talk:evt-2",
         scope_key="talk-room:room-42",
@@ -209,7 +209,7 @@ def test_global_single_thread_default_blocks_cross_scope_lease_until_active_work
     store = DurableQueueStore(tmp_path)
     first = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.talk.process_message",
+        job_type="nextcloud.talk.process_message",
         payload={"message_id": "msg-1"},
         idempotency_key="talk:evt-1",
         scope_key="talk-room:room-42",
@@ -217,7 +217,7 @@ def test_global_single_thread_default_blocks_cross_scope_lease_until_active_work
     )
     second = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.talk.process_message",
+        job_type="nextcloud.talk.process_message",
         payload={"message_id": "msg-2"},
         idempotency_key="talk:evt-2",
         scope_key="talk-room:room-43",
@@ -241,7 +241,7 @@ def test_foreground_jobs_get_priority_without_starving_background_work(tmp_path:
     store = DurableQueueStore(tmp_path)
     foreground_one = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.talk.process_message",
+        job_type="nextcloud.talk.process_message",
         payload={"message_id": "msg-1"},
         idempotency_key="talk:evt-foreground-1",
         scope_key="talk-room:room-1",
@@ -249,7 +249,7 @@ def test_foreground_jobs_get_priority_without_starving_background_work(tmp_path:
     )
     foreground_two = store.enqueue_job(
         queue="foreground",
-        job_type="nexa.talk.process_message",
+        job_type="nextcloud.talk.process_message",
         payload={"message_id": "msg-2"},
         idempotency_key="talk:evt-foreground-2",
         scope_key="talk-room:room-2",
@@ -257,7 +257,7 @@ def test_foreground_jobs_get_priority_without_starving_background_work(tmp_path:
     )
     background_one = store.enqueue_job(
         queue="background",
-        job_type="nexa.onlyoffice.reconcile_saved_document",
+        job_type="nextcloud.onlyoffice.reconcile_saved_document",
         payload={"document_key": "doc-1"},
         idempotency_key="onlyoffice:doc-1:status:6",
         scope_key="document:doc-1",

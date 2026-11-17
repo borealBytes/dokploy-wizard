@@ -43,7 +43,7 @@ ACCESS_OTP_PROVIDER_RESOURCE_TYPE = "cloudflare_access_otp_provider"
 ACCESS_APPLICATION_RESOURCE_TYPE = "cloudflare_access_application"
 ACCESS_POLICY_RESOURCE_TYPE = "cloudflare_access_policy"
 
-_NON_PUBLIC_HOSTNAME_KEYS = {"openclaw-internal"}
+_NON_PUBLIC_HOSTNAME_KEYS: frozenset[str] = frozenset()
 _LITELLM_ADMIN_ACCESS_KEY = "litellm-admin"
 # Cloudflare ships each account with an unnamed One-time PIN provider, so this is only the
 # name the wizard gives the provider it creates and the label it shows operators.
@@ -293,7 +293,7 @@ def reconcile_cloudflare_access(
     }
     outcome = "plan_only" if dry_run else ("applied" if "create" in actions else "already_present")
     notes = [
-        "Cloudflare Access self-hosted applications are applied to advisor hostnames and the LiteLLM admin hostname."
+        "Cloudflare Access self-hosted applications are applied to the LiteLLM admin hostname."
     ]
     litellm_hostname = dict(target_hostnames).get(_LITELLM_ADMIN_ACCESS_KEY)
     if litellm_hostname is not None:
@@ -579,10 +579,6 @@ def _resolve_access_policy(
 
 
 def _access_display_name(pack_name: str) -> str:
-    if pack_name == "openclaw":
-        return "Nexa Claw"
-    if pack_name == "my-farm-advisor":
-        return "Nexa Farm"
     if pack_name == _LITELLM_ADMIN_ACCESS_KEY:
         return "LiteLLM Admin"
     return pack_name
@@ -591,11 +587,7 @@ def _access_display_name(pack_name: str) -> str:
 def _access_target_hostnames(
     *, raw_env: RawEnvInput, desired_state: DesiredState
 ) -> tuple[tuple[str, str], ...]:
-    target_hostnames: list[tuple[str, str]] = [
-        (key, desired_state.hostnames[key])
-        for key in ("openclaw", "my-farm-advisor")
-        if key in desired_state.enabled_packs and key in desired_state.hostnames
-    ]
+    target_hostnames: list[tuple[str, str]] = []
     litellm_hostname = resolve_litellm_admin_hostname(raw_env=raw_env, desired_state=desired_state)
     if litellm_hostname is not None:
         target_hostnames.append(

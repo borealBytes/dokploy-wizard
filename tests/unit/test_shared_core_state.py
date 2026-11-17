@@ -16,7 +16,7 @@ def test_shared_core_plan_is_deterministic_and_services_are_planned_once() -> No
             "ROOT_DOMAIN": "example.com",
             "ENABLE_MATRIX": "true",
             "ENABLE_NEXTCLOUD": "true",
-            "ENABLE_OPENCLAW": "true",
+            "ENABLE_CODER": "true",
         },
     )
 
@@ -27,13 +27,13 @@ def test_shared_core_plan_is_deterministic_and_services_are_planned_once() -> No
     assert desired_state.shared_core.postgres.service_name == "shared-stack-shared-postgres"
     assert desired_state.shared_core.redis is not None
     assert desired_state.shared_core.redis.service_name == "shared-stack-shared-redis"
-    assert desired_state.selected_packs == ("matrix", "nextcloud", "openclaw")
+    assert desired_state.selected_packs == ("coder", "matrix", "nextcloud")
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
+        "coder",
         "matrix",
         "nextcloud",
-        "openclaw",
     ]
-    nextcloud_allocation = desired_state.shared_core.allocations[1]
+    nextcloud_allocation = desired_state.shared_core.allocations[2]
     assert nextcloud_allocation.postgres is not None
     assert nextcloud_allocation.postgres.user_name == "shared_stack_nextcloud"
     assert nextcloud_allocation.postgres.password_secret_ref == (

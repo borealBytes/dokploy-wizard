@@ -18,53 +18,7 @@ from dokploy_wizard.packs.env_metadata import (
 )
 from dokploy_wizard.packs.resolver import resolve_pack_selection
 from dokploy_wizard.state import RawEnvInput, resolve_desired_state
-
-_MY_FARM_ADVISOR_EXPECTED_MUTABLE_ENV_KEYS = {
-    "ADVISOR_GATEWAY_PASSWORD",
-    "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
-    "MY_FARM_ADVISOR_CHANNELS",
-    "AI_DEFAULT_API_KEY",
-    "AI_DEFAULT_BASE_URL",
-    "AI_DEFAULT_PROVIDER",
-    "AI_DEFAULT_MODEL",
-    "ANTHROPIC_API_KEY",
-    "LITELLM_OPENCODE_GO_API_KEY",
-    "LITELLM_OPENROUTER_API_KEY",
-    "LITELLM_OPENROUTER_MODELS",
-    "LITELLM_NVIDIA_API_KEY",
-    "LITELLM_NVIDIA_BASE_URL",
-    "LITELLM_NVIDIA_MODELS",
-    "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
-    "MY_FARM_ADVISOR_NVIDIA_API_KEY",
-    "NVIDIA_BASE_URL",
-    "MY_FARM_ADVISOR_PRIMARY_MODEL",
-    "MY_FARM_ADVISOR_FALLBACK_MODELS",
-    "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
-    "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
-    "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
-    "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
-    "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
-    "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
-    "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
-    "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
-    "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
-    "TELEGRAM_ALLOWED_USERS",
-    "OPENCLAW_TELEGRAM_GROUP_POLICY",
-    "TZ",
-    "OPENCLAW_SYNC_SKILLS_ON_START",
-    "OPENCLAW_SYNC_SKILLS_OVERWRITE",
-    "OPENCLAW_FORCE_SKILL_SYNC",
-    "OPENCLAW_BOOTSTRAP_REFRESH",
-    "OPENCLAW_MEMORY_SEARCH_ENABLED",
-    "R2_BUCKET_NAME",
-    "R2_ENDPOINT",
-    "R2_ACCESS_KEY_ID",
-    "R2_SECRET_ACCESS_KEY",
-    "CF_ACCOUNT_ID",
-    "DATA_MODE",
-    "WORKSPACE_DATA_R2_RCLONE_MOUNT",
-    "WORKSPACE_DATA_R2_PREFIX",
-}
+from dokploy_wizard.state.models import StateValidationError
 
 
 def test_catalog_exposes_expected_pack_metadata() -> None:
@@ -76,68 +30,39 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
         "nextcloud",
         "moodle",
         "docuseal",
-        "surfsense",
         "seaweedfs",
         "coder",
-        "openclaw",
-        "my-farm-advisor",
     ]
     assert get_pack_definition("headscale").default_enabled is False
     assert get_pack_definition("seaweedfs").slot is None
     assert get_pack_definition("seaweedfs").hostnames[0].key == "s3"
+    assert get_pack_definition("nextcloud").mutable_env_keys == ()
+    # The slot system is gone: no surviving pack occupies a mutual-exclusion slot.
+    assert all(pack.slot is None for pack in iter_pack_catalog())
     assert get_pack_definition("coder").hostnames[1].key == "coder-wildcard"
     assert "AI_DEFAULT_API_KEY" in get_pack_definition("coder").mutable_env_keys
     assert "AI_DEFAULT_BASE_URL" in get_pack_definition("coder").mutable_env_keys
     assert "AI_DEFAULT_PROVIDER" in get_pack_definition("coder").mutable_env_keys
     assert "AI_DEFAULT_MODEL" in get_pack_definition("coder").mutable_env_keys
+    assert "AI_DEFAULT_MODEL_PATTERN" in get_pack_definition("coder").mutable_env_keys
     assert "HERMES_INFERENCE_PROVIDER" in get_pack_definition("coder").mutable_env_keys
     assert "HERMES_MODEL" in get_pack_definition("coder").mutable_env_keys
+    assert "HERMES_DESKTOP_CHANNEL" in get_pack_definition("coder").mutable_env_keys
     assert "LITELLM_OPENCODE_GO_API_KEY" in get_pack_definition("coder").mutable_env_keys
     assert "LITELLM_OPENROUTER_API_KEY" in get_pack_definition("coder").mutable_env_keys
     assert "LITELLM_OPENROUTER_MODELS" in get_pack_definition("coder").mutable_env_keys
     assert "OPENCODE_GO_API_KEY" in get_pack_definition("coder").mutable_env_keys
     assert "OPENCODE_GO_BASE_URL" in get_pack_definition("coder").mutable_env_keys
-    assert get_pack_definition("openclaw").slot is None
-    assert get_pack_definition("my-farm-advisor").slot is None
-    assert get_pack_definition("openclaw").mutable_resource_keys == ("OPENCLAW_REPLICAS",)
-    assert "OPENCLAW_NEXA_DEPLOYMENT_MODE" in get_pack_definition("openclaw").mutable_env_keys
-    assert "OPENCLAW_NEXA_MEM0_BASE_URL" in get_pack_definition("openclaw").mutable_env_keys
-    assert "OPENCLAW_NEXA_PRESENCE_POLICY" in get_pack_definition("openclaw").mutable_env_keys
-    assert "OPENCLAW_NEXA_TALK_SHARED_SECRET" in get_pack_definition("openclaw").mutable_env_keys
-    assert "AI_DEFAULT_PROVIDER" in get_pack_definition("openclaw").mutable_env_keys
-    assert "AI_DEFAULT_MODEL" in get_pack_definition("openclaw").mutable_env_keys
-    assert "LITELLM_OPENCODE_GO_API_KEY" in get_pack_definition("openclaw").mutable_env_keys
-    assert "LITELLM_OPENROUTER_API_KEY" in get_pack_definition("openclaw").mutable_env_keys
-    assert "LITELLM_OPENROUTER_MODELS" in get_pack_definition("openclaw").mutable_env_keys
-    assert get_pack_definition("my-farm-advisor").depends_on == ()
-    assert _MY_FARM_ADVISOR_EXPECTED_MUTABLE_ENV_KEYS <= set(
-        get_pack_definition("my-farm-advisor").mutable_env_keys
+    assert get_pack_definition("coder").mutable_resource_keys == ()
+    assert get_pack_definition("moodle").depends_on == ()
+    assert get_pack_definition("moodle").mutable_env_keys == (
+        "OUTBOUND_SMTP_HOSTNAME",
+        "OUTBOUND_SMTP_FROM_ADDRESS",
     )
-    assert get_pack_definition("my-farm-advisor").mutable_resource_keys == (
-        "MY_FARM_ADVISOR_REPLICAS",
+    assert get_pack_definition("docuseal").mutable_env_keys == (
+        "OUTBOUND_SMTP_HOSTNAME",
+        "OUTBOUND_SMTP_FROM_ADDRESS",
     )
-    surfsense = get_pack_definition("surfsense")
-    assert surfsense.env_flag == "ENABLE_SURFSENSE"
-    assert surfsense.shared_core_requirements == ("postgres", "redis")
-    assert [
-        (hostname.key, hostname.default_subdomain, hostname.env_key)
-        for hostname in surfsense.hostnames
-    ] == [
-        ("surfsense", "surfsense", "SURFSENSE_SUBDOMAIN"),
-        ("surfsense-api", "surfsense-api", "SURFSENSE_API_SUBDOMAIN"),
-        ("surfsense-zero", "surfsense-zero", "SURFSENSE_ZERO_SUBDOMAIN"),
-    ]
-    assert {
-        "SURFSENSE_SUBDOMAIN",
-        "SURFSENSE_API_SUBDOMAIN",
-        "SURFSENSE_ZERO_SUBDOMAIN",
-        "SURFSENSE_VERSION",
-        "SURFSENSE_AUTH_TYPE",
-        "SURFSENSE_ETL_SERVICE",
-        "SURFSENSE_EMBEDDING_MODEL",
-        "SURFSENSE_PRIMARY_MODEL",
-        "SURFSENSE_FALLBACK_MODELS",
-    } <= set(surfsense.mutable_env_keys)
 
 
 def test_pack_env_metadata_covers_catalog_and_explicit_classifications() -> None:
@@ -149,58 +74,43 @@ def test_pack_env_metadata_covers_catalog_and_explicit_classifications() -> None
 
     assert metadata_keys == catalog_keys
 
-    openclaw_secret = get_pack_env_metadata("openclaw", "OPENCLAW_NEXA_TALK_SHARED_SECRET")
-    assert openclaw_secret.sensitive is True
-    assert openclaw_secret.required is False
-    assert openclaw_secret.shared is False
-    assert openclaw_secret.owner == "openclaw"
-    assert openclaw_secret.target_service_suffixes == ("openclaw",)
-    assert openclaw_secret.canonical_placeholder_name == (
-        "OPENCLAW_OPENCLAW_NEXA_TALK_SHARED_SECRET"
-    )
-
-    openclaw_model = get_pack_env_metadata("openclaw", "OPENCLAW_PRIMARY_MODEL")
-    assert openclaw_model.sensitive is False
-    assert openclaw_model.required is False
-    assert openclaw_model.canonical_placeholder_name == "OPENCLAW_OPENCLAW_PRIMARY_MODEL"
-
-    openclaw_gateway = get_pack_env_metadata("openclaw", "OPENCLAW_GATEWAY_PASSWORD")
-    assert openclaw_gateway.sensitive is True
-    assert openclaw_gateway.required is False
-    assert openclaw_gateway.required_placeholder is None
-
-    shared_default = get_pack_env_metadata("my-farm-advisor", "AI_DEFAULT_API_KEY")
+    shared_default = get_pack_env_metadata("coder", "AI_DEFAULT_API_KEY")
     assert shared_default.sensitive is True
+    assert shared_default.required is False
     assert shared_default.shared is True
     assert shared_default.owner == "shared-ai-defaults"
     assert shared_default.canonical_placeholder_name == "AI_DEFAULT_API_KEY"
 
-    surfsense_auth_type = get_pack_env_metadata("surfsense", "SURFSENSE_AUTH_TYPE")
-    assert surfsense_auth_type.sensitive is False
-    assert surfsense_auth_type.required is False
-    assert surfsense_auth_type.shared is False
-    assert surfsense_auth_type.owner == "surfsense"
-    assert surfsense_auth_type.target_service_suffixes == (
-        "surfsense-web",
-        "surfsense-backend",
-        "surfsense-zero",
-    )
-    assert surfsense_auth_type.canonical_placeholder_name == "SURFSENSE_SURFSENSE_AUTH_TYPE"
+    coder_model = get_pack_env_metadata("coder", "HERMES_MODEL")
+    assert coder_model.sensitive is False
+    assert coder_model.required is False
+    assert coder_model.canonical_placeholder_name == "CODER_HERMES_MODEL"
 
-    surfsense_model = get_pack_env_metadata("surfsense", "SURFSENSE_PRIMARY_MODEL")
-    assert surfsense_model.sensitive is False
-    assert surfsense_model.canonical_placeholder_name == "SURFSENSE_SURFSENSE_PRIMARY_MODEL"
+    coder_litellm_key = get_pack_env_metadata("coder", "LITELLM_OPENROUTER_API_KEY")
+    assert coder_litellm_key.sensitive is True
+    assert coder_litellm_key.shared is True
+    assert coder_litellm_key.owner == "shared-litellm"
+    assert coder_litellm_key.target_service_suffixes == ("shared-litellm",)
+    assert coder_litellm_key.canonical_placeholder_name == "LITELLM_OPENROUTER_API_KEY"
+
+    mail_hostname = get_pack_env_metadata("moodle", "OUTBOUND_SMTP_HOSTNAME")
+    assert mail_hostname.sensitive is False
+    assert mail_hostname.required is False
+    assert mail_hostname.shared is True
+    assert mail_hostname.owner == "shared-mail-relay"
+    assert mail_hostname.target_service_suffixes == ("shared-postfix",)
+    assert mail_hostname.canonical_placeholder_name == "OUTBOUND_SMTP_HOSTNAME"
 
 
 def test_pack_env_metadata_rejects_unrelated_non_shared_placeholder_collisions() -> None:
     entries = list(iter_pack_env_metadata())
-    openclaw_gateway = get_pack_env_metadata("openclaw", "OPENCLAW_GATEWAY_PASSWORD")
-    farm_gateway_index = entries.index(
-        get_pack_env_metadata("my-farm-advisor", "MY_FARM_ADVISOR_GATEWAY_PASSWORD")
+    coder_model = get_pack_env_metadata("coder", "HERMES_MODEL")
+    mail_hostname_index = entries.index(
+        get_pack_env_metadata("moodle", "OUTBOUND_SMTP_HOSTNAME")
     )
-    entries[farm_gateway_index] = replace(
-        entries[farm_gateway_index],
-        canonical_placeholder_name=openclaw_gateway.canonical_placeholder_name,
+    entries[mail_hostname_index] = replace(
+        entries[mail_hostname_index],
+        canonical_placeholder_name=coder_model.canonical_placeholder_name,
     )
 
     with pytest.raises(PackEnvMetadataError) as exc_info:
@@ -208,66 +118,38 @@ def test_pack_env_metadata_rejects_unrelated_non_shared_placeholder_collisions()
 
     message = str(exc_info.value)
     assert "Non-shared pack env placeholder collision" in message
-    assert "OPENCLAW_OPENCLAW_GATEWAY_PASSWORD" in message
-    assert "my-farm-advisor" in message
+    assert coder_model.canonical_placeholder_name in message
+    assert "shared-mail-relay" in message
+    assert "OUTBOUND_SMTP_HOSTNAME" in message
 
 
 def test_pack_env_specs_skip_empty_optional_values_without_required_placeholders() -> None:
     specs = build_pack_env_specs(
         "wizard-stack",
-        ("openclaw",),
+        ("coder",),
         {
-            "OPENCLAW_TELEGRAM_OWNER_USER_ID": "",
-            "OPENCLAW_PRIMARY_MODEL": "openrouter/model-a",
+            "OPENCODE_GO_BASE_URL": "",
+            "HERMES_MODEL": "deepseek-v4.1-flash",
         },
     )
 
     specs_by_name = {spec.name: spec for spec in specs}
-    assert "OPENCLAW_OPENCLAW_TELEGRAM_OWNER_USER_ID" not in specs_by_name
-    model_spec = specs_by_name["OPENCLAW_OPENCLAW_PRIMARY_MODEL"]
+    assert "CODER_OPENCODE_GO_BASE_URL" not in specs_by_name
+    model_spec = specs_by_name["CODER_HERMES_MODEL"]
     assert model_spec.sensitive is False
     assert model_spec.required is False
     assert model_spec.placeholder is None
 
 
-def test_pack_env_specs_default_my_farm_timezone_when_omitted() -> None:
-    specs = build_pack_env_specs(
-        "wizard-stack",
-        ("my-farm-advisor",),
-        {"MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder"},
-    )
-
-    specs_by_name = {spec.name: spec for spec in specs}
-    timezone_spec = specs_by_name["MY_FARM_ADVISOR_TZ"]
-    assert timezone_spec.value == "UTC"
-    assert timezone_spec.required is False
-    assert timezone_spec.placeholder is None
-    assert timezone_spec.target_services == ("wizard-stack-my-farm-advisor",)
-
-
-def test_pack_env_specs_preserve_explicit_my_farm_timezone() -> None:
-    specs = build_pack_env_specs(
-        "wizard-stack",
-        ("my-farm-advisor",),
-        {
-            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
-            "TZ": "America/Chicago",
-        },
-    )
-
-    specs_by_name = {spec.name: spec for spec in specs}
-    assert specs_by_name["MY_FARM_ADVISOR_TZ"].value == "America/Chicago"
-
-
 def test_pack_env_specs_use_redaction_classification_and_target_services() -> None:
     specs = build_pack_env_specs(
         "wizard-stack",
-        ("my-farm-advisor", "openclaw"),
+        ("coder", "docuseal"),
         {
             "AI_DEFAULT_API_KEY": "SECRET_TEST_SHARED_AI_VALUE",
-            "OPENCLAW_GATEWAY_PASSWORD": "SECRET_TEST_OPENCLAW_GATEWAY_VALUE",
-            "OPENCLAW_PRIMARY_MODEL": "openrouter/model-a",
-            "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN": "SECRET_TEST_FARM_BOT_TOKEN_VALUE",
+            "OPENCODE_GO_API_KEY": "SECRET_TEST_OPENCODE_GO_VALUE",
+            "LITELLM_OPENROUTER_API_KEY": "SECRET_TEST_OPENROUTER_VALUE",
+            "OUTBOUND_SMTP_HOSTNAME": "mail.example.com",
         },
     )
     specs_by_name = {spec.name: spec for spec in specs}
@@ -275,26 +157,24 @@ def test_pack_env_specs_use_redaction_classification_and_target_services() -> No
     shared_ai = specs_by_name["AI_DEFAULT_API_KEY"]
     assert shared_ai.sensitive is True
     assert shared_ai.owner == "shared-ai-defaults"
-    assert shared_ai.target_services == (
-        "wizard-stack-openclaw",
-        "wizard-stack-my-farm-advisor",
-    )
+    assert shared_ai.target_services == ("wizard-stack-coder",)
 
-    openclaw_gateway = specs_by_name["OPENCLAW_OPENCLAW_GATEWAY_PASSWORD"]
-    assert openclaw_gateway.sensitive is True
-    assert openclaw_gateway.owner == "openclaw"
-    assert openclaw_gateway.target_services == ("wizard-stack-openclaw",)
-    assert openclaw_gateway.placeholder is None
-    assert openclaw_gateway.required is False
+    opencode_go = specs_by_name["CODER_OPENCODE_GO_API_KEY"]
+    assert opencode_go.sensitive is True
+    assert opencode_go.owner == "coder"
+    assert opencode_go.target_services == ("wizard-stack-coder",)
+    assert opencode_go.placeholder is None
+    assert opencode_go.required is False
 
-    openclaw_model = specs_by_name["OPENCLAW_OPENCLAW_PRIMARY_MODEL"]
-    assert openclaw_model.sensitive is False
-    assert openclaw_model.target_services == ("wizard-stack-openclaw",)
+    litellm_key = specs_by_name["LITELLM_OPENROUTER_API_KEY"]
+    assert litellm_key.sensitive is True
+    assert litellm_key.owner == "shared-litellm"
+    assert litellm_key.target_services == ("wizard-stack-shared-litellm",)
 
-    farm_bot = specs_by_name["MY_FARM_ADVISOR_MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN"]
-    assert farm_bot.sensitive is True
-    assert farm_bot.owner == "my-farm-advisor"
-    assert farm_bot.target_services == ("wizard-stack-my-farm-advisor",)
+    mail_hostname = specs_by_name["OUTBOUND_SMTP_HOSTNAME"]
+    assert mail_hostname.sensitive is False
+    assert mail_hostname.owner == "shared-mail-relay"
+    assert mail_hostname.target_services == ("wizard-stack-shared-postfix",)
 
 
 def test_resolver_keeps_explicit_selection_separate_from_expanded_packs() -> None:
@@ -316,40 +196,44 @@ def test_resolver_keeps_explicit_selection_separate_from_expanded_packs() -> Non
     }
 
 
-def test_resolver_allows_both_advisor_packs_together() -> None:
+def test_resolver_allows_mail_and_matrix_packs_together() -> None:
     selection = resolve_pack_selection(
         {
-            "ENABLE_OPENCLAW": "true",
-            "ENABLE_MY_FARM_ADVISOR": "true",
+            "ENABLE_MOODLE": "true",
+            "ENABLE_DOCUSEAL": "true",
             "ENABLE_MATRIX": "true",
-            "OPENCLAW_CHANNELS": "telegram",
-            "MY_FARM_ADVISOR_CHANNELS": "telegram,matrix",
         },
         root_domain="example.com",
     )
 
-    assert selection.enabled_packs == ("matrix", "my-farm-advisor", "openclaw")
-    assert selection.openclaw_channels == ("telegram",)
-    assert selection.my_farm_advisor_channels == ("matrix", "telegram")
+    assert selection.enabled_packs == ("docuseal", "matrix", "moodle")
+    assert selection.enabled_features == ("dokploy",)
 
 
-def test_resolver_defaults_my_farm_advisor_channels_when_omitted_or_blank() -> None:
-    omitted_selection = resolve_pack_selection(
+def test_resolver_rejects_unknown_pack_selection() -> None:
+    with pytest.raises(
+        StateValidationError,
+        match=r"Unknown pack selection\(s\) in PACKS: \['does-not-exist'\]\.",
+    ):
+        resolve_pack_selection(
+            {
+                "PACKS": "does-not-exist",
+            },
+            root_domain="example.com",
+        )
+
+
+def test_resolver_explicit_disable_flag_overrides_packs_selection() -> None:
+    selection = resolve_pack_selection(
         {
-            "PACKS": "my-farm-advisor",
-        },
-        root_domain="example.com",
-    )
-    blank_selection = resolve_pack_selection(
-        {
-            "PACKS": "my-farm-advisor",
-            "MY_FARM_ADVISOR_CHANNELS": " ",
+            "PACKS": "matrix",
+            "ENABLE_MATRIX": "false",
         },
         root_domain="example.com",
     )
 
-    assert omitted_selection.my_farm_advisor_channels == ("telegram",)
-    assert blank_selection.my_farm_advisor_channels == ("telegram",)
+    assert selection.selected_packs == ()
+    assert selection.enabled_packs == ()
 
 
 def test_resolver_allows_existing_tailscale_to_satisfy_headscale_dependency() -> None:
@@ -364,18 +248,6 @@ def test_resolver_allows_existing_tailscale_to_satisfy_headscale_dependency() ->
 
     assert selection.enabled_packs == ("matrix",)
     assert selection.hostnames == {"matrix": "matrix.example.com"}
-
-
-def test_resolver_rejects_explicitly_disabled_required_dependency() -> None:
-    selection = resolve_pack_selection(
-        {
-            "ENABLE_OPENCLAW": "true",
-            "ENABLE_HEADSCALE": "false",
-        },
-        root_domain="example.com",
-    )
-
-    assert selection.enabled_packs == ("openclaw",)
 
 
 def test_resolver_builds_root_and_wildcard_coder_hostnames() -> None:
@@ -409,27 +281,10 @@ def test_resolver_preserves_explicit_nested_coder_wildcard_opt_in() -> None:
     }
 
 
-def test_resolver_builds_surfsense_hostnames_from_packs_selection() -> None:
+def test_resolver_full_pack_list_has_no_hostname_collisions() -> None:
     selection = resolve_pack_selection(
         {
-            "PACKS": "surfsense",
-        },
-        root_domain="example.com",
-    )
-
-    assert selection.selected_packs == ("surfsense",)
-    assert selection.enabled_packs == ("surfsense",)
-    assert selection.hostnames == {
-        "surfsense": "surfsense.example.com",
-        "surfsense-api": "surfsense-api.example.com",
-        "surfsense-zero": "surfsense-zero.example.com",
-    }
-
-
-def test_resolver_full_pack_list_with_surfsense_has_no_hostname_collisions() -> None:
-    selection = resolve_pack_selection(
-        {
-            "PACKS": "nextcloud,openclaw,my-farm-advisor,seaweedfs,coder,docuseal,surfsense",
+            "PACKS": "nextcloud,seaweedfs,coder,docuseal,matrix",
         },
         root_domain="example.com",
     )
@@ -437,28 +292,31 @@ def test_resolver_full_pack_list_with_surfsense_has_no_hostname_collisions() -> 
     assert selection.selected_packs == (
         "coder",
         "docuseal",
-        "my-farm-advisor",
+        "matrix",
         "nextcloud",
-        "openclaw",
         "seaweedfs",
-        "surfsense",
     )
     assert selection.enabled_packs == selection.selected_packs
-    assert selection.hostnames["surfsense"] == "surfsense.example.com"
-    assert selection.hostnames["surfsense-api"] == "surfsense-api.example.com"
-    assert selection.hostnames["surfsense-zero"] == "surfsense-zero.example.com"
+    assert selection.hostnames == {
+        "coder": "coder.example.com",
+        "coder-wildcard": "*.example.com",
+        "docuseal": "docuseal.example.com",
+        "matrix": "matrix.example.com",
+        "nextcloud": "nextcloud.example.com",
+        "onlyoffice": "office.example.com",
+        "s3": "s3.example.com",
+    }
     assert len(set(selection.hostnames.values())) == len(selection.hostnames)
 
 
-def test_full_pack_lifecycle_schedules_surfsense_after_faster_application_packs() -> None:
+def test_full_pack_lifecycle_orders_application_packs_after_shared_core() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
             values={
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
-                "PACKS": "nextcloud,openclaw,my-farm-advisor,seaweedfs,coder,docuseal,surfsense",
-                "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
+                "PACKS": "nextcloud,seaweedfs,coder,docuseal,matrix",
             },
         )
     )
@@ -474,31 +332,26 @@ def test_full_pack_lifecycle_schedules_surfsense_after_faster_application_packs(
         "networking",
         "shared_core",
         "seaweedfs",
+        "matrix",
         "nextcloud",
         "docuseal",
         "coder",
-        "openclaw",
-        "my-farm-advisor",
-        "cloudflare_access",
-        "surfsense",
     )
-    for earlier_pack in (
+    for application_pack in (
         "seaweedfs",
+        "matrix",
         "nextcloud",
         "docuseal",
         "coder",
-        "openclaw",
-        "my-farm-advisor",
     ):
-        assert phases.index(earlier_pack) < phases.index("surfsense")
+        assert phases.index("shared_core") < phases.index(application_pack)
 
 
 def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
     values = {
         "STACK_NAME": "catalog-stack",
         "ROOT_DOMAIN": "example.com",
-        "PACKS": "matrix,my-farm-advisor",
-        "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "sk-test-placeholder",
+        "PACKS": "matrix,nextcloud",
     }
     desired_state = resolve_desired_state(
         RawEnvInput(
@@ -507,11 +360,11 @@ def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
         )
     )
 
-    assert desired_state.selected_packs == ("matrix", "my-farm-advisor")
-    assert desired_state.enabled_packs == ("matrix", "my-farm-advisor")
+    assert desired_state.selected_packs == ("matrix", "nextcloud")
+    assert desired_state.enabled_packs == ("matrix", "nextcloud")
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
         "matrix",
-        "my-farm-advisor",
+        "nextcloud",
     ]
     assert (
         build_shared_core_plan("catalog-stack", desired_state.enabled_packs, values=values)
@@ -539,25 +392,23 @@ def test_resolved_state_includes_coder_shared_core_allocation() -> None:
     ]
 
 
-def test_resolved_state_includes_surfsense_shared_core_allocations() -> None:
+def test_resolved_state_includes_moodle_shared_core_allocation() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
             values={
-                "STACK_NAME": "surfsense-stack",
+                "STACK_NAME": "moodle-stack",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_SURFSENSE": "true",
+                "ENABLE_MOODLE": "true",
             },
         )
     )
 
-    assert desired_state.enabled_packs == ("surfsense",)
-    assert desired_state.hostnames["surfsense"] == "surfsense.example.com"
-    assert desired_state.hostnames["surfsense-api"] == "surfsense-api.example.com"
-    assert desired_state.hostnames["surfsense-zero"] == "surfsense-zero.example.com"
+    assert desired_state.enabled_packs == ("moodle",)
+    assert desired_state.hostnames["moodle"] == "moodle.example.com"
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
-        "surfsense"
+        "moodle"
     ]
     allocation = desired_state.shared_core.allocations[0]
     assert allocation.postgres is not None
-    assert allocation.redis is not None
+    assert allocation.redis is None

@@ -243,13 +243,6 @@ class DokploySharedCoreBackend:
                 allocation.database_name,
                 allocation.user_name,
             )
-            if _allocation_requires_surfsense_postgres_capabilities(allocation):
-                _ensure_postgres_role_superuser(container_name, allocation.user_name)
-                _ensure_postgres_extension(
-                    container_name,
-                    database_name=allocation.database_name,
-                    extension_name="vector",
-                )
 
     def validate_postgres_allocations(
         self, allocations: tuple[SharedPostgresAllocation, ...]
@@ -1082,7 +1075,7 @@ def _render_compose_file(
             f"  {plan.postgres.service_name}:\n"
             "    image: pgvector/pgvector:pg16\n"
             "    restart: unless-stopped\n"
-            "    command: [\"postgres\", \"-c\", \"wal_level=logical\", \"-c\", \"max_replication_slots=10\", \"-c\", \"max_wal_senders=10\"]\n"
+            "    command: [\"postgres\"]\n"
             "    environment:\n"
             '      POSTGRES_DB: "postgres"\n'
             '      POSTGRES_USER: "postgres"\n'
@@ -1402,8 +1395,6 @@ def _build_litellm_upstream_creds(litellm_env: dict[str, str]) -> dict[str, str]
     nvidia_env_name = _first_configured_env_name(
         litellm_env,
         "LITELLM_NVIDIA_API_KEY",
-        "MY_FARM_ADVISOR_NVIDIA_API_KEY",
-        "OPENCLAW_NVIDIA_API_KEY",
         "NVIDIA_API_KEY",
     )
     if nvidia_env_name is not None:
@@ -1567,8 +1558,6 @@ def _litellm_secret_ref_candidates(env_name: str) -> tuple[str, ...]:
     if env_name == "LITELLM_OPENROUTER_API_KEY":
         return (
             "LITELLM_OPENROUTER_API_KEY",
-            "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
-            "OPENCLAW_OPENROUTER_API_KEY",
             "AI_DEFAULT_API_KEY",
             "OPENROUTER_API_KEY",
         )
@@ -1631,7 +1620,7 @@ def _configure_local_litellm_chat_template_compatibility(config: dict[str, objec
             continue
         # vLLM-hosted local chat templates can reject system-role messages unless the
         # only system message is first. LiteLLM maps system content into user content
-        # when this flag is false, which keeps SurfSense chat histories compatible.
+        # when this flag is false, which keeps local-model chat histories compatible.
         litellm_params.setdefault("supports_system_message", False)
 
 
@@ -1661,7 +1650,6 @@ def build_litellm_consumer_model_allowlists(
         return {}
     config = build_litellm_config(flat_env, _build_litellm_upstream_creds(flat_env))
     projection_catalog = _build_litellm_consumer_projection_catalog(
-        flat_env=flat_env,
         config=config,
         plan=plan,
     )
@@ -1686,7 +1674,6 @@ def build_litellm_consumer_model_allowlists(
 
 def _build_litellm_consumer_projection_catalog(
     *,
-    flat_env: dict[str, str],
     config: Mapping[str, object],
     plan: SharedCorePlan,
 ) -> ModelCatalog:
@@ -1720,54 +1707,7 @@ def _build_litellm_consumer_projection_catalog(
         consumer: shared_aliases for consumer in _litellm_consumers()
     }
     visible_aliases_by_consumer["dokploy-ai"] = default_aliases[:1]
-    visible_aliases_by_consumer["my-farm-advisor"] = _advisor_alias_allowlist(
-        flat_env,
-        primary_key="MY_FARM_ADVISOR_PRIMARY_MODEL",
-        fallback_key="MY_FARM_ADVISOR_FALLBACK_MODELS",
-        catalog=base_catalog,
-        default_aliases=shared_aliases,
-        available_aliases=configured_aliases,
-    )
-    visible_aliases_by_consumer["openclaw"] = _advisor_alias_allowlist(
-        flat_env,
-        primary_key="OPENCLAW_PRIMARY_MODEL",
-        fallback_key="OPENCLAW_FALLBACK_MODELS",
-        catalog=base_catalog,
-        default_aliases=shared_aliases,
-        available_aliases=configured_aliases,
-    )
-    visible_aliases_by_consumer["surfsense"] = _advisor_alias_allowlist(
-        flat_env,
-        primary_key="SURFSENSE_PRIMARY_MODEL",
-        fallback_key="SURFSENSE_FALLBACK_MODELS",
-        catalog=base_catalog,
-        default_aliases=shared_aliases,
-        available_aliases=configured_aliases,
-    )
     return _project_catalog(base_catalog, visible_aliases_by_consumer)
-
-
-def _advisor_alias_allowlist(
-    flat_env: dict[str, str],
-    *,
-    primary_key: str,
-    fallback_key: str,
-    catalog: ModelCatalog,
-    default_aliases: tuple[str, ...],
-    available_aliases: set[str],
-) -> tuple[str, ...]:
-    aliases = [alias for alias in default_aliases if alias in available_aliases]
-    primary_model = _optional_value(flat_env, primary_key)
-    resolved_primary = _resolve_requested_catalog_alias(primary_model, catalog)
-    if resolved_primary is not None and resolved_primary in available_aliases:
-        aliases.append(resolved_primary)
-    fallback_models = _optional_value(flat_env, fallback_key)
-    if fallback_models is not None:
-        for model in fallback_models.split(","):
-            resolved_alias = _resolve_requested_catalog_alias(model.strip(), catalog)
-            if resolved_alias is not None and resolved_alias in available_aliases:
-                aliases.append(resolved_alias)
-    return tuple(dict.fromkeys(aliases))
 
 
 def _configured_litellm_aliases(config: Mapping[str, object]) -> set[str]:
@@ -1979,11 +1919,9 @@ def _render_postgres_init_script(allocations: tuple[SharedPostgresAllocation, ..
                 f'{password_env}_SQL=$(escape_sql_literal "$${{{password_env}}}")',
                 f'run_sql "DO {dollar_quote} BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = \'{_sql_literal(allocation.user_name)}\') THEN CREATE ROLE {user_name} WITH LOGIN PASSWORD \'${password_env}_SQL\'; END IF; END {dollar_quote};"',
                 f'run_sql "ALTER ROLE {user_name} WITH LOGIN PASSWORD \'${password_env}_SQL\';"',
-                *( [f'run_sql "ALTER ROLE {user_name} WITH SUPERUSER;"'] if _allocation_requires_surfsense_postgres_capabilities(allocation) else [] ),
                 f'run_sql "SELECT \'CREATE DATABASE {database_name} OWNER {user_name}\' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = \'{_sql_literal(allocation.database_name)}\')" | grep -q "CREATE DATABASE" && run_sql "CREATE DATABASE {database_name} OWNER {user_name};" || true',
                 f'run_sql "ALTER DATABASE {database_name} OWNER TO {user_name};"',
                 f'run_sql "GRANT ALL PRIVILEGES ON DATABASE {database_name} TO {user_name};"',
-                *( [f'psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname {database_name} -c "CREATE EXTENSION IF NOT EXISTS vector;"'] if _allocation_requires_surfsense_postgres_capabilities(allocation) else [] ),
                 "",
             )
         )
@@ -2149,10 +2087,6 @@ def _ensure_postgres_role(container_name: str, user_name: str, password: str) ->
     )
 
 
-def _ensure_postgres_role_superuser(container_name: str, user_name: str) -> None:
-    _run_psql(container_name, f'ALTER ROLE "{_sql_ident(user_name)}" WITH SUPERUSER;')
-
-
 def _ensure_postgres_database(container_name: str, database_name: str, owner_name: str) -> None:
     exists = _run_psql_scalar(
         container_name,
@@ -2173,22 +2107,6 @@ def _ensure_postgres_database(container_name: str, database_name: str, owner_nam
         f'GRANT ALL PRIVILEGES ON DATABASE "{_sql_ident(database_name)}" '
         f'TO "{_sql_ident(owner_name)}";',
     )
-
-
-def _ensure_postgres_extension(
-    container_name: str, *, database_name: str, extension_name: str
-) -> None:
-    _run_psql(
-        container_name,
-        f'CREATE EXTENSION IF NOT EXISTS "{_sql_ident(extension_name)}";',
-        database_name=database_name,
-    )
-
-
-def _allocation_requires_surfsense_postgres_capabilities(
-    allocation: SharedPostgresAllocation,
-) -> bool:
-    return allocation.password_secret_ref.endswith("-surfsense-postgres-password")
 
 
 def _can_connect_as_allocation(container_name: str, allocation: SharedPostgresAllocation) -> bool:

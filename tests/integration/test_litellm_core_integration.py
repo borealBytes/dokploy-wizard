@@ -35,23 +35,13 @@ from dokploy_wizard.state import (
     resolve_desired_state,
 )
 from dokploy_wizard.state.models import LiteLLMGeneratedKeys
-from tests.integration.test_networking_reconciler import (
-    FakeCloudflareBackend as NetworkingCloudflareBackend,
-)
-from tests.integration.test_networking_reconciler import (
-    FakeCoderBackend,
-)
-from tests.integration.test_openclaw_pack import (
+from tests.integration.test_nextcloud_pack import (
     FakeCloudflareBackend,
     FakeDokployBackend,
-    FakeHeadscaleBackend,
-    FakeMatrixBackend,
-    FakeOpenClawBackend,
     FakeSharedCoreBackend,
-    RecordingDokployOpenClawApi,
     _base_install_values,
-    _patch_real_dokploy_openclaw_backend,
 )
+from tests.unit.test_coder_pack import FakeCoderBackend
 
 # Static OpenCode Go routes are just the default alias; the full catalog is
 # autosynced under sync/opencode-go/*.
@@ -375,16 +365,11 @@ def test_build_litellm_config_integrates_all_supported_provider_types() -> None:
 def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consumers() -> None:
     plan = build_shared_core_plan(
         stack_name="wizard-stack",
-        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
     )
 
     allowlists = build_litellm_consumer_model_allowlists(
-        flat_env=_litellm_route_env(
-            MY_FARM_ADVISOR_PRIMARY_MODEL="nvidia/kimi-k2.5",
-            MY_FARM_ADVISOR_FALLBACK_MODELS="opencode-go/deepseek-v4.1-flash",
-            OPENCLAW_PRIMARY_MODEL="openrouter/hunter-alpha",
-            OPENCLAW_FALLBACK_MODELS="opencode-go/mimo-v2.5",
-        ),
+        flat_env=_litellm_route_env(),
         plan=plan,
     )
 
@@ -399,17 +384,18 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
         "dokploy-ai": ("local-model.internal/unsloth-active",),
-        "my-farm-advisor": (*shared_models, "nvidia/kimi-k2.5"),
-        "openclaw": shared_models,
-        "surfsense": shared_models,
     }
-    assert "opencode-go/deepseek-v4.1-flash" in allowlists["my-farm-advisor"]
+    # Consumer allowlists are explicit lists; provider passthrough aliases that
+    # are not shared defaults (nvidia) stay invisible until the sidecar merges
+    # them under sync/*, and no consumer may widen into a wildcard.
+    assert "nvidia/kimi-k2.5" not in allowlists["coder-hermes"]
+    assert "opencode-go/*" not in allowlists["coder-hermes"]
 
 
 def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases() -> None:
     plan = build_shared_core_plan(
         stack_name="wizard-stack",
-        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
     )
 
     allowlists = build_litellm_consumer_model_allowlists(
@@ -436,16 +422,13 @@ def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
         "dokploy-ai": ("local-model.internal/unsloth-active",),
-        "my-farm-advisor": shared_models,
-        "openclaw": shared_models,
-        "surfsense": shared_models,
     }
 
 
 def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_flag() -> None:
     plan = build_shared_core_plan(
         stack_name="wizard-stack",
-        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
     )
 
     allowlists = build_litellm_consumer_model_allowlists(
@@ -466,17 +449,14 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
         "dokploy-ai": ("local-model.internal/unsloth-active",),
-        "my-farm-advisor": shared_models,
-        "openclaw": shared_models,
-        "surfsense": shared_models,
     }
-    assert "opencode-go/*" not in allowlists["openclaw"]
-    assert "opencode-go/deepseek-v4.1-flash" in allowlists["openclaw"]
-    assert "opencode-go/text-embedding-3-large" not in allowlists["openclaw"]
-    assert "opencode-go/dall-e-3" not in allowlists["openclaw"]
-    assert "opencode-go/whisper-1" not in allowlists["openclaw"]
-    assert "opencode-go/sora-2" not in allowlists["openclaw"]
-    assert "opencode-go/gpt-image-1.5" not in allowlists["openclaw"]
+    assert "opencode-go/*" not in allowlists["coder-hermes"]
+    assert "opencode-go/deepseek-v4.1-flash" in allowlists["coder-hermes"]
+    assert "opencode-go/text-embedding-3-large" not in allowlists["coder-hermes"]
+    assert "opencode-go/dall-e-3" not in allowlists["coder-hermes"]
+    assert "opencode-go/whisper-1" not in allowlists["coder-hermes"]
+    assert "opencode-go/sora-2" not in allowlists["coder-hermes"]
+    assert "opencode-go/gpt-image-1.5" not in allowlists["coder-hermes"]
 
 
 def test_litellm_admin_reconciliation_adopts_live_managed_keys_into_generated_state(
@@ -484,15 +464,10 @@ def test_litellm_admin_reconciliation_adopts_live_managed_keys_into_generated_st
 ) -> None:
     plan = build_shared_core_plan(
         stack_name="wizard-stack",
-        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
     )
     allowlists = build_litellm_consumer_model_allowlists(
-        flat_env=_litellm_route_env(
-            MY_FARM_ADVISOR_PRIMARY_MODEL="nvidia/kimi-k2.5",
-            MY_FARM_ADVISOR_FALLBACK_MODELS="opencode-go/minimax-m2.7",
-            OPENCLAW_PRIMARY_MODEL="openrouter/hunter-alpha",
-            OPENCLAW_FALLBACK_MODELS="opencode-go/mimo-v2.5",
-        ),
+        flat_env=_litellm_route_env(),
         plan=plan,
     )
     generated_keys = _generated_keys_for_consumers(tuple(allowlists))
@@ -593,8 +568,9 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
     assert "  wizard-stack-shared-litellm:\n" in compose
     assert "image: ghcr.io/berriai/litellm:" in compose
     assert 'DATABASE_URL: "postgresql://wizard_stack_litellm:' in compose
-    assert "LITELLM_VIRTUAL_KEY_OPENCLAW" not in compose
-    assert "LITELLM_VIRTUAL_KEY_MY_FARM_ADVISOR" not in compose
+    # The backend renders before any consumer keys exist, so no virtual-key env
+    # reference may leak into the compose at all — for any consumer.
+    assert "LITELLM_VIRTUAL_KEY" not in compose
     assert loaded_state.applied_state is not None
     assert loaded_state.applied_state.completed_steps == (
         "preflight",
@@ -619,9 +595,6 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
         "coder-hermes",
         "coder-kdense",
         "dokploy-ai",
-        "my-farm-advisor",
-        "openclaw",
-        "surfsense",
     }
 
 
@@ -671,25 +644,21 @@ def test_core_only_rerun_is_noop_and_preserves_litellm_keys(
     assert api.deploy_calls == 1
 
 
-def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_farm(
+def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state_dir = tmp_path / "state"
-    env_file = tmp_path / "coder-farm.env"
+    env_file = tmp_path / "coder.env"
     shared_core_api = RecordingDokploySharedCoreApi()
-    networking_backend = NetworkingCloudflareBackend()
+    networking_backend = FakeCloudflareBackend()
     coder_backend = FakeCoderBackend()
-    openclaw_backend = FakeOpenClawBackend()
     initial_raw = RawEnvInput(
         format_version=1,
         values=_base_install_values(
             ENABLE_CODER="true",
-            ENABLE_MY_FARM_ADVISOR="true",
-            MY_FARM_ADVISOR_CHANNELS="telegram",
             AI_DEFAULT_API_KEY="shared-ai-key",
             AI_DEFAULT_BASE_URL="https://models.example.com/v1",
-            MY_FARM_ADVISOR_PRIMARY_MODEL="openrouter/hunter-alpha",
             OPENCODE_GO_API_KEY="opencode-go-key",
             LITELLM_OPENROUTER_MODELS="openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini",
             CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
@@ -699,12 +668,8 @@ def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_f
         format_version=1,
         values=_base_install_values(
             ENABLE_CODER="true",
-            ENABLE_MY_FARM_ADVISOR="true",
-            MY_FARM_ADVISOR_CHANNELS="telegram",
             AI_DEFAULT_API_KEY="shared-ai-key",
             AI_DEFAULT_BASE_URL="https://models.example.com/v1",
-            MY_FARM_ADVISOR_PRIMARY_MODEL="openrouter/hunter-alpha",
-            MY_FARM_ADVISOR_FALLBACK_MODELS="openrouter/healer-alpha",
             OPENCODE_GO_API_KEY="opencode-go-key",
             LITELLM_OPENROUTER_MODELS=(
                 "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini,"
@@ -729,10 +694,7 @@ def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_f
             shared_core_api,
             state_dir=state_dir,
         ),
-        headscale_backend=FakeHeadscaleBackend(),
-        matrix_backend=FakeMatrixBackend(),
         coder_backend=coder_backend,
-        openclaw_backend=openclaw_backend,
     )
     generated_before = load_litellm_generated_keys(state_dir)
 
@@ -748,10 +710,7 @@ def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_f
             shared_core_api,
             state_dir=state_dir,
         ),
-        headscale_backend=FakeHeadscaleBackend(),
-        matrix_backend=FakeMatrixBackend(),
         coder_backend=coder_backend,
-        openclaw_backend=openclaw_backend,
     )
     generated_after = load_litellm_generated_keys(state_dir)
 
@@ -759,13 +718,10 @@ def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_f
     assert summary["lifecycle"]["phases_to_run"] == [
         "shared_core",
         "coder",
-        "my-farm-advisor",
     ]
     assert summary["shared_core"]["outcome"] == "already_present"
     assert summary["coder"]["outcome"] in {"applied", "already_present"}
-    assert summary["my_farm_advisor"]["outcome"] in {"applied", "already_present"}
     assert shared_core_api.update_compose_calls == 2
-    assert openclaw_backend.update_calls == 1
     assert "openrouter/healer-alpha" in shared_core_api.compose_files_by_name["wizard-stack-shared"]
     assert generated_before is not None
     assert generated_after == generated_before
@@ -773,15 +729,14 @@ def test_modify_litellm_alias_change_keeps_generated_keys_stable_for_coder_and_f
     assert len(set(generated_after.virtual_keys.values())) == len(generated_after.virtual_keys)
 
 
-def test_coder_and_advisor_install_persist_consumer_specific_virtual_keys(
+def test_coder_install_persists_consumer_specific_virtual_keys(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state_dir = tmp_path / "state"
-    env_file = tmp_path / "coder-openclaw-farm.env"
-    api = RecordingDokployOpenClawApi()
+    env_file = tmp_path / "coder.env"
+    coder_backend = FakeCoderBackend()
 
-    _patch_real_dokploy_openclaw_backend(monkeypatch, api)
     monkeypatch.setattr(dokploy_wizard.cli, "_can_reuse_existing_dokploy_api_key", lambda **_: True)
     monkeypatch.setattr(dokploy_wizard.cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
 
@@ -793,23 +748,15 @@ def test_coder_and_advisor_install_persist_consumer_specific_virtual_keys(
             format_version=1,
             values=_base_install_values(
                 ENABLE_CODER="true",
-                ENABLE_OPENCLAW="true",
-                OPENCLAW_CHANNELS="telegram",
-                ENABLE_MY_FARM_ADVISOR="true",
-                MY_FARM_ADVISOR_CHANNELS="telegram",
                 AI_DEFAULT_API_KEY="shared-ai-key",
                 AI_DEFAULT_BASE_URL="https://models.example.com/v1",
-                MY_FARM_ADVISOR_PRIMARY_MODEL="anthropic/claude-sonnet-4",
                 CLOUDFLARE_ACCESS_OTP_EMAILS="admin@example.com",
             ),
         ),
         bootstrap_backend=FakeDokployBackend(True, True),
-        networking_backend=NetworkingCloudflareBackend(),
+        networking_backend=FakeCloudflareBackend(),
         shared_core_backend=FakeSharedCoreBackend(),
-        headscale_backend=FakeHeadscaleBackend(),
-        matrix_backend=FakeMatrixBackend(),
-        coder_backend=FakeCoderBackend(),
-        openclaw_backend=None,
+        coder_backend=coder_backend,
     )
 
     generated_keys = load_litellm_generated_keys(state_dir)
@@ -818,10 +765,6 @@ def test_coder_and_advisor_install_persist_consumer_specific_virtual_keys(
         "coder-hermes",
         "coder-kdense",
         "dokploy-ai",
-        "my-farm-advisor",
-        "openclaw",
-        "surfsense",
     }
-    assert len(set(generated_keys.virtual_keys.values())) == 6
-    assert api.compose_files_by_name["wizard-stack-openclaw"]
-    assert api.compose_files_by_name["wizard-stack-my-farm-advisor"]
+    assert len(set(generated_keys.virtual_keys.values())) == 3
+    assert coder_backend.existing_service is not None

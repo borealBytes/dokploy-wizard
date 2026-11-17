@@ -18,12 +18,10 @@ from dokploy_wizard.dokploy import (
     DokployDocuSealBackend,
     DokployMoodleBackend,
     DokployNextcloudBackend,
-    DokployOpenClawBackend,
     DokploySeaweedFsBackend,
     DokploySharedCoreBackend,
 )
 from dokploy_wizard.dokploy import coder as coder_module
-from dokploy_wizard.dokploy import openclaw as openclaw_module
 from dokploy_wizard.dokploy import seaweedfs as seaweedfs_module
 from dokploy_wizard.dokploy import shared_core as shared_core_module
 from dokploy_wizard.networking import (
@@ -49,7 +47,12 @@ from dokploy_wizard.state import (
     write_applied_checkpoint,
 )
 from dokploy_wizard.verification import ServiceVerificationResult
-from tests.integration.test_nextcloud_pack import NextcloudOccRecorder, RecordingNextcloudApi
+from tests.integration.test_nextcloud_pack import (
+    FakeDokployApiClient as RecordingNextcloudApi,
+)
+from tests.integration.test_nextcloud_pack import (
+    NextcloudOccRecorder,
+)
 from tests.unit.fake_dokploy import FakeDokployApiClient
 from tests.unit.test_docuseal_pack import FakeDokployDocuSealApiClient
 from tests.unit.test_litellm_shared_core import _FakeLiteLLMAdminApi
@@ -326,15 +329,7 @@ def _auth_email_only_raw_env() -> RawEnvInput:
             "DOKPLOY_SUBDOMAIN": "dokploy",
             "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
             "ENABLE_HEADSCALE": "true",
-            "PACKS": "nextcloud,openclaw,seaweedfs,coder",
-            "OPENCLAW_CHANNELS": "telegram",
-            "OPENCLAW_PRIMARY_MODEL": "nvidia/moonshotai/kimi-k2.5",
-            "OPENCLAW_FALLBACK_MODELS": (
-                "openrouter/nvidia/nemotron-3-super-120b-a12b:free,"
-                "openrouter/google/gemma-4-31b-it:free"
-            ),
-            "OPENCLAW_NVIDIA_API_KEY": "nvapi-test-key",
-            "OPENCLAW_OPENROUTER_API_KEY": "sk-or-test-key",
+            "PACKS": "nextcloud,seaweedfs,coder",
             "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
         },
@@ -657,7 +652,6 @@ class _FullStackClients:
     docuseal: FakeDokployDocuSealApiClient
     seaweedfs: FakeDokployApiClient
     coder: FakeDokployApiClient
-    openclaw: FakeDokployApiClient
 
 
 @dataclass
@@ -668,7 +662,6 @@ class _FullStackBackends:
     docuseal: DokployDocuSealBackend
     seaweedfs: DokploySeaweedFsBackend
     coder: DokployCoderBackend
-    openclaw: DokployOpenClawBackend
 
 
 def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
@@ -695,7 +688,6 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
         nextcloud_backend=first_backends.nextcloud,
         seaweedfs_backend=first_backends.seaweedfs,
         coder_backend=first_backends.coder,
-        openclaw_backend=first_backends.openclaw,
     )
 
     assert first_summary["shared_core"]["outcome"] == "applied"
@@ -704,7 +696,6 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
     assert first_summary["docuseal"]["outcome"] == "applied"
     assert first_summary["seaweedfs"]["outcome"] == "applied"
     assert first_summary["coder"]["outcome"] == "applied"
-    assert first_summary["openclaw"]["outcome"] == "applied"
     assert _mutation_counts(clients, service_names) == {
         "shared_core": (1, 1, 1),
         "nextcloud": (1, 2, 1),
@@ -712,7 +703,6 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
         "docuseal": (1, 1, 1),
         "seaweedfs": (1, 1, 1),
         "coder": (1, 1, 1),
-        "openclaw": (1, 1, 1),
     }
 
     _persist_missing_compose_hashes(
@@ -748,7 +738,6 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
         nextcloud_backend=second_backends.nextcloud,
         seaweedfs_backend=second_backends.seaweedfs,
         coder_backend=second_backends.coder,
-        openclaw_backend=second_backends.openclaw,
     )
     second_clients_after = _mutation_counts(clients, service_names)
 
@@ -759,7 +748,6 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
         "docuseal",
         "seaweedfs",
         "coder",
-        "openclaw",
     }.issubset(set(second_summary["lifecycle"]["phases_to_run"]))
     assert second_summary["shared_core"]["outcome"] == "already_present"
     assert second_summary["nextcloud"]["outcome"] == "already_present"
@@ -774,7 +762,6 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
         "docuseal": (0, 0, 0),
         "seaweedfs": (0, 0, 0),
         "coder": (0, 0, 0),
-        "openclaw": (0, 0, 0),
     }
 
 
@@ -784,7 +771,7 @@ def test_full_stack_deploy_rerun_only_redeploys_service_with_changed_compose(
     state_dir = tmp_path / "state"
     env_file = tmp_path / "full-stack-modify.env"
     initial_raw_env = _full_stack_raw_env()
-    modified_raw_env = _full_stack_raw_env(OPENCLAW_SUBDOMAIN="advisor")
+    modified_raw_env = _full_stack_raw_env(CODER_SUBDOMAIN="studio")
     networking_backend = FakeCloudflareBackend()
 
     clients, first_backends, service_names = _build_full_stack_backends(
@@ -803,7 +790,6 @@ def test_full_stack_deploy_rerun_only_redeploys_service_with_changed_compose(
         nextcloud_backend=first_backends.nextcloud,
         seaweedfs_backend=first_backends.seaweedfs,
         coder_backend=first_backends.coder,
-        openclaw_backend=first_backends.openclaw,
     )
 
     _persist_missing_compose_hashes(
@@ -833,26 +819,23 @@ def test_full_stack_deploy_rerun_only_redeploys_service_with_changed_compose(
         nextcloud_backend=modify_backends.nextcloud,
         seaweedfs_backend=modify_backends.seaweedfs,
         coder_backend=modify_backends.coder,
-        openclaw_backend=modify_backends.openclaw,
     )
     mutation_counts_after = _mutation_counts(clients, service_names)
 
-    assert "openclaw" in modify_summary["lifecycle"]["phases_to_run"]
+    assert "coder" in modify_summary["lifecycle"]["phases_to_run"]
     assert modify_summary["shared_core"]["outcome"] == "already_present"
     assert modify_summary["nextcloud"]["outcome"] == "already_present"
     assert modify_summary["moodle"]["outcome"] == "already_present"
     assert modify_summary["docuseal"]["outcome"] == "already_present"
     assert modify_summary["seaweedfs"]["outcome"] == "already_present"
     assert modify_summary["coder"]["outcome"] == "already_present"
-    assert modify_summary["openclaw"]["outcome"] == "applied"
     assert _mutation_deltas(mutation_counts_before, mutation_counts_after) == {
         "shared_core": (0, 0, 0),
         "nextcloud": (0, 0, 0),
         "moodle": (0, 0, 0),
         "docuseal": (0, 0, 0),
         "seaweedfs": (0, 0, 0),
-        "coder": (0, 0, 0),
-        "openclaw": (0, 1, 1),
+        "coder": (0, 1, 1),
     }
 
 
@@ -880,7 +863,6 @@ def test_full_stack_deploy_rerun_redeploys_unhealthy_service_instead_of_skipping
         nextcloud_backend=first_backends.nextcloud,
         seaweedfs_backend=first_backends.seaweedfs,
         coder_backend=first_backends.coder,
-        openclaw_backend=first_backends.openclaw,
     )
 
     _persist_missing_compose_hashes(
@@ -898,7 +880,7 @@ def test_full_stack_deploy_rerun_redeploys_unhealthy_service_instead_of_skipping
         state_dir=state_dir,
         monkeypatch=monkeypatch,
         clients=clients,
-        unhealthy_services={"openclaw"},
+        unhealthy_services={"coder"},
     )
     rerun_summary = run_install_flow(
         env_file=env_file,
@@ -911,19 +893,17 @@ def test_full_stack_deploy_rerun_redeploys_unhealthy_service_instead_of_skipping
         nextcloud_backend=unhealthy_backends.nextcloud,
         seaweedfs_backend=unhealthy_backends.seaweedfs,
         coder_backend=unhealthy_backends.coder,
-        openclaw_backend=unhealthy_backends.openclaw,
     )
     mutation_counts_after = _mutation_counts(clients, service_names)
 
-    assert rerun_summary["openclaw"]["outcome"] == "applied"
+    assert rerun_summary["coder"]["outcome"] == "already_present"
     assert _mutation_deltas(mutation_counts_before, mutation_counts_after) == {
         "shared_core": (0, 0, 0),
         "nextcloud": (0, 0, 0),
         "moodle": (0, 0, 0),
         "docuseal": (0, 0, 0),
         "seaweedfs": (0, 0, 0),
-        "coder": (0, 0, 0),
-        "openclaw": (0, 1, 1),
+        "coder": (0, 1, 1),
     }
 
 
@@ -956,9 +936,7 @@ def _full_stack_raw_env(**overrides: str) -> RawEnvInput:
         "ENABLE_MOODLE": "true",
         "ENABLE_DOCUSEAL": "true",
         "ENABLE_CODER": "true",
-        "ENABLE_OPENCLAW": "true",
         "ENABLE_SEAWEEDFS": "true",
-        "OPENCLAW_CHANNELS": "telegram",
         "AI_DEFAULT_API_KEY": "shared-ai-key",
         "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
         "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
@@ -986,7 +964,6 @@ def _build_full_stack_backends(
         "docuseal": f"{desired_state.stack_name}-docuseal",
         "seaweedfs": f"{desired_state.stack_name}-seaweedfs",
         "coder": f"{desired_state.stack_name}-coder",
-        "openclaw": f"{desired_state.stack_name}-openclaw",
     }
     nextcloud_allocation = _shared_allocation(desired_state=desired_state, pack_name="nextcloud")
     moodle_allocation = _shared_allocation(desired_state=desired_state, pack_name="moodle")
@@ -1010,7 +987,6 @@ def _build_full_stack_backends(
             docuseal=FakeDokployDocuSealApiClient(),
             seaweedfs=FakeDokployApiClient(),
             coder=FakeDokployApiClient(),
-            openclaw=FakeDokployApiClient(),
         )
 
     occ = NextcloudOccRecorder()
@@ -1041,18 +1017,6 @@ def _build_full_stack_backends(
         coder_module,
         "_list_workspaces",
         lambda **kwargs: (coder_module._default_workspace_name(desired_state.hostnames["coder"]),),
-    )
-    monkeypatch.setattr(openclaw_module, "_docker_container_is_up", lambda service_name: True)
-    monkeypatch.setattr(
-        openclaw_module,
-        "_wait_for_container_http_health",
-        lambda service_name, url, *, app_port: True,
-    )
-    monkeypatch.setattr(openclaw_module, "_wait_for_local_https_health", lambda url: True)
-    monkeypatch.setattr(
-        openclaw_module,
-        "_control_ui_origin_ready",
-        lambda service_name, url: True,
     )
     monkeypatch.setattr(
         shared_core_module,
@@ -1099,7 +1063,6 @@ def _build_full_stack_backends(
         integration_secret_ref=f"{desired_state.stack_name}-nextcloud-onlyoffice-jwt-secret",
         admin_user=raw_env.values["DOKPLOY_ADMIN_EMAIL"],
         admin_password=raw_env.values["DOKPLOY_ADMIN_PASSWORD"],
-        openclaw_volume_name=f"{desired_state.stack_name}-openclaw-data",
         state_dir=state_dir,
         client=clients.nextcloud,
     )
@@ -1201,27 +1164,6 @@ def _build_full_stack_backends(
     )
     monkeypatch.setattr(coder_backend, "check_health", lambda *, service, url: True)
 
-    openclaw_backend = DokployOpenClawBackend(
-        api_url="https://dokploy.example.com/api",
-        api_key="api-key-123",
-        stack_name=desired_state.stack_name,
-        openclaw_gateway_password="openclaw-ui-generated",
-        openclaw_ai_default_api_key=raw_env.values["AI_DEFAULT_API_KEY"],
-        openclaw_ai_default_base_url=raw_env.values["AI_DEFAULT_BASE_URL"],
-        state_dir=state_dir,
-        client=clients.openclaw,
-    )
-    monkeypatch.setattr(
-        openclaw_backend,
-        "_verify_service_runtime",
-        lambda *, service_name, variant, url: _verification_result(
-            service_name=service_name,
-            passed=variant not in unhealthy,
-            detail=f"{variant} runtime healthy at {url}",
-        ),
-    )
-    monkeypatch.setattr(openclaw_backend, "check_health", lambda *, service, url: True)
-
     return clients, _FullStackBackends(
         shared_core=shared_core_backend,
         nextcloud=nextcloud_backend,
@@ -1229,7 +1171,6 @@ def _build_full_stack_backends(
         docuseal=docuseal_backend,
         seaweedfs=seaweedfs_backend,
         coder=coder_backend,
-        openclaw=openclaw_backend,
     ), service_names
 
 
@@ -1284,9 +1225,6 @@ def _persist_missing_compose_hashes(
             service_names["seaweedfs"]
         ],
         service_names["coder"]: clients.coder.compose_files_by_name[service_names["coder"]],
-        service_names["openclaw"]: clients.openclaw.compose_files_by_name[
-            service_names["openclaw"]
-        ],
     }
     for service_name, rendered_compose in rendered_compose_by_service.items():
         if service_name in compose_hashes:
@@ -1314,7 +1252,6 @@ def _mutation_counts(
     shared_counts = clients.shared_core.mutation_counts(service_names["shared_core"])
     seaweed_counts = clients.seaweedfs.mutation_counts(service_names["seaweedfs"])
     coder_counts = clients.coder.mutation_counts(service_names["coder"])
-    openclaw_counts = clients.openclaw.mutation_counts(service_names["openclaw"])
     return {
         "shared_core": (shared_counts.create, shared_counts.update, shared_counts.deploy),
         "nextcloud": (
@@ -1334,7 +1271,6 @@ def _mutation_counts(
         ),
         "seaweedfs": (seaweed_counts.create, seaweed_counts.update, seaweed_counts.deploy),
         "coder": (coder_counts.create, coder_counts.update, coder_counts.deploy),
-        "openclaw": (openclaw_counts.create, openclaw_counts.update, openclaw_counts.deploy),
     }
 
 

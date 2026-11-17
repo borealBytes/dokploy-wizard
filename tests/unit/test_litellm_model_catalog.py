@@ -16,16 +16,15 @@ def test_build_model_catalog_returns_deterministic_aliases_targets_and_costs() -
         opencode_go_model_ids=("gpt-4.1-mini",),
         nvidia_alias_targets={"nvidia/kimi-k2.5": "nvidia/moonshot/kimi-k2.5"},
         visible_aliases_by_consumer={
-            "my-farm-advisor": (
+            "dokploy-ai": (
                 DEFAULT_LOCAL_CANONICAL_ALIAS,
                 "opencode-go/gpt-4.1-mini",
                 "openrouter/anthropic/claude-3.5-sonnet",
             ),
-            "openclaw": (
+            "coder-hermes": (
                 DEFAULT_LOCAL_CANONICAL_ALIAS,
                 "nvidia/kimi-k2.5",
             ),
-            "coder-hermes": (DEFAULT_LOCAL_CANONICAL_ALIAS,),
             "coder-kdense": ("opencode-go/gpt-4.1-mini",),
         },
         default_alias_order=(
@@ -61,8 +60,7 @@ def test_build_model_catalog_returns_deterministic_aliases_targets_and_costs() -
     assert local_entry.model_id == "unsloth-active"
     assert local_entry.visible_to_consumers == (
         "coder-hermes",
-        "my-farm-advisor",
-        "openclaw",
+        "dokploy-ai",
     )
     assert local_entry.input_cost_per_token is None
     assert local_entry.output_cost_per_token is None
@@ -73,7 +71,7 @@ def test_build_model_catalog_returns_deterministic_aliases_targets_and_costs() -
     assert opencode_entry.model_id == "gpt-4.1-mini"
     assert opencode_entry.visible_to_consumers == (
         "coder-kdense",
-        "my-farm-advisor",
+        "dokploy-ai",
     )
 
     openrouter_entry = catalog.entry_for("openrouter/anthropic/claude-3.5-sonnet")
@@ -101,7 +99,7 @@ def test_build_model_catalog_tracks_visibility_in_default_order() -> None:
         openrouter_model_ids=("anthropic/claude-3.5-sonnet",),
         opencode_go_model_ids=("gpt-4.1-mini", "o3-mini"),
         visible_aliases_by_consumer={
-            "my-farm-advisor": (
+            "dokploy-ai": (
                 DEFAULT_LOCAL_CANONICAL_ALIAS,
                 "openrouter/anthropic/claude-3.5-sonnet",
                 "opencode-go/o3-mini",
@@ -116,12 +114,12 @@ def test_build_model_catalog_tracks_visibility_in_default_order() -> None:
         ),
     )
 
-    assert catalog.visible_aliases_for("my-farm-advisor") == (
+    assert catalog.visible_aliases_for("dokploy-ai") == (
         DEFAULT_LOCAL_CANONICAL_ALIAS,
         "openrouter/anthropic/claude-3.5-sonnet",
         "opencode-go/o3-mini",
     )
-    assert catalog.fallback_alias_order_for("my-farm-advisor") == (
+    assert catalog.fallback_alias_order_for("dokploy-ai") == (
         DEFAULT_LOCAL_CANONICAL_ALIAS,
         "openrouter/anthropic/claude-3.5-sonnet",
         "opencode-go/o3-mini",

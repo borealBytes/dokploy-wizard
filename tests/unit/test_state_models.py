@@ -27,8 +27,8 @@ def test_desired_state_resolution_is_deterministic(tmp_path: Path) -> None:
                 "STACK_NAME=my-stack",
                 "ROOT_DOMAIN=example.com",
                 "ENABLE_NEXTCLOUD=true",
-                "ENABLE_OPENCLAW=true",
-                "OPENCLAW_CHANNELS=telegram,telegram",
+                "ENABLE_MOODLE=true",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,Owner@Example.COM,owner@example.com",
                 "ENABLE_MATRIX=false",
             ]
         )
@@ -39,8 +39,8 @@ def test_desired_state_resolution_is_deterministic(tmp_path: Path) -> None:
         "\n".join(
             [
                 "ENABLE_MATRIX=false",
-                "OPENCLAW_CHANNELS=telegram",
-                "ENABLE_OPENCLAW=true",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com",
+                "ENABLE_MOODLE=true",
                 "ROOT_DOMAIN=example.com",
                 "STACK_NAME=my-stack",
                 "ENABLE_NEXTCLOUD=true",
@@ -55,18 +55,17 @@ def test_desired_state_resolution_is_deterministic(tmp_path: Path) -> None:
 
     assert desired_a.to_dict() == desired_b.to_dict()
     assert desired_a.fingerprint() == desired_b.fingerprint()
-    assert desired_a.selected_packs == ("nextcloud", "openclaw")
-    assert desired_a.enabled_packs == ("nextcloud", "openclaw")
+    assert desired_a.selected_packs == ("moodle", "nextcloud")
+    assert desired_a.enabled_packs == ("moodle", "nextcloud")
     assert desired_a.hostnames["onlyoffice"] == "office.example.com"
     assert desired_a.dokploy_api_url is None
-    assert desired_a.openclaw_channels == ("telegram",)
-    assert desired_a.openclaw_replicas == 1
+    assert desired_a.cloudflare_access_otp_emails == ("owner@example.com",)
     assert desired_a.shared_core.network_name == "my-stack-shared"
     assert desired_a.shared_core.postgres is not None
     assert desired_a.shared_core.redis is not None
     assert [allocation.pack_name for allocation in desired_a.shared_core.allocations] == [
+        "moodle",
         "nextcloud",
-        "openclaw",
     ]
 
 
@@ -77,23 +76,22 @@ def test_explicitly_disabled_dependency_is_not_silently_reenabled() -> None:
             values={
                 "STACK_NAME": "my-stack",
                 "ROOT_DOMAIN": "example.com",
-                "PACKS": "nextcloud,openclaw,seaweedfs,coder",
+                "PACKS": "nextcloud,matrix,seaweedfs,coder",
                 "ENABLE_HEADSCALE": "false",
                 "ENABLE_TAILSCALE": "false",
-                "OPENCLAW_CHANNELS": "telegram",
                 "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
                 "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
             },
         )
     )
 
-    assert desired_state.selected_packs == ("coder", "nextcloud", "openclaw", "seaweedfs")
-    assert desired_state.enabled_packs == ("coder", "nextcloud", "openclaw", "seaweedfs")
+    assert desired_state.selected_packs == ("coder", "matrix", "nextcloud", "seaweedfs")
+    assert desired_state.enabled_packs == ("coder", "matrix", "nextcloud", "seaweedfs")
     assert "headscale" not in desired_state.hostnames
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
         "coder",
+        "matrix",
         "nextcloud",
-        "openclaw",
     ]
 
 
@@ -126,11 +124,6 @@ def test_models_round_trip_through_json() -> None:
         },
         seaweedfs_access_key=None,
         seaweedfs_secret_key=None,
-        openclaw_gateway_token=None,
-        openclaw_channels=(),
-        openclaw_replicas=None,
-        my_farm_advisor_channels=(),
-        my_farm_advisor_replicas=None,
         shared_core=resolve_desired_state(raw_input).shared_core,
     )
     applied_state = AppliedStateCheckpoint(

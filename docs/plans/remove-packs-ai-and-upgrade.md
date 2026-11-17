@@ -86,11 +86,29 @@ AI-provider plugin is a possible future consumer; not in this PR.
 | `state/models.py` | add `nextcloud` consumer + `sk-litellm-nextcloud` prefix |
 | `shared_core.py` | render `LITELLM_VIRTUAL_KEY_NEXTCLOUD` into the nextcloud service (mirror how `openclaw` consumed its key); nextcloud allowlist = shared aliases + `sync/*` |
 | Nextcloud reconciler | idempotent `occ app:install integration_openai` + `config:app:set` base URL (internal `http://<litellm>:4000/v1`) + key + default model; upsert semantics |
-| Dokploy | remove the `[:1]` slice and the sidecar-push exclusion; **D1**: seed one Dokploy AI provider row per configured alias (Dokploy's `ai.create` schema is one model per row), reconciled by wizard-owned name at install/modify |
+| Dokploy | remove the `[:1]` slice (`shared_core.py:1709`), the `sync/*` wildcard-append exclusion (`:1637`), and the sidecar consumer-key push exclusion (`:590`); **D1**: seed one Dokploy AI provider row per configured alias, reconciled by wizard-owned name at install/modify |
 | Tests | allowlist-shape tests for both keys; provider-row reconcile tests; "every consumer key allows the default" test extended |
 
 Follow-on (not in this PR): D2 — the sync sidecar reconciles Dokploy provider rows
 live from `/v1/models`.
+
+### D1 verified schema facts (upstream `Dokploy/dokploy` main, 2026-11-17)
+
+- `ai.delete` exists: mutation input `{aiId}`, permission `ai delete`, returns `true`
+  (`apps/dokploy/server/api/routers/ai.ts`).
+- `ai.create` input is `apiCreateAi` = exactly `{name, apiUrl, apiKey, model, isEnabled}`,
+  all required (`packages/server/src/db/schema/ai.ts`); the `ai` table has one `model`
+  text column — multi-model rows are impossible, confirming D1.
+- `ai.getAll` strips `apiKey` from every row, so reconcile comparisons must key on
+  (wizard-name, apiUrl, model, isEnabled) and re-send the key on `ai.update`;
+  `apiUpdateAi` is partial + `aiId`.
+- Rows are organization-scoped; `name` is free text (min 1 char).
+- Row naming scheme: `Dokploy Wizard LiteLLM · <alias>` per alias; the exact un-suffixed
+  base name counts as wizard-owned (legacy single row) and gets replaced by the
+  default-alias row. Never touch rows the wizard didn't name.
+- Desired alias set = configured catalog aliases (`_configured_litellm_aliases` from the
+  same rendered LiteLLM config) plus the default alias; verification asserts set equality
+  and runs `ai.testConnection` for the default-alias row only.
 
 ## Group 3 — `upgrade` command (PR B, scoped to O1+O2)
 

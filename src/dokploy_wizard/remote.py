@@ -606,7 +606,8 @@ def _resolve_expected_service_url_links(env_file: Path) -> tuple[tuple[str, str]
     for hostname_key, label in (
         ("nextcloud", "Nextcloud"),
         ("coder", "Coder"),
-        ("my-farm-advisor", "My Farm Advisor/Farm"),
+        ("docuseal", "DocuSeal"),
+        ("moodle", "Moodle"),
     ):
         hostname = desired_state.hostnames.get(hostname_key)
         if hostname:

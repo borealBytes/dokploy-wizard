@@ -19,7 +19,6 @@ from dokploy_wizard.state.models import (
     LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES,
     SEAWEEDFS_GENERATED_SECRET_PREFIXES,
     STATE_FORMAT_VERSION,
-    SURFSENSE_GENERATED_SECRET_PREFIXES,
     AppliedStateCheckpoint,
     DesiredState,
     LiteLLMGeneratedKeys,
@@ -27,7 +26,6 @@ from dokploy_wizard.state.models import (
     RawEnvInput,
     SeaweedFsGeneratedSecrets,
     StateValidationError,
-    SurfSenseGeneratedSecrets,
     litellm_key_uses_virtual_key_format,
 )
 from dokploy_wizard.state.queue_models import (
@@ -48,7 +46,6 @@ INBOX_EVENTS_FILE = "inbox-events.json"
 JOB_QUEUE_FILE = "job-queue.json"
 OUTBOUND_DELIVERIES_FILE = "outbound-deliveries.json"
 LITELLM_GENERATED_KEYS_FILE = "litellm-generated-keys.json"
-SURFSENSE_GENERATED_SECRETS_FILE = "surfsense-generated-secrets.json"
 SEAWEEDFS_GENERATED_SECRETS_FILE = "seaweedfs-generated-secrets.json"
 STATE_DOCUMENT_FILES = (
     RAW_INPUT_FILE,
@@ -438,7 +435,7 @@ def load_state_dir(state_dir: Path) -> LoadedState:
     return LoadedState(
         raw_input=_load_optional_document(state_dir / RAW_INPUT_FILE, RawEnvInput.from_dict),
         desired_state=_load_optional_document(
-            state_dir / DESIRED_STATE_FILE, _load_desired_state_with_legacy_sanitization
+            state_dir / DESIRED_STATE_FILE, DesiredState.from_dict
         ),
         applied_state=_load_optional_document(
             state_dir / APPLIED_STATE_FILE,
@@ -451,27 +448,6 @@ def load_state_dir(state_dir: Path) -> LoadedState:
     )
 
 
-def _load_desired_state_with_legacy_sanitization(payload: dict[str, Any]) -> DesiredState:
-    try:
-        return DesiredState.from_dict(payload)
-    except StateValidationError as error:
-        if not _is_legacy_disabled_openclaw_gateway_token_state(payload, error):
-            raise
-        sanitized_payload = dict(payload)
-        sanitized_payload["openclaw_gateway_token"] = None
-        return DesiredState.from_dict(sanitized_payload)
-
-
-def _is_legacy_disabled_openclaw_gateway_token_state(
-    payload: dict[str, Any], error: StateValidationError
-) -> bool:
-    if str(error) != "OpenClaw gateway token must be omitted when the OpenClaw pack is disabled.":
-        return False
-    enabled_packs = payload.get("enabled_packs")
-    if not isinstance(enabled_packs, list) or "openclaw" in enabled_packs:
-        return False
-    token = payload.get("openclaw_gateway_token")
-    return isinstance(token, str) and token != ""
 
 
 def write_inspection_snapshot(
@@ -509,33 +485,6 @@ def ensure_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys:
     return generated_keys
 
 
-def load_surfsense_generated_secrets(state_dir: Path) -> SurfSenseGeneratedSecrets | None:
-    return _load_optional_document(
-        state_dir / SURFSENSE_GENERATED_SECRETS_FILE,
-        SurfSenseGeneratedSecrets.from_dict,
-    )
-
-
-def write_surfsense_generated_secrets(
-    state_dir: Path, generated_secrets: SurfSenseGeneratedSecrets
-) -> None:
-    state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / SURFSENSE_GENERATED_SECRETS_FILE
-    _write_document(path, generated_secrets.to_dict())
-    path.chmod(0o600)
-
-
-def ensure_surfsense_generated_secrets(state_dir: Path) -> SurfSenseGeneratedSecrets:
-    existing = load_surfsense_generated_secrets(state_dir)
-    if existing is not None:
-        repaired_existing = _repair_surfsense_generated_secrets(existing)
-        if repaired_existing != existing:
-            write_surfsense_generated_secrets(state_dir, repaired_existing)
-        return repaired_existing
-
-    generated_secrets = _build_surfsense_generated_secrets()
-    write_surfsense_generated_secrets(state_dir, generated_secrets)
-    return generated_secrets
 
 
 def load_seaweedfs_generated_secrets(state_dir: Path) -> SeaweedFsGeneratedSecrets | None:
@@ -579,16 +528,6 @@ def _build_litellm_generated_keys() -> LiteLLMGeneratedKeys:
     )
 
 
-def _build_surfsense_generated_secrets() -> SurfSenseGeneratedSecrets:
-    return SurfSenseGeneratedSecrets(
-        format_version=STATE_FORMAT_VERSION,
-        secrets={
-            secret_name: _generate_secret(prefix=prefix)
-            for secret_name, prefix in SURFSENSE_GENERATED_SECRET_PREFIXES.items()
-        },
-    )
-
-
 def _build_seaweedfs_generated_secrets() -> SeaweedFsGeneratedSecrets:
     return SeaweedFsGeneratedSecrets(
         format_version=STATE_FORMAT_VERSION,
@@ -620,19 +559,6 @@ def _repair_litellm_generated_keys(existing: LiteLLMGeneratedKeys) -> LiteLLMGen
         virtual_keys=virtual_keys,
     )
 
-
-def _repair_surfsense_generated_secrets(
-    existing: SurfSenseGeneratedSecrets,
-) -> SurfSenseGeneratedSecrets:
-    secrets_by_name = dict(existing.secrets)
-    for secret_name, prefix in SURFSENSE_GENERATED_SECRET_PREFIXES.items():
-        if secrets_by_name.get(secret_name):
-            continue
-        secrets_by_name[secret_name] = _generate_secret(prefix=prefix)
-    return SurfSenseGeneratedSecrets(
-        format_version=existing.format_version,
-        secrets=secrets_by_name,
-    )
 
 
 def _repair_seaweedfs_generated_secrets(
@@ -716,7 +642,6 @@ def _validate_state_document_set(loaded_state: LoadedState) -> None:
         "dokploy_bootstrap",
         "networking",
         "shared_core",
-        "surfsense",
         "seaweedfs",
         "headscale",
         "tailscale",
@@ -725,8 +650,6 @@ def _validate_state_document_set(loaded_state: LoadedState) -> None:
         "moodle",
         "docuseal",
         "coder",
-        "openclaw",
-        "my-farm-advisor",
         "cloudflare_access",
     }
     unexpected_steps = sorted(

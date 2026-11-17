@@ -70,7 +70,7 @@ def test_scan_uses_generated_env_spec_secret_source_and_skips_source_file(tmp_pa
             {
                 "format_version": 1,
                 "master_key": "SECRET_TEST_GENERATED_MASTER_KEY",
-                "virtual_keys": {"openclaw": generated_secret},
+                "virtual_keys": {"coder-hermes": generated_secret},
             }
         ),
         encoding="utf-8",
@@ -90,24 +90,21 @@ def test_scan_uses_generated_env_spec_secret_source_and_skips_source_file(tmp_pa
 
     assert not result.passed
     rendered = json.dumps(result.to_dict(), sort_keys=True)
-    assert "litellm-generated-keys.json:virtual_keys:openclaw" in rendered
+    assert "litellm-generated-keys.json:virtual_keys:coder-hermes" in rendered
     assert generated_secret not in rendered
 
 
-def test_scan_uses_surfsense_generated_secret_source_and_skips_source_file(tmp_path: Path) -> None:
-    generated_secret = "SECRET_TEST_SURFSENSE_GENERATED_SECRET_KEY"
-    secret_source = tmp_path / "surfsense-generated-secrets.json"
+def test_scan_uses_seaweedfs_generated_secret_source_and_skips_source_file(
+    tmp_path: Path,
+) -> None:
+    generated_secret = "SECRET_TEST_SEAWEEDFS_GENERATED_SECRET_KEY"
+    secret_source = tmp_path / "seaweedfs-generated-secrets.json"
     secret_source.write_text(
         json.dumps(
             {
                 "format_version": 1,
-                "secrets": {
-                    "db_password": "SECRET_TEST_SURFSENSE_GENERATED_DB_PASSWORD",
-                    "jwt_secret": "SECRET_TEST_SURFSENSE_GENERATED_JWT_SECRET",
-                    "searxng_secret": "SECRET_TEST_SURFSENSE_GENERATED_SEARXNG_SECRET",
-                    "secret_key": generated_secret,
-                    "zero_admin_password": "SECRET_TEST_SURFSENSE_GENERATED_ZERO_ADMIN_PASSWORD",
-                },
+                "access_key": "SECRET_TEST_SEAWEEDFS_GENERATED_ACCESS_KEY",
+                "secret_key": generated_secret,
             }
         ),
         encoding="utf-8",
@@ -115,7 +112,7 @@ def test_scan_uses_surfsense_generated_secret_source_and_skips_source_file(tmp_p
     artifact_dir = tmp_path / "collected-remote"
     artifact_dir.mkdir()
     (artifact_dir / "inspect-state.json").write_text(
-        f'{{"SURFSENSE_SECRET_KEY":"{generated_secret}"}}\n',
+        f'{{"SEAWEEDFS_SECRET_KEY":"{generated_secret}"}}\n',
         encoding="utf-8",
     )
 
@@ -127,7 +124,7 @@ def test_scan_uses_surfsense_generated_secret_source_and_skips_source_file(tmp_p
 
     assert not result.passed
     rendered = json.dumps(result.to_dict(), sort_keys=True)
-    assert "surfsense-generated-secrets.json:secrets:secret_key" in rendered
+    assert "seaweedfs-generated-secrets.json:secret_key" in rendered
     assert generated_secret not in rendered
 
 

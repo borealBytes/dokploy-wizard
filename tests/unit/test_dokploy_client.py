@@ -590,7 +590,7 @@ def test_dokploy_client_lists_compose_schedules_with_query_string() -> None:
             "data": [
                 {
                     "scheduleId": "sch-1",
-                    "name": "wizard-openclaw-rescan",
+                    "name": "wizard-nextcloud-files-scan",
                     "serviceName": "wizard-nextcloud",
                     "cronExpression": "*/15 * * * *",
                     "timezone": "UTC",
@@ -626,7 +626,7 @@ def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None
         return {
             "data": {
                 "scheduleId": "sch-1",
-                "name": "wizard-openclaw-rescan",
+                "name": "wizard-nextcloud-files-scan",
                 "serviceName": "wizard-nextcloud",
                 "cronExpression": "*/15 * * * *",
                 "timezone": "UTC",
@@ -643,7 +643,7 @@ def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None
     )
 
     record = client.create_schedule(
-        name="wizard-openclaw-rescan",
+        name="wizard-nextcloud-files-scan",
         compose_id="cmp-1",
         service_name="wizard-nextcloud",
         cron_expression="*/15 * * * *",
@@ -655,7 +655,7 @@ def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None
 
     assert captured["url"] == "https://dokploy.example.com/api/schedule.create"
     assert captured["body"] == {
-        "name": "wizard-openclaw-rescan",
+        "name": "wizard-nextcloud-files-scan",
         "composeId": "cmp-1",
         "serviceName": "wizard-nextcloud",
         "cronExpression": "*/15 * * * *",
@@ -678,7 +678,7 @@ def test_dokploy_client_updates_compose_schedule_with_expected_payload() -> None
         return {
             "data": {
                 "scheduleId": "sch-1",
-                "name": "wizard-openclaw-rescan",
+                "name": "wizard-nextcloud-files-scan",
                 "serviceName": "wizard-nextcloud",
                 "cronExpression": "0 * * * *",
                 "timezone": "America/Detroit",
@@ -696,7 +696,7 @@ def test_dokploy_client_updates_compose_schedule_with_expected_payload() -> None
 
     record = client.update_schedule(
         schedule_id="sch-1",
-        name="wizard-openclaw-rescan",
+        name="wizard-nextcloud-files-scan",
         compose_id="cmp-1",
         service_name="wizard-nextcloud",
         cron_expression="0 * * * *",
@@ -709,7 +709,7 @@ def test_dokploy_client_updates_compose_schedule_with_expected_payload() -> None
     assert captured["url"] == "https://dokploy.example.com/api/schedule.update"
     assert captured["body"] == {
         "scheduleId": "sch-1",
-        "name": "wizard-openclaw-rescan",
+        "name": "wizard-nextcloud-files-scan",
         "composeId": "cmp-1",
         "serviceName": "wizard-nextcloud",
         "cronExpression": "0 * * * *",

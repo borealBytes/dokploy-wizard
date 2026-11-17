@@ -39,22 +39,10 @@ from dokploy_wizard.packs.nextcloud import (
     build_nextcloud_ledger,
     reconcile_nextcloud,
 )
-from dokploy_wizard.packs.openclaw import (
-    OpenClawBackend,
-    build_my_farm_advisor_ledger,
-    build_openclaw_ledger,
-    reconcile_my_farm_advisor,
-    reconcile_openclaw,
-)
 from dokploy_wizard.packs.seaweedfs import (
     SeaweedFsBackend,
     build_seaweedfs_ledger,
     reconcile_seaweedfs,
-)
-from dokploy_wizard.packs.surfsense import (
-    SurfSenseBackend,
-    build_surfsense_ledger,
-    reconcile_surfsense,
 )
 from dokploy_wizard.preflight import PreflightReport
 from dokploy_wizard.state import (
@@ -84,8 +72,6 @@ class LifecycleBackends:
     docuseal: DocuSealBackend
     seaweedfs: SeaweedFsBackend
     coder: CoderBackend
-    openclaw: OpenClawBackend
-    surfsense: SurfSenseBackend | None = None
 
 
 def execute_lifecycle_plan(
@@ -105,10 +91,6 @@ def execute_lifecycle_plan(
         _write_checkpoint(state_dir, desired_state, applicable_phases, valid_phases)
     phase_results: dict[str, dict[str, Any]] = {}
     current_ledger = ownership_ledger
-    nextcloud_refresh_phase = _nextcloud_refresh_phase(
-        phases_to_run=lifecycle_plan.phases_to_run,
-        enabled_packs=desired_state.enabled_packs,
-    )
 
     phase_results["preflight"] = preflight_report.to_dict()
     if not dry_run and "preflight" not in valid_phases:
@@ -243,26 +225,6 @@ def execute_lifecycle_plan(
                     data_resource_id=matrix.data_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
-        elif phase == "surfsense":
-            if backends.surfsense is None:
-                raise RuntimeError(
-                    "SurfSense backend is required when the SurfSense phase is applicable."
-                )
-            surfsense = reconcile_surfsense(
-                dry_run=dry_run,
-                desired_state=desired_state,
-                ownership_ledger=current_ledger,
-                backend=backends.surfsense,
-            )
-            phase_results[phase] = surfsense.result.to_dict()
-            if not dry_run:
-                current_ledger = build_surfsense_ledger(
-                    existing_ledger=current_ledger,
-                    stack_name=desired_state.stack_name,
-                    service_resource_id=surfsense.service_resource_id,
-                    data_resource_id=surfsense.data_resource_id,
-                )
-                write_ownership_ledger(state_dir, current_ledger)
         elif phase == "seaweedfs":
             seaweedfs = reconcile_seaweedfs(
                 dry_run=dry_run,
@@ -345,36 +307,6 @@ def execute_lifecycle_plan(
                     data_resource_id=coder.data_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
-        elif phase == "openclaw":
-            advisor = reconcile_openclaw(
-                dry_run=dry_run,
-                desired_state=desired_state,
-                ownership_ledger=current_ledger,
-                backend=backends.openclaw,
-            )
-            phase_results[phase] = advisor.result.to_dict()
-            if not dry_run:
-                current_ledger = build_openclaw_ledger(
-                    existing_ledger=current_ledger,
-                    stack_name=desired_state.stack_name,
-                    service_resource_id=advisor.service_resource_id,
-                )
-                write_ownership_ledger(state_dir, current_ledger)
-        elif phase == "my-farm-advisor":
-            advisor = reconcile_my_farm_advisor(
-                dry_run=dry_run,
-                desired_state=desired_state,
-                ownership_ledger=current_ledger,
-                backend=backends.openclaw,
-            )
-            phase_results[phase] = advisor.result.to_dict()
-            if not dry_run:
-                current_ledger = build_my_farm_advisor_ledger(
-                    existing_ledger=current_ledger,
-                    stack_name=desired_state.stack_name,
-                    service_resource_id=advisor.service_resource_id,
-                )
-                write_ownership_ledger(state_dir, current_ledger)
         elif phase == "cloudflare_access":
             access = reconcile_cloudflare_access(
                 dry_run=dry_run,
@@ -395,10 +327,6 @@ def execute_lifecycle_plan(
                 write_ownership_ledger(state_dir, current_ledger)
         _emit_lifecycle_phase_progress(phase, "finished")
         if not dry_run:
-            if phase == nextcloud_refresh_phase:
-                backends.nextcloud.refresh_openclaw_external_storage(
-                    admin_user=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
-                )
             valid_phases.add(phase)
             _promote_preserved_phases(
                 lifecycle_plan.preserved_phases, applicable_phases, valid_phases
@@ -413,18 +341,6 @@ def execute_lifecycle_plan(
         phase_results=phase_results,
         state_status="existing" if lifecycle_plan.mode != "install" else "fresh",
     )
-
-
-def _nextcloud_refresh_phase(
-    *, phases_to_run: tuple[str, ...], enabled_packs: tuple[str, ...]
-) -> str | None:
-    if "nextcloud" not in enabled_packs:
-        return None
-    advisor_phases = {"openclaw", "my-farm-advisor"}
-    for phase in reversed(phases_to_run):
-        if phase in advisor_phases:
-            return phase
-    return None
 
 
 def _write_checkpoint(
@@ -506,16 +422,13 @@ def _build_summary(
             "start_phase": lifecycle_plan.start_phase,
         },
         "matrix": phase_results.get("matrix", {"outcome": "not_run"}),
-        "my_farm_advisor": phase_results.get("my-farm-advisor", {"outcome": "not_run"}),
         "nextcloud": phase_results.get("nextcloud", {"outcome": "not_run"}),
         "moodle": phase_results.get("moodle", {"outcome": "not_run"}),
         "docuseal": phase_results.get("docuseal", {"outcome": "not_run"}),
         "coder": phase_results.get("coder", {"outcome": "not_run"}),
         "networking": phase_results.get("networking", {"outcome": "not_run"}),
-        "openclaw": phase_results.get("openclaw", {"outcome": "not_run"}),
         "preflight": preflight_report.to_dict(),
         "seaweedfs": phase_results.get("seaweedfs", {"outcome": "not_run"}),
-        "surfsense": phase_results.get("surfsense", {"outcome": "not_run"}),
         "shared_core": phase_results.get("shared_core", {"outcome": "not_run"}),
         "state_status": state_status,
         "tailscale": phase_results.get("tailscale", {"outcome": "not_run"}),
@@ -585,20 +498,6 @@ def _preserved_result(
         if result["outcome"] != "skipped":
             result["outcome"] = "already_present"
         return result
-    if phase == "surfsense":
-        if backends.surfsense is None:
-            raise RuntimeError(
-                "SurfSense backend is required when the SurfSense phase is preserved."
-            )
-        result = reconcile_surfsense(
-            dry_run=True,
-            desired_state=desired_state,
-            ownership_ledger=ownership_ledger,
-            backend=backends.surfsense,
-        ).result.to_dict()
-        if result["outcome"] != "skipped":
-            result["outcome"] = "already_present"
-        return result
     if phase == "seaweedfs":
         result = reconcile_seaweedfs(
             dry_run=True,
@@ -645,26 +544,6 @@ def _preserved_result(
             desired_state=desired_state,
             ownership_ledger=ownership_ledger,
             backend=backends.coder,
-        ).result.to_dict()
-        if result["outcome"] != "skipped":
-            result["outcome"] = "already_present"
-        return result
-    if phase == "openclaw":
-        result = reconcile_openclaw(
-            dry_run=True,
-            desired_state=desired_state,
-            ownership_ledger=ownership_ledger,
-            backend=backends.openclaw,
-        ).result.to_dict()
-        if result["outcome"] != "skipped":
-            result["outcome"] = "already_present"
-        return result
-    if phase == "my-farm-advisor":
-        result = reconcile_my_farm_advisor(
-            dry_run=True,
-            desired_state=desired_state,
-            ownership_ledger=ownership_ledger,
-            backend=backends.openclaw,
         ).result.to_dict()
         if result["outcome"] != "skipped":
             result["outcome"] = "already_present"

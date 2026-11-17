@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,15 @@ from dokploy_wizard.uninstall import (
     build_uninstall_plan,
     collect_confirmation_lines,
     compute_remaining_completed_steps,
+)
+from dokploy_wizard.uninstall.planner import (
+    MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
+    OPENCLAW_SERVICE_RESOURCE_TYPE,
+    SURFSENSE_DATA_RESOURCE_TYPE,
+    SURFSENSE_SERVICE_RESOURCE_TYPE,
 )
 
 
@@ -42,11 +52,13 @@ def _desired(*, nextcloud: bool = False, matrix: bool = False, coder: bool = Fal
         values["ENABLE_NEXTCLOUD"] = "true"
     if coder:
         values["ENABLE_CODER"] = "true"
-    values["ENABLE_OPENCLAW"] = "true"
     return resolve_desired_state(_raw(values))
 
 
 def test_uninstall_plan_retains_data_by_default() -> None:
+    # Legacy-ledger fixture: the retired packs are gone from the catalog, but a box
+    # whose ledger still names their resource types must plan a clean uninstall, so
+    # the planner keeps the deletion rules as literal insurance constants.
     desired = _desired(nextcloud=True, coder=True)
     ledger = OwnershipLedger(
         format_version=1,
@@ -97,24 +109,39 @@ def test_uninstall_plan_retains_data_by_default() -> None:
             OwnedResource("coder_service", "coder-1", "stack:nextcloud-stack:coder:service"),
             OwnedResource("coder_data", "coder-data", "stack:nextcloud-stack:coder:data"),
             OwnedResource(
-                "openclaw_service",
+                OPENCLAW_SERVICE_RESOURCE_TYPE,
                 "openclaw-1",
                 "stack:nextcloud-stack:openclaw",
             ),
             OwnedResource(
-                "openclaw_mem0_service",
+                OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
                 "mem0-1",
                 "stack:nextcloud-stack:openclaw-sidecar:mem0",
             ),
             OwnedResource(
-                "openclaw_qdrant_service",
+                OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
                 "qdrant-1",
                 "stack:nextcloud-stack:openclaw-sidecar:qdrant",
             ),
             OwnedResource(
-                "openclaw_runtime_service",
-                "nexa-runtime-1",
-                "stack:nextcloud-stack:openclaw-sidecar:nexa-runtime",
+                OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
+                "runtime-1",
+                "stack:nextcloud-stack:openclaw-sidecar:runtime",
+            ),
+            OwnedResource(
+                MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+                "advisor-1",
+                "stack:nextcloud-stack:my-farm-advisor",
+            ),
+            OwnedResource(
+                SURFSENSE_SERVICE_RESOURCE_TYPE,
+                "surfsense-1",
+                "stack:nextcloud-stack:surfsense",
+            ),
+            OwnedResource(
+                SURFSENSE_DATA_RESOURCE_TYPE,
+                "surfsense-data",
+                "stack:nextcloud-stack:surfsense-data",
             ),
         ),
     )
@@ -131,12 +158,14 @@ def test_uninstall_plan_retains_data_by_default() -> None:
         "cloudflare_access_otp_provider",
         "cloudflare_access_application",
         "cloudflare_access_policy",
-        "openclaw_service",
-        "openclaw_mem0_service",
-        "openclaw_qdrant_service",
-        "openclaw_runtime_service",
+        OPENCLAW_SERVICE_RESOURCE_TYPE,
+        OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
+        OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
+        OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
+        MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
         "nextcloud_service",
         "onlyoffice_service",
+        SURFSENSE_SERVICE_RESOURCE_TYPE,
         "coder_service",
         "headscale_service",
         "shared_core_litellm",
@@ -145,13 +174,50 @@ def test_uninstall_plan_retains_data_by_default() -> None:
         "cloudflare_dns_record",
         "cloudflare_tunnel",
     ]
+    assert [(item.phase, item.policy) for item in plan.deletions] == [
+        ("cloudflare_access", "retain_safe"),
+        ("cloudflare_access", "retain_safe"),
+        ("cloudflare_access", "retain_safe"),
+        ("openclaw", "retain_safe"),
+        ("openclaw", "retain_safe"),
+        ("openclaw", "retain_safe"),
+        ("openclaw", "retain_safe"),
+        ("my-farm-advisor", "retain_safe"),
+        ("nextcloud", "retain_safe"),
+        ("nextcloud", "retain_safe"),
+        ("surfsense", "retain_safe"),
+        ("coder", "retain_safe"),
+        ("headscale", "retain_safe"),
+        ("shared_core", "retain_safe"),
+        ("shared_core", "retain_safe"),
+        ("shared_core", "retain_safe"),
+        ("networking", "retain_safe"),
+        ("networking", "retain_safe"),
+    ]
     assert [resource.resource_type for resource in plan.retained_resources] == [
         "coder_data",
         "nextcloud_volume",
         "onlyoffice_volume",
         "shared_core_postgres",
         "shared_core_redis",
+        SURFSENSE_DATA_RESOURCE_TYPE,
     ]
+
+    destroy_plan = build_uninstall_plan(
+        raw_input=_raw({"STACK_NAME": "nextcloud-stack"}),
+        desired_state=desired,
+        ownership_ledger=ledger,
+        destroy_data=True,
+    )
+    assert destroy_plan.retained_resources == ()
+    typed = {
+        item.resource.resource_type: (item.phase, item.policy)
+        for item in destroy_plan.deletions
+    }
+    assert typed[SURFSENSE_DATA_RESOURCE_TYPE] == ("surfsense", "destroy_only")
+    assert typed[SURFSENSE_SERVICE_RESOURCE_TYPE] == ("surfsense", "retain_safe")
+    assert typed[MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE] == ("my-farm-advisor", "retain_safe")
+    assert typed[OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE] == ("openclaw", "retain_safe")
 
 
 def test_uninstall_plan_rejects_unknown_ledger_resource_type() -> None:
@@ -179,21 +245,30 @@ def test_compute_remaining_completed_steps_shrinks_after_runtime_delete() -> Non
             OwnedResource(
                 "shared_core_litellm", "litellm-1", "stack:nextcloud-stack:shared-litellm"
             ),
-            OwnedResource("openclaw_service", "openclaw-1", "stack:nextcloud-stack:openclaw"),
             OwnedResource(
-                "openclaw_mem0_service",
+                OPENCLAW_SERVICE_RESOURCE_TYPE,
+                "openclaw-1",
+                "stack:nextcloud-stack:openclaw",
+            ),
+            OwnedResource(
+                OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
                 "mem0-1",
                 "stack:nextcloud-stack:openclaw-sidecar:mem0",
             ),
             OwnedResource(
-                "openclaw_qdrant_service",
+                OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
                 "qdrant-1",
                 "stack:nextcloud-stack:openclaw-sidecar:qdrant",
             ),
             OwnedResource(
-                "openclaw_runtime_service",
-                "nexa-runtime-1",
-                "stack:nextcloud-stack:openclaw-sidecar:nexa-runtime",
+                OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
+                "runtime-1",
+                "stack:nextcloud-stack:openclaw-sidecar:runtime",
+            ),
+            OwnedResource(
+                MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+                "advisor-1",
+                "stack:nextcloud-stack:my-farm-advisor",
             ),
             OwnedResource(
                 "nextcloud_volume", "nextcloud-volume", "stack:nextcloud-stack:nextcloud-volume"
@@ -211,6 +286,79 @@ def test_compute_remaining_completed_steps_shrinks_after_runtime_delete() -> Non
     )
 
     assert completed == ("preflight", "dokploy_bootstrap")
+
+
+def test_compute_remaining_completed_steps_still_completes_legacy_retired_pack_phases() -> None:
+    # Insurance: an old box that ran the retired packs has a ledger naming their
+    # resources; a desired state (reconstructed by an older wizard) that still
+    # enables them must reach the full completed-steps prefix.
+    requested = resolve_desired_state(
+        _raw(
+            {
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "ENABLE_HEADSCALE": "true",
+            }
+        )
+    )
+    legacy = replace(
+        requested,
+        enabled_packs=tuple(
+            sorted(set(requested.enabled_packs) | {"openclaw", "my-farm-advisor"})
+        ),
+    )
+    legacy_ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource("cloudflare_tunnel", "tunnel-1", "account:one"),
+            OwnedResource("cloudflare_dns_record", "dns-1", "zone:one:dokploy.example.com"),
+            OwnedResource("cloudflare_dns_record", "dns-2", "zone:one:headscale.example.com"),
+            OwnedResource("shared_core_network", "net-1", "stack:wizard-stack:shared-network"),
+            OwnedResource("shared_core_postgres", "pg-1", "stack:wizard-stack:shared-postgres"),
+            OwnedResource("shared_core_litellm", "lm-1", "stack:wizard-stack:shared-litellm"),
+            OwnedResource("headscale_service", "hs-1", "stack:wizard-stack:headscale"),
+            OwnedResource(
+                OPENCLAW_SERVICE_RESOURCE_TYPE, "oc-1", "stack:wizard-stack:openclaw"
+            ),
+            OwnedResource(
+                OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
+                "mem0-1",
+                "stack:wizard-stack:openclaw-sidecar:mem0",
+            ),
+            OwnedResource(
+                OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
+                "qdrant-1",
+                "stack:wizard-stack:openclaw-sidecar:qdrant",
+            ),
+            OwnedResource(
+                OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
+                "runtime-1",
+                "stack:wizard-stack:openclaw-sidecar:runtime",
+            ),
+            OwnedResource(
+                MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+                "advisor-1",
+                "stack:wizard-stack:my-farm-advisor",
+            ),
+        ),
+    )
+
+    completed = compute_remaining_completed_steps(
+        desired_state=legacy,
+        raw_input=_raw({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"}),
+        ownership_ledger=legacy_ledger,
+    )
+
+    assert completed == (
+        "preflight",
+        "dokploy_bootstrap",
+        "networking",
+        "cloudflare_access",
+        "shared_core",
+        "headscale",
+        "openclaw",
+        "my-farm-advisor",
+    )
 
 
 def test_access_is_complete_only_when_the_admin_hostname_has_its_resources() -> None:
@@ -253,7 +401,7 @@ def test_access_is_complete_only_when_the_admin_hostname_has_its_resources() -> 
         {},
     )
     # An OTP policy with no application is not a finished Access configuration, and the
-    # LiteLLM admin hostname is an application target even with no advisor pack.
+    # LiteLLM admin hostname is an application target on its own.
     assert not _cloudflare_access_complete(desired, provider)
     assert not _cloudflare_access_complete(
         desired, {**provider, **typed(ACCESS_APPLICATION_RESOURCE_TYPE, "access-app:litellm.example.com")}
@@ -322,16 +470,12 @@ def test_build_pack_disable_plan_deletes_tailscale_node_even_without_pack_remova
     ("existing_overrides", "requested_overrides"),
     [
         (
-            {"ENABLE_OPENCLAW": "true"},
-            {},
-        ),
-        (
             {"ENABLE_CODER": "true"},
             {},
         ),
         (
-            {"ENABLE_OPENCLAW": "true", "ENABLE_CODER": "true"},
-            {"ENABLE_OPENCLAW": "true"},
+            {"ENABLE_CODER": "true", "ENABLE_SEAWEEDFS": "true"},
+            {"ENABLE_SEAWEEDFS": "true"},
         ),
     ],
 )
@@ -341,25 +485,54 @@ def test_build_pack_disable_plan_caps_checkpoint_before_shared_core_for_litellm_
     existing_values = {
         "STACK_NAME": "wizard-stack",
         "ROOT_DOMAIN": "example.com",
-        "ENABLE_MY_FARM_ADVISOR": "true",
         "AI_DEFAULT_API_KEY": "shared-key",
         "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
-        "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
         "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
         **existing_overrides,
     }
     requested_values = {
         "STACK_NAME": "wizard-stack",
         "ROOT_DOMAIN": "example.com",
-        "ENABLE_MY_FARM_ADVISOR": "true",
         "AI_DEFAULT_API_KEY": "shared-key",
         "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
-        "MY_FARM_ADVISOR_PRIMARY_MODEL": "anthropic/claude-sonnet-4",
         "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
         **requested_overrides,
     }
     existing = resolve_desired_state(RawEnvInput(format_version=1, values=existing_values))
     requested = resolve_desired_state(RawEnvInput(format_version=1, values=requested_values))
+
+    plan = build_pack_disable_plan(
+        existing_desired=existing,
+        requested_desired=requested,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+    )
+
+    assert plan.completed_steps_ceiling == ("preflight", "dokploy_bootstrap", "networking")
+
+
+def test_build_pack_disable_plan_caps_checkpoint_for_legacy_litellm_consumer_removal() -> None:
+    # Insurance: a ledger written by an older wizard can disable openclaw,
+    # my-farm-advisor, or surfsense; removing those LiteLLM consumers still has to
+    # cap the checkpoint before shared core so the config gets re-rendered.
+    requested = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "AI_DEFAULT_API_KEY": "shared-key",
+                "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
+            },
+        )
+    )
+    # Literal retired pack names: an old box's ledger can disable these packs even
+    # though the catalog no longer defines them.
+    legacy_packs = ("openclaw", "my-farm-advisor", "surfsense")
+    existing = replace(
+        requested,
+        enabled_packs=tuple(sorted(set(requested.enabled_packs) | set(legacy_packs))),
+    )
 
     plan = build_pack_disable_plan(
         existing_desired=existing,

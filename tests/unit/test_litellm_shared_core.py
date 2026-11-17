@@ -145,7 +145,7 @@ def test_litellm_plan_uses_openrouter_default_without_local_upstream() -> None:
 
     plan = build_shared_core_plan(
         stack_name="openmerge",
-        enabled_packs=("my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
         values=values,
     )
     allowlists = build_litellm_consumer_model_allowlists(flat_env=values, plan=plan)
@@ -156,15 +156,11 @@ def test_litellm_plan_uses_openrouter_default_without_local_upstream() -> None:
     )
     for aliases in allowlists.values():
         assert "local-model.internal/unsloth-active" not in aliases
-    assert allowlists["my-farm-advisor"] == (
-        "openrouter/deepseek/deepseek-v4.1-flash:free",
-    )
-    assert allowlists["openclaw"] == (
-        "openrouter/deepseek/deepseek-v4.1-flash:free",
-    )
-    assert allowlists["dokploy-ai"] == (
-        "openrouter/deepseek/deepseek-v4.1-flash:free",
-    )
+    assert allowlists == {
+        "coder-hermes": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
+        "coder-kdense": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
+        "dokploy-ai": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
+    }
 
 
 def test_litellm_plan_keeps_local_default_when_local_upstream_is_active() -> None:
@@ -178,7 +174,7 @@ def test_litellm_plan_keeps_local_default_when_local_upstream_is_active() -> Non
 
     plan = build_shared_core_plan(
         stack_name="openmerge",
-        enabled_packs=("my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
         values=values,
     )
     allowlists = build_litellm_consumer_model_allowlists(flat_env=values, plan=plan)
@@ -187,19 +183,18 @@ def test_litellm_plan_keeps_local_default_when_local_upstream_is_active() -> Non
     assert plan.litellm.default_model_alias_order == (
         "local-model.internal/unsloth-active",
     )
-    assert allowlists["my-farm-advisor"] == (
-        "local-model.internal/unsloth-active",
-    )
-    assert allowlists["openclaw"] == (
-        "local-model.internal/unsloth-active",
-    )
+    assert allowlists == {
+        "coder-hermes": ("local-model.internal/unsloth-active",),
+        "coder-kdense": ("local-model.internal/unsloth-active",),
+        "dokploy-ai": ("local-model.internal/unsloth-active",),
+    }
 
 
 def test_litellm_db_allocation_is_dedicated_and_not_a_pack_allocation() -> None:
-    plan = build_shared_core_plan(stack_name="openmerge", enabled_packs=("nextcloud", "openclaw"))
+    plan = build_shared_core_plan(stack_name="openmerge", enabled_packs=("moodle", "nextcloud"))
 
     assert plan.litellm is not None
-    assert [allocation.pack_name for allocation in plan.allocations] == ["nextcloud", "openclaw"]
+    assert [allocation.pack_name for allocation in plan.allocations] == ["moodle", "nextcloud"]
     assert all(allocation.pack_name != "litellm" for allocation in plan.allocations)
     assert all(allocation.postgres != plan.litellm.postgres for allocation in plan.allocations)
     assert plan.litellm.postgres == SharedPostgresAllocation(
@@ -390,7 +385,7 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
             "LITELLM_OPENROUTER_MODELS": (
                 "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"
             ),
-            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-upstream-key",
+            "OPENROUTER_API_KEY": "legacy-openrouter-upstream-key",
         },
     )
     compose = rendered.compose_file
@@ -429,7 +424,7 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
         in compose
     )
     assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "opencode-go-upstream-key"
-    assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "farm-openrouter-upstream-key"
+    assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "legacy-openrouter-upstream-key"
     assert env_specs["LITELLM_LOCAL_API_KEY"].target_services == ("wizard-stack-shared-litellm",)
     assert env_specs["LITELLM_MASTER_KEY"].target_services == (
         "wizard-stack-shared-litellm",
@@ -449,14 +444,14 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
         "wizard-stack-shared-litellm",
     )
     assert "opencode-go-upstream-key" not in compose
-    assert "farm-openrouter-upstream-key" not in compose
+    assert "legacy-openrouter-upstream-key" not in compose
     assert "    aliases:\n          - wizard-stack-shared-litellm\n" in compose
     assert '      - "127.0.0.1:4000:4000"' in compose
     assert "    expose:\n" not in compose
 
 
 def test_rendered_litellm_local_model_disables_system_role_for_vllm_templates() -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("surfsense",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
 
     rendered = _render_compose_file(
         plan,
@@ -488,17 +483,21 @@ def test_rendered_litellm_local_model_disables_system_role_for_vllm_templates() 
     assert "SECRET" not in compose
 
 
-def test_rendered_shared_postgres_supports_surfsense_migration_requirements() -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("surfsense",))
+def test_rendered_shared_postgres_pins_pgvector_image_without_logical_wal() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
 
     rendered = _render_compose_file(plan, {}, {})
     compose = rendered.compose_file
 
     assert "image: pgvector/pgvector:pg16" in compose
-    assert 'command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10"]' in compose
-    assert 'run_sql "ALTER ROLE "wizard_stack_surfsense" WITH SUPERUSER;"' in compose
-    assert 'psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "wizard_stack_surfsense" -c "CREATE EXTENSION IF NOT EXISTS vector;"' in compose
-    assert 'run_sql "ALTER ROLE "wizard_stack_litellm" WITH SUPERUSER;"' not in compose
+    assert 'command: ["postgres"]' in compose
+    assert "wal_level=logical" not in compose
+    # Pack roles are LOGIN-scoped to their own database only; the superuser and
+    # extension-creation grants existed solely for a retired pack and must not
+    # creep back into the shared Postgres init script.
+    assert 'run_sql "ALTER ROLE "wizard_stack_nextcloud" WITH LOGIN PASSWORD' in compose
+    assert "WITH SUPERUSER" not in compose
+    assert "CREATE EXTENSION" not in compose
 
 
 def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
@@ -516,7 +515,7 @@ def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
             "OPENCODE_GO_API_KEY": "legacy-opencode-go-key",
             "LITELLM_OPENROUTER_MODELS": "google/gemma-4-31b-it:free",
             "LITELLM_OPENROUTER_API_KEY": "litellm-openrouter-key",
-            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "legacy-openrouter-key",
+            "OPENROUTER_API_KEY": "legacy-openrouter-key",
         },
     )
     compose = rendered.compose_file
@@ -526,7 +525,7 @@ def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
     assert '      LITELLM_OPENROUTER_API_KEY: "${LITELLM_OPENROUTER_API_KEY:?LITELLM_OPENROUTER_API_KEY is required}"' in compose
     assert '      LITELLM_OPENCODE_GO_API_KEY: "${OPENCODE_GO_API_KEY}' not in compose
     assert (
-        '      LITELLM_OPENROUTER_API_KEY: "${MY_FARM_ADVISOR_OPENROUTER_API_KEY'
+        '      LITELLM_OPENROUTER_API_KEY: "${OPENROUTER_API_KEY'
         not in compose
     )
     assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "litellm-opencode-key"
@@ -635,6 +634,10 @@ def test_rendered_compose_uses_env_specs_for_generated_litellm_keys() -> None:
     assert env_specs["LITELLM_SALT_KEY"].value == "sk-salt-fake-test-key"
     assert env_specs["LITELLM_VIRTUAL_KEY_CODER_HERMES"].value == "sk-hermes-fake-test-key"
     assert env_specs["LITELLM_VIRTUAL_KEY_CODER_HERMES"].required is False
+    assert env_specs["LITELLM_VIRTUAL_KEY_CODER_KDENSE"].value == "sk-kdense-fake-test-key"
+    assert env_specs["LITELLM_VIRTUAL_KEY_CODER_KDENSE"].required is False
+    assert env_specs["LITELLM_VIRTUAL_KEY_DOKPLOY_AI"].value == "sk-dokploy-ai-fake-test-key"
+    assert env_specs["LITELLM_VIRTUAL_KEY_DOKPLOY_AI"].required is False
 
 
 def test_litellm_ledger_resource_is_owned() -> None:
@@ -805,7 +808,7 @@ def test_shared_core_unhealthy_litellm_blocks_noop_skip(
 
 
 def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("openclaw",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
     generated_keys = _generated_keys()
     matching_records = tuple(
         LiteLLMVirtualKeyRecord(
@@ -813,7 +816,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
             key_alias=consumer,
             team_id=f"team-{consumer}",
             models=("local-model.internal/unsloth-active",)
-            if consumer == "openclaw"
+            if consumer == "coder-hermes"
             else (),
             metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
         )
@@ -826,7 +829,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
         plan=plan,
         litellm_generated_keys=generated_keys,
         litellm_consumer_model_allowlists={
-            "openclaw": ("local-model.internal/unsloth-active",)
+            "coder-hermes": ("local-model.internal/unsloth-active",)
         },
         litellm_admin_api=_FakeLiteLLMAdminApi(
             {"status": "connected", "db": "connected"},
@@ -835,8 +838,8 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
     )
     drifted_records = tuple(
         LiteLLMVirtualKeyRecord(
-            key="sk-openclaw-db-accepted-key"
-            if record.key_alias == "openclaw"
+            key="sk-coder-hermes-db-accepted-key"
+            if record.key_alias == "coder-hermes"
             else record.key,
             key_alias=record.key_alias,
             team_id=record.team_id,
@@ -852,7 +855,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
         plan=plan,
         litellm_generated_keys=generated_keys,
         litellm_consumer_model_allowlists={
-            "openclaw": ("local-model.internal/unsloth-active",)
+            "coder-hermes": ("local-model.internal/unsloth-active",)
         },
         litellm_admin_api=_FakeLiteLLMAdminApi(
             {"status": "connected", "db": "connected"},
@@ -872,7 +875,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
             team_id=record.team_id,
             models=(
                 (*record.models, "sync/openrouter/deepseek/deepseek-v4.1-flash")
-                if record.key_alias == "openclaw"
+                if record.key_alias == "coder-hermes"
                 else record.models
             ),
             metadata=record.metadata,
@@ -886,7 +889,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
         plan=plan,
         litellm_generated_keys=generated_keys,
         litellm_consumer_model_allowlists={
-            "openclaw": ("local-model.internal/unsloth-active",)
+            "coder-hermes": ("local-model.internal/unsloth-active",)
         },
         litellm_admin_api=_FakeLiteLLMAdminApi(
             {"status": "connected", "db": "connected"},
@@ -983,10 +986,10 @@ def test_shared_core_runtime_ready_uses_resolved_dokploy_container_names(
     assert redis_container_names == ["openmerge-shared-yqjzwd-openmerge-shared-redis-1"]
 
 
-def test_litellm_allowlists_keep_local_and_bare_aliases_for_advisors() -> None:
+def test_litellm_allowlists_keep_local_alias_for_every_consumer() -> None:
     plan = build_shared_core_plan(
         stack_name="wizard-stack",
-        enabled_packs=("my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
     )
 
     allowlists = build_litellm_consumer_model_allowlists(
@@ -994,18 +997,15 @@ def test_litellm_allowlists_keep_local_and_bare_aliases_for_advisors() -> None:
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
             "LITELLM_LOCAL_MODEL": "unsloth-active",
             "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
-            "MY_FARM_ADVISOR_PRIMARY_MODEL": "local/unsloth-active",
-            "OPENCLAW_PRIMARY_MODEL": "local/unsloth-active",
         },
         plan=plan,
     )
 
-    assert allowlists["my-farm-advisor"] == (
-        "local-model.internal/unsloth-active",
-    )
-    assert allowlists["openclaw"] == (
-        "local-model.internal/unsloth-active",
-    )
+    assert allowlists == {
+        "coder-hermes": ("local-model.internal/unsloth-active",),
+        "coder-kdense": ("local-model.internal/unsloth-active",),
+        "dokploy-ai": ("local-model.internal/unsloth-active",),
+    }
 
 
 class _FakeLiteLLMAdminApi:
@@ -1115,8 +1115,6 @@ def _generated_keys() -> LiteLLMGeneratedKeys:
             "coder-hermes": "sk-hermes-fake-test-key",
             "coder-kdense": "sk-kdense-fake-test-key",
             "dokploy-ai": "sk-dokploy-ai-fake-test-key",
-            "my-farm-advisor": "sk-farm-fake-test-key",
-            "openclaw": "sk-openclaw-fake-test-key",
         },
     )
 
@@ -1652,10 +1650,10 @@ def test_ai_reconcile_updates_disabled_or_drifted_wizard_provider() -> None:
 
 
 def test_litellm_runtime_reconciles_dokploy_ai_provider_even_when_virtual_keys_unchanged() -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("openclaw",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
     generated = _generated_keys()
     allowlists: dict[str, tuple[str, ...]] = {
-        "openclaw": ("local-model.internal/unsloth-active",),
+        "coder-hermes": ("local-model.internal/unsloth-active",),
     }
     teams, keys = _managed_litellm_records_for(
         generated,
@@ -1697,10 +1695,10 @@ def test_litellm_runtime_surfaces_dokploy_ai_provider_seed_failures() -> None:
         def ai_providers_all(self):  # type: ignore[no-untyped-def]
             raise DokployApiError("Dokploy AI provider list failed visibly.")
 
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("openclaw",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
     generated = _generated_keys()
     allowlists: dict[str, tuple[str, ...]] = {
-        "openclaw": ("local-model.internal/unsloth-active",),
+        "coder-hermes": ("local-model.internal/unsloth-active",),
     }
     teams, keys = _managed_litellm_records_for(
         generated,
@@ -2004,10 +2002,10 @@ def test_consumer_virtual_keys_receive_sync_wildcard() -> None:
     )
 
     assert all(consumer in key_lists for consumer in allowlists)
-    assert key_lists["openclaw"][-1] == "sync/*"
-    assert key_lists["surfsense"][-1] == "sync/*"
+    assert key_lists["coder-hermes"][-1] == "sync/*"
+    assert key_lists["coder-kdense"][-1] == "sync/*"
     assert "sync/*" not in key_lists["dokploy-ai"]
-    assert "sync/*" not in allowlists["openclaw"]
+    assert "sync/*" not in allowlists["coder-hermes"]
 
     disabled = shared_core_module._litellm_key_model_allowlists(
         allowlists, litellm_env={**_MODEL_SYNC_ENV, "LITELLM_MODEL_SYNC_ENABLED": "0"}
@@ -2034,10 +2032,10 @@ def test_push_model_sync_consumer_keys_writes_state_file_atomically(
     monkeypatch.setattr("dokploy_wizard.dokploy.shared_core.subprocess.run", fake_run)
 
     assert shared_core_module._push_model_sync_consumer_keys(
-        "sync-container", {"coder-hermes": "sk-1", "surfsense": "sk-2"}
+        "sync-container", {"coder-hermes": "sk-1", "coder-kdense": "sk-2"}
     )
     assert captured_cmd[:4] == ["docker", "exec", "-i", "sync-container"]
-    assert json.loads(captured_input[0]) == {"coder-hermes": "sk-1", "surfsense": "sk-2"}
+    assert json.loads(captured_input[0]) == {"coder-hermes": "sk-1", "coder-kdense": "sk-2"}
     shell = " ".join(captured_cmd)
     assert "consumer-keys.json.tmp" in shell and "mv" in shell
 

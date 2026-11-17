@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -20,13 +21,13 @@ from dokploy_wizard.networking import (
 )
 from dokploy_wizard.packs.coder import CoderResourceRecord
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
+from dokploy_wizard.packs.moodle import MoodleResourceRecord
 from dokploy_wizard.packs.nextcloud import (
     NextcloudBundleVerification,
     NextcloudCommandCheck,
     NextcloudResourceRecord,
     TalkRuntime,
 )
-from dokploy_wizard.packs.openclaw import OpenClawResourceRecord
 from dokploy_wizard.preflight import HostFacts, PreflightCheck, PreflightReport, ResourceProfile
 from dokploy_wizard.state import load_state_dir
 
@@ -419,70 +420,6 @@ class FakeNextcloudBackend:
             ),
         )
 
-    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
-        del admin_user
-
-
-@dataclass
-class FakeOpenClawBackend:
-    existing_service: OpenClawResourceRecord | None = None
-
-    def get_service(self, resource_id: str) -> OpenClawResourceRecord | None:
-        if self.existing_service is not None and self.existing_service.resource_id == resource_id:
-            return self.existing_service
-        return None
-
-    def find_service_by_name(self, resource_name: str) -> OpenClawResourceRecord | None:
-        if (
-            self.existing_service is not None
-            and self.existing_service.resource_name == resource_name
-        ):
-            return self.existing_service
-        return None
-
-    def create_service(
-        self,
-        *,
-        resource_name: str,
-        hostname: str,
-        template_path: object,
-        variant: str,
-        channels: tuple[str, ...],
-        replicas: int,
-        secret_refs: tuple[str, ...],
-    ) -> OpenClawResourceRecord:
-        del hostname, template_path, variant, channels, replicas, secret_refs
-        self.existing_service = OpenClawResourceRecord(
-            resource_id="openclaw-service-1",
-            resource_name=resource_name,
-            replicas=1,
-        )
-        return self.existing_service
-
-    def update_service(
-        self,
-        *,
-        resource_id: str,
-        resource_name: str,
-        hostname: str,
-        template_path: object,
-        variant: str,
-        channels: tuple[str, ...],
-        replicas: int,
-        secret_refs: tuple[str, ...],
-    ) -> OpenClawResourceRecord:
-        del hostname, template_path, variant, channels, replicas, secret_refs
-        self.existing_service = OpenClawResourceRecord(
-            resource_id=resource_id,
-            resource_name=resource_name,
-            replicas=1,
-        )
-        return self.existing_service
-
-    def check_health(self, *, service: OpenClawResourceRecord, url: str) -> bool:
-        del service, url
-        return True
-
 
 def test_install_non_dry_run_reconciles_networking_and_persists_ledger(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
@@ -584,7 +521,7 @@ def test_install_rerun_uses_ledger_owned_networking_resources(tmp_path: Path) ->
     assert second_networking_backend.create_dns_calls == 0
 
 
-def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> None:
+def test_install_applies_access_only_for_the_litellm_admin_hostname(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     env_file = tmp_path / "access.env"
     env_file.write_text(
@@ -593,7 +530,7 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
                 "STACK_NAME=wizard-stack",
                 "ROOT_DOMAIN=example.com",
                 "DOKPLOY_BOOTSTRAP_MOCK_API_KEY=dokp-test-key",
-                "ENABLE_OPENCLAW=true",
+                "ENABLE_NEXTCLOUD=true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,ops@example.com",
                 "HOST_OS_ID=ubuntu",
                 "HOST_OS_VERSION_ID=24.04",
@@ -628,22 +565,21 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
         networking_backend=backend,
         headscale_backend=FakeHeadscaleBackend(),
         nextcloud_backend=nextcloud_backend,
-        openclaw_backend=FakeOpenClawBackend(),
     )
 
     loaded_state = load_state_dir(state_dir)
     assert summary["cloudflare_access"]["outcome"] == "applied"
     assert [item["hostname"] for item in summary["cloudflare_access"]["applications"]] == [
-        "openclaw.example.com",
-        "litellm.example.com",
+        "litellm.example.com"
     ]
     assert loaded_state.applied_state is not None
-    assert loaded_state.applied_state.completed_steps[:5] == (
+    assert loaded_state.applied_state.completed_steps == (
         "preflight",
         "dokploy_bootstrap",
         "networking",
         "shared_core",
-        "openclaw",
+        "nextcloud",
+        "cloudflare_access",
     )
     assert loaded_state.ownership_ledger is not None
     assert {resource.resource_type for resource in loaded_state.ownership_ledger.resources} >= {
@@ -653,11 +589,56 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
     }
 
 
-def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_repo_routing(
+def test_install_keeps_onlyoffice_out_of_access_while_moodle_stays_public_by_dns_routing(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class _HealthyFakeMoodleBackend:
+        def __init__(self) -> None:
+            self._service: MoodleResourceRecord | None = None
+
+        def get_service(self, resource_id: str) -> MoodleResourceRecord:
+            return MoodleResourceRecord(resource_id=resource_id, resource_name=resource_id)
+
+        def find_service_by_name(self, resource_name: str) -> MoodleResourceRecord | None:
+            return self._service
+
+        def create_service(self, *, resource_name: str, **kwargs: object) -> MoodleResourceRecord:
+            self._service = MoodleResourceRecord(
+                resource_id=resource_name, resource_name=resource_name
+            )
+            return self._service
+
+        def update_service(
+            self, *, resource_name: str, **kwargs: object
+        ) -> MoodleResourceRecord:
+            return self.create_service(resource_name=resource_name, **kwargs)
+
+        def get_persistent_data(self, resource_id: str) -> MoodleResourceRecord:
+            return MoodleResourceRecord(resource_id=resource_id, resource_name=resource_id)
+
+        def find_persistent_data_by_name(self, resource_name: str) -> MoodleResourceRecord | None:
+            return self._service
+
+        def create_persistent_data(self, resource_name: str) -> MoodleResourceRecord:
+            self._service = MoodleResourceRecord(
+                resource_id=resource_name, resource_name=resource_name
+            )
+            return self._service
+
+        def check_health(self, *, service: MoodleResourceRecord, url: str) -> bool:
+            return True
+
+        def ensure_application_ready(self) -> tuple[str, ...]:
+            return ()
+
+    monkeypatch.setattr(
+        cli,
+        "_build_moodle_backend",
+        lambda **kwargs: cast(Any, _HealthyFakeMoodleBackend()),
+    )
     state_dir = tmp_path / "state"
-    env_file = tmp_path / "access-nextcloud-farm.env"
+    env_file = tmp_path / "access-nextcloud-moodle.env"
     env_file.write_text(
         "\n".join(
             [
@@ -665,9 +646,8 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
                 "ROOT_DOMAIN=example.com",
                 "DOKPLOY_BOOTSTRAP_MOCK_API_KEY=dokp-test-key",
                 "ENABLE_NEXTCLOUD=true",
-                "ENABLE_MY_FARM_ADVISOR=true",
-                "MY_FARM_ADVISOR_CHANNELS=telegram",
-                "MY_FARM_ADVISOR_OPENROUTER_API_KEY=farm-openrouter-key",
+                "ENABLE_MOODLE=true",
+                "MOODLE_SUBDOMAIN=moodle",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,ops@example.com",
                 "HOST_OS_ID=ubuntu",
                 "HOST_OS_VERSION_ID=24.04",
@@ -702,16 +682,16 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
         networking_backend=backend,
         headscale_backend=FakeHeadscaleBackend(),
         nextcloud_backend=nextcloud_backend,
-        openclaw_backend=FakeOpenClawBackend(),
     )
 
     dns_hostnames = [item["hostname"] for item in summary["networking"]["dns_records"]]
     access_hostnames = [item["hostname"] for item in summary["cloudflare_access"]["applications"]]
 
-    assert "farm.example.com" in dns_hostnames
+    assert "moodle.example.com" in dns_hostnames
     assert "office.example.com" in dns_hostnames
-    assert access_hostnames == ["farm.example.com", "litellm.example.com"]
+    assert access_hostnames == ["litellm.example.com"]
     assert "office.example.com" not in access_hostnames
+    assert "moodle.example.com" not in access_hostnames
 
 
 def test_install_includes_coder_root_and_no_fee_wildcard_dns(
