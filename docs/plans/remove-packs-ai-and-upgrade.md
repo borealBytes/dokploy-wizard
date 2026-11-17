@@ -110,6 +110,44 @@ live from `/v1/models`.
   same rendered LiteLLM config) plus the default alias; verification asserts set equality
   and runs `ai.testConnection` for the default-alias row only.
 
+### Group 2 implementation notes (landed 2026-11-17)
+
+Deviations from the planning table, with reasons:
+
+- The `nextcloud` virtual key is not rendered into the Nextcloud compose as an env var.
+  The key is written into Nextcloud's app config via occ, so it never appears in the
+  Dokploy compose file or env spec surface; the value comes from
+  `load_litellm_generated_keys(state_dir)` (`_repair_litellm_generated_keys` backfills
+  the slot for pre-Group-2 state).
+- App target: the appstore resolver picks `integration_openai` **v3.9.1** for the
+  deployed `nextcloud:apache` major (spec `>=30.0.0 <34.0.0`, first matching release in
+  feed order). v3.9.x is the single-service redesign: flat app-config keys `url`,
+  `api_key` (stored with sensitive flag, but occ-written plaintext reads back verbatim —
+  the server only decrypts values carrying its encryption prefix), and `service_name`.
+  The model list is fetched live by the app from `{url}/models`; there is no
+  `availableModels` config key. v4.x/v5.x (NC33+/NC35) move to a services-based
+  `SERVICES_CONFIG_KEY` JSON shape — a future major-bump follow-on, same slot as D2.
+- `_ensure_ai_integration_openai(container, integration)` (in `dokploy/nextcloud.py`)
+  runs on both `ensure_application_ready` branches after OnlyOffice wiring: enable with
+  release fallback (same `_enable_app_with_release_fallback` pattern as onlyoffice/
+  spreed), set the three keys, then seed the app's cached model list (`models` app
+  config, OpenAI `{"data":[{"id","object"}],"object":"list"}` shape) from the union of
+  the static `nextcloud` consumer allowlist and a bounded live probe of
+  `http://127.0.0.1:4000/v1/models` authenticated with the consumer key. Probe failure
+  is soft (the app refetches when an admin opens its settings); enable failure raises.
+- Dokploy row reconcile (D1, as planned): desired set = `dokploy-ai` consumer allowlist
+  (shared aliases + default-chat alias) minus the `sync/*` literal, widened at apply
+  time by the live `/v1/models` probe (docker exec, master key) when the wildcard is
+  present; only `sync/`-prefixed exposed aliases join the row set. Rows for wizard-named
+  aliases outside the desired set are deleted; duplicates per alias collapse to the
+  first row. Hidden (blank) visible keys are treated as current, not drifted.
+- Verification never probes the gateway: requires every static-set alias to have a
+  correctly named row, tolerates extra `sync/*` rows, reports drift detail
+  `{missing_aliases, unexpected_aliases, duplicate_aliases}` with reason
+  `provider_state_drift`, and runs `ai.testConnection` against the default-alias row.
+- Provider row seeding now runs **after** `_reconcile_model_sync_visibility` so rows
+  seed from the post-first-cycle gateway view.
+
 ## Group 3 — `upgrade` command (PR B, scoped to O1+O2)
 
 Command name: `upgrade` (semantics include major-version gates; "update" undersells it).
@@ -168,3 +206,4 @@ Remote runs: timeout ≥ 3,600,000 ms or background (AGENTS.md).
 | Command name | `upgrade` |
 | Retirement depth | code-only, per PR A doc C2, unchanged |
 | Rollout | blank-slate reinstall on the test box (ledger lost with the Codespaces workspace) |
+| Nextcloud AI config shape | v3.9.x flat app-config keys (`url`/`api_key`/`service_name`) + `models` cache seeding; the v4/v5 services-JSON shape (NC33+) is a follow-on with D2 |

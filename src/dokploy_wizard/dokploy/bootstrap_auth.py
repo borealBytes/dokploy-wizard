@@ -546,6 +546,38 @@ class DokployBootstrapAuthClient:
         )
 
 
+    def delete_ai_provider(
+        self,
+        *,
+        admin_email: str,
+        admin_password: str,
+        ai_id: str,
+    ) -> bool:
+        self._authenticate(admin_email=admin_email, admin_password=admin_password)
+        self._resolve_session()
+        self._request_json(
+            "POST",
+            "/api/ai.delete",
+            {"aiId": ai_id},
+            allow_scalar_data=True,
+        )
+        providers = self._request_json("GET", "/api/ai.getAll", None)
+        if not isinstance(providers, list):
+            raise DokployBootstrapAuthError(
+                "Dokploy session ai.delete recovery list response must decode to a JSON array."
+            )
+        lingering = [
+            provider
+            for provider in providers
+            if isinstance(provider, dict) and provider.get("aiId") == ai_id
+        ]
+        if lingering:
+            raise DokployBootstrapAuthError(
+                "Dokploy session ai.delete succeeded but provider recovery found the record "
+                "still present."
+            )
+        return True
+
     def test_ai_provider_connection(
         self,
         *,

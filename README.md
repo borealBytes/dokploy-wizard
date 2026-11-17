@@ -129,7 +129,7 @@ stateDiagram-v2
 
 Dokploy is the control plane the wizard targets for all compose app deployment. The wizard bootstraps Dokploy, mints or reuses an API key, and then uses that API key for all managed pack operations.
 
-After LiteLLM is ready, the wizard also reconciles Dokploy's built-in AI provider named `Dokploy Wizard LiteLLM`. That provider points at the wizard-managed internal LiteLLM gateway and uses the dedicated `dokploy-ai` virtual key restricted to the resolved default model alias, not the LiteLLM master key.
+After LiteLLM is ready, the wizard also reconciles Dokploy's built-in AI provider rows. Dokploy stores one model per provider row, so the wizard seeds one row per model alias its `dokploy-ai` virtual key can invoke: the default row is named `Dokploy Wizard LiteLLM` and every additional alias gets a `Dokploy Wizard LiteLLM · <alias>` row, all pointing at the wizard-managed internal LiteLLM gateway with the dedicated `dokploy-ai` virtual key, not the LiteLLM master key. The Ask-AI picker therefore lists every gateway-visible model instead of just one, and rows outside the allowed alias set are removed on the next pass.
 
 ### Shared Core
 
@@ -158,6 +158,7 @@ What the wizard wires today:
 - trusted domain configuration
 - OnlyOffice JWT configuration wiring
 - Nextcloud Talk app verification
+- built-in AI wiring: the OpenAI/LocalAI integration app (`integration_openai`) is enabled and pointed at the internal LiteLLM gateway with the dedicated `nextcloud` virtual key, so Nextcloud's AI features list every gateway-visible model
 
 ### Coder
 
@@ -532,6 +533,7 @@ LiteLLM is always installed as core infrastructure. It is not a pack you opt int
 Primary consumers today are:
 
 - Dokploy's built-in AI provider (`Dokploy Wizard LiteLLM`)
+- Nextcloud's built-in AI (`integration_openai` app, via the `nextcloud` virtual key)
 - Coder Hermes and Coder K-Dense
 - Coder OpenCode Web through generated template gateway defaults
 
@@ -562,7 +564,7 @@ How autosynced models behave:
 
 - Autosynced deployments are named `sync/<source>/<model-id>`, so they never collide with the explicit config-file aliases.
 - Deployments created by autosync are tagged internally; when a source drops a model, only wizard-created `sync/...` deployments are pruned. Config-file aliases and models you added yourself in the admin UI are never touched.
-- Consumer virtual keys are explicit-alias allowlists refreshed by the sidecar each cycle with the current `sync/*` names (plus a `sync/*` wildcard for runtime calls), because LiteLLM's `/v1/models` does not expand wildcards and workspace tooling seeds its model picker from that endpoint. Autosynced models are therefore immediately callable from Coder Hermes and Coder K-Dense. `dokploy-ai` is pinned to the resolved default model alias for now.
+- Consumer virtual keys are explicit-alias allowlists refreshed by the sidecar each cycle with the current `sync/*` names (plus a `sync/*` wildcard for runtime calls), because LiteLLM's `/v1/models` does not expand wildcards and workspace tooling seeds its model picker from that endpoint. Autosynced models are therefore immediately callable from Coder Hermes and Coder K-Dense, and the built-in AI surfaces (Dokploy provider rows and the Nextcloud AI picker) are seeded from the same key-level visibility.
 - `sync/default-chat` is a stable alias whose upstream is *selected* rather than listed: the sidecar matches `AI_DEFAULT_MODEL_PATTERN` against the provider's live catalog, ranks matches by version number, and promotes the newest one that answers a real completion request. Upstream renames therefore cost a sync cycle instead of a reinstall, and a client can name `sync/default-chat` and never move. The new target is registered before the old one is retired, so there is no window with no working upstream; when nothing confirms (a brownout, a catalog outage) the current target stays put. Set `AI_DEFAULT_MODEL_PATTERN=` to empty to turn the alias off, which also deletes it.
 - Rendered LiteLLM config sets `general_settings.store_model_in_db` so admin-API-registered models survive proxy restarts.
 - Coder workspaces resolve their model lists live from the gateway at boot and re-run the same fetch from a background refresher roughly every 12 hours — retrying every 5 minutes after any failed refresh until the gateway is reachable again — so autosynced models appear in OpenCode, Pi, Hermes, and Copilot BYOK even in long-running workspaces. If the gateway is briefly unreachable during a refresh, the last good model list is kept.
@@ -613,7 +615,8 @@ Local model compatibility is handled in the generated LiteLLM config. For a priv
 
 The wizard auto-generates stable virtual keys for each consumer:
 
-- `dokploy-ai` — Dokploy's built-in AI provider, pinned to the resolved default model alias for now
+- `dokploy-ai` — Dokploy's built-in AI provider rows, one per gateway-visible alias
+- `nextcloud` — Nextcloud's built-in AI (`integration_openai` app)
 - `coder-hermes` — the Coder Hermes template
 - `coder-kdense` — the Coder K-Dense BYOK template
 

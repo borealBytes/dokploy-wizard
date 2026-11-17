@@ -21,6 +21,26 @@ class NextcloudManagedResource:
 
 
 @dataclass(frozen=True)
+class NextcloudAiIntegration:
+    """LiteLLM wiring for the Nextcloud OpenAI/LocalAI integration app."""
+
+    service_name: str
+    service_url: str
+    api_key: str
+    models_probe_url: str
+    expected_models: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "api_key": "<redacted>",
+            "expected_models": list(self.expected_models),
+            "models_probe_url": self.models_probe_url,
+            "service_name": self.service_name,
+            "service_url": self.service_url,
+        }
+
+
+@dataclass(frozen=True)
 class NextcloudHealthCheck:
     url: str
     passed: bool | None

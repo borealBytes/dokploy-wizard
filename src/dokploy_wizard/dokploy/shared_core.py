@@ -55,6 +55,7 @@ from dokploy_wizard.litellm.model_catalog import (
     build_model_catalog,
 )
 from dokploy_wizard.litellm.model_sync import (
+    MODEL_SYNC_ALIAS_PREFIX,
     MODEL_SYNC_CONSUMER_WILDCARD,
     model_sync_default_chat_alias,
     model_sync_enabled,
@@ -72,6 +73,7 @@ from dokploy_wizard.state.models import (
 from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 _DOKPLOY_AI_PROVIDER_NAME = "Dokploy Wizard LiteLLM"
+_DOKPLOY_AI_PROVIDER_NAME_PREFIX = _DOKPLOY_AI_PROVIDER_NAME + " \u00b7 "
 _DEFAULT_REMOTE_MODEL_ALIAS = "opencode-go/deepseek-v4.1-flash"
 
 
@@ -117,6 +119,8 @@ class DokployAiProviderApi(Protocol):
         model: str,
         is_enabled: bool,
     ) -> DokployAiProvider: ...
+
+    def ai_provider_delete(self, *, ai_id: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -548,6 +552,7 @@ class DokploySharedCoreBackend:
                 virtual_keys=updated_virtual_keys,
             )
             write_litellm_generated_keys(self._state_dir, self._litellm_generated_keys)
+        self._reconcile_model_sync_visibility()
         if isinstance(self._client, DokployAiProviderApi):
             try:
                 _ensure_dokploy_ai_provider(
@@ -555,10 +560,10 @@ class DokploySharedCoreBackend:
                     litellm_service_name=self._plan.litellm.service_name,
                     generated_keys=self._litellm_generated_keys,
                     litellm_env=self._litellm_env,
+                    consumer_allowlists=self._litellm_consumer_model_allowlists,
                 )
             except DokployApiError as error:
                 raise SharedCoreError(str(error)) from error
-        self._reconcile_model_sync_visibility()
 
     def _reconcile_model_sync_visibility(self) -> None:
         """Hand consumer key tokens to the sync sidecar and await its cycle.
@@ -587,7 +592,7 @@ class DokploySharedCoreBackend:
         consumer_keys = {
             consumer: key
             for consumer, key in self._litellm_generated_keys.virtual_keys.items()
-            if consumer != "dokploy-ai" and key
+            if key
         }
         if not consumer_keys or not _push_model_sync_consumer_keys(sync_container, consumer_keys):
             return
@@ -775,9 +780,16 @@ def verify_dokploy_ai_provider(
     litellm_service_name: str,
     generated_keys: LiteLLMGeneratedKeys | None,
     litellm_env: dict[str, str] | None = None,
+    plan: SharedCorePlan | None = None,
 ) -> ServiceVerificationResult:
+    litellm_env = litellm_env or {}
     expected_url = f"http://{litellm_service_name}:4000/v1"
-    expected_model = _dokploy_ai_model_alias(litellm_env or {})
+    expected_model = _dokploy_ai_model_alias(litellm_env)
+    expected_aliases = _verify_dokploy_ai_expected_aliases(
+        litellm_env,
+        plan=plan,
+        generated_keys=generated_keys,
+    )
     expected_key = None
     if generated_keys is not None:
         expected_key = generated_keys.virtual_keys.get("dokploy-ai")
@@ -791,6 +803,7 @@ def verify_dokploy_ai_provider(
                 reason="missing_dokploy_ai_virtual_key",
                 expected_url=expected_url,
                 expected_model=expected_model,
+                expected_aliases=expected_aliases,
                 providers=(),
                 generated_keys=generated_keys,
             ),
@@ -800,7 +813,8 @@ def verify_dokploy_ai_provider(
         providers = tuple(
             provider
             for provider in client.ai_providers_all()
-            if provider.name == _DOKPLOY_AI_PROVIDER_NAME
+            if _dokploy_ai_alias_from_row_name(provider.name, default_alias=expected_model)
+            is not None
         )
     except DokployApiError as error:
         return make_verification_result(
@@ -810,40 +824,49 @@ def verify_dokploy_ai_provider(
             detail=f"Dokploy AI provider verification failed while listing providers: {error}",
         )
 
-    if len(providers) != 1:
-        return make_verification_result(
-            service_name="dokploy-ai",
-            tier="app",
-            passed=False,
-            detail=_dokploy_ai_verification_detail(
-                status="fail",
-                reason="missing_provider" if not providers else "duplicate_wizard_provider",
-                expected_url=expected_url,
-                expected_model=expected_model,
-                providers=providers,
-                generated_keys=generated_keys,
-            ),
-        )
-
-    provider = providers[0]
-    key_status = _dokploy_ai_key_status(provider.api_key, generated_keys=generated_keys)
-    metadata_matches = (
-        provider.is_enabled is True
-        and provider.api_url == expected_url
-        and provider.model == expected_model
-        and key_status == "matches_dokploy_ai_virtual_key"
+    rows_by_alias: dict[str, list[DokployAiProvider]] = {}
+    for provider in providers:
+        alias = _dokploy_ai_alias_from_row_name(provider.name, default_alias=expected_model)
+        assert alias is not None
+        rows_by_alias.setdefault(alias, []).append(provider)
+    expected = set(expected_aliases)
+    missing_aliases = [alias for alias in expected_aliases if alias not in rows_by_alias]
+    unexpected_aliases = sorted(
+        alias
+        for alias in rows_by_alias
+        if alias not in expected and not alias.startswith(f"{MODEL_SYNC_ALIAS_PREFIX}/")
     )
+    duplicate_aliases = sorted(alias for alias, rows in rows_by_alias.items() if len(rows) > 1)
+    drifted_rows = tuple(
+        provider
+        for rows in rows_by_alias.values()
+        for provider in rows
+        if not (
+            provider.name
+            == _dokploy_ai_provider_row_name(provider.model, default_alias=expected_model)
+            and provider.api_url == expected_url
+            and provider.is_enabled is True
+            # Blank means getAll hid the key; the test connection below is the
+            # functional check for those rows.
+            and (provider.api_key == "" or provider.api_key == expected_key)
+        )
+    )
+    metadata_matches = (
+        not missing_aliases and not unexpected_aliases and not duplicate_aliases and not drifted_rows
+    )
+
     connection_result: DokployAiProviderTestConnectionResult | None = None
     connection_error: str | None = None
+    default_rows = rows_by_alias.get(expected_model, [])
     test_connection = getattr(client, "ai_provider_test_connection", None)
-    if metadata_matches and callable(test_connection):
+    if metadata_matches and default_rows and callable(test_connection):
         try:
             connection_result = cast(
                 DokployAiProviderTestConnectionResult,
                 test_connection(
-                    api_url=provider.api_url,
-                    api_key=provider.api_key,
-                    model=provider.model,
+                    api_url=expected_url,
+                    api_key=expected_key,
+                    model=expected_model,
                 ),
             )
         except Exception as error:  # noqa: BLE001 - verification reports failures as detail
@@ -858,9 +881,9 @@ def verify_dokploy_ai_provider(
     elif connection_result is not None and not connection_result.success:
         reason = "test_connection_failed"
     elif connection_result is not None:
-        reason = "provider_matches_expected_state_and_test_connection_passed"
+        reason = "providers_match_expected_state_and_test_connection_passed"
     else:
-        reason = "provider_matches_expected_state"
+        reason = "providers_match_expected_state"
     return make_verification_result(
         service_name="dokploy-ai",
         tier="app",
@@ -870,12 +893,46 @@ def verify_dokploy_ai_provider(
             reason=reason,
             expected_url=expected_url,
             expected_model=expected_model,
+            expected_aliases=expected_aliases,
             providers=providers,
             generated_keys=generated_keys,
             connection_result=connection_result,
             connection_error=connection_error,
+            drift={
+                "duplicate_aliases": duplicate_aliases,
+                "missing_aliases": missing_aliases,
+                "unexpected_aliases": unexpected_aliases,
+            },
         ),
     )
+
+
+def _verify_dokploy_ai_expected_aliases(
+    litellm_env: dict[str, str],
+    *,
+    plan: SharedCorePlan | None,
+    generated_keys: LiteLLMGeneratedKeys | None,
+) -> tuple[str, ...]:
+    # Verification never probes the running gateway: runtime-synced aliases arrive
+    # and retire between cycles, so the check requires the statically visible set
+    # and tolerates any additional ``sync/*`` row the wildcard already allows.
+    default_alias = _dokploy_ai_model_alias(litellm_env)
+    if plan is None or generated_keys is None:
+        return (default_alias,)
+    allowlists = _litellm_key_model_allowlists(
+        build_litellm_consumer_model_allowlists(
+            flat_env=litellm_env,
+            plan=plan,
+            include_default_chat_alias=True,
+        ),
+        litellm_env=litellm_env,
+    )
+    visible = {
+        alias
+        for alias in allowlists.get("dokploy-ai", ())
+        if alias != MODEL_SYNC_CONSUMER_WILDCARD
+    }
+    return (default_alias, *sorted(visible - {default_alias}))
 
 
 def _dokploy_ai_verification_detail(
@@ -884,13 +941,16 @@ def _dokploy_ai_verification_detail(
     reason: str,
     expected_url: str,
     expected_model: str,
+    expected_aliases: tuple[str, ...],
     providers: tuple[DokployAiProvider, ...],
     generated_keys: LiteLLMGeneratedKeys | None,
     connection_result: DokployAiProviderTestConnectionResult | None = None,
     connection_error: str | None = None,
+    drift: dict[str, list[str]] | None = None,
 ) -> str:
     payload = {
         "expected": {
+            "aliases": list(expected_aliases),
             "api_url": expected_url,
             "model": expected_model,
             "name": _DOKPLOY_AI_PROVIDER_NAME,
@@ -902,6 +962,8 @@ def _dokploy_ai_verification_detail(
         "reason": reason,
         "status": status,
     }
+    if drift is not None and any(drift.values()):
+        payload["drift"] = drift
     if connection_result is not None:
         payload["test_connection"] = {
             "success": connection_result.success,
@@ -947,6 +1009,8 @@ def _dokploy_ai_key_status(
 ) -> str:
     if generated_keys is None:
         return "cannot_validate_without_generated_keys"
+    if api_key == "":
+        return "hidden_by_dokploy"
     if api_key == generated_keys.master_key:
         return "uses_litellm_master_key"
     expected_key = generated_keys.virtual_keys.get("dokploy-ai")
@@ -961,54 +1025,166 @@ def _redacted_key_fingerprint(value: str) -> str:
     return f"sha256:{sha256(value.encode('utf-8')).hexdigest()[:12]}"
 
 
+def _dokploy_ai_provider_row_name(alias: str, *, default_alias: str) -> str:
+    if alias == default_alias:
+        return _DOKPLOY_AI_PROVIDER_NAME
+    return f"{_DOKPLOY_AI_PROVIDER_NAME_PREFIX}{alias}"
+
+
+def _dokploy_ai_alias_from_row_name(name: str, *, default_alias: str) -> str | None:
+    if name == _DOKPLOY_AI_PROVIDER_NAME:
+        return default_alias
+    if name.startswith(_DOKPLOY_AI_PROVIDER_NAME_PREFIX):
+        return name.removeprefix(_DOKPLOY_AI_PROVIDER_NAME_PREFIX)
+    return None
+
+
+def _litellm_exposed_aliases(*, litellm_service_name: str, master_key: str) -> tuple[str, ...] | None:
+    """Ask the running LiteLLM which model aliases it currently serves.
+
+    Returns ``None`` when the gateway cannot be reached, so the caller can fall
+    back to the statically configured set instead of deleting every provider row.
+    """
+
+    container_name = _wait_for_container_name(litellm_service_name, attempts=10, delay_seconds=3.0)
+    if container_name is None:
+        return None
+    script = (
+        "import json,os,urllib.request;"
+        "req=urllib.request.Request("
+        "'http://127.0.0.1:4000/v1/models',"
+        "{'Authorization':'Bearer '+os.environ['DW_PROBE_KEY']});"
+        "print(json.dumps([m['id'] for m in"
+        " json.load(urllib.request.urlopen(req, timeout=10))['data']]))"
+    )
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"DW_PROBE_KEY={master_key}",
+            container_name,
+            "python3",
+            "-c",
+            script,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout.strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, list):
+        return None
+    return tuple(item for item in payload if isinstance(item, str) and item)
+
+
+def _dokploy_ai_desired_aliases(
+    litellm_env: dict[str, str],
+    *,
+    consumer_allowlists: Mapping[str, tuple[str, ...]],
+    litellm_service_name: str,
+    master_key: str,
+) -> tuple[str, ...]:
+    """Every alias the dokploy-ai key can actually invoke, default alias first.
+
+    Dokploy's AI provider table stores exactly one model per row, so full model
+    visibility for the built-in picker means one wizard-owned row per alias. The
+    seed set is the consumer allowlist the wizard just enforced, widened with the
+    runtime-synced aliases LiteLLM currently reports (row staleness between
+    passes is the D2 follow-on).
+    """
+
+    default_alias = _dokploy_ai_model_alias(litellm_env)
+    dokploy_visible = consumer_allowlists.get("dokploy-ai", ())
+    visible = {alias for alias in dokploy_visible if alias != MODEL_SYNC_CONSUMER_WILDCARD}
+    if MODEL_SYNC_CONSUMER_WILDCARD in dokploy_visible:
+        exposed = _litellm_exposed_aliases(
+            litellm_service_name=litellm_service_name,
+            master_key=master_key,
+        )
+        if exposed is not None:
+            visible |= {
+                alias for alias in exposed if alias.startswith(f"{MODEL_SYNC_ALIAS_PREFIX}/")
+            }
+    return (default_alias, *sorted(visible - {default_alias}))
+
+
 def _ensure_dokploy_ai_provider(
     client: DokployAiProviderApi,
     *,
     litellm_service_name: str,
     generated_keys: LiteLLMGeneratedKeys | None,
     litellm_env: dict[str, str] | None = None,
+    consumer_allowlists: Mapping[str, tuple[str, ...]],
 ) -> None:
     if generated_keys is None:
         return
     internal_url = f"http://{litellm_service_name}:4000/v1"
-    name = _DOKPLOY_AI_PROVIDER_NAME
-    model = _dokploy_ai_model_alias(litellm_env or {})
+    litellm_env = litellm_env or {}
+    default_alias = _dokploy_ai_model_alias(litellm_env)
     try:
         api_key = generated_keys.virtual_keys["dokploy-ai"]
     except KeyError as error:
         raise SharedCoreError(
             "LiteLLM generated keys are missing the required 'dokploy-ai' virtual key."
         ) from error
-    existing = client.ai_providers_all()
-    wizard_provider = None
-    for provider in existing:
-        if provider.name == name:
-            wizard_provider = provider
-            break
-    if wizard_provider is None:
-        client.ai_provider_create(
-            name=name,
-            api_url=internal_url,
-            api_key=api_key,
-            model=model,
-            is_enabled=True,
-        )
-        return
-    if (
-        wizard_provider.api_url == internal_url
-        and wizard_provider.api_key == api_key
-        and wizard_provider.model == model
-        and wizard_provider.is_enabled is True
-    ):
-        return
-    client.ai_provider_update(
-        ai_id=wizard_provider.ai_id,
-        name=name,
-        api_url=internal_url,
-        api_key=api_key,
-        model=model,
-        is_enabled=True,
+    desired_aliases = _dokploy_ai_desired_aliases(
+        litellm_env,
+        consumer_allowlists=consumer_allowlists,
+        litellm_service_name=litellm_service_name,
+        master_key=generated_keys.master_key,
     )
+    existing = client.ai_providers_all()
+    desired = set(desired_aliases)
+    wizard_rows_by_alias: dict[str, list[DokployAiProvider]] = {}
+    for provider in existing:
+        alias = _dokploy_ai_alias_from_row_name(provider.name, default_alias=default_alias)
+        if alias is None:
+            continue
+        wizard_rows_by_alias.setdefault(alias, []).append(provider)
+    for alias in desired_aliases:
+        rows = wizard_rows_by_alias.get(alias, [])
+        name = _dokploy_ai_provider_row_name(alias, default_alias=default_alias)
+        for provider in rows[1:]:
+            client.ai_provider_delete(ai_id=provider.ai_id)
+        if not rows:
+            client.ai_provider_create(
+                name=name,
+                api_url=internal_url,
+                api_key=api_key,
+                model=alias,
+                is_enabled=True,
+            )
+            continue
+        keeper = rows[0]
+        # A blank stored key means Dokploy hid it from getAll; it is not evidence
+        # of drift, and the key is always re-sent whenever metadata forces an update.
+        if (
+            keeper.name != name
+            or keeper.api_url != internal_url
+            or keeper.model != alias
+            or keeper.is_enabled is not True
+            or (keeper.api_key != "" and keeper.api_key != api_key)
+        ):
+            client.ai_provider_update(
+                ai_id=keeper.ai_id,
+                name=name,
+                api_url=internal_url,
+                api_key=api_key,
+                model=alias,
+                is_enabled=True,
+            )
+    for alias, rows in wizard_rows_by_alias.items():
+        if alias in desired:
+            continue
+        for provider in rows:
+            client.ai_provider_delete(ai_id=provider.ai_id)
 
 
 def _render_compose_file(
@@ -1634,7 +1810,7 @@ def _litellm_key_model_allowlists(
     keyed: dict[str, tuple[str, ...]] = {}
     for consumer, models in allowlists.items():
         normalized = tuple(models)
-        if consumer != "dokploy-ai" and normalized and MODEL_SYNC_CONSUMER_WILDCARD not in normalized:
+        if normalized and MODEL_SYNC_CONSUMER_WILDCARD not in normalized:
             normalized = (*normalized, MODEL_SYNC_CONSUMER_WILDCARD)
         keyed[consumer] = normalized
     return keyed
@@ -1706,7 +1882,6 @@ def _build_litellm_consumer_projection_catalog(
     visible_aliases_by_consumer = {
         consumer: shared_aliases for consumer in _litellm_consumers()
     }
-    visible_aliases_by_consumer["dokploy-ai"] = default_aliases[:1]
     return _project_catalog(base_catalog, visible_aliases_by_consumer)
 
 

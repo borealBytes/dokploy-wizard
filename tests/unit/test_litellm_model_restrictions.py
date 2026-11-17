@@ -10,6 +10,7 @@ Opt-in live post-deploy verification:
   LITELLM_QA_KEY_CODER_HERMES=sk-... \
   LITELLM_QA_KEY_CODER_KDENSE=sk-... \
   LITELLM_QA_KEY_DOKPLOY_AI=sk-... \
+  LITELLM_QA_KEY_NEXTCLOUD=sk-... \
   pytest tests/unit/test_litellm_model_restrictions.py -q -k live
 
 The live path intentionally avoids `/health` because LiteLLM docs note that `/health`
@@ -49,11 +50,22 @@ EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
     ),
     "dokploy-ai": (
         DEFAULT_LOCAL_CANONICAL_ALIAS,
+        "openrouter/anthropic/claude-3.5-sonnet",
+    ),
+    "nextcloud": (
+        DEFAULT_LOCAL_CANONICAL_ALIAS,
+        "openrouter/anthropic/claude-3.5-sonnet",
     ),
 }
-# dokploy-ai is pinned to the single default alias, so the openrouter cost
-# metadata probe only runs against the consumers that can actually see it.
-SHARED_ALIAS_CONSUMERS = ("coder-hermes", "coder-kdense")
+# Every consumer key projects the same shared alias set; the built-in AI surfaces
+# are no longer pinned to the single default alias, so the cost-metadata probe runs
+# against all of them.
+SHARED_ALIAS_CONSUMERS = (
+    "coder-hermes",
+    "coder-kdense",
+    "dokploy-ai",
+    "nextcloud",
+)
 EXPECTED_MODEL_INFO_COSTS: dict[str, dict[str, float]] = {
     "openrouter/anthropic/claude-3.5-sonnet": {
         "input_cost_per_token": 0.000003,
@@ -67,6 +79,7 @@ LIVE_KEY_ENV_BY_CONSUMER = {
     "coder-hermes": "LITELLM_QA_KEY_CODER_HERMES",
     "coder-kdense": "LITELLM_QA_KEY_CODER_KDENSE",
     "dokploy-ai": "LITELLM_QA_KEY_DOKPLOY_AI",
+    "nextcloud": "LITELLM_QA_KEY_NEXTCLOUD",
 }
 
 
@@ -317,6 +330,7 @@ def _expected_consumer_keys() -> dict[str, str]:
         "coder-hermes": "sk-test-coder-hermes",
         "coder-kdense": "sk-test-coder-kdense",
         "dokploy-ai": "sk-test-dokploy-ai",
+        "nextcloud": "sk-test-nextcloud",
     }
 
 
@@ -363,7 +377,7 @@ def _consumer_api_key(consumer: str) -> str:
     return _expected_consumer_keys()[consumer]
 
 
-def test_dokploy_ai_reconciles_with_default_model_alias_only() -> None:
+def test_dokploy_ai_reconciles_with_shared_visible_aliases() -> None:
     flat_env = _qa_flat_env()
     plan = build_shared_core_plan(
         stack_name="wizard-stack",
@@ -377,12 +391,18 @@ def test_dokploy_ai_reconciles_with_default_model_alias_only() -> None:
         consumer_model_allowlists=allowlists,
     )
 
-    assert allowlists["dokploy-ai"] == (DEFAULT_LOCAL_CANONICAL_ALIAS,)
+    assert allowlists["dokploy-ai"] == (
+        DEFAULT_LOCAL_CANONICAL_ALIAS,
+        "openrouter/anthropic/claude-3.5-sonnet",
+    )
     assert reconciled["dokploy-ai"] == LiteLLMVirtualKeyRecord(
         key="sk-test-dokploy-ai",
         key_alias="dokploy-ai",
         team_id="team-dokploy-ai",
-        models=(DEFAULT_LOCAL_CANONICAL_ALIAS,),
+        models=(
+            DEFAULT_LOCAL_CANONICAL_ALIAS,
+            "openrouter/anthropic/claude-3.5-sonnet",
+        ),
         metadata={"consumer": "dokploy-ai", "managed_by": "dokploy-wizard"},
     )
 
@@ -579,6 +599,7 @@ def test_fake_opencode_go_wildcard_is_isolated_to_intended_alias_policy(
         "coder-hermes": (),
         "coder-kdense": (),
         "dokploy-ai": (),
+        "nextcloud": (),
     }
 
 

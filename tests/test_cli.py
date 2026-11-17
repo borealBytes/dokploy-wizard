@@ -27,6 +27,7 @@ from dokploy_wizard.dokploy import (
     DokployProjectSummary,
 )
 from dokploy_wizard.dokploy.compose_noop import persist_compose_artifact_hash
+from dokploy_wizard.dokploy.shared_core import build_litellm_consumer_model_allowlists
 from dokploy_wizard.lifecycle import (
     LifecyclePlan,
     applicable_phases_for,
@@ -42,6 +43,7 @@ from dokploy_wizard.networking.cloudflare import (
 )
 from dokploy_wizard.packs import prompts as prompt_module
 from dokploy_wizard.packs.catalog import get_known_pack_names
+from dokploy_wizard.packs.nextcloud import NextcloudAiIntegration
 from dokploy_wizard.packs.prompts import (
     GuidedInstallValues,
     PromptSelection,
@@ -74,6 +76,7 @@ from dokploy_wizard.state import (
     write_target_state,
 )
 from dokploy_wizard.state import inspection as inspection_module
+from dokploy_wizard.state.models import STATE_FORMAT_VERSION, LiteLLMGeneratedKeys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -5086,6 +5089,101 @@ def test_build_nextcloud_backend_passes_state_dir_to_dokploy_backend(
     _, _, backend_kwargs, state_dir = _capture_nextcloud_backend_kwargs(monkeypatch)
 
     assert backend_kwargs["state_dir"] == state_dir
+
+
+def test_build_nextcloud_backend_omits_ai_integration_without_generated_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, backend_kwargs, _ = _capture_nextcloud_backend_kwargs(monkeypatch)
+
+    assert backend_kwargs["ai_integration"] is None
+
+
+def _nextcloud_test_generated_keys() -> LiteLLMGeneratedKeys:
+    return LiteLLMGeneratedKeys(
+        format_version=STATE_FORMAT_VERSION,
+        master_key="sk-master-fake-test-key",
+        salt_key="sk-salt-fake-test-key",
+        virtual_keys={"nextcloud": "sk-litellm-nextcloud-abcdef"},
+    )
+
+
+def test_build_nextcloud_backend_wires_ai_integration_from_generated_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_env = _nextcloud_backend_raw_env()
+    desired_state = resolve_desired_state(raw_env)
+    recorded: dict[str, Any] = {}
+
+    def record_backend(**kwargs: Any) -> object:
+        recorded.update(kwargs)
+        return cast(Any, object())
+
+    monkeypatch.setattr(cli, "DokployNextcloudBackend", record_backend)
+    monkeypatch.setattr(cli, "_build_dokploy_api_client", lambda **_: cast(Any, object()))
+
+    cli._build_nextcloud_backend(
+        raw_env=raw_env,
+        state_dir=Path("/tmp/test-state"),
+        desired_state=desired_state,
+        litellm_generated_keys=_nextcloud_test_generated_keys(),
+    )
+
+    integration = recorded["ai_integration"]
+    assert isinstance(integration, NextcloudAiIntegration)
+    assert integration.service_url == "http://lifecycle-stack-shared-litellm:4000/v1"
+    assert integration.api_key == "sk-litellm-nextcloud-abcdef"
+    assert integration.service_name == "LiteLLM (Dokploy Wizard)"
+    assert integration.models_probe_url == "http://127.0.0.1:4000/v1/models"
+    assert integration.expected_models == build_litellm_consumer_model_allowlists(
+        flat_env=dict(raw_env.values),
+        plan=desired_state.shared_core,
+        include_default_chat_alias=True,
+    ).get("nextcloud", ())
+
+
+def test_build_nextcloud_ai_integration_requires_litellm_plan_and_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    raw_env = _nextcloud_backend_raw_env()
+    desired_state = resolve_desired_state(raw_env)
+    keys = _nextcloud_test_generated_keys()
+
+    assert (
+        cli._build_nextcloud_ai_integration(
+            raw_env=raw_env,
+            desired_state=desired_state,
+            litellm_generated_keys=None,
+        )
+        is None
+    )
+
+    keys_without_nextcloud = replace(
+        keys, virtual_keys={"dokploy-ai": "sk-dokploy-ai-fake-test-key"}
+    )
+    assert (
+        cli._build_nextcloud_ai_integration(
+            raw_env=raw_env,
+            desired_state=desired_state,
+            litellm_generated_keys=keys_without_nextcloud,
+        )
+        is None
+    )
+
+    no_litellm_state = replace(
+        desired_state,
+        shared_core=replace(desired_state.shared_core, litellm=None),
+    )
+    assert (
+        cli._build_nextcloud_ai_integration(
+            raw_env=raw_env,
+            desired_state=no_litellm_state,
+            litellm_generated_keys=keys,
+        )
+        is None
+    )
 
 
 def test_build_moodle_backend_passes_state_dir_to_dokploy_backend(

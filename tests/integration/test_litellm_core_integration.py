@@ -383,7 +383,8 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
-        "dokploy-ai": ("local-model.internal/unsloth-active",),
+        "dokploy-ai": shared_models,
+        "nextcloud": shared_models,
     }
     # Consumer allowlists are explicit lists; provider passthrough aliases that
     # are not shared defaults (nvidia) stay invisible until the sidecar merges
@@ -421,7 +422,8 @@ def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
-        "dokploy-ai": ("local-model.internal/unsloth-active",),
+        "dokploy-ai": shared_models,
+        "nextcloud": shared_models,
     }
 
 
@@ -448,7 +450,8 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
-        "dokploy-ai": ("local-model.internal/unsloth-active",),
+        "dokploy-ai": shared_models,
+        "nextcloud": shared_models,
     }
     assert "opencode-go/*" not in allowlists["coder-hermes"]
     assert "opencode-go/deepseek-v4.1-flash" in allowlists["coder-hermes"]
@@ -595,6 +598,7 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
         "coder-hermes",
         "coder-kdense",
         "dokploy-ai",
+        "nextcloud",
     }
 
 
@@ -765,6 +769,7 @@ def test_coder_install_persists_consumer_specific_virtual_keys(
         "coder-hermes",
         "coder-kdense",
         "dokploy-ai",
+        "nextcloud",
     }
-    assert len(set(generated_keys.virtual_keys.values())) == 3
+    assert len(set(generated_keys.virtual_keys.values())) == 4
     assert coder_backend.existing_service is not None

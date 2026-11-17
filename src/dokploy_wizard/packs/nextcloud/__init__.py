@@ -3,6 +3,7 @@
 """Public Nextcloud + OnlyOffice runtime interface."""
 
 from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudAiIntegration,
     NextcloudBundleVerification,
     NextcloudCommandCheck,
     NextcloudHealthCheck,
@@ -35,6 +36,7 @@ __all__ = [
     "NEXTCLOUD_VOLUME_RESOURCE_TYPE",
     "ONLYOFFICE_SERVICE_RESOURCE_TYPE",
     "ONLYOFFICE_VOLUME_RESOURCE_TYPE",
+    "NextcloudAiIntegration",
     "NextcloudBackend",
     "NextcloudBundleVerification",
     "NextcloudCommandCheck",

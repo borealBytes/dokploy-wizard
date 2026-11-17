@@ -23,6 +23,7 @@ DeleteScheduleSessionFallbackFn = Callable[[str], Any]
 AiProvidersAllSessionFallbackFn = Callable[[], Any]
 AiProviderCreateSessionFallbackFn = Callable[[str, str, str, str, bool], Any]
 AiProviderUpdateSessionFallbackFn = Callable[[str, str, str, str, str, bool], Any]
+AiProviderDeleteSessionFallbackFn = Callable[[str], Any]
 AiProviderTestConnectionSessionFallbackFn = Callable[[str, str, str], Any]
 
 
@@ -119,6 +120,7 @@ class DokployApiClient:
         ai_providers_all_session_fallback: AiProvidersAllSessionFallbackFn | None = None,
         ai_provider_create_session_fallback: AiProviderCreateSessionFallbackFn | None = None,
         ai_provider_update_session_fallback: AiProviderUpdateSessionFallbackFn | None = None,
+        ai_provider_delete_session_fallback: AiProviderDeleteSessionFallbackFn | None = None,
         ai_provider_test_connection_session_fallback: (
             AiProviderTestConnectionSessionFallbackFn | None
         ) = None,
@@ -138,6 +140,7 @@ class DokployApiClient:
         self._ai_providers_all_session_fallback = ai_providers_all_session_fallback
         self._ai_provider_create_session_fallback = ai_provider_create_session_fallback
         self._ai_provider_update_session_fallback = ai_provider_update_session_fallback
+        self._ai_provider_delete_session_fallback = ai_provider_delete_session_fallback
         self._ai_provider_test_connection_session_fallback = (
             ai_provider_test_connection_session_fallback
         )
@@ -534,6 +537,22 @@ class DokployApiClient:
             raise DokployApiError("Dokploy ai.update response must be an object.")
         return _parse_ai_provider(payload)
 
+    def ai_provider_delete(self, *, ai_id: str) -> None:
+        try:
+            payload = self._request_json(
+                "POST", "/api/ai.delete", {"aiId": ai_id}, allow_scalar=True
+            )
+        except DokployApiError as error:
+            if self._ai_provider_delete_session_fallback is None or not _is_unauthorized_error(
+                error
+            ):
+                raise
+            payload = self._ai_provider_delete_session_fallback(ai_id)
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
+        if payload is not True and not isinstance(payload, bool):
+            raise DokployApiError("Dokploy ai.delete response must be true.")
+
 
     def ai_provider_test_connection(
         self,
@@ -551,7 +570,9 @@ class DokployApiClient:
             payload = payload.get("data", payload)
         return _parse_ai_provider_test_connection_result(payload)
 
-    def _request_json(self, method: str, path: str, payload: Any | None = None) -> Any:
+    def _request_json(
+        self, method: str, path: str, payload: Any | None = None, *, allow_scalar: bool = False
+    ) -> Any:
         data = None
         headers = {
             "Accept": "application/json",
@@ -577,9 +598,12 @@ class DokployApiClient:
             raise DokployApiError(f"Dokploy API request failed: {exc.reason}.") from exc
         if isinstance(response, list):
             return response
-        if not isinstance(response, dict):
-            raise DokployApiError("Dokploy API response must decode to a JSON object or array.")
-        return response.get("data", response)
+        if isinstance(response, dict):
+            return response.get("data", response)
+        if allow_scalar:
+            # tRPC mutations like ai.delete resolve to a bare JSON boolean.
+            return response
+        raise DokployApiError("Dokploy API response must decode to a JSON object or array.")
 
 
 def _default_request(req: request.Request) -> Any:
@@ -700,7 +724,10 @@ def _parse_ai_provider(payload: Any) -> DokployAiProvider:
         ai_id=_require_string(payload, "aiId"),
         name=_require_string(payload, "name"),
         api_url=_require_string(payload, "apiUrl"),
-        api_key=_require_string(payload, "apiKey"),
+        # Current upstream ai.getAll selects the row without apiKey, so a missing
+        # or blank key means "hidden", not "unset"; callers must not treat it as
+        # evidence of drift.
+        api_key=payload.get("apiKey") if isinstance(payload.get("apiKey"), str) else "",
         model=_require_string(payload, "model"),
         is_enabled=is_enabled,
     )

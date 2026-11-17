@@ -71,6 +71,7 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
         state_dir=state_dir,
         desired_state=desired_state,
         session_client=dokploy_session_client,
+        litellm_generated_keys=litellm_generated_keys,
     )
     moodle_backend = cli._build_moodle_backend(
         raw_env=raw_env,

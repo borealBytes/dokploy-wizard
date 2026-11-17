@@ -41,6 +41,7 @@ class FakeDokployApiClient:
     _ai_providers: list[DokployAiProvider] = field(default_factory=list)
     _ai_provider_creates: list[dict[str, object]] = field(default_factory=list)
     _ai_provider_updates: list[dict[str, object]] = field(default_factory=list)
+    _ai_provider_deletes: list[str] = field(default_factory=list)
 
     def seed_existing_service(
         self,
@@ -223,6 +224,12 @@ class FakeDokployApiClient:
         )
         self._ai_providers.append(ai_provider)
         return ai_provider
+
+    def ai_provider_delete(self, *, ai_id: str) -> None:
+        self._ai_provider_deletes.append(ai_id)
+        self._ai_providers = [
+            provider for provider in self._ai_providers if provider.ai_id != ai_id
+        ]
 
 
     def ai_provider_test_connection(

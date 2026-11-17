@@ -35,6 +35,7 @@ from dokploy_wizard.dokploy.env_spec import (
     RenderedCompose,
 )
 from dokploy_wizard.packs.nextcloud.models import (
+    NextcloudAiIntegration,
     NextcloudBundleVerification,
     NextcloudCommandCheck,
     NextcloudResourceRecord,
@@ -68,6 +69,10 @@ _NEXTCLOUD_FIRST_BOOT_CONTAINER_WAIT_DELAY_SECONDS = 5.0
 _NEXTCLOUD_FIRST_BOOT_STATUS_WAIT_ATTEMPTS = 60
 _NEXTCLOUD_FIRST_BOOT_STATUS_WAIT_DELAY_SECONDS = 5.0
 _NEXTCLOUD_APPSTORE_APPS_JSON_URL = "https://apps.nextcloud.com/api/v1/apps.json"
+_INTEGRATION_OPENAI_APP_ID = "integration_openai"
+_INTEGRATION_OPENAI_APP_LABEL = "OpenAI/LocalAI integration"
+_LITELLM_MODELS_PROBE_ATTEMPTS = 10
+_LITELLM_MODELS_PROBE_DELAY_SECONDS = 3.0
 
 
 class DokployNextcloudApi(Protocol):
@@ -115,6 +120,7 @@ class DokployNextcloudBackend:
         admin_password: str = _DEFAULT_NEXTCLOUD_ADMIN_PASSWORD,
         state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployNextcloudApi | None = None,
+        ai_integration: NextcloudAiIntegration | None = None,
     ) -> None:
         self._stack_name = stack_name
         self._compose_name = _nextcloud_service_name(stack_name)
@@ -130,6 +136,7 @@ class DokployNextcloudBackend:
         self._admin_password = admin_password
         self._state_dir = state_dir
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
+        self._ai_integration = ai_integration
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
 
@@ -285,6 +292,7 @@ class DokployNextcloudBackend:
                 jwt_secret=self._onlyoffice_jwt_secret,
                 wait_for_documentserver_check=self._created_in_process,
             )
+            self._ensure_ai_integration(container)
             return _verify_nextcloud_bundle(container)
         service_name = _nextcloud_service_name(self._stack_name)
         container = _wait_for_nextcloud_first_boot_ready(
@@ -318,7 +326,13 @@ class DokployNextcloudBackend:
             jwt_secret=self._onlyoffice_jwt_secret,
             wait_for_documentserver_check=self._created_in_process,
         )
+        self._ensure_ai_integration(container)
         return _verify_nextcloud_bundle(container)
+
+    def _ensure_ai_integration(self, container: str) -> None:
+        if self._ai_integration is None:
+            return
+        _ensure_ai_integration_openai(container, self._ai_integration)
 
     def _validate_service_inputs(
         self,
@@ -1451,6 +1465,98 @@ def _ensure_onlyoffice_app_config(
         _wait_for_onlyoffice_documentserver_check(container_name)
     else:
         _run_occ_shell(container_name, "php occ onlyoffice:documentserver --check")
+
+
+def _ensure_ai_integration_openai(
+    container_name: str,
+    integration: NextcloudAiIntegration,
+) -> None:
+    _enable_app_with_release_fallback(
+        container_name,
+        enable_command=f"php occ app:enable --force {_INTEGRATION_OPENAI_APP_ID}",
+        install_from_release=_install_integration_openai_app_from_release,
+    )
+    _run_occ_shell(
+        container_name,
+        f"php occ config:app:set {_INTEGRATION_OPENAI_APP_ID} url "
+        f"--value={shlex.quote(integration.service_url)}",
+    )
+    _run_occ_shell(
+        container_name,
+        f"php occ config:app:set {_INTEGRATION_OPENAI_APP_ID} api_key "
+        f"--value={shlex.quote(integration.api_key)}",
+    )
+    _run_occ_shell(
+        container_name,
+        f"php occ config:app:set {_INTEGRATION_OPENAI_APP_ID} service_name "
+        f"--value={shlex.quote(integration.service_name)}",
+    )
+    _prime_ai_integration_models(container_name, integration)
+
+
+def _install_integration_openai_app_from_release(container_name: str) -> None:
+    _install_nextcloud_app_from_release(
+        container_name,
+        app_id=_INTEGRATION_OPENAI_APP_ID,
+        app_label=_INTEGRATION_OPENAI_APP_LABEL,
+    )
+
+
+def _prime_ai_integration_models(
+    container_name: str,
+    integration: NextcloudAiIntegration,
+) -> None:
+    aliases = tuple(
+        dict.fromkeys((*integration.expected_models, *_probe_litellm_model_aliases(integration)))
+    )
+    if not aliases:
+        # Nothing to seed yet; the app re-fetches the live list from the gateway
+        # whenever an admin opens its settings, so an empty prime is a soft miss.
+        return
+    models_document = json.dumps(
+        {
+            "data": [{"id": alias, "object": "model"} for alias in aliases],
+            "object": "list",
+        },
+        separators=(",", ":"),
+    )
+    _run_occ_shell(
+        container_name,
+        f"php occ config:app:set {_INTEGRATION_OPENAI_APP_ID} models "
+        f"--value={shlex.quote(models_document)}",
+    )
+
+
+def _probe_litellm_model_aliases(integration: NextcloudAiIntegration) -> tuple[str, ...]:
+    for attempt in range(_LITELLM_MODELS_PROBE_ATTEMPTS):
+        payload: object = None
+        try:
+            req = request.Request(
+                integration.models_probe_url,
+                headers={"Authorization": f"Bearer {integration.api_key}"},
+                method="GET",
+            )
+            with request.urlopen(req, timeout=10) as response:  # noqa: S310
+                payload = json.loads(response.read().decode("utf-8"))
+        except (error.HTTPError, error.URLError, TimeoutError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, list):
+                return tuple(
+                    dict.fromkeys(
+                        model_id
+                        for model_id in (
+                            entry.get("id")
+                            for entry in data
+                            if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+                        )
+                        if isinstance(model_id, str) and model_id != ""
+                    )
+                )
+        if attempt < _LITELLM_MODELS_PROBE_ATTEMPTS - 1:
+            time.sleep(_LITELLM_MODELS_PROBE_DELAY_SECONDS)
+    return ()
 
 
 def _wait_for_onlyoffice_documentserver_check(

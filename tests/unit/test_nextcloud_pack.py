@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import ssl
 import subprocess
 from dataclasses import dataclass, field
@@ -45,6 +46,7 @@ from dokploy_wizard.packs.nextcloud import (
     NEXTCLOUD_VOLUME_RESOURCE_TYPE,
     ONLYOFFICE_SERVICE_RESOURCE_TYPE,
     ONLYOFFICE_VOLUME_RESOURCE_TYPE,
+    NextcloudAiIntegration,
     NextcloudBundleVerification,
     NextcloudCommandCheck,
     NextcloudError,
@@ -851,6 +853,7 @@ def test_nextcloud_renderer_returns_safe_compose_with_targeted_env_specs() -> No
 def _build_nextcloud_backend(
     *,
     client: FakeDokployApiClient | None = None,
+    ai_integration: NextcloudAiIntegration | None = None,
 ) -> DokployNextcloudBackend:
     desired_state = resolve_desired_state(
         RawEnvInput(
@@ -882,6 +885,7 @@ def _build_nextcloud_backend(
         integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
         admin_user="admin@example.com",
         client=client or FakeDokployApiClient(),
+        ai_integration=ai_integration,
     )
 
 
@@ -1803,3 +1807,341 @@ def test_nextcloud_status_ready_requires_installed_true(monkeypatch: pytest.Monk
         lambda req, timeout, context: FakeResponse('{"installed": true, "maintenance": false}'),
     )
     assert _nextcloud_status_ready("https://nextcloud.example.com/status.php") is True
+
+
+# --- Group 2: Nextcloud built-in AI (integration_openai) wiring ------------
+
+
+def _ai_integration(**overrides):
+    values = {
+        "service_name": "LiteLLM (Dokploy Wizard)",
+        "service_url": "http://wizard-stack-shared-litellm:4000/v1",
+        "api_key": "sk-litellm-nextcloud-test",
+        "models_probe_url": "http://127.0.0.1:4000/v1/models",
+        "expected_models": ("opencode-go/deepseek-v4.1-flash",),
+    }
+    values.update(overrides)
+    return NextcloudAiIntegration(**values)
+
+
+def _capture_occ_commands(monkeypatch):
+    occ_commands: list[str] = []
+
+    def _record_enable(container_name, *, enable_command, install_from_release):
+        del container_name, install_from_release
+        occ_commands.append(enable_command)
+
+    monkeypatch.setattr(nextcloud_module, "_enable_app_with_release_fallback", _record_enable)
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_run_occ_shell",
+        lambda container_name, shell_command: occ_commands.append(shell_command),
+    )
+    monkeypatch.setattr(nextcloud_module.time, "sleep", lambda delay: None)
+    return occ_commands
+
+
+def _occ_config_value(command: str) -> object:
+    import json
+    import shlex
+
+    tokens = shlex.split(command)
+    value_token = next(token for token in tokens if token.startswith("--value="))
+    value = value_token.removeprefix("--value=")
+    if value.startswith(("{", "[")):
+        return json.loads(value)
+    return value
+
+
+def test_ensure_ai_integration_openai_enables_app_and_points_it_at_litellm(monkeypatch) -> None:
+    occ_commands = _capture_occ_commands(monkeypatch)
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_probe_litellm_model_aliases",
+        lambda integration: ("sync/sglang/qwen",),
+    )
+
+    nextcloud_module._ensure_ai_integration_openai("nc-container", _ai_integration())
+
+    assert occ_commands[0] == "php occ app:enable --force integration_openai"
+    values = {
+        key: next(
+            _occ_config_value(c)
+            for c in occ_commands
+            if f" config:app:set integration_openai {key} --value=" in c
+        )
+        for key in ("url", "api_key", "service_name")
+    }
+    assert values == {
+        "url": "http://wizard-stack-shared-litellm:4000/v1",
+        "api_key": "sk-litellm-nextcloud-test",
+        "service_name": "LiteLLM (Dokploy Wizard)",
+    }
+    models_commands = [c for c in occ_commands if " integration_openai models --value=" in c]
+    assert len(models_commands) == 1
+    assert _occ_config_value(models_commands[0]) == {
+        "data": [
+            {"id": "opencode-go/deepseek-v4.1-flash", "object": "model"},
+            {"id": "sync/sglang/qwen", "object": "model"},
+        ],
+        "object": "list",
+    }
+
+
+def test_ensure_ai_integration_openai_primes_from_static_allowlist_when_probe_empty(
+    monkeypatch,
+) -> None:
+    occ_commands = _capture_occ_commands(monkeypatch)
+    monkeypatch.setattr(nextcloud_module, "_probe_litellm_model_aliases", lambda integration: ())
+
+    nextcloud_module._ensure_ai_integration_openai(
+        "nc-container",
+        _ai_integration(expected_models=("alias-a", "alias-b")),
+    )
+
+    models_commands = [c for c in occ_commands if " integration_openai models --value=" in c]
+    assert len(models_commands) == 1
+    assert _occ_config_value(models_commands[0]) == {
+        "data": [
+            {"id": "alias-a", "object": "model"},
+            {"id": "alias-b", "object": "model"},
+        ],
+        "object": "list",
+    }
+
+
+def test_ensure_ai_integration_openai_skips_prime_when_no_models_visible(
+    monkeypatch,
+) -> None:
+    occ_commands = _capture_occ_commands(monkeypatch)
+    monkeypatch.setattr(nextcloud_module, "_probe_litellm_model_aliases", lambda integration: ())
+
+    nextcloud_module._ensure_ai_integration_openai(
+        "nc-container",
+        _ai_integration(expected_models=()),
+    )
+
+    assert not [c for c in occ_commands if " integration_openai models --value=" in c]
+    assert len(occ_commands) == 4  # enable + url + api_key + service_name
+
+
+def test_ensure_ai_integration_openai_dedupes_probe_against_static_allowlist(
+    monkeypatch,
+) -> None:
+    occ_commands = _capture_occ_commands(monkeypatch)
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_probe_litellm_model_aliases",
+        lambda integration: ("alias-a", "sync/sglang/qwen"),
+    )
+
+    nextcloud_module._ensure_ai_integration_openai(
+        "nc-container",
+        _ai_integration(expected_models=("alias-a",)),
+    )
+
+    models_commands = [c for c in occ_commands if " integration_openai models --value=" in c]
+    assert _occ_config_value(models_commands[0]) == {
+        "data": [
+            {"id": "alias-a", "object": "model"},
+            {"id": "sync/sglang/qwen", "object": "model"},
+        ],
+        "object": "list",
+    }
+
+
+def test_install_integration_openai_app_from_release_targets_appstore_id(monkeypatch) -> None:
+    captured: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_install_nextcloud_app_from_release",
+        lambda container_name, *, app_id, app_label: captured.append(
+            {"container": container_name, "app_id": app_id, "app_label": app_label}
+        ),
+    )
+
+    nextcloud_module._install_integration_openai_app_from_release("nc-container")
+
+    assert captured == [
+        {
+            "container": "nc-container",
+            "app_id": "integration_openai",
+            "app_label": "OpenAI/LocalAI integration",
+        }
+    ]
+
+
+def test_probe_litellm_model_aliases_sends_consumer_key_and_keeps_order(monkeypatch) -> None:
+    captured: list[request.Request] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "data": [
+                        {"id": "alias-b"},
+                        {"id": "alias-a"},
+                        {"id": "alias-b"},
+                        {"id": ""},
+                        {"name": "no-id"},
+                        "junk",
+                    ],
+                    "object": "list",
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None, **kwargs):
+        del timeout, kwargs
+        captured.append(req)
+        return FakeResponse()
+
+    monkeypatch.setattr(nextcloud_module.request, "urlopen", fake_urlopen)
+
+    aliases = nextcloud_module._probe_litellm_model_aliases(_ai_integration())
+
+    assert aliases == ("alias-b", "alias-a")
+    assert len(captured) == 1
+    assert captured[0].full_url == "http://127.0.0.1:4000/v1/models"
+    assert captured[0].get_header("Authorization") == "Bearer sk-litellm-nextcloud-test"
+
+
+def test_probe_litellm_model_aliases_gives_up_after_bounded_retries(monkeypatch) -> None:
+    from urllib import error
+
+    attempts: list[int] = []
+    monkeypatch.setattr(nextcloud_module, "_LITELLM_MODELS_PROBE_ATTEMPTS", 3)
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        nextcloud_module.time, "sleep", lambda delay: sleeps.append(delay)
+    )
+
+    def fake_urlopen(req, timeout=None, **kwargs):
+        del req, timeout, kwargs
+        attempts.append(1)
+        raise error.URLError("connection refused")
+
+    monkeypatch.setattr(nextcloud_module.request, "urlopen", fake_urlopen)
+
+    assert nextcloud_module._probe_litellm_model_aliases(_ai_integration()) == ()
+    assert len(attempts) == 3
+    assert len(sleeps) == 2
+
+
+def test_probe_litellm_model_aliases_accepts_late_gateway_recovery(monkeypatch) -> None:
+    attempts: list[int] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"data": [{"id": "alias-late"}], "object": "list"}).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None, **kwargs):
+        del req, timeout, kwargs
+        attempts.append(1)
+        if len(attempts) < 3:
+            from urllib import error
+
+            raise error.URLError("not ready yet")
+        return FakeResponse()
+
+    monkeypatch.setattr(nextcloud_module.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(nextcloud_module.time, "sleep", lambda delay: None)
+
+    assert nextcloud_module._probe_litellm_model_aliases(_ai_integration()) == ("alias-late",)
+    assert len(attempts) == 3
+
+
+def _patch_app_setup_sequence(monkeypatch, integration=None):
+    """Patch the ensure_application_ready collaborators to record call order."""
+    setup_calls: list[tuple[str, object]] = []
+    expected = object()
+
+    monkeypatch.setattr(nextcloud_module, "_ensure_admin_user", lambda container, *args, **kwargs: setup_calls.append(("admin", container)))
+    monkeypatch.setattr(nextcloud_module, "_ensure_trusted_domain", lambda container, *args, **kwargs: setup_calls.append(("trusted", container)))
+    monkeypatch.setattr(nextcloud_module, "_ensure_onlyoffice_app_config", lambda container, **kwargs: setup_calls.append(("onlyoffice", container)))
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_ensure_ai_integration_openai",
+        lambda container, ai: setup_calls.append(("ai", (container, ai))),
+    )
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_verify_nextcloud_bundle",
+        lambda container: setup_calls.append(("verify", container)) or expected,
+    )
+    return setup_calls, expected
+
+
+def test_backend_wires_ai_integration_after_onlyoffice_on_ready_branch(monkeypatch) -> None:
+    integration = _ai_integration()
+    setup_calls, expected = _patch_app_setup_sequence(monkeypatch)
+    monkeypatch.setattr(nextcloud_module, "_nextcloud_status_ready", lambda _: True)
+    monkeypatch.setattr(nextcloud_module, "_find_container_name", lambda _: "nc-container")
+
+    backend = _build_nextcloud_backend(ai_integration=integration)
+    verification = backend.ensure_application_ready(
+        nextcloud_url="https://nextcloud.example.com",
+        onlyoffice_url="https://office.example.com",
+    )
+
+    assert verification == expected
+    assert [name for name, _ in setup_calls] == [
+        "admin",
+        "trusted",
+        "onlyoffice",
+        "ai",
+        "verify",
+    ]
+    assert setup_calls[3] == ("ai", ("nc-container", integration))
+
+
+def test_backend_wires_ai_integration_after_onlyoffice_on_first_boot_branch(monkeypatch) -> None:
+    integration = _ai_integration()
+    setup_calls, expected = _patch_app_setup_sequence(monkeypatch)
+    monkeypatch.setattr(nextcloud_module, "_nextcloud_status_ready", lambda _: False)
+    monkeypatch.setattr(
+        nextcloud_module,
+        "_wait_for_nextcloud_first_boot_ready",
+        lambda service_name, status_url, *, attempts, delay_seconds: "nc-container",
+    )
+
+    backend = _build_nextcloud_backend(ai_integration=integration)
+    verification = backend.ensure_application_ready(
+        nextcloud_url="https://nextcloud.example.com",
+        onlyoffice_url="https://office.example.com",
+    )
+
+    assert verification == expected
+    assert [name for name, _ in setup_calls] == [
+        "admin",
+        "trusted",
+        "onlyoffice",
+        "ai",
+        "verify",
+    ]
+    assert setup_calls[3] == ("ai", ("nc-container", integration))
+
+
+def test_backend_skips_ai_integration_when_unset(monkeypatch) -> None:
+    setup_calls, expected = _patch_app_setup_sequence(monkeypatch)
+    monkeypatch.setattr(nextcloud_module, "_nextcloud_status_ready", lambda _: True)
+    monkeypatch.setattr(nextcloud_module, "_find_container_name", lambda _: "nc-container")
+
+    backend = _build_nextcloud_backend()
+    backend.ensure_application_ready(
+        nextcloud_url="https://nextcloud.example.com",
+        onlyoffice_url="https://office.example.com",
+    )
+
+    assert [name for name, _ in setup_calls] == ["admin", "trusted", "onlyoffice", "verify"]

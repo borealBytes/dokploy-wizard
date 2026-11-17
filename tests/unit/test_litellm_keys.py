@@ -34,6 +34,7 @@ _EXPECTED_LITELLM_CONSUMERS = {
     "coder-hermes",
     "coder-kdense",
     "dokploy-ai",
+    "nextcloud",
 }
 _EXPECTED_SEAWEEDFS_GENERATED_SECRET_NAMES = {"access_key", "secret_key"}
 
@@ -94,6 +95,7 @@ def test_empty_state_generates_consumer_keys_and_existing_state_reuses_them(
 
     assert (state_dir / LITELLM_GENERATED_KEYS_FILE).exists()
     assert set(generated_keys.virtual_keys) == _EXPECTED_LITELLM_CONSUMERS
+    assert generated_keys.virtual_keys["nextcloud"].startswith("sk-litellm-nextcloud")
     assert generated_keys.master_key.startswith("sk-litellm-master-")
     assert generated_keys.salt_key.startswith("litellm-salt-")
     assert generated_keys.virtual_keys["coder-hermes"].startswith("sk-litellm-coder-hermes-")
@@ -115,7 +117,14 @@ def test_empty_state_generates_consumer_keys_and_existing_state_reuses_them(
 
     reused_keys = ensure_litellm_generated_keys(state_dir)
 
-    assert reused_keys == existing_keys
+    # Pre-nextcloud state reuses every existing value verbatim and only grows
+    # the new consumer slot.
+    assert reused_keys.master_key == existing_keys.master_key
+    assert reused_keys.salt_key == existing_keys.salt_key
+    for consumer, key in existing_keys.virtual_keys.items():
+        assert reused_keys.virtual_keys[consumer] == key
+    assert set(reused_keys.virtual_keys) == _EXPECTED_LITELLM_CONSUMERS
+    assert reused_keys.virtual_keys["nextcloud"].startswith("sk-litellm-nextcloud-")
 
 
 def test_ensure_litellm_generated_keys_repairs_legacy_non_sk_values(tmp_path: Path) -> None:
