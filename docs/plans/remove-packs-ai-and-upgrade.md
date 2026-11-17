@@ -233,6 +233,23 @@ duplicates; prune wizard-created leftovers.
   `Pruned duplicate wizard-created Coder workspace '<name>'.`; the second
   `ensure_application_ready` pass is a true noop (flow-level idempotency test).
 
+## Phase 6 proof log
+
+- Attempt 1 (commit `7b106d4`+ tree): wrapper invoked with system `python3` →
+  paramiko missing → instant fail, box untouched. Documented in AGENTS.md; use
+  `uv run ./bin/dokploy-wizard-remote …`.
+- Attempt 2: install reached Dokploy bootstrap, then `GET /api/project.all` →
+  **HTTP 429 `{"message":"Rate limit exceeded"}`** in
+  `_qualify_dokploy_mutation_auth`. Root cause: self-hosted Dokploy forwards
+  `user.createApiKey` input verbatim to better-auth's api-key plugin, whose
+  defaults are `rateLimitEnabled: true, timeWindow: 24h, maxRequests: 10` — the
+  wizard's own API key carried a 10-calls-per-day cap. Dokploy's UI creates keys
+  with `rateLimitEnabled: false`; the wizard now does the same (commit `79b5433`),
+  plus the API client honors `Retry-After` on 429 with a bounded backoff.
+  Remote was reset (`docker service rm dokploy dokploy-postgres`,
+  `docker rm -f dokploy-traefik`, `rm -rf /root/dokploy-wizard`) so a fresh
+  unthrottled key is created.
+
 ## Verification matrix
 
 | Scenario | Command | Proves |
