@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -529,6 +530,53 @@ def test_reconcile_virtual_keys_recreates_managed_existing_key_when_generated_va
             metadata=_MANAGED_METADATA,
         )
     ]
+
+
+def test_reconcile_virtual_keys_reuses_key_whose_hashed_token_matches_generated_value(
+) -> None:
+    """Live /key/list returns hashed material, never the raw key.
+
+    Measured on the box: every wizard-managed alias comes back with
+    ``token == sha256(raw)`` (and no raw key field at all), so the reconciler
+    must prove the match through the hash. Before this, comparing the raw
+    state value to the payload's ``key`` (which falls back to the hash) saw
+    drift on every pass and churned delete+recreate for all four consumer
+    keys — and the preserved-phase validator could never return true.
+    """
+    generated_key = "sk-coder-hermes-wizard-key"
+    token_hash = hashlib.sha256(generated_key.encode()).hexdigest()
+    api = FakeLiteLLMAdminApi(
+        teams=(
+            LiteLLMTeamRecord(
+                team_id="team-coder-hermes",
+                team_alias="coder-hermes",
+                models=("local-model.internal/unsloth-active",),
+                metadata=_MANAGED_METADATA,
+            ),
+        ),
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key=token_hash,
+                key_alias="coder-hermes",
+                team_id="team-coder-hermes",
+                models=("local-model.internal/unsloth-active",),
+                metadata=_MANAGED_METADATA,
+                token=token_hash,
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={"coder-hermes": generated_key},
+        consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",)
+        },
+    )
+
+    assert api.deleted_key_aliases == []
+    assert api.created_keys == []
+    assert api.updated_keys == []
 
 
 def test_reconcile_virtual_keys_updates_managed_scope_drift_on_existing_accepted_key(

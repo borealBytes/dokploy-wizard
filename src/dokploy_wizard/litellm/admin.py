@@ -1,6 +1,7 @@
 # ruff: noqa: E501
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Callable, Mapping
@@ -34,6 +35,26 @@ class LiteLLMVirtualKeyRecord:
     team_id: str | None
     models: tuple[str, ...]
     metadata: Mapping[str, object] = field(default_factory=dict)
+    # Live /key/list payloads carry no raw token material: `token` is the
+    # sha256 hex of the accepted key (measured on the box). Records parsed
+    # from such payloads set this field so callers can prove a match without
+    # the raw value.
+    token: str | None = None
+
+
+def _matches_generated_key(record: LiteLLMVirtualKeyRecord, generated_key: str) -> bool:
+    """True when the record proves the wizard's raw key.
+
+    A gateway that echoes the raw value matches directly. The live LiteLLM
+    ``/key/list?return_full_object=true`` payload carries no raw key at all
+    (only the masked ``key_name`` and the hashed ``token``), so the hash form
+    is the proof: ``token == sha256(raw)`` is the only comparison that can
+    converge on a real box — comparing the raw state value to the payload's
+    ``key`` (which falls back to the hash) never matches.
+    """
+    if record.key == generated_key:
+        return True
+    return record.token is not None and hashlib.sha256(generated_key.encode()).hexdigest() == record.token
 
 
 class LiteLLMAdminApi(Protocol):
@@ -376,7 +397,7 @@ class LiteLLMGatewayManager:
                 )
                 existing_keys[consumer] = existing_key
             else:
-                key_value_drifted = existing_key.key != generated_key
+                key_value_drifted = not _matches_generated_key(existing_key, generated_key)
                 key_scope_drifted = (
                     existing_key.models != expected_models or existing_key.team_id != team.team_id
                 )
@@ -490,6 +511,7 @@ def _parse_key(
         team_id=team_id,
         models=_tuple_of_strings(payload.get("models")),
         metadata=_metadata_mapping(payload.get("metadata")),
+        token=_optional_string(payload, "token"),
     )
 
 

@@ -47,6 +47,7 @@ from dokploy_wizard.litellm import (
     build_litellm_config,
     render_litellm_config_yaml,
 )
+from dokploy_wizard.litellm.admin import _matches_generated_key
 from dokploy_wizard.litellm.model_catalog import (
     DEFAULT_LOCAL_CANONICAL_ALIAS,
     DEFAULT_LOCAL_UPSTREAM_TARGET,
@@ -647,7 +648,10 @@ class DokploySharedCoreBackend:
             return False
         for consumer, expected_key in self._litellm_generated_keys.virtual_keys.items():
             record = records.get(consumer)
-            if record is None or record.key != expected_key:
+            # Live /key/list returns hashed token material, never the raw key
+            # (measured on the box: token == sha256(raw) for every wizard
+            # alias), so a raw string comparison here can never converge.
+            if record is None or not _matches_generated_key(record, expected_key):
                 return False
             expected_models = tuple(
                 dict.fromkeys(self._litellm_consumer_model_allowlists.get(consumer, ()))

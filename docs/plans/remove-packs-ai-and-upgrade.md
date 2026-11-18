@@ -865,3 +865,17 @@ tests + a fresh remote proof:
     `resolve_litellm_admin_hostname`, parity-pinned by a new drift test
     (accept-ingress-including-admin-route) alongside the existing
     stale-ingress rejection.
+  - With `networking` fixed, the noop attempt surfaced the next masked
+    drift, at `shared_core`, and it was the same class of bug: the
+    virtual-key validator compared the wizard's raw key from
+    `litellm-generated-keys.json` against the live `/key/list` record key —
+    but LiteLLM's list payload carries no raw token at all. Box-measured:
+    every wizard-managed alias returns `token == sha256(raw)` (a 64-hex
+    digest), `api_key: None`, and a masked `key_name` (`sk-...epbb`);
+    `_parse_key` falls back to the hash, so raw-vs-hash never matches and
+    every noop-classified modify would rerun `shared_core` forever. The
+    reconciler had the same comparison, which additionally churned
+    delete+recreate on all four consumer keys on every real pass. Both sides
+    now prove the match with `_matches_generated_key` (raw equality OR
+    `sha256(expected) == record.token`), pinned by tests feeding
+    hash-only records to the validator and the reconciler.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -900,6 +901,75 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
         ),
     )
     assert sidecar_expanded_backend.validate_litellm_virtual_keys() is True
+
+
+def test_shared_core_validates_litellm_virtual_keys_against_hashed_token_material() -> None:
+    """Live /key/list payloads carry hashed token material, never the raw key.
+
+    Measured on the box: every wizard-managed alias returns
+    ``token == sha256(raw)`` with no raw key field. The validator must accept
+    that proof (raw-vs-hash string equality never converges, so every
+    noop-classified modify flagged permanent drift at 'shared_core' — the
+    second probe-parity bug the live proof surfaced, after the ingress one).
+    """
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
+    generated_keys = _generated_keys()
+    hashed_records = tuple(
+        LiteLLMVirtualKeyRecord(
+            key=hashlib.sha256(value.encode()).hexdigest(),
+            key_alias=consumer,
+            team_id=f"team-{consumer}",
+            models=("local-model.internal/unsloth-active",)
+            if consumer == "coder-hermes"
+            else (),
+            metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
+            token=hashlib.sha256(value.encode()).hexdigest(),
+        )
+        for consumer, value in generated_keys.virtual_keys.items()
+    )
+    hashed_backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",)
+        },
+        litellm_admin_api=_FakeLiteLLMAdminApi(
+            {"status": "connected", "db": "connected"},
+            keys=hashed_records,
+        ),
+    )
+    assert hashed_backend.validate_litellm_virtual_keys() is True
+
+    # A different hash under the same alias is a genuinely different token.
+    rotated_records = tuple(
+        LiteLLMVirtualKeyRecord(
+            key="0" * 64 if record.key_alias == "coder-hermes" else record.key,
+            key_alias=record.key_alias,
+            team_id=record.team_id,
+            models=record.models,
+            metadata=record.metadata,
+            token="0" * 64 if record.key_alias == "coder-hermes" else record.token,
+        )
+        for record in hashed_records
+    )
+    rotated_backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",)
+        },
+        litellm_admin_api=_FakeLiteLLMAdminApi(
+            {"status": "connected", "db": "connected"},
+            keys=rotated_records,
+        ),
+    )
+    assert rotated_backend.validate_litellm_virtual_keys() is False
 
 
 def test_shared_core_find_container_name_prefers_exact_manual_name(
