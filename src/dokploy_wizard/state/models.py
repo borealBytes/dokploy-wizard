@@ -521,9 +521,16 @@ def _require_optional_string(payload: dict[str, Any], key: str) -> str | None:
     return value
 
 
+# The Coder workspace issuer is not a chat consumer: it exists so every coder
+# workspace can mint its own virtual key (named after the workspace) during
+# startup, with /key/generate, /key/info, and /key/delete as its only routes.
+# Child keys are what workspaces actually send inference with.
+LITELLM_WORKSPACE_ISSUER_CONSUMER = "coder-workspace-issuer"
+
 LITELLM_CONSUMER_VIRTUAL_KEY_NAMES = (
     "coder-hermes",
     "coder-kdense",
+    "coder-workspace-issuer",
     "dokploy-ai",
     "nextcloud",
 )
@@ -532,6 +539,7 @@ LITELLM_GENERATED_MASTER_KEY_PREFIX = "sk-litellm-master"
 LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES = {
     "coder-hermes": "sk-litellm-coder-hermes",
     "coder-kdense": "sk-litellm-coder-kdense",
+    "coder-workspace-issuer": "sk-litellm-coder-workspace-issuer",
     "dokploy-ai": "sk-litellm-dokploy-ai",
     "nextcloud": "sk-litellm-nextcloud",
 }

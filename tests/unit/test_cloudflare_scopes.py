@@ -183,6 +183,12 @@ class FakeCloudflareBackend:
         self.dns_records[hostname] = (updated_record,)
         return updated_record
 
+    def ensure_always_use_https(self, zone_id: str) -> bool:
+        if not hasattr(self, "always_use_https_calls"):
+            self.always_use_https_calls: list[str] = []
+        self.always_use_https_calls.append(zone_id)
+        return False
+
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
         if not self.certificate_scope_ok:
             raise CloudflareError("certificate scope failed")

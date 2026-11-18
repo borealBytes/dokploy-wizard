@@ -113,6 +113,7 @@ class DokployCoderBackend:
         hermes_desktop_channel: str = _DEFAULT_HERMES_DESKTOP_CHANNEL,
         ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
         ai_default_api_key: str | None = None,
+        workspace_issuer_api_key: str | None = None,
         state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployCoderApi | None = None,
     ) -> None:
@@ -133,6 +134,9 @@ class DokployCoderBackend:
         self._hermes_desktop_channel = _normalize_hermes_channel(hermes_desktop_channel)
         self._ai_default_base_url = ai_default_base_url
         self._ai_default_api_key = ai_default_api_key
+        # Lets each Coder workspace mint its own LiteLLM child key at startup
+        # (see the template MINTPY block); None keeps the shared baked key.
+        self._workspace_issuer_api_key = workspace_issuer_api_key
         self._state_dir = state_dir
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
@@ -285,6 +289,9 @@ class DokployCoderBackend:
                         self._ai_default_api_key or ""
                     ),
                     "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": f"https://{self._hostname}",
+                    "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": _shell_double_quote_escape(
+                        self._workspace_issuer_api_key or ""
+                    ),
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
                     "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": _shell_double_quote_escape(
                         self._admin_password or "ChangeMeSoon"
@@ -321,6 +328,9 @@ class DokployCoderBackend:
                         self._ai_default_api_key or ""
                     ),
                     "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": f"https://{self._hostname}",
+                    "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": _shell_double_quote_escape(
+                        self._workspace_issuer_api_key or ""
+                    ),
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
                     "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": _shell_double_quote_escape(
                         self._admin_password or "ChangeMeSoon"
@@ -345,6 +355,9 @@ class DokployCoderBackend:
                         self._ai_default_api_key or ""
                     ),
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                    "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": _shell_double_quote_escape(
+                        self._workspace_issuer_api_key or ""
+                    ),
                 },
             ),
             (
@@ -365,6 +378,9 @@ class DokployCoderBackend:
                         self._ai_default_api_key or ""
                     ),
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                    "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": _shell_double_quote_escape(
+                        self._workspace_issuer_api_key or ""
+                    ),
                 },
             ),
             (
@@ -403,6 +419,9 @@ class DokployCoderBackend:
                     ),
                     "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
                         self._ai_default_api_key or ""
+                    ),
+                    "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": _shell_double_quote_escape(
+                        self._workspace_issuer_api_key or ""
                     ),
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
                 },

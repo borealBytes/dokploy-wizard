@@ -527,3 +527,66 @@ Remote runs: timeout ≥ 3,600,000 ms or background (AGENTS.md).
 | Rollout | blank-slate reinstall on the test box (ledger lost with the Codespaces workspace) |
 | Nextcloud AI config shape | v3.9.x flat app-config keys (`url`/`api_key`/`service_name`) + `models` cache seeding; the v4/v5 services-JSON shape (NC33+) is a follow-on with D2 |
 | Provider/cost visibility | Group 5 (user-requested): provenance goes INTO the alias (flat `sync/<provider>-<id>`, `/`→`->`) because clients truncate paths; costs ride LiteLLM's standard `model_info` fields from the catalogs the sync already consumes — no dependence on any picker's UI |
+
+
+## Phase 6b (2026-11): FileX pack, internal-only SeaweedFS S3, per-workspace Coder keys, HTTPS-only edge
+
+Four additions landed after the initial live-run checklist, all proven or gated by
+tests + a fresh remote proof:
+
+### FileX pack (`filex.<root-domain>`)
+- New pack: `jessfraz/ingress` image pinned by digest, single replica, bind mount at
+  `<stack data dir>/filex`, shared `seaweedfs-data` volume for the SeaweedFS client mount,
+  `DockerProxyNetwork`, and a wizard-owned `filex` tunnel route.
+- SeaweedFS backend: bucket `filex`, prefix `files`, region `us-east-1`, credentials are the
+  pack's generated secrets persisted under `filex.generated-secrets.json`.
+- Bucket bootstrap (`filex_bucket_bootstrap.py`): SigV4 PUT bucket + versioning, idempotent,
+  runs after the service is healthy. Versioning is enabled from the first boot so FileX's
+  native version history works without user setup.
+- Health probe: `/healthz`.
+- First-login seeding: admin account matches the shared Dokploy/Coder admin credentials
+  (email + password), FileX-native versioning on, default storage pointed at the mounted
+  SeaweedFS bucket/prefix — the workspace is usable without a setup wizard.
+- Live proof on `showmeseewhy.com`: `https://filex.showmeseewhy.com/healthz` 200
+  (`{"status":"ok"}`) through the tunnel and via loopback + Host header; login POST with the
+  Dokploy admin credentials returns 200 (user `admin`, id 1); bucket HEAD + versioning GET
+  return 200/`Enabled` over the loopback SigV4 probe.
+
+### SeaweedFS S3 de-exposed
+- The `s3.<root-domain>` public CNAME is retired: Nextcloud (embedded client), Moodle
+  (external), and Coder (external) all use the internal container hostname. A new
+  `internal_hostname` field on `ManagedSeaweedFS` records `http://<stack>-seaweedfs.internal:8333`
+  and the state digest now covers it. The reconcile pass deletes an owned-and-stale
+  public S3 route (404 on public `s3.` after the next apply, proven live); the internal
+  hostname keeps serving (200 on the loopback probe).
+- If public S3 is ever re-enabled (identity config), that is a deliberate later task.
+
+### Per-workspace Coder LiteLLM keys (scoped issuer + template mint)
+- New generated consumer `coder-workspace-issuer` (auto-backfilled into existing
+  generated-keys state). It is not a chat consumer: it is what each workspace uses to mint
+  its own virtual key. Validation is subset-based, so the issuer's team allowlist is
+  deliberately `("*",)` (can mint any gateway model); its key is pushed with
+  `allowed_routes = /key/generate,/key/info,/key/delete` so it can mint but never chat.
+- The issuer key is excluded from the sync sidecar's consumer-keys push (which merges
+  explicit model lists and would replace the wildcard).
+- The five gateway-key Coder templates (all except kdense-byok, which brings its own key)
+  gained a startup mint: a deterministic child token
+  `sha256(issuer + ":" + workspace_name)`, `key_alias = workspace name`, models
+  `sync/*, sync/default-chat`. Info-then-generate-then-re-info: adoption after restarts,
+  issuer rotation re-mints for free, and any failure (403, alias collision, gateway
+  unreachable) leaves the baked shared template key in place, so AI still works.
+  A workspace-level `AI_DEFAULT_API_KEY` (hermes-family: `HERMES_TEMPLATE_API_KEY`)
+  env override still wins over the minted key.
+- LiteLLM spend now attributes per workspace via the key alias; rotating one workspace's
+  key does not touch the others.
+
+### HTTPS-only edge (Cloudflare Always Use HTTPS)
+- `CloudflareApiBackend.ensure_always_use_https(zone_id)` reads the zone setting and PATCHes
+  it on once; `reconcile_networking` calls it right after zone validation (idempotent; dry
+  runs note the intent only). Plain `http://` requests bounce at Cloudflare before ever
+  reaching the tunnel, which also fixes origin apps whose auth pins the https origin
+  (Dokploy's NextAuth "Invalid origin" on http logins).
+
+### Gates
+- `pytest` (1079 passed), `ruff check`, `mypy` green. Template changes live entirely
+  inside `<<-EOT` heredoc bodies, so Terraform formatting is untouched.

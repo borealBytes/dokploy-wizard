@@ -119,6 +119,8 @@ class CloudflareBackend(Protocol):
 
     def delete_dns_record(self, zone_id: str, *, record_id: str) -> None: ...
 
+    def ensure_always_use_https(self, zone_id: str) -> bool: ...
+
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]: ...
 
     def order_advanced_certificate_pack(
@@ -194,6 +196,7 @@ class CloudflareApiBackend:
         self._mock_access_app_ids: dict[str, str] = {}
         self._mock_access_policies: dict[str, CloudflareAccessPolicy] = {}
         self._mock_deleted_dns_hostnames: set[str] = set()
+        self._mock_always_use_https_calls = 0
 
     def validate_account_access(self, account_id: str) -> None:
         if self._mock_account_ok is not None:
@@ -480,6 +483,29 @@ class CloudflareApiBackend:
                 # Already gone upstream; the prune pass must converge, not fail.
                 return
             raise
+
+    def ensure_always_use_https(self, zone_id: str) -> bool:
+        # Wizard-served sites are HTTPS surfaces: the tunnel edge terminates TLS
+        # and the apps' own auth (e.g. Dokploy's NextAuth origin check) is pinned
+        # to the https:// URL. A zone-level redirect makes plain HTTP bounce at
+        # Cloudflare before anything reaches the tunnel, so no site is ever
+        # "accessible over HTTP" from the outside.
+        if self._mock_zone_ok is not None:
+            self._mock_always_use_https_calls += 1
+            return False
+        payload = self._request_json(
+            method="GET",
+            path=f"/zones/{zone_id}/settings/always_use_https",
+        )
+        result = payload.get("result")
+        if isinstance(result, dict) and result.get("value") == "on":
+            return False
+        self._request_json(
+            method="PATCH",
+            path=f"/zones/{zone_id}/settings/always_use_https",
+            body={"value": "on"},
+        )
+        return True
 
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
         if self._mock_zone_ok is not None:

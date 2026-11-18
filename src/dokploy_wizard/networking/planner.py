@@ -87,6 +87,20 @@ def reconcile_networking(
         "Cloudflare zone scope validated for DNS Read/Edit.",
     ]
 
+    # HTTP must never be the way in: flip the zone-level redirect at the edge.
+    # Dry runs report the intent only; the real call is idempotent.
+    if dry_run:
+        notes.append(
+            "Would enable Cloudflare zone 'Always Use HTTPS' so wizard sites are HTTPS-only."
+        )
+    else:
+        if backend.ensure_always_use_https(credentials.zone_id):
+            notes.append(
+                "Enabled Cloudflare zone 'Always Use HTTPS'; plain HTTP now redirects at the edge."
+            )
+        else:
+            notes.append("Cloudflare zone already enforces HTTPS redirects.")
+
     nested_coder_wildcard = _nested_coder_wildcard_hostname(desired_state)
     if nested_coder_wildcard is not None:
         notes.extend(

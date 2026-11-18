@@ -27,12 +27,18 @@ from dokploy_wizard.state import (
     write_litellm_generated_keys,
     write_seaweedfs_generated_secrets,
 )
-from dokploy_wizard.state.models import SEAWEEDFS_GENERATED_SECRET_PREFIXES
+from dokploy_wizard.state.models import (
+    LITELLM_WORKSPACE_ISSUER_CONSUMER,
+    SEAWEEDFS_GENERATED_SECRET_PREFIXES,
+)
 
 _MANAGED_METADATA = {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"}
 _EXPECTED_LITELLM_CONSUMERS = {
     "coder-hermes",
     "coder-kdense",
+    # Not a chat consumer: the scoped key every Coder workspace mints its own
+    # child key with (see the template MINTPY block).
+    "coder-workspace-issuer",
     "dokploy-ai",
     "nextcloud",
 }
@@ -238,6 +244,8 @@ class FakeLiteLLMAdminApi:
         self.fail_create_key_for = fail_create_key_for
         self.created_teams: list[LiteLLMTeamRecord] = []
         self.created_keys: list[LiteLLMVirtualKeyRecord] = []
+        self.created_key_routes: dict[str, tuple[str, ...] | None] = {}
+        self.updated_key_routes: dict[str, tuple[str, ...] | None] = {}
         self.updated_teams: list[LiteLLMTeamRecord] = []
         self.updated_keys: list[LiteLLMVirtualKeyRecord] = []
         self.deleted_key_aliases: list[str] = []
@@ -294,9 +302,11 @@ class FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         if self.fail_create_key_for == key_alias:
             raise LiteLLMAdminError(f"failed to create key {key_alias}")
+        self.created_key_routes[key_alias] = allowed_routes
         record = LiteLLMVirtualKeyRecord(
             key=key,
             key_alias=key_alias,
@@ -316,6 +326,7 @@ class FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -324,6 +335,7 @@ class FakeLiteLLMAdminApi:
             models=models,
             metadata=dict(metadata or {}),
         )
+        self.updated_key_routes[key_alias] = allowed_routes
         self._keys[key_alias] = record
         self.updated_keys.append(record)
         return record
@@ -720,3 +732,67 @@ def test_reconcile_virtual_keys_fails_closed_for_mismatched_managed_key_metadata
                 )
             },
         )
+
+
+def test_reconcile_virtual_keys_limits_workspace_issuer_to_key_management_routes() -> None:
+    api = FakeLiteLLMAdminApi()
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    reconciled = manager.reconcile_virtual_keys(
+        generated_keys={"coder-hermes": "k-hermes", LITELLM_WORKSPACE_ISSUER_CONSUMER: "k-issuer"},
+        consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",),
+            LITELLM_WORKSPACE_ISSUER_CONSUMER: ("*",),
+        },
+    )
+
+    assert reconciled[LITELLM_WORKSPACE_ISSUER_CONSUMER].key == "k-issuer"
+    # Only the issuer gets the route fence; chat consumers keep the default
+    # (inference) surface, and the issuer itself can mint, inspect, and revoke.
+    assert api.created_key_routes[LITELLM_WORKSPACE_ISSUER_CONSUMER] == (
+        "/key/generate",
+        "/key/info",
+        "/key/delete",
+    )
+    assert api.created_key_routes["coder-hermes"] is None
+    assert reconciled[LITELLM_WORKSPACE_ISSUER_CONSUMER].models == ("*",)
+
+
+def test_reconcile_virtual_keys_keeps_issuer_routes_on_scope_drift() -> None:
+    issuer_metadata = {
+        "consumer": LITELLM_WORKSPACE_ISSUER_CONSUMER,
+        "managed_by": "dokploy-wizard",
+    }
+    api = FakeLiteLLMAdminApi(
+        teams=(
+            LiteLLMTeamRecord(
+                team_id="team-" + LITELLM_WORKSPACE_ISSUER_CONSUMER,
+                team_alias=LITELLM_WORKSPACE_ISSUER_CONSUMER,
+                models=("local-model.internal/unsloth-active",),
+                metadata=issuer_metadata,
+            ),
+        ),
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key="sk-litellm-coder-workspace-issuer-existing",
+                key_alias=LITELLM_WORKSPACE_ISSUER_CONSUMER,
+                team_id="team-" + LITELLM_WORKSPACE_ISSUER_CONSUMER,
+                models=("local-model.internal/unsloth-active",),
+                metadata=issuer_metadata,
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={
+            LITELLM_WORKSPACE_ISSUER_CONSUMER: "sk-litellm-coder-workspace-issuer-existing"
+        },
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("*",)},
+    )
+
+    assert api.updated_key_routes[LITELLM_WORKSPACE_ISSUER_CONSUMER] == (
+        "/key/generate",
+        "/key/info",
+        "/key/delete",
+    )

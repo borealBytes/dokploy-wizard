@@ -57,6 +57,7 @@ class FakeReadinessApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         raise AssertionError("unexpected create_key call")
 
@@ -68,6 +69,7 @@ class FakeReadinessApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         raise AssertionError("unexpected update_key call")
 

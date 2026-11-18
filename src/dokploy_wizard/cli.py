@@ -141,6 +141,7 @@ from dokploy_wizard.state import (
     write_target_state,
 )
 from dokploy_wizard.state.inspection import build_live_drift_report
+from dokploy_wizard.state.models import LITELLM_WORKSPACE_ISSUER_CONSUMER
 from dokploy_wizard.tailscale import ShellTailscaleBackend, TailscaleBackend, TailscaleError
 from dokploy_wizard.uninstall import (
     ShellUninstallBackend,
@@ -2386,6 +2387,9 @@ def _build_coder_backend(
         hermes_desktop_channel=raw_env.values.get("HERMES_DESKTOP_CHANNEL", ""),
         ai_default_base_url=_shared_ai_default_base_url(raw_env),
         ai_default_api_key=litellm_generated_keys.virtual_keys["coder-hermes"],
+        workspace_issuer_api_key=litellm_generated_keys.virtual_keys.get(
+            LITELLM_WORKSPACE_ISSUER_CONSUMER
+        ),
         state_dir=state_dir,
         client=_build_dokploy_api_client(
             raw_env=raw_env,

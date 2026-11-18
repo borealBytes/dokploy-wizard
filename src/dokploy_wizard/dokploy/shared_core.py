@@ -67,6 +67,7 @@ from dokploy_wizard.litellm.model_sync import (
 from dokploy_wizard.state import write_litellm_generated_keys
 from dokploy_wizard.state.models import (
     LITELLM_CONSUMER_VIRTUAL_KEY_NAMES,
+    LITELLM_WORKSPACE_ISSUER_CONSUMER,
     ComposeArtifactHashState,
     LiteLLMGeneratedKeys,
 )
@@ -594,7 +595,7 @@ class DokploySharedCoreBackend:
         consumer_keys = {
             consumer: key
             for consumer, key in self._litellm_generated_keys.virtual_keys.items()
-            if key
+            if key and consumer != LITELLM_WORKSPACE_ISSUER_CONSUMER
         }
         if not consumer_keys or not _push_model_sync_consumer_keys(sync_container, consumer_keys):
             return
@@ -1822,7 +1823,7 @@ def _litellm_key_model_allowlists(
     keyed: dict[str, tuple[str, ...]] = {}
     for consumer, models in allowlists.items():
         normalized = tuple(models)
-        if normalized and MODEL_SYNC_CONSUMER_WILDCARD not in normalized:
+        if normalized and "*" not in normalized and MODEL_SYNC_CONSUMER_WILDCARD not in normalized:
             normalized = (*normalized, MODEL_SYNC_CONSUMER_WILDCARD)
         keyed[consumer] = normalized
     return keyed
@@ -1853,6 +1854,13 @@ def build_litellm_consumer_model_allowlists(
     )
     allowlists: dict[str, tuple[str, ...]] = {}
     for consumer in _litellm_consumers():
+        if consumer == LITELLM_WORKSPACE_ISSUER_CONSUMER:
+            # The issuer mints child keys for whatever the gateway can serve
+            # today and tomorrow; pinning it to a snapshot of names would make
+            # every synced model require a wizard rerun before a workspace can
+            # ask for it.
+            allowlists[consumer] = ("*",)
+            continue
         aliases = projection_catalog.fallback_alias_order_for(consumer)
         if default_chat_alias is not None and default_chat_alias not in aliases:
             aliases = (*aliases, default_chat_alias)

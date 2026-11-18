@@ -184,6 +184,7 @@ class RecordingManagedDriftLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         self.create_key_calls.append(
             {
@@ -216,6 +217,7 @@ class RecordingManagedDriftLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         self.update_key_calls.append(
             {
@@ -383,6 +385,7 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
+        "coder-workspace-issuer": ("*",),
         "dokploy-ai": shared_models,
         "nextcloud": shared_models,
     }
@@ -422,6 +425,7 @@ def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
+        "coder-workspace-issuer": ("*",),
         "dokploy-ai": shared_models,
         "nextcloud": shared_models,
     }
@@ -450,6 +454,7 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
     assert allowlists == {
         "coder-hermes": shared_models,
         "coder-kdense": shared_models,
+        "coder-workspace-issuer": ("*",),
         "dokploy-ai": shared_models,
         "nextcloud": shared_models,
     }
@@ -597,6 +602,7 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
     assert set(generated_keys.virtual_keys) == {
         "coder-hermes",
         "coder-kdense",
+        "coder-workspace-issuer",
         "dokploy-ai",
         "nextcloud",
     }
@@ -768,8 +774,9 @@ def test_coder_install_persists_consumer_specific_virtual_keys(
     assert set(generated_keys.virtual_keys) == {
         "coder-hermes",
         "coder-kdense",
+        "coder-workspace-issuer",
         "dokploy-ai",
         "nextcloud",
     }
-    assert len(set(generated_keys.virtual_keys.values())) == 4
+    assert len(set(generated_keys.virtual_keys.values())) == 5
     assert coder_backend.existing_service is not None

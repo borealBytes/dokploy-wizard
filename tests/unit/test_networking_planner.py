@@ -34,6 +34,7 @@ class FakeCloudflareBackend:
     dns_record_updates: list[tuple[str, str, str, str, bool]] = field(default_factory=list)
     dns_records: dict[str, CloudflareDnsRecord] = field(default_factory=dict)
     dns_deletions: list[tuple[str, str]] = field(default_factory=list)
+    always_use_https_changes: bool = True
     update_tunnel_configuration_calls: list[tuple[str, str, tuple[dict[str, object], ...]]] = field(
         default_factory=list
     )
@@ -137,6 +138,13 @@ class FakeCloudflareBackend:
         for hostname, record in list(self.dns_records.items()):
             if record.record_id == record_id:
                 del self.dns_records[hostname]
+
+    def ensure_always_use_https(self, zone_id: str) -> bool:
+        if not hasattr(self, "always_use_https_calls"):
+            self.always_use_https_calls: list[str] = []
+        self.always_use_https_calls.append(zone_id)
+        changed = self.always_use_https_changes
+        return bool(changed)
 
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
         del zone_id
@@ -509,4 +517,91 @@ def test_networking_keeps_repointed_stale_dns_record() -> None:
     assert backend.dns_records["s3.example.com"].content == "origin.example.net"
     assert any(
         "left the zone; dropped its ledger entry" in note for note in phase.result.notes
+    )
+
+
+def test_networking_enforces_always_use_https_at_the_edge() -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+    )
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "CLOUDFLARE_API_TOKEN": "token",
+            "CLOUDFLARE_ACCOUNT_ID": "account-1",
+            "CLOUDFLARE_ZONE_ID": "zone-1",
+        },
+    )
+    desired_state = resolve_desired_state(
+        RawEnvInput(format_version=1, values={"STACK_NAME": "s", "ROOT_DOMAIN": "example.com"})
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert backend.always_use_https_calls == ["zone-1"]
+    assert any("Always Use HTTPS" in note for note in phase.result.notes)
+
+
+def test_networking_reports_existing_https_redirect_as_noop() -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        always_use_https_changes=False,
+    )
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "CLOUDFLARE_API_TOKEN": "token",
+            "CLOUDFLARE_ACCOUNT_ID": "account-1",
+            "CLOUDFLARE_ZONE_ID": "zone-1",
+        },
+    )
+    desired_state = resolve_desired_state(
+        RawEnvInput(format_version=1, values={"STACK_NAME": "s", "ROOT_DOMAIN": "example.com"})
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert backend.always_use_https_calls == ["zone-1"]
+    assert any("already enforces HTTPS redirects" in note for note in phase.result.notes)
+
+
+def test_networking_dry_run_only_plans_the_https_redirect() -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+    )
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "CLOUDFLARE_API_TOKEN": "token",
+            "CLOUDFLARE_ACCOUNT_ID": "account-1",
+            "CLOUDFLARE_ZONE_ID": "zone-1",
+        },
+    )
+    desired_state = resolve_desired_state(
+        RawEnvInput(format_version=1, values={"STACK_NAME": "s", "ROOT_DOMAIN": "example.com"})
+    )
+
+    phase = reconcile_networking(
+        dry_run=True,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    assert getattr(backend, "always_use_https_calls", []) == []
+    assert any(
+        "Would enable Cloudflare zone 'Always Use HTTPS'" in note for note in phase.result.notes
     )

@@ -160,6 +160,7 @@ def test_litellm_plan_uses_openrouter_default_without_local_upstream() -> None:
     assert allowlists == {
         "coder-hermes": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
         "coder-kdense": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
+        "coder-workspace-issuer": ("*",),
         "dokploy-ai": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
         "nextcloud": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
     }
@@ -188,6 +189,7 @@ def test_litellm_plan_keeps_local_default_when_local_upstream_is_active() -> Non
     assert allowlists == {
         "coder-hermes": ("local-model.internal/unsloth-active",),
         "coder-kdense": ("local-model.internal/unsloth-active",),
+        "coder-workspace-issuer": ("*",),
         "dokploy-ai": ("local-model.internal/unsloth-active",),
         "nextcloud": ("local-model.internal/unsloth-active",),
     }
@@ -1007,6 +1009,7 @@ def test_litellm_allowlists_keep_local_alias_for_every_consumer() -> None:
     assert allowlists == {
         "coder-hermes": ("local-model.internal/unsloth-active",),
         "coder-kdense": ("local-model.internal/unsloth-active",),
+        "coder-workspace-issuer": ("*",),
         "dokploy-ai": ("local-model.internal/unsloth-active",),
         "nextcloud": ("local-model.internal/unsloth-active",),
     }
@@ -1076,6 +1079,7 @@ class _FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -1095,6 +1099,7 @@ class _FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,

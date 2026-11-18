@@ -106,6 +106,73 @@ resource "coder_agent" "main" {
     export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"
     export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"
     export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"
+    # -- wizard: per-workspace LiteLLM identity --------------------------------
+    # The baked template key is shared by every workspace. When the wizard
+    # provided an issuer key, this workspace mints its own virtual key named
+    # after itself: spend attributes per workspace, and rotating one
+    # workspace's key touches no other. The token derives from issuer +
+    # workspace name, so restarts adopt the same key and an issuer rotation
+    # re-mints for free. Any failure falls back to the baked shared key: a
+    # workspace without a personal key still starts with AI.
+    DOKPLOY_WIZARD_LITELLM_ISSUER_KEY="__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__"
+    DOKPLOY_WIZARD_WORKSPACE_API_KEY=""
+    DOKPLOY_WIZARD_ENV_API_KEY_OVERRIDE="$${AI_DEFAULT_API_KEY:-}"
+    if [ -n "$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" ] && \
+       [ "$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" != "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__" ]; then
+      DOKPLOY_WIZARD_WORKSPACE_API_KEY=$(
+        DOKPLOY_LITELLM_BASE_URL="$AI_DEFAULT_BASE_URL" \
+        DOKPLOY_LITELLM_ISSUER_KEY="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" \
+        DOKPLOY_WORKSPACE_NAME="${data.coder_workspace.me.name}" \
+        python3 - <<'MINTPY'
+import hashlib, json, os, urllib.error, urllib.request
+
+base = os.environ.get("DOKPLOY_LITELLM_BASE_URL", "").rstrip("/")
+issuer = os.environ.get("DOKPLOY_LITELLM_ISSUER_KEY", "")
+workspace = os.environ.get("DOKPLOY_WORKSPACE_NAME", "")
+if base and issuer and workspace:
+    token = "sk-" + hashlib.sha256((issuer + ":" + workspace).encode()).hexdigest()[:40]
+
+    def mint_request(method, path, payload=None):
+        data = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            base + path,
+            method=method,
+            data=data,
+            headers={"Authorization": "Bearer " + issuer, "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+        except Exception:
+            return 0
+
+    # info-then-generate: a previous boot (or a recreate under the same
+    # workspace name) already owns this deterministic token; adopt it rather
+    # than collide. The final re-info is what decides: if minting was refused
+    # for any reason the fallback below keeps the baked shared key.
+    if mint_request("GET", "/key/info?key=" + token) != 200:
+        mint_request(
+            "POST",
+            "/key/generate",
+            {
+                "key": token,
+                "key_alias": workspace,
+                "models": ["sync/*", "sync/default-chat"],
+                "metadata": {"managed_by": "dokploy-wizard", "coder_workspace": workspace},
+            },
+        )
+    if mint_request("GET", "/key/info?key=" + token) == 200:
+        print(token)
+MINTPY
+      ) || DOKPLOY_WIZARD_WORKSPACE_API_KEY=""
+    fi
+    if [ -n "$DOKPLOY_WIZARD_WORKSPACE_API_KEY" ] && [ -z "$DOKPLOY_WIZARD_ENV_API_KEY_OVERRIDE" ]; then
+      # An explicit workspace-level AI_DEFAULT_API_KEY still wins; the minted
+      # key replaces only the shared template default.
+      export AI_DEFAULT_API_KEY="$DOKPLOY_WIZARD_WORKSPACE_API_KEY"
+    fi
     export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"
     export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"
     export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"

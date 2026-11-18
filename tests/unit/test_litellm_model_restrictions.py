@@ -144,6 +144,7 @@ class FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -163,6 +164,7 @@ class FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,

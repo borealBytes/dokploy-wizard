@@ -316,6 +316,12 @@ Not behind Cloudflare Access in the current implementation:
 - `office.<root-domain>`
 - `filex.<root-domain>`
 - `coder.<root-domain>`
+
+Everything the wizard publishes rides the Cloudflare Tunnel and is HTTPS-only:
+the networking phase flips the zone's "Always Use HTTPS" setting, so a plain
+`http://` visit redirects at Cloudflare before anything reaches the tunnel.
+This also protects origin apps whose login flow pins its CSRF origin to the
+`https://` URL (Dokploy rejects an `http://` sign-in as "Invalid origin").
 - Coder workspace app hosts, currently routed via a controlled `*.<root-domain>` fallback
 - `matrix.<root-domain>`
 - `headscale.<root-domain>`

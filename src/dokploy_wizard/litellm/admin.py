@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib import error, parse, request
 
+from dokploy_wizard.state.models import LITELLM_WORKSPACE_ISSUER_CONSUMER
+
 
 class LiteLLMAdminError(RuntimeError):
     """Raised when LiteLLM admin API requests fail."""
@@ -66,6 +68,7 @@ class LiteLLMAdminApi(Protocol):
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord: ...
 
     def update_key(
@@ -76,6 +79,7 @@ class LiteLLMAdminApi(Protocol):
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord: ...
 
     def delete_key(self, *, key_alias: str) -> None: ...
@@ -186,18 +190,18 @@ class LiteLLMAdminClient:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
-        payload = self._request_json(
-            "POST",
-            "/key/generate",
-            {
-                "key": key,
-                "key_alias": key_alias,
-                "team_id": team_id,
-                "models": list(models),
-                "metadata": dict(metadata or {}),
-            },
-        )
+        body: dict[str, object] = {
+            "key": key,
+            "key_alias": key_alias,
+            "team_id": team_id,
+            "models": list(models),
+            "metadata": dict(metadata or {}),
+        }
+        if allowed_routes is not None:
+            body["allowed_routes"] = list(allowed_routes)
+        payload = self._request_json("POST", "/key/generate", body)
         return _parse_key(
             _unwrap_record_response(
                 payload,
@@ -219,18 +223,18 @@ class LiteLLMAdminClient:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
     ) -> LiteLLMVirtualKeyRecord:
-        payload = self._request_json(
-            "POST",
-            "/key/update",
-            {
-                "key_alias": key_alias,
-                "key": key,
-                "team_id": team_id,
-                "models": list(models),
-                "metadata": dict(metadata or {}),
-            },
-        )
+        body: dict[str, object] = {
+            "key_alias": key_alias,
+            "key": key,
+            "team_id": team_id,
+            "models": list(models),
+            "metadata": dict(metadata or {}),
+        }
+        if allowed_routes is not None:
+            body["allowed_routes"] = list(allowed_routes)
+        payload = self._request_json("POST", "/key/update", body)
         return _parse_key(
             _unwrap_record_response(
                 payload,
@@ -277,6 +281,13 @@ class LiteLLMAdminClient:
             ) from exc
         except error.URLError as exc:
             raise LiteLLMAdminError(f"LiteLLM admin API request failed: {exc.reason}.") from exc
+
+
+WORKSPACE_ISSUER_ALLOWED_ROUTES: tuple[str, ...] = (
+    "/key/generate",
+    "/key/info",
+    "/key/delete",
+)
 
 
 class LiteLLMGatewayManager:
@@ -345,6 +356,11 @@ class LiteLLMGatewayManager:
                 existing_teams[consumer] = team
 
             existing_key = existing_keys.get(consumer)
+            key_routes = (
+                WORKSPACE_ISSUER_ALLOWED_ROUTES
+                if consumer == LITELLM_WORKSPACE_ISSUER_CONSUMER
+                else None
+            )
             if existing_key is None:
                 existing_key = self._api.create_key(
                     key=generated_key,
@@ -352,6 +368,7 @@ class LiteLLMGatewayManager:
                     team_id=team.team_id,
                     models=expected_models,
                     metadata=managed_metadata,
+                    allowed_routes=key_routes,
                 )
                 existing_keys[consumer] = existing_key
             else:
@@ -378,6 +395,7 @@ class LiteLLMGatewayManager:
                         team_id=team.team_id,
                         models=expected_models,
                         metadata=managed_metadata,
+                        allowed_routes=key_routes,
                     )
                     existing_keys[consumer] = existing_key
                 elif key_scope_drifted:
@@ -389,6 +407,7 @@ class LiteLLMGatewayManager:
                         team_id=team.team_id,
                         models=expected_models,
                         metadata=managed_metadata,
+                        allowed_routes=key_routes,
                     )
                     existing_keys[consumer] = existing_key
             reconciled[consumer] = existing_key

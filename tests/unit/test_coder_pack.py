@@ -1409,6 +1409,7 @@ def test_hermes_template_uses_litellm_credentials(
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
     }
 
 
@@ -1496,6 +1497,7 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
     }
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -1504,6 +1506,7 @@ def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
     }
     assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -1626,6 +1629,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
     }
     assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -1634,6 +1638,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
     }
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name
     assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
@@ -3279,6 +3284,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
     }
     assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -3287,6 +3293,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
         "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
     }
     assert template_replacements_by_name[coder_module._default_hermes_desktop_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
@@ -3308,6 +3315,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         # not a decision to make on behalf of the other Hermes templates.
         "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__": "main",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
+        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
     }
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name
     assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
@@ -3361,3 +3369,119 @@ def _write_coder_hash_checkpoint(
             },
         ),
     )
+
+_GATEWAY_KEY_TEMPLATE_DIRS = (
+    "default-ubuntu-code-server",
+    "default-ubuntu-code-server-opencode-web",
+    "default-ubuntu-code-server-hermes",
+    "default-ubuntu-vscode-opencode-hermes-pi",
+    "default-ubuntu-vscode-hermes-desktop",
+)
+
+
+@pytest.mark.parametrize("template_dir", _GATEWAY_KEY_TEMPLATE_DIRS)
+def test_workspace_key_mint_block_is_baked_into_gateway_key_templates(template_dir: str) -> None:
+    template = Path(f"templates/coder/{template_dir}/main.tf").read_text(encoding="utf-8")
+
+    # The issuer token survives as a sentinel when the wizard seeded no issuer,
+    # and the guard rejects both the empty value and the raw token.
+    assert 'DOKPLOY_WIZARD_LITELLM_ISSUER_KEY="__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__"' in template
+    assert '!= "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__"' in template
+    assert "<<'MINTPY'" in template
+    # Deterministic child token: issuer + workspace name, so restarts adopt the
+    # existing key and issuer rotations re-mint without extra bookkeeping.
+    assert 'token = "sk-" + hashlib.sha256((issuer + ":" + workspace).encode()).hexdigest()[:40]' in template
+    # The workspace identity comes from Coder itself; the alias is the workspace
+    # name, so LiteLLM spend attributes per workspace by construction.
+    assert '"${data.coder_workspace.me.name}"' in template
+    assert '"key_alias": workspace' in template
+    assert '"models": ["sync/*", "sync/default-chat"]' in template
+    # Info-then-generate with a final re-info: any refusal (permissions, alias
+    # collision, gateway unreachable) leaves the variable empty and the baked
+    # shared template key in play.
+    assert 'mint_request("GET", "/key/info?key=" + token)' in template
+    assert 'mint_request(' in template
+    assert '|| DOKPLOY_WIZARD_WORKSPACE_API_KEY=""' in template
+    assert "import hashlib, json, os, urllib.error, urllib.request" in template
+
+
+def test_kdense_byok_template_skips_workspace_key_mint() -> None:
+    template = Path(
+        "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
+    ).read_text(encoding="utf-8")
+    assert "MINTPY" not in template
+    assert "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__" not in template
+
+
+def test_workspace_issuer_key_flows_into_gateway_key_template_replacements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        hermes_inference_provider="openai",
+        hermes_model="unsloth-active",
+        ai_default_api_key="litellm-coder-hermes-key",
+        workspace_issuer_api_key="sk-litellm-coder-workspace-issuer-provided",
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    template_replacements_by_name: dict[str, dict[str, str] | None] = {}
+
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda *,
+        container_name,
+        template_dir,
+        template_name,
+        replacements: template_replacements_by_name.setdefault(template_name, replacements),
+    )
+    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
+    )
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+
+    backend.ensure_application_ready()
+
+    for name in (
+        coder_module._default_template_name(),
+        coder_module._opencode_hermes_pi_template_name(),
+        coder_module._base_template_name(),
+        coder_module._default_opencode_web_template_name(),
+        coder_module._default_hermes_template_name(),
+    ):
+        replacements = template_replacements_by_name[name]
+        assert replacements is not None
+        assert (
+            replacements["__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__"]
+            == "sk-litellm-coder-workspace-issuer-provided"
+        )
+    # BYOK brings its own key; the issuer is none of its business.
+    kdense = template_replacements_by_name[coder_module._default_kdense_byok_template_name()]
+    assert kdense is not None
+    assert "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__" not in kdense

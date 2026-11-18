@@ -109,6 +109,12 @@ class FakeCloudflareBackend:
     ) -> None:
         del account_id, tunnel_id, ingress
 
+    def ensure_always_use_https(self, zone_id: str) -> bool:
+        if not hasattr(self, "always_use_https_calls"):
+            self.always_use_https_calls: list[str] = []
+        self.always_use_https_calls.append(zone_id)
+        return False
+
     def list_dns_records(
         self,
         zone_id: str,
