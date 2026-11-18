@@ -304,6 +304,15 @@ duplicates; prune wizard-created leftovers.
   digest, incl. model-sync), litellm newest-stable correctly v1.83.14-stable
   (no bump pending), workspaces section report-only as designed (coder CLI
   wants a session token). `inspect-state`: status clean, all healthy.
+- Upgrade APPLY (same tag, exercising the gate): first apply completed
+  (pin written, hash cleared, modify redeploy, rollback hint emitted) but
+  the snapshot's `pg_dumpall` leg failed — `DockerCliProbe.exec` forced
+  `--workdir /app`, which the postgres image lacks (OCI exit 127). Fixed
+  (commit `b096ead`); second apply captured
+  `shared-core-postgres.sql.gz` + the state copy, and its plan showed
+  `previous_pin_source: state-pin`, proving the written pin outranks the
+  env default on the next pass. `fixtures/upgrade.confirm` now ships as the
+  typed confirmation file the docs reference.
 - Known hygiene gaps observed during proof (not blockers, candidate
   follow-ups): every mutating pass creates a fresh run-scoped Dokploy API key
   (`dokploy-wizard-<uuid>`) that is never revoked, and each bootstrap
