@@ -57,6 +57,7 @@ _MANIFEST_ACCEPT = ", ".join(
     )
 )
 _REGISTRY_TAG_PAGE_LIMIT = 20
+_REGISTRY_TAG_PAGE_SIZE = 1000
 _POSTGRES_DUMP_TIMEOUT_SECONDS = 300
 _EXEC_TIMEOUT_SECONDS = 60
 
@@ -144,7 +145,9 @@ class HttpImageRegistry:
 
     def list_tags(self, ref: ImageRef) -> tuple[str, ...] | None:
         tags: list[str] = []
-        url: str | None = f"https://{ref.registry}/v2/{ref.repository}/tags/list"
+        url: str | None = (
+            f"https://{ref.registry}/v2/{ref.repository}/tags/list?n={_REGISTRY_TAG_PAGE_SIZE}"
+        )
         for _ in range(_REGISTRY_TAG_PAGE_LIMIT):
             if url is None:
                 break
@@ -159,10 +162,14 @@ class HttpImageRegistry:
             if isinstance(page_tags, list):
                 tags.extend(str(item) for item in page_tags if isinstance(item, (str, int)))
             link = _parse_link_next(_header_value(headers, "Link"))
-            # ghcr.io answers Link pagination with path-relative targets while
-            # Docker Hub sends absolute URLs; resolve against the current page
-            # so urllib always receives a fully qualified URL.
-            url = parse.urljoin(url, link) if link is not None else None
+            if link is None:
+                url = None
+                continue
+            # ghcr.io answers Link pagination with path-relative targets and
+            # n=0 (its own default page size) while Docker Hub sends absolute
+            # URLs; resolve against the current page and force our page size
+            # so follow-up requests stay fully qualified and bounded.
+            url = _force_page_size(parse.urljoin(url, link))
         return tuple(tags)
 
     def _call(
@@ -247,6 +254,21 @@ def _parse_link_next(link_header: str | None) -> str | None:
     return None
 
 
+def _force_page_size(url: str) -> str:
+    """Rewrite a pagination Link so it asks for our page size, whatever n the
+    registry chose to echo back (ghcr.io sends n=0)."""
+    parts = parse.urlsplit(url)
+    query = [
+        item
+        for item in parts.query.split("&")
+        if item and not item.split("=", 1)[0].lower() == "n"
+    ]
+    query.append(f"n={_REGISTRY_TAG_PAGE_SIZE}")
+    return parse.urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, "&".join(query), parts.fragment)
+    )
+
+
 class RuntimeProbe(Protocol):
     """Host-runtime facts the upgrade report needs; fake-friendly."""
 
@@ -275,9 +297,54 @@ class DockerCliProbe:
                 service_name,
             ]
         )
+        if result is not None and result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        # Most wizard runtimes ship as compose containers, not swarm services;
+        # resolve their image reference from the running container instead.
+        container_id = self.container_id_for_service(service_name)
+        if container_id is None:
+            return None
+        result = _run_docker(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                "{{.Config.Image}} {{.Image}}",
+                container_id,
+            ]
+        )
+        if result is None or result.returncode != 0:
+            return None
+        configured, _, image_id = result.stdout.strip().partition(" ")
+        if not configured:
+            return None
+        if "@" in configured:
+            return configured
+        # A tag-name reference carries no digest; ask the image for the pulled
+        # repo digests so stale-image drift can compare real content.
+        if image_id:
+            digests = self._image_repo_digests(image_id, configured)
+            if digests is not None:
+                return digests
+        return configured
+
+    def _image_repo_digests(self, image_id: str, configured: str) -> str | None:
+        result = _run_docker(
+            ["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", image_id]
+        )
         if result is None or result.returncode != 0 or not result.stdout.strip():
             return None
-        return result.stdout.strip()
+        try:
+            entries = json.loads(result.stdout.strip())
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(entries, list):
+            return None
+        repository = configured.partition(":")[0].partition("@")[0]
+        for entry in entries:
+            if isinstance(entry, str) and entry.startswith(f"{repository}@"):
+                return entry
+        return None
 
     def container_id_for_service(self, service_name: str) -> str | None:
         for label in (

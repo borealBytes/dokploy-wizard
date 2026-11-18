@@ -751,10 +751,12 @@ def test_http_image_registry_lists_tags_with_link_pagination() -> None:
 
     def opener(url: str, headers):
         del headers
-        if url.endswith("/tags/list"):
+        if "?" not in url:
+            return 404, {}, b"{}"
+        if "last=" not in url:
             return (
                 200,
-                {"Link": f'<{url}?last=v1.83.14-stable>; rel="next"'},
+                {"Link": f'<{url}&last=v1.83.14-stable>; rel="next"'},
                 json.dumps({"tags": ["v1.83.14-stable", "latest"]}).encode("utf-8"),
             )
         if "last=v1.83.14" in url:
@@ -768,8 +770,8 @@ def test_http_image_registry_lists_tags_with_link_pagination() -> None:
 
 
 def test_http_image_registry_resolves_relative_link_pagination() -> None:
-    """ghcr.io returns path-relative Link targets; the client must send fully
-    qualified URLs on every page."""
+    """ghcr.io returns path-relative Link targets with its own n=0 page size;
+    the client must fully qualify the URL and re-assert our page size."""
     from dokploy_wizard.upgrade import HttpImageRegistry
     from dokploy_wizard.upgrade import parse_image_ref as parse
 
@@ -779,7 +781,8 @@ def test_http_image_registry_resolves_relative_link_pagination() -> None:
         del headers
         seen.append(url)
         assert url.startswith("https://"), f"relative URL leaked to opener: {url}"
-        if url.endswith("/tags/list"):
+        assert url.endswith("n=1000"), f"page size not enforced: {url}"
+        if url.endswith("tags/list?n=1000"):
             return (
                 200,
                 {"Link": '</v2/berriai/litellm/tags/list?last=v1.83.14-stable&n=0>; rel="next"'},
@@ -794,9 +797,45 @@ def test_http_image_registry_resolves_relative_link_pagination() -> None:
 
     assert registry.list_tags(ref) == ("v1.83.14-stable", "latest", "v1.84.0-stable")
     assert seen == [
-        "https://ghcr.io/v2/berriai/litellm/tags/list",
-        "https://ghcr.io/v2/berriai/litellm/tags/list?last=v1.83.14-stable&n=0",
+        "https://ghcr.io/v2/berriai/litellm/tags/list?n=1000",
+        "https://ghcr.io/v2/berriai/litellm/tags/list?last=v1.83.14-stable&n=1000",
     ]
+
+
+def test_docker_cli_probe_service_image_falls_back_to_compose_container(
+    monkeypatch,
+) -> None:
+    """Compose runtimes have no swarm service; the probe must resolve the
+    image reference (with a content digest) from the running container."""
+    from dokploy_wizard import upgrade
+
+    def fake_run_docker(command: list[str]) -> Any:
+        class Result:
+            returncode = 0
+            stdout = ""
+
+        result = Result()
+        if command[:3] == ["docker", "service", "inspect"]:
+            result.stdout = ""
+        elif command[:2] == ["docker", "ps"]:
+            result.stdout = "abc123\n"
+        elif command[:2] == ["docker", "inspect"]:
+            result.stdout = "ghcr.io/berriai/litellm:v1.83.14-stable img999\n"
+        elif command[:3] == ["docker", "image", "inspect"]:
+            result.stdout = (
+                '["ghcr.io/berriai/litellm@sha256:aaa", "quay.io/other@sha256:bbb"]\n'
+            )
+        else:  # pragma: no cover - guards test intent
+            result.returncode = 1
+        return result
+
+    monkeypatch.setattr(upgrade, "_run_docker", fake_run_docker)
+    probe = upgrade.DockerCliProbe()
+
+    assert (
+        probe.service_image("showmeseewhy-com-shared-litellm")
+        == "ghcr.io/berriai/litellm@sha256:aaa"
+    )
 
 
 # --- CLI surface ---------------------------------------------------------------
