@@ -138,7 +138,9 @@ def test_sources_cover_configured_providers_only() -> None:
 
     assert [source["name"] for source in sources] == ["openrouter", "opencode-go"]
     openrouter = sources[0]
-    assert openrouter["alias_prefix"] == "sync/openrouter"
+    # Alias shape is derived from the source name now (sync/<name>-<flattened id>),
+    # so the document must not carry a stale prefix field to be mistaken for truth.
+    assert "alias_prefix" not in openrouter
     assert openrouter["list_url"] == "https://openrouter.ai/api/v1/models"
     assert openrouter["rankings_url"] == "https://openrouter.ai/api/frontend/v1/rankings/models"
     assert openrouter["max_models"] == MODEL_SYNC_OPENROUTER_MAX_MODELS
@@ -151,6 +153,11 @@ def test_sources_cover_configured_providers_only() -> None:
     assert opencode_go["model_ref_template"] == "openai/{model}"
     assert opencode_go["max_models"] == MODEL_SYNC_OPENCODE_GO_MAX_MODELS
     assert opencode_go["extra_headers"] == dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS)
+    # The go gateway's own rows carry no pricing; costs come from models.dev.
+    assert opencode_go["cost_catalog_url"] == "https://models.dev/api.json"
+    assert opencode_go["cost_catalog_provider"] == "opencode-go"
+    # OpenRouter ships pricing on its catalog rows, so no external registry.
+    assert "cost_catalog_url" not in openrouter
     assert model_sync_enabled(env, creds) is True
 
 
@@ -226,7 +233,7 @@ def test_readme_documents_model_autosync() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 
     assert "### Model autosync" in readme
-    assert "sync/<source>/<model-id>" in readme
+    assert "sync/<source>-<model-id>" in readme
     assert "LITELLM_MODEL_SYNC_ENABLED" in readme
     assert "LITELLM_MODEL_SYNC_INTERVAL_MINUTES" in readme
     assert "store_model_in_db" in readme
@@ -239,7 +246,6 @@ def _sidecar_document() -> dict:
         "sources": [
             {
                 "name": "openrouter",
-                "alias_prefix": "sync/openrouter",
                 "list_url": "https://openrouter.ai/api/v1/models",
                 "api_key_env": "LITELLM_OPENROUTER_API_KEY",
                 "model_ref_template": "openrouter/{model}",
@@ -255,7 +261,15 @@ def _sidecar_transport(document: dict, gateway_models: dict):
         calls.append((method, url, payload))
         if url.endswith("/api/v1/models"):
             assert token == "or-upstream-key"
-            return {"data": [{"id": "deepseek/new-thing"}, {"id": "wild/*"}]}
+            return {
+                "data": [
+                    {
+                        "id": "deepseek/new-thing",
+                        "pricing": {"prompt": "0.000003", "completion": "0.000008"},
+                    },
+                    {"id": "wild/*"},
+                ]
+            }
         if url.endswith("/model/info"):
             assert token == "master-key"
             return {"data": gateway_models}
@@ -293,12 +307,17 @@ def test_sidecar_creates_new_models_and_prunes_gone_models(
     assert summary["created"] == 1
     assert summary["pruned"] == 1
     create = next(call for call in calls if call[1].endswith("/model/new"))
-    assert create[2]["model_name"] == "sync/openrouter/deepseek/new-thing"
+    # Provider-qualified flat alias: the whole name is the last path segment,
+    # so pickers that shorten ids still show which provider answers.
+    assert create[2]["model_name"] == "sync/openrouter-deepseek->new-thing"
     assert create[2]["litellm_params"] == {
         "model": "openrouter/deepseek/new-thing",
         "api_key": "or-upstream-key",
     }
     assert create[2]["model_info"]["metadata"]["managed_by"] == "dokploy-wizard-model-sync"
+    # The catalog row priced the model, so the gateway records its real cost.
+    assert create[2]["model_info"]["input_cost_per_token"] == 0.000003
+    assert create[2]["model_info"]["output_cost_per_token"] == 0.000008
     delete = next(call for call in calls if call[1].endswith("/model/delete"))
     assert delete[2] == {"id": "db-id-gone"}
     assert all(call[2] != {"id": "db-id-kept"} and call[2] != {"id": "db-id-static"} for call in calls if call[1].endswith("/model/delete"))
@@ -315,7 +334,6 @@ def test_sidecar_applies_source_extra_headers(
         "sources": [
             {
                 "name": "opencode-go",
-                "alias_prefix": "sync/opencode-go",
                 "list_url": "https://opencode.ai/zen/go/v1/models",
                 "api_key_env": "LITELLM_OPENCODE_GO_API_KEY",
                 "api_base": "https://opencode.ai/zen/go/v1",
@@ -341,7 +359,7 @@ def test_sidecar_applies_source_extra_headers(
 
     assert summary["created"] == 1
     create = next(call for call in calls if call[1].endswith("/model/new"))
-    assert create[2]["model_name"] == "sync/opencode-go/deepseek-v4.1-flash"
+    assert create[2]["model_name"] == "sync/opencode-go-deepseek-v4.1-flash"
     assert create[2]["litellm_params"] == {
         "model": "openai/deepseek-v4.1-flash",
         "api_base": "https://opencode.ai/zen/go/v1",
@@ -386,16 +404,19 @@ _RANKED_CATALOG = {
             "id": "deepseek/deepseek-v4.1-flash",
             "canonical_slug": "deepseek/deepseek-v4.1-flash-20260423",
             "architecture": {"output_modalities": ["text"]},
+            "pricing": {"prompt": "0.0000001", "completion": "0.0000002"},
         },
         {
             "id": "deepseek/deepseek-v4.1-flash:free",
             "canonical_slug": "deepseek/deepseek-v4.1-flash-20260423",
             "architecture": {"output_modalities": ["text"]},
+            "pricing": {"prompt": "0", "completion": "0"},
         },
         {
             "id": "z-ai/glm-5.3",
             "canonical_slug": "z-ai/glm-5.3-20260816",
             "architecture": {"output_modalities": ["text"]},
+            "pricing": {"prompt": "0.0000003", "completion": "0.0000006"},
         },
         {
             "id": "openai/gpt-6-luna:batch",
@@ -411,6 +432,7 @@ _RANKED_CATALOG = {
             "id": "xiaomi/mimo-v2.6-flash:free",
             "canonical_slug": "xiaomi/mimo-v2.6-flash-20260921",
             "architecture": {"output_modalities": ["text"]},
+            "pricing": {"prompt": "0", "completion": "0"},
         },
         {
             "id": "tencent/hy4-preview",
@@ -424,7 +446,6 @@ _RANKED_CATALOG = {
 def _ranked_source(**overrides: object) -> dict:
     source: dict = {
         "name": "openrouter",
-        "alias_prefix": "sync/openrouter",
         "list_url": "https://openrouter.ai/api/v1/models",
         "rankings_url": "https://openrouter.ai/api/frontend/v1/rankings/models",
         "api_key_env": "LITELLM_OPENROUTER_API_KEY",
@@ -474,7 +495,7 @@ def test_sidecar_ranks_openrouter_models_paid_then_free_by_leaderboard(
     sidecar = _load_sidecar(tmp_path, monkeypatch)
     sidecar.http_json, calls = _ranked_transport(monkeypatch, _ranked_rows())
 
-    model_ids = sidecar.source_model_ids(_ranked_source(), 50)
+    model_ids, costs = sidecar.source_model_ids(_ranked_source(), 50)
 
     assert model_ids == [
         "deepseek/deepseek-v4.1-flash",
@@ -483,6 +504,11 @@ def test_sidecar_ranks_openrouter_models_paid_then_free_by_leaderboard(
         "xiaomi/mimo-v2.6-flash:free",
         "deepseek/deepseek-v4.1-flash:free",
     ]
+    # Inline catalog pricing rides the same fetch that selects the models.
+    assert costs["deepseek/deepseek-v4.1-flash"] == (0.0000001, 0.0000002)
+    assert costs["deepseek/deepseek-v4.1-flash:free"] == (0.0, 0.0)
+    # A row the catalog does not price is absent, not zero.
+    assert "tencent/hy4-preview" not in costs
     rankings_call = next(call for call in calls if call[1].endswith("/rankings/models"))
     assert rankings_call[2] is None
 
@@ -492,7 +518,7 @@ def test_sidecar_ranked_total_cap_and_fallback(
 ) -> None:
     sidecar = _load_sidecar(tmp_path, monkeypatch)
     sidecar.http_json, _calls = _ranked_transport(monkeypatch, _ranked_rows())
-    assert sidecar.source_model_ids(_ranked_source(max_models=2), 50) == [
+    assert sidecar.source_model_ids(_ranked_source(max_models=2), 50)[0] == [
         "deepseek/deepseek-v4.1-flash",
         "z-ai/glm-5.3",
     ]
@@ -500,7 +526,7 @@ def test_sidecar_ranked_total_cap_and_fallback(
     sidecar.http_json, _calls2 = _ranked_transport(
         monkeypatch, RuntimeError("rankings offline")
     )
-    fallback = sidecar.source_model_ids(_ranked_source(max_models=3), 50)
+    fallback = sidecar.source_model_ids(_ranked_source(max_models=3), 50)[0]
     assert fallback == [
         "deepseek/deepseek-v4.1-flash",
         "deepseek/deepseek-v4.1-flash:free",
@@ -519,12 +545,11 @@ def test_sidecar_source_budget_overrides_global_cap(
     sidecar.http_json = fake_http_json
     source = {
         "name": "opencode-go",
-        "alias_prefix": "sync/opencode-go",
         "list_url": "https://opencode.ai/zen/go/v1/models",
         "model_ref_template": "openai/{model}",
         "max_models": 100,
     }
-    assert len(sidecar.source_model_ids(source, 2)) == 5
+    assert len(sidecar.source_model_ids(source, 2)[0]) == 5
 
 
 def test_sidecar_refreshes_consumer_key_allowlists(
@@ -570,7 +595,7 @@ def test_sidecar_refreshes_consumer_key_allowlists(
     assert update[2]["models"] == [
         "opencode-go/deepseek-v4.1-flash",
         "sync/*",
-        "sync/openrouter/deepseek/new-thing",
+        "sync/openrouter-deepseek->new-thing",
     ]
 
     calls.clear()
@@ -625,7 +650,6 @@ _NVIDIA_CATALOG = [
 def _nvidia_document(max_models: int = 3, probe: object = True) -> dict:
     source: dict = {
         "name": "nvidia",
-        "alias_prefix": "sync/nvidia",
         "list_url": "https://integrate.api.nvidia.com/v1/models",
         "api_key_env": "LITELLM_NVIDIA_API_KEY",
         "api_base": "https://integrate.api.nvidia.com/v1",
@@ -694,8 +718,8 @@ def test_nvidia_source_declares_probe_and_cap() -> None:
     assert nvidia["max_models"] == MODEL_SYNC_NVIDIA_MAX_MODELS_DEFAULT
     assert nvidia["probe_ttl_days"] == MODEL_SYNC_DEFAULT_PROBE_TTL_DAYS
     assert nvidia["free_only"] is True
-    assert nvidia["free_catalog_url"] == "https://models.dev/api.json"
-    assert nvidia["free_catalog_provider"] == "nvidia"
+    assert nvidia["cost_catalog_url"] == "https://models.dev/api.json"
+    assert nvidia["cost_catalog_provider"] == "nvidia"
     assert nvidia["alias_suffix"] == ":free"
 
     overridden = build_model_sync_sources(
@@ -731,11 +755,16 @@ def test_sidecar_probe_drops_dead_models_and_caps_survivors(
     # Dead models never sync; inconclusive (non-404 failures) are kept; the
     # budget then applies to the surviving set in catalog order.
     assert _created_aliases(calls) == {
-        "sync/nvidia/meta/live-one",
-        "sync/nvidia/deepseek/live-two",
-        "sync/nvidia/mistral/weird",
+        "sync/nvidia-meta->live-one",
+        "sync/nvidia-deepseek->live-two",
+        "sync/nvidia-mistral->weird",
     }
     assert summary["created"] == 3
+    # Nothing priced this source's rows (no registry declared, no inline
+    # pricing), so the gateway records no cost fields rather than zeros.
+    create = next(call for call in calls if call[1].endswith("/model/new"))
+    assert "input_cost_per_token" not in create[2]["model_info"]
+    assert "output_cost_per_token" not in create[2]["model_info"]
 
 
 def test_sidecar_probe_cache_skips_known_alive_reprobes_dead(
@@ -763,7 +792,7 @@ def test_sidecar_probe_cache_skips_known_alive_reprobes_dead(
     # Known-alive models ride the cache; dead and inconclusive ones re-probe
     # every cycle so recovered models return without waiting for TTL expiry.
     assert set(probes_second) == {"bigcode/dead-one", "nvidia/dead-two", "mistral/weird"}
-    assert "sync/nvidia/nvidia/dead-two" in _created_aliases(calls)
+    assert "sync/nvidia-nvidia->dead-two" in _created_aliases(calls)
 
 
 def test_sidecar_probe_cache_expiry_forces_full_reprobe(
@@ -797,9 +826,9 @@ def test_sidecar_probe_brownout_keeps_full_list(
     sidecar.sync_once(_nvidia_document(max_models=3))
 
     assert _created_aliases(calls) == {
-        "sync/nvidia/meta/live-one",
-        "sync/nvidia/bigcode/dead-one",
-        "sync/nvidia/deepseek/live-two",
+        "sync/nvidia-meta->live-one",
+        "sync/nvidia-bigcode->dead-one",
+        "sync/nvidia-deepseek->live-two",
     }
     # A brownout must not poison the cache: everything is re-probed next cycle.
     probes_second: list = []
@@ -831,9 +860,9 @@ def test_sidecar_probe_disabled_skips_chat_probing(
 
     assert probes == []
     assert _created_aliases(calls) == {
-        "sync/nvidia/meta/live-one",
-        "sync/nvidia/bigcode/dead-one",
-        "sync/nvidia/deepseek/live-two",
+        "sync/nvidia-meta->live-one",
+        "sync/nvidia-bigcode->dead-one",
+        "sync/nvidia-deepseek->live-two",
     }
 
 
@@ -858,7 +887,6 @@ def _free_nvidia_document(max_models: int = 5) -> dict:
         "sources": [
             {
                 "name": "nvidia",
-                "alias_prefix": "sync/nvidia",
                 "list_url": "https://integrate.api.nvidia.com/v1/models",
                 "api_key_env": "LITELLM_NVIDIA_API_KEY",
                 "api_base": "https://integrate.api.nvidia.com/v1",
@@ -867,8 +895,8 @@ def _free_nvidia_document(max_models: int = 5) -> dict:
                 "probe": True,
                 "probe_ttl_days": 7,
                 "free_only": True,
-                "free_catalog_url": "https://models.dev/api.json",
-                "free_catalog_provider": "nvidia",
+                "cost_catalog_url": "https://models.dev/api.json",
+                "cost_catalog_provider": "nvidia",
                 "alias_suffix": ":free",
             }
         ],
@@ -938,10 +966,14 @@ def test_sidecar_free_only_filter_drops_paid_models_before_probing(
     # Free-verified aliases carry a ":free" tail unless the name already
     # says free, so pickers advertise the zero cost.
     assert _created_aliases(calls) == {
-        "sync/nvidia/meta/live-one:free",
-        "sync/nvidia/deepseek/live-two:free",
-        "sync/nvidia/meta/free-named",
+        "sync/nvidia-meta->live-one:free",
+        "sync/nvidia-deepseek->live-two:free",
+        "sync/nvidia-meta->free-named",
     }
+    # The registry priced these at zero, and the deployments say so explicitly.
+    for create in [c for c in calls if c[1].endswith("/model/new")]:
+        assert create[2]["model_info"]["input_cost_per_token"] == 0.0
+        assert create[2]["model_info"]["output_cost_per_token"] == 0.0
 
 
 def test_sidecar_free_registry_failure_keeps_full_catalog(
@@ -968,16 +1000,22 @@ def test_sidecar_free_registry_failure_keeps_full_catalog(
         "mistral/dead-free",
     }
     assert _created_aliases(calls) == {
-        "sync/nvidia/meta/live-one",
-        "sync/nvidia/qwen/paid",
-        "sync/nvidia/deepseek/live-two",
-        "sync/nvidia/ibm/paid",
-        "sync/nvidia/meta/free-named",
+        "sync/nvidia-meta->live-one",
+        "sync/nvidia-qwen->paid",
+        "sync/nvidia-deepseek->live-two",
+        "sync/nvidia-ibm->paid",
+        "sync/nvidia-meta->free-named",
     }
+    # Registry unreachable: no price on file is an honest "unknown", never a
+    # claimed zero, and the ":free" tail stays off for the same reason.
+    create = next(c for c in calls if c[1].endswith("/model/new"))
+    assert "input_cost_per_token" not in create[2]["model_info"]
+    assert "output_cost_per_token" not in create[2]["model_info"]
+
+
 def _default_chat_document(**overrides: object) -> dict:
     source = {
         "name": "opencode-go",
-        "alias_prefix": "sync/opencode-go",
         "list_url": "https://opencode.ai/zen/go/v1/models",
         "api_key_env": "LITELLM_OPENCODE_GO_API_KEY",
         "api_base": "https://opencode.ai/zen/go/v1",
@@ -997,6 +1035,7 @@ def _selection_transport(
     *,
     alive: set[str] | None = None,
     dead: set[str] | None = None,
+    registry: dict | None = None,
 ) -> tuple[object, list[dict]]:
     """Fake transport for the sidecar's catalog, probe, and admin calls."""
 
@@ -1024,6 +1063,8 @@ def _selection_transport(
         )
         if url.endswith("/models"):
             return {"data": [{"id": model_id} for model_id in model_ids]}
+        if url.endswith("/api.json"):
+            return registry or {}
         if url.endswith("/chat/completions"):
             model = str((payload or {}).get("model"))
             if model in dead:
@@ -1084,7 +1125,7 @@ def test_default_chat_candidates_rank_newest_first_with_catalog_order_on_ties(
         ],
     )
 
-    candidates = sidecar.default_chat_candidates(
+    candidates, _costs = sidecar.default_chat_candidates(
         document["sources"][0], "go-key", "deepseek*flash*"
     )
 
@@ -1217,6 +1258,7 @@ def test_default_chat_stays_put_when_the_alias_already_points_at_the_winner(
         "alias": MODEL_SYNC_DEFAULT_CHAT_ALIAS,
         "target": "openai/deepseek-v4.1-flash",
         "changed": False,
+        "costs_refreshed": False,
     }
     assert not [c for c in calls if c["url"].endswith("/model/new")]
     assert not [c for c in calls if c["url"].endswith("/model/delete")]
@@ -1242,16 +1284,49 @@ def test_default_chat_is_never_touched_by_the_source_prune_loop(
             "managed_by": sidecar.MANAGED_BY,
             "targets": [{"id": "dep-or", "target": "openrouter/gone"}],
         },
+        "sync/openrouter-gone-model": {
+            "id": "dep-or-flat",
+            "managed_by": sidecar.MANAGED_BY,
+            "targets": [{"id": "dep-or-flat", "target": "openrouter/gone"}],
+        },
+        # The go provider is unhealthy this cycle, so its flat aliases must
+        # ride out the brownout: an unclaimed name stays put.
+        "sync/opencode-go-deepseek-v9-flash": {
+            "id": "dep-go",
+            "managed_by": sidecar.MANAGED_BY,
+            "targets": [{"id": "dep-go", "target": "openai/deepseek-v9-flash"}],
+        },
     }
 
-    # Source "openrouter" is healthy but stopped reporting the model; "opencode-go"
-    # is down entirely. Neither may take the default alias with it.
+    # Source "openrouter" is healthy but stopped reporting the models (both
+    # alias shapes); "opencode-go" is down entirely. Neither may take the
+    # default alias with it.
     pruned_count, _ = sidecar._prune_deployments(
         existing, deployments={}, ok_sources={"openrouter"}
     )
 
-    assert pruned == ["dep-or"]
-    assert pruned_count == 1
+    assert pruned == ["dep-or", "dep-or-flat"]
+    assert pruned_count == 2
+
+
+def test_alias_source_recognizes_both_shapes_and_longest_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+
+    # Legacy nested shape and the current flat shape resolve to the provider.
+    assert sidecar._alias_source("sync/nvidia/meta/gemma:free", {"nvidia"}) == "nvidia"
+    assert sidecar._alias_source("sync/nvidia-meta->gemma:free", {"nvidia"}) == "nvidia"
+    # A hypothetical "opencode" source must not steal "opencode-go"'s flat
+    # aliases: the longest matching provider name wins.
+    assert (
+        sidecar._alias_source("sync/opencode-go-x", {"opencode", "opencode-go"})
+        == "opencode-go"
+    )
+    # Names no healthy source claims (a provider that vanished from the
+    # document, or a foreign sync/ row) resolve to "" and are never pruned.
+    assert sidecar._alias_source("sync/goneprovider-x", {"nvidia"}) == ""
+    assert sidecar._alias_source("sync/default-chat", {"nvidia"}) == ""
 
 
 def test_default_chat_alias_is_retired_when_the_feature_is_turned_off(
@@ -1386,3 +1461,141 @@ def test_openrouter_source_is_probed_through_its_own_base() -> None:
         {"openrouter_api_key_env": "LITELLM_OPENROUTER_API_KEY"},
     )
     assert off[0]["probe"] is False
+
+
+# --- provider cost metadata (Group 5) ------------------------------------
+
+
+def test_catalog_costs_parse_per_token_and_reject_unpriced(tmp_path, monkeypatch) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    catalog = {
+        "data": [
+            {"id": "a/x", "pricing": {"prompt": "0.000003", "completion": "0.000008"}},
+            {"id": "b/y", "pricing": {"prompt": 0, "completion": 0}},
+            {"id": "c/z"},  # no pricing block at all
+            {"id": "d/w", "pricing": {"prompt": "n/a", "completion": "0"}},  # unparseable
+        ]
+    }
+
+    costs = sidecar._catalog_costs(catalog)
+
+    assert costs["a/x"] == (0.000003, 0.000008)
+    assert costs["b/y"] == (0.0, 0.0)
+    assert "c/z" not in costs
+    assert "d/w" not in costs
+
+
+def test_models_dev_costs_convert_from_per_million(tmp_path, monkeypatch) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    sidecar.http_json = lambda *a, **k: {
+        "nvidia": {"models": {"meta/live-one": {"cost": {"input": 1.0, "output": 2.0}}}}
+    }
+
+    costs = sidecar._models_dev_costs(
+        {
+            "name": "nvidia",
+            "cost_catalog_url": "https://models.dev/api.json",
+            "cost_catalog_provider": "nvidia",
+        }
+    )
+
+    # models.dev prices per million tokens; the gateway wants per token.
+    assert costs == {"meta/live-one": (0.000001, 0.000002)}
+
+
+def test_free_nvidia_aliases_carry_zero_cost_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A model the registry proved free still records an explicit (0, 0) so the
+    # picker can render it as free rather than leaving the field undefined.
+    monkeypatch.setenv("LITELLM_NVIDIA_API_KEY", "nv-upstream-key")
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    calls = _capture_sidecar(sidecar, _free_filter_transport([], dead=set()))
+
+    sidecar.sync_once(_free_nvidia_document(max_models=5))
+
+    created = [c for c in calls if c[1].endswith("/model/new")]
+    assert created
+    for call in created:
+        info = call[2]["model_info"]
+        assert info["input_cost_per_token"] == 0.0
+        assert info["output_cost_per_token"] == 0.0
+
+
+def test_default_chat_refresh_replaces_an_unpriced_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    document = _default_chat_document()
+    document["sources"][0]["cost_catalog_url"] = "https://models.dev/api.json"
+    document["sources"][0]["cost_catalog_provider"] = "opencode-go"
+    sidecar.http_json, calls = _selection_transport(
+        monkeypatch,
+        ["deepseek-v4.1-flash"],
+        alive={"deepseek-v4.1-flash"},
+        registry={"opencode-go": {"models": {"deepseek-v4.1-flash": {"cost": {"input": 3.0, "output": 4.0}}}}},
+    )
+    # The alias already routes at the winner, but the deployment predates cost
+    # metadata: the target is unchanged, yet the price must be recorded.
+    existing = {
+        MODEL_SYNC_DEFAULT_CHAT_ALIAS: {
+            "id": "dep-old",
+            "managed_by": sidecar.MANAGED_BY,
+            "targets": [
+                {
+                    "id": "dep-old",
+                    "target": "openai/deepseek-v4.1-flash",
+                    "input_cost": None,
+                    "output_cost": None,
+                }
+            ],
+        }
+    }
+
+    result = sidecar.resolve_default_chat(document, existing)
+
+    assert result["status"] == "confirmed"
+    assert result["changed"] is False
+    assert result["costs_refreshed"] is True
+    created = [c for c in calls if c["url"].endswith("/model/new")]
+    deleted = [c for c in calls if c["url"].endswith("/model/delete")]
+    assert len(created) == 1 and len(deleted) == 1
+    # Promote-before-retire still holds when only the price is changing.
+    assert calls.index(created[0]) < calls.index(deleted[0])
+    assert created[0]["payload"]["model_info"]["input_cost_per_token"] == 0.000003
+    assert created[0]["payload"]["model_info"]["output_cost_per_token"] == 0.000004
+
+
+def test_default_chat_no_refresh_when_price_already_correct(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    document = _default_chat_document()
+    document["sources"][0]["cost_catalog_url"] = "https://models.dev/api.json"
+    document["sources"][0]["cost_catalog_provider"] = "opencode-go"
+    sidecar.http_json, calls = _selection_transport(
+        monkeypatch,
+        ["deepseek-v4.1-flash"],
+        alive={"deepseek-v4.1-flash"},
+        registry={"opencode-go": {"models": {"deepseek-v4.1-flash": {"cost": {"input": 3.0, "output": 4.0}}}}},
+    )
+    existing = {
+        MODEL_SYNC_DEFAULT_CHAT_ALIAS: {
+            "id": "dep-old",
+            "managed_by": sidecar.MANAGED_BY,
+            "targets": [
+                {
+                    "id": "dep-old",
+                    "target": "openai/deepseek-v4.1-flash",
+                    "input_cost": 0.000003,
+                    "output_cost": 0.000004,
+                }
+            ],
+        }
+    }
+
+    result = sidecar.resolve_default_chat(document, existing)
+
+    assert result["costs_refreshed"] is False
+    assert not [c for c in calls if c["url"].endswith("/model/new")]
+    assert not [c for c in calls if c["url"].endswith("/model/delete")]

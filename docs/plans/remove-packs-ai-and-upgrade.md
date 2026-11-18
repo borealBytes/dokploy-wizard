@@ -233,6 +233,57 @@ duplicates; prune wizard-created leftovers.
   `Pruned duplicate wizard-created Coder workspace '<name>'.`; the second
   `ensure_application_ready` pass is a true noop (flow-level idempotency test).
 
+## Group 5 — Provider + cost visibility for synced models
+
+Operator-driven (showmeseewhy.com): the Hermes Desktop picker lists "Gemma 4 31B
+IT:Free" and the default-chat row, but nothing says whether a model is served by
+OpenRouter (pay-as-you-go), NVIDIA (free tier), or OpenCode Go (subscription) —
+and no surface shows what any of it costs. The gateway already knew the provider:
+synced aliases carried it as a path segment (`sync/nvidia/google/gemma...`), but
+`/v1/models` exposes only the id and pickers render only the last path segment,
+so the provenance half stayed invisible; cost metadata was never written at all,
+and LiteLLM reported an implicit 0/0, which reads as "free" even for priced
+endpoints.
+
+Fix, one mechanism on every surface (Hermes, the Dokploy AI rows, and the
+Nextcloud picker all display the alias id verbatim):
+
+- Aliases flatten the provider into one segment: `sync/<provider>-<model-id>`
+  with the id's `/` written as `->` (e.g. `sync/nvidia-google->gemma-4-31b-it:free`).
+  Provider leads, so it survives display truncation; the `->` keeps the
+  org/model boundary readable; the `:free` tail keeps its meaning (registry-
+  verified zero cost).
+- Cost threading: each deployment records `input_cost_per_token` /
+  `output_cost_per_token` when a catalog can price the model — OpenRouter ships
+  `pricing.prompt/completion` (USD/token) on its own catalog rows; NVIDIA and
+  OpenCode Go are priced from models.dev (`cost.input/output`, USD/**million**
+  tokens, converted down). Unpriced models omit the fields rather than claiming
+  zero, so spend reports stay honest and the free-claim logic is unchanged.
+- The sources document drops the now-derived `alias_prefix` field and renames
+  `free_catalog_url`/`_provider` to `cost_catalog_url`/`_provider`: one registry
+  fetch serves both the NVIDIA zero-cost gate and the price metadata.
+- `sync/default-chat` keeps its stable name and gains the winner's price; when
+  only the price is stale (the deployment predates the metadata — exactly the
+  live-box state), the sidecar registers the priced deployment and retires the
+  unpriced one without moving the target (`costs_refreshed` in the marker).
+- Migration is self-healing: prune/allowlist matching is `sync/`-prefix based,
+  so the first cycle creates the flattened set and prunes the nested-shape set
+  (provider attribution accepts both shapes, longest provider name first);
+  wizard reconcile re-seeds the Dokploy rows on the next pass. One-time cost:
+  previously-saved picks in Hermes need re-selecting.
+
+### Group 5 implementation notes (landed 2026-11-18)
+
+- `templates/litellm/model-sync/sync.py`: `alias_slug`, `_catalog_costs`,
+  `_models_dev_costs` (replaces `_free_model_ids`; free ⇔ registry-priced zero
+  on both sides, unreadable rows fail closed), `source_model_ids` now returns
+  `(ids, costs)` from the same fetch, `desired_deployments` builds flat names
+  and attaches costs, `create_deployment` emits the cost fields,
+  `_alias_source` attributes both alias shapes, `gateway_model_names` records
+  existing costs so default-chat can refresh them.
+- `src/dokploy_wizard/litellm/model_sync.py`: field renames + `cost_catalog_*`
+  on the opencode-go source; README documents the new scheme and the cost fields.
+
 ## Phase 6 proof log
 
 - Attempt 1 (commit `7b106d4`+ tree): wrapper invoked with system `python3` →
@@ -354,3 +405,4 @@ Remote runs: timeout ≥ 3,600,000 ms or background (AGENTS.md).
 | Retirement depth | code-only, per PR A doc C2, unchanged |
 | Rollout | blank-slate reinstall on the test box (ledger lost with the Codespaces workspace) |
 | Nextcloud AI config shape | v3.9.x flat app-config keys (`url`/`api_key`/`service_name`) + `models` cache seeding; the v4/v5 services-JSON shape (NC33+) is a follow-on with D2 |
+| Provider/cost visibility | Group 5 (user-requested): provenance goes INTO the alias (flat `sync/<provider>-<id>`, `/`→`->`) because clients truncate paths; costs ride LiteLLM's standard `model_info` fields from the catalogs the sync already consumes — no dependence on any picker's UI |

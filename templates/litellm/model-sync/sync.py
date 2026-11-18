@@ -12,9 +12,20 @@ Sources that declare "probe": true (NVIDIA) are liveness-checked with a
 provider 404s are dropped, everything else is kept, verdicts are cached under
 the state dir for probe_ttl_days, and dead models are re-probed every cycle.
 Sources that declare "free_only": true are first intersected with the free
-models of their free_catalog_url pricing registry; when that filter succeeds,
+models of their cost_catalog_url pricing registry; when that filter succeeds,
 surviving aliases gain the source's "alias_suffix" (":free") unless the model
-name already says free.
+name already says free. The same registry (and inline catalog pricing where
+the source ships it) also supplies provider costs: every deployment carries
+input_cost_per_token/output_cost_per_token when a catalog priced the model,
+so gateway spend accounting and cost-aware pickers show what each alias
+actually bills instead of LiteLLM's implicit zero.
+
+Alias names are provider-qualified and flat - sync/<provider>-<model-id>
+with "/" replaced by "->" - because model pickers that render only the last
+path segment would otherwise hide which provider answers (and therefore which
+bill gets touched): sync/nvidia/google/gemma:free displays as just
+"gemma:free", while sync/nvidia-google->gemma:free displays with its
+provenance intact.
 
 Managed deployments are tagged with model_info.metadata.managed_by, so only
 wizard-created deployments are ever pruned. Config-file models and
@@ -72,8 +83,9 @@ DEFAULT_PROBE_TIMEOUT_SECONDS = 8.0
 DEFAULT_PROBE_PARALLELISM = 6
 # The operator-facing default model: one stable alias whose upstream target is chosen
 # from the live catalog by pattern, so a rename upstream costs a cycle, not a stack
-# rebuild. It lives at sync/<name> depth exactly like a provider alias, but its target
-# is resolved by selection rather than by the source's model list.
+# rebuild. It sits at the same flat sync/<segment> depth as a provider alias, but its
+# segment names no provider, so the source prune loop can never attribute it to one
+# and only selection ever moves it.
 DEFAULT_CHAT_ALIAS = "sync/default-chat"
 DEFAULT_CHAT_PROBE_MAX_TOKENS = 16
 DEFAULT_CHAT_PROBE_TIMEOUT_SECONDS = 20.0
@@ -309,41 +321,89 @@ def _probe_model_status(
         return "unknown"
 
 
-def _free_model_ids(source: dict[str, Any]) -> set[str] | None:
-    """Free-tier model ids from the models.dev registry, or None on failure.
+def alias_slug(model_id: str) -> str:
+    """Flatten an upstream model id into one alias segment.
 
-    NVIDIA's servable /models list mixes free and paid endpoints, and a paid
-    chat hit spends credits. models.dev (the registry OpenCode itself ships)
-    carries per-model pricing keyed in the same org/model form, so the sync
-    keeps only zero-cost endpoints before anything gets probed.
+    Pickers that render only the last path segment would keep the provider
+    invisible if the id nested as extra path levels, so the org/model slash
+    becomes "->" and the whole thing lives under the provider segment: the
+    displayed name leads with provenance and keeps the org/model boundary
+    readable inside it.
     """
 
-    url = source.get("free_catalog_url")
+    return model_id.replace("/", "->")
+
+
+def _catalog_costs(catalog: dict[str, Any]) -> dict[str, tuple[float, float]]:
+    """Per-token (input, output) costs from catalog rows carrying inline pricing.
+
+    OpenRouter's /models rows ship pricing.prompt/pricing.completion in USD per
+    token; other sources leave the fields out and get their prices from the
+    models.dev registry instead. Rows without a parseable price are absent from
+    the map, which callers render as "unknown", never as zero.
+    """
+
+    costs: dict[str, tuple[float, float]] = {}
+    for item in catalog.get("data", []) or []:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id", "")).strip()
+        pricing = item.get("pricing")
+        if not model_id or not isinstance(pricing, dict):
+            continue
+        try:
+            costs[model_id] = (
+                float(pricing.get("prompt") or 0),
+                float(pricing.get("completion") or 0),
+            )
+        except (TypeError, ValueError):
+            continue
+    return costs
+
+
+def _models_dev_costs(source: dict[str, Any]) -> dict[str, tuple[float, float]] | None:
+    """Per-token cost map from the models.dev registry, or None on failure.
+
+    models.dev (the registry OpenCode itself ships) carries per-model pricing
+    in USD per million tokens keyed in the same org/model form NVIDIA's
+    /models list uses — that single fetch serves both the zero-cost filter
+    (NVIDIA's servable list mixes free and paid endpoints, and a paid chat hit
+    spends credits) and the cost metadata for every source that declares the
+    registry as its price catalog. Models the registry does not list are absent
+    from the map; models whose cost fields do not parse are treated as paid so
+    an unreadable row can never sneak a billable endpoint through the free
+    filter.
+    """
+
+    url = source.get("cost_catalog_url")
     if not (isinstance(url, str) and url):
         return None
-    provider = str(source.get("free_catalog_provider") or "nvidia")
+    provider = str(source.get("cost_catalog_provider") or source.get("name") or "")
     try:
         payload = http_json("GET", url)
     except Exception as exc:
         log(
-            f"source {provider} free-catalog fetch failed: "
+            f"source {source.get('name') or provider or '?'} cost-catalog fetch failed: "
             f"{type(exc).__name__}: {exc}; keeping full list"
         )
         return None
     provider_block = payload.get(provider) if isinstance(payload, dict) else None
     models = provider_block.get("models") or {} if isinstance(provider_block, dict) else {}
-    free: set[str] = set()
+    costs: dict[str, tuple[float, float]] = {}
     for model_id, meta in models.items():
         if not isinstance(meta, dict):
             continue
-        cost = meta.get("cost") or {}
+        raw_cost = meta.get("cost")
+        cost = raw_cost if isinstance(raw_cost, dict) else {}
         try:
-            paid = any(float(cost.get(field) or 0) > 0 for field in ("input", "output"))
+            per_million = (
+                float(cost.get("input") or 0),
+                float(cost.get("output") or 0),
+            )
         except (TypeError, ValueError):
-            paid = True
-        if not paid:
-            free.add(str(model_id))
-    return free or None
+            continue
+        costs[str(model_id)] = (per_million[0] / 1_000_000.0, per_million[1] / 1_000_000.0)
+    return costs or None
 
 
 def _probe_in_order(source: dict[str, Any], token: str, model_ids: list[str]) -> list[str]:
@@ -429,10 +489,25 @@ def probe_source_models(source: dict[str, Any], token: str, model_ids: list[str]
     return [model_id for model_id in model_ids if results.get(model_id) != "dead"]
 
 
-def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
+def source_model_ids(
+    source: dict[str, Any], max_models: int
+) -> tuple[list[str], dict[str, tuple[float, float]]]:
+    """Selected upstream ids for this source, plus per-token costs where known.
+
+    The cost map covers whatever the provider's own catalog ships inline or the
+    models.dev registry the source declares; models neither prices are absent,
+    so the gateway records "no price on file" instead of inventing a zero.
+    """
+
     api_key_env = source.get("api_key_env")
     token = os.environ.get(api_key_env, "") if isinstance(api_key_env, str) else ""
     payload = http_json("GET", source["list_url"], token=token or None)
+    costs = _catalog_costs(payload)
+    registry_costs: dict[str, tuple[float, float]] | None = None
+    if source.get("free_only") or source.get("cost_catalog_url"):
+        registry_costs = _models_dev_costs(source)
+        if registry_costs:
+            costs = {**registry_costs, **costs}
     limit = max_models
     source_max = source.get("max_models")
     if isinstance(source_max, (int, float)) and int(source_max) > 0:
@@ -443,7 +518,7 @@ def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
     if ranked is not None:
         if source.get("probe"):
             ranked = _probe_in_order(source, token, ranked)
-        return ranked[:limit]
+        return ranked[:limit], costs
     model_ids: list[str] = []
     for item in payload.get("data", []) or []:
         if not isinstance(item, dict):
@@ -455,9 +530,15 @@ def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
         if model_id.endswith("/*"):
             continue
         model_ids.append(model_id)
-    if source.get("free_only"):
-        free_ids = _free_model_ids(source)
-        if free_ids is not None:
+    if source.get("free_only") and registry_costs:
+        # A model is free only if the registry priced it at zero on both sides;
+        # rows missing from the registry or with unreadable costs fail closed.
+        free_ids = {
+            model_id
+            for model_id, (input_cost, output_cost) in registry_costs.items()
+            if not (input_cost > 0 or output_cost > 0)
+        }
+        if free_ids:
             kept = [model_id for model_id in model_ids if model_id in free_ids]
             if kept:
                 log(
@@ -475,7 +556,7 @@ def source_model_ids(source: dict[str, Any], max_models: int) -> list[str]:
         # Probe the full catalog first, then apply the budget: "top N" must
         # mean the first N that actually answer, not the first N listed.
         model_ids = probe_source_models(source, token, model_ids)
-    return model_ids[:limit]
+    return model_ids[:limit], costs
 
 
 def deployment_params(source: dict[str, Any], model_id: str) -> dict[str, Any]:
@@ -507,22 +588,26 @@ def desired_deployments(document: dict[str, Any]) -> tuple[dict[str, dict[str, A
     for source in document.get("sources", []) or []:
         name = str(source.get("name", ""))
         try:
-            model_ids = source_model_ids(source, max_models)
+            model_ids, costs = source_model_ids(source, max_models)
         except Exception as exc:
             log(f"source {name or '?'} fetch failed: {type(exc).__name__}: {exc}")
             continue
         ok_sources.add(name)
-        prefix = str(source.get("alias_prefix", f"{ALIAS_PREFIX}/{name}"))
         # Only label aliases as free when the pricing registry actually
         # verified them this cycle; a failed registry fetch (fail-open) must
         # not slap ":free" on endpoints that may bill.
         suffix = str(source.get("alias_suffix") or "") if source.get("_free_verified") else ""
         for model_id in model_ids:
             params = deployment_params(source, model_id)
-            alias = f"{prefix}/{model_id}"
+            # The provider leads the flat alias segment so pickers that render
+            # only the last path segment still show which bill an alias touches.
+            alias = f"{ALIAS_PREFIX}/{name}-{alias_slug(model_id)}"
             if suffix and "free" not in model_id.lower():
                 alias += suffix
-            deployments[alias] = {"params": params, "source": name}
+            entry: dict[str, Any] = {"params": params, "source": name}
+            if model_id in costs:
+                entry["cost"] = costs[model_id]
+            deployments[alias] = entry
     return deployments, ok_sources
 
 
@@ -552,10 +637,21 @@ def pattern_matches(pattern: str, model_id: str) -> bool:
     return fnmatch.fnmatch(model_id.lower().strip(), pattern.lower().strip())
 
 
-def default_chat_candidates(source: dict[str, Any], token: str, pattern: str) -> list[str]:
-    """Catalog ids matching the pattern, newest version first, catalog order on ties."""
+def default_chat_candidates(
+    source: dict[str, Any], token: str, pattern: str
+) -> tuple[list[str], dict[str, tuple[float, float]]]:
+    """Catalog ids matching the pattern (newest first) plus per-token costs.
+
+    The cost map rides the same fetch that selects the candidates so the
+    promoted deployment can record what its target bills.
+    """
 
     payload = http_json("GET", source["list_url"], token=token or None)
+    costs = _catalog_costs(payload)
+    if source.get("cost_catalog_url"):
+        registry_costs = _models_dev_costs(source)
+        if registry_costs:
+            costs = {**registry_costs, **costs}
     ids: list[str] = []
     for item in payload.get("data", []) or []:
         if not isinstance(item, dict):
@@ -570,7 +666,7 @@ def default_chat_candidates(source: dict[str, Any], token: str, pattern: str) ->
     # sort is stable, so equal versions keep the order the provider listed them in
     # (providers list newest first, which is the recency tiebreak the plan asks for).
     ids.sort(key=version_rank, reverse=True)
-    return ids[:DEFAULT_CHAT_MAX_CANDIDATES]
+    return ids[:DEFAULT_CHAT_MAX_CANDIDATES], costs
 
 
 def default_chat_probe(source: dict[str, Any], token: str, model_id: str) -> str:
@@ -630,7 +726,7 @@ def resolve_default_chat(
         api_key_env = source.get("api_key_env")
         token = os.environ.get(api_key_env, "") if isinstance(api_key_env, str) else ""
         try:
-            candidates = default_chat_candidates(source, token, pattern)
+            candidates, costs = default_chat_candidates(source, token, pattern)
         except Exception as exc:  # noqa: BLE001 - catalog outages are routine
             log(f"default-chat catalog fetch failed for {source_name}: {exc}")
             return {"status": "catalog-error", "source": source_name, "alias": alias}
@@ -663,19 +759,46 @@ def resolve_default_chat(
             if entry.get("target")
         }
         params = deployment_params(source, winner)
+        entry_payload: dict[str, Any] = {"params": params, "source": source_name}
+        winner_cost = costs.get(winner)
+        if winner_cost is not None:
+            entry_payload["cost"] = winner_cost
         if current_targets == {str(params["model"])}:
+            refreshed = False
+            target_rows = [row for row in current.get("targets", []) if row.get("id")]
+            if winner_cost is not None and target_rows:
+                priced = {
+                    (float(row.get("input_cost") or 0), float(row.get("output_cost") or 0))
+                    for row in target_rows
+                }
+                if winner_cost not in priced:
+                    # The alias already routes where we would point it, but the
+                    # deployment under it predates cost metadata (or carries a
+                    # stale price): register the priced deployment first, then
+                    # retire the unpriced ones, so the switch never opens a
+                    # window without a working upstream.
+                    try:
+                        create_deployment(alias, entry_payload)
+                    except Exception as exc:  # noqa: BLE001 - stale costs are cosmetic
+                        log(f"default-chat cost refresh for {winner} failed: {exc}")
+                    else:
+                        for row in target_rows:
+                            try:
+                                delete_deployment(row["id"])
+                            except Exception as exc:  # noqa: BLE001 - extra row is harmless
+                                log(f"default-chat cost-retire failed: {type(exc).__name__}: {exc}")
+                        refreshed = True
+                        log(f"default-chat {alias} cost metadata refreshed for {winner}")
             return {
                 "status": "confirmed",
                 "source": source_name,
                 "alias": alias,
                 "target": params["model"],
                 "changed": False,
+                "costs_refreshed": refreshed,
             }
         try:
-            create_deployment(
-                alias,
-                {"params": params, "source": source_name},
-            )
+            create_deployment(alias, entry_payload)
         except Exception as exc:  # noqa: BLE001 - the previous target still stands
             log(f"default-chat promote to {winner} failed: {type(exc).__name__}: {exc}")
             return {
@@ -708,7 +831,7 @@ def resolve_default_chat(
     # No source carries a default-chat block: the operator turned the feature off (or
     # picked a provider with no synced catalog). A leftover alias would keep answering
     # with a model nobody selected any more, so it is retired here — the source prune
-    # loop can never reach it because its name is one segment deep.
+    # loop can never attribute the segment to a provider, so only this path moves it.
     leftover = existing.get(DEFAULT_CHAT_ALIAS) or {}
     retired = 0
     for entry in leftover.get("targets", []):
@@ -747,11 +870,34 @@ def gateway_model_names() -> dict[str, dict[str, Any]]:
         params = item.get("litellm_params")
         target = params.get("model") if isinstance(params, dict) else None
         if info.get("id"):
-            entry["targets"].append({"id": info.get("id"), "target": target})
+            # The recorded costs ride along so default-chat can tell a
+            # priced deployment from one that predates cost metadata.
+            entry["targets"].append(
+                {
+                    "id": info.get("id"),
+                    "target": target,
+                    "input_cost": info.get("input_cost_per_token"),
+                    "output_cost": info.get("output_cost_per_token"),
+                }
+            )
     return models
 
 
 def create_deployment(alias: str, entry: dict[str, Any]) -> None:
+    model_info: dict[str, Any] = {
+        "metadata": {"managed_by": MANAGED_BY, "sync_source": entry["source"]}
+    }
+    cost = entry.get("cost")
+    if (
+        isinstance(cost, (list, tuple))
+        and len(cost) == 2
+        and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in cost)
+    ):
+        # The provider's real per-token price at sync time (LiteLLM's standard
+        # spend fields). Omitted, not zeroed, when no catalog priced the model:
+        # spend accounting must never claim a paid endpoint is free.
+        model_info["input_cost_per_token"] = float(cost[0])
+        model_info["output_cost_per_token"] = float(cost[1])
     http_json(
         "POST",
         f"{GATEWAY_URL}/model/new",
@@ -759,7 +905,7 @@ def create_deployment(alias: str, entry: dict[str, Any]) -> None:
         payload={
             "model_name": alias,
             "litellm_params": entry["params"],
-            "model_info": {"metadata": {"managed_by": MANAGED_BY, "sync_source": entry["source"]}},
+            "model_info": model_info,
         },
     )
 
@@ -844,6 +990,28 @@ def reconcile_consumer_key(consumer: str, token: str, desired_aliases: list[str]
     return True
 
 
+def _alias_source(name: str, ok_sources: set[str]) -> str:
+    """Which provider a managed sync alias belongs to, in either alias shape.
+
+    Current names are flat (sync/<provider>-<flattened id>); names from before
+    the flattening nested the upstream id as extra path segments
+    (sync/<provider>/<id>). Matching happens against the sources that reported
+    health this cycle and tries the longest name first, so opencode-go cannot
+    be mistaken for a hypothetical opencode inside a flat name. A name no
+    live source claims resolves to "" and stays put — the same conservative
+    rule that keeps an unhealthy provider from losing its whole fleet.
+    """
+
+    rest = name[len(ALIAS_PREFIX) + 1 :]
+    nested = rest.split("/", 1)[0]
+    if nested in ok_sources:
+        return nested
+    for provider in sorted(ok_sources, key=len, reverse=True):
+        if rest.startswith(f"{provider}-"):
+            return provider
+    return ""
+
+
 def _prune_deployments(
     existing: dict[str, dict[str, Any]],
     *,
@@ -860,12 +1028,11 @@ def _prune_deployments(
             continue
         if name == DEFAULT_CHAT_ALIAS:
             # Managed by selection, which retires its own stale targets. The source
-            # rule below would otherwise drop it whenever its provider hiccuped: the
-            # name is one segment deep, so source_name resolves to "".
+            # rule below would otherwise drop it whenever its provider hiccuped.
             continue
         if meta.get("managed_by") != MANAGED_BY:
             continue
-        source_name = name.split("/")[1] if name.count("/") >= 2 else ""
+        source_name = _alias_source(name, ok_sources)
         if source_name not in ok_sources or name in deployments:
             continue
         model_id = meta.get("id")

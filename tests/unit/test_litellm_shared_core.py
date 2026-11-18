@@ -2128,9 +2128,11 @@ def test_rendered_compose_includes_model_sync_sidecar() -> None:
     assert "condition: service_healthy" in compose
     assert '"CMD", "python3", "/app/model_sync.py", "--healthcheck"' in compose
     assert "store_model_in_db: true" in compose
-    assert '"alias_prefix": "sync/openrouter"' in compose
-    assert '"alias_prefix": "sync/opencode-go"' in compose
-    assert '"alias_prefix": "sync/nvidia"' in compose
+    assert '"name": "openrouter"' in compose
+    assert '"name": "opencode-go"' in compose
+    assert '"name": "nvidia"' in compose
+    assert '"cost_catalog_provider": "nvidia"' in compose
+    assert '"cost_catalog_provider": "opencode-go"' in compose
     assert "openrouter-upstream-key" not in compose
 
 
@@ -2172,8 +2174,8 @@ def test_rendered_compose_model_sync_honors_provider_subset_and_interval() -> No
     compose = rendered.compose_file
 
     assert 'MODEL_SYNC_INTERVAL_MINUTES: "30"' in compose
-    assert '"alias_prefix": "sync/openrouter"' in compose
-    assert '"alias_prefix": "sync/opencode-go"' not in compose
+    assert '"name": "openrouter"' in compose
+    assert '"name": "opencode-go"' not in compose
 
 
 def test_consumer_virtual_keys_receive_sync_wildcard() -> None:
