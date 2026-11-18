@@ -560,6 +560,40 @@ def _provisioner_args(cli: ScriptedCli) -> list[str]:
     return cli.calls[0]
 
 
+def test_provisioner_seed_is_gated_on_the_health_wait_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Box-measured cold-start race: on a first install the in-container CLI
+    ran while the just-deployed Gitea task was still starting, saw 'no
+    running container', and the seed degraded to a WARNING (the coder phase's
+    sync then 401ed against the stale doc the wiped database left behind).
+    The health wait now runs FIRST: while it reports not-ready, the CLI must
+    never run at all, and seeding only happens once it passes."""
+    backend = _gitea_backend(tmp_path, ScriptedS3(head_script=[200]))
+    order: list[str] = []
+
+    def fake_health(*args: object, **kwargs: object) -> bool:
+        order.append("health")
+        return False
+
+    def no_cli(service_name: str, args: list[str]) -> _CliResult:
+        raise AssertionError("CLI must not run while Gitea is not serving yet")
+
+    monkeypatch.setattr(gitea_module, "_wait_for_local_https_health", fake_health)
+    monkeypatch.setattr(gitea_module, "_gitea_cli_exec", no_cli)
+    http = _ScriptedGiteaHttp()
+    monkeypatch.setattr(gitea_module.urlrequest, "urlopen", http)
+
+    state, notes = backend.ensure_application_ready(
+        secret_key_secret_ref="wizard-stack-gitea-secret-key"
+    )
+    assert order == ["health"]
+    assert state.initialized is False
+    assert state.provisioner_ready is False
+    # A not-ready Gitea surfaces through the health gate, not as a CLI WARNING.
+    assert not any(note.startswith("WARNING") for note in notes)
+
+
 def test_provisioner_bootstraps_account_token_and_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

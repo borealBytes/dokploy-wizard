@@ -249,12 +249,23 @@ class DokployGiteaBackend:
                 "Gitea SECRET_KEY secret ref no longer matches the active Dokploy plan."
             )
         notes: list[str] = []
+        # Gate on the container first: a first install seeds while Dokploy has
+        # just deployed Gitea and the task may still be starting (measured on
+        # the clean-slate proof: the in-container CLI saw 'no running
+        # container', the seed degraded to a WARNING, and the coder phase's
+        # sync then 401ed against the stale doc left by the wiped database).
+        # The health wait proves the container is up AND serving, which both
+        # the CLI seed and the basic-auth token mint require; while it has not
+        # passed, seeding is skipped and the reconciler's health gate owns the
+        # verdict (a not-ready service raises there — the next pass retries).
+        initialized = _wait_for_local_https_health(_health_url(self._hostname))
         bucket_ready, s3_notes = self._ensure_bucket()
         notes.extend(s3_notes)
-        provisioner_ready, provisioner_note = self._ensure_provisioner()
-        if provisioner_note is not None:
-            notes.append(provisioner_note)
-        initialized = _wait_for_local_https_health(_health_url(self._hostname))
+        provisioner_ready = False
+        if initialized:
+            provisioner_ready, provisioner_note = self._ensure_provisioner()
+            if provisioner_note is not None:
+                notes.append(provisioner_note)
         return (
             GiteaBootstrapState(
                 initialized=initialized,
