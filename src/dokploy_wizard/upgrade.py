@@ -158,7 +158,11 @@ class HttpImageRegistry:
             page_tags = payload.get("tags") if isinstance(payload, dict) else None
             if isinstance(page_tags, list):
                 tags.extend(str(item) for item in page_tags if isinstance(item, (str, int)))
-            url = _parse_link_next(_header_value(headers, "Link"))
+            link = _parse_link_next(_header_value(headers, "Link"))
+            # ghcr.io answers Link pagination with path-relative targets while
+            # Docker Hub sends absolute URLs; resolve against the current page
+            # so urllib always receives a fully qualified URL.
+            url = parse.urljoin(url, link) if link is not None else None
         return tuple(tags)
 
     def _call(

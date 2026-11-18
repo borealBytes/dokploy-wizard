@@ -767,6 +767,38 @@ def test_http_image_registry_lists_tags_with_link_pagination() -> None:
     assert registry.list_tags(ref) == ("v1.83.14-stable", "latest", "v1.84.0-stable")
 
 
+def test_http_image_registry_resolves_relative_link_pagination() -> None:
+    """ghcr.io returns path-relative Link targets; the client must send fully
+    qualified URLs on every page."""
+    from dokploy_wizard.upgrade import HttpImageRegistry
+    from dokploy_wizard.upgrade import parse_image_ref as parse
+
+    seen: list[str] = []
+
+    def opener(url: str, headers):
+        del headers
+        seen.append(url)
+        assert url.startswith("https://"), f"relative URL leaked to opener: {url}"
+        if url.endswith("/tags/list"):
+            return (
+                200,
+                {"Link": '</v2/berriai/litellm/tags/list?last=v1.83.14-stable&n=0>; rel="next"'},
+                json.dumps({"tags": ["v1.83.14-stable", "latest"]}).encode("utf-8"),
+            )
+        if "last=v1.83.14" in url:
+            return 200, {}, json.dumps({"tags": ["v1.84.0-stable"]}).encode("utf-8")
+        return 404, {}, b"{}"
+
+    registry = HttpImageRegistry(opener=opener)
+    ref = parse("ghcr.io/berriai/litellm")
+
+    assert registry.list_tags(ref) == ("v1.83.14-stable", "latest", "v1.84.0-stable")
+    assert seen == [
+        "https://ghcr.io/v2/berriai/litellm/tags/list",
+        "https://ghcr.io/v2/berriai/litellm/tags/list?last=v1.83.14-stable&n=0",
+    ]
+
+
 # --- CLI surface ---------------------------------------------------------------
 
 
