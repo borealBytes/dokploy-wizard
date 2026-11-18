@@ -843,7 +843,25 @@ tests + a fresh remote proof:
     the modern consumer/`MINIO_`-prefixed set above was proven live by patching app.ini
     in place: `Initialising Attachment/LFS storage with type: minio`,
     `Creating minio storage at <gw>:8333:gitea`, healthz 200.
-  - Final convergence run: `proof` (verification-first) re-runs every phase; the changed
-    gitea render (new artifact hash) redeploys the compose with the corrected env —
-    re-rendering app.ini via environment-to-ini — and service verification re-mints the
-    provisioner token with the fixed scope.
+  - Convergence on the box went through the modify resume lane (proof's
+    mutate-install lane refuses a post-modify box by design: the install-time
+    raw predates `ENABLE_GITEA`, so it raises "Use 'modify'"). Truncating
+    `completed_steps` to the `filex` prefix — the exact shape a failed phase
+    leaves behind — made the next modify genuinely rerun `gitea`: compose
+    redeployed with the corrected env, provisioner account seeded, token
+    minted with the bare `all` scope, `gitea-provisioner.json` written 0600,
+    `provisioner_ready: true` with no WARNING note. Box-verified after the
+    rerun: token authenticates at `/api/v1/user`, deployed container env
+    carries exactly the measured key set, boot logs show Attachment and LFS
+    storage initializing as `minio` against the live bucket with the mailer
+    warning gone, and the public `https://gitea.<root>/api/healthz` serves
+    200 over the HTTPS-only edge.
+  - The follow-up noop check then exposed a pre-existing convergence bug
+    outside the gitea lane: the preserved-phase drift probe compared the live
+    Cloudflare tunnel ingress against a route set built WITHOUT the on-demand
+    LiteLLM admin hostname, while the planner pushes it WITH that route —
+    so every noop-classified modify flagged drift at `networking` and
+    reran the whole chain forever. The probe now builds its expectation with
+    `resolve_litellm_admin_hostname`, parity-pinned by a new drift test
+    (accept-ingress-including-admin-route) alongside the existing
+    stale-ingress rejection.

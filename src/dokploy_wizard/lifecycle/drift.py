@@ -14,7 +14,10 @@ from dokploy_wizard.networking import (
     reconcile_cloudflare_access,
     reconcile_networking,
 )
-from dokploy_wizard.networking.planner import _build_tunnel_ingress
+from dokploy_wizard.networking.planner import (
+    _build_tunnel_ingress,
+    resolve_litellm_admin_hostname,
+)
 from dokploy_wizard.packs.coder import CoderBackend, CoderResourceRecord, reconcile_coder
 from dokploy_wizard.packs.docuseal import (
     DocuSealBackend,
@@ -227,7 +230,17 @@ def _validate_phase(
                 callable(get_tunnel_configuration)
                 and raw_env.values.get("CLOUDFLARE_MOCK_ACCOUNT_OK") != "true"
             ):
-                desired_ingress = _build_tunnel_ingress(desired_state)
+                # Compare against the route set the planner actually pushes:
+                # that one includes the on-demand LiteLLM admin hostname, so
+                # building the expectation without it would flag permanent
+                # drift on every LiteLLM-backed box (measured live: each noop
+                # modify resumed from 'networking' forever).
+                desired_ingress = _build_tunnel_ingress(
+                    desired_state,
+                    litellm_admin_hostname=resolve_litellm_admin_hostname(
+                        raw_env=raw_env, desired_state=desired_state
+                    ),
+                )
                 live_ingress = get_tunnel_configuration(account_id, tunnel.tunnel_id)
                 if live_ingress != desired_ingress:
                     return DriftEntry(

@@ -12,6 +12,10 @@ import pytest
 
 from dokploy_wizard.lifecycle.drift import LifecycleDriftError, validate_preserved_phases
 from dokploy_wizard.networking import CloudflareDnsRecord, CloudflareTunnel
+from dokploy_wizard.networking.planner import (
+    _build_tunnel_ingress,
+    resolve_litellm_admin_hostname,
+)
 from dokploy_wizard.packs.nextcloud.models import (
     NextcloudCommandCheck,
     NextcloudHealthCheck,
@@ -685,16 +689,7 @@ def test_validate_preserved_phases_rejects_stale_tunnel_ingress() -> None:
 
     with pytest.raises(LifecycleDriftError, match="Cloudflare tunnel ingress no longer matches"):
         _validate(
-            raw_env=RawEnvInput(
-                format_version=1,
-                values={
-                    "STACK_NAME": "openmerge",
-                    "ROOT_DOMAIN": "openmerge.me",
-                    "CLOUDFLARE_ACCOUNT_ID": "account-123",
-                    "CLOUDFLARE_ZONE_ID": "zone-123",
-                    "ENABLE_HEADSCALE": "true",
-                },
-            ),
+            raw_env=_networking_drift_raw_env(),
             desired_state=desired_state,
             ownership_ledger=OwnershipLedger(
                 format_version=1,
@@ -724,6 +719,114 @@ def test_validate_preserved_phases_rejects_stale_tunnel_ingress() -> None:
             preserved_phases=("networking",),
             networking_backend=networking_backend,
         )
+
+
+def _networking_drift_raw_env() -> RawEnvInput:
+    return RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "openmerge",
+            "ROOT_DOMAIN": "openmerge.me",
+            "CLOUDFLARE_ACCOUNT_ID": "account-123",
+            "CLOUDFLARE_ZONE_ID": "zone-123",
+            "ENABLE_HEADSCALE": "true",
+        },
+    )
+
+
+def test_validate_preserved_phases_accepts_pushed_tunnel_ingress_including_admin_route() -> None:
+    """The drift probe must compare against exactly what the planner pushes.
+
+    The planner's ingress route set includes the on-demand LiteLLM admin
+    hostname; an expectation built without it can never match on a
+    LiteLLM-backed box, so every noop-classified modify would flag preserved
+    drift at 'networking' and rerun the whole downstream chain forever
+    (measured live on the box before the probe was aligned).
+    """
+    raw_env = _networking_drift_raw_env()
+    desired_state = resolve_desired_state(raw_env)
+    pushed_ingress = _build_tunnel_ingress(
+        desired_state,
+        litellm_admin_hostname=resolve_litellm_admin_hostname(
+            raw_env=raw_env, desired_state=desired_state
+        ),
+    )
+    # Guard the premise: this env really does resolve the admin route.
+    assert any(
+        rule.get("hostname") == "litellm.openmerge.me" for rule in pushed_ingress
+    )
+
+    networking_backend = SimpleNamespace(
+        get_tunnel_configuration=lambda account_id, tunnel_id: pushed_ingress,
+        validate_account_access=lambda account_id: None,
+        validate_zone_access=lambda zone_id: None,
+        get_tunnel=lambda account_id, tunnel_id: CloudflareTunnel(
+            tunnel_id=tunnel_id, name="openmerge-tunnel"
+        ),
+        find_tunnel_by_name=lambda account_id, tunnel_name: CloudflareTunnel(
+            tunnel_id="tunnel-123", name=tunnel_name
+        ),
+        create_tunnel=lambda account_id, tunnel_name: CloudflareTunnel(
+            tunnel_id="tunnel-123", name=tunnel_name
+        ),
+        list_dns_records=lambda zone_id, **kwargs: (
+            CloudflareDnsRecord(
+                record_id=(
+                    "dns-1"
+                    if kwargs["hostname"] == "dokploy.openmerge.me"
+                    else "dns-3"
+                    if kwargs["hostname"] == "litellm.openmerge.me"
+                    else "dns-2"
+                ),
+                name=kwargs["hostname"],
+                record_type="CNAME",
+                content=kwargs.get("content")
+                or "8df8d550-b8ad-4444-ad28-b17f1291b5f2.cfargotunnel.com",
+                proxied=True,
+            ),
+        ),
+        create_dns_record=lambda zone_id, **kwargs: CloudflareDnsRecord(
+            record_id="dns-1",
+            name=kwargs["hostname"],
+            record_type="CNAME",
+            content=kwargs["content"],
+            proxied=kwargs["proxied"],
+        ),
+        get_tunnel_token=lambda account_id, tunnel_id: "token",
+        update_tunnel_configuration=lambda account_id, tunnel_id, ingress: None,
+    )
+
+    _validate(
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(
+            format_version=1,
+            resources=(
+                OwnedResource(
+                    resource_type="cloudflare_tunnel",
+                    resource_id="tunnel-123",
+                    scope="account:account-123",
+                ),
+                OwnedResource(
+                    resource_type="cloudflare_dns_record",
+                    resource_id="dns-1",
+                    scope="zone:zone-123:dokploy.openmerge.me",
+                ),
+                OwnedResource(
+                    resource_type="cloudflare_dns_record",
+                    resource_id="dns-2",
+                    scope="zone:zone-123:headscale.openmerge.me",
+                ),
+                OwnedResource(
+                    resource_type="cloudflare_dns_record",
+                    resource_id="dns-3",
+                    scope="zone:zone-123:litellm.openmerge.me",
+                ),
+            ),
+        ),
+        preserved_phases=("networking",),
+        networking_backend=networking_backend,
+    )
 
 
 def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_coder(
