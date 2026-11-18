@@ -475,28 +475,15 @@ class DokployCoderBackend:
             _emit_coder_progress(note)
             notes.append(note)
         workspace_name = _default_workspace_name(self._hostname)
-        if bootstrap_ready:
-            # The compose application verified clean, so the workspace itself
-            # needs no ensure step — but a template push just happened above,
-            # and the running workspace keeps its old build until something
-            # updates it. The convergence check therefore rides this path too,
-            # or the ~/shared bootstrap (and every later template change) would
-            # wait for the one pass where bootstrap verification happens to fail.
-            try:
-                if _update_workspace_if_outdated(
-                    container_name=container_name,
-                    hostname=self._hostname,
-                    session_token=session_token,
-                    workspace_name=workspace_name,
-                    template_name=_default_template_name(),
-                ):
-                    notes.append(
-                        f"Updated Coder workspace '{workspace_name}' onto the active "
-                        f"template version."
-                    )
-            except CoderError as e:
-                notes.append(f"Coder default workspace step did not complete: {e}")
-            return tuple(notes)
+        # The adopt-or-create lane rides every coder pass, healthy included: on
+        # a box upgraded from a pre-fix wizard the compose application verifies
+        # clean while legacy date-stamped workspaces still stand, and skipping
+        # the lane there pinned the legacy names (and the retired templates
+        # holding them) in place forever — measured on a box running Coder
+        # v2.38.3. On a converged stack the lane is a read-only exists noop;
+        # the template-version convergence inside it is the same check this
+        # path used directly, so the ~/shared bootstrap still lands without
+        # waiting for the one pass where bootstrap verification fails.
         try:
             outcome = _ensure_default_workspace(
                 container_name=container_name,
@@ -2186,7 +2173,15 @@ def _workspace_template_name(
     session_token: str,
     workspace_name: str,
 ) -> str | None:
-    """Best-effort template name for a workspace; None when the CLI shape is unknown."""
+    """Best-effort template name for a workspace; None when the list shape is unknown.
+
+    Read from ``coder list``, not ``coder show``: the show subcommand's ``--output``
+    flag is not portable across Coder builds (v2.38.3 rejects it outright, measured
+    on a box upgraded from an older wizard), and silently returning None there let
+    every legacy workspace escape the migrate lane, blocking template retirement
+    forever. The list payload is the shape the rest of this module already parses
+    on every pass (flat ``owner_name``/``template_name``).
+    """
 
     del hostname
     result = subprocess.run(
@@ -2199,8 +2194,7 @@ def _workspace_template_name(
             f"CODER_SESSION_TOKEN={session_token}",
             container_name,
             "/opt/coder",
-            "show",
-            workspace_name,
+            "list",
             "--output",
             "json",
         ],
@@ -2211,24 +2205,27 @@ def _workspace_template_name(
     if result.returncode != 0:
         return None
     try:
-        payload = json.loads(result.stdout or "{}")
+        payload = json.loads(result.stdout or "[]")
     except json.JSONDecodeError:
         return None
-    if not isinstance(payload, dict):
+    if not isinstance(payload, list):
         return None
-    direct = payload.get("template_name")
-    if isinstance(direct, str) and direct:
-        return direct
-    latest_build = payload.get("latest_build")
-    if isinstance(latest_build, dict):
-        build_template_name = latest_build.get("template_name")
-        if isinstance(build_template_name, str) and build_template_name:
-            return build_template_name
-        template = latest_build.get("template")
-        if isinstance(template, dict):
-            name = template.get("name")
-            if isinstance(name, str) and name:
-                return name
+    for item in payload:
+        if not isinstance(item, dict) or item.get("name") != workspace_name:
+            continue
+        direct = item.get("template_name")
+        if isinstance(direct, str) and direct:
+            return direct
+        latest_build = item.get("latest_build")
+        if isinstance(latest_build, dict):
+            build_template_name = latest_build.get("template_name")
+            if isinstance(build_template_name, str) and build_template_name:
+                return build_template_name
+            template = latest_build.get("template")
+            if isinstance(template, dict):
+                name = template.get("name")
+                if isinstance(name, str) and name:
+                    return name
     return None
 
 

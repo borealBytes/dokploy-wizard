@@ -862,7 +862,12 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     notes = backend.ensure_application_ready()
 
     assert template_push_calls == [coder_module._default_template_name()]
-    assert ensure_workspace_calls == []
+    # The adopt-or-create lane rides the healthy path too (upgraded boxes
+    # converge their legacy names there); the stub reports the stable name
+    # already exists, so no workspace note is emitted.
+    assert len(ensure_workspace_calls) == 1
+    assert ensure_workspace_calls[0]["workspace_name"] == "examplecom-workspace"
+    assert ensure_workspace_calls[0]["template_name"] == coder_module._default_template_name()
     assert notes == ("Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",)
     consolidated_replacements = template_replacements_by_name[coder_module._default_template_name()]
     assert consolidated_replacements["__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"] == "https://coder.example.com"
@@ -3294,10 +3299,15 @@ def test_ensure_default_workspace_reports_updated_flag(monkeypatch: pytest.Monke
 def test_ensure_application_ready_updates_workspace_on_verified_bootstrap_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On a box whose compose application verifies clean, the workspace ensure
-    step is skipped — but a template push still happened, and the running
-    workspace keeps its old build until something updates it. The convergence
-    check therefore has to ride the verified path as well."""
+    """The healthy box's coder pass rides the full adopt-or-create lane.
+
+    A template push still happened above, and the running workspace keeps its
+    old build until something updates it — so the convergence check inside
+    `_ensure_default_workspace` must ride the verified path. The whole lane
+    rides it: an upgraded box whose compose application verifies clean is
+    exactly the box whose legacy date-stamped workspaces still need adopting
+    (the pre-fix branch skipped the lane there and pinned those names, and
+    the retired templates holding them, in place forever)."""
     backend = DokployCoderBackend(
         api_url="https://dokploy.example.com/api",
         api_key="key-123",
@@ -3327,13 +3337,8 @@ def test_ensure_application_ready_updates_workspace_on_verified_bootstrap_path(
     monkeypatch.setattr(
         backend, "_verify_current_compose_application", lambda: SimpleNamespace(passed=True)
     )
-
-    ensure_calls: list[str] = []
     monkeypatch.setattr(
-        coder_module,
-        "_ensure_default_workspace",
-        lambda **kwargs: ensure_calls.append("called")
-        or coder_module.DefaultWorkspaceOutcome(action="exists"),
+        coder_module, "_list_workspaces", lambda **kwargs: ("examplecom-workspace",)
     )
     update_calls: list[str] = []
 
@@ -3345,9 +3350,149 @@ def test_ensure_application_ready_updates_workspace_on_verified_bootstrap_path(
 
     notes = backend.ensure_application_ready()
 
-    assert ensure_calls == []
     assert update_calls == ["examplecom-workspace"]
     assert any("Updated Coder workspace 'examplecom-workspace'" in note for note in notes)
+
+
+def test_workspace_template_name_reads_workspace_list_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The template lookup rides the list payload, not `coder show`.
+
+    The upgraded-box lesson: Coder v2.38.3 rejects `coder show --output`, so a
+    show-based read returned None for every workspace, the migrate lane
+    silently skipped every legacy workspace, and the retired templates holding
+    them could never be removed. The list payload is the shape every other
+    coder lane already parses (flat ``owner_name``/``template_name``), so the
+    lookup reads there and keeps the nested-build fallback for older shapes.
+    """
+
+    calls = _fake_docker_cli(
+        monkeypatch,
+        _workspace_list_json(
+            [
+                {
+                    "name": "assignment-1",
+                    "owner_name": "grader",
+                    "template_name": "operator-custom",
+                },
+                {
+                    "name": "examplecom-workspace",
+                    "owner_name": "admin",
+                    "latest_build": {"template_name": "ubuntu-vscode"},
+                },
+                {"name": "shapeless", "owner_name": "admin"},
+            ]
+        ),
+    )
+    assert (
+        coder_module._workspace_template_name(
+            container_name="wizard-stack-coder-container",
+            hostname="coder.example.com",
+            session_token="session-123",
+            workspace_name="examplecom-workspace",
+        )
+        == "ubuntu-vscode"
+    )
+    # Unknown shape yields None — the adopt lane treats that conservatively
+    # (wizard-created) rather than trusting a stale guess.
+    assert (
+        coder_module._workspace_template_name(
+            container_name="wizard-stack-coder-container",
+            hostname="coder.example.com",
+            session_token="session-123",
+            workspace_name="shapeless",
+        )
+        is None
+    )
+    for command in calls:
+        assert "show" not in command
+        assert "list" in command
+
+
+def test_ensure_application_ready_adopts_legacy_workspaces_on_verified_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A healthy upgraded box converges its legacy workspace names in place.
+
+    The box this pins: compose application verifies clean (so the old branch
+    skipped the ensure lane entirely), while legacy date-stamped workspaces on
+    a retired template still stand. The lane now rides the verified path: the
+    newest wizard-owned dated workspace is adopted via rename, the older
+    duplicate pruned, and the operator's own workspace names are left alone.
+    """
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: True)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module, "_coder_container_name", lambda service_name: "wizard-stack-coder-container"
+    )
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_seed_template", lambda **kwargs: False)
+    monkeypatch.setattr(coder_module, "_migrate_retired_template_workspaces", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_default_workspace_name", lambda hostname: "examplecom-workspace")
+    monkeypatch.setattr(
+        backend, "_verify_current_compose_application", lambda: SimpleNamespace(passed=True)
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_list_workspaces",
+        lambda **kwargs: (
+            "Assignment-1",
+            "examplecom-workspace-2026-10-28",
+            "examplecom-workspace-2026-11-03",
+            "workspace2",
+        ),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_workspace_template_name",
+        lambda **kwargs: coder_module._default_template_name(),
+    )
+    renames: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_rename_workspace",
+        lambda *, workspace_name, new_workspace_name, **kwargs: renames.append(
+            (workspace_name, new_workspace_name)
+        ),
+    )
+    deletes: list[str] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_delete_workspace",
+        lambda *, workspace_name, **kwargs: deletes.append(workspace_name),
+    )
+    monkeypatch.setattr(coder_module, "_update_workspace_if_outdated", lambda **kwargs: False)
+
+    notes = backend.ensure_application_ready()
+
+    assert renames == [("examplecom-workspace-2026-11-03", "examplecom-workspace")]
+    assert deletes == ["examplecom-workspace-2026-10-28"]
+    assert (
+        "Renamed legacy default Coder workspace 'examplecom-workspace-2026-11-03' "
+        "to 'examplecom-workspace'." in notes
+    )
+    assert (
+        "Pruned duplicate wizard-created Coder workspace 'examplecom-workspace-2026-10-28'."
+        in notes
+    )
 
 
 def test_ensure_application_ready_verified_path_survives_update_failure(
@@ -3381,6 +3526,9 @@ def test_ensure_application_ready_verified_path_survives_update_failure(
     monkeypatch.setattr(coder_module, "_default_workspace_name", lambda hostname: "examplecom-workspace")
     monkeypatch.setattr(
         backend, "_verify_current_compose_application", lambda: SimpleNamespace(passed=True)
+    )
+    monkeypatch.setattr(
+        coder_module, "_list_workspaces", lambda **kwargs: ("examplecom-workspace",)
     )
 
     def fail_update(**kwargs: object) -> bool:
