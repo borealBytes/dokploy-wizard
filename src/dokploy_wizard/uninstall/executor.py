@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from dokploy_wizard.networking.edge_https import EDGE_HTTPS_FILENAME, TRAEFIK_DYNAMIC_DIR
 from dokploy_wizard.state import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
@@ -145,6 +146,7 @@ def execute_uninstall_plan(
     plan: UninstallPlan,
     backend: UninstallBackend,
     dry_run: bool,
+    traefik_dynamic_dir: Path | None = None,
 ) -> UninstallExecutionResult:
     if dry_run:
         return UninstallExecutionResult(
@@ -203,6 +205,15 @@ def execute_uninstall_plan(
                 lifecycle_checkpoint_contract_version=LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
             ),
         )
+
+    # The Traefik HTTPS-edge drop-in is wizard-owned file state on the box.
+    # Dokploy's own teardown usually removes the whole dynamic directory, but
+    # a stale redirect router must never outlive the wizard, so remove ours.
+    edge_dir = traefik_dynamic_dir or TRAEFIK_DYNAMIC_DIR
+    try:
+        (edge_dir / EDGE_HTTPS_FILENAME).unlink(missing_ok=True)
+    except OSError:
+        pass
 
     state_cleared = not current_ledger.resources
     if state_cleared:

@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 from dokploy_wizard.networking.cloudflare import (
     CloudflareAccessApplication,
@@ -17,6 +18,7 @@ from dokploy_wizard.networking.cloudflare import (
     CloudflareError,
     CloudflareTunnel,
 )
+from dokploy_wizard.networking.edge_https import TRAEFIK_DIR, apply_edge_https_config
 from dokploy_wizard.networking.models import (
     AccessPhase,
     AccessResult,
@@ -73,6 +75,8 @@ def reconcile_networking(
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
     connector_backend: Any | None = None,
+    traefik_dir: Path | None = None,
+    restart_traefik: Callable[[str], bool] | None = None,
 ) -> NetworkingPhase:
     credentials = _resolve_credentials(raw_env, desired_state, backend)
     backend.validate_account_access(credentials.account_id)
@@ -86,32 +90,6 @@ def reconcile_networking(
         "Cloudflare account scope validated for Cloudflare Tunnel Read/Edit.",
         "Cloudflare zone scope validated for DNS Read/Edit.",
     ]
-
-    # HTTP must never be the way in: flip the zone-level redirect at the edge.
-    # Dry runs report the intent only; the real call is idempotent.
-    if dry_run:
-        notes.append(
-            "Would enable Cloudflare zone 'Always Use HTTPS' so wizard sites are HTTPS-only."
-        )
-    else:
-        # A missing Zone Settings permission (or a transient edge failure) must
-        # not block tunnel/DNS convergence; it degrades to a loud warning so
-        # operators fix the token instead of the whole wizard stalling.
-        try:
-            if backend.ensure_always_use_https(credentials.zone_id):
-                notes.append(
-                    "Enabled Cloudflare zone 'Always Use HTTPS'; "
-                    "plain HTTP now redirects at the edge."
-                )
-            else:
-                notes.append("Cloudflare zone already enforces HTTPS redirects.")
-        except CloudflareError as exc:
-            notes.append(
-                "WARNING: could not enforce 'Always Use HTTPS' on the zone; wizard sites "
-                "remain reachable over plain HTTP until fixed. Ensure the token includes "
-                "'Zone -> Zone Settings -> Read and Edit'. "
-                f"Underlying error: {exc}"
-            )
 
     nested_coder_wildcard = _nested_coder_wildcard_hostname(desired_state)
     if nested_coder_wildcard is not None:
@@ -174,6 +152,29 @@ def reconcile_networking(
             tunnel.tunnel_id,
             ingress_rules,
         )
+
+    # HTTPS-only is enforced on this box, not in the zone: the tunnel re-encrypts
+    # every visitor request to :443, so a per-hostname Traefik router keyed on
+    # cloudflared's X-Forwarded-Proto is what actually turns plain HTTP away. The
+    # coder workspace wildcard route is deliberately excluded — a workspace may
+    # still choose to serve plain HTTP — and so are any other wildcard entries.
+    edge_hostnames = tuple(
+        sorted(
+            hostname
+            for hostname in _public_hostnames(
+                desired_state, litellm_admin_hostname=litellm_admin_hostname
+            ).values()
+            if not hostname.startswith("*.")
+        )
+    )
+    notes.extend(
+        apply_edge_https_config(
+            edge_hostnames,
+            traefik_dir=traefik_dir or TRAEFIK_DIR,
+            dry_run=dry_run,
+            restart=restart_traefik,
+        )
+    )
 
     # Owned DNS records for hostnames that are no longer part of the desired
     # state (a de-exposed pack endpoint, a hostname rename) must come out of

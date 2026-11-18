@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -12,11 +13,11 @@ from dokploy_wizard.networking import (
     CloudflareAccessPolicy,
     CloudflareCertificatePack,
     CloudflareDnsRecord,
-    CloudflareError,
     CloudflareTunnel,
     reconcile_cloudflare_access,
     reconcile_networking,
 )
+from dokploy_wizard.networking.edge_https import EDGE_HTTPS_FILENAME
 from dokploy_wizard.state import (
     DesiredState,
     OwnedResource,
@@ -35,8 +36,6 @@ class FakeCloudflareBackend:
     dns_record_updates: list[tuple[str, str, str, str, bool]] = field(default_factory=list)
     dns_records: dict[str, CloudflareDnsRecord] = field(default_factory=dict)
     dns_deletions: list[tuple[str, str]] = field(default_factory=list)
-    always_use_https_changes: bool = True
-    always_use_https_error: str | None = None
     update_tunnel_configuration_calls: list[tuple[str, str, tuple[dict[str, object], ...]]] = field(
         default_factory=list
     )
@@ -140,15 +139,6 @@ class FakeCloudflareBackend:
         for hostname, record in list(self.dns_records.items()):
             if record.record_id == record_id:
                 del self.dns_records[hostname]
-
-    def ensure_always_use_https(self, zone_id: str) -> bool:
-        if not hasattr(self, "always_use_https_calls"):
-            self.always_use_https_calls: list[str] = []
-        self.always_use_https_calls.append(zone_id)
-        if self.always_use_https_error is not None:
-            raise CloudflareError(self.always_use_https_error)
-        changed = self.always_use_https_changes
-        return bool(changed)
 
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
         del zone_id
@@ -524,10 +514,7 @@ def test_networking_keeps_repointed_stale_dns_record() -> None:
     )
 
 
-def test_networking_enforces_always_use_https_at_the_edge() -> None:
-    backend = FakeCloudflareBackend(
-        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
-    )
+def _edge_inputs(*, packs: str | None = None) -> tuple[RawEnvInput, DesiredState]:
     raw_env = RawEnvInput(
         format_version=1,
         values={
@@ -536,9 +523,37 @@ def test_networking_enforces_always_use_https_at_the_edge() -> None:
             "CLOUDFLARE_ZONE_ID": "zone-1",
         },
     )
-    desired_state = resolve_desired_state(
-        RawEnvInput(format_version=1, values={"STACK_NAME": "s", "ROOT_DOMAIN": "example.com"})
+    values = {"STACK_NAME": "s", "ROOT_DOMAIN": "example.com"}
+    if packs is not None:
+        values["PACKS"] = packs
+    desired_state = resolve_desired_state(RawEnvInput(format_version=1, values=values))
+    return raw_env, desired_state
+
+
+def _traefik_home(tmp_path: Path) -> Path:
+    (tmp_path / "traefik.yml").write_text(
+        "entryPoints:\n"
+        "  web:\n"
+        "    address: :80\n"
+        "  websecure:\n"
+        "    address: :443\n",
+        encoding="utf-8",
     )
+    (tmp_path / "dynamic").mkdir()
+    return tmp_path
+
+
+def test_networking_writes_traefik_edge_https(tmp_path: Path) -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+    )
+    raw_env, desired_state = _edge_inputs(packs="coder,filex")
+    home = _traefik_home(tmp_path)
+    restarts: list[str] = []
+
+    def restart(service: str) -> bool:
+        restarts.append(service)
+        return True
 
     phase = reconcile_networking(
         dry_run=False,
@@ -546,56 +561,67 @@ def test_networking_enforces_always_use_https_at_the_edge() -> None:
         desired_state=desired_state,
         ownership_ledger=OwnershipLedger(format_version=1, resources=()),
         backend=backend,
+        traefik_dir=home,
+        restart_traefik=restart,
     )
 
-    assert backend.always_use_https_calls == ["zone-1"]
-    assert any("Always Use HTTPS" in note for note in phase.result.notes)
+    content = (home / "dynamic" / EDGE_HTTPS_FILENAME).read_text(encoding="utf-8")
+    # Every wizard login surface is redirected; the zone is never modified.
+    assert "wizard-edge-https-dokploy-example-com:" in content
+    assert "wizard-edge-https-filex-example-com:" in content
+    assert "wizard-edge-https-coder-example-com:" in content
+    # Coder workspace wildcard hosts must keep the option of plain HTTP.
+    assert "*.example.com" not in content
+    # Traefik v3: Header (v2's HeadersRegexp was removed and fails open).
+    assert "Header(`X-Forwarded-Proto`, `http`)" in content
+    assert "redirectScheme:" in content
+    assert (home / "traefik.yml").read_text(encoding="utf-8").count("forwardedHeaders:") == 1
+    assert restarts == ["dokploy-traefik"]
+    assert not hasattr(backend, "always_use_https_calls")
+    assert any("HTTPS-edge redirect drop-in" in note for note in phase.result.notes)
 
 
-def test_networking_reports_existing_https_redirect_as_noop() -> None:
+def test_networking_edge_https_second_pass_is_noop(tmp_path: Path) -> None:
+    raw_env, desired_state = _edge_inputs(packs="coder,filex")
     backend = FakeCloudflareBackend(
         existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
-        always_use_https_changes=False,
     )
-    raw_env = RawEnvInput(
-        format_version=1,
-        values={
-            "CLOUDFLARE_API_TOKEN": "token",
-            "CLOUDFLARE_ACCOUNT_ID": "account-1",
-            "CLOUDFLARE_ZONE_ID": "zone-1",
-        },
-    )
-    desired_state = resolve_desired_state(
-        RawEnvInput(format_version=1, values={"STACK_NAME": "s", "ROOT_DOMAIN": "example.com"})
-    )
+    home = _traefik_home(tmp_path)
 
+    reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+        traefik_dir=home,
+        restart_traefik=lambda _svc: True,
+    )
+    static_first = (home / "traefik.yml").read_bytes()
+    dropin_first = (home / "dynamic" / EDGE_HTTPS_FILENAME).read_bytes()
     phase = reconcile_networking(
         dry_run=False,
         raw_env=raw_env,
         desired_state=desired_state,
         ownership_ledger=OwnershipLedger(format_version=1, resources=()),
         backend=backend,
+        traefik_dir=home,
+        # No change on the second pass, so Traefik must not be restarted again.
+        restart_traefik=lambda _svc: False,
     )
 
-    assert backend.always_use_https_calls == ["zone-1"]
-    assert any("already enforces HTTPS redirects" in note for note in phase.result.notes)
+    assert (home / "traefik.yml").read_bytes() == static_first
+    assert (home / "dynamic" / EDGE_HTTPS_FILENAME).read_bytes() == dropin_first
+    assert any("already trusts forwarded headers" in note for note in phase.result.notes)
+    assert any("is up to date" in note for note in phase.result.notes)
 
 
-def test_networking_dry_run_only_plans_the_https_redirect() -> None:
+def test_networking_dry_run_only_plans_the_https_edge(tmp_path: Path) -> None:
     backend = FakeCloudflareBackend(
         existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
     )
-    raw_env = RawEnvInput(
-        format_version=1,
-        values={
-            "CLOUDFLARE_API_TOKEN": "token",
-            "CLOUDFLARE_ACCOUNT_ID": "account-1",
-            "CLOUDFLARE_ZONE_ID": "zone-1",
-        },
-    )
-    desired_state = resolve_desired_state(
-        RawEnvInput(format_version=1, values={"STACK_NAME": "s", "ROOT_DOMAIN": "example.com"})
-    )
+    raw_env, desired_state = _edge_inputs(packs="coder,filex")
+    home = _traefik_home(tmp_path)
 
     phase = reconcile_networking(
         dry_run=True,
@@ -603,30 +629,26 @@ def test_networking_dry_run_only_plans_the_https_redirect() -> None:
         desired_state=desired_state,
         ownership_ledger=OwnershipLedger(format_version=1, resources=()),
         backend=backend,
+        traefik_dir=home,
+        restart_traefik=lambda _svc: True,
     )
 
-    assert getattr(backend, "always_use_https_calls", []) == []
+    assert not (home / "dynamic" / EDGE_HTTPS_FILENAME).exists()
+    assert "forwardedHeaders" not in (home / "traefik.yml").read_text(encoding="utf-8")
     assert any(
-        "Would enable Cloudflare zone 'Always Use HTTPS'" in note for note in phase.result.notes
+        "Would add forwardedHeaders.trustedIPs" in note for note in phase.result.notes
+    )
+    assert any(
+        "Would write the Traefik HTTPS-edge redirect drop-in" in note
+        for note in phase.result.notes
     )
 
 
-def test_networking_survives_missing_zone_settings_permission() -> None:
+def test_networking_warns_when_traefik_not_installed(tmp_path: Path) -> None:
     backend = FakeCloudflareBackend(
         existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
-        always_use_https_error="Cloudflare API request failed with HTTP 403.",
     )
-    raw_env = RawEnvInput(
-        format_version=1,
-        values={
-            "CLOUDFLARE_API_TOKEN": "token",
-            "CLOUDFLARE_ACCOUNT_ID": "account-1",
-            "CLOUDFLARE_ZONE_ID": "zone-1",
-        },
-    )
-    desired_state = resolve_desired_state(
-        RawEnvInput(format_version=1, values={"STACK_NAME": "s", "ROOT_DOMAIN": "example.com"})
-    )
+    raw_env, desired_state = _edge_inputs(packs="coder,filex")
 
     phase = reconcile_networking(
         dry_run=False,
@@ -634,10 +656,13 @@ def test_networking_survives_missing_zone_settings_permission() -> None:
         desired_state=desired_state,
         ownership_ledger=OwnershipLedger(format_version=1, resources=()),
         backend=backend,
+        traefik_dir=tmp_path / "not-installed",
+        restart_traefik=lambda _svc: True,
     )
 
-    # The redirect is hardening, not core: a 403 must warn, never fail the phase.
+    # The redirect is hardening, not core: a missing Traefik warns once, never fails.
     assert phase.result.outcome == "applied"
     warning = [note for note in phase.result.notes if note.startswith("WARNING")]
     assert len(warning) == 1
-    assert "Zone Settings" in warning[0]
+    assert "no Traefik install" in warning[0]
+    assert not (tmp_path / "not-installed").exists()

@@ -380,10 +380,13 @@ Not behind Cloudflare Access in the current implementation:
 - `coder.<root-domain>`
 
 Everything the wizard publishes rides the Cloudflare Tunnel and is HTTPS-only:
-the networking phase flips the zone's "Always Use HTTPS" setting, so a plain
-`http://` visit redirects at Cloudflare before anything reaches the tunnel.
-This also protects origin apps whose login flow pins its CSRF origin to the
-`https://` URL (Dokploy rejects an `http://` sign-in as "Invalid origin").
+the networking phase patches Traefik on the box to trust the tunnel's
+forwarded headers and installs a redirect drop-in, so any plain `http://`
+request to a wizard hostname gets a permanent redirect to the `https://` URL
+before any app is reached. The Cloudflare zone is not touched, so Coder
+workspace hosts can still opt to serve plain HTTP. This also protects
+origin apps whose login flow pins its CSRF origin to the `https://` URL
+(Dokploy rejects an `http://` sign-in as "Invalid origin").
 - Coder workspace app hosts, currently routed via a controlled `*.<root-domain>` fallback
 - `matrix.<root-domain>`
 - `headscale.<root-domain>`
@@ -447,7 +450,7 @@ Then edit `.install.env` and replace placeholders with operator-owned values.
 
 Use Cloudflare values for the one account and one zone that will host this stack. In the Cloudflare dashboard, find the Account ID from Account home by using the account row menu and selecting Copy account ID. Find the Zone ID by opening the target domain and copying Zone ID from the Overview page API section.
 
-Create a Cloudflare API token for the wizard instead of using a Global API Key. Scope the token to the target account and target zone. The token needs Zone DNS Edit for the target zone, plus Zone Settings Read and Edit on the target zone so the wizard can enforce the zone-level 'Always Use HTTPS' redirect (without it the networking phase warns and wizard sites stay reachable over plain HTTP), plus account-level Cloudflare Tunnel Edit or the current Cloudflare One connector write permission for the target account so the wizard can manage the tunnel and route hostnames. If Cloudflare Access OTP apps are enabled, also grant Access Apps Write/Edit and Access Policies Write/Edit on the target account. Do not use all-account or all-zone scopes unless you are testing in a disposable Cloudflare account.
+Create a Cloudflare API token for the wizard instead of using a Global API Key. Scope the token to the target account and target zone. The token needs Zone DNS Edit for the target zone, plus account-level Cloudflare Tunnel Edit or the current Cloudflare One connector write permission for the target account so the wizard can manage the tunnel and route hostnames. If Cloudflare Access OTP apps are enabled, also grant Access Apps Write/Edit and Access Policies Write/Edit on the target account. The wizard does not read or modify zone settings: HTTPS-only enforcement lives in a Traefik redirect drop-in on the box itself. Do not use all-account or all-zone scopes unless you are testing in a disposable Cloudflare account.
 
 Important details:
 

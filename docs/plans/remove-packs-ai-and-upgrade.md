@@ -580,12 +580,32 @@ tests + a fresh remote proof:
 - LiteLLM spend now attributes per workspace via the key alias; rotating one workspace's
   key does not touch the others.
 
-### HTTPS-only edge (Cloudflare Always Use HTTPS)
-- `CloudflareApiBackend.ensure_always_use_https(zone_id)` reads the zone setting and PATCHes
-  it on once; `reconcile_networking` calls it right after zone validation (idempotent; dry
-  runs note the intent only). Plain `http://` requests bounce at Cloudflare before ever
-  reaching the tunnel, which also fixes origin apps whose auth pins the https origin
-  (Dokploy's NextAuth "Invalid origin" on http logins).
+### HTTPS-only edge (box-local Traefik redirect, two halves)
+- The zone setting is deliberately NOT touched: `Always Use HTTPS` is zone-wide state, and it
+  would also silence plain HTTP for Coder workspace wildcard routes, where serving HTTP can be
+  a legitimate choice. The tunnel re-encrypts every visitor request to origin
+  `https://localhost:443` (`noTLSVerify`), so the only visitor-scheme signal at the box is
+  cloudflared's `X-Forwarded-Proto` header. Enforcement lives on this box, in `edge_https.py`:
+  1. **Static trust patch** — Dokploy's `/etc/dokploy/traefik/traefik.yml` is patched
+     idempotently with `entryPoints.websecure.forwardedHeaders.trustedIPs` (loopback +
+     RFC1918, because swarm's userland proxy makes :443 peers gateway addresses; verified
+     live: without trust, Traefik overwrites client `X-Forwarded-Proto` before rule matching,
+     and with it the header rule fires and the request scheme becomes `http`). Traefik is a
+     service, so a static change rides a `docker service update --force dokploy-traefik`
+     (fallback `docker restart`); a failed restart warns, never fails the phase.
+  2. **File-provider drop-in** — `dokploy-wizard-edge-https.yml` rendered into the watched
+     dynamic dir: per wizard hostname a priority-1000 router
+     `Host(...) && Header(\`X-Forwarded-Proto\`, \`http\`)` (Traefik **v3** rule name — v2's
+     `HeadersRegexp` was removed and such rules fail open, silently never matching) on web +
+     websecure, attached to a permanent `redirectScheme` middleware (trust makes the scheme
+     `http`, so it fires and Traefik builds the Location from the real host/path — a manual
+     `redirectRegex` earlier produced mangled Locations) and a discard service.
+- Plain HTTP 301s to the HTTPS URL before any app is dialed; `https://` requests fall through
+  to the normal routers; wildcard routes (Coder workspaces) are absent from the file and keep
+  plain HTTP. Writes are content-stable; dry runs note intent only; a box without a Traefik
+  install warns once and never fails the phase. Uninstall removes the drop-in. This also fixes
+  the Dokploy NextAuth "Invalid origin" failure mode: the http:// login surface no longer
+  exists.
 
 ### Gates
 - `pytest` (1079 passed), `ruff check`, `mypy` green. Template changes live entirely
@@ -625,9 +645,9 @@ tests + a fresh remote proof:
 - Live: modify on the box re-seeds one template, migrates both existing workspaces (already
   on the survivor from the 6b proof), retires the five ghosts, prunes the kdense key/team in
   LiteLLM, and the rebuilt workspace mints its child key (verified via `/key/info`).
-- Blocked on the operator: the zone `Always Use HTTPS` PATCH needs
-  `Zone -> Zone Settings -> Read and Edit` on the API token; the phase now warns (never
-  fails) until that grant lands.
+- The zone `Always Use HTTPS` blocker is obsolete: the redirect moved to a box-local Traefik
+  drop-in (see "HTTPS-only edge" above), so the API token needs no Zone Settings grant and
+  the zone itself is never modified — Coder workspaces keep the option of plain HTTP.
 
 ### Follow-ons (next slices, approved in planning)
 - ~~FileX image pin bump~~ resolved: the pack shipped modern (`brf-tech/filex:latest`, and
