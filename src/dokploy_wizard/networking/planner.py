@@ -94,12 +94,24 @@ def reconcile_networking(
             "Would enable Cloudflare zone 'Always Use HTTPS' so wizard sites are HTTPS-only."
         )
     else:
-        if backend.ensure_always_use_https(credentials.zone_id):
+        # A missing Zone Settings permission (or a transient edge failure) must
+        # not block tunnel/DNS convergence; it degrades to a loud warning so
+        # operators fix the token instead of the whole wizard stalling.
+        try:
+            if backend.ensure_always_use_https(credentials.zone_id):
+                notes.append(
+                    "Enabled Cloudflare zone 'Always Use HTTPS'; "
+                    "plain HTTP now redirects at the edge."
+                )
+            else:
+                notes.append("Cloudflare zone already enforces HTTPS redirects.")
+        except CloudflareError as exc:
             notes.append(
-                "Enabled Cloudflare zone 'Always Use HTTPS'; plain HTTP now redirects at the edge."
+                "WARNING: could not enforce 'Always Use HTTPS' on the zone; wizard sites "
+                "remain reachable over plain HTTP until fixed. Ensure the token includes "
+                "'Zone -> Zone Settings -> Read and Edit'. "
+                f"Underlying error: {exc}"
             )
-        else:
-            notes.append("Cloudflare zone already enforces HTTPS redirects.")
 
     nested_coder_wildcard = _nested_coder_wildcard_hostname(desired_state)
     if nested_coder_wildcard is not None:

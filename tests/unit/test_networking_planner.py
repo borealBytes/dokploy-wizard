@@ -12,6 +12,7 @@ from dokploy_wizard.networking import (
     CloudflareAccessPolicy,
     CloudflareCertificatePack,
     CloudflareDnsRecord,
+    CloudflareError,
     CloudflareTunnel,
     reconcile_cloudflare_access,
     reconcile_networking,
@@ -35,6 +36,7 @@ class FakeCloudflareBackend:
     dns_records: dict[str, CloudflareDnsRecord] = field(default_factory=dict)
     dns_deletions: list[tuple[str, str]] = field(default_factory=list)
     always_use_https_changes: bool = True
+    always_use_https_error: str | None = None
     update_tunnel_configuration_calls: list[tuple[str, str, tuple[dict[str, object], ...]]] = field(
         default_factory=list
     )
@@ -143,6 +145,8 @@ class FakeCloudflareBackend:
         if not hasattr(self, "always_use_https_calls"):
             self.always_use_https_calls: list[str] = []
         self.always_use_https_calls.append(zone_id)
+        if self.always_use_https_error is not None:
+            raise CloudflareError(self.always_use_https_error)
         changed = self.always_use_https_changes
         return bool(changed)
 
@@ -605,3 +609,35 @@ def test_networking_dry_run_only_plans_the_https_redirect() -> None:
     assert any(
         "Would enable Cloudflare zone 'Always Use HTTPS'" in note for note in phase.result.notes
     )
+
+
+def test_networking_survives_missing_zone_settings_permission() -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        always_use_https_error="Cloudflare API request failed with HTTP 403.",
+    )
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "CLOUDFLARE_API_TOKEN": "token",
+            "CLOUDFLARE_ACCOUNT_ID": "account-1",
+            "CLOUDFLARE_ZONE_ID": "zone-1",
+        },
+    )
+    desired_state = resolve_desired_state(
+        RawEnvInput(format_version=1, values={"STACK_NAME": "s", "ROOT_DOMAIN": "example.com"})
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+    )
+
+    # The redirect is hardening, not core: a 403 must warn, never fail the phase.
+    assert phase.result.outcome == "applied"
+    warning = [note for note in phase.result.notes if note.startswith("WARNING")]
+    assert len(warning) == 1
+    assert "Zone Settings" in warning[0]
