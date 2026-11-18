@@ -364,6 +364,24 @@ Nextcloud picker all display the alias id verbatim):
   `previous_pin_source: state-pin`, proving the written pin outranks the
   env default on the next pass. `fixtures/upgrade.confirm` now ships as the
   typed confirmation file the docs reference.
+- Group 5 ALIAS MIGRATION (remote modify, 2026-11-18): sources-doc change
+  forced the sidecar redeploy; its boot cycle migrated the live gateway in one
+  pass — `desired=73 created=73 pruned=73 create_errors=0 prune_errors=0
+  key_reconciled=4` (all four consumer keys), and the immediately following
+  early cycle was a true noop (`created=0 pruned=0`). Post-state verified:
+  `/v1/models` (hermes key) shows 75 sync aliases, ALL flat
+  (`sync/nvidia-google->gemma-4-31b-it:free`), zero nested-shape leftovers;
+  49 rows carry nonzero cost — OpenRouter aliases priced from inline catalog
+  rows (e.g. `deepseek/deepseek-v4.1-flash` at $0.051/M in, $0.567/M out),
+  NVIDIA free endpoints record explicit zeros; `sync/default-chat` refreshed
+  in place to OpenCode Go list price ($0.15/M in, $0.60/M out — models.dev)
+  without moving its target (`cost metadata refreshed` log line, deployments
+  replaced promote-before-retire). Dokploy `ai.getAll` after the pass: exactly
+  2 wizard rows, both flat-shaped, enabled; no nested-shape stragglers.
+  Bonus field evidence while at it: the liveness probe correctly dropped one
+  delisted OpenRouter model and four dead NVIDIA endpoints during the same
+  cycle. The `g5-proof-probe` API key used for this read could not be revoked
+  (`user.listApiKeys` 404s on this Dokploy build) and joins the hygiene list.
 - Known hygiene gaps observed during proof (not blockers, candidate
   follow-ups): every mutating pass creates a fresh run-scoped Dokploy API key
   (`dokploy-wizard-<uuid>`) that is never revoked, and each bootstrap
