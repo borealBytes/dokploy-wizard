@@ -1450,3 +1450,106 @@ def test_modify_filex_addition_and_s3_de_expose_schedules_three_phases() -> None
     assert plan.mode == "modify"
     assert set(plan.phases_to_run) >= {"networking", "seaweedfs", "filex"}
     assert "docuseal" in plan.preserved_phases
+
+
+def test_modify_litellm_model_policy_flag_flip_reruns_shared_core_and_coder() -> None:
+    """A workspace-key policy flip must re-sweep minted keys and re-seed the template.
+
+    shared_core carries the reconcile sweep that re-scopes existing minted
+    keys admin-side (no workspace reboot needed), and the coder phase re-bakes
+    the MINTPY lane so future boots mint under the fresh policy. Non-consumer
+    packs keep their evidence.
+    """
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,coder,gitea",
+            "ALLOW_LITELLM_MODELS_FOR_NEW_USERS": "false",
+        }
+    )
+    requested_raw = _raw(
+        {
+            **existing_raw.values,
+            "ALLOW_LITELLM_MODELS_FOR_NEW_USERS": "true",
+            "ALLOWED_LITELLM_ADDITIONAL_USERS": "bob,jo-ho",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=tuple(applicable_phases_for(existing_desired)),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert set(plan.phases_to_run) >= {"shared_core", "coder"}
+    assert "gitea" in plan.preserved_phases
+
+
+def test_modify_litellm_model_policy_default_valued_key_still_lands_one_rerun() -> None:
+    """Adding the key with its default value still lands one rerun, then noops.
+
+    The classifier routes on effective raw changes: the first pass that adds
+    ALLOW_LITELLM_MODELS_FOR_NEW_USERS=false reruns shared_core and coder
+    (the sweep converges and the template re-seeds even though the parsed
+    value equals the built-in default). The second pass is a true noop once
+    the on-box raw snapshot carries the same line — the exact sequence the
+    box proof measures.
+    """
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,coder,gitea",
+        }
+    )
+    requested_raw = _raw(
+        {
+            **existing_raw.values,
+            "ALLOW_LITELLM_MODELS_FOR_NEW_USERS": "false",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+    checkpoint = AppliedStateCheckpoint(
+        format_version=1,
+        desired_state_fingerprint=requested_desired.fingerprint(),
+        completed_steps=tuple(applicable_phases_for(requested_desired)),
+    )
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=tuple(applicable_phases_for(existing_desired)),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert set(plan.phases_to_run) >= {"shared_core", "coder"}
+
+    second = classify_modify_request(
+        existing_raw=requested_raw,
+        existing_desired=requested_desired,
+        existing_applied=checkpoint,
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert second.mode == "noop"

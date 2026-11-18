@@ -4,11 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib import error, parse, request
 
+from dokploy_wizard.identity import username_from_email
 from dokploy_wizard.state.models import LITELLM_WORKSPACE_ISSUER_CONSUMER
 
 
@@ -55,6 +56,60 @@ def _matches_generated_key(record: LiteLLMVirtualKeyRecord, generated_key: str) 
     if record.key == generated_key:
         return True
     return record.token is not None and hashlib.sha256(generated_key.encode()).hexdigest() == record.token
+
+
+# The grant a workspace-minted key (template MINTPY lane) carries when its
+# owner has model access: the model-sync wildcard plus the synced default-chat
+# alias. The template hardcodes the same pair — test_coder_pack pins both
+# sides so they cannot drift apart silently.
+WORKSPACE_KEY_GRANTED_MODELS: tuple[str, ...] = ("sync/*", "sync/default-chat")
+# The deny lane is a real key scoped to one model name the gateway does not
+# deploy. The workspace still gets its personal key (boot stays healthy,
+# spend stays attributed); inference fails honestly at the gateway with a
+# model-not-found error instead of the fallback leaking the shared baked key.
+WORKSPACE_KEY_DENY_MODEL = "dokploy-wizard-model-access-denied"
+
+
+@dataclass(frozen=True)
+class LiteLLMWorkspaceKeyPolicy:
+    """Who may hold a workspace-minted key with the operator's LiteLLM models.
+
+    Brand-new Coder users are denied by default; ``allow_new_users`` grants
+    everyone, ``allowed_users`` names logins, and the seeded admin (derived
+    from the operator admin email, the same normalization the first-user lane
+    used) is always exempt. A key minted for a denied owner scopes to
+    ``WORKSPACE_KEY_DENY_MODEL`` so boot stays healthy and inference fails at
+    the gateway rather than falling back to the shared baked key.
+    """
+
+    allow_new_users: bool
+    allowed_users: frozenset[str]
+    admin_login: str
+
+    def models_for_owner(self, owner: str) -> tuple[str, ...]:
+        login = str(owner).strip().lower()
+        if (
+            self.allow_new_users
+            or login in self.allowed_users
+            or login == self.admin_login
+        ):
+            return WORKSPACE_KEY_GRANTED_MODELS
+        return (WORKSPACE_KEY_DENY_MODEL,)
+
+
+def build_litellm_workspace_key_policy(
+    *,
+    allow_new_users: bool,
+    allowed_users: Iterable[str],
+    admin_email: str,
+) -> LiteLLMWorkspaceKeyPolicy:
+    return LiteLLMWorkspaceKeyPolicy(
+        allow_new_users=allow_new_users,
+        allowed_users=frozenset(
+            str(user).strip().lower() for user in allowed_users if str(user).strip()
+        ),
+        admin_login=username_from_email(admin_email),
+    )
 
 
 class LiteLLMAdminApi(Protocol):
@@ -348,6 +403,7 @@ class LiteLLMGatewayManager:
         *,
         generated_keys: Mapping[str, str],
         consumer_model_allowlists: Mapping[str, tuple[str, ...]],
+        workspace_key_policy: LiteLLMWorkspaceKeyPolicy | None = None,
     ) -> dict[str, LiteLLMVirtualKeyRecord]:
         existing_teams = {team.team_alias: team for team in self._api.list_teams()}
         existing_keys = {record.key_alias: record for record in self._api.list_keys()}
@@ -453,7 +509,58 @@ class LiteLLMGatewayManager:
             if alias in generated_keys or team.metadata.get("managed_by") != "dokploy-wizard":
                 continue
             self._api.delete_team(team_id=team.team_id)
+        if workspace_key_policy is not None:
+            self._apply_workspace_key_policy(existing_keys, generated_keys, workspace_key_policy)
         return reconciled
+
+    def _apply_workspace_key_policy(
+        self,
+        existing_keys: Mapping[str, LiteLLMVirtualKeyRecord],
+        generated_keys: Mapping[str, str],
+        policy: LiteLLMWorkspaceKeyPolicy,
+    ) -> None:
+        """Bring workspace-minted keys in line with the operator's policy.
+
+        Workspace keys live outside the state consumer set (the template mints
+        them at boot), so the retired sweep spares them and nothing else would
+        re-scope one after a policy flip. The MINTPY token is deterministic —
+        sha256(issuer + ":" + login + "-" + workspace) — so the master key can
+        address the raw token and /key/update the grant without rebooting the
+        workspace. Owners that cannot be attributed are spared: guessing a
+        policy for an anonymous key could revoke a real user's access.
+        """
+        issuer = generated_keys.get(LITELLM_WORKSPACE_ISSUER_CONSUMER)
+        if issuer is None:
+            return
+        for alias, record in existing_keys.items():
+            if alias in generated_keys:
+                continue
+            if record.metadata.get("managed_by") != "dokploy-wizard":
+                continue
+            workspace = record.metadata.get("coder_workspace")
+            owner = record.metadata.get("coder_owner")
+            if not isinstance(workspace, str) or not workspace:
+                continue
+            if not isinstance(owner, str) or not owner:
+                continue
+            expected = policy.models_for_owner(owner)
+            if tuple(sorted(record.models)) == tuple(sorted(expected)):
+                continue
+            label = f"{owner}-{workspace}"
+            token = "sk-" + hashlib.sha256((issuer + ":" + label).encode()).hexdigest()[:40]
+            try:
+                self._api.update_key(
+                    key_alias=alias,
+                    key=token,
+                    team_id=record.team_id,
+                    models=expected,
+                    metadata=record.metadata,
+                )
+            except LiteLLMAdminError:
+                # Best-effort: an unreachable gateway or a record the update
+                # route refuses simply waits for the next pass or the next
+                # boot (the template lane re-mints on a model mismatch).
+                continue
 
 
 def _expected_models_for_consumer(

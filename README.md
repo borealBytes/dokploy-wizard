@@ -196,6 +196,19 @@ Copilot BYOK with the full alias list resolved from the wizard-managed LiteLLM
 gateway, so agents are pre-wired on first boot instead of waiting for manual
 provider setup.
 
+Each workspace also mints its own LiteLLM child key at boot (named
+`<login>-<workspace>` from the wizard's issuer key), so spend attributes per
+person and machine. Operator model access on those minted keys is opt-in for
+new users: `ALLOW_LITELLM_MODELS_FOR_NEW_USERS` grants every owner the
+operator's models, `ALLOWED_LITELLM_ADDITIONAL_USERS` names specific Coder
+logins, and the seeded admin is always exempt. A denied owner still gets a
+personal key — scoped to one sentinel model the gateway does not deploy — so
+boot stays healthy and inference fails honestly at the gateway instead of
+falling back to the shared template key. Flipping the policy reruns
+`shared_core` and `coder`: the reconcile sweep re-scopes existing minted keys
+admin-side (no workspace reboot needed), and future boots mint under the fresh
+policy.
+
 - creates a default workspace for the operator
 
 Removed templates are retired automatically on the next wizard rerun or modify; workspaces still on a retired template are migrated in place before the delete.

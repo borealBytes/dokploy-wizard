@@ -67,6 +67,7 @@ from dokploy_wizard.lifecycle import (
     validate_preserved_phases,
 )
 from dokploy_wizard.litellm import LiteLLMAdminClient
+from dokploy_wizard.litellm.admin import build_litellm_workspace_key_policy
 from dokploy_wizard.networking import (
     CloudflareApiBackend,
     CloudflareError,
@@ -1955,6 +1956,13 @@ def _build_shared_core_backend(
                 # the first boot rather than only after the sidecar's first cycle.
                 include_default_chat_alias=True,
             ),
+            # Reconcile-side sweep input: workspace-minted keys are re-scoped
+            # when the operator flips the policy, without rebooting workspaces.
+            litellm_workspace_key_policy=build_litellm_workspace_key_policy(
+                allow_new_users=desired_state.litellm_model_access_allow_new_users,
+                allowed_users=desired_state.litellm_model_access_allowed_users,
+                admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
+            ),
             # The admin hostname is the only way in from outside, and Traefik will not
             # route a hostname it has no rule for, so the compose service needs it.
             litellm_admin_hostname=resolve_litellm_admin_hostname(
@@ -2483,6 +2491,10 @@ def _build_coder_backend(
         workspace_issuer_api_key=litellm_generated_keys.virtual_keys.get(
             LITELLM_WORKSPACE_ISSUER_CONSUMER
         ),
+        # Per-user model access policy baked into the template's MINTPY lane
+        # (the seeded admin login is derived inside the backend).
+        litellm_allow_new_users=desired_state.litellm_model_access_allow_new_users,
+        litellm_allowed_users=desired_state.litellm_model_access_allowed_users,
         filex_provisioner=filex_provisioner,
         gitea_provisioner=gitea_provisioner,
         gitea_hostname=desired_state.hostnames.get("gitea") or "",

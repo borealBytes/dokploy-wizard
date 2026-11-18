@@ -69,6 +69,8 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
         tailscale_tags=_resolve_tailscale_csv(values, key="TAILSCALE_TAGS"),
         tailscale_subnet_routes=_resolve_tailscale_csv(values, key="TAILSCALE_SUBNET_ROUTES"),
         cloudflare_access_otp_emails=_resolve_access_otp_emails(values),
+        litellm_model_access_allow_new_users=_resolve_litellm_model_access_flag(values),
+        litellm_model_access_allowed_users=_resolve_litellm_model_access_users(values),
         enabled_features=pack_selection.enabled_features,
         selected_packs=pack_selection.selected_packs,
         enabled_packs=pack_selection.enabled_packs,
@@ -355,6 +357,26 @@ def _parse_bool(raw_value: str, *, key: str) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise StateValidationError(f"Invalid boolean value for '{key}': {raw_value!r}.")
+
+
+def _resolve_litellm_model_access_flag(values: dict[str, str]) -> bool:
+    # Opt-in by default: a brand-new Coder user's workspace key is minted
+    # against the operator's LiteLLM models only when the operator opens the
+    # flag or names that login in ALLOWED_LITELLM_ADDITIONAL_USERS (the seeded
+    # admin is always exempt). Empty counts as unset, like every other key.
+    raw_value = _get_configured_value(values, "ALLOW_LITELLM_MODELS_FOR_NEW_USERS")
+    if raw_value is None:
+        return False
+    return _parse_bool(raw_value, key="ALLOW_LITELLM_MODELS_FOR_NEW_USERS")
+
+
+def _resolve_litellm_model_access_users(values: dict[str, str]) -> tuple[str, ...]:
+    # Coder logins are lowercase by derivation, so the allowlist normalizes
+    # case, trims entries, drops duplicates, and sorts: the same input always
+    # resolves to the same desired-state tuple and fingerprint.
+    raw_value = _get_configured_value(values, "ALLOWED_LITELLM_ADDITIONAL_USERS") or ""
+    users = {item.strip().lower() for item in raw_value.split(",") if item.strip()}
+    return tuple(sorted(users))
 
 
 def _resolve_access_otp_emails(values: dict[str, str]) -> tuple[str, ...]:

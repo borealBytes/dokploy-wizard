@@ -40,6 +40,8 @@ from dokploy_wizard.dokploy.compose_noop import (
 )
 from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
 from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
+from dokploy_wizard.identity import display_name_from_email, username_from_email
+from dokploy_wizard.litellm.admin import WORKSPACE_KEY_DENY_MODEL
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
 from dokploy_wizard.state import load_state_dir
@@ -115,6 +117,8 @@ class DokployCoderBackend:
         ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
         ai_default_api_key: str | None = None,
         workspace_issuer_api_key: str | None = None,
+        litellm_allow_new_users: bool = False,
+        litellm_allowed_users: tuple[str, ...] = (),
         filex_provisioner: FilexProvisionerState | None = None,
         gitea_provisioner: GiteaProvisionerState | None = None,
         gitea_hostname: str = "",
@@ -141,6 +145,13 @@ class DokployCoderBackend:
         # Lets each Coder workspace mint its own LiteLLM child key at startup
         # (see the template MINTPY block); None keeps the shared baked key.
         self._workspace_issuer_api_key = workspace_issuer_api_key
+        # Per-user model access policy baked into the template's MINTPY lane:
+        # who may mint a key carrying the operator's models. The seeded admin
+        # login is always exempt and is derived from `admin_email` below.
+        self._litellm_allow_new_users = bool(litellm_allow_new_users)
+        self._litellm_allowed_users = tuple(
+            user.strip().lower() for user in litellm_allowed_users if user.strip()
+        )
         # When the FileX pack reconciled, its provisioner account rides into the
         # template so every workspace boot can materialize the owner's account
         # and per-(user, workspace) credentials; None keeps ~/shared unmounted.
@@ -378,6 +389,25 @@ class DokployCoderBackend:
                         self._workspace_issuer_api_key or ""
                     ),
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                    # Per-user LiteLLM workspace-key policy (MINTPY lane): the
+                    # flag grants every owner, the allowlist names logins, and
+                    # the seeded admin login — derived from the same email the
+                    # first-user lane used — is always exempt. A denied owner
+                    # mints against the deny model instead of the operator's
+                    # models (the boot stays healthy; inference fails honestly
+                    # at the gateway instead of leaking the shared baked key).
+                    "__DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS__": (
+                        "true" if self._litellm_allow_new_users else "false"
+                    ),
+                    "__DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS__": _shell_double_quote_escape(
+                        ",".join(self._litellm_allowed_users)
+                    ),
+                    "__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__": _shell_double_quote_escape(
+                        username_from_email(self._admin_email)
+                    ),
+                    "__DOKPLOY_WIZARD_LITELLM_DENY_MODEL__": _shell_double_quote_escape(
+                        WORKSPACE_KEY_DENY_MODEL
+                    ),
                     # ~/shared: the FileX internal door (empty when the pack is off,
                     # which the startup script treats as "no mount, no warnings") and
                     # the provisioner token. The *_SENTINEL__ markers below are
@@ -2535,14 +2565,11 @@ def _workspace_is_wizard_owned(
 
 
 def _username_from_email(email: str) -> str:
-    local = email.split("@", 1)[0].lower()
-    normalized = re.sub(r"[^a-z0-9]+", "-", local).strip("-")
-    return normalized or "admin"
+    return username_from_email(email)
 
 
 def _display_name_from_email(email: str) -> str:
-    local = email.split("@", 1)[0].replace(".", " ").replace("_", " ").replace("-", " ").strip()
-    return local.title() or "Dokploy Admin"
+    return display_name_from_email(email)
 
 
 @dataclass(frozen=True)

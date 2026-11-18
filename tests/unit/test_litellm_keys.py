@@ -11,10 +11,13 @@ import pytest
 
 import dokploy_wizard.cli as cli
 from dokploy_wizard.litellm.admin import (
+    WORKSPACE_KEY_DENY_MODEL,
+    WORKSPACE_KEY_GRANTED_MODELS,
     LiteLLMAdminError,
     LiteLLMGatewayManager,
     LiteLLMTeamRecord,
     LiteLLMVirtualKeyRecord,
+    build_litellm_workspace_key_policy,
 )
 from dokploy_wizard.state import (
     LITELLM_GENERATED_KEYS_FILE,
@@ -940,3 +943,180 @@ def test_reconcile_virtual_keys_spare_workspace_minted_keys() -> None:
 
     assert api.deleted_key_aliases == []
     assert any(record.key_alias == "clayton-dev" for record in api.list_keys())
+
+
+def _minted_workspace_key(
+    *,
+    alias: str,
+    owner: str | None,
+    workspace: str,
+    models: tuple[str, ...],
+    key: str,
+) -> LiteLLMVirtualKeyRecord:
+    metadata: dict[str, object] = {
+        "managed_by": "dokploy-wizard",
+        "coder_workspace": workspace,
+    }
+    if owner is not None:
+        metadata["coder_owner"] = owner
+    return LiteLLMVirtualKeyRecord(
+        key=key,
+        key_alias=alias,
+        team_id=None,
+        models=models,
+        metadata=metadata,
+    )
+
+
+def test_workspace_key_policy_sweep_degrades_out_of_policy_mint_without_reboot() -> None:
+    """A policy flip re-scopes live workspace keys admin-side, no boot needed.
+
+    The minted token is deterministic (sha256 of issuer + ``<login>-<workspace>``),
+    so the master-key sweep can address the raw token and /key/update the grant
+    on any shared_core pass. The key is spared by the retired sweep (it stays)
+    and updated in place; a second pass proves the re-scope converged.
+    """
+    issuer = "sk-litellm-coder-workspace-issuer-generated"
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            _minted_workspace_key(
+                alias="guest-dev",
+                owner="guest",
+                workspace="dev",
+                models=WORKSPACE_KEY_GRANTED_MODELS,
+                key="sk-stored-mint-material",
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+    policy = build_litellm_workspace_key_policy(
+        allow_new_users=False, allowed_users=(), admin_email="Clayton@Example.com"
+    )
+
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=policy,
+    )
+
+    assert api.deleted_key_aliases == []
+    assert len(api.updated_keys) == 1
+    updated = api.updated_keys[0]
+    assert updated.key_alias == "guest-dev"
+    assert updated.models == (WORKSPACE_KEY_DENY_MODEL,)
+    assert updated.key == (
+        "sk-" + hashlib.sha256((issuer + ":guest-dev").encode()).hexdigest()[:40]
+    )
+
+    # Idempotent: the degraded record now matches the deny policy, so the
+    # next shared_core pass changes nothing.
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=policy,
+    )
+    assert len(api.updated_keys) == 1
+
+
+def test_workspace_key_policy_sweep_upgrades_allowlisted_owner() -> None:
+    issuer = "sk-litellm-coder-workspace-issuer-generated"
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            _minted_workspace_key(
+                alias="bob-dev",
+                owner="bob",
+                workspace="dev",
+                models=(WORKSPACE_KEY_DENY_MODEL,),
+                key="sk-bob-mint",
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=build_litellm_workspace_key_policy(
+            allow_new_users=False,
+            # Allowlist logins normalize to lowercase: Coder logins are
+            # lowercase by derivation, and this comparison must match.
+            allowed_users=("Bob",),
+            admin_email="admin@example.com",
+        ),
+    )
+
+    assert api.deleted_key_aliases == []
+    assert [record.models for record in api.updated_keys] == [WORKSPACE_KEY_GRANTED_MODELS]
+
+
+def test_workspace_key_policy_sweep_spares_exempt_unattributed_and_foreign_keys() -> None:
+    """Admin exemption, anonymous spares, and operator-owned keys all stay put."""
+    issuer = "sk-litellm-coder-workspace-issuer-generated"
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            _minted_workspace_key(
+                alias="clayton-dev",
+                owner="clayton",
+                workspace="dev",
+                models=WORKSPACE_KEY_GRANTED_MODELS,
+                key="sk-admin-mint",
+            ),
+            _minted_workspace_key(
+                alias="orphan-dev",
+                owner=None,
+                workspace="dev",
+                models=WORKSPACE_KEY_GRANTED_MODELS,
+                key="sk-orphan-mint",
+            ),
+            LiteLLMVirtualKeyRecord(
+                key="sk-operator",
+                key_alias="operator-mint",
+                team_id=None,
+                models=("*",),
+                metadata={},
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=build_litellm_workspace_key_policy(
+            allow_new_users=False, allowed_users=(), admin_email="clayton@example.com"
+        ),
+    )
+
+    # The seeded admin is always exempt (granted, no update needed); the
+    # owner-less mint is spared rather than guessed at; the unmarked operator
+    # key is invisible to the sweep and to the retired sweep.
+    assert api.updated_keys == []
+    assert api.deleted_key_aliases == []
+    assert api.deleted_team_ids == []
+
+
+def test_workspace_key_policy_sweep_is_inert_without_issuer_material() -> None:
+    """No issuer raw in state means the deterministic token cannot be re-derived."""
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            _minted_workspace_key(
+                alias="guest-dev",
+                owner="guest",
+                workspace="dev",
+                models=WORKSPACE_KEY_GRANTED_MODELS,
+                key="sk-guest-mint",
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={"coder-hermes": "k-hermes"},
+        consumer_model_allowlists={"coder-hermes": ("sync/*",)},
+        workspace_key_policy=build_litellm_workspace_key_policy(
+            allow_new_users=False, allowed_users=(), admin_email="admin@example.com"
+        ),
+    )
+
+    assert api.updated_keys == []
+    assert api.deleted_key_aliases == []

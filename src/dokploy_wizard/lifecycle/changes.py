@@ -167,6 +167,12 @@ _LITELLM_SHARED_CONFIG_ENV_KEYS = {
     "LITELLM_LOCAL_BASE_URL",
     "LITELLM_LOCAL_MODEL",
     "LITELLM_LOCAL_API_KEY",
+    # The per-user workspace-key policy: shared_core re-runs so the reconcile
+    # sweep re-scopes the minted keys (granted logins regain model access
+    # without rebooting workspaces), and the coder phase re-seeds so the
+    # template's MINTPY lane mints new keys under the fresh policy.
+    "ALLOW_LITELLM_MODELS_FOR_NEW_USERS",
+    "ALLOWED_LITELLM_ADDITIONAL_USERS",
     "LITELLM_OPENROUTER_MODELS",
     "LITELLM_NVIDIA_MODELS",
     "LITELLM_OPENCODE_GO_WILDCARD",

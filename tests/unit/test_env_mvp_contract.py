@@ -15,7 +15,11 @@ from dokploy_wizard import cli
 from dokploy_wizard.packs.catalog import get_mutable_pack_env_keys, get_pack_definition
 from dokploy_wizard.packs.resolver import resolve_pack_selection
 from dokploy_wizard.state import resolve_desired_state
-from dokploy_wizard.state.models import RawEnvInput, StateValidationError
+from dokploy_wizard.state.models import (
+    DesiredState,
+    RawEnvInput,
+    StateValidationError,
+)
 
 _ALWAYS_REQUIRED_KEYS = frozenset({"ROOT_DOMAIN"})
 _LIVE_BOOTSTRAP_REQUIRED_KEYS = frozenset(
@@ -39,6 +43,7 @@ _DEFAULTED_KEYS = frozenset(
     {
         "AI_DEFAULT_PROVIDER",
         "AI_DEFAULT_MODEL",
+        "ALLOW_LITELLM_MODELS_FOR_NEW_USERS",
         "STACK_NAME",
         "DOKPLOY_SUBDOMAIN",
         "LITELLM_ADMIN_SUBDOMAIN",
@@ -61,6 +66,7 @@ _OPTIONAL_COMMENTED_KEYS = frozenset(
         "LITELLM_OPENROUTER_MODELS",
         "LITELLM_ADMIN_SUBDOMAIN",
         "CLOUDFLARE_ACCESS_OTP_EMAILS",
+        "ALLOWED_LITELLM_ADDITIONAL_USERS",
     }
 )
 _DEFAULT_AI_PROVIDER = "opencode-go"
@@ -275,6 +281,51 @@ def test_cloudflare_access_otp_emails_are_opt_in_and_always_honored() -> None:
         )
     )
     assert quiet.cloudflare_access_otp_emails == ()
+
+
+def test_litellm_model_access_policy_defaults_to_deny_with_normalized_allowlist() -> None:
+    # Brand-new Coder users see the operator's LiteLLM models only when the
+    # operator opens the flag or names their login in the allowlist (the
+    # seeded admin is always exempt — that exemption is derived at apply time
+    # from the admin email, not carried in the state).
+    default_state = resolve_desired_state(_minimal_env())
+    assert default_state.litellm_model_access_allow_new_users is False
+    assert default_state.litellm_model_access_allowed_users == ()
+
+    blank = resolve_desired_state(_minimal_env(ALLOW_LITELLM_MODELS_FOR_NEW_USERS=""))
+    assert blank.litellm_model_access_allow_new_users is False
+
+    granted = resolve_desired_state(_minimal_env(ALLOW_LITELLM_MODELS_FOR_NEW_USERS="TRUE"))
+    assert granted.litellm_model_access_allow_new_users is True
+
+    denied = resolve_desired_state(_minimal_env(ALLOW_LITELLM_MODELS_FOR_NEW_USERS="FALSE"))
+    assert denied.litellm_model_access_allow_new_users is False
+
+    with pytest.raises(StateValidationError):
+        resolve_desired_state(_minimal_env(ALLOW_LITELLM_MODELS_FOR_NEW_USERS="maybe"))
+
+    # Coder logins are lowercase by derivation, so the allowlist normalizes
+    # case, trims, dedupes, and sorts: the same intent always resolves to the
+    # same desired-state tuple and fingerprint.
+    allowlisted = resolve_desired_state(
+        _minimal_env(ALLOWED_LITELLM_ADDITIONAL_USERS=" Bob ,alice,BOB,, jo-ho ")
+    )
+    assert allowlisted.litellm_model_access_allowed_users == ("alice", "bob", "jo-ho")
+
+
+def test_pre_policy_desired_state_docs_load_with_model_access_defaults() -> None:
+    # On-box state docs predate the policy feature: the fields are optional on
+    # load (flag false, empty allowlist), so a wizard upgrade never strands an
+    # existing stack and the reloaded doc fingerprints identically.
+    payload = resolve_desired_state(_minimal_env()).to_dict()
+    del payload["litellm_model_access_allow_new_users"]
+    del payload["litellm_model_access_allowed_users"]
+
+    legacy = DesiredState.from_dict(payload)
+
+    assert legacy.litellm_model_access_allow_new_users is False
+    assert legacy.litellm_model_access_allowed_users == ()
+    assert legacy.fingerprint() == resolve_desired_state(_minimal_env()).fingerprint()
 
 
 def test_public_examples_do_not_make_default_subdomains_active_inputs() -> None:

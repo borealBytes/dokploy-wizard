@@ -78,6 +78,18 @@ def _require_string_list(payload: dict[str, Any], key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _optional_string_list(payload: dict[str, Any], key: str) -> tuple[str, ...]:
+    value = payload.get(key)
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or item == "" for item in value
+    ):
+        msg = f"Expected list of non-empty strings for '{key}'."
+        raise StateValidationError(msg)
+    return tuple(value)
+
+
 def _require_string_map(
     payload: dict[str, Any], key: str, *, allow_empty_values: bool = False
 ) -> dict[str, str]:
@@ -393,6 +405,14 @@ class DesiredState:
     seaweedfs_access_key: str | None
     seaweedfs_secret_key: str | None
     shared_core: SharedCorePlan
+    # Per-user LiteLLM workspace-key policy (template MINTPY lane + the
+    # shared-core reconcile sweep): brand-new Coder users get the operator's
+    # models on their minted workspace key only when the flag is on or their
+    # login is allowlisted. The seeded admin is always exempt — its login is
+    # derived from the admin email at apply time, not modeled here. Defaults
+    # keep pre-policy state documents loadable.
+    litellm_model_access_allow_new_users: bool = False
+    litellm_model_access_allowed_users: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.format_version != STATE_FORMAT_VERSION:
@@ -421,6 +441,11 @@ class DesiredState:
             raise StateValidationError(msg)
         if sorted(self.cloudflare_access_otp_emails) != list(self.cloudflare_access_otp_emails):
             msg = "Cloudflare Access OTP emails must be stored in sorted order."
+            raise StateValidationError(msg)
+        if sorted(self.litellm_model_access_allowed_users) != list(
+            self.litellm_model_access_allowed_users
+        ):
+            msg = "LiteLLM model-access allowlist must be stored in sorted order."
             raise StateValidationError(msg)
         if (self.seaweedfs_access_key is None) != (self.seaweedfs_secret_key is None):
             msg = "SeaweedFS access and secret keys must be provided together."
@@ -457,6 +482,8 @@ class DesiredState:
             "tailscale_tags": list(self.tailscale_tags),
             "tailscale_subnet_routes": list(self.tailscale_subnet_routes),
             "cloudflare_access_otp_emails": list(self.cloudflare_access_otp_emails),
+            "litellm_model_access_allow_new_users": self.litellm_model_access_allow_new_users,
+            "litellm_model_access_allowed_users": list(self.litellm_model_access_allowed_users),
             "enabled_features": list(self.enabled_features),
             "selected_packs": list(self.selected_packs),
             "enabled_packs": list(self.enabled_packs),
@@ -489,6 +516,14 @@ class DesiredState:
             tailscale_subnet_routes=_require_string_list(payload, "tailscale_subnet_routes"),
             cloudflare_access_otp_emails=_require_string_list(
                 payload, "cloudflare_access_otp_emails"
+            ),
+            # Optional with defaults: state docs written before the policy
+            # feature must keep loading (and re-serializing) unchanged.
+            litellm_model_access_allow_new_users=_optional_bool(
+                payload, "litellm_model_access_allow_new_users", default=False
+            ),
+            litellm_model_access_allowed_users=_optional_string_list(
+                payload, "litellm_model_access_allowed_users"
             ),
             enabled_features=_require_string_list(payload, "enabled_features"),
             selected_packs=_require_string_list(payload, "selected_packs"),

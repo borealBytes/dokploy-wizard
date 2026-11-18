@@ -47,7 +47,10 @@ from dokploy_wizard.litellm import (
     build_litellm_config,
     render_litellm_config_yaml,
 )
-from dokploy_wizard.litellm.admin import _matches_generated_key
+from dokploy_wizard.litellm.admin import (
+    LiteLLMWorkspaceKeyPolicy,
+    _matches_generated_key,
+)
 from dokploy_wizard.litellm.model_catalog import (
     DEFAULT_LOCAL_CANONICAL_ALIAS,
     DEFAULT_LOCAL_UPSTREAM_TARGET,
@@ -151,6 +154,7 @@ class DokploySharedCoreBackend:
         litellm_consumer_model_allowlists: dict[str, tuple[str, ...]] | None = None,
         litellm_admin_api: LiteLLMAdminApi | None = None,
         litellm_admin_hostname: str | None = None,
+        litellm_workspace_key_policy: LiteLLMWorkspaceKeyPolicy | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
         state_dir: Path = Path(".dokploy-wizard-state"),
     ) -> None:
@@ -170,6 +174,7 @@ class DokploySharedCoreBackend:
             litellm_env=self._litellm_env,
         )
         self._litellm_admin_api = litellm_admin_api
+        self._litellm_workspace_key_policy = litellm_workspace_key_policy
         self._sleep_fn = sleep_fn
         self._state_dir = state_dir
 
@@ -539,6 +544,7 @@ class DokploySharedCoreBackend:
             reconciled = manager.reconcile_virtual_keys(
                 generated_keys=self._litellm_generated_keys.virtual_keys,
                 consumer_model_allowlists=self._litellm_consumer_model_allowlists,
+                workspace_key_policy=self._litellm_workspace_key_policy,
             )
         except Exception as error:
             raise SharedCoreError(str(error)) from error

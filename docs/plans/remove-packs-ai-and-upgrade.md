@@ -1094,3 +1094,53 @@ repairs, and a plain noop. It found and drove the fixes for two real bugs
   state document md5 is byte-identical before/after — the gate is proven
   live, the corruption cycle closed end to end.
 - Gates: 1118 passed, 1 skipped; ruff + mypy green.
+
+## Phase 10 (2026-11): Gitea pack-form proof + per-user workspace-key policy
+
+### Gitea PACKS conversion, box-proven (modify36)
+- The `fcfa5f9` conversion (PACKS canonical, `ENABLE_GITEA` one-release alias)
+  flipped the testing env from flag form to `PACKS=...,gitea` against the box
+  whose applied state was installed with `ENABLE_GITEA=true`: modify36
+  measured **`"mode": "noop"`** (23.8 s), reasons `Requested raw input and
+  desired state match the persisted target.`, zero deprecation warnings on the
+  PACKS path — alias equivalence confirmed live, not just in unit pins. The
+  Slice 5 identity-automation box verify re-ran green on the same pass.
+
+### Per-user LiteLLM workspace-key policy
+- Operator knobs: `ALLOW_LITELLM_MODELS_FOR_NEW_USERS` (default false;
+  `FALSE`/`false`/`0`/`no`/`off` all parse) and
+  `ALLOWED_LITELLM_ADDITIONAL_USERS` (CSV of Coder logins; lowercased,
+  trimmed, deduped, sorted at parse). Both land on `DesiredState` (sorted
+  post_init check, `to_dict` always, `from_dict` optional-with-defaults so
+  pre-policy on-box docs load byte-equivalently) and both join
+  `_LITELLM_SHARED_CONFIG_ENV_KEYS`: a policy flip routes
+  `shared_core` (reconcile sweep) + `coder` (template re-seed), and the first
+  pass that merely *adds* a default-valued key reruns once (raw-based
+  routing), then noops.
+- Semantics: a workspace-minted key (template MINTPY lane) carries the
+  operator's models only for owners the policy grants — flag true (everyone),
+  allowlist entry, or the seeded admin login (always exempt, derived from
+  `DOKPLOY_ADMIN_EMAIL` through the shared `identity.username_from_email`
+  helper that the Coder first-user lane also uses). A denied owner still mints
+  its personal key, scoped to the sentinel model
+  `dokploy-wizard-model-access-denied`: boot stays healthy (the no-key guards
+  stay quiet, the bootstrap re-default can't resurrect the baked key), spend
+  stays attributed, and inference fails honestly at the gateway instead of
+  leaking the shared baked key via the fallback.
+- Enforcement is double-lane by design. Boot lane: MINTPY compares the
+  existing mint's `/key/info` grant against the baked policy and, on mismatch
+  (the issuer route set has no `/key/update`), retires and re-mints under the
+  same deterministic token. Admin lane: `reconcile_virtual_keys` gained
+  `workspace_key_policy`; the sweep re-derives each mint's token
+  (sha256(issuer + ":" + owner + "-" + workspace)), addresses it with the
+  master key, and `/key/update`s the grant — so a policy flip converges
+  **without rebooting any workspace**. Owner-less mints are spared
+  (conservative), operator-marked records are invisible, and the sweep is
+  best-effort per key (failures wait for the next pass or boot).
+- New box expectation: the policy keys' first landing reruns shared_core +
+  coder once (sweep converges, template re-seeds with the four new
+  `__DOKPLOY_WIZARD_LITELLM_{ALLOW_NEW_USERS,ALLOWED_USERS,ADMIN_LOGIN,DENY_MODEL}__`
+  replacements); the seeded admin's existing mint must keep its grant
+  untouched, and a second pass must classify noop.
+- Gates: pytest + ruff + mypy green (policy parse/back-compat, routing, sweep
+  degrade/upgrade/spare/idempotence, template bake + replacement-map pins).

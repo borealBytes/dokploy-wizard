@@ -17,6 +17,7 @@ import pytest
 import dokploy_wizard.dokploy.coder as coder_module
 from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.dokploy.coder import DokployCoderApi, DokployCoderBackend, _render_compose_file
+from dokploy_wizard.litellm.admin import WORKSPACE_KEY_DENY_MODEL, WORKSPACE_KEY_GRANTED_MODELS
 from dokploy_wizard.packs.coder import build_coder_ledger, reconcile_coder
 from dokploy_wizard.packs.coder.models import CoderResourceRecord
 from dokploy_wizard.state import (
@@ -2794,6 +2795,13 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         # GITEAPROV boot lane is disabled and the coder phase runs no sync.
         "__DOKPLOY_WIZARD_GITEA_INTERNAL_URL__": "",
         "__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN__": "",
+        # Default policy lane: deny for new users, empty allowlist, the
+        # seeded admin login derived from the admin email, and the sentinel
+        # deny model the sweep and the template both recognize.
+        "__DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS__": "false",
+        "__DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS__": "",
+        "__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__": "admin",
+        "__DOKPLOY_WIZARD_LITELLM_DENY_MODEL__": "dokploy-wizard-model-access-denied",
     }
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name
     assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
@@ -2872,7 +2880,32 @@ def test_workspace_key_mint_block_is_baked_into_gateway_key_templates(template_d
     assert '"${data.coder_workspace_owner.me.name}"' in template
     assert '"key_alias": label' in template
     assert '"coder_owner": owner' in template
-    assert '"models": ["sync/*", "sync/default-chat"]' in template
+    # The grant is the model-sync pair; the deny lane is a sentinel model the
+    # gateway does not deploy. The Python sweep pins the same constants, so
+    # template and admin-side re-scope can never drift apart silently.
+    assert 'granted_models = ["sync/*", "sync/default-chat"]' in template
+    assert '"models": models,' in template
+    assert WORKSPACE_KEY_GRANTED_MODELS == ("sync/*", "sync/default-chat")
+    assert WORKSPACE_KEY_DENY_MODEL == "dokploy-wizard-model-access-denied"
+    # Per-user model access policy (baked at seed time): the flag, the
+    # allowlist, and the always-exempt seeded admin login. A denied owner
+    # mints against the deny model instead of falling back to the shared
+    # baked key, which would bypass the policy entirely.
+    assert (
+        'DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS="__DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS__"'
+        in template
+    )
+    assert (
+        'DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS="__DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS__"'
+        in template
+    )
+    assert (
+        'DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN="__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__"' in template
+    )
+    assert 'DOKPLOY_WIZARD_LITELLM_DENY_MODEL="__DOKPLOY_WIZARD_LITELLM_DENY_MODEL__"' in template
+    assert 'or owner.lower() in allowed_users' in template
+    assert 'admin_login and owner.lower() == admin_login' in template
+    assert 'models = [deny_model]' in template
     # Info-then-generate with a final re-info: any refusal (permissions, alias
     # collision, gateway unreachable) leaves the variable empty and the baked
     # shared template key in play.
@@ -2880,6 +2913,11 @@ def test_workspace_key_mint_block_is_baked_into_gateway_key_templates(template_d
     assert 'mint_request(' in template
     assert '|| DOKPLOY_WIZARD_WORKSPACE_API_KEY=""' in template
     assert "import hashlib, json, os, urllib.error, urllib.request" in template
+    # Policy-mismatch lane: the issuer route set has /key/delete but no
+    # /key/update, so a moved policy swaps the mint under the same
+    # deterministic token (spend attribution survives the swap).
+    assert 'current != sorted(str(item) for item in models)' in template
+    assert 'mint_request("POST", "/key/delete", {"keys": [token]})' in template
     # Upgrade path: the pre owner-scoping token (issuer + bare workspace) is
     # deterministic too, so retire it once the scoped key stands — otherwise
     # the sweep's workspace-key spare strands the old-format key forever.
@@ -2963,8 +3001,87 @@ def test_workspace_issuer_key_flows_into_gateway_key_template_replacements(
             replacements["__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__"]
             == "sk-litellm-coder-workspace-issuer-provided"
         )
+        # Default policy: deny for new users, empty allowlist, the seeded
+        # admin login derived from the admin email, and the sentinel deny
+        # model the sweep and the template both recognize.
+        assert replacements["__DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS__"] == "false"
+        assert replacements["__DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS__"] == ""
+        assert replacements["__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__"] == "admin"
+        assert replacements["__DOKPLOY_WIZARD_LITELLM_DENY_MODEL__"] == WORKSPACE_KEY_DENY_MODEL
     # Post-collapse there is exactly one seeded template; nothing else carries tokens.
     assert set(template_replacements_by_name) == {coder_module._default_template_name()}
+
+
+def test_workspace_key_policy_replacements_bake_operator_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="clayton@superiorbyteworks.com",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        hermes_inference_provider="openai",
+        hermes_model="unsloth-active",
+        ai_default_api_key="litellm-coder-hermes-key",
+        workspace_issuer_api_key="sk-litellm-coder-workspace-issuer-provided",
+        litellm_allow_new_users=True,
+        litellm_allowed_users=("Bob", "jo-ho"),
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    template_replacements_by_name: dict[str, dict[str, str] | None] = {}
+
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_copy_template_into_container",
+        lambda *,
+        container_name,
+        template_dir,
+        template_name,
+        replacements: template_replacements_by_name.setdefault(template_name, replacements),
+    )
+    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
+    )
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+
+    backend.ensure_application_ready()
+
+    replacements = template_replacements_by_name[coder_module._default_template_name()]
+    assert replacements is not None
+    assert replacements["__DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS__"] == "true"
+    # Logins normalize to lowercase at store time so the template's lowercase
+    # comparison actually matches Coder's lowercased logins.
+    assert replacements["__DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS__"] == "bob,jo-ho"
+    assert replacements["__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__"] == "clayton"
+    assert replacements["__DOKPLOY_WIZARD_LITELLM_DENY_MODEL__"] == WORKSPACE_KEY_DENY_MODEL
 
 
 def test_retirement_migrates_workspaces_off_retired_templates(

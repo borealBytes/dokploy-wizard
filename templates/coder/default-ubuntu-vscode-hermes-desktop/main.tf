@@ -168,6 +168,10 @@ resource "coder_agent" "main" {
         DOKPLOY_LITELLM_ISSUER_KEY="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" \
         DOKPLOY_WORKSPACE_NAME="${data.coder_workspace.me.name}" \
         DOKPLOY_WORKSPACE_OWNER="${data.coder_workspace_owner.me.name}" \
+        DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS="__DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS__" \
+        DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS="__DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS__" \
+        DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN="__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__" \
+        DOKPLOY_WIZARD_LITELLM_DENY_MODEL="__DOKPLOY_WIZARD_LITELLM_DENY_MODEL__" \
         python3 - <<'MINTPY'
 import hashlib, json, os, urllib.error, urllib.request
 
@@ -175,6 +179,34 @@ base = os.environ.get("DOKPLOY_LITELLM_BASE_URL", "").rstrip("/")
 issuer = os.environ.get("DOKPLOY_LITELLM_ISSUER_KEY", "")
 workspace = os.environ.get("DOKPLOY_WORKSPACE_NAME", "")
 owner = os.environ.get("DOKPLOY_WORKSPACE_OWNER", "")
+# Operator model access is opt-in for new users: the wizard bakes the policy
+# (ALLOW_LITELLM_MODELS_FOR_NEW_USERS + ALLOWED_LITELLM_ADDITIONAL_USERS + the
+# seeded admin login, always exempt) and a denied owner mints a key scoped to
+# the deny model instead of the operator's models. Boot stays healthy, spend
+# stays attributed, and inference fails honestly at the gateway — rather than
+# the no-key fallback handing the workspace the shared baked key, which would
+# bypass the policy entirely. The shared-core reconcile sweep re-scopes
+# existing keys the same way when the policy flips, so no reboot is needed.
+granted_models = ["sync/*", "sync/default-chat"]
+allow_new_users = os.environ.get("DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS", "") == "true"
+allowed_users = {
+    item.strip().lower()
+    for item in os.environ.get("DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS", "").split(",")
+    if item.strip()
+}
+admin_login = os.environ.get("DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN", "").strip().lower()
+deny_model = os.environ.get("DOKPLOY_WIZARD_LITELLM_DENY_MODEL", "").strip()
+if (
+    allow_new_users
+    or owner.lower() in allowed_users
+    or (admin_login and owner.lower() == admin_login)
+):
+    models = granted_models
+elif deny_model:
+    models = [deny_model]
+else:
+    # Unmapped marker (pre-policy template build): keep the legacy grant.
+    models = granted_models
 if base and issuer and workspace and owner:
     label = owner + "-" + workspace
     token = "sk-" + hashlib.sha256((issuer + ":" + label).encode()).hexdigest()[:40]
@@ -189,24 +221,23 @@ if base and issuer and workspace and owner:
         )
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
-                return resp.status
+                try:
+                    return resp.status, json.loads(resp.read().decode())
+                except Exception:
+                    return resp.status, None
         except urllib.error.HTTPError as exc:
-            return exc.code
+            return exc.code, None
         except Exception:
-            return 0
+            return 0, None
 
-    # info-then-generate: a previous boot (or a recreate under the same
-    # workspace identity) already owns this deterministic token; adopt it
-    # rather than collide. The final re-info is what decides: if minting was
-    # refused for any reason the fallback below keeps the baked shared key.
-    if mint_request("GET", "/key/info?key=" + token) != 200:
+    def mint_generate():
         mint_request(
             "POST",
             "/key/generate",
             {
                 "key": token,
                 "key_alias": label,
-                "models": ["sync/*", "sync/default-chat"],
+                "models": models,
                 "metadata": {
                     "managed_by": "dokploy-wizard",
                     "coder_workspace": workspace,
@@ -214,13 +245,40 @@ if base and issuer and workspace and owner:
                 },
             },
         )
-    if mint_request("GET", "/key/info?key=" + token) == 200:
+
+    def minted_models(info):
+        # /key/info exposes the grant flat or nested under "info" depending on
+        # the LiteLLM build; absence means unknown, not mismatched — the
+        # admin-side sweep is what enforces policy without a reboot anyway.
+        if not isinstance(info, dict):
+            return None
+        for holder in (info, info.get("info")):
+            if isinstance(holder, dict) and isinstance(holder.get("models"), list):
+                return sorted(str(item) for item in holder["models"])
+        return None
+
+    # info-then-generate: a previous boot (or a recreate under the same
+    # workspace identity) already owns this deterministic token; adopt it
+    # rather than collide. When the policy moved since the key was minted,
+    # the issuer route set has /key/delete but no /key/update, so retire and
+    # re-mint under the same deterministic token (spend attribution survives
+    # the swap). The final re-info is what decides: if minting was refused
+    # for any reason the fallback below keeps the baked shared key.
+    status, info = mint_request("GET", "/key/info?key=" + token)
+    if status != 200:
+        mint_generate()
+    else:
+        current = minted_models(info)
+        if current is not None and current != sorted(str(item) for item in models):
+            mint_request("POST", "/key/delete", {"keys": [token]})
+            mint_generate()
+    if mint_request("GET", "/key/info?key=" + token)[0] == 200:
         # Upgrade cleanup: pre owner-scoping, the token derived from issuer +
         # bare workspace name. That key is deterministic too, so retire it
         # once the new one stands — otherwise the sweep's workspace-key spare
         # strands it forever (nothing would ever mint or delete it again).
         old_token = "sk-" + hashlib.sha256((issuer + ":" + workspace).encode()).hexdigest()[:40]
-        if old_token != token and mint_request("GET", "/key/info?key=" + old_token) == 200:
+        if old_token != token and mint_request("GET", "/key/info?key=" + old_token)[0] == 200:
             mint_request("POST", "/key/delete", {"keys": [old_token]})
         print(token)
 MINTPY
