@@ -1144,3 +1144,29 @@ repairs, and a plain noop. It found and drove the fixes for two real bugs
   untouched, and a second pass must classify noop.
 - Gates: pytest + ruff + mypy green (policy parse/back-compat, routing, sweep
   degrade/upgrade/spare/idempotence, template bake + replacement-map pins).
+
+### Coder-lane fix from an upgraded-box diagnosis (`3d045b6`)
+- Diagnosing why a **different project's upgraded box** (pre-stable-naming
+  wizard state, Coder v2.38.3) never adopted its legacy workspaces surfaced two
+  real bugs, now fixed and pinned:
+  - `_workspace_template_name` called `coder show --output json`, which that
+    build rejects (`unknown flag`), so the migrate lane saw None for every
+    workspace and retired-template deletes stayed blocked forever. The lookup
+    now reads the same `coder list --output json` payload the rest of the
+    module already parses (flat `owner_name`/`template_name`, nested
+    `latest_build` fallback kept).
+  - The bootstrap-ready branch skipped `_ensure_default_workspace` entirely —
+    exactly the branch an upgraded healthy box takes — so adoption/pruning
+    could never converge there. The adopt-or-create lane now rides every
+    coder pass (read-only exists noop on converged stacks; the
+    template-version convergence check it used to run directly lives inside).
+- showmeseewhy box proof of the fix code: **modify39** landed
+  `ALLOWED_LITELLM_ADDITIONAL_USERS=` (empty value: raw changes, desired state
+  identical) → `mode: modify`, phases exactly `shared_core`+`coder`, zero
+  WARNINGs, no adopt/prune noise on the converged box; **modify40** →
+  `mode: noop` (19.8 s). Slice 5 re-verify after both passes: minted key
+  present and hash-matches-derived, issuer raws RAW, Gitea identity lane and
+  workspace ssh/git artifacts healthy.
+- The deny-lane live proof (a second Coder user signing up interactively) is
+  still open; the admin-exemption half of the policy is box-proven and the
+  sweep/upgrade lanes are unit-pinned.
