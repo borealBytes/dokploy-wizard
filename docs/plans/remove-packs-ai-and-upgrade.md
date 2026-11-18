@@ -1023,3 +1023,72 @@ tests + a fresh remote proof:
   integration + degrade-to-note, GITEAPROV template contract (incl. the list
   probe), re-scoped MINTPY contract (incl. the upgrade cleanup), sweep spare,
   adopt-back suppression + drift-still-adopts.
+
+## Phase 9 (2026-11): full-lifecycle clean-box proof (uninstall → cold slate → noop)
+
+Destructive validation of the whole lifecycle on the test box, in order:
+read-only drift report, destroy-data uninstall, from-zero install, resume
+repairs, and a plain noop. It found and drove the fixes for two real bugs
+(below), both committed with regression tests.
+
+- **`upgrade --check` (read-only): clean.** Every component `status: ok`
+  against its state pin; LiteLLM reports `pin_source: state-pin` at
+  `v1.83.14-stable` with `bump_available: false` (already newest stable —
+  nothing for the operator to approve right now).
+- **Uninstall (destroy-data) — ledger behavior box-proven.** Deleted
+  resources land in reverse-dependency order: gitea service + data after
+  filex and *before* seaweedfs (the `gitea` bucket outlives the app, as
+  designed), zone DNS records pruned, `state_cleared: true`, and the state
+  shrinks to `[preflight, dokploy_bootstrap]` — Dokploy itself survives by
+  design.
+- **Box-measured runtime gap (backlog, NOT fixed):**
+  `ShellUninstallBackend.delete` is a no-op for compose resource types
+  (only tailscale/Access/DNS act), so destroy-data cleared the ledger,
+  state, and DNS in ~1 s while every stack service kept *running*. The
+  next `proof` correctly refused: the orphaned model-sync task container
+  now classifies as `manual_collision` drift — the guard works, but the
+  operator must wipe the runtime at the docker level (services first per
+  the recovery recipe, incl. the bootstrap; `docker rm` alone lets swarm
+  reschedule tasks). Also measured: ~15
+  `dokploy-wizard-auth-probe-*` one-off task containers accumulate across
+  runs and are never reaped.
+- **Cold-slate install (`proof`, 610.7 s):** all packs deployed and
+  verified (FileX admin login verified, bucket created). It surfaced two
+  honest degraded notes that were real first-install bugs, both fixed:
+  - **inspect-state corrupted the uninstall gate** (fixed): the snapshot
+    writer overwrote canonical `raw-input.json`/`desired-state.json` with
+    `<REDACTED>` report values, so the applied-vs-persisted fingerprint
+    gate could never pass again — and every remote flow runs
+    inspect-state, so uninstall was permanently disabled on every remotely
+    managed box. The snapshot rides a dedicated
+    `inspection-snapshot.json` now (cleared with state at teardown); the
+    regression test replays the gate's exact comparison.
+  - **Gitea provisioner seed raced the container** (fixed): the seed-gate
+    reorder from Phase 8 held — see modify34 below.
+- **modify33 (resume from the networking prefix):** the engine itself
+  rewrote the canonical pair, and the uninstall gate passed on the box
+  (applied fp == desired fp).
+- **modify34 (resume from the filex prefix, fixed code):** gitea phase
+  reports `initialized: true, provisioner_ready: true` with zero WARNINGs
+  — the provisioner seeded cleanly against the fresh (post-wipe) database;
+  the coder phase baked the door with the live token, updated the
+  workspace onto the active template, and produced **no** `Skipped Gitea
+  identity sync` note (the sync read the roster fine). Workspace boot (new
+  container): `created the Gitea account for 'clayton'` on the fresh DB,
+  registered `clayton-showmeseewhycom-workspace`, rewrote ssh_config +
+  known_hosts + git identity; the scoped key re-minted with
+  `hash-matches-derived=True` (issuer raw unchanged since the cold
+  install → same derived token) and the old bare-workspace format stays
+  404. The LiteLLM state document stayed RAW through the pass.
+  Read-only gate probe on the box afterwards: fingerprints match,
+  `desired-state.json` unredacted, snapshot in its own file — the
+  inspect-state corruption cycle is closed.
+- **modify35 PLAIN: `"mode": "noop"`, `"phases_to_run": []`** (23 s) —
+  the full lifecycle converges on the box.
+- **Uninstall dry-run through the real CLI path** (on-box, after the
+  inspect-state pass): the fingerprint gate passes (it raised in
+  uninstall1), the destroy plan orders gitea *before* seaweedfs with
+  `remaining_completed_steps: [preflight, dokploy_bootstrap]`, and every
+  state document md5 is byte-identical before/after — the gate is proven
+  live, the corruption cycle closed end to end.
+- Gates: 1118 passed, 1 skipped; ruff + mypy green.
