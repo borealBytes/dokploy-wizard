@@ -221,7 +221,9 @@ def test_reconcile_seaweedfs_plans_runtime_when_enabled() -> None:
     )
 
     assert phase.result.outcome == "plan_only"
-    assert phase.result.hostname == "s3.example.com"
+    # The s3 hostname was de-exposed: the reconciler falls back to the
+    # cluster-internal route hostname.
+    assert phase.result.hostname == "wizard-stack-s3.internal"
     assert phase.result.service is not None
     assert phase.result.service.resource_name == "wizard-stack-seaweedfs"
     assert phase.result.persistent_data is not None

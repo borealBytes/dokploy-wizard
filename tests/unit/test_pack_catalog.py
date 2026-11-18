@@ -31,11 +31,15 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
         "moodle",
         "docuseal",
         "seaweedfs",
+        "filex",
         "coder",
     ]
     assert get_pack_definition("headscale").default_enabled is False
     assert get_pack_definition("seaweedfs").slot is None
-    assert get_pack_definition("seaweedfs").hostnames[0].key == "s3"
+    # The S3 endpoint is internal-only: the pack models no public hostname.
+    assert get_pack_definition("seaweedfs").hostnames == ()
+    assert get_pack_definition("filex").depends_on == ("seaweedfs",)
+    assert get_pack_definition("filex").hostnames[0].key == "filex"
     assert get_pack_definition("nextcloud").mutable_env_keys == ()
     # The slot system is gone: no surviving pack occupies a mutual-exclusion slot.
     assert all(pack.slot is None for pack in iter_pack_catalog())
@@ -284,7 +288,7 @@ def test_resolver_preserves_explicit_nested_coder_wildcard_opt_in() -> None:
 def test_resolver_full_pack_list_has_no_hostname_collisions() -> None:
     selection = resolve_pack_selection(
         {
-            "PACKS": "nextcloud,seaweedfs,coder,docuseal,matrix",
+            "PACKS": "nextcloud,seaweedfs,filex,coder,docuseal,matrix",
         },
         root_domain="example.com",
     )
@@ -292,6 +296,7 @@ def test_resolver_full_pack_list_has_no_hostname_collisions() -> None:
     assert selection.selected_packs == (
         "coder",
         "docuseal",
+        "filex",
         "matrix",
         "nextcloud",
         "seaweedfs",
@@ -301,10 +306,10 @@ def test_resolver_full_pack_list_has_no_hostname_collisions() -> None:
         "coder": "coder.example.com",
         "coder-wildcard": "*.example.com",
         "docuseal": "docuseal.example.com",
+        "filex": "filex.example.com",
         "matrix": "matrix.example.com",
         "nextcloud": "nextcloud.example.com",
         "onlyoffice": "office.example.com",
-        "s3": "s3.example.com",
     }
     assert len(set(selection.hostnames.values())) == len(selection.hostnames)
 

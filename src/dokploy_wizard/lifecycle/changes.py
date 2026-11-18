@@ -32,6 +32,7 @@ PHASE_ORDER: tuple[str, ...] = (
     "nextcloud",
     "moodle",
     "docuseal",
+    "filex",
     "coder",
     "cloudflare_access",
 )
@@ -67,6 +68,7 @@ _SUPPORTED_HOSTNAME_KEYS = {
     "ONLYOFFICE_SUBDOMAIN",
     "MOODLE_SUBDOMAIN",
     "DOCUSEAL_SUBDOMAIN",
+    "FILEX_SUBDOMAIN",
     "CODER_SUBDOMAIN",
     "CODER_WILDCARD_SUBDOMAIN",
     "LITELLM_ADMIN_SUBDOMAIN",
@@ -81,6 +83,7 @@ _SUPPORTED_ENABLEMENT_KEYS = {
     "ENABLE_NEXTCLOUD",
     "ENABLE_MOODLE",
     "ENABLE_DOCUSEAL",
+    "ENABLE_FILEX",
     "ENABLE_CODER",
 }
 _SUPPORTED_MUTABLE_PACK_ENV_KEYS = set(get_mutable_pack_env_keys())
@@ -124,6 +127,10 @@ _HOSTNAME_PHASES = {
     "onlyoffice": ("networking", "nextcloud"),
     "moodle": ("networking", "moodle"),
     "docuseal": ("networking", "docuseal"),
+    "filex": ("networking", "filex"),
+    # Legacy public s3 hostname: stacks installed before the de-expose still
+    # model it as a desired hostname, and removing it has to schedule the
+    # rebind of the SeaweedFS route onto the internal host plus the DNS prune.
     "s3": ("networking", "seaweedfs"),
     "coder": ("networking", "coder"),
     "coder-wildcard": ("networking", "coder"),
@@ -215,6 +222,8 @@ def applicable_phases_for(desired_state: DesiredState) -> tuple[str, ...]:
         phases.add("moodle")
     if "docuseal" in desired_state.enabled_packs:
         phases.add("docuseal")
+    if "filex" in desired_state.enabled_packs:
+        phases.add("filex")
     if "coder" in desired_state.enabled_packs:
         phases.add("coder")
     if _access_enabled(desired_state):
@@ -605,6 +614,8 @@ def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredS
         phases.add("nextcloud")
     if "seaweedfs" in new_packs:
         phases.add("seaweedfs")
+    if "filex" in new_packs:
+        phases.add("filex")
     if "coder" in new_packs:
         phases.add("coder")
     if (

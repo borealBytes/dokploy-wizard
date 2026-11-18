@@ -442,6 +442,20 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "scope": f"stack:{desired_state.stack_name}:docuseal:service",
             }
         )
+    if "filex" in desired_state.enabled_packs:
+        candidates.append(
+            {
+                "aliases": ("filex",),
+                "hostname": desired_state.hostnames.get("filex"),
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-filex"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-filex",
+                "pack": "filex",
+                "scope": f"stack:{desired_state.stack_name}:filex:service",
+            }
+        )
     if "coder" in desired_state.enabled_packs:
         candidates.append(
             {

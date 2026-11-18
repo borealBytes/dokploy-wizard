@@ -27,6 +27,7 @@ from dokploy_wizard.networking import (
     CloudflareTunnel,
 )
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
+from dokploy_wizard.packs.seaweedfs import internal_s3_hostname
 from dokploy_wizard.state import RawEnvInput, load_state_dir, resolve_desired_state
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
@@ -345,7 +346,7 @@ def test_install_reconciles_seaweedfs_pack_via_dokploy_backend(
     client = FakeDokployApiClient()
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.seaweedfs._local_https_health_check",
-        lambda url: url == "https://s3.example.com/status",
+        lambda url: url == "https://seaweedfs-stack-s3.internal/status",
     )
 
     summary = run_install_flow(
@@ -390,7 +391,7 @@ def test_install_reconciles_seaweedfs_pack_via_dokploy_backend(
             api_key="dokp-key-123",
             state_dir=state_dir,
             stack_name=desired_state.stack_name,
-            hostname=desired_state.hostnames["s3"],
+            hostname=internal_s3_hostname(desired_state.stack_name),
             access_key="seaweed-access",
             secret_key="seaweed-secret",
             client=client,

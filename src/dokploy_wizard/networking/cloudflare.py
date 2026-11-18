@@ -117,6 +117,8 @@ class CloudflareBackend(Protocol):
         proxied: bool,
     ) -> CloudflareDnsRecord: ...
 
+    def delete_dns_record(self, zone_id: str, *, record_id: str) -> None: ...
+
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]: ...
 
     def order_advanced_certificate_pack(
@@ -191,6 +193,7 @@ class CloudflareApiBackend:
         }
         self._mock_access_app_ids: dict[str, str] = {}
         self._mock_access_policies: dict[str, CloudflareAccessPolicy] = {}
+        self._mock_deleted_dns_hostnames: set[str] = set()
 
     def validate_account_access(self, account_id: str) -> None:
         if self._mock_account_ok is not None:
@@ -360,6 +363,8 @@ class CloudflareApiBackend:
         content: str | None,
     ) -> tuple[CloudflareDnsRecord, ...]:
         if self._mock_zone_ok is not None:
+            if hostname.lower() in self._mock_deleted_dns_hostnames:
+                return ()
             if hostname.lower() not in self._mock_existing_hostnames and content is None:
                 return ()
             target = content or (
@@ -455,6 +460,26 @@ class CloudflareApiBackend:
             },
         )
         return _parse_dns_record(payload)
+
+    def delete_dns_record(self, zone_id: str, *, record_id: str) -> None:
+        if self._mock_zone_ok is not None:
+            for hostname in sorted(self._mock_existing_hostnames):
+                if _mock_dns_record_id(hostname) == record_id:
+                    self._mock_existing_hostnames.discard(hostname)
+                    self._mock_deleted_dns_hostnames.add(hostname)
+                    return
+            self._mock_deleted_dns_hostnames.add(record_id)
+            return
+        try:
+            self._request_json(
+                method="DELETE",
+                path=f"/zones/{zone_id}/dns_records/{record_id}",
+            )
+        except CloudflareError as error_value:
+            if "HTTP 404" in str(error_value):
+                # Already gone upstream; the prune pass must converge, not fail.
+                return
+            raise
 
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
         if self._mock_zone_ok is not None:

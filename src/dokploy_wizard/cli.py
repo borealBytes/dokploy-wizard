@@ -39,6 +39,7 @@ from dokploy_wizard.dokploy import (
     DokployCloudflaredBackend,
     DokployCoderBackend,
     DokployDocuSealBackend,
+    DokployFilexBackend,
     DokployHeadscaleBackend,
     DokployMatrixBackend,
     DokployMoodleBackend,
@@ -75,6 +76,10 @@ from dokploy_wizard.packs.docuseal import (
     DocuSealBackend,
     ShellDocuSealBackend,
 )
+from dokploy_wizard.packs.filex import (
+    FilexBackend,
+    ShellFilexBackend,
+)
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     HeadscaleError,
@@ -103,6 +108,7 @@ from dokploy_wizard.packs.seaweedfs import (
     SeaweedFsBackend,
     SeaweedFsError,
     ShellSeaweedFsBackend,
+    internal_s3_hostname,
 )
 from dokploy_wizard.preflight import (
     REQUIRED_PORTS,
@@ -1393,6 +1399,12 @@ def _run_lifecycle_flow(
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
+    filex_phase_backend = _build_filex_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
     seaweedfs_phase_backend = seaweedfs_backend or _build_seaweedfs_backend(
         raw_env=raw_env,
         state_dir=state_dir,
@@ -1416,6 +1428,7 @@ def _run_lifecycle_flow(
         nextcloud=nextcloud_phase_backend,
         moodle=moodle_phase_backend,
         docuseal=docuseal_phase_backend,
+        filex=filex_phase_backend,
         seaweedfs=seaweedfs_phase_backend,
         coder=coder_phase_backend,
     )
@@ -1435,6 +1448,7 @@ def _run_lifecycle_flow(
             nextcloud_backend=nextcloud_phase_backend,
             moodle_backend=moodle_phase_backend,
             docuseal_backend=docuseal_phase_backend,
+            filex_backend=filex_phase_backend,
             seaweedfs_backend=seaweedfs_phase_backend,
             coder_backend=coder_phase_backend,
         )
@@ -2236,6 +2250,57 @@ def _build_docuseal_backend(
     )
 
 
+def _build_filex_backend(
+    *,
+    raw_env: RawEnvInput,
+    state_dir: Path,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> FilexBackend:
+    if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
+        return ShellFilexBackend()
+    api_url = desired_state.dokploy_api_url
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    if not api_url or not api_key or "filex" not in desired_state.enabled_packs:
+        return ShellFilexBackend()
+    hostname = desired_state.hostnames.get("filex")
+    if hostname is None or "seaweedfs" not in desired_state.enabled_packs:
+        return ShellFilexBackend()
+    access_key = desired_state.seaweedfs_access_key
+    secret_key = desired_state.seaweedfs_secret_key
+    if access_key is None and secret_key is None:
+        generated_secrets = ensure_seaweedfs_generated_secrets(state_dir)
+        access_key = generated_secrets.access_key
+        secret_key = generated_secrets.secret_key
+    if access_key is None or secret_key is None:
+        return ShellFilexBackend()
+    return DokployFilexBackend(
+        api_url=api_url,
+        api_key=api_key,
+        state_dir=state_dir,
+        stack_name=desired_state.stack_name,
+        hostname=hostname,
+        admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
+        admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD),
+        s3_endpoint_url=_seaweedfs_internal_s3_endpoint(desired_state),
+        s3_internal_host=desired_state.hostnames.get("s3") or internal_s3_hostname(
+            desired_state.stack_name
+        ),
+        s3_access_key=access_key,
+        s3_secret_key=secret_key,
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
+    )
+
+
+def _seaweedfs_internal_s3_endpoint(desired_state: DesiredState) -> str:
+    return f"http://{desired_state.stack_name}-seaweedfs:8333"
+
+
 def _build_seaweedfs_backend(
     *,
     raw_env: RawEnvInput,
@@ -2247,14 +2312,18 @@ def _build_seaweedfs_backend(
     api_key = raw_env.values.get("DOKPLOY_API_KEY")
     if not api_url or not api_key or "seaweedfs" not in desired_state.enabled_packs:
         return ShellSeaweedFsBackend(raw_env)
-    hostname = desired_state.hostnames.get("s3")
+    # De-exposed s3 route: the compose Host rule and health probe ride the
+    # internal hostname when the public one is no longer modeled.
+    hostname = desired_state.hostnames.get("s3") or internal_s3_hostname(
+        desired_state.stack_name
+    )
     access_key = desired_state.seaweedfs_access_key
     secret_key = desired_state.seaweedfs_secret_key
     if access_key is None and secret_key is None and "seaweedfs" in desired_state.enabled_packs:
         generated_secrets = ensure_seaweedfs_generated_secrets(state_dir)
         access_key = generated_secrets.access_key
         secret_key = generated_secrets.secret_key
-    if hostname is None or access_key is None or secret_key is None:
+    if access_key is None or secret_key is None:
         return ShellSeaweedFsBackend(raw_env)
     return DokploySeaweedFsBackend(
         api_url=api_url,

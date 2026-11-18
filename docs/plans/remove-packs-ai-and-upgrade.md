@@ -322,6 +322,70 @@ scaffolding that earns its keep). Landed as one `fix:` batch:
   `/v1/models` (Group 5 attaches them), so flat `sync/<provider>-<model>` aliases price
   without reverse-mapping; the registry fallback map keeps only passthrough prefixes.
 
+## FileX pack + SeaweedFS S3 de-exposure
+
+`filex.showmeseewhy.com` answered 404 because nothing owned the route: the coder
+wildcard `*.showmeseewhy.com` swallowed every unrouted subdomain, and FileX was only
+ever a wish. This batch ships the pack for real and, in the same pass, pulls the S3
+endpoint back off the public internet.
+
+### The pack
+
+- Catalog: `filex` (`ENABLE_FILEX`), `depends_on=("seaweedfs",)` — selecting filex
+  auto-selects SeaweedFS; one hostname `filex.<root>` (`FILEX_SUBDOMAIN`);
+  `mutable_env_keys=()` because every knob is fixed-by-design.
+- Lifecycle: phase `filex` between `docuseal` and `coder` (needs no shared-core
+  postgres — FileX carries its own SQLite in `/data`); full ledger/data-volume/
+  uninstall/inspect/verify wiring, mirroring DocuSeal.
+- Compose renders the upstream image `ghcr.io/brf-tech/filex:latest` with the
+  first-boot seed env verified against upstream CONFIGURATION.md/BACKEND.md:
+  `FILEX_PUBLIC_URL`, `FILEX_ADMIN_EMAIL`/`FILEX_ADMIN_PASSWORD` (same credentials
+  as Dokploy and Coder — the username `admin` is FileX's reserved seed account),
+  `FILEX_SECRET_KEY` (derived per stack as sha256 hex, 64 chars ≥ the 32-byte
+  requirement, never a literal in the compose file),
+  `FILEX_DEFAULT_STORAGE_DRIVER=s3` + bucket/prefix/endpoint/region/keys/path-style,
+  `FILEX_TRUSTED_PROXIES=auto`, `FILEX_VERSIONS_ON_OVERWRITE=1`,
+  `FILEX_TRASH_RETENTION_DAYS=30`. All of these are first-boot seeds only: operator
+  edits inside FileX win afterwards (`filex settings reseed` is the escape hatch).
+- Bucket contract (constants, no env override): bucket `filex`, prefix `files`,
+  region `us-east-1` — FileX refuses an empty prefix and needs the region explicit.
+
+### Bucket + versioning provisioning
+
+`DokployFilexBackend` talks S3 with a minimal SigV4 client (the flow proven live on
+the box by `s3_ver_probe.js`): path-style requests always to
+`https://127.0.0.1` with an explicit `Host:` of the internal s3 route — UFW blocks
+host→overlay TCP, so the loopback edge is the only host-side door, and traefik
+answers unknown SNI with its default cert (verification off). Provisioning is a
+retry loop (12 × 5 s) — head the bucket, create on 404, read versioning, PUT
+`<Status>Enabled</Status>` — so it converges even while the route is still
+propagating, then fails loudly rather than half-provisioning. Once per reconcile
+it probes `POST /api/auth/login` through the public route: 200 proves the seeded
+admin; 401/403/429 are recorded as notes, not failures, because FileX locks an
+account after 5 wrong attempts and stored DB values outrank the env anyway.
+
+### The de-expose
+
+`seaweedfs` now models **no public hostname**: the S3 gateway on this deployment
+is anonymous-by-default (no `s3.json`), and an open bucket on the internet is an
+abuse invitation. The gateway serves on `<stack>-s3.internal` — a traefik Host
+rule on the same tunnel edge, resolvable only from cluster containers and from
+the host through the loopback trick.
+
+Old boxes carried an owned `s3.<root>` CNAME. The networking phase now ends with
+a generic DNS prune: owned records whose hostname left the desired state are
+deleted **only if the zone still shows them pointing at this tunnel's target**
+(an operator who repointed the name keeps their record; a vanished record just
+drops its ledger entry; upstream 404s are tolerated so the prune converges). The
+`"s3"` entry in `_HOSTNAME_PHASES` keeps legacy desired states scheduling
+networking + seaweedfs when the hostname disappears.
+
+**Future re-exposure** stays an open item deliberately: before `s3.<root>` comes
+back it needs an identity story — per-user SeaweedFS credentials (`s3.json` +
+identity mapping) and ideally a Cloudflare Access service-token policy in front —
+otherwise the next wizard pass will happily keep publishing an unauthenticated
+bucket again.
+
 ## Phase 6 proof log
 
 - Attempt 1 (commit `7b106d4`+ tree): wrapper invoked with system `python3` →
@@ -436,6 +500,7 @@ scaffolding that earns its keep). Landed as one `fix:` batch:
 | Drift report | `…-remote upgrade --check …` | digest-resolved table; closes the "newest `litellm:*-stable` + CVE list" backlog item |
 | Upgrade apply | `…-remote upgrade … --litellm <approved tag>` + one forced failure | real redeploy on a pinned component; ledger rollback restores previous tag |
 | Survivor regression | browser + CLI pass | coder/Hermes tile, community WebUI, nextcloud, moodle, docuseal, seaweedfs, Access in front of litellm |
+| FileX first serve + de-expose | `…-remote modify …` with `PACKS=…,filex` | `https://filex.<root>/healthz` 200, login with Dokploy creds, `filex` bucket default storage with versioning Enabled, `s3.<root>` tunnel route dead (terminal 404) + owned CNAME pruned, second pass noop |
 
 Remote runs: timeout ≥ 3,600,000 ms or background (AGENTS.md).
 

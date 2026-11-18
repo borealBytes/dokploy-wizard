@@ -667,6 +667,7 @@ def _validate_state_document_set(loaded_state: LoadedState) -> None:
         "nextcloud",
         "moodle",
         "docuseal",
+        "filex",
         "coder",
         "cloudflare_access",
     }

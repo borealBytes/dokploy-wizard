@@ -143,11 +143,30 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         depends_on=(),
         slot=None,
         shared_core_requirements=(),
+        # The S3 endpoint is deliberately not exposed on a public hostname: the
+        # gateway is anonymous-by-default (no s3.json on this deployment) and a
+        # bare open bucket on the internet invites abuse. SeaweedFS serves S3 on
+        # the internal host '<stack>-s3.internal' only; a re-exposure needs an
+        # identity layer first (see the plan doc).
+        hostnames=(),
+        mutable_env_keys=(),
+        mutable_resource_keys=(),
+        enabled_features=(),
+        resource_profile="recommended",
+    ),
+    PackDefinition(
+        name="filex",
+        prompt_label="FileX",
+        env_flag="ENABLE_FILEX",
+        default_enabled=False,
+        depends_on=("seaweedfs",),
+        slot=None,
+        shared_core_requirements=(),
         hostnames=(
             PackHostname(
-                key="s3",
-                default_subdomain="s3",
-                env_key="SEAWEEDFS_SUBDOMAIN",
+                key="filex",
+                default_subdomain="filex",
+                env_key="FILEX_SUBDOMAIN",
             ),
         ),
         mutable_env_keys=(),

@@ -14,10 +14,12 @@ from dokploy_wizard.packs.seaweedfs.reconciler import (
     SeaweedFsResourceRecord,
     ShellSeaweedFsBackend,
     build_seaweedfs_ledger,
+    internal_s3_hostname,
     reconcile_seaweedfs,
 )
 
 __all__ = [
+    "internal_s3_hostname",
     "SEAWEEDFS_DATA_RESOURCE_TYPE",
     "SEAWEEDFS_SERVICE_RESOURCE_TYPE",
     "SeaweedFsBackend",

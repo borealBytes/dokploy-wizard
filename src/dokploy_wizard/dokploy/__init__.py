@@ -29,6 +29,7 @@ from dokploy_wizard.dokploy.compose_noop import (
     persist_compose_artifact_hash,
 )
 from dokploy_wizard.dokploy.docuseal import DokployDocuSealBackend
+from dokploy_wizard.dokploy.filex import DokployFilexBackend, LoopbackSigV4Client
 from dokploy_wizard.dokploy.headscale import DokployHeadscaleBackend
 from dokploy_wizard.dokploy.matrix import DokployMatrixBackend
 from dokploy_wizard.dokploy.moodle import DokployMoodleBackend
@@ -51,6 +52,8 @@ __all__ = [
     "DokployCloudflaredBackend",
     "DokployCoderBackend",
     "DokployDocuSealBackend",
+    "DokployFilexBackend",
+    "LoopbackSigV4Client",
     "DokployCreatedProject",
     "DokployDeployResult",
     "DokployHeadscaleBackend",

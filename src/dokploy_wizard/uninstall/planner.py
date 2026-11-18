@@ -24,6 +24,10 @@ from dokploy_wizard.packs.docuseal import (
     DOCUSEAL_DATA_RESOURCE_TYPE,
     DOCUSEAL_SERVICE_RESOURCE_TYPE,
 )
+from dokploy_wizard.packs.filex import (
+    FILEX_DATA_RESOURCE_TYPE,
+    FILEX_SERVICE_RESOURCE_TYPE,
+)
 from dokploy_wizard.packs.headscale import HEADSCALE_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.matrix import MATRIX_DATA_RESOURCE_TYPE, MATRIX_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.moodle import MOODLE_DATA_RESOURCE_TYPE, MOODLE_SERVICE_RESOURCE_TYPE
@@ -137,6 +141,8 @@ _RULES: dict[str, DeletionRule] = {
         phase="docuseal", retain_safe=True, priority=26
     ),
     DOCUSEAL_DATA_RESOURCE_TYPE: DeletionRule(phase="docuseal", retain_safe=False, priority=27),
+    FILEX_SERVICE_RESOURCE_TYPE: DeletionRule(phase="filex", retain_safe=True, priority=32),
+    FILEX_DATA_RESOURCE_TYPE: DeletionRule(phase="filex", retain_safe=False, priority=33),
     SEAWEEDFS_SERVICE_RESOURCE_TYPE: DeletionRule(phase="seaweedfs", retain_safe=True, priority=28),
     SEAWEEDFS_DATA_RESOURCE_TYPE: DeletionRule(phase="seaweedfs", retain_safe=False, priority=29),
     SURFSENSE_SERVICE_RESOURCE_TYPE: DeletionRule(phase="surfsense", retain_safe=True, priority=30),
@@ -169,13 +175,14 @@ _PHASE_ORDER = {
     "nextcloud": 4,
     "moodle": 5,
     "docuseal": 6,
-    "seaweedfs": 7,
-    "surfsense": 8,
-    "coder": 9,
-    "matrix": 10,
-    "headscale": 11,
-    "shared_core": 12,
-    "networking": 13,
+    "filex": 7,
+    "seaweedfs": 8,
+    "surfsense": 9,
+    "coder": 10,
+    "matrix": 11,
+    "headscale": 12,
+    "shared_core": 13,
+    "networking": 14,
 }
 
 _PACK_RUNTIME_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
@@ -184,6 +191,7 @@ _PACK_RUNTIME_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "nextcloud": (NEXTCLOUD_SERVICE_RESOURCE_TYPE, ONLYOFFICE_SERVICE_RESOURCE_TYPE),
     "moodle": (MOODLE_SERVICE_RESOURCE_TYPE,),
     "docuseal": (DOCUSEAL_SERVICE_RESOURCE_TYPE,),
+    "filex": (FILEX_SERVICE_RESOURCE_TYPE,),
     "seaweedfs": (SEAWEEDFS_SERVICE_RESOURCE_TYPE,),
     "surfsense": (SURFSENSE_SERVICE_RESOURCE_TYPE,),
     "coder": (CODER_SERVICE_RESOURCE_TYPE,),
@@ -207,6 +215,7 @@ _PACK_DATA_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "nextcloud": (NEXTCLOUD_VOLUME_RESOURCE_TYPE, ONLYOFFICE_VOLUME_RESOURCE_TYPE),
     "moodle": (MOODLE_DATA_RESOURCE_TYPE,),
     "docuseal": (DOCUSEAL_DATA_RESOURCE_TYPE,),
+    "filex": (FILEX_DATA_RESOURCE_TYPE,),
     "seaweedfs": (SEAWEEDFS_DATA_RESOURCE_TYPE,),
     "surfsense": (SURFSENSE_DATA_RESOURCE_TYPE,),
     "coder": (CODER_DATA_RESOURCE_TYPE,),
@@ -221,6 +230,7 @@ _PACK_HOSTNAME_KEYS: dict[str, tuple[str, ...]] = {
     "nextcloud": ("nextcloud", "onlyoffice"),
     "moodle": ("moodle",),
     "docuseal": ("docuseal",),
+    "filex": ("filex",),
     "seaweedfs": ("s3",),
     "surfsense": ("surfsense", "surfsense-api", "surfsense-zero"),
     "coder": ("coder",),
@@ -488,6 +498,12 @@ def compute_remaining_completed_steps(
         if not _has_resource_type(resources_by_type, DOCUSEAL_DATA_RESOURCE_TYPE):
             return tuple(prefix)
         prefix.append("docuseal")
+    if "filex" in desired_state.enabled_packs:
+        if not _has_resource_type(resources_by_type, FILEX_SERVICE_RESOURCE_TYPE):
+            return tuple(prefix)
+        if not _has_resource_type(resources_by_type, FILEX_DATA_RESOURCE_TYPE):
+            return tuple(prefix)
+        prefix.append("filex")
     if "seaweedfs" in desired_state.enabled_packs:
         if not _has_resource_type(resources_by_type, SEAWEEDFS_SERVICE_RESOURCE_TYPE):
             return tuple(prefix)

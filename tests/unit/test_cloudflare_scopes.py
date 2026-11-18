@@ -80,6 +80,7 @@ class FakeCloudflareBackend:
     certificate_scope_ok: bool = True
     ordered_certificate_hosts: list[tuple[str, ...]] = field(default_factory=list)
     dns_record_updates: list[tuple[str, str, str, str, bool]] = field(default_factory=list)
+    dns_deletions: list[tuple[str, str]] = field(default_factory=list)
 
     def validate_account_access(self, account_id: str) -> None:
         if not self.account_ok:
@@ -151,6 +152,16 @@ class FakeCloudflareBackend:
             content=content,
             proxied=proxied,
         )
+
+    def delete_dns_record(self, zone_id: str, *, record_id: str) -> None:
+        self.dns_deletions.append((zone_id, record_id))
+        for hostname, records in list(self.dns_records.items()):
+            remaining = tuple(r for r in records if r.record_id != record_id)
+            if len(remaining) != len(records):
+                if remaining:
+                    self.dns_records[hostname] = remaining
+                else:
+                    del self.dns_records[hostname]
 
     def update_dns_record(
         self,

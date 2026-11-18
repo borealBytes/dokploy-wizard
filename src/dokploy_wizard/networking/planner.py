@@ -149,6 +149,24 @@ def reconcile_networking(
             ingress_rules,
         )
 
+    # Owned DNS records for hostnames that are no longer part of the desired
+    # state (a de-exposed pack endpoint, a hostname rename) must come out of
+    # the zone, or the stale CNAME keeps resolving to a tunnel route that
+    # already answers the terminal 404.
+    prune_notes = _prune_stale_dns_records(
+        dry_run=dry_run,
+        zone_id=credentials.zone_id,
+        dns_target=dns_target,
+        desired_hostnames=set(
+            _public_hostnames(
+                desired_state, litellm_admin_hostname=litellm_admin_hostname
+            ).values()
+        ),
+        ownership_ledger=ownership_ledger,
+        backend=backend,
+    )
+    notes.extend(prune_notes)
+
     connector = _resolve_connector(
         dry_run=dry_run,
         desired_state=desired_state,
@@ -800,6 +818,55 @@ def _resolve_dns_records(
         f"Planned {len(planned_records)} Cloudflare DNS CNAME record(s) from desired hostnames."
     )
     return tuple(planned_records), resource_ids, tuple(notes)
+
+
+def _prune_stale_dns_records(
+    *,
+    dry_run: bool,
+    zone_id: str,
+    dns_target: str,
+    desired_hostnames: set[str],
+    ownership_ledger: OwnershipLedger,
+    backend: CloudflareBackend,
+) -> tuple[str, ...]:
+    notes: list[str] = []
+    for resource in ownership_ledger.resources:
+        if resource.resource_type != DNS_RESOURCE_TYPE:
+            continue
+        prefix = f"zone:{zone_id}:"
+        if not resource.scope.startswith(prefix):
+            continue
+        hostname = resource.scope.removeprefix(prefix)
+        if hostname in desired_hostnames:
+            continue
+        records = backend.list_dns_records(
+            zone_id,
+            hostname=hostname,
+            record_type="CNAME",
+            content=dns_target,
+        )
+        matching = next(
+            (record for record in records if record.record_id == resource.resource_id),
+            records[0] if records else None,
+        )
+        if matching is None:
+            notes.append(
+                f"DNS record for '{hostname}' left the zone; dropped its ledger entry."
+            )
+            continue
+        if dry_run:
+            notes.append(f"Would delete stale DNS record for '{hostname}'.")
+            continue
+        # Only delete a record that still carries this tunnel's target; an
+        # operator who repointed the name keeps their record.
+        if matching.content != dns_target:
+            notes.append(
+                f"DNS record for '{hostname}' no longer points at this tunnel; left in place."
+            )
+            continue
+        backend.delete_dns_record(zone_id, record_id=matching.record_id)
+        notes.append(f"Deleted stale DNS record for '{hostname}'.")
+    return tuple(notes)
 
 
 def _degradable_dns_conflict_hostnames(desired_state: DesiredState) -> set[str]:

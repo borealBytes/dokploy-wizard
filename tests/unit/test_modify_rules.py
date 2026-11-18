@@ -1296,3 +1296,60 @@ def test_force_phase_ignores_phases_outside_applicable_set() -> None:
     noop = _noop_plan(("preflight", "dokploy_bootstrap", "networking", "shared_core"))
 
     assert force_phase_into_plan(noop, phase="coder", reason="x") is noop
+
+
+def test_modify_filex_addition_and_s3_de_expose_schedules_three_phases() -> None:
+    """Migrating an old box: s3 was de-exposed and filex is being added.
+
+    The stored desired state still models the public s3 hostname; the new
+    catalog does not. The plan must rebind networking (route + DNS prune) and
+    rerun seaweedfs (internal route) plus the new filex phase, while leaving
+    docuseal preserved.
+    """
+    from dataclasses import replace
+
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,docuseal",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,docuseal,filex",
+        }
+    )
+    legacy_desired = resolve_desired_state(existing_raw)
+    existing_desired = replace(
+        legacy_desired,
+        hostnames={**legacy_desired.hostnames, "s3": "s3.example.com"},
+    )
+    requested_desired = resolve_desired_state(requested_raw)
+    assert "s3" not in requested_desired.hostnames
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=legacy_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "seaweedfs",
+                "docuseal",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert set(plan.phases_to_run) >= {"networking", "seaweedfs", "filex"}
+    assert "docuseal" in plan.preserved_phases

@@ -34,6 +34,7 @@ from dokploy_wizard.networking import (
 )
 from dokploy_wizard.packs.docuseal import DocuSealBootstrapState
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
+from dokploy_wizard.packs.seaweedfs import internal_s3_hostname
 from dokploy_wizard.state import (
     RAW_INPUT_FILE,
     STATE_DOCUMENT_FILES,
@@ -1128,7 +1129,7 @@ def _build_full_stack_backends(
         api_key="api-key-123",
         state_dir=state_dir,
         stack_name=desired_state.stack_name,
-        hostname=desired_state.hostnames["s3"],
+        hostname=internal_s3_hostname(desired_state.stack_name),
         access_key=desired_state.seaweedfs_access_key,
         secret_key=desired_state.seaweedfs_secret_key,
         client=clients.seaweedfs,

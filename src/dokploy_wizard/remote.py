@@ -701,6 +701,7 @@ def _resolve_expected_service_url_links(env_file: Path) -> tuple[tuple[str, str]
         ("nextcloud", "Nextcloud"),
         ("coder", "Coder"),
         ("docuseal", "DocuSeal"),
+        ("filex", "FileX"),
         ("moodle", "Moodle"),
     ):
         hostname = desired_state.hostnames.get(hostname_key)

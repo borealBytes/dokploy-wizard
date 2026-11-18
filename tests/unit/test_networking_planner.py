@@ -16,7 +16,13 @@ from dokploy_wizard.networking import (
     reconcile_cloudflare_access,
     reconcile_networking,
 )
-from dokploy_wizard.state import DesiredState, OwnershipLedger, RawEnvInput
+from dokploy_wizard.state import (
+    DesiredState,
+    OwnedResource,
+    OwnershipLedger,
+    RawEnvInput,
+    resolve_desired_state,
+)
 
 
 @dataclass
@@ -26,6 +32,8 @@ class FakeCloudflareBackend:
     access_apps: dict[str, CloudflareAccessApplication] = field(default_factory=dict)
     access_policies: dict[str, CloudflareAccessPolicy] = field(default_factory=dict)
     dns_record_updates: list[tuple[str, str, str, str, bool]] = field(default_factory=list)
+    dns_records: dict[str, CloudflareDnsRecord] = field(default_factory=dict)
+    dns_deletions: list[tuple[str, str]] = field(default_factory=list)
     update_tunnel_configuration_calls: list[tuple[str, str, tuple[dict[str, object], ...]]] = field(
         default_factory=list
     )
@@ -81,8 +89,13 @@ class FakeCloudflareBackend:
         record_type: str | None,
         content: str | None,
     ) -> tuple[CloudflareDnsRecord, ...]:
-        del zone_id, hostname, record_type, content
-        return ()
+        del zone_id, record_type
+        record = self.dns_records.get(hostname.lower())
+        if record is None:
+            return ()
+        if content is not None and record.content != content:
+            return ()
+        return (record,)
 
     def create_dns_record(
         self,
@@ -118,6 +131,12 @@ class FakeCloudflareBackend:
             content=content,
             proxied=proxied,
         )
+
+    def delete_dns_record(self, zone_id: str, *, record_id: str) -> None:
+        self.dns_deletions.append((zone_id, record_id))
+        for hostname, record in list(self.dns_records.items()):
+            if record.record_id == record_id:
+                del self.dns_records[hostname]
 
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
         del zone_id
@@ -362,4 +381,132 @@ def _desired_state(*, cloudflare_access_otp_emails: tuple[str, ...] = ("owner@ex
         seaweedfs_access_key=None,
         seaweedfs_secret_key=None,
         shared_core=build_shared_core_plan(stack_name="wizard-stack", enabled_packs=()),
+    )
+
+
+def test_networking_prunes_owned_dns_record_for_de_exposed_hostname() -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "s3.example.com": CloudflareDnsRecord(
+                record_id="dns-s3",
+                name="s3.example.com",
+                record_type="CNAME",
+                content="tunnel-123.cfargotunnel.com",
+                proxied=True,
+            ),
+            "filex.example.com": CloudflareDnsRecord(
+                record_id="dns-filex",
+                name="filex.example.com",
+                record_type="CNAME",
+                content="tunnel-123.cfargotunnel.com",
+                proxied=True,
+            ),
+        },
+    )
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "CLOUDFLARE_API_TOKEN": "token",
+            "CLOUDFLARE_ACCOUNT_ID": "account-1",
+            "CLOUDFLARE_ZONE_ID": "zone-1",
+        },
+    )
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "PACKS": "seaweedfs,filex",
+            },
+        )
+    )
+    ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                resource_type="cloudflare_dns_record",
+                resource_id="dns-s3",
+                scope="zone:zone-1:s3.example.com",
+            ),
+            OwnedResource(
+                resource_type="cloudflare_dns_record",
+                resource_id="dns-filex",
+                scope="zone:zone-1:filex.example.com",
+            ),
+        ),
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=ledger,
+        backend=backend,
+    )
+
+    assert backend.dns_deletions == [("zone-1", "dns-s3")]
+    assert any("Deleted stale DNS record for 's3.example.com'" in note for note in phase.result.notes)
+    # filex.example.com is desired; the record for it stays (and gets re-planned
+    # through the create/update path, never pruned).
+    assert all(hostname != "filex.example.com" for hostname, _ in backend.dns_deletions)
+
+
+def test_networking_keeps_repointed_stale_dns_record() -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "s3.example.com": CloudflareDnsRecord(
+                record_id="dns-s3",
+                name="s3.example.com",
+                record_type="CNAME",
+                content="origin.example.net",
+                proxied=False,
+            )
+        },
+    )
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "CLOUDFLARE_API_TOKEN": "token",
+            "CLOUDFLARE_ACCOUNT_ID": "account-1",
+            "CLOUDFLARE_ZONE_ID": "zone-1",
+        },
+    )
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "PACKS": "seaweedfs",
+            },
+        )
+    )
+    ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                resource_type="cloudflare_dns_record",
+                resource_id="dns-s3",
+                scope="zone:zone-1:s3.example.com",
+            ),
+        ),
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=ledger,
+        backend=backend,
+    )
+    # The zone query filters by tunnel content, so a record the operator
+    # repointed is invisible to the prune: it is neither deleted nor claimed,
+    # and its ledger entry is simply dropped.
+    assert backend.dns_deletions == []
+    assert backend.dns_records["s3.example.com"].content == "origin.example.net"
+    assert any(
+        "left the zone; dropped its ledger entry" in note for note in phase.result.notes
     )

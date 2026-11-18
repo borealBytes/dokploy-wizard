@@ -21,6 +21,11 @@ from dokploy_wizard.packs.docuseal import (
     DocuSealResourceRecord,
     reconcile_docuseal,
 )
+from dokploy_wizard.packs.filex import (
+    FilexBackend,
+    FilexResourceRecord,
+    reconcile_filex,
+)
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     HeadscaleResourceRecord,
@@ -88,6 +93,7 @@ def validate_preserved_phases(
     coder_backend: CoderBackend,
     moodle_backend: MoodleBackend | None = None,
     docuseal_backend: DocuSealBackend | None = None,
+    filex_backend: FilexBackend | None = None,
 ) -> DriftReport:
     applicable = applicable_phases_for(desired_state)
     entries: list[DriftEntry] = []
@@ -109,6 +115,7 @@ def validate_preserved_phases(
                 nextcloud_backend=nextcloud_backend,
                 moodle_backend=moodle_backend,
                 docuseal_backend=docuseal_backend,
+                filex_backend=filex_backend,
                 seaweedfs_backend=seaweedfs_backend,
                 coder_backend=coder_backend,
             )
@@ -142,6 +149,7 @@ def _validate_phase(
     coder_backend: CoderBackend,
     moodle_backend: MoodleBackend | None = None,
     docuseal_backend: DocuSealBackend | None = None,
+    filex_backend: FilexBackend | None = None,
 ) -> DriftEntry:
     try:
         if phase == "preflight":
@@ -536,6 +544,52 @@ def _validate_phase(
                     detail="DocuSeal health check no longer passes for a preserved phase.",
                 )
             return DriftEntry(phase=phase, status="ok", detail="DocuSeal ownership remains aligned.")
+        if phase == "filex":
+            if filex_backend is None:
+                return DriftEntry(phase=phase, status="drift", detail="FileX backend is unavailable.")
+            filex = reconcile_filex(
+                dry_run=True,
+                desired_state=desired_state,
+                ownership_ledger=ownership_ledger,
+                backend=filex_backend,
+            ).result
+            if filex.outcome == "skipped":
+                return DriftEntry(phase=phase, status="ok", detail="FileX remains skipped.")
+            actions = {
+                resource.action
+                for resource in (filex.service, filex.persistent_data)
+                if resource is not None
+            }
+            if actions != {"reuse_owned"}:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=f"FileX expected owned reuse, found actions {sorted(actions)}.",
+                )
+            bootstrap_state = filex.bootstrap_state
+            if bootstrap_state is not None and bootstrap_state.initialized is False:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="FileX bootstrap state is not initialized.",
+                )
+            if (
+                filex.health_state is None
+                or filex.service is None
+                or not filex_backend.check_health(
+                    service=FilexResourceRecord(
+                        resource_id=filex.service.resource_id,
+                        resource_name=filex.service.resource_name,
+                    ),
+                    url=filex.health_state.url,
+                )
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="FileX health check no longer passes for a preserved phase.",
+                )
+            return DriftEntry(phase=phase, status="ok", detail="FileX ownership remains aligned.")
         if phase == "seaweedfs":
             seaweedfs = reconcile_seaweedfs(
                 dry_run=True,

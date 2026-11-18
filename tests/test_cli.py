@@ -780,7 +780,9 @@ def test_inspect_state_reports_seaweedfs_generated_credentials_without_values(
     assert payload["seaweedfs_status"] == {
         "display_name": "SeaweedFS",
         "enabled": True,
-        "hostname": "s3.example.com",
+        # De-exposed: the pack no longer models a public s3 hostname; the S3
+        # route rides the cluster-internal name (not a public display value).
+        "hostname": None,
         "credential_source": "generated-state",
         "generated_runtime_values": [
             {
@@ -5343,6 +5345,7 @@ def test_execute_lifecycle_plan_initializes_checkpoint_before_compose_hash_persi
             nextcloud=cast(Any, object()),
             moodle=cast(Any, object()),
             docuseal=cast(Any, object()),
+            filex=cast(Any, object()),
             seaweedfs=cast(Any, object()),
             coder=cast(Any, object()),
         ),

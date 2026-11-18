@@ -19,16 +19,17 @@ Today this repo is not a scaffold or mock planner. It performs real deployment, 
 - **Moodle**
 - **DocuSeal**
 - **SeaweedFS** for S3-compatible object storage
+- **FileX** lightweight web file manager, storing files in a wizard-owned SeaweedFS bucket
 - **Coder** with seeded Ubuntu + VS Code workspace templates
 
-Optional packs also include Headscale, Matrix, and Tailscale host access. The AI-advisor packs this repo once shipped (a browser/Telegram agent runtime with its embedded Talk assistant, the farm advisor, and the research/chat pack) were removed in code; the wizard still cleans their ledger entries up on uninstall for older boxes that ran them.
+Optional packs also include Headscale, Matrix, and Tailscale host access. FileX requires the SeaweedFS pack and turns it on automatically. The AI-advisor packs this repo once shipped (a browser/Telegram agent runtime with its embedded Talk assistant, the farm advisor, and the research/chat pack) were removed in code; the wizard still cleans their ledger entries up on uninstall for older boxes that ran them.
 
 ## Current reality
 
 - Fresh-VPS install works
 - Same-host rerun / noop proof works
 - fresh-VPS install, rerun, and inspect-state flows are part of the validation path
-- Nextcloud Talk, OnlyOffice, SeaweedFS, Matrix, Moodle, DocuSeal, and Coder are all part of the wizard-managed path
+- Nextcloud Talk, OnlyOffice, SeaweedFS, Matrix, Moodle, DocuSeal, FileX, and Coder are all part of the wizard-managed path
 - Unchanged healthy services skip Dokploy update/deploy on rerun through compose artifact hash tracking
 
 ## High-level architecture
@@ -243,7 +244,28 @@ SeaweedFS provides the S3-compatible object-storage surface. The wizard wires:
 
 - service + data volume
 - generated access key + secret key in guided mode
-- public `s3.<root-domain>` hostname
+- an internal-only S3 route on `<stack>-s3.internal` (traefik Host rule on the tunnel edge, reachable from cluster containers and from the host through the loopback edge)
+
+The endpoint is deliberately not published on a public hostname: this deployment
+has no S3 identity layer (the gateway itself is anonymous-by-default), so an open
+`s3.<root-domain>` bucket would be an abuse magnet for anyone who finds it. On
+boxes that ran the earlier public route, the next modify pass rebinds the service
+onto the internal hostname and prunes the stale `s3.<root-domain>` DNS record.
+Re-exposing S3 publicly is a future item that needs an identity/auth story first.
+
+### FileX
+
+FileX is a single-binary web file manager (browse, upload, share) that stores its
+files in the SeaweedFS bucket the wizard owns. The wizard wires:
+
+- service + data volume, exposed at `filex.<root-domain>`
+- a `filex` bucket with prefix `files` seeded as the default storage on first boot, with native object versioning turned on so overwrites and deletes are recoverable
+- admin login using the same Dokploy admin email + password as Dokploy and Coder
+- a `FILEX_SECRET_KEY` derived per stack and kept out of the compose file
+
+The FileX environment is a first-boot seed: once the bucket, storage record, and
+admin account exist in FileX's own database, operator edits inside FileX win and
+the wizard does not overwrite them.
 
 ## Auth and credential model
 
@@ -292,19 +314,21 @@ Not behind Cloudflare Access in the current implementation:
 - `dokploy.<root-domain>`
 - `nextcloud.<root-domain>`
 - `office.<root-domain>`
-- `s3.<root-domain>`
+- `filex.<root-domain>`
 - `coder.<root-domain>`
 - Coder workspace app hosts, currently routed via a controlled `*.<root-domain>` fallback
 - `matrix.<root-domain>`
 - `headscale.<root-domain>`
 - `moodle.<root-domain>`
 - `docuseal.<root-domain>`
+- `filex.<root-domain>`
 
 Why:
 
 - Dokploy still needs a usable API/control plane path
 - Nextcloud and OnlyOffice have client/protocol concerns
-- SeaweedFS is an object-storage protocol surface
+- FileX has its own application login
+- SeaweedFS is an object-storage protocol surface and is not exposed publicly at all
 - Coder has its own application login
 - Matrix and Headscale are protocol/control-plane surfaces
 
@@ -317,6 +341,7 @@ Why:
 | OnlyOffice | JWT integration value shared with Nextcloud | currently wired by deployment bootstrap/runtime config |
 | Coder | Coder admin login | currently derived from Dokploy admin credentials |
 | SeaweedFS / S3 | access key + secret key | wizard-generated in guided mode or env-file provided |
+| FileX | FileX admin login | currently derived from Dokploy admin credentials |
 
 ### Credential sources
 
@@ -362,7 +387,7 @@ Important details:
 - `.install.env` contains real Cloudflare credentials, Dokploy credentials, optional Tailscale values, and optional upstream model-provider keys. Keep it `0600` and uncommitted.
 - `.install.env` stays flat. It contains `key=value` pairs, not nested LiteLLM config or generated app state.
 - `STACK_NAME` defaults from `ROOT_DOMAIN` by lowercasing it and replacing dots or other unsafe characters with hyphens, so `openmerge.me` becomes `openmerge-me`. Wizard-managed Dokploy projects, Docker networks, services, volumes, and tunnel names use that prefix. Set `STACK_NAME` only to preserve an existing explicit stack name.
-- `PACKS` selects optional packs: `nextcloud`, `moodle`, `docuseal`, `seaweedfs`, `coder`, `matrix`, and `headscale`. Each pack also honors its matching `ENABLE_*` flag (e.g. `ENABLE_HEADSCALE=true`) instead of a `PACKS` entry.
+- `PACKS` selects optional packs: `nextcloud`, `moodle`, `docuseal`, `seaweedfs`, `filex`, `coder`, `matrix`, and `headscale`. Each pack also honors its matching `ENABLE_*` flag (e.g. `ENABLE_HEADSCALE=true`) instead of a `PACKS` entry. `filex` implies `seaweedfs`.
 - Generated values such as Dokploy API keys, SeaweedFS secrets, and LiteLLM virtual keys are state-backed. Do not hand-fill them for normal installs.
 - `DOKPLOY_SUBDOMAIN` defaults to `dokploy`; set it only when you need a different Dokploy hostname.
 - `LITELLM_ADMIN_SUBDOMAIN` defaults to `litellm`; set it only when you need a different LiteLLM admin hostname. The admin UI already has its own login; it becomes a Cloudflare Access OTP target only when you set `CLOUDFLARE_ACCESS_OTP_EMAILS`.
@@ -537,7 +562,7 @@ pytest tests/test_cli.py -q
 - Docker can be bootstrap-remediated by the wizard on supported Ubuntu hosts.
 - The chosen state directory stores wizard metadata and the generated env file, not the Docker volumes themselves.
 - The ownership ledger is the uninstall authority.
-- Every wizard-managed pack (Nextcloud, Moodle, DocuSeal, SeaweedFS, Matrix, Headscale, Coder) is state-tracked and reconciled on rerun, not just manually drifted on one VPS.
+- Every wizard-managed pack (Nextcloud, Moodle, DocuSeal, SeaweedFS, FileX, Matrix, Headscale, Coder) is state-tracked and reconciled on rerun, not just manually drifted on one VPS.
 - Reruns and modify operations skip Dokploy update/deploy for services whose rendered compose hash matches the stored hash and whose verification checks pass. Changed compose or unhealthy services still redeploy normally.
 - The LiteLLM image tag resolves as: state pin (`litellm-image-pin.json`, written by `upgrade`) > `LITELLM_IMAGE`/`LITELLM_IMAGE_TAG` env > built-in default. Rotate it with `upgrade --litellm`, not by editing the env file behind the pin.
 

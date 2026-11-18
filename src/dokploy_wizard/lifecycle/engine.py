@@ -27,6 +27,11 @@ from dokploy_wizard.packs.docuseal import (
     build_docuseal_ledger,
     reconcile_docuseal,
 )
+from dokploy_wizard.packs.filex import (
+    FilexBackend,
+    build_filex_ledger,
+    reconcile_filex,
+)
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     build_headscale_ledger,
@@ -70,6 +75,7 @@ class LifecycleBackends:
     nextcloud: NextcloudBackend
     moodle: MoodleBackend
     docuseal: DocuSealBackend
+    filex: FilexBackend
     seaweedfs: SeaweedFsBackend
     coder: CoderBackend
 
@@ -291,6 +297,22 @@ def execute_lifecycle_plan(
                     data_resource_id=docuseal.data_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
+        elif phase == "filex":
+            filex = reconcile_filex(
+                dry_run=dry_run,
+                desired_state=desired_state,
+                ownership_ledger=current_ledger,
+                backend=backends.filex,
+            )
+            phase_results[phase] = filex.result.to_dict()
+            if not dry_run:
+                current_ledger = build_filex_ledger(
+                    existing_ledger=current_ledger,
+                    stack_name=desired_state.stack_name,
+                    service_resource_id=filex.service_resource_id,
+                    data_resource_id=filex.data_resource_id,
+                )
+                write_ownership_ledger(state_dir, current_ledger)
         elif phase == "coder":
             coder = reconcile_coder(
                 dry_run=dry_run,
@@ -425,6 +447,7 @@ def _build_summary(
         "nextcloud": phase_results.get("nextcloud", {"outcome": "not_run"}),
         "moodle": phase_results.get("moodle", {"outcome": "not_run"}),
         "docuseal": phase_results.get("docuseal", {"outcome": "not_run"}),
+        "filex": phase_results.get("filex", {"outcome": "not_run"}),
         "coder": phase_results.get("coder", {"outcome": "not_run"}),
         "networking": phase_results.get("networking", {"outcome": "not_run"}),
         "preflight": preflight_report.to_dict(),
@@ -534,6 +557,16 @@ def _preserved_result(
             desired_state=desired_state,
             ownership_ledger=ownership_ledger,
             backend=backends.docuseal,
+        ).result.to_dict()
+        if result["outcome"] != "skipped":
+            result["outcome"] = "already_present"
+        return result
+    if phase == "filex":
+        result = reconcile_filex(
+            dry_run=True,
+            desired_state=desired_state,
+            ownership_ledger=ownership_ledger,
+            backend=backends.filex,
         ).result.to_dict()
         if result["outcome"] != "skipped":
             result["outcome"] = "already_present"
