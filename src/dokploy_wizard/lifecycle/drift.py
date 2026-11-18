@@ -26,6 +26,11 @@ from dokploy_wizard.packs.filex import (
     FilexResourceRecord,
     reconcile_filex,
 )
+from dokploy_wizard.packs.gitea import (
+    GiteaBackend,
+    GiteaResourceRecord,
+    reconcile_gitea,
+)
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
     HeadscaleResourceRecord,
@@ -94,6 +99,7 @@ def validate_preserved_phases(
     moodle_backend: MoodleBackend | None = None,
     docuseal_backend: DocuSealBackend | None = None,
     filex_backend: FilexBackend | None = None,
+    gitea_backend: GiteaBackend | None = None,
 ) -> DriftReport:
     applicable = applicable_phases_for(desired_state)
     entries: list[DriftEntry] = []
@@ -116,6 +122,7 @@ def validate_preserved_phases(
                 moodle_backend=moodle_backend,
                 docuseal_backend=docuseal_backend,
                 filex_backend=filex_backend,
+                gitea_backend=gitea_backend,
                 seaweedfs_backend=seaweedfs_backend,
                 coder_backend=coder_backend,
             )
@@ -150,6 +157,7 @@ def _validate_phase(
     moodle_backend: MoodleBackend | None = None,
     docuseal_backend: DocuSealBackend | None = None,
     filex_backend: FilexBackend | None = None,
+    gitea_backend: GiteaBackend | None = None,
 ) -> DriftEntry:
     try:
         if phase == "preflight":
@@ -590,6 +598,52 @@ def _validate_phase(
                     detail="FileX health check no longer passes for a preserved phase.",
                 )
             return DriftEntry(phase=phase, status="ok", detail="FileX ownership remains aligned.")
+        if phase == "gitea":
+            if gitea_backend is None:
+                return DriftEntry(phase=phase, status="drift", detail="Gitea backend is unavailable.")
+            gitea = reconcile_gitea(
+                dry_run=True,
+                desired_state=desired_state,
+                ownership_ledger=ownership_ledger,
+                backend=gitea_backend,
+            ).result
+            if gitea.outcome == "skipped":
+                return DriftEntry(phase=phase, status="ok", detail="Gitea remains skipped.")
+            actions = {
+                resource.action
+                for resource in (gitea.service, gitea.persistent_data)
+                if resource is not None
+            }
+            if actions != {"reuse_owned"}:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail=f"Gitea expected owned reuse, found actions {sorted(actions)}.",
+                )
+            bootstrap_state = gitea.bootstrap_state
+            if bootstrap_state is not None and bootstrap_state.initialized is False:
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="Gitea bootstrap state is not initialized.",
+                )
+            if (
+                gitea.health_state is None
+                or gitea.service is None
+                or not gitea_backend.check_health(
+                    service=GiteaResourceRecord(
+                        resource_id=gitea.service.resource_id,
+                        resource_name=gitea.service.resource_name,
+                    ),
+                    url=gitea.health_state.url,
+                )
+            ):
+                return DriftEntry(
+                    phase=phase,
+                    status="drift",
+                    detail="Gitea health check no longer passes for a preserved phase.",
+                )
+            return DriftEntry(phase=phase, status="ok", detail="Gitea ownership remains aligned.")
         if phase == "seaweedfs":
             seaweedfs = reconcile_seaweedfs(
                 dry_run=True,

@@ -20,16 +20,17 @@ Today this repo is not a scaffold or mock planner. It performs real deployment, 
 - **DocuSeal**
 - **SeaweedFS** for S3-compatible object storage
 - **FileX** lightweight web file manager, storing files in a wizard-owned SeaweedFS bucket
+- **Gitea** self-hosted git hosting (rootless image, repos on its own volume, LFS/attachments in a wizard-owned SeaweedFS bucket)
 - **Coder** with a single seeded Ubuntu + VS Code workspace template (Hermes Desktop)
 
-Optional packs also include Headscale, Matrix, and Tailscale host access. FileX requires the SeaweedFS pack and turns it on automatically. The AI-advisor packs this repo once shipped (a browser/Telegram agent runtime with its embedded Talk assistant, the farm advisor, and the research/chat pack) were removed in code; the wizard still cleans their ledger entries up on uninstall for older boxes that ran them.
+Optional packs also include Headscale, Matrix, and Tailscale host access. FileX and Gitea require the SeaweedFS pack and turn it on automatically. The AI-advisor packs this repo once shipped (a browser/Telegram agent runtime with its embedded Talk assistant, the farm advisor, and the research/chat pack) were removed in code; the wizard still cleans their ledger entries up on uninstall for older boxes that ran them.
 
 ## Current reality
 
 - Fresh-VPS install works
 - Same-host rerun / noop proof works
 - fresh-VPS install, rerun, and inspect-state flows are part of the validation path
-- Nextcloud Talk, OnlyOffice, SeaweedFS, Matrix, Moodle, DocuSeal, FileX, and Coder are all part of the wizard-managed path
+- Nextcloud Talk, OnlyOffice, SeaweedFS, Matrix, Moodle, DocuSeal, FileX, Gitea, and Coder are all part of the wizard-managed path
 - Unchanged healthy services skip Dokploy update/deploy on rerun through compose artifact hash tracking
 
 ## High-level architecture
@@ -329,6 +330,41 @@ keys: the file row names the person, the key label names the workspace, and
 history. FileX's audit table covers only its REST doors; protocol-door writes
 carry no audit row, which is exactly why the per-(user, workspace) keys exist.
 
+### Gitea
+
+Gitea is self-hosted git hosting running the official **rootless** image,
+digest-pinned so a rerun can never swap the binary under the ledger. The
+wizard wires:
+
+- service + one data volume holding both roots (`/var/lib/gitea` and
+  `/etc/gitea`), exposed at `gitea.<root-domain>` over the tunnel edge
+- a per-pack database and role on the shared-core Postgres
+  (`<stack>_gitea`, password ref `<stack>-gitea-postgres-password`)
+- LFS objects and issue attachments redirected to a wizard-owned `gitea`
+  bucket on the stack's SeaweedFS gateway, so the repo volume stays small
+  and backup-friendly — the bucket is created (never versioned; Gitea
+  tracks object identity itself) through the same loopback SigV4 lane the
+  FileX pack rides
+- install-lock config rendered entirely from environment: registration is
+  off, the built-in SSH server listens on `2222` inside the overlay network
+  only (git-over-HTTPS rides the public route; publishing SSH to the host is
+  an operator choice), and the wizard's `~/shared` mount and FileX stay
+  independent services
+- a `GITEA_SECRET_KEY` derived per stack and kept out of the compose file
+
+Gitea's own login has one wizard-managed identity: a `dokploy-wizard` admin
+account created through the in-container CLI (an install-locked Gitea has no
+signup path) with a deterministic password, plus a single API token minted
+once and persisted at `gitea-provisioner.json` (0600) in the state directory.
+Every later pass verifies the token against `/api/v1/user` and only re-mints
+when it no longer authenticates — the CLI create tolerating "already taken"
+is what lets a lost state document converge. The token is what the next
+identity slice (Coder-as-OIDC-IdP account springing and deleted-user disable)
+drives the API with.
+
+The service attaches to the shared-core overlay, so Coder workspaces can
+clone over `http://<stack>-gitea:3000` without leaving the host.
+
 ## Auth and credential model
 
 ### Auth boundaries at a glance
@@ -377,6 +413,7 @@ Not behind Cloudflare Access in the current implementation:
 - `nextcloud.<root-domain>`
 - `office.<root-domain>`
 - `filex.<root-domain>`
+- `gitea.<root-domain>`
 - `coder.<root-domain>`
 
 Everything the wizard publishes rides the Cloudflare Tunnel and is HTTPS-only:
@@ -393,6 +430,7 @@ origin apps whose login flow pins its CSRF origin to the `https://` URL
 - `moodle.<root-domain>`
 - `docuseal.<root-domain>`
 - `filex.<root-domain>`
+- `gitea.<root-domain>`
 
 Why:
 

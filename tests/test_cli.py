@@ -5346,6 +5346,7 @@ def test_execute_lifecycle_plan_initializes_checkpoint_before_compose_hash_persi
             moodle=cast(Any, object()),
             docuseal=cast(Any, object()),
             filex=cast(Any, object()),
+            gitea=cast(Any, object()),
             seaweedfs=cast(Any, object()),
             coder=cast(Any, object()),
         ),

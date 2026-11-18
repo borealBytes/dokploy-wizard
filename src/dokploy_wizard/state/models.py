@@ -733,6 +733,55 @@ class FilexProvisionerState:
 
 
 @dataclass(frozen=True)
+class GiteaProvisionerState:
+    """Gitea admin account the wizard uses to provision identities and config.
+
+    The account is created through the in-container CLI (an install-locked
+    Gitea has no signup path), and the token is minted once through the API,
+    so this document is the only durable copy. If it is lost the next pass
+    re-runs the idempotent CLI create, issues a replacement token, and drops
+    the stale one by name.
+    """
+
+    format_version: int
+    username: str
+    email: str
+    password: str
+    token: str
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        for name in ("username", "email", "password", "token"):
+            if getattr(self, name) == "":
+                msg = f"Gitea provisioner {name} must be a non-empty string."
+                raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format_version": self.format_version,
+            "username": self.username,
+            "email": self.email,
+            "password": self.password,
+            "token": self.token,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> GiteaProvisionerState:
+        return cls(
+            format_version=_require_format_version(payload),
+            username=_require_string(payload, "username"),
+            email=_require_string(payload, "email"),
+            password=_require_string(payload, "password"),
+            token=_require_string(payload, "token"),
+        )
+
+
+@dataclass(frozen=True)
 class AppliedStateCheckpoint:
     """Last known successfully applied state."""
 

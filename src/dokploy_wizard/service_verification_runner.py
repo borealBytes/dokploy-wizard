@@ -91,6 +91,12 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
+    gitea_backend = cli._build_gitea_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
     seaweedfs_backend = cli._build_seaweedfs_backend(
         raw_env=raw_env,
         state_dir=state_dir,
@@ -142,6 +148,15 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
                 method_name="_verify_current_application",
                 service_name="filex",
                 unavailable_detail="FileX verification backend is unavailable.",
+            )
+        )
+    if "gitea" in desired_state.enabled_packs:
+        results.append(
+            _verify_backend_method(
+                backend=gitea_backend,
+                method_name="_verify_current_application",
+                service_name="gitea",
+                unavailable_detail="Gitea verification backend is unavailable.",
             )
         )
     if "seaweedfs" in desired_state.enabled_packs:

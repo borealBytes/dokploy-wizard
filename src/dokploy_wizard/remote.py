@@ -702,6 +702,7 @@ def _resolve_expected_service_url_links(env_file: Path) -> tuple[tuple[str, str]
         ("coder", "Coder"),
         ("docuseal", "DocuSeal"),
         ("filex", "FileX"),
+        ("gitea", "Gitea"),
         ("moodle", "Moodle"),
     ):
         hostname = desired_state.hostnames.get(hostname_key)

@@ -28,6 +28,10 @@ from dokploy_wizard.packs.filex import (
     FILEX_DATA_RESOURCE_TYPE,
     FILEX_SERVICE_RESOURCE_TYPE,
 )
+from dokploy_wizard.packs.gitea import (
+    GITEA_DATA_RESOURCE_TYPE,
+    GITEA_SERVICE_RESOURCE_TYPE,
+)
 from dokploy_wizard.packs.headscale import HEADSCALE_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.matrix import MATRIX_DATA_RESOURCE_TYPE, MATRIX_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.moodle import MOODLE_DATA_RESOURCE_TYPE, MOODLE_SERVICE_RESOURCE_TYPE
@@ -143,6 +147,8 @@ _RULES: dict[str, DeletionRule] = {
     DOCUSEAL_DATA_RESOURCE_TYPE: DeletionRule(phase="docuseal", retain_safe=False, priority=27),
     FILEX_SERVICE_RESOURCE_TYPE: DeletionRule(phase="filex", retain_safe=True, priority=32),
     FILEX_DATA_RESOURCE_TYPE: DeletionRule(phase="filex", retain_safe=False, priority=33),
+    GITEA_SERVICE_RESOURCE_TYPE: DeletionRule(phase="gitea", retain_safe=True, priority=34),
+    GITEA_DATA_RESOURCE_TYPE: DeletionRule(phase="gitea", retain_safe=False, priority=35),
     SEAWEEDFS_SERVICE_RESOURCE_TYPE: DeletionRule(phase="seaweedfs", retain_safe=True, priority=28),
     SEAWEEDFS_DATA_RESOURCE_TYPE: DeletionRule(phase="seaweedfs", retain_safe=False, priority=29),
     SURFSENSE_SERVICE_RESOURCE_TYPE: DeletionRule(phase="surfsense", retain_safe=True, priority=30),
@@ -176,13 +182,14 @@ _PHASE_ORDER = {
     "moodle": 5,
     "docuseal": 6,
     "filex": 7,
-    "seaweedfs": 8,
-    "surfsense": 9,
-    "coder": 10,
-    "matrix": 11,
-    "headscale": 12,
-    "shared_core": 13,
-    "networking": 14,
+    "gitea": 8,
+    "seaweedfs": 9,
+    "surfsense": 10,
+    "coder": 11,
+    "matrix": 12,
+    "headscale": 13,
+    "shared_core": 14,
+    "networking": 15,
 }
 
 _PACK_RUNTIME_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
@@ -192,6 +199,7 @@ _PACK_RUNTIME_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "moodle": (MOODLE_SERVICE_RESOURCE_TYPE,),
     "docuseal": (DOCUSEAL_SERVICE_RESOURCE_TYPE,),
     "filex": (FILEX_SERVICE_RESOURCE_TYPE,),
+    "gitea": (GITEA_SERVICE_RESOURCE_TYPE,),
     "seaweedfs": (SEAWEEDFS_SERVICE_RESOURCE_TYPE,),
     "surfsense": (SURFSENSE_SERVICE_RESOURCE_TYPE,),
     "coder": (CODER_SERVICE_RESOURCE_TYPE,),
@@ -216,6 +224,7 @@ _PACK_DATA_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "moodle": (MOODLE_DATA_RESOURCE_TYPE,),
     "docuseal": (DOCUSEAL_DATA_RESOURCE_TYPE,),
     "filex": (FILEX_DATA_RESOURCE_TYPE,),
+    "gitea": (GITEA_DATA_RESOURCE_TYPE,),
     "seaweedfs": (SEAWEEDFS_DATA_RESOURCE_TYPE,),
     "surfsense": (SURFSENSE_DATA_RESOURCE_TYPE,),
     "coder": (CODER_DATA_RESOURCE_TYPE,),
@@ -231,6 +240,7 @@ _PACK_HOSTNAME_KEYS: dict[str, tuple[str, ...]] = {
     "moodle": ("moodle",),
     "docuseal": ("docuseal",),
     "filex": ("filex",),
+    "gitea": ("gitea",),
     "seaweedfs": ("s3",),
     "surfsense": ("surfsense", "surfsense-api", "surfsense-zero"),
     "coder": ("coder",),

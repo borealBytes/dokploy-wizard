@@ -175,6 +175,30 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         resource_profile="recommended",
     ),
     PackDefinition(
+        name="gitea",
+        prompt_label="Gitea",
+        env_flag="ENABLE_GITEA",
+        default_enabled=False,
+        depends_on=("seaweedfs",),
+        slot=None,
+        shared_core_requirements=("postgres",),
+        hostnames=(
+            PackHostname(
+                key="gitea",
+                default_subdomain="gitea",
+                env_key="GITEA_SUBDOMAIN",
+            ),
+        ),
+        mutable_env_keys=(),
+        mutable_resource_keys=(),
+        enabled_features=(),
+        # Rootless image, repos on the data volume, LFS/attachments in the
+        # SeaweedFS bucket, shared-core Postgres. Built-in SSH listens on 2222
+        # inside the overlay network only (git-over-HTTPS rides the public
+        # route; publishing 2222 is an operator choice, not a wizard default).
+        resource_profile="recommended",
+    ),
+    PackDefinition(
         name="coder",
         prompt_label="Coder",
         env_flag="ENABLE_CODER",

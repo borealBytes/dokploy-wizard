@@ -10,6 +10,8 @@ from dokploy_wizard.core.models import SharedCorePlan
 from dokploy_wizard.packs.catalog import (
     get_mutable_pack_env_keys,
     get_mutable_pack_resource_keys,
+    get_pack_definition,
+    iter_pack_catalog,
 )
 from dokploy_wizard.state.models import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
@@ -33,6 +35,7 @@ PHASE_ORDER: tuple[str, ...] = (
     "moodle",
     "docuseal",
     "filex",
+    "gitea",
     "coder",
     "cloudflare_access",
 )
@@ -62,15 +65,8 @@ _SUPPORTED_ACCESS_KEYS = {"CLOUDFLARE_ACCESS_OTP_EMAILS"}
 _SUPPORTED_HOSTNAME_KEYS = {
     "ROOT_DOMAIN",
     "DOKPLOY_SUBDOMAIN",
-    "HEADSCALE_SUBDOMAIN",
-    "MATRIX_SUBDOMAIN",
-    "NEXTCLOUD_SUBDOMAIN",
-    "ONLYOFFICE_SUBDOMAIN",
-    "MOODLE_SUBDOMAIN",
-    "DOCUSEAL_SUBDOMAIN",
-    "FILEX_SUBDOMAIN",
-    "CODER_SUBDOMAIN",
-    "CODER_WILDCARD_SUBDOMAIN",
+    # Derived from the catalog so every pack hostname stays whitelisted.
+    *(hostname.env_key for pack in iter_pack_catalog() for hostname in pack.hostnames),
     "LITELLM_ADMIN_SUBDOMAIN",
 }
 # The LiteLLM admin hostname is derived from this key on demand instead of being
@@ -78,13 +74,8 @@ _SUPPORTED_HOSTNAME_KEYS = {
 _LITELLM_ADMIN_HOSTNAME_ENV_KEYS = frozenset({"LITELLM_ADMIN_SUBDOMAIN"})
 _SUPPORTED_ENABLEMENT_KEYS = {
     "PACKS",
-    "ENABLE_HEADSCALE",
-    "ENABLE_MATRIX",
-    "ENABLE_NEXTCLOUD",
-    "ENABLE_MOODLE",
-    "ENABLE_DOCUSEAL",
-    "ENABLE_FILEX",
-    "ENABLE_CODER",
+    # Derived from the catalog so no pack's flag can drift out of the whitelist.
+    *(pack.env_flag for pack in iter_pack_catalog()),
 }
 _SUPPORTED_MUTABLE_PACK_ENV_KEYS = set(get_mutable_pack_env_keys())
 _SUPPORTED_MUTABLE_PACK_RESOURCE_KEYS = set(get_mutable_pack_resource_keys())
@@ -128,6 +119,7 @@ _HOSTNAME_PHASES = {
     "moodle": ("networking", "moodle"),
     "docuseal": ("networking", "docuseal"),
     "filex": ("networking", "filex"),
+    "gitea": ("networking", "gitea"),
     # Legacy public s3 hostname: stacks installed before the de-expose still
     # model it as a desired hostname, and removing it has to schedule the
     # rebind of the SeaweedFS route onto the internal host plus the DNS prune.
@@ -224,6 +216,8 @@ def applicable_phases_for(desired_state: DesiredState) -> tuple[str, ...]:
         phases.add("docuseal")
     if "filex" in desired_state.enabled_packs:
         phases.add("filex")
+    if "gitea" in desired_state.enabled_packs:
+        phases.add("gitea")
     if "coder" in desired_state.enabled_packs:
         phases.add("coder")
     if _access_enabled(desired_state):
@@ -601,23 +595,16 @@ def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredS
     new_packs = set(requested_desired.enabled_packs) - set(existing_desired.enabled_packs)
     if not new_packs:
         return phases
-    if any(
-        pack in new_packs
-        for pack in {"matrix", "nextcloud", "coder"}
-    ):
-        phases.add("shared_core")
-    if "headscale" in new_packs:
-        phases.add("headscale")
-    if "matrix" in new_packs:
-        phases.add("matrix")
-    if "nextcloud" in new_packs:
-        phases.add("nextcloud")
-    if "seaweedfs" in new_packs:
-        phases.add("seaweedfs")
-    if "filex" in new_packs:
-        phases.add("filex")
-    if "coder" in new_packs:
-        phases.add("coder")
+    for pack_name in sorted(new_packs):
+        definition = get_pack_definition(pack_name)
+        # A pack enabled through modify always runs its own lifecycle phase,
+        # and any pack backed by the shared core has to re-run that phase so
+        # the per-pack Postgres/Redis allocation is live-provisioned (the
+        # Postgres init scripts only answer a first boot, never a data volume
+        # that already exists).
+        if definition.shared_core_requirements:
+            phases.add("shared_core")
+        phases.add(pack_name)
     if (
         "headscale" in requested_desired.selected_packs
         and "headscale" not in existing_desired.selected_packs

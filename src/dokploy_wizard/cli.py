@@ -40,6 +40,7 @@ from dokploy_wizard.dokploy import (
     DokployCoderBackend,
     DokployDocuSealBackend,
     DokployFilexBackend,
+    DokployGiteaBackend,
     DokployHeadscaleBackend,
     DokployMatrixBackend,
     DokployMoodleBackend,
@@ -79,6 +80,10 @@ from dokploy_wizard.packs.docuseal import (
 from dokploy_wizard.packs.filex import (
     FilexBackend,
     ShellFilexBackend,
+)
+from dokploy_wizard.packs.gitea import (
+    GiteaBackend,
+    ShellGiteaBackend,
 )
 from dokploy_wizard.packs.headscale import (
     HeadscaleBackend,
@@ -1407,6 +1412,12 @@ def _run_lifecycle_flow(
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
+    gitea_phase_backend = _build_gitea_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
     seaweedfs_phase_backend = seaweedfs_backend or _build_seaweedfs_backend(
         raw_env=raw_env,
         state_dir=state_dir,
@@ -1431,6 +1442,7 @@ def _run_lifecycle_flow(
         moodle=moodle_phase_backend,
         docuseal=docuseal_phase_backend,
         filex=filex_phase_backend,
+        gitea=gitea_phase_backend,
         seaweedfs=seaweedfs_phase_backend,
         coder=coder_phase_backend,
     )
@@ -1451,6 +1463,7 @@ def _run_lifecycle_flow(
             moodle_backend=moodle_phase_backend,
             docuseal_backend=docuseal_phase_backend,
             filex_backend=filex_phase_backend,
+            gitea_backend=gitea_phase_backend,
             seaweedfs_backend=seaweedfs_phase_backend,
             coder_backend=coder_phase_backend,
         )
@@ -2290,6 +2303,67 @@ def _build_filex_backend(
         ),
         s3_access_key=access_key,
         s3_secret_key=secret_key,
+        client=_build_dokploy_api_client(
+            raw_env=raw_env,
+            api_url=api_url,
+            api_key=api_key,
+            session_client=session_client,
+        ),
+    )
+
+
+def _build_gitea_backend(
+    *,
+    raw_env: RawEnvInput,
+    state_dir: Path,
+    desired_state: DesiredState,
+    session_client: DokployBootstrapAuthClient | None = None,
+) -> GiteaBackend:
+    if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
+        return ShellGiteaBackend()
+    api_url = desired_state.dokploy_api_url
+    api_key = raw_env.values.get("DOKPLOY_API_KEY")
+    if not api_url or not api_key or "gitea" not in desired_state.enabled_packs:
+        return ShellGiteaBackend()
+    hostname = desired_state.hostnames.get("gitea")
+    allocation = next(
+        (item for item in desired_state.shared_core.allocations if item.pack_name == "gitea"),
+        None,
+    )
+    mail_relay = desired_state.shared_core.mail_relay
+    if (
+        hostname is None
+        or allocation is None
+        or allocation.postgres is None
+        or desired_state.shared_core.postgres is None
+        or "seaweedfs" not in desired_state.enabled_packs
+    ):
+        return ShellGiteaBackend()
+    access_key = desired_state.seaweedfs_access_key
+    secret_key = desired_state.seaweedfs_secret_key
+    if access_key is None and secret_key is None:
+        generated_secrets = ensure_seaweedfs_generated_secrets(state_dir)
+        access_key = generated_secrets.access_key
+        secret_key = generated_secrets.secret_key
+    if access_key is None or secret_key is None:
+        return ShellGiteaBackend()
+    return DokployGiteaBackend(
+        api_url=api_url,
+        api_key=api_key,
+        state_dir=state_dir,
+        stack_name=desired_state.stack_name,
+        hostname=hostname,
+        postgres_service_name=desired_state.shared_core.postgres.service_name,
+        postgres=allocation.postgres,
+        s3_endpoint_url=_seaweedfs_internal_s3_endpoint(desired_state),
+        s3_internal_host=desired_state.hostnames.get("s3") or internal_s3_hostname(
+            desired_state.stack_name
+        ),
+        s3_access_key=access_key,
+        s3_secret_key=secret_key,
+        smtp_host=None if mail_relay is None else mail_relay.service_name,
+        smtp_port=None if mail_relay is None else mail_relay.smtp_port,
+        smtp_from_address=None if mail_relay is None else mail_relay.from_address,
         client=_build_dokploy_api_client(
             raw_env=raw_env,
             api_url=api_url,

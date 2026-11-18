@@ -32,6 +32,7 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
         "docuseal",
         "seaweedfs",
         "filex",
+        "gitea",
         "coder",
     ]
     assert get_pack_definition("headscale").default_enabled is False

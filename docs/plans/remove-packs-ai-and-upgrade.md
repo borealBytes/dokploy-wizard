@@ -657,8 +657,8 @@ tests + a fresh remote proof:
 - `~/shared` rclone-FUSE mount of the FileX bucket in the surviving template: per-(user,
   workspace) FileX S3 key, `--vfs-cache-mode full` hot cache (defaults 10 G / 48 h via
   `SHARED_CACHE_SIZE`/`SHARED_CACHE_AGE`), `shared-versions` + `shared-cache` helpers.
-- Gitea pack (rootless, repos on disk, `gitea` bucket for LFS/attachments, internal SSH
-  :2222, HTTPS+PAT external).
+- ~~Gitea pack~~ implemented as Phase 7 below: rootless image, repos on the data volume,
+  `gitea` bucket for LFS/attachments, internal SSH :2222, git-over-HTTPS on the public route.
 - Identity automation: Coder as OIDC IdP for Gitea/FileX (accounts spring up at first
   login), workspace-boot provisioner for owner account + per-(user,workspace) FileX key +
   deterministic account-level Gitea SSH key, deleted-user disable, LiteLLM mint re-scope to
@@ -748,3 +748,102 @@ tests + a fresh remote proof:
 ### Gates
 - `pytest` (1058 passed), `ruff check`, `mypy` green; provisioner lifecycle,
   compose network, replacement-map, and sentinel-regression tests added.
+
+
+## Phase 7 (2026-11): Gitea pack
+
+### Shape
+- New pack `gitea` in the catalog (`ENABLE_GITEA`, default off, subdomain `gitea`,
+  `depends_on=("seaweedfs",)`, `shared_core_requirements=("postgres",)`). Full lifecycle
+  wiring: phase after filex, drift handler mirroring filex, uninstall rules (service 34 /
+  data 35, phase ordered after filex and before seaweedfs so the bucket outlives the app),
+  service-verification candidate (`_verify_current_application`), inspect-state candidate.
+- Official **rootless** image, digest-pinned: `gitea/gitea:28.4.0-rootless
+  @sha256:15ab7fadb4…073a` (same digest serves `28.4-rootless`/`latest-rootless`; v28.4.0
+  is the current stable). Run as `1000:1000`; the rootless image ships no OpenSSH, so the
+  **built-in SSH server** listens on `2222` inside the overlay only (`START_SSH_SERVER`,
+  `SSH_LISTEN_PORT`/`SSH_PORT=2222`) — no publish, no tunnel route; git-over-HTTPS rides
+  the public hostname. Publishing 2222 is an operator choice, not a wizard default.
+- One named volume carries both roots (`/var/lib/gitea` and `/etc/gitea` on the same
+  volume — harmless coexistence, keeps a single ledger data resource). Repos live there;
+  **LFS objects and attachments are redirected to a wizard-owned `gitea` bucket** on the
+  stack's SeaweedFS gateway. Schema is the modern (1.20+) one, verified live:
+  consumer sections carry `STORAGE_TYPE = minio` + `MINIO_BUCKET`
+  (`GITEA__attachment__*` / `GITEA__lfs__*`) and the shared
+  `[storage.minio]` section carries the `MINIO_`-prefixed connection
+  (`MINIO_ENDPOINT`, `MINIO_ACCESS_KEY_ID`, `MINIO_SECRET_ACCESS_KEY`,
+  `MINIO_USE_SSL`, `MINIO_PATH_STYLE`, `MINIO_LOCATION`). The pre-1.20
+  spellings are silently ignored — with them in place the box logged
+  `storage with type: local` and no warning. So the repo volume stays small
+  and backup-friendly. Bucket create rides the same
+  `LoopbackSigV4Client` lane FileX uses (UFW blocks host→overlay). No versioning — Gitea
+  tracks object identity itself; unlike FileX the bucket is create-only.
+- Config fully via `GITEA__section__KEY` env with `INSTALL_LOCK=true` and
+  `DISABLE_REGISTRATION=true`: no web installer, no signup. `ROOT_URL` is the https
+  hostname; the `forwarded-https` middleware stamps `X-Forwarded-Proto/Host/Port` so
+  clone URLs match `ROOT_URL`. Mailer wires to the shared postfix relay when present
+  (`ENABLED=true`, `SMTP_ADDR={stack}-shared-postfix` + `SMTP_PORT=587` —
+  the address is looked up as a bare hostname, so a host:port value fails
+  resolution with `no such host`), else disabled. Health gate is
+  the native `/api/healthz` (`ENABLE_HEALTHCHECK=true`), probed over the loopback edge.
+- `GITEA__security__SECRET_KEY` is derived per stack+ref (`sha256("dokploy-wizard:gitea:
+  <stack>:<ref>")`) and kept out of the compose file behind the `${VAR:?…}` placeholder,
+  exactly like the FileX secret-key base. DB password is the shared-core literal
+  `change-me` (the DocuSeal convention: every pack role shares it; overlay-only network).
+
+### Provisioner account
+- An install-locked Gitea has **no signup path**, so the wizard's `dokploy-wizard` admin
+  is created through the in-container CLI: `docker exec --user 1000 <container> gitea -c
+  /etc/gitea/app.ini admin user create … --admin --must-change-password=false`, with a
+  deterministic password (`sha256` of stack+secret-ref material). The CLI create tolerating
+  "already (been) taken" is what lets a lost state document converge on the next pass.
+- One API token (`dokploy-wizard-provisioner`, scope `all`) is minted once
+  via basic-auth `POST /api/v1/users/<u>/tokens` over the loopback edge and persisted to
+  `gitea-provisioner.json` (0600) in the state dir. Every later pass verifies the token
+  against `/api/v1/user`; only when it stops authenticating does the pass delete the stale
+  token by name and re-mint (409 → delete → POST). A failed CLI create degrades to a
+  `WARNING:` note + `provisioner_ready=false`, letting the health gate own the verdict.
+- This token is the credential the next identity slice (Coder-as-OIDC-IdP account
+  springing, deleted-user disable) drives the API with.
+
+### Wiring
+- Service attaches to the shared overlay (`{stack}-shared`, external) so Coder workspaces
+  clone over `http://<stack>-gitea:3000` without leaving the host.
+- Apply path reuses the filex/docuseal pattern: `apply_compose_noop_guard` + artifact-hash
+  persistence, so reruns on unchanged renders deploy nothing.
+
+### Gates
+- `pytest` (1099 passed, 1 skipped), `ruff check`, `mypy` (179 files) green.
+- `tests/unit/test_gitea_pack.py`: 19 tests — reconciler skip/requires/allocation/dry-run
+  bindings/applied-ledger/owned-reuse/health-fail; render assertions (pin, rootless user,
+  dual-mount, install lock, ssh, bucket endpoint w/ scheme stripped, mailer on/off, shared
+  network, env-spec values + hash anchor); `ScriptedS3` bucket create/idempotent/retry/
+  give-up paths; provisioner bootstrap/alive-token short-circuit/rotation with
+  already-taken CLI/degrade-to-warning via `ScriptedCli` + `_ScriptedGiteaHttp`.
+- Two pre-existing expectations updated for the new pack: catalog name list, and the
+  `LifecycleBackends` construction in `test_cli.py` now carries `gitea=`.
+- Live proof history on the box (log `/tmp/opencode/modify19..21.log` + probes):
+  - modify19: classifier rejected `ENABLE_GITEA` — `_SUPPORTED_ENABLEMENT_KEYS`/
+    `_SUPPORTED_HOSTNAME_KEYS` were hand-maintained lists that had drifted (missing
+    gitea AND seaweedfs); both now derive from `iter_pack_catalog()`.
+  - modify20: phases ran `docuseal,filex,gitea` without `shared_core` — `_new_pack_phases`
+    was a hardcoded map. Gitea crash-looped `pq: password authentication failed (28P01)`
+    because the per-pack role is live-provisioned by the shared_core phase (init scripts
+    only answer a first boot). The function is now catalog-derived: a new pack schedules
+    its own phase plus `shared_core` when it declares requirements. Regression test added.
+  - modify21: gitea `outcome: applied`, health passed, bucket ready, ledger written —
+    only `provisioner_ready: false` (see scope grammar). Container exec lookup also had
+    to move to the compose-service-label pattern (Dokploy names containers
+    `{project}-{service}-{replica}`, not swarm `<service>.<slot>.<task>`).
+  - Box-measured API truths: token `scopes` accept ONLY the bare `"all"` — `all:all`,
+    `all:write`, `write:all`, `admin:write` → 400 (earlier 422s were JSON-string forms);
+    `SMTP_ADDR` must be host-only + `SMTP_PORT` (the whole `host:port` string is DNS
+    looked up as one name → warning; postfix's alias on the shared network is
+    `{stack}-shared-postfix:587`); and the pre-1.20 storage keys are silently ignored —
+    the modern consumer/`MINIO_`-prefixed set above was proven live by patching app.ini
+    in place: `Initialising Attachment/LFS storage with type: minio`,
+    `Creating minio storage at <gw>:8333:gitea`, healthz 200.
+  - Final convergence run: `proof` (verification-first) re-runs every phase; the changed
+    gitea render (new artifact hash) redeploys the compose with the corrected env —
+    re-rendering app.ini via environment-to-ini — and service verification re-mints the
+    provisioner token with the fixed scope.

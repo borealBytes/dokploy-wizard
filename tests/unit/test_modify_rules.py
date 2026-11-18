@@ -938,6 +938,56 @@ def test_modify_enabling_matrix_adds_networking_shared_core_and_matrix_phases() 
     assert "nextcloud" in plan.preserved_phases
 
 
+def test_modify_enabling_gitea_schedules_shared_core_and_gitea_phases() -> None:
+    """Enabling the gitea pack via modify must live-provision its database.
+
+    The shared-core Postgres init scripts only answer a first boot, so the
+    per-pack role for a newly enabled pack is created by the shared_core
+    phase's live-allocation path. A plan that runs 'gitea' without
+    'shared_core' leaves the app crash-looping on password auth — the exact
+    failure the first live proof measured.
+    """
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex",
+            "ENABLE_GITEA": "true",
+        }
+    )
+
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=tuple(
+                phase
+                for phase in applicable_phases_for(existing_desired)
+                if phase != "cloudflare_access"
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert set(plan.phases_to_run) >= {"shared_core", "gitea"}
+    assert "filex" in plan.preserved_phases
+
+
 def test_modify_litellm_desired_only_local_alias_removal_reruns_consumers() -> None:
     raw = _raw(
         {

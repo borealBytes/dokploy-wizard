@@ -22,6 +22,7 @@ from dokploy_wizard.state.models import (
     AppliedStateCheckpoint,
     DesiredState,
     FilexProvisionerState,
+    GiteaProvisionerState,
     LiteLLMGeneratedKeys,
     LiteLLMImagePin,
     OwnershipLedger,
@@ -51,6 +52,7 @@ LITELLM_GENERATED_KEYS_FILE = "litellm-generated-keys.json"
 LITELLM_IMAGE_PIN_FILE = "litellm-image-pin.json"
 SEAWEEDFS_GENERATED_SECRETS_FILE = "seaweedfs-generated-secrets.json"
 FILEX_PROVISIONER_FILE = "filex-provisioner.json"
+GITEA_PROVISIONER_FILE = "gitea-provisioner.json"
 STATE_DOCUMENT_FILES = (
     RAW_INPUT_FILE,
     DESIRED_STATE_FILE,
@@ -515,6 +517,20 @@ def write_filex_provisioner(state_dir: Path, provisioner: FilexProvisionerState)
     path.chmod(0o600)
 
 
+def load_gitea_provisioner(state_dir: Path) -> GiteaProvisionerState | None:
+    return _load_optional_document(
+        state_dir / GITEA_PROVISIONER_FILE,
+        GiteaProvisionerState.from_dict,
+    )
+
+
+def write_gitea_provisioner(state_dir: Path, provisioner: GiteaProvisionerState) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / GITEA_PROVISIONER_FILE
+    _write_document(path, provisioner.to_dict())
+    path.chmod(0o600)
+
+
 def load_seaweedfs_generated_secrets(state_dir: Path) -> SeaweedFsGeneratedSecrets | None:
     return _load_optional_document(
         state_dir / SEAWEEDFS_GENERATED_SECRETS_FILE,
@@ -684,6 +700,7 @@ def _validate_state_document_set(loaded_state: LoadedState) -> None:
         "moodle",
         "docuseal",
         "filex",
+        "gitea",
         "coder",
         "cloudflare_access",
     }

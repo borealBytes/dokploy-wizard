@@ -456,6 +456,20 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "scope": f"stack:{desired_state.stack_name}:filex:service",
             }
         )
+    if "gitea" in desired_state.enabled_packs:
+        candidates.append(
+            {
+                "aliases": ("gitea",),
+                "hostname": desired_state.hostnames.get("gitea"),
+                "managed_container_labels": {
+                    "com.docker.compose.service": f"{desired_state.stack_name}-gitea"
+                },
+                "port": None,
+                "expected_service_name": f"{desired_state.stack_name}-gitea",
+                "pack": "gitea",
+                "scope": f"stack:{desired_state.stack_name}:gitea:service",
+            }
+        )
     if "coder" in desired_state.enabled_packs:
         candidates.append(
             {
