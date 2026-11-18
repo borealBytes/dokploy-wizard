@@ -289,7 +289,10 @@ def _render(**overrides: object) -> Any:
 def test_render_filex_compose_seeds_storage_versioning_and_route() -> None:
     rendered = _render()
     compose = rendered.compose_file
-    assert "image: ghcr.io/brf-tech/filex:latest" in compose
+    assert (
+        "image: ghcr.io/brf-tech/filex:v0.61.2"
+        "@sha256:e8756486300542bcfb7f8cf1a323a583c2444815da09c8947389197d43b04c8d"
+    ) in compose
     assert 'FILEX_PUBLIC_URL: "https://filex.example.com"' in compose
     assert 'FILEX_ADMIN_EMAIL: "admin@example.com"' in compose
     assert 'FILEX_ADMIN_PASSWORD: "${FILEX_ADMIN_PASSWORD:?FILEX_ADMIN_PASSWORD is required}"' in compose

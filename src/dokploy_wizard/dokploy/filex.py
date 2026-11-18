@@ -56,7 +56,19 @@ from dokploy_wizard.packs.filex import (
 )
 from dokploy_wizard.verification import ServiceVerificationResult
 
-_DEFAULT_FILEX_IMAGE = "ghcr.io/brf-tech/filex:latest"
+# Pinned to filex v0.61.2 (BRF-Tech/filex release, 2026-11-18). The tag names the
+# release for humans; the digest is what Docker resolves, so reruns and reinstalls
+# land on the same bytes. Verify the tag/digest pair before every bump:
+#   TOKEN=$(curl -s https://ghcr.io/token?scope=repository:brf-tech/filex:pull | ...)
+#   curl -sI -H "Authorization: Bearer $TOKEN" \
+#     -H "Accept: application/vnd.oci.image.index.v1+json" \
+#     https://ghcr.io/v2/brf-tech/filex/manifests/v0.61.2 | grep -i docker-content-digest
+# v0.61.x is also the floor for S3-key attribution in the audit log, which the
+# ~/shared workspace mount depends on.
+_DEFAULT_FILEX_IMAGE = (
+    "ghcr.io/brf-tech/filex:v0.61.2"
+    "@sha256:e8756486300542bcfb7f8cf1a323a583c2444815da09c8947389197d43b04c8d"
+)
 _DEFAULT_FILEX_PORT = "5212"
 _DEFAULT_FILEX_DATA_ROOT = "/data"
 _VERSIONING_XML = (

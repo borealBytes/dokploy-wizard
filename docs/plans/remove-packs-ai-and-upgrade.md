@@ -535,7 +535,7 @@ Four additions landed after the initial live-run checklist, all proven or gated 
 tests + a fresh remote proof:
 
 ### FileX pack (`filex.<root-domain>`)
-- New pack: `jessfraz/ingress` image pinned by digest, single replica, bind mount at
+- New pack: `brf-tech/filex` image, single replica, bind mount at
   `<stack data dir>/filex`, shared `seaweedfs-data` volume for the SeaweedFS client mount,
   `DockerProxyNetwork`, and a wizard-owned `filex` tunnel route.
 - SeaweedFS backend: bucket `filex`, prefix `files`, region `us-east-1`, credentials are the
@@ -630,8 +630,10 @@ tests + a fresh remote proof:
   fails) until that grant lands.
 
 ### Follow-ons (next slices, approved in planning)
-- FileX image pin bump to a current `brf-tech/filex` release (the pinned `jessfraz/ingress`
-  digest predates S3 key attribution in the audit log).
+- ~~FileX image pin bump~~ resolved: the pack shipped modern (`brf-tech/filex:latest`, and
+  the box resolved it to the v0.61.2 digest — audit-log S3-key attribution is available).
+  The tag is now an immutable digest pin (`v0.61.2@sha256:e8756486…`) so reruns land on
+  the same bytes; live compose convergence re-proves it on the next modify.
 - `~/shared` rclone-FUSE mount of the FileX bucket in the surviving template: per-(user,
   workspace) FileX S3 key, `--vfs-cache-mode full` hot cache (defaults 10 G / 48 h via
   `SHARED_CACHE_SIZE`/`SHARED_CACHE_AGE`), `shared-versions` + `shared-cache` helpers.
