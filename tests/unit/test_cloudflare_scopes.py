@@ -280,6 +280,17 @@ class FakeCloudflareBackend:
         self.access_policies[app_id] = policy
         return policy
 
+    def delete_access_application(self, account_id: str, app_id: str) -> None:
+        del account_id
+        for domain, app in list(self.access_apps.items()):
+            if app.app_id == app_id:
+                del self.access_apps[domain]
+                self.access_policies.pop(app_id, None)
+
+    def delete_access_policy(self, account_id: str, app_id: str, policy_id: str) -> None:
+        del account_id, policy_id
+        self.access_policies.pop(app_id, None)
+
 
 def test_networking_rejects_zone_scope_before_planning_dns() -> None:
     with pytest.raises(CloudflareError, match="zone scope failed"):
@@ -1290,7 +1301,10 @@ def test_access_phase_reuses_the_builtin_provider_and_names_it_for_operators() -
     assert phase.result.otp_provider.name == "One-time PIN login"
 
 
-def test_resolve_desired_state_defaults_access_email_to_dokploy_admin_for_litellm_admin() -> None:
+def test_resolve_desired_state_keeps_access_opt_in_without_explicit_emails() -> None:
+    # Access OTP is opt-in: every shipped surface already has its own login, so
+    # an unset recipient list stays empty even when the admin hostname exists.
+    # Listing an email is what turns the phase on.
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -1303,4 +1317,18 @@ def test_resolve_desired_state_defaults_access_email_to_dokploy_admin_for_litell
         )
     )
 
-    assert desired_state.cloudflare_access_otp_emails == ("admin@example.com",)
+    assert desired_state.cloudflare_access_otp_emails == ()
+
+    opted_in = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openmerge",
+                "ROOT_DOMAIN": "openmerge.me",
+                "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "admin@example.com",
+            },
+        )
+    )
+
+    assert opted_in.cloudflare_access_otp_emails == ("admin@example.com",)

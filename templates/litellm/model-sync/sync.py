@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
 import os
 import re
 import sys
@@ -351,11 +352,12 @@ def _catalog_costs(catalog: dict[str, Any]) -> dict[str, tuple[float, float]]:
         pricing = item.get("pricing")
         if not model_id or not isinstance(pricing, dict):
             continue
+        if "prompt" not in pricing or "completion" not in pricing:
+            # An absent price field is unknown, not zero: pricing the row
+            # (0.0, 0.0) would advertise a billable endpoint as free.
+            continue
         try:
-            costs[model_id] = (
-                float(pricing.get("prompt") or 0),
-                float(pricing.get("completion") or 0),
-            )
+            costs[model_id] = (float(pricing["prompt"]), float(pricing["completion"]))
         except (TypeError, ValueError):
             continue
     return costs
@@ -394,12 +396,15 @@ def _models_dev_costs(source: dict[str, Any]) -> dict[str, tuple[float, float]] 
         if not isinstance(meta, dict):
             continue
         raw_cost = meta.get("cost")
-        cost = raw_cost if isinstance(raw_cost, dict) else {}
+        if not isinstance(raw_cost, dict):
+            # No cost block at all is "unpriced", not "free": fail closed so the
+            # row stays out of the map (and out of the free-only gate) instead
+            # of getting explicit zero spend fields.
+            continue
+        if "input" not in raw_cost or "output" not in raw_cost:
+            continue
         try:
-            per_million = (
-                float(cost.get("input") or 0),
-                float(cost.get("output") or 0),
-            )
+            per_million = (float(raw_cost["input"]), float(raw_cost["output"]))
         except (TypeError, ValueError):
             continue
         costs[str(model_id)] = (per_million[0] / 1_000_000.0, per_million[1] / 1_000_000.0)
@@ -771,7 +776,12 @@ def resolve_default_chat(
                     (float(row.get("input_cost") or 0), float(row.get("output_cost") or 0))
                     for row in target_rows
                 }
-                if winner_cost not in priced:
+                priced_matches = any(
+                    math.isclose(winner_cost[0], stored_in, abs_tol=1e-12)
+                    and math.isclose(winner_cost[1], stored_out, abs_tol=1e-12)
+                    for stored_in, stored_out in priced
+                )
+                if not priced_matches:
                     # The alias already routes where we would point it, but the
                     # deployment under it predates cost metadata (or carries a
                     # stale price): register the priced deployment first, then

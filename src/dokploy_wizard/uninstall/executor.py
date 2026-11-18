@@ -5,12 +5,13 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from dokploy_wizard.state import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
+    OwnedResource,
     OwnershipLedger,
     RawEnvInput,
     clear_state_documents,
@@ -33,11 +34,34 @@ class UninstallBackend(Protocol):
     def delete(self, deletion: PlannedDeletion) -> None: ...
 
 
+ACCESS_APPLICATION_RESOURCE_TYPE = "cloudflare_access_application"
+ACCESS_POLICY_RESOURCE_TYPE = "cloudflare_access_policy"
+_ACCESS_DELETION_TYPES = frozenset({ACCESS_APPLICATION_RESOURCE_TYPE, ACCESS_POLICY_RESOURCE_TYPE})
+
+
+def _parse_access_scope(scope: str) -> tuple[str, str] | None:
+    """Return (account_id, hostname) from an access ledger scope string.
+
+    Scopes look like ``account:<id>:access-app:<hostname>`` (or
+    ``access-policy``); the provider scope carries no hostname and returns None.
+    """
+
+    parts = scope.split(":")
+    if len(parts) != 4 or parts[0] != "account" or parts[2] not in {"access-app", "access-policy"}:
+        return None
+    return parts[1], parts[3]
+
+
 class ShellUninstallBackend:
     """Deterministic default backend for ledger-driven teardown execution."""
 
-    def __init__(self, raw_input: RawEnvInput) -> None:
+    def __init__(
+        self,
+        raw_input: RawEnvInput,
+        cloudflare_backend: Any | None = None,
+    ) -> None:
         values = raw_input.values
+        self._cloudflare_backend = cloudflare_backend
         self._failing_types = {
             item.strip()
             for item in values.get("UNINSTALL_FAIL_RESOURCE_TYPES", "").split(",")
@@ -50,7 +74,8 @@ class ShellUninstallBackend:
         }
 
     def delete(self, deletion: PlannedDeletion) -> None:
-        if deletion.resource.resource_type == TAILSCALE_NODE_RESOURCE_TYPE:
+        resource = deletion.resource
+        if resource.resource_type == TAILSCALE_NODE_RESOURCE_TYPE:
             result = subprocess.run(
                 ["tailscale", "down"],
                 check=False,
@@ -64,7 +89,10 @@ class ShellUninstallBackend:
                     msg = f"{msg}: {stderr}"
                 raise UninstallExecutionError(msg)
             return
-        if deletion.resource.resource_type in self._failing_types:
+        if resource.resource_type in _ACCESS_DELETION_TYPES:
+            self._delete_access_resource(resource)
+            return
+        if resource.resource_type in self._failing_types:
             raise UninstallExecutionError(
                 "Simulated uninstall failure for resource type "
                 f"'{deletion.resource.resource_type}'."
@@ -73,6 +101,25 @@ class ShellUninstallBackend:
             raise UninstallExecutionError(
                 f"Simulated uninstall failure for resource id '{deletion.resource.resource_id}'."
             )
+
+    def _delete_access_resource(self, resource: OwnedResource) -> None:
+        # Disabling Access OTP must take the application and policy down with
+        # it; otherwise the hostname stays gated even though the wizard no
+        # longer manages or intends the policy.
+        if self._cloudflare_backend is None:
+            return
+        parsed = _parse_access_scope(resource.scope)
+        if parsed is None:
+            return
+        account_id, hostname = parsed
+        if resource.resource_type == ACCESS_APPLICATION_RESOURCE_TYPE:
+            self._cloudflare_backend.delete_access_application(account_id, resource.resource_id)
+            return
+        app = self._cloudflare_backend.find_access_application_by_domain(account_id, hostname)
+        if app is None:
+            # Cloudflare cascades policies with the application.
+            return
+        self._cloudflare_backend.delete_access_policy(account_id, app.app_id, resource.resource_id)
 
 
 @dataclass(frozen=True)

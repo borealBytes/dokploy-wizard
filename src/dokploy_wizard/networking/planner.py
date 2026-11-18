@@ -43,6 +43,9 @@ ACCESS_OTP_PROVIDER_RESOURCE_TYPE = "cloudflare_access_otp_provider"
 ACCESS_APPLICATION_RESOURCE_TYPE = "cloudflare_access_application"
 ACCESS_POLICY_RESOURCE_TYPE = "cloudflare_access_policy"
 
+# Hostname keys that exist in desired state but must not get a public DNS
+# record or tunnel route (kept as the extension hook for future internal-only
+# surfaces, e.g. a re-exposed SeaweedFS S3 endpoint behind identity config).
 _NON_PUBLIC_HOSTNAME_KEYS: frozenset[str] = frozenset()
 _LITELLM_ADMIN_ACCESS_KEY = "litellm-admin"
 # Cloudflare ships each account with an unnamed One-time PIN provider, so this is only the

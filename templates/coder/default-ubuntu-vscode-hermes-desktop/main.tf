@@ -350,12 +350,19 @@ if "--daemon" in sys.argv[1:]:
         time.sleep(300 if refresh_rc else 43200)
 
 
-def fetch_model_ids() -> list[str]:
+def fetch_model_ids() -> tuple[list[str], dict[str, dict[str, float]]]:
+    """Return the servable model list plus per-alias costs echoed by the gateway.
+
+    LiteLLM stores input_cost_per_token/output_cost_per_token in each alias's
+    model_info, so the sync/* flat aliases come back priced and the pickers do
+    not have to reverse-map slugs onto registry keys.
+    """
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
-    model_ids = []
+    model_ids: list[str] = []
+    costs: dict[str, dict[str, float]] = {}
     for attempt in range(4):
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
@@ -364,6 +371,7 @@ def fetch_model_ids() -> list[str]:
             payload = {"data": []}
 
         model_ids = []
+        costs = {}
         for item in payload.get("data", []):
             if not isinstance(item, dict):
                 continue
@@ -373,13 +381,21 @@ def fetch_model_ids() -> list[str]:
             normalized = model_id.strip()
             if normalized and "/" in normalized and not normalized.endswith("/*") and not normalized.startswith("openai/"):
                 model_ids.append(normalized)
+            info = item.get("model_info")
+            if isinstance(info, dict):
+                try:
+                    cost_in = float(info["input_cost_per_token"]) * 1000000.0
+                    cost_out = float(info["output_cost_per_token"]) * 1000000.0
+                except (KeyError, TypeError, ValueError):
+                    continue
+                costs[normalized] = {"input": cost_in, "output": cost_out}
         if model_ids or attempt == 3:
-            return model_ids
+            return model_ids, costs
         time.sleep(10)
-    return model_ids
+    return model_ids, costs
 
 
-fetched_model_ids = fetch_model_ids()
+fetched_model_ids, fetched_model_costs = fetch_model_ids()
 if not fetched_model_ids and Path("/home/coder/.config/opencode/opencode.json").exists():
     # Gateway unreachable during a background refresh; keep the last good list
     # and exit non-zero so the daemon schedules a fast retry.
@@ -484,9 +500,10 @@ write_vscode_copilot_byok_settings(base_url, api_key, model_ids)
 # daily so the daemon's twice-daily pass does not refetch the full catalog.
 MODELS_DEV_URL = "https://models.dev/api.json"
 MODELS_DEV_CACHE = Path("/home/coder/.cache/dokploy-models-dev.json")
+# Registry fallback for passthrough aliases only: the flat sync/<provider>-<model>
+# names the gateway mints cannot be reverse-mapped onto registry org/model keys,
+# but every sync alias carries the gateway-echoed cost from model_info instead.
 ALIAS_PROVIDERS = {
-    "sync/nvidia/": "nvidia",
-    "sync/openrouter/": "openrouter",
     "opencode-go/": "opencode-go",
     "opencode/": "opencode",
     "nvidia/": "nvidia",
@@ -541,6 +558,9 @@ def _registry_costs():
 def _cost_for(alias, costs):
     if alias.endswith(":free"):
         return {"input": 0, "output": 0}
+    gateway = fetched_model_costs.get(alias)
+    if gateway is not None:
+        return gateway
     for prefix, provider_key in ALIAS_PROVIDERS.items():
         if alias.startswith(prefix):
             return costs.get(provider_key + "/" + alias[len(prefix):])

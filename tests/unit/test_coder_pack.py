@@ -113,12 +113,14 @@ def test_consolidated_template_picker_advertises_per_model_costs() -> None:
     ).read_text(encoding="utf-8")
 
     # Pickers price models from models.dev (dollars per million tokens, the
-    # unit opencode's UI bills in), mapping gateway aliases back to registry
-    # entries through their sync/provider prefix; ":free" aliases are always
+    # unit opencode's UI bills in). Flat sync/<provider>-<model> aliases carry
+    # their price in the gateway's own /v1/models model_info, so the registry
+    # prefix map only needs passthrough aliases; ":free" aliases are always
     # priced at zero and shown as "(free)".
     assert 'MODELS_DEV_URL = "https://models.dev/api.json"' in template
-    assert '"sync/nvidia/": "nvidia",' in template
-    assert '"sync/openrouter/": "openrouter",' in template
+    assert 'fetched_model_costs.get(alias)' in template
+    assert '"input_cost_per_token"' in template
+    assert '"sync/nvidia/": "nvidia",' not in template
     assert '"opencode-go/": "opencode-go",' in template
     assert 'if alias.endswith(":free"):' in template
     # "$${" is Terraform's escape for a literal "${": this script sits in a

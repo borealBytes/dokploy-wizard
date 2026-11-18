@@ -30,6 +30,9 @@ def root_install_env() -> RawEnvInput:
             "CLOUDFLARE_API_TOKEN": "token-123",
             "CLOUDFLARE_ZONE_ID": "zone-123",
             "CLOUDFLARE_TUNNEL_NAME": "openmerge-tunnel",
+            # Access OTP is opt-in; the synthetic root env opts in so contract
+            # tests keep exercising the gated path.
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
             "CLOUDFLARE_MOCK_ACCOUNT_OK": "true",
             "CLOUDFLARE_MOCK_ZONE_OK": "true",
             "DOKPLOY_API_URL": "https://dokploy.example.com",

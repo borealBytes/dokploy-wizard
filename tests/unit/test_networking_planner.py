@@ -218,6 +218,18 @@ class FakeCloudflareBackend:
         self.access_policies[app_id] = policy
         return policy
 
+    def delete_access_application(self, account_id: str, app_id: str) -> None:
+        del account_id
+        for domain, app in list(self.access_apps.items()):
+            if app.app_id == app_id:
+                del self.access_apps[domain]
+                self.access_policies.pop(app_id, None)
+
+    def delete_access_policy(self, account_id: str, app_id: str, policy_id: str) -> None:
+        del account_id, policy_id
+        self.access_policies.pop(app_id, None)
+
+
 
 def test_litellm_admin_access_planned_without_optional_packs() -> None:
     backend = FakeCloudflareBackend(

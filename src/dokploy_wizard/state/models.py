@@ -511,16 +511,6 @@ def _require_shared_core(payload: dict[str, Any], key: str) -> SharedCorePlan:
         raise StateValidationError(str(error)) from error
 
 
-def _require_optional_positive_int(payload: dict[str, Any], key: str) -> int | None:
-    value = payload.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, int) or value < 1:
-        msg = f"Expected positive integer or null for '{key}'."
-        raise StateValidationError(msg)
-    return value
-
-
 def _require_optional_string(payload: dict[str, Any], key: str) -> str | None:
     value = payload.get(key)
     if value is None:

@@ -169,6 +169,10 @@ class CloudflareBackend(Protocol):
         emails: tuple[str, ...],
     ) -> CloudflareAccessPolicy: ...
 
+    def delete_access_application(self, account_id: str, app_id: str) -> None: ...
+
+    def delete_access_policy(self, account_id: str, app_id: str, policy_id: str) -> None: ...
+
 
 class CloudflareApiBackend:
     """Default Cloudflare backend using live API calls or env-driven fixtures."""
@@ -714,6 +718,42 @@ class CloudflareApiBackend:
             },
         )
         return _parse_access_policy(payload, app_id=app_id)
+
+    def delete_access_application(self, account_id: str, app_id: str) -> None:
+        if self._mock_account_ok is not None:
+            domain = next(
+                (host for host, rid in self._mock_access_app_ids.items() if rid == app_id), None
+            )
+            if domain is not None:
+                del self._mock_access_app_ids[domain]
+                self._mock_access_policies.pop(app_id, None)
+            return
+        try:
+            self._request_json(
+                method="DELETE",
+                path=f"/accounts/{account_id}/access/apps/{app_id}",
+            )
+        except CloudflareError as error_value:
+            if "HTTP 404" in str(error_value):
+                # Already gone upstream; a disable pass must converge, not fail.
+                return
+            raise
+
+    def delete_access_policy(self, account_id: str, app_id: str, policy_id: str) -> None:
+        if self._mock_account_ok is not None:
+            policy = self._mock_access_policies.get(app_id)
+            if policy is not None and policy.policy_id == policy_id:
+                del self._mock_access_policies[app_id]
+            return
+        try:
+            self._request_json(
+                method="DELETE",
+                path=f"/accounts/{account_id}/access/apps/{app_id}/policies/{policy_id}",
+            )
+        except CloudflareError as error_value:
+            if "HTTP 404" in str(error_value):
+                return
+            raise
 
     def _request_json(
         self,

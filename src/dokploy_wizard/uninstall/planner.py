@@ -359,7 +359,13 @@ def build_pack_disable_plan(
             ACCESS_APPLICATION_RESOURCE_TYPE,
             ACCESS_POLICY_RESOURCE_TYPE,
         }:
-            if _access_scope_matches_any_hostname(resource.scope, removed_hostnames):
+            # Either a gated hostname left the stack (its app and policy go with
+            # it) or Access was disabled outright. The OTP provider itself is
+            # Cloudflare's account-level built-in, so only its ledger entry is
+            # dropped; the application and its policy are deleted upstream.
+            if access_disable_only or _access_scope_matches_any_hostname(
+                resource.scope, removed_hostnames
+            ):
                 deletions.append(
                     PlannedDeletion(
                         resource=resource,

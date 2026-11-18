@@ -128,14 +128,6 @@ _HOSTNAME_PHASES = {
     "coder": ("networking", "coder"),
     "coder-wildcard": ("networking", "coder"),
 }
-_OPTIONAL_PHASE_PACKS = {
-    "matrix": "matrix",
-    "nextcloud": "nextcloud",
-    "moodle": "moodle",
-    "docuseal": "docuseal",
-    "seaweedfs": "seaweedfs",
-    "coder": "coder",
-}
 _OUTBOUND_MAIL_ENV_KEYS = {
     "OUTBOUND_SMTP_HOSTNAME",
     "OUTBOUND_SMTP_FROM_ADDRESS",
@@ -394,6 +386,11 @@ def classify_modify_request(
     if set(removed_packs) & _LITELLM_CONSUMER_PHASES:
         phases_to_run.add("shared_core")
     phases_to_run.update(_hostname_change_phases(existing_desired, requested_desired))
+    if "ROOT_DOMAIN" in effective_changed_keys and _access_enabled(requested_desired):
+        # A domain rotation rewrites every hostname, including the derived LiteLLM
+        # admin hostname the Access application protects, so the policy has to be
+        # re-applied or the admin UI comes up unguarded on the new domain.
+        phases_to_run.add("cloudflare_access")
     if effective_changed_keys & _LITELLM_ADMIN_HOSTNAME_ENV_KEYS:
         # networking publishes the DNS record and the Access application for the admin
         # hostname, and shared_core re-renders the LiteLLM service that advertises it.
@@ -402,7 +399,10 @@ def classify_modify_request(
             phases_to_run.add("cloudflare_access")
     phases_to_run.update(_new_pack_phases(existing_desired, requested_desired))
 
-    if not phases_to_run and not tailscale_disable_only:
+    access_disable_only = bool(existing_desired.cloudflare_access_otp_emails) and not bool(
+        requested_desired.cloudflare_access_otp_emails
+    )
+    if not phases_to_run and not tailscale_disable_only and not access_disable_only:
         raise StateValidationError(
             "Requested modify operation changes values that are not modeled as supported "
             "runtime mutations in Task 11."
@@ -432,6 +432,89 @@ def classify_modify_request(
         start_phase=start_phase,
         raw_equivalent=raw_equivalent,
         desired_equivalent=desired_equivalent,
+    )
+
+
+def force_shared_core_refresh(
+    *,
+    existing_applied: AppliedStateCheckpoint,
+    desired_state: DesiredState,
+    reason: str,
+) -> LifecyclePlan:
+    """Plan used by ``upgrade --litellm`` when nothing else changed.
+
+    The image pin lives in state, so a tag bump leaves the raw env and the
+    desired state byte-identical; the same-target classifier would answer
+    ``noop`` and the freshly pinned image would never be rendered into the
+    compose app. This plan forces one real ``shared_core`` pass, which
+    re-renders compose from the pin and deploys it while every other phase
+    keeps its preserved evidence.
+    """
+
+    applicable_phases = applicable_phases_for(desired_state)
+    validate_checkpoint_contract(existing_applied, applicable_phases)
+    return LifecyclePlan(
+        mode="modify",
+        reasons=(reason,),
+        applicable_phases=applicable_phases,
+        phases_to_run=(_LITELLM_PHASE,),
+        preserved_phases=tuple(
+            phase for phase in applicable_phases if phase != _LITELLM_PHASE
+        ),
+        initial_completed_steps=applicable_phases,
+        start_phase=_LITELLM_PHASE,
+        raw_equivalent=True,
+        desired_equivalent=True,
+    )
+
+
+def force_phase_into_plan(plan: LifecyclePlan, *, phase: str, reason: str) -> LifecyclePlan:
+    """Make one already-completed phase run again inside an existing plan.
+
+    ``upgrade --litellm`` repins the shared-core image out of band, so the
+    classification it triggers may be ``noop`` (nothing in the env changed) or
+    a ``modify`` that never touches ``shared_core`` (some unrelated key moved).
+    Both answers would leave the freshly pinned image unreached; this helper
+    folds the phase into either plan shape, preserving every other phase's
+    evidence.
+    """
+
+    if phase in plan.phases_to_run:
+        return plan
+    if phase not in plan.applicable_phases:
+        return plan
+    if plan.mode == "noop":
+        preserved_phases = tuple(p for p in plan.applicable_phases if p != phase)
+        return replace(
+            plan,
+            mode="modify",
+            reasons=(reason,),
+            phases_to_run=(phase,),
+            preserved_phases=preserved_phases,
+            initial_completed_steps=_longest_valid_prefix(
+                plan.applicable_phases, set(preserved_phases) | {phase}
+            ),
+            start_phase=phase,
+        )
+    preserved_phases = tuple(p for p in plan.preserved_phases if p != phase)
+    phases_to_run = tuple(
+        sorted(
+            set(plan.phases_to_run) | {phase},
+            key=lambda item: plan.applicable_phases.index(item),
+        )
+    )
+    return replace(
+        plan,
+        reasons=(*plan.reasons, reason),
+        phases_to_run=phases_to_run,
+        preserved_phases=preserved_phases,
+        initial_completed_steps=_longest_valid_prefix(
+            plan.applicable_phases, set(preserved_phases) | {phase}
+        ),
+        start_phase=next(
+            (item for item in plan.applicable_phases if item in phases_to_run),
+            plan.start_phase,
+        ),
     )
 
 

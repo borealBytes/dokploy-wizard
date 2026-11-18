@@ -305,7 +305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     confirm_file=args.confirm_file,
                     reporter=reporter,
                 )
-                if args.litellm is not None
+                if args.litellm is not None and not args.check
                 else None
             )
             _run_remote_command(
@@ -427,7 +427,13 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             parser.error(
                 "uninstall requires --confirm-file for non-interactive remote confirmation."
             )
-    if command == "upgrade" and getattr(args, "litellm", None) is not None:
+    if (
+        command == "upgrade"
+        and getattr(args, "litellm", None) is not None
+        and not getattr(args, "check", False)
+    ):
+        # --check never applies anything, so a read-only drift run must not
+        # demand the apply-time confirm file.
         if getattr(args, "confirm_file", None) is None:
             parser.error(
                 "upgrade --litellm runs non-interactively and requires --confirm-file."

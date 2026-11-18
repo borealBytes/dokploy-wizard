@@ -1059,22 +1059,26 @@ def _litellm_exposed_aliases(*, litellm_service_name: str, master_key: str) -> t
         "print(json.dumps([m['id'] for m in"
         " json.load(urllib.request.urlopen(req, timeout=10))['data']]))"
     )
-    result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "-e",
-            f"DW_PROBE_KEY={master_key}",
-            container_name,
-            "python3",
-            "-c",
-            script,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "-e",
+                f"DW_PROBE_KEY={master_key}",
+                container_name,
+                "python3",
+                "-c",
+                script,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # A stalled docker exec is just another shape of "gateway unreachable".
+        return None
     if result.returncode != 0:
         return None
     try:

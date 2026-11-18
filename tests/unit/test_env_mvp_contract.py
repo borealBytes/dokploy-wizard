@@ -249,10 +249,11 @@ def test_subdomain_defaults_are_optional_and_overrides_are_honored() -> None:
     assert override_state.hostnames["coder"] == "dev.example.com"
 
 
-def test_cloudflare_access_otp_emails_default_from_admin_email_only_via_litellm_admin() -> None:
-    # Access also gates the LiteLLM admin hostname, so any stack can ask for it. The key
-    # used to be rejected outright when no AI pack was installed, which left the
-    # admin UI as the one public hostname nobody could put in front of a sign-in page.
+def test_cloudflare_access_otp_emails_are_opt_in_and_always_honored() -> None:
+    # Access also gates the LiteLLM admin hostname, so any stack can ask for it. The
+    # recipient list is purely opt-in now: every shipped surface has its own
+    # application login, and the wizard no longer invents a policy from the admin
+    # email behind the operator's back.
     explicit = resolve_desired_state(
         _litellm_env(
             PACKS="seaweedfs,coder",
@@ -261,12 +262,10 @@ def test_cloudflare_access_otp_emails_default_from_admin_email_only_via_litellm_
     )
     assert explicit.cloudflare_access_otp_emails == ("owner@example.com",)
 
-    # The implicit default from the stack admin email rides on the LiteLLM admin
-    # hostname being configured explicitly.
-    implicit = resolve_desired_state(
+    opted_out = resolve_desired_state(
         _litellm_env(DOKPLOY_ADMIN_EMAIL="owner@example.com")
     )
-    assert implicit.cloudflare_access_otp_emails == ("owner@example.com",)
+    assert opted_out.cloudflare_access_otp_emails == ()
     quiet = resolve_desired_state(
         _litellm_env(
             PACKS="seaweedfs,coder",

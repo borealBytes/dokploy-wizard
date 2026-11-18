@@ -602,3 +602,111 @@ def test_destroy_confirmation_rejects_weak_phrase(tmp_path: Path) -> None:
             mode="destroy",
             environment="nextcloud-stack",
         )
+
+
+def _access_ledger() -> OwnershipLedger:
+    return OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                "cloudflare_access_otp_provider", "provider-1", "account:acct:access-otp-provider"
+            ),
+            OwnedResource(
+                "cloudflare_access_application",
+                "app-1",
+                "account:acct:access-app:litellm.example.com",
+            ),
+            OwnedResource(
+                "cloudflare_access_policy",
+                "policy-1",
+                "account:acct:access-policy:litellm.example.com",
+            ),
+        ),
+    )
+
+
+def test_pack_disable_plan_tears_down_access_app_and_policy_when_opted_out() -> None:
+    existing = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+            },
+        )
+    )
+    requested = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"},
+        )
+    )
+
+    plan = build_pack_disable_plan(
+        existing_desired=existing,
+        requested_desired=requested,
+        ownership_ledger=_access_ledger(),
+    )
+
+    deleted = {item.resource.resource_type for item in plan.deletions}
+    # Application and policy come down upstream; the provider is Cloudflare's
+    # account-level built-in, so only its ledger entry goes away.
+    assert deleted == {
+        "cloudflare_access_application",
+        "cloudflare_access_policy",
+        "cloudflare_access_otp_provider",
+    }
+    assert plan.retained_resources == ()
+
+
+def test_shell_uninstall_backend_calls_cloudflare_for_access_deletions() -> None:
+    from dokploy_wizard.networking import CloudflareAccessApplication
+    from dokploy_wizard.uninstall import ShellUninstallBackend
+    from dokploy_wizard.uninstall.planner import PlannedDeletion
+
+    class RecordingCloudflare:
+        def __init__(self) -> None:
+            self.deleted_apps: list[tuple[str, str]] = []
+            self.deleted_policies: list[tuple[str, str, str]] = []
+
+        def find_access_application_by_domain(
+            self, account_id: str, domain: str
+        ) -> CloudflareAccessApplication:
+            del account_id
+            return CloudflareAccessApplication(
+                app_id="app-1",
+                name="x",
+                domain=domain,
+                app_type="self_hosted",
+                allowed_identity_provider_ids=("p",),
+            )
+
+        def delete_access_application(self, account_id: str, app_id: str) -> None:
+            self.deleted_apps.append((account_id, app_id))
+
+        def delete_access_policy(self, account_id: str, app_id: str, policy_id: str) -> None:
+            self.deleted_policies.append((account_id, app_id, policy_id))
+
+    backend = RecordingCloudflare()
+    deleter = ShellUninstallBackend(
+        RawEnvInput(format_version=1, values={"ROOT_DOMAIN": "example.com"}), cloudflare_backend=backend
+    )
+    ledger = _access_ledger()
+    app = ledger.resources[1]
+    policy = ledger.resources[2]
+
+    deleter.delete(PlannedDeletion(resource=policy, phase="cloudflare_access", policy="retain_safe"))
+    deleter.delete(PlannedDeletion(resource=app, phase="cloudflare_access", policy="retain_safe"))
+
+    assert backend.deleted_policies == [("acct", "app-1", "policy-1")]
+    assert backend.deleted_apps == [("acct", "app-1")]
+
+
+def test_shell_uninstall_backend_without_cloudflare_stays_ledger_only() -> None:
+    from dokploy_wizard.uninstall import ShellUninstallBackend
+    from dokploy_wizard.uninstall.planner import PlannedDeletion
+
+    deleter = ShellUninstallBackend(RawEnvInput(format_version=1, values={"ROOT_DOMAIN": "example.com"}))
+    app = _access_ledger().resources[1]
+    deleter.delete(PlannedDeletion(resource=app, phase="cloudflare_access", policy="retain_safe"))

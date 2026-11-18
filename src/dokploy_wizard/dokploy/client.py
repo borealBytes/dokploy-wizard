@@ -609,7 +609,10 @@ class DokployApiClient:
             payload = self._ai_provider_delete_session_fallback(ai_id)
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
-        if payload is not True and not isinstance(payload, bool):
+        if payload is not True:
+            # Anything but a bare ``true`` (false, null, an object) means the
+            # row was not removed; the reconciliation lists providers before
+            # deleting, so a missing row never reaches this call.
             raise DokployApiError("Dokploy ai.delete response must be true.")
 
 
@@ -660,7 +663,15 @@ class DokployApiClient:
                 # limiter trips; a cold reconcile can burst through the core
                 # auth limiter and recover in seconds, so a small bounded
                 # backoff beats failing a whole install on a transient.
-                time.sleep(_retry_after_seconds(exc))
+                retry_after = _retry_after_seconds(exc)
+                # Drain and close before sleeping: HTTPError carries the open
+                # response, and holding it across the backoff keeps the socket
+                # pinned for GC-dependent cleanup instead of deterministic.
+                try:
+                    exc.read()
+                finally:
+                    exc.close()
+                time.sleep(retry_after)
             except error.URLError as exc:
                 raise DokployApiError(f"Dokploy API request failed: {exc.reason}.") from exc
         if isinstance(response, list):

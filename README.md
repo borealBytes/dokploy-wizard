@@ -285,7 +285,7 @@ Current Cloudflare Access scope:
 
 - `litellm.<root-domain>` for LiteLLM admin access
 
-OTP recipients come from `CLOUDFLARE_ACCESS_OTP_EMAILS`. With the list unset, the default recipients key on `LITELLM_ADMIN_SUBDOMAIN`: when that target is configured, the Dokploy admin email is enrolled so the admin hostname is never created unguarded. The retired advisor hostnames no longer get Access apps; on older boxes that ran them, the Access apps and pack resources stay recorded in the ownership ledger and are removed on uninstall.
+OTP recipients come from `CLOUDFLARE_ACCESS_OTP_EMAILS`, and Access is opt-in: with the list unset no hostname is gated, because every surface the wizard ships (Dokploy, Coder, Nextcloud, Moodle, DocuSeal, the LiteLLM admin UI) already sits behind its own application login. Listing one or more emails turns the phase on for the LiteLLM admin hostname; clearing the list on a modify run takes the Access application and policy back down. The retired advisor hostnames no longer get Access apps; on older boxes that ran them, the Access apps and pack resources stay recorded in the ownership ledger and are removed on uninstall.
 
 Not behind Cloudflare Access in the current implementation:
 
@@ -365,7 +365,7 @@ Important details:
 - `PACKS` selects optional packs: `nextcloud`, `moodle`, `docuseal`, `seaweedfs`, `coder`, `matrix`, and `headscale`. Each pack also honors its matching `ENABLE_*` flag (e.g. `ENABLE_HEADSCALE=true`) instead of a `PACKS` entry.
 - Generated values such as Dokploy API keys, SeaweedFS secrets, and LiteLLM virtual keys are state-backed. Do not hand-fill them for normal installs.
 - `DOKPLOY_SUBDOMAIN` defaults to `dokploy`; set it only when you need a different Dokploy hostname.
-- `LITELLM_ADMIN_SUBDOMAIN` defaults to `litellm`; set it only when you need a different LiteLLM admin hostname. This hostname is the Cloudflare Access OTP target, so it also keys the default `CLOUDFLARE_ACCESS_OTP_EMAILS` fallback.
+- `LITELLM_ADMIN_SUBDOMAIN` defaults to `litellm`; set it only when you need a different LiteLLM admin hostname. The admin UI already has its own login; it becomes a Cloudflare Access OTP target only when you set `CLOUDFLARE_ACCESS_OTP_EMAILS`.
 - The remote proof helper copies `.install.env` explicitly to the remote host during validation.
 
 ## Current fresh-VPS proof status

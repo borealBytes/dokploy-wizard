@@ -61,6 +61,7 @@ from dokploy_wizard.lifecycle import (
     classify_install_request,
     classify_modify_request,
     execute_lifecycle_plan,
+    force_phase_into_plan,
     validate_preserved_phases,
 )
 from dokploy_wizard.litellm import LiteLLMAdminClient
@@ -969,6 +970,7 @@ def run_modify_flow(
     seaweedfs_backend: SeaweedFsBackend | None = None,
     coder_backend: CoderBackend | None = None,
     enforce_live_run_contamination_check: bool = False,
+    force_phase: str | None = None,
 ) -> dict[str, Any]:
     return _run_lifecycle_flow(
         env_file=env_file,
@@ -989,6 +991,7 @@ def run_modify_flow(
         allow_memory_shortfall=False,
         prompt_for_memory_shortfall=False,
         enforce_live_run_contamination_check=enforce_live_run_contamination_check,
+        force_phase=force_phase,
     )
 
 
@@ -1072,6 +1075,7 @@ def run_upgrade_flow(
         dry_run=False,
         raw_env=raw_env_input,
         enforce_live_run_contamination_check=True,
+        force_phase="shared_core",
     )
     return report
 
@@ -1162,6 +1166,7 @@ def _run_lifecycle_flow(
     allow_memory_shortfall: bool,
     prompt_for_memory_shortfall: bool,
     enforce_live_run_contamination_check: bool,
+    force_phase: str | None = None,
 ) -> dict[str, Any]:
     loaded_state = load_state_dir(state_dir)
     existing_state = validate_existing_state(loaded_state)
@@ -1192,6 +1197,15 @@ def _run_lifecycle_flow(
             requested_raw=raw_env,
             requested_desired=desired_state,
         )
+        if force_phase is not None:
+            lifecycle_plan = force_phase_into_plan(
+                lifecycle_plan,
+                phase=force_phase,
+                reason=(
+                    "Upgrade repinned shared-core images out of band; forcing one "
+                    "real shared_core pass so the compose app renders the new pin."
+                ),
+            )
         disable_plan = build_pack_disable_plan(
             existing_desired=loaded_state.desired_state,
             requested_desired=desired_state,
@@ -1461,7 +1475,11 @@ def _run_lifecycle_flow(
                 desired_state=desired_state,
                 ownership_ledger=ownership_ledger,
                 plan=disable_plan,
-                backend=ShellUninstallBackend(raw_env),
+                backend=(
+                    ShellUninstallBackend(raw_env, cloudflare_backend=CloudflareApiBackend(raw_env))
+                    if raw_env.values.get("CLOUDFLARE_API_TOKEN")
+                    else ShellUninstallBackend(raw_env)
+                ),
                 dry_run=False,
             )
             ownership_ledger = load_state_dir(state_dir).ownership_ledger or OwnershipLedger(

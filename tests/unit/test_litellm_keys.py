@@ -164,7 +164,8 @@ def test_ensure_litellm_generated_keys_repairs_existing_state_missing_dokploy_ai
         "coder-hermes": "sk-<redacted-coder-hermes-existing>",
         "coder-kdense": "sk-<redacted-coder-kdense-existing>",
         # State written by an older wizard carries consumer aliases the current
-        # build no longer issues keys for; repair must keep them untouched.
+        # build no longer issues keys for; repair prunes them so ghost names
+        # never reach the gateway key sync or the model-sync sidecar again.
         "retired-pack-consumer": "sk-<redacted-retired-pack-consumer-existing>",
     }
     legacy_payload = {
@@ -180,12 +181,11 @@ def test_ensure_litellm_generated_keys_repairs_existing_state_missing_dokploy_ai
 
     repaired_keys = ensure_litellm_generated_keys(state_dir)
 
-    assert set(repaired_keys.virtual_keys) == _EXPECTED_LITELLM_CONSUMERS | {
-        "retired-pack-consumer"
-    }
+    assert set(repaired_keys.virtual_keys) == _EXPECTED_LITELLM_CONSUMERS
+    assert "retired-pack-consumer" not in repaired_keys.virtual_keys
     assert repaired_keys.master_key == legacy_payload["master_key"]
     assert repaired_keys.salt_key == legacy_payload["salt_key"]
-    for consumer in ("coder-hermes", "coder-kdense", "retired-pack-consumer"):
+    for consumer in ("coder-hermes", "coder-kdense"):
         assert repaired_keys.virtual_keys[consumer] == legacy_virtual_keys[consumer]
     assert repaired_keys.virtual_keys["dokploy-ai"].startswith("sk-litellm-dokploy-ai-")
 

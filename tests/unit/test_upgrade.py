@@ -26,6 +26,7 @@ from dokploy_wizard.state import (
     write_litellm_image_pin,
 )
 from dokploy_wizard.upgrade import (
+    _POSTGRES_DUMP_TIMEOUT_SECONDS,
     UpgradeError,
     apply_litellm_image_pin_to_env,
     apply_litellm_pin,
@@ -96,6 +97,7 @@ class FakeProbe:
         self.exec_results = exec_results or {}
         self.container_names = container_names
         self.exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+        self.exec_timeouts: list[tuple[str, tuple[str, ...], int | None]] = []
 
     def service_image(self, service_name: str) -> str | None:
         return self.images.get(service_name)
@@ -103,9 +105,10 @@ class FakeProbe:
     def container_id_for_service(self, service_name: str) -> str | None:
         return self.containers.get(service_name)
 
-    def exec(self, container_id, argv, env={}):  # noqa: B006
+    def exec(self, container_id, argv, env={}, timeout_seconds=None):  # noqa: B006
         key = (container_id, tuple(argv))
         self.exec_calls.append((container_id, tuple(argv), dict(env)))
+        self.exec_timeouts.append((container_id, tuple(argv), timeout_seconds))
         if key in self.exec_results:
             return self.exec_results[key]
         return None
@@ -334,6 +337,13 @@ def test_capture_upgrade_snapshot_copies_state_and_dumps_postgres(tmp_path: Path
     assert not (snapshot_dir / "state" / "snapshots").exists()
     dump_path = Path(snapshot["postgres"]["dump_path"])
     assert gzip.decompress(dump_path.read_bytes()) == b"COPY DONE\n"
+    # The dump holds every shared-core secret: file and directory stay owner-only,
+    # and pg_dumpall runs under its own long timeout instead of the 60s default.
+    assert dump_path.stat().st_mode & 0o777 == 0o600
+    assert snapshot_dir.stat().st_mode & 0o777 == 0o700
+    assert probe.exec_timeouts == [
+        ("pg-container", ("pg_dumpall", "-U", "postgres"), _POSTGRES_DUMP_TIMEOUT_SECONDS)
+    ]
     container_id, argv, env = probe.exec_calls[0]
     assert container_id == "pg-container"
     assert argv == ("pg_dumpall", "-U", "postgres")
@@ -635,6 +645,9 @@ def test_run_upgrade_flow_apply_snapshots_pins_and_reuses_modify(tmp_path: Path)
     assert summary["modify"] == {"outcome": "applied"}
     assert len(modify_calls) == 1
     assert modify_calls[0]["dry_run"] is False
+    # The apply pass must force one real shared_core run; classification alone
+    # would answer noop because the pin lives outside the env.
+    assert modify_calls[0]["force_phase"] == "shared_core"
     assert modify_calls[0]["raw_env"] == _upgrade_raw_env()
 
     # The pin is now the effective source; env could disagree and lose anyway.

@@ -284,6 +284,44 @@ Nextcloud picker all display the alias id verbatim):
 - `src/dokploy_wizard/litellm/model_sync.py`: field renames + `cost_catalog_*`
   on the opencode-go source; README documents the new scheme and the cost fields.
 
+## Review fixes (post-G5, `ocr` pass over the full branch)
+
+An AI code review (`ocr` v1.13.12 over local sglang, `103e397..HEAD`) produced 30 findings;
+triage confirmed seven real defects plus a cheap-hardening cluster, and rejected the rest
+(style claims that `ruff` disproves, deliberate sync-cost-propagation scope, Access
+scaffolding that earns its keep). Landed as one `fix:` batch:
+
+- **Apply-noop upgrade defect** (the review's most serious hit): `run_upgrade_flow` passed
+  the apply through modify classification, and the pin file lives outside the env, so a
+  re-pin alone classified `noop` and redeployed nothing. The earlier live proof only passed
+  because the box already ran the target tag. Fix: `force_phase_into_plan()`
+  (`lifecycle/changes.py`) promotes `noop`→`modify` (or folds into an existing plan) for a
+  named phase; `run_upgrade_flow` forces `shared_core`. The hash-clear remains
+  belt-and-braces.
+- **OTP is opt-in** (user call): every shipped surface has its own login, and the admin was
+  paying OTP + app-login double-hop. `_resolve_access_otp_emails` no longer infers from
+  `DOKPLOY_ADMIN_EMAIL`; `CLOUDFLARE_ACCESS_OTP_EMAILS` alone turns the phase on. The
+  machinery stays for future surfaces without their own login. Opting out on a modify run
+  takes the Access application and policy down via the API (the OTP provider is Cloudflare's
+  undeletable account built-in, so its ledger entry is dropped without an upstream call),
+  and the classification guard treats access-disable-only as a disable-only modify.
+- **ROOT_DOMAIN rotation + Access**: the phase is scheduled when opted in, so the policy
+  re-points at the derived admin hostname on the new domain instead of gating a ghost.
+- **Timeouts/`TimeoutExpired`**: `run` helpers around dokploy/remote probing catch it and
+  report as failures instead of aborting the flow; the snapshot `pg_dumpall` exec runs under
+  its own long timeout rather than the 60 s default.
+- **Snapshot hygiene**: `pre-upgrade-*` directories land `0700`, dumps `0600` — the dump
+  holds every shared-core secret.
+- **`ai.delete` strictness**, 429 body close on the key API, `stable_tag_sort_key` ordering
+  fix, generated-key state prunes consumer aliases the build no longer issues, coder
+  `list` env passthrough, and `--check` no longer demands a confirm file (read-only).
+- **Dead code**: retired `_OPTIONAL_PHASE_PACKS`, nvidia env helpers,
+  `_require_optional_positive_int`.
+- **Picker costs in templates**: both consolidated coder templates now read
+  `model_info.input_cost_per_token`/`output_cost_per_token` echoed by the gateway's
+  `/v1/models` (Group 5 attaches them), so flat `sync/<provider>-<model>` aliases price
+  without reverse-mapping; the registry fallback map keeps only passthrough prefixes.
+
 ## Phase 6 proof log
 
 - Attempt 1 (commit `7b106d4`+ tree): wrapper invoked with system `python3` →

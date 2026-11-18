@@ -199,12 +199,6 @@ def _normalize_litellm_nvidia_ref(model_ref: str) -> str:
     return f"nvidia/{model_ref}"
 
 
-def _litellm_nvidia_base_url(values: dict[str, str]) -> str | None:
-    return _get_configured_value(values, "LITELLM_NVIDIA_BASE_URL") or _get_configured_value(
-        values, "NVIDIA_BASE_URL"
-    )
-
-
 def _validate_litellm_nvidia_env(values: dict[str, str]) -> None:
     configured_keys = {
         key
@@ -269,12 +263,6 @@ def _canonical_ai_default_provider(provider: str) -> str:
     normalized = provider.strip().lower()
     aliases = {"opencode": "opencode-go"}
     return aliases.get(normalized, normalized)
-
-
-def _litellm_nvidia_configured(values: dict[str, str]) -> bool:
-    return _has_configured_value(values, "LITELLM_NVIDIA_API_KEY") and _litellm_nvidia_base_url(
-        values
-    ) is not None
 
 
 def _resolve_dokploy_api_url(values: dict[str, str]) -> str | None:
@@ -372,13 +360,12 @@ def _parse_bool(raw_value: str, *, key: str) -> bool:
 def _resolve_access_otp_emails(values: dict[str, str]) -> tuple[str, ...]:
     raw_value = _get_configured_value(values, "CLOUDFLARE_ACCESS_OTP_EMAILS") or ""
     if raw_value == "":
-        # The default is keyed on the Access targets that exist without an explicit
-        # list: today only the LiteLLM admin hostname. An unset list on a stack
-        # without that target stays empty rather than inventing a policy.
-        if _has_configured_value(values, "LITELLM_ADMIN_SUBDOMAIN"):
-            admin_email = values.get("DOKPLOY_ADMIN_EMAIL", "").strip().lower()
-            if admin_email != "" and "@" in admin_email:
-                return (admin_email,)
+        # Access OTP is opt-in. Every public surface the wizard ships today
+        # (Dokploy, Coder, Nextcloud, Moodle, DocuSeal, the LiteLLM admin UI)
+        # sits behind its own application login, so wrapping them in Cloudflare
+        # Access would only add a second, weaker identity gate. Operators who
+        # want the extra layer for a future unauthenticated surface list their
+        # emails here and the cloudflare_access phase takes over.
         return ()
     items = tuple(sorted({item.strip().lower() for item in raw_value.split(",") if item.strip()}))
     invalid = [item for item in items if "@" not in item]

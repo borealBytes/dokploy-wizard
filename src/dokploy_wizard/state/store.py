@@ -450,8 +450,6 @@ def load_state_dir(state_dir: Path) -> LoadedState:
     )
 
 
-
-
 def write_inspection_snapshot(
     state_dir: Path, raw_input: RawEnvInput, desired_state_snapshot: dict[str, Any]
 ) -> None:
@@ -499,8 +497,6 @@ def ensure_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys:
     generated_keys = _build_litellm_generated_keys()
     write_litellm_generated_keys(state_dir, generated_keys)
     return generated_keys
-
-
 
 
 def load_seaweedfs_generated_secrets(state_dir: Path) -> SeaweedFsGeneratedSecrets | None:
@@ -561,7 +557,14 @@ def _repair_litellm_generated_keys(existing: LiteLLMGeneratedKeys) -> LiteLLMGen
     if not litellm_key_uses_virtual_key_format(master_key):
         master_key = _generate_secret(prefix=LITELLM_GENERATED_MASTER_KEY_PREFIX)
 
-    virtual_keys = dict(existing.virtual_keys)
+    # Prune entries for consumers the wizard no longer provisions (retired
+    # packs); keeping them would hand ghost names to the gateway key sync and
+    # to the model-sync sidecar forever.
+    virtual_keys = {
+        name: value
+        for name, value in existing.virtual_keys.items()
+        if name in LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES
+    }
     for consumer, prefix in LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES.items():
         current_key = virtual_keys.get(consumer)
         if current_key is not None and litellm_key_uses_virtual_key_format(current_key):
@@ -574,7 +577,6 @@ def _repair_litellm_generated_keys(existing: LiteLLMGeneratedKeys) -> LiteLLMGen
         salt_key=existing.salt_key,
         virtual_keys=virtual_keys,
     )
-
 
 
 def _repair_seaweedfs_generated_secrets(

@@ -10,6 +10,7 @@ from dokploy_wizard.lifecycle import (
     LifecyclePlan,
     applicable_phases_for,
     classify_modify_request,
+    force_phase_into_plan,
 )
 from dokploy_wizard.packs.catalog import (
     get_mutable_pack_env_keys,
@@ -204,6 +205,90 @@ def test_modify_access_email_change_reruns_access_phase() -> None:
 
     assert plan.start_phase == "cloudflare_access"
     assert plan.phases_to_run == ("cloudflare_access",)
+
+
+def test_modify_disabling_cloudflare_access_is_disable_only() -> None:
+    # Dropping the recipient list is the supported opt-out: no phase may re-run
+    # (the Access phase is no longer applicable), but the plan must classify
+    # cleanly so the disable plan can tear the existing records down.
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_CODER": "true",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "ENABLE_CODER": "true",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "coder",
+                "cloudflare_access",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert plan.phases_to_run == ()
+    assert "cloudflare_access" not in plan.applicable_phases
+
+
+def test_root_domain_rotation_reapplies_cloudflare_access_when_enabled() -> None:
+    # A domain rotation rewrites the derived admin hostname; with Access opted
+    # in, the phase has to re-run or the policy keeps pointing at the old domain.
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "old.example.com",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "new.example.com",
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=applicable_phases_for(existing_desired),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert "networking" in plan.phases_to_run
+    assert "cloudflare_access" in plan.phases_to_run
 
 
 def test_modify_rejects_legacy_checkpoint_contract_even_when_steps_match_old_prefix() -> None:
@@ -1137,3 +1222,77 @@ def test_modify_schedules_shared_core_for_projection_drift_and_unfinished_tail()
     assert plan.mode == "modify"
     assert plan.phases_to_run == ("shared_core", "coder")
     assert "nextcloud" in plan.preserved_phases
+
+
+def _noop_plan(applicable: tuple[str, ...]) -> LifecyclePlan:
+    return LifecyclePlan(
+        mode="noop",
+        reasons=("Requested raw input and desired state match the persisted target.",),
+        applicable_phases=applicable,
+        phases_to_run=(),
+        preserved_phases=applicable,
+        initial_completed_steps=applicable,
+        start_phase=None,
+        raw_equivalent=True,
+        desired_equivalent=True,
+    )
+
+
+_FULL_APPLICABLE = (
+    "preflight",
+    "dokploy_bootstrap",
+    "networking",
+    "shared_core",
+    "coder",
+    "cloudflare_access",
+)
+
+
+def test_force_phase_promotes_noop_plan_into_single_shared_core_pass() -> None:
+    plan = force_phase_into_plan(
+        _noop_plan(_FULL_APPLICABLE),
+        phase="shared_core",
+        reason="upgrade repinned the shared-core image",
+    )
+
+    assert plan.mode == "modify"
+    assert plan.phases_to_run == ("shared_core",)
+    assert plan.start_phase == "shared_core"
+    assert set(plan.preserved_phases) == set(_FULL_APPLICABLE) - {"shared_core"}
+    assert plan.initial_completed_steps == _FULL_APPLICABLE
+    assert plan.reasons == ("upgrade repinned the shared-core image",)
+
+
+def test_force_phase_folds_into_existing_modify_plan_without_duplicating() -> None:
+    existing = LifecyclePlan(
+        mode="modify",
+        reasons=("docuseal SMTP moved",),
+        applicable_phases=_FULL_APPLICABLE,
+        phases_to_run=("coder",),
+        preserved_phases=(
+            "preflight",
+            "dokploy_bootstrap",
+            "networking",
+            "shared_core",
+            "cloudflare_access",
+        ),
+        initial_completed_steps=("preflight", "dokploy_bootstrap", "networking"),
+        start_phase="coder",
+        raw_equivalent=False,
+        desired_equivalent=False,
+    )
+
+    plan = force_phase_into_plan(existing, phase="shared_core", reason="forced")
+
+    assert plan.mode == "modify"
+    assert plan.phases_to_run == ("shared_core", "coder")
+    assert "shared_core" not in plan.preserved_phases
+    assert plan.reasons == ("docuseal SMTP moved", "forced")
+    # Forcing an already-scheduled phase is a no-op.
+    assert force_phase_into_plan(plan, phase="shared_core", reason="forced") is plan
+
+
+def test_force_phase_ignores_phases_outside_applicable_set() -> None:
+    noop = _noop_plan(("preflight", "dokploy_bootstrap", "networking", "shared_core"))
+
+    assert force_phase_into_plan(noop, phase="coder", reason="x") is noop

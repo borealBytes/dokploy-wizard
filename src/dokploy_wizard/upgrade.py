@@ -113,13 +113,27 @@ def parse_image_ref(raw: str) -> ImageRef | None:
     return ImageRef(registry=registry, repository=repository, tag=tag, digest=digest)
 
 
-def stable_tag_sort_key(tag: str) -> tuple[int, int, int, tuple[str, ...]] | None:
+def stable_tag_sort_key(
+    tag: str,
+) -> tuple[int, int, int, int, tuple[tuple[int, int, str], ...]] | None:
+    """Ascending sort key for ``-stable`` tags: newest compares largest.
+
+    A plain ``vX.Y.Z-stable`` outranks every qualifier variant of the same
+    version (release candidates are older by definition), and qualifier
+    segments compare numerically, so ``rc.10`` sits above ``rc.2``.
+    """
+
     match = _LITELLM_STABLE_TAG_RE.match(tag)
     if match is None:
         return None
     major, minor, patch, suffix = match.groups()
-    suffix_parts = tuple(re.split(r"[.\-]", suffix or ""))
-    return (int(major), int(minor), int(patch), suffix_parts)
+    if suffix is None:
+        return (int(major), int(minor), int(patch), 1, ())
+    parts = tuple(
+        (1, int(part), "") if part.isdigit() else (0, 0, part)
+        for part in re.split(r"[.\-]", suffix)
+    )
+    return (int(major), int(minor), int(patch), 0, parts)
 
 
 class ImageRegistry(Protocol):
@@ -277,7 +291,11 @@ class RuntimeProbe(Protocol):
     def container_id_for_service(self, service_name: str) -> str | None: ...
 
     def exec(
-        self, container_id: str, argv: Sequence[str], env: Mapping[str, str] = {}
+        self,
+        container_id: str,
+        argv: Sequence[str],
+        env: Mapping[str, str] = {},
+        timeout_seconds: int = _EXEC_TIMEOUT_SECONDS,
     ) -> tuple[int, str, str] | None: ...
 
     def list_container_names(self) -> tuple[str, ...]: ...
@@ -360,7 +378,11 @@ class DockerCliProbe:
         return None
 
     def exec(
-        self, container_id: str, argv: Sequence[str], env: Mapping[str, str] = {}
+        self,
+        container_id: str,
+        argv: Sequence[str],
+        env: Mapping[str, str] = {},
+        timeout_seconds: int = _EXEC_TIMEOUT_SECONDS,
     ) -> tuple[int, str, str] | None:
         command = ["docker", "exec"]
         for key, value in env.items():
@@ -375,7 +397,7 @@ class DockerCliProbe:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=_EXEC_TIMEOUT_SECONDS,
+                timeout=timeout_seconds,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -390,8 +412,14 @@ class DockerCliProbe:
 
 def _run_docker(command: list[str]) -> subprocess.CompletedProcess[str] | None:
     try:
-        return subprocess.run(command, check=False, capture_output=True, text=True)
-    except OSError:
+        return subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_EXEC_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return None
 
 
@@ -656,7 +684,7 @@ def _build_workspace_section(*, probe: RuntimeProbe, desired_state: DesiredState
     except json.JSONDecodeError:
         return {
             "available": False,
-            "detail": "coder workspaces ls returned unparseable output.",
+            "detail": "coder list returned unparseable output.",
             "workspaces": [],
         }
     workspaces = []
@@ -704,7 +732,7 @@ def capture_upgrade_snapshot(
     snapshot_dir = (
         state_dir / SNAPSHOTS_DIR_NAME / f"pre-upgrade-{timestamp.strftime('%Y%m%dT%H%M%SZ')}"
     )
-    snapshot_dir.mkdir(parents=True, exist_ok=False)
+    snapshot_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
     snapshot: dict[str, Any] = {
         "captured_at": timestamp.isoformat(),
         "hermes": _capture_hermes_backup_note(probe=probe),
@@ -740,7 +768,10 @@ def _capture_postgres_dump(
         }
     password = _shared_core_generated_secret(f"{postgres_service}-root-password")
     result = probe.exec(
-        container_id, ("pg_dumpall", "-U", "postgres"), env={"PGPASSWORD": password}
+        container_id,
+        ("pg_dumpall", "-U", "postgres"),
+        env={"PGPASSWORD": password},
+        timeout_seconds=_POSTGRES_DUMP_TIMEOUT_SECONDS,
     )
     if result is None:
         return {"status": "failed", "detail": "pg_dumpall could not execute."}
@@ -752,6 +783,8 @@ def _capture_postgres_dump(
         }
     dump_path = snapshot_dir / "shared-core-postgres.sql.gz"
     dump_path.write_bytes(gzip.compress(stdout.encode("utf-8")))
+    # The dump holds every hash and key in the shared core; keep it root-only.
+    dump_path.chmod(0o600)
     return {"dump_path": str(dump_path), "status": "captured"}
 
 
