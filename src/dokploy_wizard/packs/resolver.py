@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Mapping
 
 from dokploy_wizard.packs.catalog import (
+    PackDefinition,
     get_known_pack_names,
     get_pack_definition,
     iter_pack_catalog,
@@ -82,6 +84,8 @@ def _parse_explicit_pack_intent(values: Mapping[str, str]) -> tuple[set[str], se
         if raw_value is None:
             continue
         enabled = _parse_bool(raw_value, pack.env_flag)
+        if pack.env_flag_deprecated:
+            _warn_deprecated_env_flag(pack)
         if enabled:
             explicit_selected.add(pack.name)
             explicit_disabled.discard(pack.name)
@@ -90,6 +94,17 @@ def _parse_explicit_pack_intent(values: Mapping[str, str]) -> tuple[set[str], se
             explicit_selected.discard(pack.name)
 
     return explicit_selected, explicit_disabled
+
+
+def _warn_deprecated_env_flag(pack: PackDefinition) -> None:
+    print(
+        (
+            f"Warning: the {pack.env_flag} flag is deprecated; list '{pack.name}' in PACKS "
+            f"instead. The flag still resolves the '{pack.name}' pack this release and stops "
+            "being read in the next one."
+        ),
+        file=sys.stderr,
+    )
 
 
 def _expand_dependencies(

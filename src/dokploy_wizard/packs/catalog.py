@@ -27,6 +27,11 @@ class PackDefinition:
     mutable_resource_keys: tuple[str, ...]
     enabled_features: tuple[str, ...]
     resource_profile: Literal["core", "recommended"]
+    # Marks a pack that entered the catalog through the legacy `ENABLE_*` flag
+    # path and is now canonically selected through a `PACKS` entry. The flag
+    # keeps folding into the enabled set, but the resolver stamps a deprecation
+    # note on stderr; the flag stops being read one release after marking.
+    env_flag_deprecated: bool = False
 
 
 _PACK_CATALOG: tuple[PackDefinition, ...] = (
@@ -197,6 +202,7 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         # inside the overlay network only (git-over-HTTPS rides the public
         # route; publishing 2222 is an operator choice, not a wizard default).
         resource_profile="recommended",
+        env_flag_deprecated=True,
     ),
     PackDefinition(
         name="coder",

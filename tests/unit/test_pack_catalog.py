@@ -37,6 +37,12 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     ]
     assert get_pack_definition("headscale").default_enabled is False
     assert get_pack_definition("seaweedfs").slot is None
+    # Gitea is canonically selected through a PACKS entry; its legacy env flag
+    # lives one release longer as a deprecated alias (the resolver stamps the
+    # note). Exactly one pack may wear the marker — it is a migration aid, not
+    # a permanent second selection path.
+    assert get_pack_definition("gitea").env_flag_deprecated is True
+    assert [pack.name for pack in iter_pack_catalog() if pack.env_flag_deprecated] == ["gitea"]
     # The S3 endpoint is internal-only: the pack models no public hostname.
     assert get_pack_definition("seaweedfs").hostnames == ()
     assert get_pack_definition("filex").depends_on == ("seaweedfs",)
@@ -289,7 +295,7 @@ def test_resolver_preserves_explicit_nested_coder_wildcard_opt_in() -> None:
 def test_resolver_full_pack_list_has_no_hostname_collisions() -> None:
     selection = resolve_pack_selection(
         {
-            "PACKS": "nextcloud,seaweedfs,filex,coder,docuseal,matrix",
+            "PACKS": "nextcloud,seaweedfs,filex,gitea,coder,docuseal,matrix",
         },
         root_domain="example.com",
     )
@@ -298,6 +304,7 @@ def test_resolver_full_pack_list_has_no_hostname_collisions() -> None:
         "coder",
         "docuseal",
         "filex",
+        "gitea",
         "matrix",
         "nextcloud",
         "seaweedfs",
@@ -308,6 +315,7 @@ def test_resolver_full_pack_list_has_no_hostname_collisions() -> None:
         "coder-wildcard": "*.example.com",
         "docuseal": "docuseal.example.com",
         "filex": "filex.example.com",
+        "gitea": "gitea.example.com",
         "matrix": "matrix.example.com",
         "nextcloud": "nextcloud.example.com",
         "onlyoffice": "office.example.com",
@@ -322,7 +330,7 @@ def test_full_pack_lifecycle_orders_application_packs_after_shared_core() -> Non
             values={
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
-                "PACKS": "nextcloud,seaweedfs,coder,docuseal,matrix",
+                "PACKS": "nextcloud,seaweedfs,coder,docuseal,matrix,gitea",
             },
         )
     )
@@ -341,6 +349,7 @@ def test_full_pack_lifecycle_orders_application_packs_after_shared_core() -> Non
         "matrix",
         "nextcloud",
         "docuseal",
+        "gitea",
         "coder",
     )
     for application_pack in (
@@ -348,6 +357,7 @@ def test_full_pack_lifecycle_orders_application_packs_after_shared_core() -> Non
         "matrix",
         "nextcloud",
         "docuseal",
+        "gitea",
         "coder",
     ):
         assert phases.index("shared_core") < phases.index(application_pack)

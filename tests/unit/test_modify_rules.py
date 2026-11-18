@@ -958,8 +958,7 @@ def test_modify_enabling_gitea_schedules_shared_core_and_gitea_phases() -> None:
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex",
-            "ENABLE_GITEA": "true",
+            "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex,gitea",
         }
     )
 
@@ -986,6 +985,54 @@ def test_modify_enabling_gitea_schedules_shared_core_and_gitea_phases() -> None:
     assert plan.mode == "modify"
     assert set(plan.phases_to_run) >= {"shared_core", "gitea"}
     assert "filex" in plan.preserved_phases
+
+
+def test_modify_gitea_flag_to_packs_alias_flip_is_noop() -> None:
+    """An env-form flip from the deprecated flag to a PACKS entry is a noop.
+
+    The box proof for the Gitea conversion relies on this: the applied state
+    was installed with ENABLE_GITEA=true, and re-running modify with the same
+    intent spelled as 'gitea' inside PACKS must classify noop against the same
+    applied fingerprint — the alias folds into the identical enabled set, so
+    nothing on the box changes except where the intent is written down.
+    """
+    existing_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex",
+            "ENABLE_GITEA": "true",
+        }
+    )
+    requested_raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex,gitea",
+        }
+    )
+
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_modify_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=tuple(
+                phase
+                for phase in applicable_phases_for(existing_desired)
+                if phase != "cloudflare_access"
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "noop"
 
 
 def test_modify_litellm_desired_only_local_alias_removal_reruns_consumers() -> None:

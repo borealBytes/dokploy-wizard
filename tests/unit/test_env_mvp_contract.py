@@ -180,8 +180,9 @@ def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> No
     install_min_keys, _model_shape, safe_values = _load_install_min_env_shape()
     active_packs = safe_values["PACKS"].split(",")
     # The minimal class-proof stack is Coder plus the shared services it needs
-    # and SeaweedFS object storage; heavier packs stay opt-in.
-    required_proof_packs = ["seaweedfs", "coder"]
+    # and SeaweedFS object storage, with Gitea riding that same storage layer
+    # (no new service class of its own); heavier packs stay opt-in.
+    required_proof_packs = ["seaweedfs", "coder", "gitea"]
     optional_proof_packs = {"nextcloud"}
 
     assert active_packs[: len(required_proof_packs)] == required_proof_packs

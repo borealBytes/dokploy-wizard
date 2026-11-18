@@ -357,6 +357,21 @@ def test_resolve_desired_state_accepts_litellm_routing_env_and_rejects_removed_p
 
     assert "coder" in desired_state.enabled_packs
 
+    # Gitea is a first-class PACKS pack: the bare name resolves, and the
+    # dependency expansion pulls its storage layer in with it.
+    gitea_packs_env = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "gitea",
+        }
+    )
+
+    gitea_state = resolve_desired_state(gitea_packs_env)
+
+    assert gitea_state.enabled_packs == ("gitea", "seaweedfs")
+    assert gitea_state.hostnames["gitea"] == "gitea.example.com"
+
     removed_pack_env = _raw_input(
         {
             "STACK_NAME": "wizard-stack",
@@ -369,6 +384,44 @@ def test_resolve_desired_state_accepts_litellm_routing_env_and_rejects_removed_p
         resolve_desired_state(removed_pack_env)
 
     assert "Unknown pack selection(s) in PACKS" in str(exc_info.value)
+
+
+def test_gitea_env_flag_alias_resolves_identical_to_packs_form(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The deprecated ENABLE_GITEA alias is a presentation difference only:
+    # both forms must fold into the exact same DesiredState, so the uninstall
+    # fingerprint gate and modify noop classification survive an env-form flip
+    # untouched, and the alias buys the operator one release, not a migration.
+    flag_state = resolve_desired_state(
+        _raw_input(
+            {
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex",
+                "ENABLE_GITEA": "true",
+            }
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "Warning: the ENABLE_GITEA flag is deprecated" in captured.err
+    assert "list 'gitea' in PACKS" in captured.err
+
+    packs_state = resolve_desired_state(
+        _raw_input(
+            {
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex,gitea",
+            }
+        )
+    )
+
+    # The PACKS form is the silent, canonical path.
+    assert capsys.readouterr().err == ""
+    assert packs_state.to_dict() == flag_state.to_dict()
+    assert packs_state.fingerprint() == flag_state.fingerprint()
 
 
 def test_modify_coder_runtime_env_change_reruns_only_coder_phase() -> None:
@@ -2781,6 +2834,36 @@ def test_guided_install_generates_seaweedfs_credentials(monkeypatch: pytest.Monk
         "SEAWEEDFS_ACCESS_KEY": "seaweed-generated",
         "SEAWEEDFS_SECRET_KEY": "seaweed-secret-generated",
     }
+
+
+def test_prompt_for_pack_selection_lists_gitea_after_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        prompt_module,
+        "_generate_credential",
+        lambda prefix: f"{prefix}-generated",
+    )
+    messages: list[str] = []
+    answers = iter(["n", "n", "y", "y"])
+
+    def scripted_prompt(message: str) -> str:
+        messages.append(message)
+        return next(answers)
+
+    selection = prompt_module.prompt_for_pack_selection(
+        scripted_prompt,
+        include_headscale_prompt=False,
+    )
+
+    assert selection.selected_packs == ("gitea", "seaweedfs")
+    # Gitea is asked after SeaweedFS: the forge rides the bucket, so the
+    # storage decision (and its credentials) are already on the table when
+    # the git forge joins the selection.
+    storage_index = next(index for index, m in enumerate(messages) if "SeaweedFS" in m)
+    gitea_index = next(index for index, m in enumerate(messages) if "Gitea" in m)
+    assert gitea_index > storage_index
+    assert selection.seaweedfs_access_key == "seaweed-generated"
 
 
 def test_guided_install_prints_generated_seaweedfs_credentials(

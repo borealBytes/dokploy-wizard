@@ -98,6 +98,14 @@ def prompt_for_pack_selection(
         seaweedfs_secret_key = _generate_credential(prefix="seaweed-secret")
         generated_secrets["SEAWEEDFS_ACCESS_KEY"] = seaweedfs_access_key
         generated_secrets["SEAWEEDFS_SECRET_KEY"] = seaweedfs_secret_key
+    # Gitea is a first-class pack selected through PACKS (the legacy
+    # ENABLE_GITEA flag is a deprecated one-release alias). It rides the
+    # SeaweedFS bucket for LFS/attachments: a yes here pulls the storage layer
+    # in through dependency expansion even when the answer above was no, and
+    # the deploy then synthesizes the S3 credentials into state like any other
+    # expansion-enabled storage pack.
+    if _prompt_yes_no(prompt, "Enable Gitea? [Y/n]: ", default=True):
+        selected.append("gitea")
 
     return PromptSelection(
         selected_packs=tuple(sorted(selected)),

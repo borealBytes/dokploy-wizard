@@ -753,8 +753,10 @@ tests + a fresh remote proof:
 ## Phase 7 (2026-11): Gitea pack
 
 ### Shape
-- New pack `gitea` in the catalog (`ENABLE_GITEA`, default off, subdomain `gitea`,
-  `depends_on=("seaweedfs",)`, `shared_core_requirements=("postgres",)`). Full lifecycle
+- New pack `gitea` in the catalog (`PACKS` name `gitea`, default off, subdomain `gitea`,
+  `depends_on=("seaweedfs",)`, `shared_core_requirements=("postgres",)`; the launch-era
+  `ENABLE_GITEA` flag lives on one release longer as a deprecated alias — the resolver
+  folds it into the same enabled set and stamps a stderr deprecation note). Full lifecycle
   wiring: phase after filex, drift handler mirroring filex, uninstall rules (service 34 /
   data 35, phase ordered after filex and before seaweedfs so the bucket outlives the app),
   service-verification candidate (`_verify_current_application`), inspect-state candidate.
