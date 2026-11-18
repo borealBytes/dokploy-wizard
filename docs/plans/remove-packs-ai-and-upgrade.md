@@ -1167,6 +1167,27 @@ repairs, and a plain noop. It found and drove the fixes for two real bugs
   `mode: noop` (19.8 s). Slice 5 re-verify after both passes: minted key
   present and hash-matches-derived, issuer raws RAW, Gitea identity lane and
   workspace ssh/git artifacts healthy.
-- The deny-lane live proof (a second Coder user signing up interactively) is
-  still open; the admin-exemption half of the policy is box-proven and the
-  sweep/upgrade lanes are unit-pinned.
+- Deny-lane live proof (showmeseewhy, second Coder user `assistant` created via
+  API + workspace `denyproof` on the default template):
+  - Boot lane minted `assistant-denyproof` with models
+    `["dokploy-wizard-model-access-denied"]` — **DENIED** verdict,
+    token-hash-matches-derived, owner/workspace metadata present, boot stayed
+    healthy (policy FALSE honestly denies at the gateway without breaking
+    startup).
+  - Allowlist flip to `assistant` → **modify41**: `mode: modify`, phases
+    exactly `shared_core`+`coder`, 161.4 s, zero WARNINGs. Post-check: the mint
+    re-scoped to GRANTED (`sync/*`,`sync/default-chat`) admin-side with
+    **no workspace reboot** — `latest_build.id` byte-identical to the boot-time
+    build — and the seeded admin's mint stayed GRANTED throughout (exemption).
+  - Allowlist reverted to empty → **modify42** re-demoted the mint to the deny
+    sentinel admin-side (again no reboot, no WARNINGs); **modify43** →
+    `mode: noop` (24.4 s).
+  - Cleanup: workspace deleted (owner-CLI), Coder user and gitea account
+    removed, orphaned mint deleted via `/key/delete`; slice5 re-verify after
+    cleanup fully green — box is back at exactly its steady-state roster.
+  - Build-API quirks recorded for this Coder v2.38.x-class box: `/api/v2/
+    templates` returns a bare array; admin create-user requires
+    `organization_ids` + inline password with `login_type: "password"` (bypass
+    rejected); delete-user is `DELETE /api/v2/users/{id}?convert_to_user=false`
+    (legacy `?user_id=` route 405); `POST /api/v2/workspaces` 405 — workspaces
+    are created through the in-container `coder create` CLI lane instead.
