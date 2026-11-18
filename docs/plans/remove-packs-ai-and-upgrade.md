@@ -259,6 +259,56 @@ duplicates; prune wizard-created leftovers.
   volumes) before attempt 4; AGENTS.md recovery note now spells this out.
   Operator lesson: never pipe the remote helper through `tail` for live runs —
   the pipe buffers everything and the run looks silent even while streaming.
+- Attempt 4: install passed bootstrap + networking, died in `shared_core` at
+  provider seeding with `Dokploy ai.create response must be an object.` Live
+  probe against Dokploy v0.31.4 established the real API-key surface shapes:
+  `/api/ai.create` and `/api/ai.update` answer **`[]`** (empty array) after
+  writing the row, `/api/ai.getAll` omits `apiKey` entirely, and
+  `/api/ai.delete` answers bare `true`. The API-key client's dict assertion
+  was wrong for upstream. Fix (commit `1f07417`): accept non-object mutation
+  responses and recover the authoritative record from `ai.getAll`, matching on
+  name/apiUrl/model/isEnabled (plus aiId for updates), ignoring the never
+  echoed apiKey. Attempt 5 relaunched `proof` on the same box but the wizard
+  correctly refused: `Existing install state does not match this install
+  request. Use 'modify'` — attempt 4 had persisted state before crashing.
+  Pivoted to `dokploy-wizard-remote modify` to converge over the healthy
+  partial install (this also exercises the modify path twice: first pass
+  completes the stack, second pass must be a noop).
+- Attempt 6 (modify #1): drift gate blocked on the `litellm-sync` container
+  deployed by attempt 4 but never ledger-recorded (crash mid-phase left the
+  ledger pre-shared-core; auxiliary tolerance requires the parent litellm
+  scope to be managed). Removed the container; the compose definition stayed.
+- Attempt 7 (modify #2): full converge in 222s. All phases green; single
+  workspace `showmeseewhycom-workspace` (Group 4 stable name live). Live
+  probes confirmed: Dokploy `ai.getAll` = exactly the two D1 rows
+  (`Dokploy Wizard LiteLLM` default + `· sync/default-chat`), and Nextcloud
+  `integration_openai` points at the internal gateway with its own virtual
+  key, service name "LiteLLM (Dokploy Wizard)", models cache seeded with the
+  default alias, `sync/default-chat`, and the `sync/*` wildcard.
+- Attempt 8: the removed sync service did not come back because modify skips
+  compose deploys when the artifact hash matches, and the model-sync wait is
+  soft-fail. Cleared the hash via `clear_compose_artifact_hash` and reran
+  (modify #3): sidecar healthy, cycling (desired=73, liveness probes, key
+  reconcile=4), and the wizard's consumer-key push triggered its early
+  cycle. Modify #4: true noop — zero create actions with the sidecar
+  running, proving drift auxiliary tolerance.
+- Attempt 9 (`upgrade --check`): first run crashed following the registry
+  Link rel (`unknown url type: '/v2/...?last=...&n=0'`) — ghcr.io paginates
+  with path-relative Links. Fixed by joining against the current page
+  (commit `5720388`). Second run exposed two more truths: the probe only
+  inspected swarm services (everything reported missing — this stack is
+  compose), and the echoed n=0 truncated the newest-stable scan to
+  v1.83.7-stable. Fixed with a compose container fallback (Config.Image +
+  RepoDigests) and forced n=1000 page size (commit `a75f855`). Third run:
+  report available, all 11 components ok (running digest == registry
+  digest, incl. model-sync), litellm newest-stable correctly v1.83.14-stable
+  (no bump pending), workspaces section report-only as designed (coder CLI
+  wants a session token). `inspect-state`: status clean, all healthy.
+- Known hygiene gaps observed during proof (not blockers, candidate
+  follow-ups): every mutating pass creates a fresh run-scoped Dokploy API key
+  (`dokploy-wizard-<uuid>`) that is never revoked, and each bootstrap
+  qualification leaves an `auth-probe` compose project behind. Both are
+  invisible to functionality but accumulate on long-lived boxes.
 
 ## Verification matrix
 
