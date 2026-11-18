@@ -643,3 +643,88 @@ tests + a fresh remote proof:
   login), workspace-boot provisioner for owner account + per-(user,workspace) FileX key +
   deterministic account-level Gitea SSH key, deleted-user disable, LiteLLM mint re-scope to
   `<login>-<workspace>`.
+
+
+## Phase 6d (2026-11): ~/shared — the FileX bucket as a live workspace folder
+
+### The door
+- Spike-proven on the box: rclone FUSE mount over FileX's own S3 door
+  (`http://{stack}-filex:5212/s3`, path-style, bucket = the storage name
+  `Files`) beats native `filex mount` — rclone carries the disk-backed VFS hot
+  cache the requirement asks for (names visible, content on first open, idle
+  eviction; `--vfs-cache-mode full`, defaults 10 G / 48 h via
+  `SHARED_CACHE_SIZE`/`SHARED_CACHE_AGE` in `~/.config/dokploy/shared-mount.env`).
+  `--vfs-cache-poll-interval` is unsupported on S3 remotes — dropped.
+  The remote must be `provider = Other`: with `provider = AWS`, rclone v1.76's
+  AWS-SDKv2 flexible-checksum path dies on "failed to seek body to start"
+  before the PUT is sent (the `--s3-disable-checksum` flag does not bypass
+  it); `Other` signs plain PUTs the door accepts. Confirmed live end-to-end:
+  write through `~/shared` -> door -> FileX index row owned by the person ->
+  overwrite snapshot -> `shared-versions --restore` -> content back.
+- The FileX compose now also attaches to the shared overlay (`{stack}-shared`,
+  external): the service was unreachable by DNS from workspaces before this
+  (spikes could only reach it by container IP).
+
+### FUSE inside the workspace container
+- `docker_container.workspace` gains `privileged = true` and the `/dev/fuse`
+  device. The provider Coder ships (kreuzwerker/docker v4.7.0) has no
+  `cap_add`/`capability` support at all, so privileges cannot be narrowed; the
+  docker-default AppArmor profile otherwise denies `mount()` to fusermount3
+  ("mount failed: Permission denied", measured live). Single-tenant box: the
+  workspace container is already the user's own machine.
+- A `flock`-guarded supervisor loop remounts when the mount dies and re-reads
+  the env file each cycle, so `shared-cache <size>` (rewrites the cap and
+  unmounts) takes effect within ~20 s without restarting anything.
+- The whole bootstrap runs backgrounded inside the agent startup script: no
+  identity, download, or FUSE failure can take a workspace boot down.
+
+### Identity and attribution
+- The pack provisions `wizard-provisioner` (admin role) + one admin-scoped API
+  token per pass (`read,write,delete,admin`). Measured: FileX refuses
+  `/api/admin` for plain tokens ("delegated administration is available to a
+  signed-in session only"), admin-scope tokens can create users and mint child
+  tokens, and `list` is **not** an issuable scope (valid: read, write, delete,
+  mcp, admin, root:<storage>://<folder>).
+- Workspace boot (template `FILEXPROV` block): ensure the owner's user (role
+  `user`, password `sha256(issuer + ":" + login)`, email `<login>@coder.wizard.local`),
+  sign in as the owner, then label-match/delete/re-mint the per-(user,
+  workspace) S3 key `<login>-<workspace>` and a `read,write` helper token
+  `coder-<login>` (`/api/ai/versions/restore` is the versions API; restore is a
+  write, hence no narrower scope exists). The provisioner retires from the
+  path immediately — every write carries the person's own credential. A manual
+  account with the same name is never reset: the mount skips and logs.
+- Protocol-door (S3) writes feed the FileX catalogue live (measured): the file
+  row appears in `/api/files/manager?action=index` immediately with owner =
+  the writing S3 key's owner, and an overwrite snapshots the previous body
+  into the `.versions` catalogue (`storage_key .versions/<node>/<n>`) exactly
+  like REST-door writes. They emit no `audit_log` rows (v0.61.2 middleware
+  covers REST doors only), so attribution for `~/shared` writes is the file
+  row's owner, the key label (the workspace), and the version-catalogue
+  snapshots. Audit webhooks remain the upgrade path if row-level audit for
+  protocol doors ever matters. The S3 `?versions` sub-resource is answered
+  `501` on the door — history rides `/api/ai/versions`.
+- `FILEXPROV` writes `shared-mount.env` (0600, access key + secret + helper
+  token) and `~/.config/rclone/rclone.conf` (0600); both live on the home
+  volume, and the secret adoption path (reuse while the stored key
+  authenticates) keeps restarts from churning credentials.
+
+### Convergence
+- A template push alone leaves the running workspace on its old build; the
+  proof needed a manual `coder update` before the mount appeared. So
+  `_ensure_default_workspace` now ends with `_update_workspace_if_outdated`:
+  `coder list -o json`, and when the default workspace on the default template
+  reports `outdated`, run `coder update <owner>/<ws> --yes`. Only the wizard's
+  own default workspace is touched — user-created workspaces keep their own
+  rebuild timing. The home volume (`ignore_changes = all`) survives the
+  in-place update, and the VFS cache on it resumes pending uploads.
+
+### Guards
+- Same sentinel discipline as the issuer fix: the mount activates only when
+  `__DOKPLOY_WIZARD_FILEX_INTERNAL_URL__` and
+  `__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN__` were substituted (the
+  `*_SENTINEL__` markers are deliberately absent from the replacement map), so
+  a FileX-less stack or a raw pushed template renders a plain `~/shared`.
+
+### Gates
+- `pytest` (1058 passed), `ruff check`, `mypy` green; provisioner lifecycle,
+  compose network, replacement-map, and sentinel-regression tests added.

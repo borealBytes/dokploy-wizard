@@ -21,6 +21,7 @@ from dokploy_wizard.state.models import (
     STATE_FORMAT_VERSION,
     AppliedStateCheckpoint,
     DesiredState,
+    FilexProvisionerState,
     LiteLLMGeneratedKeys,
     LiteLLMImagePin,
     OwnershipLedger,
@@ -49,6 +50,7 @@ OUTBOUND_DELIVERIES_FILE = "outbound-deliveries.json"
 LITELLM_GENERATED_KEYS_FILE = "litellm-generated-keys.json"
 LITELLM_IMAGE_PIN_FILE = "litellm-image-pin.json"
 SEAWEEDFS_GENERATED_SECRETS_FILE = "seaweedfs-generated-secrets.json"
+FILEX_PROVISIONER_FILE = "filex-provisioner.json"
 STATE_DOCUMENT_FILES = (
     RAW_INPUT_FILE,
     DESIRED_STATE_FILE,
@@ -497,6 +499,20 @@ def ensure_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys:
     generated_keys = _build_litellm_generated_keys()
     write_litellm_generated_keys(state_dir, generated_keys)
     return generated_keys
+
+
+def load_filex_provisioner(state_dir: Path) -> FilexProvisionerState | None:
+    return _load_optional_document(
+        state_dir / FILEX_PROVISIONER_FILE,
+        FilexProvisionerState.from_dict,
+    )
+
+
+def write_filex_provisioner(state_dir: Path, provisioner: FilexProvisionerState) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / FILEX_PROVISIONER_FILE
+    _write_document(path, provisioner.to_dict())
+    path.chmod(0o600)
 
 
 def load_seaweedfs_generated_secrets(state_dir: Path) -> SeaweedFsGeneratedSecrets | None:

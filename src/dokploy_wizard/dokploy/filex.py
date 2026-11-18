@@ -54,6 +54,8 @@ from dokploy_wizard.packs.filex import (
     FilexError,
     FilexResourceRecord,
 )
+from dokploy_wizard.state.models import STATE_FORMAT_VERSION, FilexProvisionerState
+from dokploy_wizard.state.store import load_filex_provisioner, write_filex_provisioner
 from dokploy_wizard.verification import ServiceVerificationResult
 
 # Pinned to filex v0.61.2 (BRF-Tech/filex release, 2026-11-18). The tag names the
@@ -65,6 +67,12 @@ from dokploy_wizard.verification import ServiceVerificationResult
 #     https://ghcr.io/v2/brf-tech/filex/manifests/v0.61.2 | grep -i docker-content-digest
 # v0.61.x is also the floor for S3-key attribution in the audit log, which the
 # ~/shared workspace mount depends on.
+# Service account the wizard manages inside FileX. Workspace boot scripts use
+# its admin-scoped API token to materialize the workspace owner's FileX account
+# and that person's own credentials; the token is the only credential baked into
+# the Coder template, and /api/admin delegation requires the admin scope (a
+# plain user token is refused by FileX by design).
+FILEX_PROVISIONER_USERNAME = "wizard-provisioner"
 _DEFAULT_FILEX_IMAGE = (
     "ghcr.io/brf-tech/filex:v0.61.2"
     "@sha256:e8756486300542bcfb7f8cf1a323a583c2444815da09c8947389197d43b04c8d"
@@ -337,9 +345,13 @@ class DokployFilexBackend:
         notes: list[str] = []
         bucket_ready, versioning_enabled, s3_notes = self._ensure_bucket_and_versioning()
         notes.extend(s3_notes)
-        login_verified, login_note = self._probe_admin_login()
+        login_verified, admin_session, login_note = self._probe_admin_login()
         if login_note is not None:
             notes.append(login_note)
+        provisioner, provisioner_note = self._ensure_provisioner(admin_session)
+        if provisioner_note is not None:
+            notes.append(provisioner_note)
+        del provisioner  # persisted to its own 0600 state document, not the phase result
         return (
             FilexBootstrapState(
                 initialized=True,
@@ -419,20 +431,158 @@ class DokployFilexBackend:
         )
         try:
             with urlrequest.urlopen(req, timeout=20, context=_https_context()) as response:  # noqa: S310
-                response.read()
                 status = response.status
+                body = _json_or_none(response.read())
         except urlerror.HTTPError as exc:
             status = exc.code
+            body = None
         except (urlerror.URLError, TimeoutError):
-            return False, "FileX admin login probe could not reach the service; skipped."
-        if status == 200:
-            return True, "FileX admin login verified with the seeded credentials."
+            return False, None, "FileX admin login probe could not reach the service; skipped."
+        if status == 200 and isinstance(body, dict) and isinstance(body.get("token"), str):
+            return (
+                True,
+                body["token"],
+                "FileX admin login verified with the seeded credentials.",
+            )
         if status in {401, 403, 429}:
             return (
                 False,
+                None,
                 "FileX admin credentials differ from the environment seed or the login is rate-limited; stored values own the account.",
             )
-        return False, f"FileX admin login probe answered HTTP {status}; skipped."
+        return False, None, f"FileX admin login probe answered HTTP {status}; skipped."
+
+    # -- provisioner service account ------------------------------------------------
+
+    def _ensure_provisioner(
+        self, admin_session: str | None
+    ) -> tuple[FilexProvisionerState | None, str | None]:
+        """Guarantee the wizard's FileX service account and its admin-scoped token.
+
+        Workspace boot scripts use this token to materialize each owner's FileX
+        account and per-(user, workspace) credentials at first boot, so every
+        write carries both a person and a machine. /api/admin delegation is
+        session-or-admin-scope only, hence the admin scope on this one account;
+        everything below it (owner accounts, their tokens) is a plain user.
+        """
+        if admin_session is None:
+            return (
+                load_filex_provisioner(self._state_dir),
+                "FileX provisioner step skipped: no admin session (login probe did not verify).",
+            )
+        email = f"{FILEX_PROVISIONER_USERNAME}@{self._hostname}"
+        password = _provisioner_password(self._stack_name, self._secret_key_secret_ref)
+        status, users = self._fx_api("GET", "/api/admin/users", token=admin_session)
+        if status != 200:
+            return (
+                load_filex_provisioner(self._state_dir),
+                f"FileX provisioner step skipped: user listing answered HTTP {status}.",
+            )
+        user = _find_user_by_username(users, FILEX_PROVISIONER_USERNAME)
+        if user is None:
+            status, created = self._fx_api(
+                "POST",
+                "/api/admin/users",
+                token=admin_session,
+                body={
+                    "email": email,
+                    "username": FILEX_PROVISIONER_USERNAME,
+                    "role": "admin",
+                    "password": password,
+                },
+            )
+            if status not in {200, 201} or not isinstance(created, dict) or "id" not in created:
+                detail = "" if isinstance(created, dict) else str(created)[:120]
+                return (
+                    None,
+                    f"FileX provisioner account could not be created (HTTP {status}); {detail}",
+                )
+            user = created
+        user_id = int(user["id"])
+
+        existing = load_filex_provisioner(self._state_dir)
+        status, tokens_payload = self._fx_api("GET", "/api/admin/ai-tokens", token=admin_session)
+        rows: list[dict] = []
+        if status == 200 and isinstance(tokens_payload, dict):
+            rows = [r for r in tokens_payload.get("tokens", []) if isinstance(r, dict)]
+        mine = [r for r in rows if r.get("label") == FILEX_PROVISIONER_USERNAME]
+
+        if existing is not None and any(r.get("id") == existing.token_id for r in mine):
+            alive_status, _ = self._fx_api("GET", "/api/auth/s3-keys", token=existing.token)
+            if alive_status == 200:
+                return existing, None
+
+        # State lost, token rotated server-side, or the stored secret died:
+        # label-match every provisioner row away and mint a replacement. The
+        # token is shown exactly once by FileX, so the state document written
+        # here is the durable copy.
+        for row in mine:
+            row_id = row.get("id")
+            if row_id is not None:
+                self._fx_api("DELETE", f"/api/admin/ai-tokens/{row_id}", token=admin_session)
+        status, minted = self._fx_api(
+            "POST",
+            "/api/admin/ai-tokens",
+            token=admin_session,
+            body={
+                "label": FILEX_PROVISIONER_USERNAME,
+                "user_id": user_id,
+                # read/write/delete for file attribution flows; admin for the
+                # /api/admin delegation the workspace provisioner scripts ride.
+                "scopes": "read,write,delete,admin",
+                "kind": "user",
+            },
+        )
+        token = minted.get("token") if isinstance(minted, dict) else None
+        row = minted.get("row") if isinstance(minted, dict) else None
+        # FileX answers 201 Created for the mint (measured live).
+        if status not in (200, 201) or not isinstance(token, str) or not isinstance(row, dict):
+            return None, f"FileX provisioner token mint failed (HTTP {status}); ~/shared mounts will warn."
+        state = FilexProvisionerState(
+            format_version=STATE_FORMAT_VERSION,
+            username=FILEX_PROVISIONER_USERNAME,
+            email=email,
+            password=password,
+            user_id=user_id,
+            token=token,
+            token_id=int(row.get("id", 0) or 0),
+        )
+        write_filex_provisioner(self._state_dir, state)
+        note = (
+            "Provisioned FileX service account 'wizard-provisioner' with an admin-scoped "
+            "token (workspace ~/shared identity automation)."
+        )
+        if existing is not None:
+            note = (
+                "Rotated the FileX provisioner token (stored secret or server row was gone); "
+                "workspace mounts adopt the new key on their next boot."
+            )
+        return state, note
+
+    def _fx_api(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str | None = None,
+        body: dict | None = None,
+    ) -> tuple[int | None, object]:
+        """One FileX API call through the loopback edge (UFW blocks host->overlay)."""
+        headers = {"Host": self._hostname, "Accept": "application/json"}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urlrequest.Request(f"https://127.0.0.1{path}", data=data, method=method, headers=headers)
+        try:
+            with urlrequest.urlopen(req, timeout=20, context=_https_context()) as response:  # noqa: S310
+                return response.status, _json_or_none(response.read())
+        except urlerror.HTTPError as exc:
+            return exc.code, _json_or_none(exc.read())
+        except (urlerror.URLError, TimeoutError):
+            return None, None
 
     # -- compose application ----------------------------------------------------
 
@@ -738,11 +888,18 @@ def _render_compose_file(
         "    networks:\n"
         "      - default\n"
         "      - dokploy-network\n"
+        "      - shared\n"
         "volumes:\n"
         f"  {data_name}:\n"
         "networks:\n"
         "  dokploy-network:\n"
         "    external: true\n"
+        # The shared overlay is created by the shared-core compose; attached
+        # here (external) so Coder workspaces reach the app and its S3 door at
+        # http://{stack}-filex:{port} — the ~/shared mount rides that door.
+        "  shared:\n"
+        "    external: true\n"
+        f"    name: {stack_name}-shared\n"
         f"# Managed health endpoint: {health_url}\n"
     )
     return RenderedCompose(
@@ -795,6 +952,35 @@ def _required_placeholder(name: str) -> str:
 def _yaml_quote(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def _provisioner_password(stack_name: str, secret_key_secret_ref: str) -> str:
+    """Deterministic provisioner password: stable across reruns, derivable, no new secret."""
+    material = f"dokploy-wizard:filex-provisioner:{stack_name}:{secret_key_secret_ref}"
+    return sha256(material.encode("utf-8")).hexdigest()
+
+
+def _find_user_by_username(payload: object, username: str) -> dict | None:
+    rows: list = []
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        for key in ("users", "data", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                rows = value
+                break
+    for row in rows:
+        if isinstance(row, dict) and row.get("username") == username:
+            return row
+    return None
+
+
+def _json_or_none(raw: bytes):
+    try:
+        return json.loads(raw.decode("utf-8", "ignore"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
 
 
 def _https_context() -> ssl.SSLContext:

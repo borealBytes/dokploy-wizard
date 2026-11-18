@@ -9,6 +9,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -2044,6 +2045,11 @@ def test_ensure_default_workspace_creates_missing_workspace(
 ) -> None:
     monkeypatch.setattr(
         coder_module,
+        "_update_workspace_if_outdated",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        coder_module,
         "_list_workspaces",
         lambda **kwargs: ("existing-workspace",),
     )
@@ -2084,6 +2090,11 @@ def test_ensure_default_workspace_creates_missing_workspace(
 
 
 def test_ensure_default_workspace_skips_existing_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        coder_module,
+        "_update_workspace_if_outdated",
+        lambda **kwargs: False,
+    )
     monkeypatch.setattr(
         coder_module,
         "_list_workspaces",
@@ -2296,6 +2307,55 @@ def test_ensure_default_workspace_adopts_when_template_shape_unknown(
     assert renamed == [("examplecom-workspace-2026-11-01", "examplecom-workspace")]
 
 
+def test_coder_backend_reads_filex_provisioner_lazily_from_state(tmp_path: Path) -> None:
+    """The lifecycle builds backends before any phase runs, but the FileX phase
+    creates its provisioner document before the Coder phase pushes the template.
+    The backend therefore re-reads the state directory at push time — otherwise
+    a first-run install bakes no door and the ~/shared mount only appears on a
+    second pass."""
+    from dokploy_wizard.state.models import STATE_FORMAT_VERSION, FilexProvisionerState
+    from dokploy_wizard.state.store import write_filex_provisioner
+
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        state_dir=tmp_path,
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    # Nothing on disk yet: no door, no token (the pack is off or unreconciled).
+    assert backend._filex_internal_url() == ""
+    assert backend._filex_provisioner_state() is None
+
+    write_filex_provisioner(
+        tmp_path,
+        FilexProvisionerState(
+            format_version=STATE_FORMAT_VERSION,
+            username="wizard-provisioner",
+            email="wizard-provisioner@filex.example.com",
+            password="pw",
+            user_id=7,
+            token="prov-token-9",
+            token_id=11,
+        ),
+    )
+    # The document appeared mid-run (FileX phase before Coder phase): the push
+    # sees it without the backend being rebuilt.
+    assert backend._filex_internal_url() == "http://wizard-stack-filex:5212"
+    assert backend._filex_provisioner_state() is not None
+    assert backend._filex_provisioner_state().token == "prov-token-9"
+
+
 def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2441,6 +2501,10 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__": "main",
         "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
         "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
+        # This backend was built without a FileX provisioner: the pack is off,
+        # so both door values render empty and the startup script skips ~/shared.
+        "__DOKPLOY_WIZARD_FILEX_INTERNAL_URL__": "",
+        "__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN__": "",
     }
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name
     assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
@@ -2677,3 +2741,233 @@ def test_issuer_mint_guard_stays_honest_after_substitution() -> None:
 
     source = inspect.getsource(coder_module.DokployCoderBackend.ensure_application_ready)
     assert "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__" not in source
+
+
+def _workspace_list_json(rows: list[dict[str, object]]) -> str:
+    import json as _json
+
+    return _json.dumps(rows)
+
+
+def _fake_docker_cli(monkeypatch: pytest.MonkeyPatch, list_stdout: str) -> list[list[str]]:
+    """Route coder list/update through a fake docker exec and record the argv."""
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(command))
+        if "list" in command:
+            return subprocess.CompletedProcess(command, 0, stdout=list_stdout, stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+    return calls
+
+
+def test_update_workspace_if_outdated_updates_matching_stale_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_docker_cli(
+        monkeypatch,
+        _workspace_list_json(
+            [{"name": "examplecom-workspace", "owner_name": "admin", "template_name": "ubuntu-vscode", "outdated": True}]
+        ),
+    )
+    updated = coder_module._update_workspace_if_outdated(
+        container_name="wizard-stack-coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        workspace_name="examplecom-workspace",
+        template_name="ubuntu-vscode",
+    )
+    assert updated is True
+    update_calls = [c for c in calls if "update" in c]
+    assert len(update_calls) == 1
+    assert "admin/examplecom-workspace" in update_calls[0]
+    assert "--yes" in update_calls[0]
+
+
+def test_update_workspace_if_outdated_ignores_fresh_and_foreign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_docker_cli(
+        monkeypatch,
+        _workspace_list_json(
+            [
+                {"name": "examplecom-workspace", "owner_name": "admin", "template_name": "other", "outdated": True},
+            ]
+        ),
+    )
+    updated = coder_module._update_workspace_if_outdated(
+        container_name="wizard-stack-coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        workspace_name="examplecom-workspace",
+        template_name="ubuntu-vscode",
+    )
+    assert updated is False
+    assert [c for c in calls if "update" in c] == []
+
+    calls2 = _fake_docker_cli(
+        monkeypatch,
+        _workspace_list_json(
+            [{"name": "examplecom-workspace", "owner_name": "admin", "template_name": "ubuntu-vscode", "outdated": False}]
+        ),
+    )
+    updated2 = coder_module._update_workspace_if_outdated(
+        container_name="wizard-stack-coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        workspace_name="examplecom-workspace",
+        template_name="ubuntu-vscode",
+    )
+    assert updated2 is False
+    assert [c for c in calls2 if "update" in c] == []
+
+
+def test_update_workspace_if_outdated_raises_when_update_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "list" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=_workspace_list_json(
+                    [{"name": "examplecom-workspace", "owner_name": "admin", "template_name": "ubuntu-vscode", "outdated": True}]
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+    with pytest.raises(coder_module.CoderError, match="Unable to update Coder workspace"):
+        coder_module._update_workspace_if_outdated(
+            container_name="wizard-stack-coder-container",
+            hostname="coder.example.com",
+            session_token="session-123",
+            workspace_name="examplecom-workspace",
+            template_name="ubuntu-vscode",
+        )
+
+
+def test_ensure_default_workspace_reports_updated_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        coder_module,
+        "_list_workspaces",
+        lambda **kwargs: ("examplecom-workspace",),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_update_workspace_if_outdated",
+        lambda **kwargs: True,
+    )
+    outcome = coder_module._ensure_default_workspace(
+        container_name="wizard-stack-coder-container",
+        hostname="coder.example.com",
+        session_token="session-123",
+        workspace_name="examplecom-workspace",
+        template_name="ubuntu-vscode",
+    )
+    assert outcome.action == "exists"
+    assert outcome.updated is True
+
+
+def test_ensure_application_ready_updates_workspace_on_verified_bootstrap_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a box whose compose application verifies clean, the workspace ensure
+    step is skipped — but a template push still happened, and the running
+    workspace keeps its old build until something updates it. The convergence
+    check therefore has to ride the verified path as well."""
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: True)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module, "_coder_container_name", lambda service_name: "wizard-stack-coder-container"
+    )
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_seed_template", lambda **kwargs: False)
+    monkeypatch.setattr(coder_module, "_migrate_retired_template_workspaces", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_default_workspace_name", lambda hostname: "examplecom-workspace")
+    monkeypatch.setattr(
+        backend, "_verify_current_compose_application", lambda: SimpleNamespace(passed=True)
+    )
+
+    ensure_calls: list[str] = []
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: ensure_calls.append("called")
+        or coder_module.DefaultWorkspaceOutcome(action="exists"),
+    )
+    update_calls: list[str] = []
+
+    def fake_update(**kwargs: object) -> bool:
+        update_calls.append(str(kwargs["workspace_name"]))
+        return True
+
+    monkeypatch.setattr(coder_module, "_update_workspace_if_outdated", fake_update)
+
+    notes = backend.ensure_application_ready()
+
+    assert ensure_calls == []
+    assert update_calls == ["examplecom-workspace"]
+    assert any("Updated Coder workspace 'examplecom-workspace'" in note for note in notes)
+
+
+def test_ensure_application_ready_verified_path_survives_update_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: True)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module, "_coder_container_name", lambda service_name: "wizard-stack-coder-container"
+    )
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_seed_template", lambda **kwargs: False)
+    monkeypatch.setattr(coder_module, "_migrate_retired_template_workspaces", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_default_workspace_name", lambda hostname: "examplecom-workspace")
+    monkeypatch.setattr(
+        backend, "_verify_current_compose_application", lambda: SimpleNamespace(passed=True)
+    )
+
+    def fail_update(**kwargs: object) -> bool:
+        raise coder_module.CoderError("boom")
+
+    monkeypatch.setattr(coder_module, "_update_workspace_if_outdated", fail_update)
+
+    notes = backend.ensure_application_ready()
+    assert any("Coder default workspace step did not complete" in note for note in notes)

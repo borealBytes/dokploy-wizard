@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -314,6 +315,10 @@ def test_render_filex_compose_seeds_storage_versioning_and_route() -> None:
     assert 'traefik.http.services.wizard-stack-filex.loadbalancer.server.port: "5212"' in compose
     assert "- wizard-stack-filex-data:/data" in compose
     assert "dokploy-network:" in compose
+    # The service rides the shared overlay so workspaces can reach the app and
+    # its S3 door at http://wizard-stack-filex:5212 (the ~/shared mount door).
+    assert "      - shared\n" in compose
+    assert "  shared:\n    external: true\n    name: wizard-stack-shared\n" in compose
 
 
 def test_render_filex_env_specs_carry_real_secrets_and_hash_anchor() -> None:
@@ -459,7 +464,10 @@ def test_ensure_application_ready_reports_login_verification(
         status = 200
 
         def read(self) -> bytes:
-            return b"{}"
+            # The login probe now consumes the session token (the provisioner
+            # step reuses it instead of logging in twice), and every later call
+            # in this test degrades to a note off the same empty-ish payload.
+            return b'{"token": "sess-1"}'
 
         def __enter__(self) -> "_Resp":
             return self
@@ -523,3 +531,167 @@ def test_filex_backend_rejects_off_plan_plan_values(tmp_path: Path) -> None:
             bucket="someone-elses-bucket",
             data_resource_name="wizard-stack-filex-data",
         )
+
+
+class _ScriptedFxHttp:
+    """Fake urlrequest.urlopen answering the loopback FileX API with a script."""
+
+    def __init__(self) -> None:
+        self.requests: list[Any] = []
+        # (method, path) -> list of (status, json_bytes) responses, consumed in order.
+        self.script: dict[tuple[str, str], list[tuple[int, bytes]]] = {}
+        self.default: tuple[int, bytes] = (404, b'{"error":"unplanned"}')
+
+    def queue(self, method: str, path: str, status: int, payload: object) -> None:
+        self.script.setdefault((method, path), []).append((status, json.dumps(payload).encode()))
+
+    def __call__(self, req: Any, **kwargs: Any) -> Any:
+        self.requests.append(req)
+        method = req.get_method()
+        path = req.full_url.replace("https://127.0.0.1", "")
+        entries = self.script.get((method, path))
+        status, body = entries.pop(0) if entries else self.default
+
+        class _Resp:
+            def __init__(self, status: int, body: bytes) -> None:
+                self.status = status
+                self._body = body
+
+            def read(self) -> bytes:
+                return self._body
+
+            def __enter__(self) -> "_ScriptedFxHttp._Resp":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+        if 200 <= status < 300:
+            return _Resp(status, body)
+        from urllib import error as urlerror
+
+        raise urlerror.HTTPError(req.full_url, status, "scripted", {}, _io_bytes(body))
+
+
+def _io_bytes(body: bytes) -> Any:
+    import io
+
+    return io.BytesIO(body)
+
+
+def _provisioner_backend(tmp_path: Path) -> DokployFilexBackend:
+    s3 = ScriptedS3(head_script=[200], versioning_script=[(200, "<Status>Enabled</Status>")])
+    return _filex_backend(tmp_path, s3)
+
+
+def test_provisioner_bootstraps_user_token_and_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dokploy_wizard.state.store import load_filex_provisioner
+
+    backend = _provisioner_backend(tmp_path)
+    monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    http = _ScriptedFxHttp()
+    http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
+    http.queue("GET", "/api/admin/users", 200, [])
+    http.queue(
+        "POST",
+        "/api/admin/users",
+        201,
+        {"id": 7, "username": "wizard-provisioner", "email": "wizard-provisioner@filex.example.com"},
+    )
+    http.queue("GET", "/api/admin/ai-tokens", 200, {"tokens": []})
+    http.queue("POST", "/api/admin/ai-tokens", 201, {"token": "prov-token-1", "row": {"id": 9}})
+    monkeypatch.setattr(filex_module.urlrequest, "urlopen", http)
+
+    state, notes = backend.ensure_application_ready(
+        secret_key_secret_ref="wizard-stack-filex-secret-key"
+    )
+    assert state.login_verified is True
+    assert any("wizard-provisioner" in note for note in notes)
+
+    stored = load_filex_provisioner(tmp_path)
+    assert stored is not None
+    assert stored.username == "wizard-provisioner"
+    assert stored.user_id == 7
+    assert stored.token_id == 9
+    assert stored.token == "prov-token-1"
+    # The token is asked for with the admin scope: /api/admin delegation is
+    # session-or-admin-scope only, and workspace scripts ride it to provision.
+    mint = next(
+        req for req in http.requests
+        if req.full_url.endswith("/api/admin/ai-tokens") and req.get_method() == "POST"
+    )
+    body = json.loads(mint.data.decode())
+    assert body["scopes"] == "read,write,delete,admin"
+    assert body["kind"] == "user"
+    assert body["user_id"] == 7
+    assert (tmp_path / "filex-provisioner.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_provisioner_keeps_alive_token_and_rotates_dead_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dokploy_wizard.state.models import STATE_FORMAT_VERSION, FilexProvisionerState
+    from dokploy_wizard.state.store import load_filex_provisioner, write_filex_provisioner
+
+    write_filex_provisioner(
+        tmp_path,
+        FilexProvisionerState(
+            format_version=STATE_FORMAT_VERSION,
+            username="wizard-provisioner",
+            email="wizard-provisioner@filex.example.com",
+            password="pw",
+            user_id=7,
+            token="old-token",
+            token_id=9,
+        ),
+    )
+    backend = _provisioner_backend(tmp_path)
+    monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    http = _ScriptedFxHttp()
+    http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
+    http.queue("GET", "/api/admin/users", 200, [{"id": 7, "username": "wizard-provisioner"}])
+    http.queue("GET", "/api/admin/ai-tokens", 200, {"tokens": [{"id": 9, "label": "wizard-provisioner"}]})
+    # Stored token still authenticates → reused, no re-mint.
+    http.queue("GET", "/api/auth/s3-keys", 200, {"keys": []})
+    monkeypatch.setattr(filex_module.urlrequest, "urlopen", http)
+    state, _notes = backend.ensure_application_ready(
+        secret_key_secret_ref="wizard-stack-filex-secret-key"
+    )
+    assert state.login_verified is True
+    assert load_filex_provisioner(tmp_path).token == "old-token"
+
+    # Second pass: the row was deleted server-side → label-match rotation.
+    http2 = _ScriptedFxHttp()
+    http2.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
+    http2.queue("GET", "/api/admin/users", 200, [{"id": 7, "username": "wizard-provisioner"}])
+    http2.queue("GET", "/api/admin/ai-tokens", 200, {"tokens": [{"id": 12, "label": "wizard-provisioner"}]})
+    http2.queue("DELETE", "/api/admin/ai-tokens/12", 200, {"ok": True})
+    http2.queue("POST", "/api/admin/ai-tokens", 200, {"token": "new-token", "row": {"id": 13}})
+    monkeypatch.setattr(filex_module.urlrequest, "urlopen", http2)
+    backend2 = _provisioner_backend(tmp_path)
+    state2, notes2 = backend2.ensure_application_ready(
+        secret_key_secret_ref="wizard-stack-filex-secret-key"
+    )
+    assert state2.login_verified is True
+    rotated = load_filex_provisioner(tmp_path)
+    assert rotated.token == "new-token"
+    assert rotated.token_id == 13
+    assert any("Rotated" in note for note in notes2)
+
+
+def test_provisioner_degrades_to_note_when_admin_session_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _provisioner_backend(tmp_path)
+    monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    from urllib import error as urlerror
+
+    def fake_urlopen(req: Any, **kwargs: Any) -> Any:
+        raise urlerror.HTTPError(req.full_url, 429, "Too Many Requests", {}, _io_bytes(b"{}"))
+
+    monkeypatch.setattr(filex_module.urlrequest, "urlopen", fake_urlopen)
+    state, notes = backend.ensure_application_ready(
+        secret_key_secret_ref="wizard-stack-filex-secret-key"
+    )
+    assert state.login_verified is False
+    assert any("provisioner step skipped" in note for note in notes)

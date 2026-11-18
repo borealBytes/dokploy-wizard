@@ -674,6 +674,65 @@ class LiteLLMImagePin:
 
 
 @dataclass(frozen=True)
+class FilexProvisionerState:
+    """FileX service account the wizard uses to provision per-user identities.
+
+    The token is an admin-scoped FileX API token: /api/admin delegation is
+    session-or-admin-scope-token only (a plain user token is refused), and the
+    provisioner must be able to create users and mint their child tokens from
+    inside every workspace boot. The token is shown exactly once by FileX at
+    creation, so this document is the only durable copy; if it is lost the next
+    pass label-matches the server-side row, deletes it, and mints a replacement.
+    """
+
+    format_version: int
+    username: str
+    email: str
+    password: str
+    user_id: int
+    token: str
+    token_id: int
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        for name in ("username", "email", "password", "token"):
+            if getattr(self, name) == "":
+                msg = f"FileX provisioner {name} must be a non-empty string."
+                raise StateValidationError(msg)
+        if self.user_id <= 0 or self.token_id <= 0:
+            msg = "FileX provisioner user_id and token_id must be positive integers."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format_version": self.format_version,
+            "username": self.username,
+            "email": self.email,
+            "password": self.password,
+            "user_id": self.user_id,
+            "token": self.token,
+            "token_id": self.token_id,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> FilexProvisionerState:
+        return cls(
+            format_version=_require_format_version(payload),
+            username=_require_string(payload, "username"),
+            email=_require_string(payload, "email"),
+            password=_require_string(payload, "password"),
+            user_id=_require_int(payload, "user_id"),
+            token=_require_string(payload, "token"),
+            token_id=_require_int(payload, "token_id"),
+        )
+
+
+@dataclass(frozen=True)
 class AppliedStateCheckpoint:
     """Last known successfully applied state."""
 

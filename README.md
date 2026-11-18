@@ -208,6 +208,40 @@ That default template installs:
 - `opencode`
 - `pi` (Pi coding agent CLI)
 - `zellij`
+- `fuse3` (for the `~/shared` mount below)
+
+When the FileX pack is enabled, every workspace also gets **`~/shared`**: the
+FileX bucket mounted as a live folder through an rclone FUSE mount over FileX's
+own S3 door. It behaves as a window onto the bucket, never a clone of it — file
+names are always visible, content is fetched on first open, and a disk-backed
+hot cache on the home volume keeps only recently touched files (defaults: 10 G
+cap, 48 h idle eviction, raisable at runtime with `shared-cache 20G`). The
+mount, its supervisor, and the helpers bootstrap themselves in the background
+at workspace start: any failure (account, network, FUSE) logs to
+`/tmp/filex-shared.log` and leaves `~/shared` a plain folder — the workspace
+never loses its boot over a mount. A wizard `modify` that changes the template
+also brings the default workspace onto the new active template version
+(`coder update`), so pushed changes land in running workspaces on the same
+pass.
+
+Attribution is per **(user, workspace)**: each workspace mints its own FileX
+S3 key labeled `<login>-<workspace>`, owned by the workspace owner's own FileX
+account (created lazily at first boot with a deterministic password derived
+from the LiteLLM issuer key). The rclone remote is configured with
+`provider = Other` deliberately: rclone's AWS-provider path computes a flexible
+checksum from a seekable body and never sends the PUT to FileX's door
+(measured on the box), while the Other provider signs plain PUTs the door
+accepts, catalogues under the key's owner, and snapshots on overwrite. File
+rows therefore record the person, the label names the machine, and
+`shared-versions <path>` lists or `--restore <id>` rolls back history. A manually
+created FileX account with the same name keeps its own secret — the mount then
+skips instead of resetting a human's password. Every workspace, the admin's
+included, rides the same rules. The wizard-managed service account behind all
+of this is `wizard-provisioner` (admin role, `read,write,delete,admin` token:
+FileX grants `/api/admin` delegation to signed-in sessions or admin-scoped
+tokens only, and the token is the sole credential baked into the template —
+workspace scripts immediately trade down to the owner's own credentials, which
+never carry admin).
 
 The workspace home directory lives on a per-workspace Docker volume. The control plane state lives in shared-core Postgres.
 
@@ -269,6 +303,31 @@ files in the SeaweedFS bucket the wizard owns. The wizard wires:
 The FileX environment is a first-boot seed: once the bucket, storage record, and
 admin account exist in FileX's own database, operator edits inside FileX win and
 the wizard does not overwrite them.
+
+Two wizard-managed identities live inside FileX:
+
+- `wizard-provisioner` — admin role with one admin-scoped API token, persisted
+  at `filex-provisioner.json` (0600) in the state directory. Coder workspaces
+  ride this token to materialize owner accounts and mint their keys; if the
+  state document is lost, the next pass label-matches the server-side token row,
+  deletes it, and mints a replacement (tokens show exactly once at creation).
+- each Coder user's own account (role `user`), created lazily at workspace
+  first boot, plus per-(user, workspace) S3 keys and a `read,write` helper
+  token — everything a person does through `~/shared` is theirs, not the
+  provisioner's.
+
+The service attaches to the shared-core overlay network, so workspaces reach it
+(and its S3 door at `{url}/s3`, bucket = the storage name `Files`) by service
+DNS without leaving the host. The S3 door feeds FileX's own catalogue: an
+external write appears in the file index immediately, owned by the account the
+writing S3 key belongs to, and — with version-on-overwrite on — an overwrite
+snapshots the previous content into the version catalogue before replacing it.
+So `~/shared` writes are attributed through the named per-(user, workspace)
+keys: the file row names the person, the key label names the workspace, and
+`shared-versions` (FileX's `/api/ai/versions` door — the S3 protocol's own
+`?versions` sub-resource is answered `501` on this door) lists and restores
+history. FileX's audit table covers only its REST doors; protocol-door writes
+carry no audit row, which is exactly why the per-(user, workspace) keys exist.
 
 ## Auth and credential model
 

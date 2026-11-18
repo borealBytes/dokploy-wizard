@@ -66,7 +66,7 @@ resource "coder_agent" "main" {
     fi
 
     $_SUDO apt-get update -q
-    $_SUDO apt-get install -y curl git ca-certificates wget btop python3
+    $_SUDO apt-get install -y curl git ca-certificates wget btop python3 fuse3
 
     # OpenCode, skip if already installed
     if ! command -v opencode >/dev/null 2>&1; then
@@ -214,6 +214,349 @@ MINTPY
     fi
     export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"
     export HERMES_PUBLIC_ORIGIN="__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"
+
+    # -- wizard: ~/shared (FileX team folder) ---------------------------------
+    # The FileX bucket rides into every workspace as a live folder at ~/shared:
+    # an rclone FUSE mount over FileX's own S3 door with a disk-backed hot
+    # cache. Names are always visible, content arrives on first open, idle
+    # files are evicted — a window onto the bucket, never a full clone. Each
+    # workspace mints its own S3 key labeled <login>-<workspace>, so every
+    # write names a person and a machine: file rows record the key's owner,
+    # overwrites snapshot into FileX's version catalogue, and the label ties
+    # the write to one workspace. The account belongs to the coder login and
+    # springs into existence at first boot when the person has no FileX
+    # account yet — a manual account with the same name keeps its own secret
+    # and its own meaning (the mount then skips, never resets). Every
+    # workspace, the admin's included, rides these same rules. Nothing in the
+    # setup can take a workspace down: the whole thing runs in the background,
+    # every failure logs and exits, and ~/shared simply stays a plain folder.
+    DOKPLOY_WIZARD_FILEX_URL="__DOKPLOY_WIZARD_FILEX_INTERNAL_URL__"
+    # The *_SENTINEL__ markers are deliberately absent from the wizard's
+    # replacement map (same trick as the issuer guard): a guard comparing
+    # against a second copy of a replaced marker would compare the real value
+    # to itself and skip the mount forever.
+    DOKPLOY_WIZARD_FILEX_URL_SENTINEL="__DOKPLOY_WIZARD_FILEX_INTERNAL_URL_SENTINEL__"
+    DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN="__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN__"
+    DOKPLOY_WIZARD_FILEX_PROVISIONER_SENTINEL="__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN_SENTINEL__"
+    if [ -n "$DOKPLOY_WIZARD_FILEX_URL" ] && \
+       [ "$DOKPLOY_WIZARD_FILEX_URL" != "$DOKPLOY_WIZARD_FILEX_URL_SENTINEL" ] && \
+       [ -n "$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN" ] && \
+       [ "$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN" != "$DOKPLOY_WIZARD_FILEX_PROVISIONER_SENTINEL" ]; then
+      export DOKPLOY_FX_URL="$DOKPLOY_WIZARD_FILEX_URL"
+      export DOKPLOY_FX_TOKEN="$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN"
+      export DOKPLOY_FX_LOGIN="${data.coder_workspace_owner.me.name}"
+      export DOKPLOY_FX_WORKSPACE="${data.coder_workspace.me.name}"
+      # Account passwords derive: hash(issuer + ":" + login). Re-runs and
+      # re-mints reproduce the same value without a new secret to store, and
+      # an issuer rotation re-derives cleanly. Without an issuer (LiteLLM
+      # unseeded) the provisioner token itself is the derivation seed.
+      DOKPLOY_FX_SEED="$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN"
+      case "$${DOKPLOY_WIZARD_LITELLM_ISSUER_KEY:-}" in
+        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)
+          ;;
+        *) DOKPLOY_FX_SEED="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" ;;
+      esac
+      export DOKPLOY_FX_SEED
+      (
+        # Background on purpose: identity calls and the first rclone download
+        # must never hold the IDE hostage. set -e inside so the first real
+        # failure ends this subshell quietly; the boot does not care.
+        set -e
+        mkdir -p "$HOME/.config/rclone" "$HOME/.config/dokploy" "$HOME/.local/share/dokploy" "$HOME/shared"
+        if ! command -v fusermount3 >/dev/null 2>&1; then
+          # The foreground apt may still be running behind us; retry past the
+          # dpkg lock for a minute before giving the mount up in the log.
+          for _attempt in 1 2 3 4 5 6; do
+            sleep 10
+            command -v fusermount3 >/dev/null 2>&1 && break
+            $_SUDO apt-get -qq -y install fuse3 >/dev/null 2>&1 || true
+          done
+        fi
+        command -v fusermount3 >/dev/null 2>&1 || { echo "shared: no fusermount3; skipping ~/shared"; exit 0; }
+        [ -e /dev/fuse ] || { echo "shared: /dev/fuse not exposed to this workspace; skipping"; exit 0; }
+
+        RCLONE_BIN="$HOME/.local/bin/rclone"
+        if [ ! -x "$RCLONE_BIN" ]; then
+          curl -fsSL -o /tmp/rclone.zip https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          python3 - "$RCLONE_BIN" <<'RCLONEPY'
+import os
+import stat
+import sys
+import zipfile
+
+dest = sys.argv[1]
+with zipfile.ZipFile("/tmp/rclone.zip") as archive:
+    member = next(n for n in archive.namelist() if n.split("/")[-1] == "rclone")
+    with archive.open(member) as source, open(dest, "wb") as out:
+        out.write(source.read())
+os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+RCLONEPY
+          rm -f /tmp/rclone.zip
+        fi
+
+        python3 - <<'FILEXPROV'
+import hashlib, json, os, urllib.error, urllib.request
+
+base = os.environ["DOKPLOY_FX_URL"].rstrip("/")
+token = os.environ["DOKPLOY_FX_TOKEN"]
+login = os.environ["DOKPLOY_FX_LOGIN"]
+workspace = os.environ["DOKPLOY_FX_WORKSPACE"]
+seed = os.environ["DOKPLOY_FX_SEED"]
+password = "fx-" + hashlib.sha256((seed + ":" + login).encode()).hexdigest()[:40]
+email = login + "@coder.wizard.local"
+label = login + "-" + workspace
+env_path = os.path.expanduser("~/.config/dokploy/shared-mount.env")
+
+
+def note(message):
+    print("shared: " + message)
+
+
+def call(method, path, bearer=None, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base + path, data=data, method=method)
+    if bearer:
+        req.add_header("Authorization", "Bearer " + bearer)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read().decode() or "null")
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read().decode() or "null")
+        except Exception:
+            return exc.code, None
+    except Exception:
+        return 0, None
+
+
+def read_env(path):
+    values = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    values[key.strip()] = value.strip().strip('"')
+    except FileNotFoundError:
+        pass
+    return values
+
+
+existing = read_env(env_path)
+
+# 1) The owner's account, lazily created through the provisioner. A pre-
+#    existing manual account keeps its own secret: the derived password then
+#    simply does not fit, and the mount is skipped for this workspace rather
+#    than resetting a human's password.
+status, users = call("GET", "/api/admin/users", token)
+if status != 200:
+    note("skipped: provisioner token rejected by /api/admin/users (HTTP %s)" % status)
+    raise SystemExit
+rows = users if isinstance(users, list) else (users or {}).get("users", [])
+user = next((row for row in rows if isinstance(row, dict) and row.get("username") == login), None)
+if user is None:
+    status, user = call(
+        "POST", "/api/admin/users", token,
+        {"email": email, "username": login, "role": "user", "password": password},
+    )
+    if status not in (200, 201) or not isinstance(user, dict) or "id" not in user:
+        note("skipped: could not create the FileX account (HTTP %s)" % status)
+        raise SystemExit
+    note("created the FileX account for '" + login + "'")
+
+# 2) Sign in as the owner: every credential below belongs to that person, not
+#    to the provisioner — this is where the provisioner's admin power retires.
+status, session = call(
+    "POST", "/api/auth/login",
+    body={"email": user.get("email") or email, "password": password},
+)
+if status != 200 or not isinstance(session, dict) or not session.get("token"):
+    note("skipped: FileX sign-in as '" + login + "' refused (manual account owns that name?)")
+    raise SystemExit
+user_jwt = session["token"]
+
+# 3) One S3 key per (user, workspace). The stored secret rides on until it
+#    stops authenticating; then label-match, delete, re-mint (secrets show
+#    once at creation — the env file is their only home).
+status, listed = call("GET", "/api/auth/s3-keys", user_jwt)
+key_rows = (listed or {}).get("keys", []) if isinstance(listed, dict) else []
+access = existing.get("SHARED_ACCESS_KEY_ID")
+secret = existing.get("SHARED_SECRET_ACCESS_KEY")
+adopted = False
+for row in key_rows:
+    if not isinstance(row, dict) or row.get("label") != label:
+        continue
+    if access and row.get("access_key_id") == access:
+        adopted = True
+    else:
+        call("DELETE", "/api/auth/s3-keys/%s" % row.get("id"), user_jwt)
+if not adopted:
+    status, created = call("POST", "/api/auth/s3-keys", user_jwt, {"label": label})
+    payload = created if isinstance(created, dict) else {}
+    key_row = payload.get("key") if isinstance(payload.get("key"), dict) else {}
+    access = key_row.get("access_key_id") or payload.get("access_key_id")
+    secret = payload.get("secret")
+    if not access or not secret:
+        note("skipped: S3 key mint failed (HTTP %s)" % status)
+        raise SystemExit
+    note("minted S3 key '" + label + "'")
+
+# 4) A scoped ai token for the helper commands (/api/ai is token-only by
+#    design; FileX issues read/write/delete/mcp/admin — no narrower "list"
+#    exists, and a restore IS a write, so read+write is the honest floor).
+ai_label = "coder-" + login
+ai_token = existing.get("SHARED_AI_TOKEN")
+ai_alive = False
+if ai_token:
+    ai_alive_status, _ = call("GET", "/api/ai/versions?path=Files%3A%2F%2F", ai_token)
+    ai_alive = ai_alive_status == 200
+if not ai_alive:
+    status, tokens = call("GET", "/api/admin/ai-tokens", token)
+    for row in ((tokens or {}).get("tokens", []) if isinstance(tokens, dict) else []):
+        if isinstance(row, dict) and row.get("label") == ai_label and row.get("user_id") == user.get("id"):
+            call("DELETE", "/api/admin/ai-tokens/%s" % row.get("id"), token)
+    status, minted = call(
+        "POST", "/api/admin/ai-tokens", token,
+        {"label": ai_label, "user_id": user.get("id"), "scopes": "read,write", "kind": "user"},
+    )
+    ai_token = (minted or {}).get("token") if isinstance(minted, dict) else None
+    if not ai_token:
+        note("warning: helper token mint failed (HTTP %s); shared-versions stays offline" % status)
+
+with open(env_path, "w", encoding="utf-8") as handle:
+    handle.write('DOKPLOY_FX_URL="%s"\n' % base)
+    handle.write('SHARED_ACCESS_KEY_ID="%s"\n' % access)
+    handle.write('SHARED_SECRET_ACCESS_KEY="%s"\n' % (secret or ""))
+    handle.write('SHARED_BUCKET="Files"\n')
+    handle.write('SHARED_LABEL="%s"\n' % label)
+    handle.write('SHARED_LOGIN="%s"\n' % login)
+    handle.write('SHARED_PASSWORD="%s"\n' % password)
+    handle.write('SHARED_AI_TOKEN="%s"\n' % (ai_token or ""))
+    handle.write('SHARED_CACHE_SIZE="%s"\n' % (existing.get("SHARED_CACHE_SIZE") or "10G"))
+    handle.write('SHARED_CACHE_AGE="%s"\n' % (existing.get("SHARED_CACHE_AGE") or "48h"))
+os.chmod(env_path, 0o600)
+
+with open(os.path.expanduser("~/.config/rclone/rclone.conf"), "w", encoding="utf-8") as handle:
+    handle.write("[filex]\n")
+    handle.write("type = s3\n")
+    # provider "Other", not "AWS": rclone 1.76's AWS-SDKv2 path computes a
+    # flexible checksum from a seekable body and dies on FileX's door
+    # ("failed to seek body to start") before the PUT is ever sent (measured
+    # live; the flag --s3-disable-checksum does not bypass it). "Other" signs
+    # the plain PUT and the write lands — FileX catalogs it with the key's
+    # owner as the file's owner.
+    handle.write("provider = Other\n")
+    handle.write("endpoint = %s/s3\n" % base)
+    handle.write("env_auth = false\n")
+    handle.write("access_key_id = %s\n" % access)
+    handle.write("secret_access_key = %s\n" % (secret or ""))
+    handle.write("force_path_style = true\n")
+os.chmod(os.path.expanduser("~/.config/rclone/rclone.conf"), 0o600)
+note("ready: ~/shared mounts as '" + label + "'")
+FILEXPROV
+
+        test -f "$HOME/.config/dokploy/shared-mount.env" || exit 0
+
+        cat > "$HOME/.local/bin/filex-shared-supervisor" <<'SUPERVISOR'
+#!/bin/bash
+# dokploy-wizard ~/shared supervisor: keeps the FileX mount alive, and
+# re-reads the env file every cycle so `shared-cache 20G` takes effect on the
+# next remount without restarting anything. flock (held by the launcher) keeps
+# exactly one supervisor per workspace across agent restarts.
+# --allow-non-empty: the mount point lives on the persistent home volume, so
+# anything written while the mount was down (its whole design promise: stay a
+# plain folder, never eat the boot) sits there when the mount returns. FUSE
+# would refuse a non-empty directory by default and retry forever (measured);
+# the flag mounts over the top, shadowing those files until the mount dies.
+umask 022
+ENV_FILE="$HOME/.config/dokploy/shared-mount.env"
+MOUNT_POINT="$HOME/shared"
+mkdir -p "$MOUNT_POINT"
+while :; do
+  if mountpoint -q "$MOUNT_POINT"; then
+    sleep 15
+    continue
+  fi
+  # shellcheck disable=SC1090
+  . "$ENV_FILE" 2>/dev/null || { sleep 30; continue; }
+  "$HOME/.local/bin/rclone" mount "filex:$${SHARED_BUCKET:-Files}" "$MOUNT_POINT" \
+    --config "$HOME/.config/rclone/rclone.conf" \
+    --s3-disable-checksum \
+    --allow-non-empty \
+    --vfs-cache-mode full \
+    --vfs-cache-max-size "$${SHARED_CACHE_SIZE:-10G}" \
+    --vfs-cache-max-age "$${SHARED_CACHE_AGE:-48h}" \
+    --vfs-write-back 5s \
+    --dir-cache-time 1m \
+    --log-file "$HOME/.local/share/dokploy/shared-mount.log" \
+    --log-level NOTICE
+  sleep 5
+done
+SUPERVISOR
+        chmod +x "$HOME/.local/bin/filex-shared-supervisor"
+
+        cat > "$HOME/.local/bin/shared-cache" <<'HELPER'
+#!/bin/bash
+# shared-cache [<size>|--status] — inspect or change the ~/shared hot cache
+# cap (default 10G / 48h idle eviction). The cache holds only what has been
+# touched: raising the cap costs disk, never time. The supervisor picks a new
+# cap up on its next remount; passing a size forces that cycle now.
+ENV_FILE="$HOME/.config/dokploy/shared-mount.env"
+case "$${1:-}" in
+  --status|"")
+    if [ -f "$ENV_FILE" ]; then
+      grep -E '^(SHARED_CACHE_SIZE|SHARED_CACHE_AGE)=' "$ENV_FILE" || true
+      mountpoint -q "$HOME/shared" && echo "mounted: $HOME/shared" || echo "not mounted (remount inside ~20s)"
+      du -sh "$HOME/.cache/rclone" 2>/dev/null | sed 's/^/cache on disk: /'
+    else
+      echo "no ~/shared mount configured"
+    fi
+    ;;
+  *)
+    [ -f "$ENV_FILE" ] || { echo "no ~/shared mount configured"; exit 1; }
+    sed -i "s/^SHARED_CACHE_SIZE=.*/SHARED_CACHE_SIZE=\"$1\"/" "$ENV_FILE"
+    fusermount3 -u "$HOME/shared" 2>/dev/null || true
+    echo "hot cache cap set to $1; the supervisor remounts within ~20s"
+    ;;
+esac
+HELPER
+        chmod +x "$HOME/.local/bin/shared-cache"
+
+        cat > "$HOME/.local/bin/shared-versions" <<'HELPER'
+#!/bin/bash
+# shared-versions <path-under-shared> [--restore <version-id>]
+# FileX records every overwrite of the shared folder in its own version
+# catalogue (independent of backend bucket versioning). List, or restore an
+# older revision by id. Rides the workspace's scoped read/list helper token —
+# the /api/ai surface is token-only, so this is exactly the power needed.
+ENV_FILE="$HOME/.config/dokploy/shared-mount.env"
+[ -f "$ENV_FILE" ] || { echo "no ~/shared mount configured"; exit 1; }
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+TARGET="Files://$${1:?usage: shared-versions <path> [--restore <version-id>]}"
+shift || true
+if [ "$${1:-}" = "--restore" ]; then
+  VID="$${2:?usage: shared-versions <path> --restore <version-id>}"
+  curl -s -X POST -H "Authorization: Bearer $SHARED_AI_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d "{\"path\":\"$TARGET\",\"version_id\":$VID}" \
+    "$DOKPLOY_FX_URL/api/ai/versions/restore"
+  echo
+else
+  curl -s -H "Authorization: Bearer $SHARED_AI_TOKEN" \
+    "$DOKPLOY_FX_URL/api/ai/versions?path=$TARGET" | python3 -m json.tool
+fi
+HELPER
+        chmod +x "$HOME/.local/bin/shared-versions"
+
+        if ! mountpoint -q "$HOME/shared" 2>/dev/null; then
+          setsid flock -n "$HOME/.config/dokploy/shared-mount.lock" \
+            "$HOME/.local/bin/filex-shared-supervisor" >/dev/null 2>&1 &
+        fi
+      ) > /tmp/filex-shared.log 2>&1 &
+    fi
 
     if ! command -v hermes >/dev/null 2>&1; then
       HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup --channel "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__"
@@ -1731,6 +2074,23 @@ resource "docker_container" "workspace" {
 
   networks_advanced {
     name = data.docker_network.shared.name
+  }
+
+  # ~/shared rides an rclone FUSE mount. The workspace's own supervisor needs
+  # /dev/fuse plus CAP_SYS_ADMIN and an AppArmor profile that lets the mount()
+  # syscall through (the docker-default profile denies it: "mount failed:
+  # Permission denied", measured live). The docker provider Coder ships
+  # (kreuzwerker v4.7.0) cannot express capabilities — no cap_add, no
+  # capability block — so the container goes privileged. This is a
+  # single-tenant box and the container is already the user's own machine with
+  # their own secrets on it; privileged widens what that machine may do, not
+  # who may reach it.
+  privileged = true
+
+  devices {
+    container_path = "/dev/fuse"
+    host_path      = "/dev/fuse"
+    permissions    = "rwm"
   }
 
   volumes {

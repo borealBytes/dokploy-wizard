@@ -129,6 +129,7 @@ from dokploy_wizard.state import (
     StateValidationError,
     ensure_litellm_generated_keys,
     ensure_seaweedfs_generated_secrets,
+    load_filex_provisioner,
     load_litellm_generated_keys,
     load_seaweedfs_generated_secrets,
     load_state_dir,
@@ -2365,6 +2366,15 @@ def _build_coder_backend(
     if allocation.postgres is None or desired_state.shared_core.postgres is None:
         return ShellCoderBackend()
     litellm_generated_keys = ensure_litellm_generated_keys(state_dir)
+    # The FileX pack reconciles before Coder in every lifecycle plan, so when
+    # the pack is enabled its provisioner state document already exists and the
+    # template can bake the ~/shared mount; a missing document (pack off, or
+    # filex never reconciled) simply renders an empty door and no mount.
+    filex_provisioner = (
+        load_filex_provisioner(state_dir)
+        if "filex" in desired_state.enabled_packs
+        else None
+    )
     ai_default_provider = _shared_ai_default_provider(raw_env)
     ai_default_model = _shared_ai_default_model(raw_env)
     hermes_model = raw_env.values.get("HERMES_MODEL", "").strip() or f"{ai_default_provider}/{ai_default_model}"
@@ -2390,6 +2400,7 @@ def _build_coder_backend(
         workspace_issuer_api_key=litellm_generated_keys.virtual_keys.get(
             LITELLM_WORKSPACE_ISSUER_CONSUMER
         ),
+        filex_provisioner=filex_provisioner,
         state_dir=state_dir,
         client=_build_dokploy_api_client(
             raw_env=raw_env,

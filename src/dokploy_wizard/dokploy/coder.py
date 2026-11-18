@@ -43,6 +43,7 @@ from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, Rende
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
 from dokploy_wizard.state import load_state_dir
+from dokploy_wizard.state.models import FilexProvisionerState
 from dokploy_wizard.verification import make_verification_result, redact_text
 
 
@@ -114,6 +115,7 @@ class DokployCoderBackend:
         ai_default_base_url: str = _DEFAULT_AI_DEFAULT_BASE_URL,
         ai_default_api_key: str | None = None,
         workspace_issuer_api_key: str | None = None,
+        filex_provisioner: FilexProvisionerState | None = None,
         state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployCoderApi | None = None,
     ) -> None:
@@ -137,10 +139,42 @@ class DokployCoderBackend:
         # Lets each Coder workspace mint its own LiteLLM child key at startup
         # (see the template MINTPY block); None keeps the shared baked key.
         self._workspace_issuer_api_key = workspace_issuer_api_key
+        # When the FileX pack reconciled, its provisioner account rides into the
+        # template so every workspace boot can materialize the owner's account
+        # and per-(user, workspace) credentials; None keeps ~/shared unmounted.
+        self._filex_provisioner = filex_provisioner
         self._state_dir = state_dir
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
+
+    def _filex_provisioner_state(self) -> FilexProvisionerState | None:
+        """The provisioner record to bake, re-reading state when needed.
+
+        Lifecycle builds every backend up front, but the FileX phase runs (and
+        creates its provisioner document) before the Coder phase in the same
+        process. A backend constructed earlier would otherwise push a template
+        with no door and only gain the mount on a second pass, so the document
+        is re-read from the state directory at push time.
+        """
+        if self._filex_provisioner is None:
+            from dokploy_wizard.state.store import load_filex_provisioner
+
+            self._filex_provisioner = load_filex_provisioner(self._state_dir)
+        return self._filex_provisioner
+
+    def _filex_internal_url(self) -> str:
+        """Workspace-reachable FileX base URL, or empty when the pack is off.
+
+        The service rides the shared overlay (see the FileX pack compose), so
+        the service DNS name answers from inside any workspace; the S3 door the
+        ~/shared mount rides lives at {url}/s3.
+        """
+        if self._filex_provisioner_state() is None:
+            return ""
+        # The FileX pack's service name is its own ({stack}-filex); the local
+        # _service_name here belongs to the Coder pack.
+        return f"http://{self._stack_name}-filex:{_FILEX_INTERNAL_PORT}"
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "service")
@@ -300,6 +334,16 @@ class DokployCoderBackend:
                         self._workspace_issuer_api_key or ""
                     ),
                     "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
+                    # ~/shared: the FileX internal door (empty when the pack is off,
+                    # which the startup script treats as "no mount, no warnings") and
+                    # the provisioner token. The *_SENTINEL__ markers below are
+                    # deliberately NOT mapped — same trick as the issuer guard: a
+                    # guard comparing against a second copy of the replaced marker
+                    # would compare the value to itself and skip forever.
+                    "__DOKPLOY_WIZARD_FILEX_INTERNAL_URL__": self._filex_internal_url(),
+                    "__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN__": _shell_double_quote_escape(
+                        provisioner.token if (provisioner := self._filex_provisioner_state()) else ""
+                    ),
                     "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": _shell_double_quote_escape(
                         self._admin_password or "ChangeMeSoon"
                     ),
@@ -341,9 +385,29 @@ class DokployCoderBackend:
             notes.append(note)
             retired_templates = ()
         notes.extend(f"Retired removed Coder template '{name}'." for name in retired_templates)
-        if bootstrap_ready:
-            return tuple(notes)
         workspace_name = _default_workspace_name(self._hostname)
+        if bootstrap_ready:
+            # The compose application verified clean, so the workspace itself
+            # needs no ensure step — but a template push just happened above,
+            # and the running workspace keeps its old build until something
+            # updates it. The convergence check therefore rides this path too,
+            # or the ~/shared bootstrap (and every later template change) would
+            # wait for the one pass where bootstrap verification happens to fail.
+            try:
+                if _update_workspace_if_outdated(
+                    container_name=container_name,
+                    hostname=self._hostname,
+                    session_token=session_token,
+                    workspace_name=workspace_name,
+                    template_name=_default_template_name(),
+                ):
+                    notes.append(
+                        f"Updated Coder workspace '{workspace_name}' onto the active "
+                        f"template version."
+                    )
+            except CoderError as e:
+                notes.append(f"Coder default workspace step did not complete: {e}")
+            return tuple(notes)
         try:
             outcome = _ensure_default_workspace(
                 container_name=container_name,
@@ -368,8 +432,13 @@ class DokployCoderBackend:
                 f"Pruned duplicate wizard-created Coder workspace '{name}'."
                 for name in outcome.pruned
             )
+            if outcome.updated:
+                notes.append(
+                    f"Updated Coder workspace '{workspace_name}' onto the active "
+                    f"template version."
+                )
         except CoderError as e:
-            notes.append(f"Skipped default workspace creation: {e}")
+            notes.append(f"Coder default workspace step did not complete: {e}")
         return tuple(notes)
 
     def _find_compose_locator(self) -> _ComposeLocator | None:
@@ -676,6 +745,11 @@ def _pick_environment(project: DokployProjectSummary) -> DokployEnvironmentSumma
         if environment.is_default:
             return environment
     return project.environments[0]
+
+
+# The FileX pack's listening port; the ~/shared mount talks to it over the
+# shared overlay (http://{stack}-filex:5212/s3 for the S3 door).
+_FILEX_INTERNAL_PORT = 5212
 
 
 def _service_name(stack_name: str) -> str:
@@ -1849,12 +1923,17 @@ class DefaultWorkspaceOutcome:
 
     ``adopted_from`` carries the legacy date-stamped name that was renamed to the
     stable default name; ``pruned`` lists wizard-created date-stamped duplicates
-    that were deleted after the stable workspace was in place.
+    that were deleted after the stable workspace was in place. ``updated`` is
+    true when the workspace was out of date on the active template version and
+    the wizard ran ``coder update`` to move it onto that version — the step
+    that makes a template change (a new ~/shared block, a new container flag)
+    land inside running workspaces on the same modify pass.
     """
 
     action: str
     adopted_from: str | None = None
     pruned: tuple[str, ...] = ()
+    updated: bool = False
 
 
 def _workspace_template_name(
@@ -2130,11 +2209,99 @@ def _ensure_default_workspace(
                 workspace_name=candidate,
             )
             pruned.append(candidate)
+    updated = _update_workspace_if_outdated(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+        workspace_name=workspace_name,
+        template_name=template_name,
+    )
     return DefaultWorkspaceOutcome(
         action=action,
         adopted_from=adopted_from,
         pruned=tuple(pruned),
+        updated=updated,
     )
+
+
+def _update_workspace_if_outdated(
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+    workspace_name: str,
+    template_name: str,
+) -> bool:
+    """Bring the wizard's default workspace onto the active template version.
+
+    A template push only creates a version; the running workspace keeps its
+    build until something updates it. Without this step the changes a modify
+    pass just pushed (the ~/shared bootstrap is the concrete case) would sit
+    unreachable until a human ran ``coder update`` — so the wizard owns the
+    last mile for the workspace it owns. Only the default workspace on the
+    default template: anything else belongs to the user, mid-session rebuilds
+    included.
+    """
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "list",
+            "--output",
+            "json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, list):
+        return False
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        if item.get("name") != workspace_name or item.get("template_name") != template_name:
+            continue
+        if item.get("outdated") is not True:
+            return False
+        owner = item.get("owner_name")
+        target = f"{owner}/{workspace_name}" if isinstance(owner, str) and owner else workspace_name
+        update = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "-e",
+                f"CODER_URL={_coder_cli_url()}",
+                "-e",
+                f"CODER_SESSION_TOKEN={session_token}",
+                container_name,
+                "/opt/coder",
+                "update",
+                target,
+                "--yes",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if update.returncode != 0:
+            raise CoderError(
+                f"Unable to update Coder workspace '{target}' onto the active template "
+                f"version: {(update.stderr or update.stdout).strip()}"
+            )
+        return True
+    return False
 
 
 def _workspace_is_wizard_owned(
