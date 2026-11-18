@@ -901,3 +901,42 @@ def test_reconcile_virtual_keys_prunes_retired_managed_consumers() -> None:
     # ...while records without the wizard marker belong to the operator and stay.
     assert api.list_keys() and any(record.key_alias == "operator-key" for record in api.list_keys())
     assert any(team.team_alias == "operator-team" for team in api.list_teams())
+
+
+def test_reconcile_virtual_keys_spare_workspace_minted_keys() -> None:
+    """Workspace-minted keys are wizard-marked but not state consumers.
+
+    The template MINTPY lane mints ``<login>-<workspace>`` aliases carrying
+    ``coder_workspace`` metadata; the alias never appears in the wizard's
+    generated-keys document. Before the exemption, the retired-consumer sweep
+    deleted every live workspace key on every real shared_core pass (measured
+    on the box: /key/list held exactly the four state aliases after a pass,
+    the workspace key gone). MINTPY re-mints at next boot, so the box only
+    showed silent per-pass churn — the exemption must keep the key.
+    """
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key="sk-clayton-dev",
+                key_alias="clayton-dev",
+                team_id=None,
+                models=("sync/*", "sync/default-chat"),
+                metadata={
+                    "managed_by": "dokploy-wizard",
+                    "coder_workspace": "dev",
+                    "coder_owner": "clayton",
+                },
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={"coder-hermes": "k-hermes"},
+        consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",),
+        },
+    )
+
+    assert api.deleted_key_aliases == []
+    assert any(record.key_alias == "clayton-dev" for record in api.list_keys())

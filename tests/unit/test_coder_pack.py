@@ -2356,6 +2356,291 @@ def test_coder_backend_reads_filex_provisioner_lazily_from_state(tmp_path: Path)
     assert backend._filex_provisioner_state().token == "prov-token-9"
 
 
+def test_coder_backend_reads_gitea_provisioner_lazily_from_state(tmp_path: Path) -> None:
+    """Same mid-run convergence as FileX: the Gitea phase seeds its provisioner
+    before the Coder phase pushes the template in one process, so the backend
+    re-reads the state directory at push time — otherwise a first-run install
+    bakes no Gitea door and the identity lane only appears on a second pass."""
+    from dokploy_wizard.state.models import STATE_FORMAT_VERSION, GiteaProvisionerState
+    from dokploy_wizard.state.store import write_gitea_provisioner
+
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        state_dir=tmp_path,
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    assert backend._gitea_internal_url() == ""
+    assert backend._gitea_provisioner_state() is None
+
+    write_gitea_provisioner(
+        tmp_path,
+        GiteaProvisionerState(
+            format_version=STATE_FORMAT_VERSION,
+            username="dokploy-wizard",
+            email="dokploy-wizard@gitea.example.com",
+            password="pw",
+            token="gt-token-9",
+        ),
+    )
+    assert backend._gitea_internal_url() == "http://wizard-stack-gitea:3000"
+    assert backend._gitea_provisioner_state() is not None
+    assert backend._gitea_provisioner_state().token == "gt-token-9"
+
+
+def test_identity_sync_actions_scopes_to_wizard_sprung_accounts() -> None:
+    # Scope is the email convention alone: the provisioner and any manual
+    # account (whatever its active flag) are never touched.
+    rows = [
+        {"username": "clayton", "email": "clayton@coder.wizard.local", "active": True},
+        {"username": "ghost", "email": "ghost@coder.wizard.local", "active": True},
+        {"username": "returner", "email": "returner@coder.wizard.local", "active": False},
+        {"username": "operator-manual", "email": "ops@example.com", "active": True},
+        {"username": "dokploy-wizard", "email": "dokploy-wizard@gitea.example.com", "active": True},
+    ]
+
+    actions = coder_module._identity_sync_actions(
+        gitea_rows=rows,
+        present_logins={"clayton", "returner"},
+        provisioner_username="dokploy-wizard",
+    )
+
+    # Present+active stays; deleted gets disabled; returned gets re-enabled.
+    assert actions == [("ghost", False), ("returner", True)]
+
+
+def test_identity_sync_actions_treats_deleted_status_as_absent() -> None:
+    actions = coder_module._identity_sync_actions(
+        gitea_rows=[{"username": "gone", "email": "gone@coder.wizard.local", "active": True}],
+        present_logins={"gone"},  # caller already filtered status == "deleted"
+        provisioner_username="dokploy-wizard",
+    )
+    assert actions == []
+
+
+def test_sync_gitea_identities_patches_and_reports(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str, object]] = []
+
+    def fake_coder_request(**kwargs: object) -> dict[str, object]:
+        assert kwargs["method"] == "GET"
+        assert kwargs["path"] == "/api/v2/users"
+        # Measured at the v2.39.4 pin: this header spelling is the one Coder
+        # accepts on the users API.
+        assert kwargs["session_token"] == "session-123"
+        return {
+            "users": [
+                {"username": "clayton", "status": "active"},
+                {"username": "returner", "status": "dormant"},
+                {"username": "purged", "status": "deleted"},
+            ]
+        }
+
+    def fake_gitea_request(**kwargs: object) -> tuple[int | None, object]:
+        calls.append((str(kwargs["method"]), str(kwargs["path"]), kwargs.get("payload") or {}))
+        assert kwargs["token"] == "gt-token-9"
+        if kwargs["method"] == "GET":
+            return 200, [
+                {
+                    "username": "dokploy-wizard",
+                    "email": "dokploy-wizard@gitea.example.com",
+                    "active": True,
+                },
+                {"username": "clayton", "email": "clayton@coder.wizard.local", "active": True},
+                {"username": "purged", "email": "purged@coder.wizard.local", "active": True},
+                {"username": "returner", "email": "returner@coder.wizard.local", "active": False},
+            ]
+        return 200, None
+
+    monkeypatch.setattr(coder_module, "_coder_request", fake_coder_request)
+    monkeypatch.setattr(coder_module, "_gitea_api_request", fake_gitea_request)
+
+    notes = coder_module._sync_gitea_identities(
+        coder_hostname="coder.example.com",
+        session_token="session-123",
+        gitea_hostname="gitea.example.com",
+        provisioner_token="gt-token-9",
+        provisioner_username="dokploy-wizard",
+    )
+
+    assert notes == [
+        "Disabled Gitea account 'purged' (Coder user deleted).",
+        "Re-enabled Gitea account 'returner' (Coder user returned).",
+    ]
+    assert calls[0] == ("GET", "/api/v1/admin/users?page=1", {})
+    assert ("PATCH", "/api/v1/admin/users/purged", {"active": False}) in calls
+    assert ("PATCH", "/api/v1/admin/users/returner", {"active": True}) in calls
+
+
+def test_sync_gitea_identities_raises_when_patch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A rejected PATCH must surface, not vanish: the caller degrades it to a
+    # WARNING note, and the next pass retries — a silently ignored 405 would
+    # pin the account in the wrong state forever.
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_request",
+        lambda **kwargs: {"users": []},
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_gitea_admin_user_rows",
+        lambda **kwargs: [{"username": "ghost", "email": "ghost@coder.wizard.local", "active": True}],
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_gitea_api_request",
+        lambda **kwargs: (405, {"message": "Method Not Allowed"}),
+    )
+
+    with pytest.raises(coder_module.CoderError):
+        coder_module._sync_gitea_identities(
+            coder_hostname="coder.example.com",
+            session_token="session-123",
+            gitea_hostname="gitea.example.com",
+            provisioner_token="gt-token-9",
+            provisioner_username="dokploy-wizard",
+        )
+
+
+def test_gitea_identity_lane_is_baked_into_the_desktop_template() -> None:
+    template = Path(
+        "templates/coder/default-ubuntu-vscode-hermes-desktop/main.tf"
+    ).read_text(encoding="utf-8")
+
+    # Guard + sentinels follow the FileX trick: the door renders empty when
+    # the pack is off, and the *_SENTINEL__ markers stay out of the map.
+    assert 'DOKPLOY_WIZARD_GITEA_URL="__DOKPLOY_WIZARD_GITEA_INTERNAL_URL__"' in template
+    assert (
+        'DOKPLOY_WIZARD_GITEA_URL_SENTINEL="__DOKPLOY_WIZARD_GITEA_INTERNAL_URL_SENTINEL__"'
+        in template
+    )
+    assert "<<'GITEAPROV'" in template
+    # Account spring through the admin API: username = coder login, email the
+    # convention the coder-phase sync scopes on, and must-change OFF (measured:
+    # a pending must-change turns basic-auth API calls into 403).
+    assert 'email = login + "@coder.wizard.local"' in template
+    assert '"must_change_password": False' in template
+    assert '"/api/v1/admin/users", provisioner_auth' in template
+    # Box-measured: GET /api/v1/admin/users/<name> is NOT routed (405; missing
+    # names 404 from the redirect middleware), so the lane probes existence
+    # through the paginated collection list instead.
+    assert '"/api/v1/admin/users?page=%d" % page' in template
+    assert "if len(rows) < 30" in template
+    # Same seed rule as the FileX account: issuer when present, else token.
+    assert 'DOKPLOY_GT_SEED="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY"' in template
+    # One key per (user, workspace): title is the shared label, adoption is by
+    # key material, replacement goes through the owner's own credentials.
+    assert 'title = login + "-" + workspace' in template
+    assert '/api/v1/users/" + user_path + "/keys' in template
+    assert '/api/v1/admin/users/" + user_path + "/keys' in template
+    assert '/api/v1/user/keys/%s' in template
+    # ssh convenience over the overlay door, and git identity defaults.
+    assert '"# BEGIN dokploy-wizard gitea"' in template
+    assert "ssh-keyscan" in template
+    assert '"git", "config", "--global", "user.name", login' in template
+    # The lane must never hold the boot hostage: backgrounded, log to file.
+    assert ") > /tmp/gitea-identity.log 2>&1 &" in template
+
+
+@pytest.mark.parametrize("sync_failure", (False, True))
+def test_ensure_application_ready_runs_gitea_identity_sync_and_degrades_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    sync_failure: bool,
+) -> None:
+    from dokploy_wizard.state.models import STATE_FORMAT_VERSION, GiteaProvisionerState
+
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        gitea_provisioner=GiteaProvisionerState(
+            format_version=STATE_FORMAT_VERSION,
+            username="dokploy-wizard",
+            email="dokploy-wizard@gitea.example.com",
+            password="pw",
+            token="gt-token-9",
+        ),
+        gitea_hostname="gitea.example.com",
+        state_dir=tmp_path,
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_container_name",
+        lambda service_name: "wizard-stack-coder-container",
+    )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_copy_template_into_container", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
+    )
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(
+        coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
+
+    sync_calls: list[dict[str, str]] = []
+
+    def fake_sync(**kwargs: str) -> list[str]:
+        sync_calls.append(dict(kwargs))
+        if sync_failure:
+            raise coder_module.CoderError("HTTP 500")
+        return ["Disabled Gitea account 'purged' (Coder user deleted)."]
+
+    monkeypatch.setattr(coder_module, "_sync_gitea_identities", fake_sync)
+
+    notes = backend.ensure_application_ready()
+
+    # The provisioner document baked at construction (plus the pack hostname)
+    # drives the sync directly: no re-read of a missing state file needed.
+    assert sync_calls == [
+        {
+            "coder_hostname": "coder.example.com",
+            "session_token": "session-123",
+            "gitea_hostname": "gitea.example.com",
+            "provisioner_token": "gt-token-9",
+            "provisioner_username": "dokploy-wizard",
+        }
+    ]
+    if sync_failure:
+        assert any(note.startswith("Skipped Gitea identity sync:") for note in notes)
+        assert "Disabled Gitea account 'purged' (Coder user deleted)." not in notes
+    else:
+        assert "Disabled Gitea account 'purged' (Coder user deleted)." in notes
+
+
 def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2505,6 +2790,10 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         # so both door values render empty and the startup script skips ~/shared.
         "__DOKPLOY_WIZARD_FILEX_INTERNAL_URL__": "",
         "__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN__": "",
+        # Same for the Gitea identity lane: no provisioner document, so the
+        # GITEAPROV boot lane is disabled and the coder phase runs no sync.
+        "__DOKPLOY_WIZARD_GITEA_INTERNAL_URL__": "",
+        "__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN__": "",
     }
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name
     assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
@@ -2571,13 +2860,18 @@ def test_workspace_key_mint_block_is_baked_into_gateway_key_templates(template_d
     assert 'DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL="__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__"' in template
     assert '"$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL" ' in template + " "
     assert "<<'MINTPY'" in template
-    # Deterministic child token: issuer + workspace name, so restarts adopt the
-    # existing key and issuer rotations re-mint without extra bookkeeping.
-    assert 'token = "sk-" + hashlib.sha256((issuer + ":" + workspace).encode()).hexdigest()[:40]' in template
-    # The workspace identity comes from Coder itself; the alias is the workspace
-    # name, so LiteLLM spend attributes per workspace by construction.
+    # Deterministic child token: issuer + the owner-scoped label, so restarts
+    # adopt the existing key and issuer rotations re-mint without bookkeeping.
+    # A bare workspace name would collide across owners (Coder names are
+    # unique per owner), letting a second owner's "dev" adopt the first's key.
+    assert 'token = "sk-" + hashlib.sha256((issuer + ":" + label).encode()).hexdigest()[:40]' in template
+    assert 'label = owner + "-" + workspace' in template
+    # The identity comes from Coder itself: owner AND workspace, so LiteLLM
+    # spend attributes per person and machine by construction.
     assert '"${data.coder_workspace.me.name}"' in template
-    assert '"key_alias": workspace' in template
+    assert '"${data.coder_workspace_owner.me.name}"' in template
+    assert '"key_alias": label' in template
+    assert '"coder_owner": owner' in template
     assert '"models": ["sync/*", "sync/default-chat"]' in template
     # Info-then-generate with a final re-info: any refusal (permissions, alias
     # collision, gateway unreachable) leaves the variable empty and the baked
@@ -2586,6 +2880,14 @@ def test_workspace_key_mint_block_is_baked_into_gateway_key_templates(template_d
     assert 'mint_request(' in template
     assert '|| DOKPLOY_WIZARD_WORKSPACE_API_KEY=""' in template
     assert "import hashlib, json, os, urllib.error, urllib.request" in template
+    # Upgrade path: the pre owner-scoping token (issuer + bare workspace) is
+    # deterministic too, so retire it once the scoped key stands — otherwise
+    # the sweep's workspace-key spare strands the old-format key forever.
+    assert (
+        'old_token = "sk-" + hashlib.sha256((issuer + ":" + workspace).encode())'
+        ".hexdigest()[:40]"
+    ) in template
+    assert 'mint_request("POST", "/key/delete", {"keys": [old_token]})' in template
 
 
 

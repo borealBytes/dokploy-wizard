@@ -43,7 +43,7 @@ from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, Rende
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
 from dokploy_wizard.state import load_state_dir
-from dokploy_wizard.state.models import FilexProvisionerState
+from dokploy_wizard.state.models import FilexProvisionerState, GiteaProvisionerState
 from dokploy_wizard.verification import make_verification_result, redact_text
 
 
@@ -116,6 +116,8 @@ class DokployCoderBackend:
         ai_default_api_key: str | None = None,
         workspace_issuer_api_key: str | None = None,
         filex_provisioner: FilexProvisionerState | None = None,
+        gitea_provisioner: GiteaProvisionerState | None = None,
+        gitea_hostname: str = "",
         state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployCoderApi | None = None,
     ) -> None:
@@ -143,6 +145,11 @@ class DokployCoderBackend:
         # template so every workspace boot can materialize the owner's account
         # and per-(user, workspace) credentials; None keeps ~/shared unmounted.
         self._filex_provisioner = filex_provisioner
+        # The Gitea pack reconciles before Coder too, so its provisioner token
+        # can ride into the template (GITEAPROV boot lane) and the coder phase
+        # can run the identity sync (deleted-user disable / return re-enable).
+        self._gitea_provisioner = gitea_provisioner
+        self._gitea_hostname = gitea_hostname
         self._state_dir = state_dir
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
@@ -175,6 +182,43 @@ class DokployCoderBackend:
         # The FileX pack's service name is its own ({stack}-filex); the local
         # _service_name here belongs to the Coder pack.
         return f"http://{self._stack_name}-filex:{_FILEX_INTERNAL_PORT}"
+
+    def _gitea_provisioner_state(self) -> GiteaProvisionerState | None:
+        """The Gitea provisioner record, re-reading state when needed.
+
+        Same mid-run convergence as the FileX document: the Gitea phase seeds
+        its provisioner before the Coder phase pushes the template in the same
+        process, so the document is re-read from the state directory at push
+        time instead of only at backend construction.
+        """
+        if self._gitea_provisioner is None:
+            from dokploy_wizard.state.store import load_gitea_provisioner
+
+            self._gitea_provisioner = load_gitea_provisioner(self._state_dir)
+        return self._gitea_provisioner
+
+    def _gitea_internal_url(self) -> str:
+        """Workspace-reachable Gitea base URL, or empty when the pack is off.
+
+        The compose exposes 3000 on the shared overlay (external network), so
+        the service DNS name answers from inside any workspace.
+        """
+        if self._gitea_provisioner_state() is None:
+            return ""
+        return f"http://{self._stack_name}-gitea:{_GITEA_INTERNAL_PORT}"
+
+    def _sync_gitea_identities(self, session_token: str) -> list[str]:
+        """Align Gitea wizard-sprung accounts with the Coder user roster."""
+        provisioner = self._gitea_provisioner_state()
+        if provisioner is None or not self._gitea_hostname:
+            return []
+        return _sync_gitea_identities(
+            coder_hostname=self._hostname,
+            session_token=session_token,
+            gitea_hostname=self._gitea_hostname,
+            provisioner_token=provisioner.token,
+            provisioner_username=provisioner.username,
+        )
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "service")
@@ -344,6 +388,15 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN__": _shell_double_quote_escape(
                         provisioner.token if (provisioner := self._filex_provisioner_state()) else ""
                     ),
+                    # Gitea identity lane: the overlay door + provisioner token
+                    # for the GITEAPROV boot lane (account spring, SSH key). The
+                    # *_SENTINEL__ markers stay unmapped (same guard trick).
+                    "__DOKPLOY_WIZARD_GITEA_INTERNAL_URL__": self._gitea_internal_url(),
+                    "__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN__": _shell_double_quote_escape(
+                        gitea_provisioner.token
+                        if (gitea_provisioner := self._gitea_provisioner_state())
+                        else ""
+                    ),
                     "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": _shell_double_quote_escape(
                         self._admin_password or "ChangeMeSoon"
                     ),
@@ -385,6 +438,12 @@ class DokployCoderBackend:
             notes.append(note)
             retired_templates = ()
         notes.extend(f"Retired removed Coder template '{name}'." for name in retired_templates)
+        try:
+            notes.extend(self._sync_gitea_identities(session_token))
+        except Exception as exc:  # noqa: BLE001 - identity sync must never take the pass down
+            note = f"Skipped Gitea identity sync: {_safe_progress_reason(str(exc))}"
+            _emit_coder_progress(note)
+            notes.append(note)
         workspace_name = _default_workspace_name(self._hostname)
         if bootstrap_ready:
             # The compose application verified clean, so the workspace itself
@@ -1035,18 +1094,24 @@ def _coder_request(
     path: str,
     payload: dict[str, object] | None = None,
     expected_statuses: set[int] | None = None,
+    session_token: str | None = None,
 ) -> dict[str, object]:
     if expected_statuses is None:
         expected_statuses = {200}
     body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Host": hostname,
+    }
+    if session_token is not None:
+        # Measured on the box at the v2.39.4 pin: `Coder-Session-Token` is the
+        # accepted spelling (`CoderSessionToken` and ?session_token= → 401).
+        headers["Coder-Session-Token"] = session_token
     req = urlrequest.Request(
         f"https://127.0.0.1{path}",
         data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Host": hostname,
-        },
+        headers=headers,
         method=method,
     )
     try:
@@ -1059,6 +1124,154 @@ def _coder_request(
             return {} if raw == "" else json.loads(raw)
     except urlerror.HTTPError as exc:
         raise _CoderHTTPError(status=exc.code) from exc
+
+
+# Gitea's compose exposes 3000 on the shared overlay (no publish); workspaces
+# reach the identity lane door at that service DNS name.
+_GITEA_INTERNAL_PORT = 3000
+# The boot lane's account-email convention; the identity sync scopes itself to
+# accounts that carry it and never touches anyone else's.
+_IDENTITY_EMAIL_DOMAIN = "coder.wizard.local"
+# Gitea's admin user list defaults to 30 rows per page; paginate to stay
+# correct at stack scale (the box scale is tiny, the cap keeps bugs bounded).
+_GITEA_PAGE_SIZE = 30
+_GITEA_MAX_PAGES = 20
+
+
+def _gitea_api_request(
+    *,
+    hostname: str,
+    method: str,
+    path: str,
+    token: str,
+    payload: dict[str, object] | None = None,
+) -> tuple[int | None, object]:
+    """One Gitea API call with the provisioner token through the loopback edge.
+
+    Same door the Gitea pack itself uses: UFW blocks host->overlay and the
+    HTTPS-only edge answers on loopback with the pack hostname as Host.
+    """
+    headers = {
+        "Host": hostname,
+        "Accept": "application/json",
+        "Authorization": f"Token {token}",
+    }
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urlrequest.Request(
+        f"https://127.0.0.1{path}",
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    try:
+        context = ssl._create_unverified_context()
+        opener = urlrequest.build_opener(urlrequest.HTTPSHandler(context=context))
+        with opener.open(req, timeout=20) as response:
+            raw = response.read().decode("utf-8", "ignore")
+            return response.status, (json.loads(raw) if raw else None)
+    except urlerror.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read().decode("utf-8", "ignore") or "null")
+        except Exception:
+            return exc.code, None
+    except (urlerror.URLError, TimeoutError, OSError):
+        return None, None
+
+
+def _gitea_admin_user_rows(*, hostname: str, token: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    page = 1
+    while page <= _GITEA_MAX_PAGES:
+        status, payload = _gitea_api_request(
+            hostname=hostname,
+            method="GET",
+            path=f"/api/v1/admin/users?page={page}",
+            token=token,
+        )
+        if status != 200 or not isinstance(payload, list):
+            raise CoderError(f"Gitea admin user list failed (HTTP {status}).")
+        rows.extend(row for row in payload if isinstance(row, dict))
+        if len(payload) < _GITEA_PAGE_SIZE:
+            break
+        page += 1
+    return rows
+
+
+def _identity_sync_actions(
+    *,
+    gitea_rows: Sequence[object],
+    present_logins: set[str],
+    provisioner_username: str,
+) -> list[tuple[str, bool]]:
+    """Accounts to flip, as (username, desired-active) pairs.
+
+    Scope: only wizard-sprung accounts, identified by the email convention
+    ({login}@coder.wizard.local). Manual accounts and the provisioner itself
+    are never touched. A login present in Coder's default users list must be
+    active in Gitea; absent (deleted — measured: v2.39.4 drops deleted rows
+    from the default list) must be inactive.
+    """
+    actions: list[tuple[str, bool]] = []
+    for row in gitea_rows:
+        if not isinstance(row, dict):
+            continue
+        username = str(row.get("username") or "")
+        email = str(row.get("email") or "").lower()
+        if not username or username == provisioner_username:
+            continue
+        if not email.endswith("@" + _IDENTITY_EMAIL_DOMAIN):
+            continue
+        desired_active = username.lower() in present_logins
+        if bool(row.get("active")) is not desired_active:
+            actions.append((username, desired_active))
+    return actions
+
+
+def _sync_gitea_identities(
+    *,
+    coder_hostname: str,
+    session_token: str,
+    gitea_hostname: str,
+    provisioner_token: str,
+    provisioner_username: str,
+) -> list[str]:
+    """Keep wizard-sprung Gitea accounts aligned with the Coder roster."""
+    users = _coder_request(
+        hostname=coder_hostname,
+        method="GET",
+        path="/api/v2/users",
+        session_token=session_token,
+    )
+    rows = users.get("users")
+    present_logins = {
+        str(row.get("username") or "").lower()
+        for row in (rows if isinstance(rows, list) else [])
+        if isinstance(row, dict) and str(row.get("status") or "") != "deleted"
+    }
+    gitea_rows = _gitea_admin_user_rows(hostname=gitea_hostname, token=provisioner_token)
+    notes: list[str] = []
+    for username, desired_active in _identity_sync_actions(
+        gitea_rows=gitea_rows,
+        present_logins=present_logins,
+        provisioner_username=provisioner_username,
+    ):
+        status, _payload = _gitea_api_request(
+            hostname=gitea_hostname,
+            method="PATCH",
+            path=f"/api/v1/admin/users/{parse.quote(username, safe='')}",
+            token=provisioner_token,
+            payload={"active": desired_active},
+        )
+        if status != 200:
+            raise CoderError(f"Gitea identity sync for '{username}' returned HTTP {status}.")
+        if desired_active:
+            notes.append(f"Re-enabled Gitea account '{username}' (Coder user returned).")
+        else:
+            notes.append(f"Disabled Gitea account '{username}' (Coder user deleted).")
+    return notes
 
 
 def _coder_container_name(service_name: str) -> str | None:

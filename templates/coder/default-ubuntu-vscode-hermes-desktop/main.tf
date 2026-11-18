@@ -144,11 +144,14 @@ resource "coder_agent" "main" {
     # -- wizard: per-workspace LiteLLM identity --------------------------------
     # The baked template key is shared by every workspace. When the wizard
     # provided an issuer key, this workspace mints its own virtual key named
-    # after itself: spend attributes per workspace, and rotating one
-    # workspace's key touches no other. The token derives from issuer +
-    # workspace name, so restarts adopt the same key and an issuer rotation
-    # re-mints for free. Any failure falls back to the baked shared key: a
-    # workspace without a personal key still starts with AI.
+    # <login>-<workspace>: spend attributes per person and machine, and
+    # rotating one workspace's key touches no other. The pair is the honest
+    # identity — Coder workspace names are unique only PER OWNER, so a bare
+    # workspace name let a second owner's "dev" adopt the first owner's key.
+    # The token derives from issuer + that label, so restarts adopt the same
+    # key and an issuer rotation re-mints for free. Any failure falls back to
+    # the baked shared key: a workspace without a personal key still starts
+    # with AI.
     DOKPLOY_WIZARD_LITELLM_ISSUER_KEY="__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__"
     # The sentinel is deliberately NOT in the wizard's replacement map (the same
     # trick the Hermes wiring above uses): comparing the assignment against a
@@ -164,14 +167,17 @@ resource "coder_agent" "main" {
         DOKPLOY_LITELLM_BASE_URL="$HERMES_TEMPLATE_BASE_URL" \
         DOKPLOY_LITELLM_ISSUER_KEY="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" \
         DOKPLOY_WORKSPACE_NAME="${data.coder_workspace.me.name}" \
+        DOKPLOY_WORKSPACE_OWNER="${data.coder_workspace_owner.me.name}" \
         python3 - <<'MINTPY'
 import hashlib, json, os, urllib.error, urllib.request
 
 base = os.environ.get("DOKPLOY_LITELLM_BASE_URL", "").rstrip("/")
 issuer = os.environ.get("DOKPLOY_LITELLM_ISSUER_KEY", "")
 workspace = os.environ.get("DOKPLOY_WORKSPACE_NAME", "")
-if base and issuer and workspace:
-    token = "sk-" + hashlib.sha256((issuer + ":" + workspace).encode()).hexdigest()[:40]
+owner = os.environ.get("DOKPLOY_WORKSPACE_OWNER", "")
+if base and issuer and workspace and owner:
+    label = owner + "-" + workspace
+    token = "sk-" + hashlib.sha256((issuer + ":" + label).encode()).hexdigest()[:40]
 
     def mint_request(method, path, payload=None):
         data = json.dumps(payload).encode() if payload is not None else None
@@ -190,21 +196,32 @@ if base and issuer and workspace:
             return 0
 
     # info-then-generate: a previous boot (or a recreate under the same
-    # workspace name) already owns this deterministic token; adopt it rather
-    # than collide. The final re-info is what decides: if minting was refused
-    # for any reason the fallback below keeps the baked shared key.
+    # workspace identity) already owns this deterministic token; adopt it
+    # rather than collide. The final re-info is what decides: if minting was
+    # refused for any reason the fallback below keeps the baked shared key.
     if mint_request("GET", "/key/info?key=" + token) != 200:
         mint_request(
             "POST",
             "/key/generate",
             {
                 "key": token,
-                "key_alias": workspace,
+                "key_alias": label,
                 "models": ["sync/*", "sync/default-chat"],
-                "metadata": {"managed_by": "dokploy-wizard", "coder_workspace": workspace},
+                "metadata": {
+                    "managed_by": "dokploy-wizard",
+                    "coder_workspace": workspace,
+                    "coder_owner": owner,
+                },
             },
         )
     if mint_request("GET", "/key/info?key=" + token) == 200:
+        # Upgrade cleanup: pre owner-scoping, the token derived from issuer +
+        # bare workspace name. That key is deterministic too, so retire it
+        # once the new one stands — otherwise the sweep's workspace-key spare
+        # strands it forever (nothing would ever mint or delete it again).
+        old_token = "sk-" + hashlib.sha256((issuer + ":" + workspace).encode()).hexdigest()[:40]
+        if old_token != token and mint_request("GET", "/key/info?key=" + old_token) == 200:
+            mint_request("POST", "/key/delete", {"keys": [old_token]})
         print(token)
 MINTPY
       ) || DOKPLOY_WIZARD_WORKSPACE_API_KEY=""
@@ -556,6 +573,248 @@ HELPER
             "$HOME/.local/bin/filex-shared-supervisor" >/dev/null 2>&1 &
         fi
       ) > /tmp/filex-shared.log 2>&1 &
+    fi
+
+    # -- wizard: Gitea identity lane --------------------------------------------
+    # The person who owns this workspace gets a Gitea account, springing at
+    # first boot: username = the coder login, email the wizard convention
+    # ({login}@coder.wizard.local), password derived from the same seed rule
+    # as the ~/shared account (issuer key, else the provisioner token). The
+    # change-password flag is OFF because a pending must-change turns every
+    # basic-auth API call into a 403 (measured). A manual account that already
+    # owns the name keeps its own secret and its own meaning — this lane skips
+    # it, never resets it. One SSH key per (user, workspace) rides the home
+    # volume: pushes over the built-in SSH server (overlay port 2222) name a
+    # person and a machine, and an ssh_config Host alias makes
+    # `git clone gitea:owner/repo.git` work out of the box. When the coder
+    # user is deleted the coder phase disables the account; re-adding the
+    # user re-enables it here at the next boot. Nothing here can take a
+    # workspace down: the whole lane runs in the background and every failure
+    # logs and exits.
+    DOKPLOY_WIZARD_GITEA_URL="__DOKPLOY_WIZARD_GITEA_INTERNAL_URL__"
+    # *_SENTINEL__ markers stay out of the replacement map (same trick as the
+    # issuer and FileX guards).
+    DOKPLOY_WIZARD_GITEA_URL_SENTINEL="__DOKPLOY_WIZARD_GITEA_INTERNAL_URL_SENTINEL__"
+    DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN="__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN__"
+    DOKPLOY_WIZARD_GITEA_PROVISIONER_SENTINEL="__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN_SENTINEL__"
+    if [ -n "$DOKPLOY_WIZARD_GITEA_URL" ] && \
+       [ "$DOKPLOY_WIZARD_GITEA_URL" != "$DOKPLOY_WIZARD_GITEA_URL_SENTINEL" ] && \
+       [ -n "$DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN" ] && \
+       [ "$DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN" != \
+         "$DOKPLOY_WIZARD_GITEA_PROVISIONER_SENTINEL" ]; then
+      export DOKPLOY_GT_URL="$DOKPLOY_WIZARD_GITEA_URL"
+      export DOKPLOY_GT_TOKEN="$DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN"
+      export DOKPLOY_GT_LOGIN="${data.coder_workspace_owner.me.name}"
+      export DOKPLOY_GT_WORKSPACE="${data.coder_workspace.me.name}"
+      # Same seed rule as the FileX account: issuer when present, else the
+      # provisioner token, so an issuer rotation re-derives cleanly.
+      DOKPLOY_GT_SEED="$DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN"
+      case "$${DOKPLOY_WIZARD_LITELLM_ISSUER_KEY:-}" in
+        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)
+          ;;
+        *) DOKPLOY_GT_SEED="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" ;;
+      esac
+      export DOKPLOY_GT_SEED
+      (
+        # Background on purpose, same rule as ~/shared: identity calls and
+        # apt locks must never hold the IDE hostage. set -e inside so the
+        # first real failure ends this subshell quietly; the boot doesn't care.
+        set -e
+        mkdir -p "$HOME/.ssh"
+        if ! command -v ssh-keygen >/dev/null 2>&1; then
+          # The foreground apt may still hold the dpkg lock behind us; retry
+          # past it for a minute before giving the lane up in the log.
+          for _attempt in 1 2 3 4 5 6; do
+            sleep 10
+            command -v ssh-keygen >/dev/null 2>&1 && break
+            $_SUDO apt-get -qq -y install openssh-client >/dev/null 2>&1 || true
+          done
+        fi
+        command -v ssh-keygen >/dev/null 2>&1 \
+          || { echo "gitea: no ssh-keygen; skipping identity lane"; exit 0; }
+        [ -f "$HOME/.ssh/id_ed25519_gitea" ] || ssh-keygen -q -t ed25519 -N '' \
+          -C "${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}@gitea" \
+          -f "$HOME/.ssh/id_ed25519_gitea"
+        python3 - <<'GITEAPROV'
+import base64, hashlib, json, os, subprocess, urllib.error, urllib.parse, urllib.request
+
+base = os.environ["DOKPLOY_GT_URL"].rstrip("/")
+token = os.environ["DOKPLOY_GT_TOKEN"]
+login = os.environ["DOKPLOY_GT_LOGIN"]
+workspace = os.environ["DOKPLOY_GT_WORKSPACE"]
+seed = os.environ["DOKPLOY_GT_SEED"]
+password = "gt-" + hashlib.sha256((seed + ":" + login).encode()).hexdigest()[:40]
+email = login + "@coder.wizard.local"
+title = login + "-" + workspace
+
+
+def note(message):
+    print("gitea: " + message)
+
+
+def call(method, path, auth=None, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base + path, data=data, method=method)
+    if auth:
+        req.add_header("Authorization", auth)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode()
+            return resp.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read().decode() or "null")
+        except Exception:
+            return exc.code, None
+    except Exception:
+        return 0, None
+
+
+provisioner_auth = "Token " + token
+owner_basic = "Basic " + base64.b64encode((login + ":" + password).encode()).decode()
+user_path = urllib.parse.quote(login, safe="")
+
+# 1) The owner's account, lazily created through the provisioner. A manual
+#    account owning the name is left exactly as it is. The admin route serves
+#    GET only on the collection (GET /admin/users/<name> is a 405 and a missing
+#    name 404s from the redirect middleware — measured on the box), so the
+#    list is the only honest existence probe.
+def admin_user_row():
+    page = 1
+    while page <= 20:
+        status, rows = call("GET", "/api/v1/admin/users?page=%d" % page, provisioner_auth)
+        if status != 200 or not isinstance(rows, list):
+            return None, status
+        for row in rows:
+            if isinstance(row, dict) and row.get("username") == login:
+                return row, status
+        if len(rows) < 30:  # Gitea's default page size
+            return None, status
+        page += 1
+    return None, 200
+
+
+user, status = admin_user_row()
+if user is None and status != 200:
+    note("skipped: provisioner token rejected by /api/v1/admin/users (HTTP %s)" % status)
+    raise SystemExit
+if user is None:
+    status, user = call(
+        "POST", "/api/v1/admin/users", provisioner_auth,
+        {"username": login, "email": email, "password": password,
+         "must_change_password": False, "send_notify_email": False},
+    )
+    if status not in (200, 201):
+        note("skipped: could not create the Gitea account (HTTP %s)" % status)
+        raise SystemExit
+    note("created the Gitea account for '" + login + "'")
+else:
+    if str(user.get("email") or "").lower() != email.lower():
+        note("skipped: a manual Gitea account owns '" + login + "'")
+        raise SystemExit
+    if not user.get("active"):
+        status, _body = call(
+            "PATCH", "/api/v1/admin/users/" + user_path, provisioner_auth, {"active": True}
+        )
+        if status == 200:
+            note("re-enabled the Gitea account for '" + login + "' (Coder user returned)")
+
+# 2) One SSH key per (user, workspace): content adopts, title replaces. The
+#    keypair lives on the home volume, so it survives restarts; a fresh home
+#    rotates it and the old title-matched key retires through the owner's own
+#    credentials (a password the human changed then simply leaves the stale
+#    key behind — harmless, the new one works).
+with open(os.path.expanduser("~/.ssh/id_ed25519_gitea.pub"), encoding="utf-8") as handle:
+    public = handle.read().strip()
+material = " ".join(public.split()[:2])
+status, keys = call("GET", "/api/v1/users/" + user_path + "/keys", provisioner_auth)
+rows = keys if isinstance(keys, list) else []
+adopted = any(
+    isinstance(row, dict) and " ".join(str(row.get("key") or "").split()[:2]) == material
+    for row in rows
+)
+if not adopted:
+    for row in rows:
+        if isinstance(row, dict) and row.get("title") == title:
+            status, _body = call(
+                "DELETE", "/api/v1/user/keys/%s" % row.get("id"), owner_basic
+            )
+            if status not in (200, 204):
+                note("warning: stale key '" + title + "' stayed behind (HTTP %s)" % status)
+    status, _body = call(
+        "POST", "/api/v1/admin/users/" + user_path + "/keys", provisioner_auth,
+        {"title": title, "key": public},
+    )
+    if status in (200, 201):
+        note("registered SSH key '" + title + "'")
+    else:
+        note("warning: SSH key registration failed (HTTP %s)" % status)
+
+# 3) ssh convenience over the overlay door: a Host alias + a pinned host key,
+#    so `git clone gitea:owner/repo.git` needs no first-connect prompt.
+parsed = urllib.parse.urlparse(base)
+host = parsed.hostname or ""
+port = 2222
+config_path = os.path.expanduser("~/.ssh/config")
+begin, end = "# BEGIN dokploy-wizard gitea", "# END dokploy-wizard gitea"
+try:
+    with open(config_path, encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+except FileNotFoundError:
+    lines = []
+try:
+    start = lines.index(begin)
+    stop = lines.index(end)
+    lines = lines[:start] + lines[stop + 1:]
+except ValueError:
+    pass
+if host:
+    lines.extend([
+        begin,
+        "Host gitea",
+        "  HostName " + host,
+        "  Port %d" % port,
+        "  User git",
+        "  IdentityFile ~/.ssh/id_ed25519_gitea",
+        "  IdentitiesOnly yes",
+        end,
+    ])
+with open(config_path, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(lines) + "\n")
+os.chmod(config_path, 0o600)
+
+known_path = os.path.expanduser("~/.ssh/known_hosts")
+try:
+    with open(known_path, encoding="utf-8") as handle:
+        known = handle.read()
+except FileNotFoundError:
+    known = ""
+if host and ("[" + host + "]:" + str(port)) not in known:
+    scan = subprocess.run(
+        ["ssh-keyscan", "-p", str(port), host], capture_output=True, text=True, timeout=15
+    )
+    if scan.stdout:
+        with open(known_path, "a", encoding="utf-8") as handle:
+            handle.write(scan.stdout)
+        os.chmod(known_path, 0o644)
+
+# 4) Commit identity defaults, and only where the person has none yet.
+def git_get(key):
+    done = subprocess.run(
+        ["git", "config", "--global", "--get", key], capture_output=True, text=True
+    )
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+if host and not git_get("user.name"):
+    subprocess.run(["git", "config", "--global", "user.name", login], check=False)
+if host and not git_get("user.email"):
+    subprocess.run(["git", "config", "--global", "user.email", email], check=False)
+note("ready: git over the 'gitea' host alias clones as '" + title + "'")
+GITEAPROV
+      ) > /tmp/gitea-identity.log 2>&1 &
     fi
 
     if ! command -v hermes >/dev/null 2>&1; then

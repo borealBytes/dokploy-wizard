@@ -893,3 +893,133 @@ tests + a fresh remote proof:
     (all ten phases preserved, health outcomes `already_present`),
     completed in 22s with no phase reruns — the full
     install→modify→noop lifecycle holds with the Gitea pack enabled.
+
+## Phase 8 (2026-11): identity automation — Gitea accounts spring with workspaces
+
+### The OIDC verdict (measured, blocks the literal lane)
+- The original slice-5 sketch was Coder-as-OIDC-IdP → Gitea `source_id`
+  accounts. Box-measured at the pinned Coder **v2.39.4**: `CODER_OAUTH2_PROVIDER_ENABLE=true`
+  flips `buildinfo.oauth2_provider`, but the provider is RFC 8414 **OAuth-only**:
+  discovery lives at `/.well-known/oauth-authorization-server` (authorize/tokens/
+  revoke, PKCE S256, opaque tokens, **no id_token**), and
+  `/.well-known/openid-configuration` serves the dashboard SPA HTML (the dashboard
+  fallback router owns that path). DCR is off by default. Gitea's only generic
+  auth-source type is OIDC-with-discovery → **Coder cannot be Gitea's OIDC
+  provider at this pin**; the lane reopens when Coder ships OIDC discovery.
+- So identity automation rides the provisioner token the Gitea pack already
+  seeded: boot lanes spring accounts, the coder phase disables them, and the
+  per-workspace LiteLLM identity is fixed for cross-owner collisions.
+
+### Boot lane: GITEAPROV (template)
+- New background subshell alongside the ~/shared lane, guarded by the two new
+  replacements `__DOKPLOY_WIZARD_GITEA_INTERNAL_URL__` /
+  `__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN__` (sentinels unmapped, same trick;
+  empty when the pack is off → lane skipped silently, no boot noise). Door is
+  the overlay service DNS `http://{stack}-gitea:3000` — compose exposes 3000
+  on the external shared network, workspaces never leave the host.
+- Account spring: username = coder login, email = `{login}@coder.wizard.local`
+  (the FileX lane's convention), password derived `sha256(seed + ":" + login)`
+  with the same seed rule (issuer key, else provisioner token). Created through
+  `POST /api/v1/admin/users` with `must_change_password:false` — box-measured:
+  a pending must-change makes every basic-auth API call a 403, so a boot lane
+  could not manage its own key. A manual account that owns the name is left
+  alone (email mismatch → skip, never reset).
+- One SSH key per (user, workspace): `ssh-keygen`ed on first boot into the home
+  volume (`~/.ssh/id_ed25519_gitea`), registered by title `{login}-{workspace}`
+  via `POST /api/v1/admin/users/{u}/keys` (measured: the admin route is
+  POST-only, GET → 405; `GET /api/v1/users/{u}/keys` answers for the token).
+  Adoption is by key material, replacement retitles through the owner's own
+  basic auth (a human-set password then harmlessly leaves the stale key).
+- Convenience: ssh_config Host alias `gitea` → overlay name port 2222 (the
+  built-in SSH server, overlay-only) with a keyscanned known_hosts pin, and
+  `git config --global user.name/email` defaults set only when unset.
+- Re-enable lane closes the loop: if the account exists but is inactive (the
+  coder phase disabled it when the Coder user was deleted), the next boot
+  PATCHes it active again.
+
+### Disable lane: coder-phase identity sync
+- `ensure_application_ready` runs `_sync_gitea_identities` after template
+  seeding: Coder users via `GET /api/v2/users` (session token) ∩ Gitea via
+  `GET /api/v1/admin/users` (provisioner token, loopback edge). Scope is the
+  email convention alone — manual accounts and the provisioner are invisible
+  to it. Present → active, absent-or-deleted → inactive, applied with
+  `PATCH /api/v1/admin/users/{u}` `{active}` (measured 200 both directions).
+  Measured at the pin: created users are `dormant` until first login (a boot
+  lane only ever runs for logged-in owners, so springing never races that);
+  deleted users are simply **absent from the default list** (`?status=deleted`
+  does not filter them out — presence is the lane's test); the suspend route
+  is 404 at this version, so suspend never disables (a suspended-but-present
+  user keeps the account, which is the conservative choice).
+- Degrades like every other identity note: any failure becomes
+  `Skipped Gitea identity sync: …`, the pass stands, the next pass retries.
+
+### Per-workspace LiteLLM identity: re-scope + churn fix
+- MINTPY re-scoped to `<login>-<workspace>` (alias + derivation seed): Coder
+  workspace names are unique only **per owner**, so the bare-workspace key let
+  a second owner's "dev" adopt the first owner's key and spend. Metadata gains
+  `coder_owner`; template tests pin the new shape.
+- Churn bug found by the same recon: `reconcile_virtual_keys`'s retired-
+  consumer sweep was deleting every workspace-minted key on every real
+  shared_core pass (wizard metadata, alias not a state consumer → swept).
+  Box-measured: `/key/list` held exactly the four state aliases after any pass,
+  no workspace key — the boot lane re-minted at every restart, silent churn.
+  The sweep now spares records carrying `coder_workspace`; pinned by a
+  spare-the-workspace-key test.
+
+- Wiring: `DokployCoderBackend` gains `gitea_provisioner`/`gitea_hostname`; the
+  provisioner document is re-read at push time (the gitea phase reconciles
+  before coder in the same process — identical to the FileX lane, own test).
+  `_coder_request` accepts `session_token` (the measured `Coder-Session-Token`
+  header; `CoderSessionToken` and `?session_token=` return 401 at the pin).
+- MINTPY upgrade lane: the pre owner-scoping token (issuer + bare workspace)
+  is deterministic too, so the boot retires it through `/key/delete` once the
+  scoped key stands — otherwise the sweep's workspace-key spare strands the
+  old-format key forever (nothing would ever mint or delete it again).
+
+### Box-measured bugs (both fixed, both pinned by tests)
+- **Gitea admin GET-by-name is not routed.** The first boot lane probed
+  `GET /api/v1/admin/users/{name}` and boxed with `provisioner token rejected
+  … (HTTP 405)`; a missing name 404s from the redirect middleware, so the code
+  never had a working GET at all. Existence is now probed through the
+  paginated collection `GET /api/v1/admin/users?page=N` (default page size
+  30, capped pages) — mirrored in the backend's own sync list reader.
+- **Adopt-back corrupted the LiteLLM state document.** The shared-core
+  reconcile adopted `/key/list` records back into `litellm-generated-keys.json`
+  whenever `record.key` differed from the state raw — but the live payload
+  carries `key == token == sha256(raw)` with no raw material, so a no-drift
+  pass replaced every consumer raw with its own hash. Irreversible; the
+  validator stayed green (hash-vs-hash), and every later bake handed apps a
+  token the gateway rejects with 401 ("LiteLLM Virtual Key expected.
+  Received=b56b\*\*\*\*2a2d, expected to start with 'sk-'") — the workspace
+  mint had silently fallen back to the (also hashed) baked key. The adopt-back
+  now skips records whose `key` equals `token` (hashed list material proves
+  nothing new); regression tests cover both the suppression and the genuine
+  drift path still adopting its recreated raw.
+
+### Box outcomes (157.173.124.231, modify30–modify32)
+- modify30 (resume to the gitea prefix): sync lanes PROVEN — `Disabled Gitea
+  account 'slice5-probe' (Coder user deleted)` and `Re-enabled Gitea account
+  'slice5-return' (Coder user returned)` against seeded probes; the re-scoped
+  alias `clayton-showmeseewhycom-workspace` appeared with `coder_owner`
+  metadata. The same pass surfaced the 405 and the adopt-back corruption.
+- State repair: fresh raws written into the box document (master/salt
+  unchanged), stale scoped row swept by token, resume from the networking
+  prefix.
+- modify31 (resume through coder): value drift detected → all four consumer
+  keys delete+recreated with the repaired raws; the state document stayed
+  RAW through the pass (guard held on the box); `issuer GET /key/info?self`
+  back to 200. Workspace boot lane (new container): `created the Gitea
+  account for 'clayton'`, registered SSH key `clayton-showmeseewhycom-workspace`
+  (visible in the admin list), wrote the `gitea` ssh_config alias + pinned
+  `[showmeseewhy-com-gitea]:2222` known_hosts entry, set `user.name`/
+  `user.email` git identity, and the scoped key re-minted hash-matching the
+  newly derived token; the old bare-workspace format 404s (retired/never
+  minted). Sync lanes idempotent: zero notes.
+- Probe cleanup, then **modify32 PLAIN: `"mode": "noop"`, `"phases_to_run":
+  []`** in 22s — the slice converges.
+- Gates: 1116 passed, 1 skipped; ruff + mypy green. New tests: lazy gitea
+  document read, sync scope matrix (manual/provisioner/present/deleted/
+  re-enabled), scripted PATCH round-trip, patch-failure fail-closed, hook
+  integration + degrade-to-note, GITEAPROV template contract (incl. the list
+  probe), re-scoped MINTPY contract (incl. the upgrade cleanup), sweep spare,
+  adopt-back suppression + drift-still-adopts.

@@ -24,10 +24,12 @@ from dokploy_wizard.dokploy.shared_core import (
 )
 from dokploy_wizard.litellm.admin import LiteLLMTeamRecord, LiteLLMVirtualKeyRecord
 from dokploy_wizard.state import (
+    LITELLM_GENERATED_KEYS_FILE,
     AppliedStateCheckpoint,
     ComposeArtifactHashState,
     resolve_desired_state,
     write_applied_checkpoint,
+    write_litellm_generated_keys,
 )
 from dokploy_wizard.state.models import (
     STATE_FORMAT_VERSION,
@@ -970,6 +972,117 @@ def test_shared_core_validates_litellm_virtual_keys_against_hashed_token_materia
         ),
     )
     assert rotated_backend.validate_litellm_virtual_keys() is False
+
+
+def test_shared_core_reconcile_does_not_adopt_hashed_material_back_into_state(
+    tmp_path: Path,
+) -> None:
+    """Adopt-back must never store /key/list's hashed token as the raw key.
+
+    Measured on the box: a no-drift pass where every wizard alias came back
+    with ``key == token == sha256(raw)`` rewrote litellm-generated-keys.json
+    with those hashes — irreversible (the raw was nowhere else), and every
+    later bake handed consumers a token the gateway rejects with 401
+    ("LiteLLM Virtual Key expected. Received=b56b****2a2d, expected to start
+    with 'sk-'"). The raw in state already proved itself through the hash, so
+    hashed list material must leave the state document byte-identical, while
+    a genuinely drifted alias is still replaced with its raw material.
+    """
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
+    generated_keys = _generated_keys()
+    write_litellm_generated_keys(tmp_path, generated_keys)
+    seeded_bytes = (tmp_path / LITELLM_GENERATED_KEYS_FILE).read_bytes()
+
+    hashed_records = tuple(
+        LiteLLMVirtualKeyRecord(
+            key=hashlib.sha256(value.encode()).hexdigest(),
+            key_alias=consumer,
+            team_id=f"team-{consumer}",
+            models=("local-model.internal/unsloth-active",)
+            if consumer == "coder-hermes"
+            else (),
+            metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
+            token=hashlib.sha256(value.encode()).hexdigest(),
+        )
+        for consumer, value in generated_keys.virtual_keys.items()
+    )
+    backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",)
+        },
+        litellm_admin_api=_FakeLiteLLMAdminApi(
+            {"status": "connected", "db": "connected"},
+            keys=hashed_records,
+        ),
+        client=FakeDokployApiClient(),
+        state_dir=tmp_path,
+    )
+
+    backend.reconcile_litellm_runtime()
+
+    # No-drift adopt-back suppressed: the document keeps its raw material.
+    assert (tmp_path / LITELLM_GENERATED_KEYS_FILE).read_bytes() == seeded_bytes
+    assert backend._litellm_generated_keys is not None
+    assert backend._litellm_generated_keys.virtual_keys == generated_keys.virtual_keys
+
+
+def test_shared_core_reconcile_still_adopts_recreated_raw_key_after_value_drift(
+    tmp_path: Path,
+) -> None:
+    """The hashed-material guard must not blind the genuine drift path.
+
+    A wizard-managed alias whose live token hash does not match the state raw
+    is delete+recreated with the state raw; the reconciled record carries that
+    raw back (token=None), and adopt-back must still run — it just settles on
+    the same value, so the document keeps its raw material either way.
+    """
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
+    generated_keys = _generated_keys()
+    write_litellm_generated_keys(tmp_path, generated_keys)
+
+    hashed_records = tuple(
+        LiteLLMVirtualKeyRecord(
+            key=("0" * 64 if consumer == "coder-hermes" else hashlib.sha256(value.encode()).hexdigest()),
+            key_alias=consumer,
+            team_id=f"team-{consumer}",
+            models=("local-model.internal/unsloth-active",)
+            if consumer == "coder-hermes"
+            else (),
+            metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
+            token=("0" * 64 if consumer == "coder-hermes" else hashlib.sha256(value.encode()).hexdigest()),
+        )
+        for consumer, value in generated_keys.virtual_keys.items()
+    )
+    api = _FakeLiteLLMAdminApi({"status": "connected", "db": "connected"}, keys=hashed_records)
+    backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",)
+        },
+        litellm_admin_api=api,
+        client=FakeDokployApiClient(),
+        state_dir=tmp_path,
+    )
+
+    backend.reconcile_litellm_runtime()
+
+    # The drifted alias was churn-replaced with the state raw (the hash proof
+    # said the old record was a different key), and the state document still
+    # holds raw material for every consumer.
+    recreated = api._keys["coder-hermes"]
+    assert recreated.key == "sk-hermes-fake-test-key"
+    assert recreated.token is None
+    doc = json.loads((tmp_path / LITELLM_GENERATED_KEYS_FILE).read_text(encoding="utf-8"))
+    assert doc["virtual_keys"] == generated_keys.virtual_keys
 
 
 def test_shared_core_find_container_name_prefers_exact_manual_name(

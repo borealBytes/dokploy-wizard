@@ -442,6 +442,12 @@ class LiteLLMGatewayManager:
         for alias, record in existing_keys.items():
             if alias in generated_keys or record.metadata.get("managed_by") != "dokploy-wizard":
                 continue
+            # Workspace-minted keys (the template MINTPY lane) are wizard-marked
+            # but not state consumers: their alias is <login>-<workspace>. The
+            # sweep must leave them alone or every real shared_core pass
+            # churn-deletes the live workspace key (measured on the box).
+            if record.metadata.get("coder_workspace"):
+                continue
             self._api.delete_key(key_alias=alias)
         for alias, team in existing_teams.items():
             if alias in generated_keys or team.metadata.get("managed_by") != "dokploy-wizard":

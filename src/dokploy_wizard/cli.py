@@ -135,6 +135,7 @@ from dokploy_wizard.state import (
     ensure_litellm_generated_keys,
     ensure_seaweedfs_generated_secrets,
     load_filex_provisioner,
+    load_gitea_provisioner,
     load_litellm_generated_keys,
     load_seaweedfs_generated_secrets,
     load_state_dir,
@@ -2449,6 +2450,14 @@ def _build_coder_backend(
         if "filex" in desired_state.enabled_packs
         else None
     )
+    # Same mid-run convergence for the Gitea lane: the gitea phase seeds its
+    # provisioner before coder, whose template bakes the boot-lane door and
+    # whose phase runs the deleted-user disable sync.
+    gitea_provisioner = (
+        load_gitea_provisioner(state_dir)
+        if "gitea" in desired_state.enabled_packs
+        else None
+    )
     ai_default_provider = _shared_ai_default_provider(raw_env)
     ai_default_model = _shared_ai_default_model(raw_env)
     hermes_model = raw_env.values.get("HERMES_MODEL", "").strip() or f"{ai_default_provider}/{ai_default_model}"
@@ -2475,6 +2484,8 @@ def _build_coder_backend(
             LITELLM_WORKSPACE_ISSUER_CONSUMER
         ),
         filex_provisioner=filex_provisioner,
+        gitea_provisioner=gitea_provisioner,
+        gitea_hostname=desired_state.hostnames.get("gitea") or "",
         state_dir=state_dir,
         client=_build_dokploy_api_client(
             raw_env=raw_env,

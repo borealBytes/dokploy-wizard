@@ -545,6 +545,15 @@ class DokploySharedCoreBackend:
         updated_virtual_keys = dict(self._litellm_generated_keys.virtual_keys)
         changed = False
         for consumer, record in reconciled.items():
+            if record.token is not None and record.key == record.token:
+                # Hashed list material, not raw key material: /key/list carries
+                # `token == sha256(raw)` and no raw value at all (measured on
+                # the box), so adopting it back would replace the state's raw
+                # key with its own hash — irreversible, and every later bake
+                # hands consumers a token the gateway rejects with 401
+                # ("expected to start with 'sk-'"). The raw in state already
+                # proved itself (the reconciler matched it through the hash).
+                continue
             if updated_virtual_keys.get(consumer) != record.key:
                 updated_virtual_keys[consumer] = record.key
                 changed = True
