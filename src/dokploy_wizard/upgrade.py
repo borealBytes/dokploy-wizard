@@ -365,7 +365,10 @@ class DockerCliProbe:
         command = ["docker", "exec"]
         for key, value in env.items():
             command.extend(["-e", f"{key}={value}"])
-        command.extend(["--workdir", "/app", container_id, *argv])
+        # No --workdir: images disagree on which directories exist (the
+        # postgres image has no /app, and exec fails with 127 there); none of
+        # the exec'd commands depend on the working directory.
+        command.extend([container_id, *argv])
         try:
             result = subprocess.run(
                 command,

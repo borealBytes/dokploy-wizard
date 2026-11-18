@@ -838,6 +838,39 @@ def test_docker_cli_probe_service_image_falls_back_to_compose_container(
     )
 
 
+def test_docker_cli_probe_exec_does_not_assume_a_workdir(monkeypatch) -> None:
+    """--workdir /app made every exec fail with exit 127 on images without
+    that directory (e.g. the shared postgres container)."""
+    from dokploy_wizard import upgrade
+
+    captured: dict[str, object] = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return Completed()
+
+    monkeypatch.setattr(upgrade.subprocess, "run", fake_run)
+    probe = upgrade.DockerCliProbe()
+
+    assert probe.exec("abc123", ("pg_dumpall", "-U", "postgres"), env={"PGPASSWORD": "pw"}) == (
+        0,
+        "ok",
+        "",
+    )
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert "--workdir" not in command
+    assert command[:2] == ["docker", "exec"]
+    assert "-e" in command and "PGPASSWORD=pw" in command
+    assert command[4:] == ["abc123", "pg_dumpall", "-U", "postgres"]
+
+
 # --- CLI surface ---------------------------------------------------------------
 
 
