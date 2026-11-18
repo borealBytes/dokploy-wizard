@@ -159,7 +159,6 @@ def test_litellm_plan_uses_openrouter_default_without_local_upstream() -> None:
         assert "local-model.internal/unsloth-active" not in aliases
     assert allowlists == {
         "coder-hermes": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
-        "coder-kdense": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
         "nextcloud": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
@@ -188,7 +187,6 @@ def test_litellm_plan_keeps_local_default_when_local_upstream_is_active() -> Non
     )
     assert allowlists == {
         "coder-hermes": ("local-model.internal/unsloth-active",),
-        "coder-kdense": ("local-model.internal/unsloth-active",),
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": ("local-model.internal/unsloth-active",),
         "nextcloud": ("local-model.internal/unsloth-active",),
@@ -1008,7 +1006,6 @@ def test_litellm_allowlists_keep_local_alias_for_every_consumer() -> None:
 
     assert allowlists == {
         "coder-hermes": ("local-model.internal/unsloth-active",),
-        "coder-kdense": ("local-model.internal/unsloth-active",),
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": ("local-model.internal/unsloth-active",),
         "nextcloud": ("local-model.internal/unsloth-active",),
@@ -1113,6 +1110,11 @@ class _FakeLiteLLMAdminApi:
 
     def delete_key(self, *, key_alias: str) -> None:
         self._keys.pop(key_alias, None)
+
+    def delete_team(self, *, team_id: str) -> None:
+        for alias, team in list(self._teams.items()):
+            if team.team_id == team_id:
+                del self._teams[alias]
 
 
 def _generated_keys() -> LiteLLMGeneratedKeys:
@@ -2193,7 +2195,6 @@ def test_consumer_virtual_keys_receive_sync_wildcard() -> None:
 
     assert all(consumer in key_lists for consumer in allowlists)
     assert key_lists["coder-hermes"][-1] == "sync/*"
-    assert key_lists["coder-kdense"][-1] == "sync/*"
     # The wildcard reaches every consumer key, including the two built-in AI
     # surfaces; the provider-row seeder strips it rather than making a "sync/*" row.
     assert key_lists["dokploy-ai"][-1] == "sync/*"
@@ -2225,10 +2226,10 @@ def test_push_model_sync_consumer_keys_writes_state_file_atomically(
     monkeypatch.setattr("dokploy_wizard.dokploy.shared_core.subprocess.run", fake_run)
 
     assert shared_core_module._push_model_sync_consumer_keys(
-        "sync-container", {"coder-hermes": "sk-1", "coder-kdense": "sk-2"}
+        "sync-container", {"coder-hermes": "sk-1"}
     )
     assert captured_cmd[:4] == ["docker", "exec", "-i", "sync-container"]
-    assert json.loads(captured_input[0]) == {"coder-hermes": "sk-1", "coder-kdense": "sk-2"}
+    assert json.loads(captured_input[0]) == {"coder-hermes": "sk-1"}
     shell = " ".join(captured_cmd)
     assert "consumer-keys.json.tmp" in shell and "mv" in shell
 

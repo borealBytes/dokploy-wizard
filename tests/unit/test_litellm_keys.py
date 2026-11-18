@@ -35,7 +35,6 @@ from dokploy_wizard.state.models import (
 _MANAGED_METADATA = {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"}
 _EXPECTED_LITELLM_CONSUMERS = {
     "coder-hermes",
-    "coder-kdense",
     # Not a chat consumer: the scoped key every Coder workspace mints its own
     # child key with (see the template MINTPY block).
     "coder-workspace-issuer",
@@ -105,7 +104,6 @@ def test_empty_state_generates_consumer_keys_and_existing_state_reuses_them(
     assert generated_keys.master_key.startswith("sk-litellm-master-")
     assert generated_keys.salt_key.startswith("litellm-salt-")
     assert generated_keys.virtual_keys["coder-hermes"].startswith("sk-litellm-coder-hermes-")
-    assert generated_keys.virtual_keys["coder-kdense"].startswith("sk-litellm-coder-kdense-")
     assert generated_keys.virtual_keys["dokploy-ai"].startswith("sk-litellm-dokploy-ai-")
     assert all(value for value in generated_keys.virtual_keys.values())
 
@@ -115,7 +113,6 @@ def test_empty_state_generates_consumer_keys_and_existing_state_reuses_them(
         salt_key="existing-salt-key",
         virtual_keys={
             "coder-hermes": "sk-<redacted-coder-hermes-existing>",
-            "coder-kdense": "sk-<redacted-coder-kdense-existing>",
             "dokploy-ai": "sk-<redacted-dokploy-ai-existing>",
         },
     )
@@ -141,7 +138,7 @@ def test_ensure_litellm_generated_keys_repairs_legacy_non_sk_values(tmp_path: Pa
         salt_key="existing-salt-key",
         virtual_keys={
             "coder-hermes": "sk-<redacted-coder-hermes-existing>",
-            "coder-kdense": "legacy-coder-kdense-key",
+            "nextcloud": "legacy-nextcloud-key",
             "dokploy-ai": "345elegacy5043",
         },
     )
@@ -153,8 +150,8 @@ def test_ensure_litellm_generated_keys_repairs_legacy_non_sk_values(tmp_path: Pa
     assert repaired_keys.master_key != legacy_keys.master_key
     assert repaired_keys.salt_key == legacy_keys.salt_key
     assert repaired_keys.virtual_keys["coder-hermes"] == "sk-<redacted-coder-hermes-existing>"
-    assert repaired_keys.virtual_keys["coder-kdense"].startswith("sk-litellm-coder-kdense-")
-    assert repaired_keys.virtual_keys["coder-kdense"] != "legacy-coder-kdense-key"
+    assert repaired_keys.virtual_keys["nextcloud"].startswith("sk-litellm-nextcloud-")
+    assert repaired_keys.virtual_keys["nextcloud"] != "legacy-nextcloud-key"
     assert repaired_keys.virtual_keys["dokploy-ai"].startswith("sk-litellm-dokploy-ai-")
     assert repaired_keys.virtual_keys["dokploy-ai"] != "345elegacy5043"
 
@@ -189,10 +186,12 @@ def test_ensure_litellm_generated_keys_repairs_existing_state_missing_dokploy_ai
 
     assert set(repaired_keys.virtual_keys) == _EXPECTED_LITELLM_CONSUMERS
     assert "retired-pack-consumer" not in repaired_keys.virtual_keys
+    # A consumer retired with its template is pruned exactly like an unknown
+    # ghost name: repair only ever converges on the current consumer list.
+    assert "coder-kdense" not in repaired_keys.virtual_keys
     assert repaired_keys.master_key == legacy_payload["master_key"]
     assert repaired_keys.salt_key == legacy_payload["salt_key"]
-    for consumer in ("coder-hermes", "coder-kdense"):
-        assert repaired_keys.virtual_keys[consumer] == legacy_virtual_keys[consumer]
+    assert repaired_keys.virtual_keys["coder-hermes"] == legacy_virtual_keys["coder-hermes"]
     assert repaired_keys.virtual_keys["dokploy-ai"].startswith("sk-litellm-dokploy-ai-")
 
 
@@ -245,6 +244,7 @@ class FakeLiteLLMAdminApi:
         self.created_teams: list[LiteLLMTeamRecord] = []
         self.created_keys: list[LiteLLMVirtualKeyRecord] = []
         self.created_key_routes: dict[str, tuple[str, ...] | None] = {}
+        self.deleted_team_ids: list[str] = []
         self.updated_key_routes: dict[str, tuple[str, ...] | None] = {}
         self.updated_teams: list[LiteLLMTeamRecord] = []
         self.updated_keys: list[LiteLLMVirtualKeyRecord] = []
@@ -343,6 +343,12 @@ class FakeLiteLLMAdminApi:
     def delete_key(self, *, key_alias: str) -> None:
         self.deleted_key_aliases.append(key_alias)
         self._keys.pop(key_alias, None)
+
+    def delete_team(self, *, team_id: str) -> None:
+        self.deleted_team_ids.append(team_id)
+        for alias, team in list(self._teams.items()):
+            if team.team_id == team_id:
+                del self._teams[alias]
 
     def visible_models_for_key(self, key_alias: str) -> tuple[str, ...]:
         return self._keys[key_alias].models
@@ -796,3 +802,54 @@ def test_reconcile_virtual_keys_keeps_issuer_routes_on_scope_drift() -> None:
         "/key/info",
         "/key/delete",
     )
+
+
+def test_reconcile_virtual_keys_prunes_retired_managed_consumers() -> None:
+    api = FakeLiteLLMAdminApi(
+        teams=(
+            LiteLLMTeamRecord(
+                team_id="team-coder-kdense",
+                team_alias="coder-kdense",
+                models=("local-model.internal/unsloth-active",),
+                metadata={"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
+            ),
+            LiteLLMTeamRecord(
+                team_id="team-operator-team",
+                team_alias="operator-team",
+                models=("*",),
+                metadata={"owned_by": "operator"},
+            ),
+        ),
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key="sk-retired-kdense",
+                key_alias="coder-kdense",
+                team_id="team-coder-kdense",
+                models=("local-model.internal/unsloth-active",),
+                metadata={"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
+            ),
+            LiteLLMVirtualKeyRecord(
+                key="sk-operator-key",
+                key_alias="operator-key",
+                team_id=None,
+                models=("*",),
+                metadata={},
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    reconciled = manager.reconcile_virtual_keys(
+        generated_keys={"coder-hermes": "k-hermes"},
+        consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",),
+        },
+    )
+
+    assert set(reconciled) == {"coder-hermes"}
+    # The retired wizard-managed consumer is swept end to end...
+    assert api.deleted_key_aliases == ["coder-kdense"]
+    assert api.deleted_team_ids == ["team-coder-kdense"]
+    # ...while records without the wizard marker belong to the operator and stay.
+    assert api.list_keys() and any(record.key_alias == "operator-key" for record in api.list_keys())
+    assert any(team.team_alias == "operator-team" for team in api.list_teams())

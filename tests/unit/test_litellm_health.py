@@ -76,6 +76,9 @@ class FakeReadinessApi:
     def delete_key(self, *, key_alias: str) -> None:
         raise AssertionError(f"unexpected delete_key call for {key_alias}")
 
+    def delete_team(self, *, team_id: str) -> None:
+        raise AssertionError(f"unexpected delete_team call for {team_id}")
+
 
 class FakeTransientReadinessApi(FakeReadinessApi):
     def __init__(self) -> None:

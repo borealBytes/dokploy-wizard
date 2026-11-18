@@ -20,7 +20,7 @@ Today this repo is not a scaffold or mock planner. It performs real deployment, 
 - **DocuSeal**
 - **SeaweedFS** for S3-compatible object storage
 - **FileX** lightweight web file manager, storing files in a wizard-owned SeaweedFS bucket
-- **Coder** with seeded Ubuntu + VS Code workspace templates
+- **Coder** with a single seeded Ubuntu + VS Code workspace template (Hermes Desktop)
 
 Optional packs also include Headscale, Matrix, and Tailscale host access. FileX requires the SeaweedFS pack and turns it on automatically. The AI-advisor packs this repo once shipped (a browser/Telegram agent runtime with its embedded Talk assistant, the farm advisor, and the research/chat pack) were removed in code; the wizard still cleans their ledger entries up on uninstall for older boxes that ran them.
 
@@ -163,7 +163,7 @@ What the wizard wires today:
 
 ### Coder
 
-Coder gets a seeded Ubuntu + VS Code template and a first default workspace. The default workspace keeps a stable name (`<root-token>-workspace`, derived from the Coder hostname): an earlier date-stamped name made every post-midnight rerun mint a second full Hermes stack. On the first pass after the fix, an existing legacy date-stamped workspace on the default template is adopted by rename, and leftover wizard-created dated duplicates are pruned — dated names on templates the wizard did not seed are left alone.
+Coder gets one seeded Ubuntu + VS Code template — Hermes Desktop — and a first default workspace. The default workspace keeps a stable name (`<root-token>-workspace`, derived from the Coder hostname): an earlier date-stamped name made every post-midnight rerun mint a second full Hermes stack. On the first pass after the fix, an existing legacy date-stamped workspace on the default template is adopted by rename, and leftover wizard-created dated duplicates are pruned — dated names on templates the wizard did not seed are left alone.
 
 On first successful bootstrap the wizard:
 
@@ -172,11 +172,14 @@ On first successful bootstrap the wizard:
 
   | Template | What it provides |
   |---|---|
-  | `ubuntu-vscode` | Base Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `zellij` |
-  | `ubuntu-vscode-opencode-web` | OpenCode Web (browser-based IDE) |
-  | `ubuntu-vscode-kdense-byok` | K-Dense BYOK (Bring Your Own Key for local model inference) |
-  | `ubuntu-vscode-hermes` | Hermes (on-device AI assistant) |
-  | `ubuntu-vscode-hermes-desktop` | Hermes with the official Desktop webapp as its own tile, beside the community WebUI |
+  | `ubuntu-vscode-hermes-desktop` | Ubuntu + VS Code with `curl`, `git`, `wget`, `btop`, `zellij`, OpenCode Web, the community Hermes WebUI, and the official Hermes Desktop webapp as its own tile |
+
+  This is the only template the wizard seeds. The five predecessors it grew out of
+  (`ubuntu-vscode`, `ubuntu-vscode-opencode-web`, `ubuntu-vscode-kdense-byok`,
+  `ubuntu-vscode-hermes`, `ubuntu-vscode-opencode-hermes-pi`) are retired on the next
+  pass, and any live workspace still riding one is re-based onto the survivor first:
+  the workspace id survives, so the home volume — everything under `/home` — comes
+  with it.
 
 The Desktop tile opens with no sign-in of its own: the gateway binds `127.0.0.1`,
 declares no public hostname (upstream ties a declared public URL to a second
@@ -194,7 +197,7 @@ provider setup.
 
 - creates a default workspace for the operator
 
-Removed templates are retired automatically on the next wizard rerun or modify.
+Removed templates are retired automatically on the next wizard rerun or modify; workspaces still on a retired template are migrated in place before the delete.
 
 That default template installs:
 
@@ -236,7 +239,7 @@ Future architecture options:
 Operational note:
 
 - Hermes and OpenCode Web are already path-based Coder apps in this repo.
-- K-Dense BYOK is the current outlier that uses `subdomain = true` and benefits the most from proper wildcard app routing.
+- K-Dense BYOK (retired with the template collapse) was the outlier that used `subdomain = true`; the surviving template routes its apps by path, so wildcard app routing is optional.
 
 ### SeaweedFS
 
@@ -585,7 +588,7 @@ Primary consumers today are:
 
 - Dokploy's built-in AI provider (`Dokploy Wizard LiteLLM`)
 - Nextcloud's built-in AI (`integration_openai` app, via the `nextcloud` virtual key)
-- Coder Hermes and Coder K-Dense
+- Coder Hermes
 - Coder OpenCode Web through generated template gateway defaults
 
 Those services use internal gateway config or wizard-managed virtual keys. They should not receive raw OpenRouter, NVIDIA, OpenCode Go, local model, or other upstream provider keys directly when the wizard-managed LiteLLM path is in use.
@@ -616,7 +619,7 @@ How autosynced models behave:
 - Autosynced deployments are named `sync/<source>-<model-id>`, with the upstream id's slashes written as `->` (e.g. `sync/nvidia-google->gemma-4-31b-it:free`), so they never collide with the explicit config-file aliases. The source leads the name inside one flat segment because pickers that shorten model ids render only the last path segment: nesting the source as its own segment would hide which bill — subscription or pay-as-you-go — every alias touches.
 - Each synced deployment records the provider's per-token cost (`input_cost_per_token`/`output_cost_per_token`) wherever a catalog can price the model: OpenRouter ships pricing on its own catalog rows, while NVIDIA and OpenCode Go are priced from the models.dev registry (USD per million tokens, converted down). LiteLLM spend reports and cost-aware pickers therefore show what an alias actually bills; a model no catalog prices carries no cost fields at all rather than a claimed zero, and the `:free` name tail still marks the zero-cost NVIDIA endpoints the registry verified.
 - Deployments created by autosync are tagged internally; when a source drops a model, only wizard-created `sync/...` deployments are pruned. Config-file aliases and models you added yourself in the admin UI are never touched.
-- Consumer virtual keys are explicit-alias allowlists refreshed by the sidecar each cycle with the current `sync/*` names (plus a `sync/*` wildcard for runtime calls), because LiteLLM's `/v1/models` does not expand wildcards and workspace tooling seeds its model picker from that endpoint. Autosynced models are therefore immediately callable from Coder Hermes and Coder K-Dense, and the built-in AI surfaces (Dokploy provider rows and the Nextcloud AI picker) are seeded from the same key-level visibility.
+- Consumer virtual keys are explicit-alias allowlists refreshed by the sidecar each cycle with the current `sync/*` names (plus a `sync/*` wildcard for runtime calls), because LiteLLM's `/v1/models` does not expand wildcards and workspace tooling seeds its model picker from that endpoint. Autosynced models are therefore immediately callable from Coder Hermes, and the built-in AI surfaces (Dokploy provider rows and the Nextcloud AI picker) are seeded from the same key-level visibility.
 - `sync/default-chat` is a stable alias whose upstream is *selected* rather than listed: the sidecar matches `AI_DEFAULT_MODEL_PATTERN` against the provider's live catalog, ranks matches by version number, and promotes the newest one that answers a real completion request. Upstream renames therefore cost a sync cycle instead of a reinstall, and a client can name `sync/default-chat` and never move. The new target is registered before the old one is retired, so there is no window with no working upstream; when nothing confirms (a brownout, a catalog outage) the current target stays put. Set `AI_DEFAULT_MODEL_PATTERN=` to empty to turn the alias off, which also deletes it.
 - Rendered LiteLLM config sets `general_settings.store_model_in_db` so admin-API-registered models survive proxy restarts.
 - Coder workspaces resolve their model lists live from the gateway at boot and re-run the same fetch from a background refresher roughly every 12 hours — retrying every 5 minutes after any failed refresh until the gateway is reachable again — so autosynced models appear in OpenCode, Pi, Hermes, and Copilot BYOK even in long-running workspaces. If the gateway is briefly unreachable during a refresh, the last good model list is kept.
@@ -659,7 +662,7 @@ The pattern is matched against the provider catalog for `AI_DEFAULT_PROVIDER` (i
 
 For LiteLLM upstream API keys, the canonical names are `LITELLM_OPENROUTER_API_KEY` and `LITELLM_OPENCODE_GO_API_KEY`. The older bare keys `OPENROUTER_API_KEY` and `OPENCODE_GO_API_KEY` are still accepted as compatibility fallbacks. The old alias `local/unsloth-active` is also resolved to the canonical alias when it appears in legacy env values.
 
-`LITELLM_OPENCODE_GO_API_KEY` is the OpenCode Go upstream credential. When it is set, generated OpenCode Go aliases are exposed through LiteLLM to approved consumers such as Coder Hermes and Coder K-Dense, without copying that upstream key into the app container. The gateway sends the `x-opencode-session` routing header and a dedicated User-Agent on every OpenCode Go request (required by the OpenCode Go API), and forwards per-conversation session headers when clients provide their own.
+`LITELLM_OPENCODE_GO_API_KEY` is the OpenCode Go upstream credential. When it is set, generated OpenCode Go aliases are exposed through LiteLLM to approved consumers such as Coder Hermes, without copying that upstream key into the app container. The gateway sends the `x-opencode-session` routing header and a dedicated User-Agent on every OpenCode Go request (required by the OpenCode Go API), and forwards per-conversation session headers when clients provide their own.
 
 Local model compatibility is handled in the generated LiteLLM config. For a private local-model path such as `local-model.internal/unsloth-active`, LiteLLM adapts system-message handling before forwarding to the local OpenAI-compatible endpoint, which keeps chats working with local unsloth templates that reject non-leading system messages.
 
@@ -669,12 +672,16 @@ The wizard auto-generates stable virtual keys for each consumer:
 
 - `dokploy-ai` — Dokploy's built-in AI provider rows, one per gateway-visible alias
 - `nextcloud` — Nextcloud's built-in AI (`integration_openai` app)
-- `coder-hermes` — the Coder Hermes template
-- `coder-kdense` — the Coder K-Dense BYOK template
+- `coder-hermes` — the Coder Hermes template (the baked fallback every workspace ships with)
+- `coder-workspace-issuer` — not a chat consumer: the scoped minting credential each
+  workspace uses to create its own child key (its only allowed routes are
+  `/key/generate`, `/key/info`, `/key/delete`)
 
 Keys are explicit-alias allowlists, and the model autosync sidecar refreshes them each cycle so newly synced models become callable without a rerun.
 
 OpenCode Web inherits wizard-managed LiteLLM defaults through the shared Coder AI gateway env during template bootstrap rather than receiving its own dedicated LiteLLM virtual-key consumer record.
+
+Every Coder workspace mints its own child virtual key at startup through the issuer and then points its AI tools at that key instead of the baked template key, so LiteLLM spend and logs name the individual workspace, not just Coder. The child token is deterministic (`sha256(issuer + ":" + workspace name)`), so restarts adopt the same key and rotating the issuer simply re-mints. A workspace that cannot mint — mint refused, alias collision, gateway unreachable — keeps using the baked `coder-hermes` key instead of losing AI. Child keys are not tracked in the wizard state file; a stale alias left behind by a deleted workspace can be removed from the LiteLLM admin UI.
 
 These keys are generated once and reused across reruns and modify operations. They are stored in the wizard state directory, not written back into `.install.env`. If you need to rotate a key, that is a future operator action, not something that happens silently on reinstall.
 

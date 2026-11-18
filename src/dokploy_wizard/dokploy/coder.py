@@ -270,11 +270,18 @@ class DokployCoderBackend:
             ai_default_api_key=self._ai_default_api_key,
         )
         shared_network_name = _shared_network_name(self._stack_name)
-        for template_name, template_dir, replacements in (
-            (
-                _default_template_name(),
-                _default_template_dir(),
-                {
+        # One template, one world: the collapsed desktop template is the only thing
+        # the wizard seeds. Everything else the wizard ever pushed is retired below,
+        # and workspaces still riding a retired template are migrated in place (the
+        # home volume is named off the workspace id, so an in-place template switch
+        # keeps /home while delete-plus-recreate would not).
+        seeded = _seed_template(
+            container_name=container_name,
+            hostname=self._hostname,
+            session_token=session_token,
+            template_name=_default_template_name(),
+            template_dir=_default_template_dir(),
+            replacements={
                     "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
                     "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": _shell_double_quote_escape(
                         self._hermes_inference_provider
@@ -309,151 +316,19 @@ class DokployCoderBackend:
                         self._hermes_desktop_channel
                     ),
                 },
-            ),
-            (
-                _opencode_hermes_pi_template_name(),
-                _opencode_hermes_pi_template_dir(),
-                {
-                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
-                    "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": _shell_double_quote_escape(
-                        self._hermes_inference_provider
-                    ),
-                    "__DOKPLOY_WIZARD_HERMES_MODEL__": _shell_double_quote_escape(
-                        self._hermes_model
-                    ),
-                    "__DOKPLOY_WIZARD_HERMES_BASE_URL__": _shell_double_quote_escape(
-                        hermes_litellm_base_url
-                    ),
-                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
-                    ),
-                    "__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__": f"https://{self._hostname}",
-                    "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": _shell_double_quote_escape(
-                        self._workspace_issuer_api_key or ""
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
-                    "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": _shell_double_quote_escape(
-                        self._admin_password or "ChangeMeSoon"
-                    ),
-                },
-            ),
-            (
-                _base_template_name(),
-                _base_template_dir(),
-                {
-                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
-                        self._ai_default_provider
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
-                        self._ai_default_model
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
-                        hermes_litellm_base_url
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
-                    "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": _shell_double_quote_escape(
-                        self._workspace_issuer_api_key or ""
-                    ),
-                },
-            ),
-            (
-                _default_opencode_web_template_name(),
-                _default_opencode_web_template_dir(),
-                {
-                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
-                        self._ai_default_provider
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
-                        self._ai_default_model
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": _shell_double_quote_escape(
-                        hermes_litellm_base_url
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
-                    "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": _shell_double_quote_escape(
-                        self._workspace_issuer_api_key or ""
-                    ),
-                },
-            ),
-            (
-                _default_kdense_byok_template_name(),
-                _default_kdense_byok_template_dir(),
-                {
-                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": _shell_double_quote_escape(
-                        self._ai_default_provider
-                    ),
-                    "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": _shell_double_quote_escape(
-                        self._ai_default_model
-                    ),
-                    "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": _shell_double_quote_escape(
-                        _litellm_internal_base_url(self._stack_name)
-                    ),
-                    "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": _litellm_virtual_key_ref(
-                        "coder-kdense"
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
-                },
-            ),
-            (
-                _default_hermes_template_name(),
-                _default_hermes_template_dir(),
-                {
-                    "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": shared_network_name,
-                    "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": _shell_double_quote_escape(
-                        self._hermes_inference_provider
-                    ),
-                    "__DOKPLOY_WIZARD_HERMES_MODEL__": _shell_double_quote_escape(
-                        self._hermes_model
-                    ),
-                    "__DOKPLOY_WIZARD_HERMES_BASE_URL__": _shell_double_quote_escape(
-                        hermes_litellm_base_url
-                    ),
-                    "__DOKPLOY_WIZARD_HERMES_API_KEY__": _shell_double_quote_escape(
-                        self._ai_default_api_key or ""
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": _shell_double_quote_escape(
-                        self._workspace_issuer_api_key or ""
-                    ),
-                    "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": litellm_fallback_models_json,
-                },
-            ),
-        ):
-            try:
-                seeded = _seed_template(
-                    container_name=container_name,
-                    hostname=self._hostname,
-                    session_token=session_token,
-                    template_name=template_name,
-                    template_dir=template_dir,
-                    replacements=replacements,
-                )
-            except CoderError as e:
-                if template_name == _default_template_name():
-                    raise
-                # The operator sees the diagnosis; the state file keeps a bounded note.
-                # Terraform's reason arrives at the end of a long stream, so the note
-                # that survives into state is the one that has to be wide enough.
-                _emit_coder_progress(
-                    f"Skipped optional Coder template '{template_name}': "
-                    f"{_safe_progress_reason(str(e), limit=6000)}"
-                )
-                note = (
-                    f"Skipped optional Coder template '{template_name}': "
-                    f"{_safe_progress_reason(str(e), limit=1200)}"
-                )
-                notes.append(note)
-                continue
-            if seeded:
-                notes.append(f"Seeded default Coder template '{template_name}'.")
+        )
+        if seeded:
+            notes.append(f"Seeded default Coder template '{_default_template_name()}'.")
+        migrated = _migrate_retired_template_workspaces(
+            container_name=container_name,
+            hostname=self._hostname,
+            session_token=session_token,
+            template_name=_default_template_name(),
+        )
+        notes.extend(
+            f"Migrated Coder workspace '{name}' onto template '{_default_template_name()}'."
+            for name in migrated
+        )
         try:
             retired_templates = _retire_removed_templates(
                 container_name=container_name,
@@ -819,11 +694,6 @@ def _litellm_internal_base_url(stack_name: str) -> str:
     return f"http://{stack_name}-shared-litellm:{_DEFAULT_LITELLM_INTERNAL_PORT}"
 
 
-def _litellm_virtual_key_ref(consumer: str) -> str:
-    normalized = consumer.strip().replace("-", "_").upper()
-    return f"$${{LITELLM_VIRTUAL_KEY_{normalized}}}"
-
-
 def _normalize_hermes_channel(value: str) -> str:
     """The update channel name, or the default.
 
@@ -1146,19 +1016,6 @@ def _default_template_name() -> str:
     return _default_hermes_desktop_template_name()
 
 
-def _opencode_hermes_pi_template_name() -> str:
-    return "ubuntu-vscode-opencode-hermes-pi"
-
-
-def _opencode_hermes_pi_template_dir() -> Path:
-    return (
-        Path(__file__).resolve().parents[3]
-        / "templates"
-        / "coder"
-        / "default-ubuntu-vscode-opencode-hermes-pi"
-    )
-
-
 def _default_hermes_desktop_template_dir() -> Path:
     return (
         Path(__file__).resolve().parents[3]
@@ -1170,55 +1027,6 @@ def _default_hermes_desktop_template_dir() -> Path:
 
 def _default_hermes_desktop_template_name() -> str:
     return "ubuntu-vscode-hermes-desktop"
-
-
-def _base_template_dir() -> Path:
-    return (
-        Path(__file__).resolve().parents[3] / "templates" / "coder" / "default-ubuntu-code-server"
-    )
-
-
-def _base_template_name() -> str:
-    return "ubuntu-vscode"
-
-
-def _default_opencode_web_template_dir() -> Path:
-    return (
-        Path(__file__).resolve().parents[3]
-        / "templates"
-        / "coder"
-        / "default-ubuntu-code-server-opencode-web"
-    )
-
-
-def _default_opencode_web_template_name() -> str:
-    return "ubuntu-vscode-opencode-web"
-
-
-def _default_kdense_byok_template_dir() -> Path:
-    return (
-        Path(__file__).resolve().parents[3]
-        / "templates"
-        / "coder"
-        / "default-ubuntu-code-server-kdense-byok"
-    )
-
-
-def _default_kdense_byok_template_name() -> str:
-    return "ubuntu-vscode-kdense-byok"
-
-
-def _default_hermes_template_dir() -> Path:
-    return (
-        Path(__file__).resolve().parents[3]
-        / "templates"
-        / "coder"
-        / "default-ubuntu-code-server-hermes"
-    )
-
-
-def _default_hermes_template_name() -> str:
-    return "ubuntu-vscode-hermes"
 
 
 _LEGACY_DEFAULT_WORKSPACE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -1268,26 +1076,22 @@ def _legacy_default_workspace_names(
 
 
 def _required_template_names() -> tuple[str, ...]:
-    # dict.fromkeys rather than a set: the order is the push order, and the default is
-    # now the same template the desktop accessor names, so it would be pushed twice.
-    return tuple(
-        dict.fromkeys(
-            (
-                _default_template_name(),
-                _opencode_hermes_pi_template_name(),
-                _base_template_name(),
-                _default_opencode_web_template_name(),
-                _default_kdense_byok_template_name(),
-                _default_hermes_template_name(),
-            )
-        )
-    )
+    # The collapse: one seeded template. Everything the wizard ever pushed before
+    # it lives in `_retired_template_names()` and is removed on the next pass.
+    return (_default_template_name(),)
 
 
 def _retired_template_names() -> tuple[str, ...]:
+    # Workspaces still on a retired template are migrated in place first (see
+    # `_migrate_retired_template_workspaces`), so the delete never orphans one.
     return (
         "ubuntu-vscode-openwork",
         "ubuntu-vscode-pi-web",
+        "ubuntu-vscode-hermes",
+        "ubuntu-vscode",
+        "ubuntu-vscode-opencode-web",
+        "ubuntu-vscode-kdense-byok",
+        "ubuntu-vscode-opencode-hermes-pi",
     )
 
 
@@ -2139,6 +1943,82 @@ def _rename_workspace(
         raise CoderError(
             f"Unable to rename Coder workspace '{workspace_name}' to '{new_workspace_name}': "
             f"{(result.stderr or result.stdout).strip()}"
+        )
+
+
+def _migrate_retired_template_workspaces(
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+    template_name: str,
+) -> tuple[str, ...]:
+    """Move every workspace off a retiring template, preserving the workspace itself.
+
+    The home volume is `coder-<workspace-id>-home` with `ignore_changes = all`, so
+    the id must survive: `coder update --template` re-bases the workspace in place,
+    while a delete-and-recreate would hand the user an empty home.
+    """
+
+    retired = set(_retired_template_names())
+    migrated: list[str] = []
+    for workspace_name in _list_workspaces(
+        container_name=container_name,
+        hostname=hostname,
+        session_token=session_token,
+    ):
+        observed = _workspace_template_name(
+            container_name=container_name,
+            hostname=hostname,
+            session_token=session_token,
+            workspace_name=workspace_name,
+        )
+        if observed is None or observed not in retired:
+            continue
+        _update_workspace_template(
+            container_name=container_name,
+            hostname=hostname,
+            session_token=session_token,
+            workspace_name=workspace_name,
+            template_name=template_name,
+        )
+        migrated.append(workspace_name)
+    return tuple(migrated)
+
+
+def _update_workspace_template(
+    *,
+    container_name: str,
+    hostname: str,
+    session_token: str,
+    workspace_name: str,
+    template_name: str,
+) -> None:
+    del hostname
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"CODER_URL={_coder_cli_url()}",
+            "-e",
+            f"CODER_SESSION_TOKEN={session_token}",
+            container_name,
+            "/opt/coder",
+            "update",
+            workspace_name,
+            "--template",
+            template_name,
+            "--yes",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise CoderError(
+            f"Unable to move Coder workspace '{workspace_name}' onto template "
+            f"'{template_name}': {(result.stderr or result.stdout).strip()}"
         )
 
 

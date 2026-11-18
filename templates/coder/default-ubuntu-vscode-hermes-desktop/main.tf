@@ -150,10 +150,16 @@ resource "coder_agent" "main" {
     # re-mints for free. Any failure falls back to the baked shared key: a
     # workspace without a personal key still starts with AI.
     DOKPLOY_WIZARD_LITELLM_ISSUER_KEY="__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__"
+    # The sentinel is deliberately NOT in the wizard's replacement map (the same
+    # trick the Hermes wiring above uses): comparing the assignment against a
+    # second copy of the marker would compare the real key to itself after
+    # substitution, fail the guard, and silently skip minting forever.
+    DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL="__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__"
     DOKPLOY_WIZARD_WORKSPACE_API_KEY=""
     DOKPLOY_WIZARD_ENV_API_KEY_OVERRIDE="$${AI_DEFAULT_API_KEY:-}"
     if [ -n "$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" ] && \
-       [ "$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" != "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__" ]; then
+       [ "$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" != \
+         "$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL" ]; then
       DOKPLOY_WIZARD_WORKSPACE_API_KEY=$(
         DOKPLOY_LITELLM_BASE_URL="$HERMES_TEMPLATE_BASE_URL" \
         DOKPLOY_LITELLM_ISSUER_KEY="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" \

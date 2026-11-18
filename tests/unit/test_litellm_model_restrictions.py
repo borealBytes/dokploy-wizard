@@ -44,10 +44,6 @@ EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
         DEFAULT_LOCAL_CANONICAL_ALIAS,
         "openrouter/anthropic/claude-3.5-sonnet",
     ),
-    "coder-kdense": (
-        DEFAULT_LOCAL_CANONICAL_ALIAS,
-        "openrouter/anthropic/claude-3.5-sonnet",
-    ),
     "dokploy-ai": (
         DEFAULT_LOCAL_CANONICAL_ALIAS,
         "openrouter/anthropic/claude-3.5-sonnet",
@@ -62,7 +58,6 @@ EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
 # against all of them.
 SHARED_ALIAS_CONSUMERS = (
     "coder-hermes",
-    "coder-kdense",
     "dokploy-ai",
     "nextcloud",
 )
@@ -178,6 +173,11 @@ class FakeLiteLLMAdminApi:
 
     def delete_key(self, *, key_alias: str) -> None:
         self._keys.pop(key_alias, None)
+
+    def delete_team(self, *, team_id: str) -> None:
+        for alias, team in list(self._teams.items()):
+            if team.team_id == team_id:
+                del self._teams[alias]
 
 
 class FakeLiteLLMRestrictionHarness:
@@ -599,7 +599,6 @@ def test_fake_opencode_go_wildcard_is_isolated_to_intended_alias_policy(
 
     assert visible_wildcards == {
         "coder-hermes": (),
-        "coder-kdense": (),
         "dokploy-ai": (),
         "nextcloud": (),
     }

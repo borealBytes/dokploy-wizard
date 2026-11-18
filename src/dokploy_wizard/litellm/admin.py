@@ -83,6 +83,7 @@ class LiteLLMAdminApi(Protocol):
     ) -> LiteLLMVirtualKeyRecord: ...
 
     def delete_key(self, *, key_alias: str) -> None: ...
+    def delete_team(self, *, team_id: str) -> None: ...
 
 
 class LiteLLMAdminClient:
@@ -251,6 +252,9 @@ class LiteLLMAdminClient:
     def delete_key(self, *, key_alias: str) -> None:
         self._request_json("POST", "/key/delete", {"key_aliases": [key_alias]})
 
+    def delete_team(self, *, team_id: str) -> None:
+        self._request_json("POST", "/team/delete", {"team_ids": [team_id]})
+
     def _request_json(
         self,
         method: str,
@@ -411,6 +415,17 @@ class LiteLLMGatewayManager:
                     )
                     existing_keys[consumer] = existing_key
             reconciled[consumer] = existing_key
+        # Retired consumers (a pack the wizard no longer provisions): sweep the
+        # wizard-managed key and team so the gateway state converges too. Records
+        # without the wizard marker are the operator's own and stay untouched.
+        for alias, record in existing_keys.items():
+            if alias in generated_keys or record.metadata.get("managed_by") != "dokploy-wizard":
+                continue
+            self._api.delete_key(key_alias=alias)
+        for alias, team in existing_teams.items():
+            if alias in generated_keys or team.metadata.get("managed_by") != "dokploy-wizard":
+                continue
+            self._api.delete_team(team_id=team.team_id)
         return reconciled
 
 

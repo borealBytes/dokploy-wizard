@@ -590,3 +590,54 @@ tests + a fresh remote proof:
 ### Gates
 - `pytest` (1079 passed), `ruff check`, `mypy` green. Template changes live entirely
   inside `<<-EOT` heredoc bodies, so Terraform formatting is untouched.
+
+
+## Phase 6c (2026-11): template collapse, kdense retire, honest mint guard
+
+### One template to rule them all
+- The wizard now seeds exactly one template, `ubuntu-vscode-hermes-desktop`. The other five
+  (`ubuntu-vscode`, `ubuntu-vscode-opencode-web`, `ubuntu-vscode-kdense-byok`,
+  `ubuntu-vscode-hermes`, `ubuntu-vscode-opencode-hermes-pi`) moved to the retire list; their
+  directories are deleted.
+- Retirement migrates first: `_migrate_retired_template_workspaces` re-bases every workspace
+  riding a retired template onto the survivor via `coder update --template --yes` BEFORE
+  `coder templates delete`. The home volume is `coder-<workspace-id>-home` with
+  `ignore_changes = all`, so an in-place template switch preserves `/home` while a
+  delete-and-recreate would silently hand the user an empty home.
+- The `coder-kdense` virtual-key consumer retired with its template. `reconcile_virtual_keys`
+  gained a prune pass: wizard-managed key/team records outside the desired consumer set are
+  deleted (`delete_team` added; `POST /team/delete`); records without the wizard metadata
+  marker are the operator's and stay untouched. State repair prunes the retired consumer from
+  the generated-keys file like any ghost name.
+
+### Mint guard fix (live proof caught it)
+- The mint guard compared the issuer assignment against a second copy of the
+  `__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__` marker. Template substitution replaces every
+  occurrence, so post-substitution the guard compared the real key to itself and minting was
+  skipped on every boot. The guard now compares against
+  `__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__`, which is deliberately absent from the
+  replacement map (the Hermes wiring already used that trick). A regression test substitutes
+  a fake issuer into the template text and asserts no guard line ends up comparing the
+  variable to its own substituted value.
+
+### Gates
+- `pytest` (1055 passed), `ruff check`, `my` green.
+- Live: modify on the box re-seeds one template, migrates both existing workspaces (already
+  on the survivor from the 6b proof), retires the five ghosts, prunes the kdense key/team in
+  LiteLLM, and the rebuilt workspace mints its child key (verified via `/key/info`).
+- Blocked on the operator: the zone `Always Use HTTPS` PATCH needs
+  `Zone -> Zone Settings -> Read and Edit` on the API token; the phase now warns (never
+  fails) until that grant lands.
+
+### Follow-ons (next slices, approved in planning)
+- FileX image pin bump to a current `brf-tech/filex` release (the pinned `jessfraz/ingress`
+  digest predates S3 key attribution in the audit log).
+- `~/shared` rclone-FUSE mount of the FileX bucket in the surviving template: per-(user,
+  workspace) FileX S3 key, `--vfs-cache-mode full` hot cache (defaults 10 G / 48 h via
+  `SHARED_CACHE_SIZE`/`SHARED_CACHE_AGE`), `shared-versions` + `shared-cache` helpers.
+- Gitea pack (rootless, repos on disk, `gitea` bucket for LFS/attachments, internal SSH
+  :2222, HTTPS+PAT external).
+- Identity automation: Coder as OIDC IdP for Gitea/FileX (accounts spring up at first
+  login), workspace-boot provisioner for owner account + per-(user,workspace) FileX key +
+  deterministic account-level Gitea SSH key, deleted-user disable, LiteLLM mint re-scope to
+  `<login>-<workspace>`.

@@ -62,15 +62,24 @@ def test_consolidated_default_template_is_the_workspace_default() -> None:
     assert coder_module._default_template_name() == "ubuntu-vscode-hermes-desktop"
     assert coder_module._default_template_dir().name == "default-ubuntu-vscode-hermes-desktop"
     assert coder_module._default_template_dir().is_dir()
-    assert coder_module._opencode_hermes_pi_template_name() in coder_module._required_template_names()
-    assert coder_module._opencode_hermes_pi_template_dir().is_dir()
-    assert coder_module._base_template_name() == "ubuntu-vscode"
-    assert "ubuntu-vscode" in coder_module._required_template_names()
+    # Post-collapse the default is the only required template; its retired
+    # predecessors are retirement targets, not push targets.
+    assert coder_module._required_template_names() == (coder_module._default_template_name(),)
+    assert "ubuntu-vscode" in coder_module._retired_template_names()
+    assert "ubuntu-vscode-opencode-hermes-pi" in coder_module._retired_template_names()
+    for retired_dir in (
+        "default-ubuntu-code-server",
+        "default-ubuntu-code-server-opencode-web",
+        "default-ubuntu-code-server-hermes",
+        "default-ubuntu-code-server-kdense-byok",
+        "default-ubuntu-vscode-opencode-hermes-pi",
+    ):
+        assert not Path(f"templates/coder/{retired_dir}").exists()
 
 
 def test_consolidated_template_apps_are_desktop_server_opencode_hermes_terminal() -> None:
     template = Path(
-        "templates/coder/default-ubuntu-vscode-opencode-hermes-pi/main.tf"
+        "templates/coder/default-ubuntu-vscode-hermes-desktop/main.tf"
     ).read_text(encoding="utf-8")
 
     # VS Code browser + terminal + desktop come from the official code-server module.
@@ -78,15 +87,126 @@ def test_consolidated_template_apps_are_desktop_server_opencode_hermes_terminal(
     assert 'slug         = "opencode"' in template
     assert 'slug         = "hermes-webui"' in template
     # Classic webui only: no ekko webui, no hermes dashboard surface anywhere.
-    assert 'slug         = "hermes-web-ui"' not in template
-    assert 'slug         = "hermes-dashboard"' not in template
-    assert "npm install -g hermes-web-ui" not in template
-    assert "hermes dashboard" not in template
+    # Judged on executable lines only: the header comment names the dashboard to
+    # say this is not it, and a guard that bans the words would ban the explanation.
+    code = "\n".join(line for line in template.splitlines() if not line.lstrip().startswith("#"))
+    assert 'slug         = "hermes-web-ui"' not in code
+    assert 'slug         = "hermes-dashboard"' not in code
+    assert "npm install -g hermes-web-ui" not in code
+    assert "hermes dashboard" not in code
+
+
+
+@dataclass
+class FakeCoderBackend:
+    existing_service: CoderResourceRecord | None = None
+    existing_data: CoderResourceRecord | None = None
+    health_ok: bool = True
+    health_results: list[bool] | None = None
+    ensure_calls: int = 0
+
+    def get_service(self, resource_id: str) -> CoderResourceRecord | None:
+        if self.existing_service is not None and self.existing_service.resource_id == resource_id:
+            return self.existing_service
+        return None
+
+    def find_service_by_name(self, resource_name: str) -> CoderResourceRecord | None:
+        if (
+            self.existing_service is not None
+            and self.existing_service.resource_name == resource_name
+        ):
+            return self.existing_service
+        return None
+
+    def create_service(self, **kwargs: object) -> CoderResourceRecord:
+        resource_name = str(kwargs["resource_name"])
+        self.existing_service = CoderResourceRecord(
+            resource_id="coder-service-1",
+            resource_name=resource_name,
+        )
+        return self.existing_service
+
+    def update_service(self, **kwargs: object) -> CoderResourceRecord:
+        return self.create_service(**kwargs)
+
+    def get_persistent_data(self, resource_id: str) -> CoderResourceRecord | None:
+        if self.existing_data is not None and self.existing_data.resource_id == resource_id:
+            return self.existing_data
+        return None
+
+    def find_persistent_data_by_name(self, resource_name: str) -> CoderResourceRecord | None:
+        if self.existing_data is not None and self.existing_data.resource_name == resource_name:
+            return self.existing_data
+        return None
+
+    def create_persistent_data(self, resource_name: str) -> CoderResourceRecord:
+        self.existing_data = CoderResourceRecord(
+            resource_id="coder-data-1", resource_name=resource_name
+        )
+        return self.existing_data
+
+    def check_health(self, *, service: CoderResourceRecord, url: str) -> bool:
+        del service, url
+        if self.health_results is not None:
+            if self.health_results:
+                return self.health_results.pop(0)
+            return self.health_ok
+        return self.health_ok
+
+    def ensure_application_ready(self) -> tuple[str, ...]:
+        self.ensure_calls += 1
+        return ()
+
+
+@dataclass
+
+
+
+class FakeCoderApi:
+    last_create_compose_file: str | None = None
+
+    def list_projects(self):
+        return ()
+
+    def create_project(self, *, name: str, description: str | None, env: str | None):
+        class Created:
+            project_id = "project-1"
+            environment_id = "env-1"
+
+        return Created()
+
+    def create_compose(self, *, name: str, environment_id: str, compose_file: str, app_name: str):
+        del name, environment_id, app_name
+        self.last_create_compose_file = compose_file
+
+        class Compose:
+            compose_id = "compose-1"
+
+        return Compose()
+
+    def update_compose(self, *, compose_id: str, compose_file: str | None = None, env: str | None = None):
+        del compose_id, env
+        if compose_file is not None:
+            self.last_create_compose_file = compose_file
+
+        class Compose:
+            compose_id = "compose-1"
+
+        return Compose()
+
+    def deploy_compose(self, *, compose_id: str, title: str | None, description: str | None):
+        del compose_id, title, description
+
+        class Deploy:
+            success = True
+            message = "ok"
+
+        return Deploy()
 
 
 def test_consolidated_template_serves_opencode_web_and_classic_hermes_with_cors_origin() -> None:
     template = Path(
-        "templates/coder/default-ubuntu-vscode-opencode-hermes-pi/main.tf"
+        "templates/coder/default-ubuntu-vscode-hermes-desktop/main.tf"
     ).read_text(encoding="utf-8")
 
     assert 'nohup opencode serve --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT"' in template
@@ -109,7 +229,7 @@ def test_consolidated_template_serves_opencode_web_and_classic_hermes_with_cors_
 
 def test_consolidated_template_picker_advertises_per_model_costs() -> None:
     template = Path(
-        "templates/coder/default-ubuntu-vscode-opencode-hermes-pi/main.tf"
+        "templates/coder/default-ubuntu-vscode-hermes-desktop/main.tf"
     ).read_text(encoding="utf-8")
 
     # Pickers price models from models.dev (dollars per million tokens, the
@@ -142,7 +262,7 @@ def test_consolidated_template_picker_advertises_per_model_costs() -> None:
 
 def test_consolidated_template_refresher_avoids_terraform_interpolations() -> None:
     template = Path(
-        "templates/coder/default-ubuntu-vscode-opencode-hermes-pi/main.tf"
+        "templates/coder/default-ubuntu-vscode-hermes-desktop/main.tf"
     ).read_text(encoding="utf-8")
 
     match = re.search(
@@ -251,11 +371,6 @@ def _assert_template_preseeds_copilot_byok(template: str) -> None:
 
 
 _TEMPLATE_DIRS_WITH_PI_AND_OPENCODE = (
-    "default-ubuntu-code-server",
-    "default-ubuntu-code-server-opencode-web",
-    "default-ubuntu-code-server-kdense-byok",
-    "default-ubuntu-code-server-hermes",
-    "default-ubuntu-vscode-opencode-hermes-pi",
     "default-ubuntu-vscode-hermes-desktop",
 )
 
@@ -286,157 +401,7 @@ def test_every_template_installs_pi_and_opencode_and_preseeds_litellm(template_d
     assert "def _parse_fallback_models" in template
 
 
-def test_base_copilot_byok_template_settings() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server/main.tf").read_text(
-        encoding="utf-8"
-    )
 
-    _assert_template_preseeds_copilot_byok(template)
-    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
-    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
-
-
-def test_opencode_web_copilot_byok_template_settings() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-opencode-web/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    _assert_template_preseeds_copilot_byok(template)
-    assert "OPENCODE_WEB_PORT=4096" in template
-    assert "OPENCODE_PROXY_PORT=4097" in template
-
-
-def test_hermes_copilot_byok_template_settings() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-hermes/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    _assert_template_preseeds_copilot_byok(template)
-    assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_HERMES_API_KEY__"' in template
-    assert 'upsert_env OPENAI_API_KEY "$OPENAI_API_KEY"' in template
-
-
-def test_kdense_copilot_byok_uses_central_gateway() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    _assert_template_preseeds_copilot_byok(template)
-    assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"' in template
-    assert 'export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"' in template
-    assert 'export KDENSE_COPILOT_DEFAULT_ALIAS="__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__/__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__"' in template
-    assert 'base_url = setting("DOKPLOY_LITELLM_BASE_URL").rstrip("/")' in template
-    assert 'KDENSE_CENTRAL_LITELLM_API_KEY="$${KDENSE_OPENCODE_GO_API_KEY:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY}"' in template
-    assert 'api_key = setting("DOKPLOY_LITELLM_API_KEY")' in template
-    assert '"DOKPLOY_LITELLM_API_KEY": "KDENSE_CENTRAL_LITELLM_API_KEY"' in template
-    assert 'KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"' in template
-    assert 'append_env OPENROUTER_API_KEY ' not in template
-    assert 'append_env NVIDIA_API_KEY ' not in template
-    assert 'append_env ANTHROPIC_API_KEY ' not in template
-
-
-@dataclass
-class FakeCoderBackend:
-    existing_service: CoderResourceRecord | None = None
-    existing_data: CoderResourceRecord | None = None
-    health_ok: bool = True
-    health_results: list[bool] | None = None
-    ensure_calls: int = 0
-
-    def get_service(self, resource_id: str) -> CoderResourceRecord | None:
-        if self.existing_service is not None and self.existing_service.resource_id == resource_id:
-            return self.existing_service
-        return None
-
-    def find_service_by_name(self, resource_name: str) -> CoderResourceRecord | None:
-        if (
-            self.existing_service is not None
-            and self.existing_service.resource_name == resource_name
-        ):
-            return self.existing_service
-        return None
-
-    def create_service(self, **kwargs: object) -> CoderResourceRecord:
-        resource_name = str(kwargs["resource_name"])
-        self.existing_service = CoderResourceRecord(
-            resource_id="coder-service-1",
-            resource_name=resource_name,
-        )
-        return self.existing_service
-
-    def update_service(self, **kwargs: object) -> CoderResourceRecord:
-        return self.create_service(**kwargs)
-
-    def get_persistent_data(self, resource_id: str) -> CoderResourceRecord | None:
-        if self.existing_data is not None and self.existing_data.resource_id == resource_id:
-            return self.existing_data
-        return None
-
-    def find_persistent_data_by_name(self, resource_name: str) -> CoderResourceRecord | None:
-        if self.existing_data is not None and self.existing_data.resource_name == resource_name:
-            return self.existing_data
-        return None
-
-    def create_persistent_data(self, resource_name: str) -> CoderResourceRecord:
-        self.existing_data = CoderResourceRecord(
-            resource_id="coder-data-1", resource_name=resource_name
-        )
-        return self.existing_data
-
-    def check_health(self, *, service: CoderResourceRecord, url: str) -> bool:
-        del service, url
-        if self.health_results is not None:
-            if self.health_results:
-                return self.health_results.pop(0)
-            return self.health_ok
-        return self.health_ok
-
-    def ensure_application_ready(self) -> tuple[str, ...]:
-        self.ensure_calls += 1
-        return ()
-
-
-@dataclass
-class FakeCoderApi:
-    last_create_compose_file: str | None = None
-
-    def list_projects(self):
-        return ()
-
-    def create_project(self, *, name: str, description: str | None, env: str | None):
-        class Created:
-            project_id = "project-1"
-            environment_id = "env-1"
-
-        return Created()
-
-    def create_compose(self, *, name: str, environment_id: str, compose_file: str, app_name: str):
-        del name, environment_id, app_name
-        self.last_create_compose_file = compose_file
-
-        class Compose:
-            compose_id = "compose-1"
-
-        return Compose()
-
-    def update_compose(self, *, compose_id: str, compose_file: str | None = None, env: str | None = None):
-        del compose_id, env
-        if compose_file is not None:
-            self.last_create_compose_file = compose_file
-
-        class Compose:
-            compose_id = "compose-1"
-
-        return Compose()
-
-    def deploy_compose(self, *, compose_id: str, title: str | None, description: str | None):
-        del compose_id, title, description
-
-        class Deploy:
-            success = True
-            message = "ok"
-
-        return Deploy()
 
 
 def test_render_coder_compose_includes_root_and_wildcard_routes() -> None:
@@ -510,171 +475,27 @@ def test_render_coder_compose_includes_root_and_wildcard_routes() -> None:
     )
 
 
-def test_default_coder_template_restores_workspace_bootstrap_tools() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    assert "apt-get install -y curl git ca-certificates wget btop" in template
-    assert "if ! command -v opencode >/dev/null 2>&1; then" in template
-    assert (
-        "if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/v2/install | bash; then"
-        in template
-    )
-    assert "if [ ! -x /home/coder/.opencode/bin/opencode ]; then" in template
-    assert 'echo "OpenCode installer did not produce a usable binary" >&2' in template
-    assert "exit 1" in template
-    assert "if [ -x /home/coder/.opencode/bin/opencode ]; then" in template
-    assert "ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode" in template
-    assert "if ! command -v zellij >/dev/null 2>&1; then" in template
-    assert "zellij-$${ARCH}-unknown-linux-musl.tar.gz" in template
-    assert "if ! command -v node >/dev/null 2>&1; then" in template
-    assert "curl -fsSL https://deb.nodesource.com/setup_22.x | $_SUDO -E bash -" in template
-    assert "$_SUDO apt-get install -y nodejs" in template
-    assert "$_SUDO corepack enable" in template
-    assert "$_SUDO corepack prepare pnpm@10.27.0 --activate" in template
-    assert "export PNPM_HOME=/home/coder/.local/share/pnpm" in template
-    assert 'export PATH="$PNPM_HOME/bin:$PATH"' in template
-    assert '/home/coder/.bashrc || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.bashrc' in template
-    assert r'/home/coder/.bashrc || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.bashrc' in template
-    assert '/home/coder/.profile || echo "export PNPM_HOME=/home/coder/.local/share/pnpm" >> /home/coder/.profile' in template
-    assert r'/home/coder/.profile || echo "export PATH=\"$PNPM_HOME/bin:$PATH\"" >> /home/coder/.profile' in template
-    assert "pnpm add -g @earendil-works/pi-coding-agent" in template
-    assert "command -v pi" in template
-    assert "pi --version" in template
-    assert "bash -lc 'command -v pi && pi --version'" in template
-    assert 'export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"' in template
-    assert 'export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"' in template
-    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"' in template
-    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
-    assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
-    assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
-    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
-    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
-    assert 'timeout=15' in template
-    assert 'for attempt in range(4):' in template
-    assert 'payload = json.load(response)' in template
-    assert 'except (OSError, ValueError, urllib.error.URLError):' in template
-    assert 'payload = {"data": []}' in template
-    assert 'model_id = item.get("id")' in template
-    assert 'and not normalized.endswith("/*")' in template
-    assert 'and not normalized.startswith("openai/")' in template
-    assert 'model_ids = list(dict.fromkeys(fetched_model_ids + fallback_models))' in template
-    assert '"npm": "@ai-sdk/openai-compatible"' in template
-    assert '"options": {"baseURL": base_url, "apiKey": api_key}' in template
-    assert '"models": {model_id: {} for model_id in model_ids}' in template
-    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
-    assert '"models": [{"id": model_id, "name": model_id} for model_id in model_ids]' in template
-    assert 'Path("/home/coder/.pi/agent/models.json").write_text(' in template
-    assert "pi.dev/install.sh" not in template
-    assert 'resource "coder_app"' not in template
-    assert "pi-web-ui" not in template
-    assert "vite preview" not in template
-    assert "subdomain =" not in template
-
-
-def test_default_opencode_web_template_includes_web_app() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-opencode-web/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    assert "apt-get install -y curl git ca-certificates wget btop" in template
-    assert "if ! command -v opencode >/dev/null 2>&1; then" in template
-    assert (
-        "if ! OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/v2/install | bash; then"
-        in template
-    )
-    assert "if [ ! -x /home/coder/.opencode/bin/opencode ]; then" in template
-    assert "ln -sf /home/coder/.opencode/bin/opencode /usr/local/bin/opencode" in template
-    assert "NEED_NODE=true" in template
-    assert "Shared LiteLLM defaults keep OpenCode Web on the wizard-managed gateway." in template
-    assert 'export AI_DEFAULT_PROVIDER="$${AI_DEFAULT_PROVIDER:-__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__}"' in template
-    assert 'export AI_DEFAULT_MODEL="$${AI_DEFAULT_MODEL:-__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__}"' in template
-    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__}"' in template
-    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__}"' in template
-    assert 'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
-    assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
-    assert 'export LITELLM_DEFAULT_ALIAS="$AI_DEFAULT_PROVIDER/$AI_DEFAULT_MODEL"' in template
-    assert 'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"' in template
-    assert 'timeout=15' in template
-    assert 'for attempt in range(4):' in template
-    assert 'payload = json.load(response)' in template
-    assert 'payload = {"data": []}' in template
-    assert 'model_ids = list(dict.fromkeys(fetched_model_ids + fallback_models))' in template
-    assert '"npm": "@ai-sdk/openai-compatible"' in template
-    assert '"options": {"baseURL": base_url, "apiKey": api_key}' in template
-    assert '"models": {model_id: {} for model_id in model_ids}' in template
-    assert 'Path("/home/coder/.config/opencode/opencode.json").write_text(' in template
-    assert "OPENCODE_WEB_PORT=4096" in template
-    assert "OPENCODE_PROXY_PORT=4097" in template
-    assert (
-        'nohup opencode web --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT" >/tmp/opencode-web.log 2>&1 &'
-        in template
-    )
-    assert "cat >/tmp/coder-mounted-proxy.mjs <<'JS'" in template
-    assert '"accept-encoding"' in template
-    assert "content-security-policy" in template
-    assert "content-encoding" in template
-    assert "pageHttpOrigin + mount + next.pathname + next.search" in template
-    assert "const requestInitFrom = async (request, init) => {" in template
-    assert "requestInit.body = await request.clone().arrayBuffer();" in template
-    assert (
-        "if (input instanceof Request) return originalFetch(url, await requestInitFrom(input, init));"
-        in template
-    )
-    assert "window.EventSource = class extends OriginalEventSource" in template
-    assert "window.WebSocket = class extends OriginalWebSocket" in template
-    assert "originalPushState = window.history.pushState" in template
-    assert "window.__OPENCODE_MOUNT = mount;" in template
-    assert "const mountedBaseScript" in template
-    assert "document.head.prepend(base);" in template
-    assert "coder-mount=v2" in template
-    assert 'responseHeaders["Cache-Control"] = "no-store";' in template
-    assert '.replace("<head>", "<head>" + mountedBaseScript)' in template
-    assert 'KO=function(e){let t="";const n=location.pathname.indexOf("/apps/");' in template
-    assert 'import("./$1?coder-mount=v2")' in template
-    assert 'from"./$1?coder-mount=v2"' in template
-    assert (
-        'window.history.replaceState(window.history.state, "", "/L2hvbWUvY29kZXI/session");'
-        in template
-    )
-    assert 'path:"/:coderUser/:coderWorkspace/apps/:coderApp/:dir"' in template
-    assert (
-        'nohup env TARGET_PORT="$OPENCODE_WEB_PORT" PROXY_PORT="$OPENCODE_PROXY_PORT" node /tmp/coder-mounted-proxy.mjs'
-        in template
-    )
-    assert 'resource "coder_app" "opencode"' in template
-    assert 'display_name = "OpenCode"' in template
-    assert (
-        'icon         = "https://raw.githubusercontent.com/anomalyco/opencode/refs/heads/dev/packages/ui/src/assets/favicon/favicon-v3.svg"'
-        in template
-    )
-    assert 'url          = "http://localhost:4097"' in template
-    assert 'share        = "owner"' in template
-    assert "subdomain    = false" in template
-    assert 'url       = "http://localhost:4097"' in template
 
 
 def test_required_template_names_cover_only_remaining_templates() -> None:
     assert coder_module._required_template_names() == (
         coder_module._default_template_name(),
-        coder_module._opencode_hermes_pi_template_name(),
-        coder_module._base_template_name(),
-        coder_module._default_opencode_web_template_name(),
-        coder_module._default_kdense_byok_template_name(),
-        coder_module._default_hermes_template_name(),
     )
-    names = coder_module._required_template_names()
-    assert len(names) == 6
-    # The default is now the template the desktop accessor names, so a list that
-    # naively includes both would push the same template twice every run.
-    assert len(set(names)) == len(names)
+    # The collapse: exactly one seeded template; the workspace default is it.
+    assert coder_module._required_template_names() == (
+        coder_module._default_hermes_desktop_template_name(),
+    )
 
 
 def test_retired_template_names_cover_removed_templates() -> None:
     assert coder_module._retired_template_names() == (
         "ubuntu-vscode-openwork",
         "ubuntu-vscode-pi-web",
+        "ubuntu-vscode-hermes",
+        "ubuntu-vscode",
+        "ubuntu-vscode-opencode-web",
+        "ubuntu-vscode-kdense-byok",
+        "ubuntu-vscode-opencode-hermes-pi",
     )
     assert set(coder_module._retired_template_names()).isdisjoint(
         coder_module._required_template_names()
@@ -686,10 +507,7 @@ def test_stable_serve_password_self_heals_a_placeholder_left_by_an_older_build()
     # string becomes the password, which is exactly what one released build shipped
     # (the stored file was 43 bytes, the length of the token). Workspaces keep that
     # file across rebuilds, so the block has to recognize and rewrite it.
-    for name in (
-        "default-ubuntu-vscode-hermes-desktop",
-        "default-ubuntu-vscode-opencode-hermes-pi",
-    ):
+    for name in ("default-ubuntu-vscode-hermes-desktop",):
         template = Path(f"templates/coder/{name}/main.tf").read_text(encoding="utf-8")
         assert "grep -q '__DOKPLOY_WIZARD_' \"$OPENCODE_SERVER_PW_FILE\"" in template
 
@@ -856,11 +674,6 @@ def test_seeded_template_names_fit_coder_name_limit() -> None:
     # clean modify, so the limit is checked here and at push time.
     names = {
         coder_module._default_template_name(),
-        coder_module._opencode_hermes_pi_template_name(),
-        coder_module._base_template_name(),
-        coder_module._default_opencode_web_template_name(),
-        coder_module._default_kdense_byok_template_name(),
-        coder_module._default_hermes_template_name(),
         *coder_module._retired_template_names(),
     }
     limit = coder_module._CODER_MAX_NAME_LENGTH
@@ -886,7 +699,7 @@ def test_retire_removed_templates_deletes_only_retired_templates(monkeypatch) ->
     def fake_list_templates(*, container_name: str, hostname: str, session_token: str) -> tuple[dict[str, object], ...]:
         del container_name, hostname, session_token
         return (
-            {"name": "ubuntu-vscode"},
+            {"name": coder_module._default_template_name()},
             {"name": "ubuntu-vscode-openwork"},
             {"name": "operator-custom-template"},
         )
@@ -937,7 +750,7 @@ def test_retire_removed_templates_reports_delete_failure(monkeypatch) -> None:
 def test_retire_removed_templates_is_silent_when_nothing_retired(monkeypatch) -> None:
     def fake_list_templates(*, container_name: str, hostname: str, session_token: str) -> tuple[dict[str, object], ...]:
         del container_name, hostname, session_token
-        return ({"name": "ubuntu-vscode"},)
+        return ({"name": coder_module._default_template_name()},)
 
     def fail_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
         raise AssertionError(f"Unexpected subprocess call: {command}")
@@ -970,554 +783,8 @@ def test_readme_documents_pi_and_opencode_on_every_template() -> None:
     assert "pre-wired on first boot" in readme
 
 
-def test_default_kdense_byok_template_includes_upstream_parameterized_stack() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    assert 'resource "coder_script" "kdense_bootstrap"' in template
-    assert 'display_name       = "K-Dense BYOK Bootstrap"' in template
-    assert "run_on_start       = true" in template
-    assert "start_blocks_login = false" in template
-    assert "timeout            = 3600" in template
-    assert "cat >/tmp/kdense-bootstrap.sh <<'BOOT'" in template
-    assert "chmod +x /tmp/kdense-bootstrap.sh" in template
-    assert "nohup bash /tmp/kdense-bootstrap.sh >/tmp/kdense-bootstrap.log 2>&1 &" in template
-    assert "missing_packages=()" in template
-    assert "for package in curl ca-certificates wget python3; do" in template
-    assert "if ! command -v git >/dev/null 2>&1; then" in template
-    assert "if ! command -v btop >/dev/null 2>&1; then" in template
-    assert '$_SUDO apt-get install -y "$${missing_packages[@]}"' in template
-    assert "curl -LsSf https://astral.sh/uv/install.sh | sh" in template
-    assert "https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt" in template
-    assert "tar -xJf - -C /usr/local --strip-components=1 --no-same-owner" in template
-    assert "NPM_CONFIG_PREFIX=/home/coder/.local npm install -g @google/gemini-cli" in template
-    assert 'data "coder_parameter" "kdense_default_model" {' in template
-    assert 'data "coder_parameter" "kdense_expert_model" {' in template
-    assert 'data "coder_parameter" "kdense_search_provider" {' in template
-    assert 'data "coder_parameter" "kdense_opencode_go_api_key" {' in template
-    assert 'data "coder_parameter" "kdense_exa_api_key" {' in template
-    assert 'data "coder_parameter" "kdense_parallel_api_key" {' in template
-    assert 'data "coder_parameter" "kdense_modal_token_id" {' in template
-    assert 'data "coder_parameter" "kdense_modal_token_secret" {' in template
-    assert 'name  = "Unsloth Active (local alias)"' in template
-    assert 'value = "local-model.internal/unsloth-active"' in template
-    assert 'default      = "local-model.internal/unsloth-active"' in template
-    assert 'default      = "openrouter/google/gemini-3.1-pro-preview"' in template
-    assert 'default      = "disabled"' in template
-    assert (
-        'export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"'
-        in template
-    )
-    assert (
-        'export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"'
-        in template
-    )
-    assert "KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL_PLACEHOLDER" not in template
-    assert "KDENSE_TEMPLATE_OPENCODE_GO_API_KEY_PLACEHOLDER" not in template
-    assert "sync_kdense_source() {" in template
-    assert 'EXPECTED_REPO_URL="https://github.com/K-Dense-AI/k-dense-byok.git"' in template
-    assert (
-        'git clone --depth 1 --branch main https://github.com/K-Dense-AI/k-dense-byok.git "$KDENSE_SRC_DIR"'
-        in template
-    )
-    assert (
-        'curl -fsSL https://codeload.github.com/K-Dense-AI/k-dense-byok/tar.gz/refs/heads/main | tar -xz --strip-components=1 -C "$KDENSE_SRC_DIR"'
-        in template
-    )
-    assert (
-        'const streamdownComponents = { p: SafeParagraph } as unknown as ComponentProps<typeof Streamdown>["components"];'
-        in template
-    )
-    assert 'status: "running" as const,' in template
-    assert (
-        "text = re.sub(r'status:\\s*\"running\",', 'status: \"running\" as const,', text, count=1)"
-        in template
-    )
-    assert "text = text.replace('// @ts-expect-error polyfill\\n', '')" in template
-    assert "KDENSE_REV=archive-main" in template
-    assert "normalize_model_for_gateway() {" in template
-    assert 'openrouter/*) printf \x27openai/%s\x27 "$${model#openrouter/}" ;;' in template
-    assert 'opencode-go/*) printf \x27openai/%s\x27 "$${model#opencode-go/}" ;;' in template
-    assert (
-        'KDENSE_DEFAULT_MODEL_EFFECTIVE=$(normalize_model_for_gateway "$KDENSE_DEFAULT_MODEL")'
-        in template
-    )
-    assert (
-        'KDENSE_EXPERT_MODEL_EFFECTIVE=$(normalize_model_for_gateway "$KDENSE_EXPERT_MODEL")'
-        in template
-    )
-    assert "write_kdense_env_file() {" in template
-    assert "DEFAULT_AGENT_MODEL=%s" in template
-    assert "DEFAULT_EXPERT_MODEL=%s" in template
-    assert 'append_env OPENAI_API_KEY "$KDENSE_CENTRAL_LITELLM_API_KEY" "$env_file"' in template
-    assert 'append_env OPENAI_API_BASE "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
-    assert 'append_env OPENAI_BASE_URL "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
-    assert 'append_env EXA_API_KEY "$KDENSE_EXA_API_KEY" "$env_file"' in template
-    assert 'append_env PARALLEL_API_KEY "$KDENSE_PARALLEL_API_KEY" "$env_file"' in template
-    assert 'append_env MODAL_TOKEN_ID "$KDENSE_MODAL_TOKEN_ID" "$env_file"' in template
-    assert 'append_env MODAL_TOKEN_SECRET "$KDENSE_MODAL_TOKEN_SECRET" "$env_file"' in template
-    assert "append_env OPENROUTER_API_KEY " not in template
-    assert "append_env NVIDIA_API_KEY " not in template
-    assert "append_env ANTHROPIC_API_KEY " not in template
-    assert (
-        'KDENSE_CENTRAL_LITELLM_API_KEY="$${KDENSE_OPENCODE_GO_API_KEY:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY}"'
-        in template
-    )
-    assert (
-        'KDENSE_CENTRAL_LITELLM_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL}"'
-        in template
-    )
-    assert 'KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"' in template
-    assert 'if [ -z "$KDENSE_CENTRAL_LITELLM_API_KEY" ]; then' in template
-    assert (
-        "KDENSE_CENTRAL_LITELLM_API_KEY is required for the central LiteLLM provider." in template
-    )
-    assert 'KDENSE_UPSTREAM_LITELLM="$KDENSE_SRC_DIR/litellm_config.yaml"' in template
-    assert 'model_name: "openai/*"' in template
-    assert "api_base: os.environ/OPENAI_API_BASE" in template
-    assert "catalog_options = json.loads(sys.argv[5])" in template
-    assert "for option in catalog_options:" in template
-    assert 'source = dict(openrouter_models.get(option_value, {}))' in template
-    assert 'clone["id"] = "openai/" + option_value[len("openrouter/"):]' in template
-    assert 'clone["provider"] = "OpenCode Go"' in template
-    assert "option_value.removeprefix(\"openrouter/\")" in template
-    assert '"id": "openai/deepseek-v4.1-flash"' not in template
-    assert "KDENSE_SETUP_STAMP=/home/coder/.cache/kdense-byok-setup-rev" in template
-    assert "KDENSE_SETUP_KEY=v11-central-litellm-only" in template
-    assert (
-        'KDENSE_SETUP_ID="$KDENSE_REV:$KDENSE_SETUP_KEY:$KDENSE_DEFAULT_MODEL_EFFECTIVE:$KDENSE_EXPERT_MODEL_EFFECTIVE"'
-        in template
-    )
-    assert '[ ! -f "$KDENSE_SRC_DIR/web/.next/BUILD_ID" ]' in template
-    assert "uv sync --python 3.13 --no-dev --quiet" in template
-    assert "if [ -f web/package-lock.json ]; then" in template
-    assert (
-        "(cd web && NEXT_PUBLIC_ADK_API_URL= npm ci --silent && NEXT_PUBLIC_ADK_API_URL= npm run build)"
-        in template
-    )
-    assert (
-        "(cd web && NEXT_PUBLIC_ADK_API_URL= npm install --silent && NEXT_PUBLIC_ADK_API_URL= npm run build)"
-        in template
-    )
-    assert 'printf \'%s\' "$KDENSE_SETUP_ID" > "$KDENSE_SETUP_STAMP"' in template
-    assert "KDENSE_NEEDS_PREP=false" in template
-    assert 'if [ ! -d "$KDENSE_SRC_DIR/sandbox/.gemini/skills" ]; then' in template
-    assert "KDENSE_NEEDS_PREP=true" in template
-    assert "uv run python prep_sandbox.py" in template
-    assert ">/tmp/kdense-prep.log 2>&1 &" in template
-    assert 'pkill -f "next dev --hostname 127.0.0.1 --port $KDENSE_UI_PORT"' in template
-    assert 'pkill -f "next start --hostname 127.0.0.1 --port $KDENSE_UI_PORT"' in template
-    assert (
-        "NEXT_PUBLIC_ADK_API_URL= npm run start -- --hostname 127.0.0.1 --port $KDENSE_UI_PORT"
-        in template
-    )
-    assert (
-        'const UI_PATHS = new Set(["/", "/favicon.ico", "/icon.png", "/site.webmanifest"]);'
-        in template
-    )
-    assert "function isUiPath(pathname) {" in template
-    assert (
-        'return UI_PATHS.has(pathname) || pathname.startsWith("/_next/") || pathname.startsWith("/brand/");'
-        in template
-    )
-    assert "function filteredHeaders(headers) {" in template
-    assert 'if (["transfer-encoding", "connection"].includes(lowered)) continue;' in template
-    assert "function targetForPath(pathname) {" in template
-    assert "if (isUiPath(pathname)) return { host: UI_HOST, port: UI_PORT };" in template
-    assert "return { host: API_HOST, port: API_PORT };" in template
-    assert 'path: req.url || "/",' in template
-    assert (
-        "res.writeHead(upstreamRes.statusCode || 502, filteredHeaders(upstreamRes.headers));"
-        in template
-    )
-    assert 'resource "coder_app" "kdense_byok"' in template
-    assert 'display_name = "K-Dense BYOK"' in template
-    assert (
-        'icon         = "https://raw.githubusercontent.com/K-Dense-AI/k-dense-byok/main/web/public/brand/kdense-logo-dark.png"'
-        in template
-    )
-    assert 'url          = "http://localhost:3001"' in template
-    assert "subdomain    = true" in template
-    assert 'url       = "http://localhost:3001/health"' in template
 
 
-def test_kdense_calls_central_litellm() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    assert (
-        'export KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL="__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__"'
-        in template
-    )
-    assert (
-        'export KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY="__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__"'
-        in template
-    )
-    assert (
-        'KDENSE_CENTRAL_LITELLM_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL}"'
-        in template
-    )
-    assert (
-        'KDENSE_CENTRAL_LITELLM_API_KEY="$${KDENSE_OPENCODE_GO_API_KEY:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_API_KEY}"'
-        in template
-    )
-    assert 'KDENSE_LOCAL_LITELLM_BASE_URL="http://localhost:$KDENSE_LITELLM_PORT"' in template
-    assert (
-        'printf \'GOOGLE_GEMINI_BASE_URL=%s\\n\' "$KDENSE_LOCAL_LITELLM_BASE_URL" >> "$env_file"'
-        in template
-    )
-    assert 'append_env OPENAI_API_KEY "$KDENSE_CENTRAL_LITELLM_API_KEY" "$env_file"' in template
-    assert 'append_env OPENAI_API_BASE "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
-    assert 'append_env OPENAI_BASE_URL "$KDENSE_CENTRAL_LITELLM_BASE_URL" "$env_file"' in template
-
-
-def test_no_openrouter_wildcard_in_kdense_config() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    assert "# Central LiteLLM gateway owns the OpenCode Go wildcard route." in template
-    assert (
-        "# Workspace-local LiteLLM stays on localhost for the Gemini/OpenAI shim only." in template
-    )
-    assert "KDENSE_OPENROUTER_API_KEY" not in template
-    assert "kdense_openrouter_api_key" not in template
-    assert 'model_name: "openrouter/*"' not in template
-    assert 'model_name: "openai/*"' in template
-
-
-def test_kdense_template_preserves_restored_byok_source_state() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-kdense-byok/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    assert 'data "coder_parameter" "kdense_opencode_go_base_url" {' in template
-    assert 'display_name = "Central LiteLLM Base URL"' in template
-    assert 'default      = "https://opencode.ai/zen/go/v1"' in template
-    assert (
-        'KDENSE_CENTRAL_LITELLM_BASE_URL="$${KDENSE_OPENCODE_GO_BASE_URL:-$KDENSE_TEMPLATE_LITELLM_GATEWAY_BASE_URL}"'
-        in template
-    )
-    assert "KDENSE_TEMPLATE_OPENCODE_GO_BASE_URL_PLACEHOLDER" not in template
-    assert "KDENSE_TEMPLATE_OPENCODE_GO_API_KEY_PLACEHOLDER" not in template
-    assert 'append_env OPENROUTER_API_KEY ' not in template
-    assert 'append_env NVIDIA_API_KEY ' not in template
-    assert 'append_env ANTHROPIC_API_KEY ' not in template
-
-
-def test_default_hermes_template_includes_full_web_stack() -> None:
-    template = Path("templates/coder/default-ubuntu-code-server-hermes/main.tf").read_text(
-        encoding="utf-8"
-    )
-
-    assert "$_SUDO apt-get install -y curl git ca-certificates wget btop python3" in template
-    assert "curl -fsSL https://deb.nodesource.com/setup_24.x | $_SUDO -E bash -" in template
-    assert (
-        'HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup'
-        in template
-    )
-    assert "export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1" in template
-    assert (
-        'export HERMES_TEMPLATE_PROVIDER="__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__"' in template
-    )
-    assert 'export HERMES_TEMPLATE_MODEL="__DOKPLOY_WIZARD_HERMES_MODEL__"' in template
-    assert 'export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_HERMES_BASE_URL__"' in template
-    assert 'export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_HERMES_API_KEY__"' in template
-    assert (
-        'export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__"' in template
-    )
-    assert (
-        'export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"'
-        in template
-    )
-    assert (
-        'export HERMES_INFERENCE_PROVIDER="$${HERMES_INFERENCE_PROVIDER:-$HERMES_TEMPLATE_PROVIDER}"'
-        in template
-    )
-    assert 'export HERMES_MODEL="$${HERMES_MODEL:-$HERMES_TEMPLATE_MODEL}"' in template
-    assert 'export OPENAI_API_BASE="$${OPENAI_API_BASE:-$HERMES_TEMPLATE_BASE_URL}"' in template
-    assert 'export OPENAI_API_KEY="$${OPENAI_API_KEY:-$HERMES_TEMPLATE_API_KEY}"' in template
-    assert 'export AI_DEFAULT_BASE_URL="$${AI_DEFAULT_BASE_URL:-$OPENAI_API_BASE}"' in template
-    assert 'export AI_DEFAULT_API_KEY="$${AI_DEFAULT_API_KEY:-$OPENAI_API_KEY}"' in template
-    assert (
-        'export OPENCODE_GO_BASE_URL="$${OPENCODE_GO_BASE_URL:-$AI_DEFAULT_BASE_URL}"' in template
-    )
-    assert 'export OPENCODE_GO_API_KEY="$${OPENCODE_GO_API_KEY:-$AI_DEFAULT_API_KEY}"' in template
-    assert 'upsert_env OPENAI_API_KEY "$OPENAI_API_KEY"' in template
-    assert 'upsert_env OPENAI_API_BASE "$OPENAI_API_BASE"' in template
-    assert 'upsert_env AI_DEFAULT_API_KEY "$AI_DEFAULT_API_KEY"' in template
-    assert 'upsert_env OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"' in template
-    assert "upsert_env OPENROUTER_API_KEY " not in template
-    assert "upsert_env NVIDIA_API_KEY " not in template
-    assert "upsert_env ANTHROPIC_API_KEY " not in template
-    assert "API_SERVER_ENABLED=true" in template
-    assert "OPENAI_API_KEY is required for the Hermes workspace template" in template
-    assert 'hermes config set model.provider "$HERMES_INFERENCE_PROVIDER"' in template
-    assert 'hermes config set model.default "$HERMES_MODEL"' in template
-    assert 'hermes config set model.base_url "$OPENAI_API_BASE"' in template
-    assert "hermes config set terminal.cwd /home/coder" in template
-    assert 'providers[provider] = {' in template
-    assert '"name": "Dokploy LiteLLM"' in template
-    assert '"base_url": base_url' in template
-    assert '"models": {model_id: {} for model_id in model_ids}' in template
-    assert '"discover_models": False' in template
-    assert "export HERMES_DASHBOARD_PORT=9119" in template
-    assert "export HERMES_DASHBOARD_PROXY_PORT=9120" in template
-    assert "export HERMES_WEB_UI_PORT=8648" in template
-    assert "export HERMES_WEB_UI_PROXY_PORT=8649" in template
-    assert "export HERMES_WEBUI_PORT=8787" in template
-    assert "export HERMES_WEBUI_PROXY_PORT=8788" in template
-    assert "HERMES_BOOTSTRAP_SCRIPT=/tmp/hermes-workspace-bootstrap.sh" in template
-    assert 'export HERMES_HOME="$${HERMES_HOME:-/home/coder/.hermes}"' in template
-    assert 'export HERMES_INSTALL_DIR="$${HERMES_INSTALL_DIR:-/home/coder/.hermes/hermes-agent}"' in template
-    assert 'nohup sh "$HERMES_BOOTSTRAP_SCRIPT" >/tmp/hermes-bootstrap.log 2>&1 &' in template
-    assert "nohup hermes gateway >/tmp/hermes-gateway.log 2>&1 &" in template
-    assert 'hermes dashboard --host 127.0.0.1 --port "$HERMES_DASHBOARD_PORT" --no-open' in template
-    assert (
-        'hermes-web-ui start --port "$HERMES_WEB_UI_PORT" >/tmp/hermes-web-ui-start.log 2>&1'
-        in template
-    )
-    assert (
-        "HERMES_WEBUI_HOST=127.0.0.1 HERMES_WEBUI_PORT=$HERMES_WEBUI_PORT HERMES_WEBUI_AGENT_DIR=$HERMES_INSTALL_DIR"
-        in template
-    )
-    assert "python3 /home/coder/.cache/hermes-webui-src/bootstrap.py --no-browser --skip-agent-install" in template
-    assert 'const SYNTHETIC_HEALTHCHECK = process.env.SYNTHETIC_HEALTHCHECK === "1";' in template
-    assert (
-        'const DASHBOARD_SESSION_HEADER = process.env.DASHBOARD_SESSION_HEADER === "1";' in template
-    )
-    assert 'const TOKEN_FILE = process.env.TOKEN_FILE || "";' in template
-    assert 'headers["X-Hermes-Session-Token"] = await getDashboardSessionToken();' in template
-    assert (
-        "window.history.pushState = (state, title, url) => originalPushState(state, title, url == null ? url : rewrite(url));"
-        in template
-    )
-    assert 'location.pathname.indexOf("/apps/") !== -1' in template
-    assert '.replace(/(["\'])\\/assets\\//g, "$1./assets/")' in template
-    assert '.replace(/(["\'])\\/static\\//g, "$1./static/")' in template
-    assert '.replace(/`\\/`\\+e/g, "`./`+e")' in template
-    assert (
-        "DASHBOARD_SESSION_HEADER=1 SYNTHETIC_HEALTHCHECK=1 TARGET_PORT=$HERMES_DASHBOARD_PORT PROXY_PORT=$HERMES_DASHBOARD_PROXY_PORT node /tmp/coder-mounted-proxy.mjs"
-        in template
-    )
-    assert (
-        "TOKEN_FILE=/home/coder/.hermes-web-ui/.token TARGET_PORT=$HERMES_WEB_UI_PORT PROXY_PORT=$HERMES_WEB_UI_PROXY_PORT node /tmp/coder-mounted-proxy.mjs"
-        in template
-    )
-    assert 'server.on("upgrade", (req, socket, head) => {' in template
-    assert "window.WebSocket = class extends OriginalWebSocket" in template
-    assert 'resource "coder_app" "hermes_dashboard"' in template
-    assert (
-        'icon         = "https://raw.githubusercontent.com/NousResearch/hermes-agent/refs/heads/main/acp_registry/icon.svg"'
-        in template
-    )
-    assert 'url          = "http://localhost:9120"' in template
-    assert 'resource "coder_app" "hermes_web_ui"' in template
-    assert (
-        'icon         = "https://raw.githubusercontent.com/EKKOLearnAI/hermes-web-ui/refs/heads/main/packages/client/public/favicon.svg"'
-        in template
-    )
-    assert 'url          = "http://localhost:8649"' in template
-    assert 'resource "coder_app" "hermes_webui"' in template
-    assert (
-        'icon         = "https://raw.githubusercontent.com/nesquena/hermes-webui/refs/heads/master/static/favicon.svg"'
-        in template
-    )
-    assert 'url          = "http://localhost:8788"' in template
-    assert "HERMIES_PROVIDER" not in template
-    assert "HERMEIS_OPENCODE_GO_MODEL" not in template
-    assert "HERMIES_BASE_USL" not in template
-    assert "HERMIES_API_MODE" not in template
-
-
-def test_hermes_template_uses_litellm_credentials(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    backend = DokployCoderBackend(
-        api_url="https://dokploy.example.com/api",
-        api_key="key-123",
-        stack_name="wizard-stack",
-        hostname="coder.example.com",
-        wildcard_hostname="*.coder.example.com",
-        admin_email="admin@openmerge.me",
-        admin_password="ChangeMeSoon",
-        postgres_service_name="wizard-stack-shared-postgres",
-        postgres=SharedPostgresAllocation(
-            database_name="wizard_stack_coder",
-            user_name="wizard_stack_coder",
-            password_secret_ref="wizard-stack-coder-postgres-password",
-        ),
-        hermes_inference_provider="openai",
-        hermes_model="unsloth-active",
-        ai_default_base_url="https://upstream.example.invalid/v1",
-        ai_default_api_key="litellm-coder-hermes-key",
-        client=cast(DokployCoderApi, FakeCoderApi()),
-    )
-    template_replacements_by_name: dict[str, dict[str, str] | None] = {}
-    secret_sync_calls: list[dict[str, object]] = []
-
-    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
-    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
-    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
-    monkeypatch.setattr(
-        coder_module,
-        "_coder_container_name",
-        lambda service_name: "wizard-stack-coder-container",
-    )
-    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
-    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
-    monkeypatch.setattr(
-        coder_module,
-        "_sync_hermes_workspace_secrets",
-        lambda **kwargs: secret_sync_calls.append(kwargs),
-    )
-    monkeypatch.setattr(
-        coder_module,
-        "_copy_template_into_container",
-        lambda *,
-        container_name,
-        template_dir,
-        template_name,
-        replacements: template_replacements_by_name.setdefault(template_name, replacements),
-    )
-    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
-    monkeypatch.setattr(
-        coder_module,
-        "_ensure_default_workspace",
-        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
-    )
-
-    backend.ensure_application_ready()
-
-    assert secret_sync_calls == [
-        {
-            "container_name": "wizard-stack-coder-container",
-            "hostname": "coder.example.com",
-            "session_token": "session-123",
-            "hermes_inference_provider": "openai",
-            "hermes_model": "local-model.internal/unsloth-active",
-            "ai_default_base_url": "http://wizard-stack-shared-litellm:4000",
-            "ai_default_api_key": "litellm-coder-hermes-key",
-        }
-    ]
-    assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "openai",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "local-model.internal/unsloth-active",
-        "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "litellm-coder-hermes-key",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
-    }
-
-
-def test_base_and_opencode_web_templates_receive_shared_litellm_defaults(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    backend = DokployCoderBackend(
-        api_url="https://dokploy.example.com/api",
-        api_key="key-123",
-        stack_name="wizard-stack",
-        hostname="coder.example.com",
-        wildcard_hostname="*.coder.example.com",
-        admin_email="admin@openmerge.me",
-        admin_password="ChangeMeSoon",
-        postgres_service_name="wizard-stack-shared-postgres",
-        postgres=SharedPostgresAllocation(
-            database_name="wizard_stack_coder",
-            user_name="wizard_stack_coder",
-            password_secret_ref="wizard-stack-coder-postgres-password",
-        ),
-        hermes_inference_provider="openai",
-        hermes_model="unsloth-active",
-        ai_default_api_key="litellm-coder-hermes-key",
-        client=cast(DokployCoderApi, FakeCoderApi()),
-    )
-    template_replacements_by_name: dict[str, dict[str, str] | None] = {}
-
-    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
-    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
-    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
-    monkeypatch.setattr(
-        coder_module,
-        "_coder_container_name",
-        lambda service_name: "wizard-stack-coder-container",
-    )
-    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
-    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
-    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
-    monkeypatch.setattr(
-        coder_module,
-        "_copy_template_into_container",
-        lambda *,
-        container_name,
-        template_dir,
-        template_name,
-        replacements: template_replacements_by_name.setdefault(template_name, replacements),
-    )
-    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
-    monkeypatch.setattr(
-        coder_module,
-        "_ensure_default_workspace",
-        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
-    )
-    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
-
-    backend.ensure_application_ready()
-
-    consolidated_replacements = template_replacements_by_name[coder_module._default_template_name()]
-    hermes_legacy_replacements = template_replacements_by_name[coder_module._default_hermes_template_name()]
-    assert consolidated_replacements["__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"] == "https://coder.example.com"
-    assert consolidated_replacements["__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__"] == "ChangeMeSoon"
-    assert consolidated_replacements["__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__"] == "wizard-stack-shared"
-    assert consolidated_replacements["__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"] == (
-        _expected_coder_fallback_models_json_escaped()
-    )
-    # The two templates have to agree on how Hermes reaches the gateway. The keys are
-    # named rather than filtered by prefix because the default template now carries a
-    # Hermes key the legacy one never had; a prefix filter turns that into a failure
-    # with no explanation attached.
-    hermes_wiring_keys = (
-        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__",
-        "__DOKPLOY_WIZARD_HERMES_BASE_URL__",
-        "__DOKPLOY_WIZARD_HERMES_API_KEY__",
-    )
-    assert {key: consolidated_replacements[key] for key in hermes_wiring_keys} == {
-        key: hermes_legacy_replacements[key] for key in hermes_wiring_keys
-    }
-    assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" in consolidated_replacements
-    assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" not in hermes_legacy_replacements
-    assert template_replacements_by_name[coder_module._base_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
-    }
-    assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
-    }
-    assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
-        "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-    }
-    assert "ubuntu-vscode-openwork" not in template_replacements_by_name
-    assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
 
 
 def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
@@ -1560,6 +827,11 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
     monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
     monkeypatch.setattr(
         coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
+    monkeypatch.setattr(
+        coder_module,
         "_copy_template_into_container",
         lambda *,
         container_name,
@@ -1579,67 +851,27 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
         or coder_module.DefaultWorkspaceOutcome(action="exists"),
     )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(
+        coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
 
     notes = backend.ensure_application_ready()
 
-    assert template_push_calls == [
-        coder_module._default_template_name(),
-        coder_module._opencode_hermes_pi_template_name(),
-        coder_module._base_template_name(),
-        coder_module._default_opencode_web_template_name(),
-        coder_module._default_kdense_byok_template_name(),
-        coder_module._default_hermes_template_name(),
-    ]
+    assert template_push_calls == [coder_module._default_template_name()]
     assert ensure_workspace_calls == []
-    assert notes == (
-        "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
-        "Seeded default Coder template 'ubuntu-vscode'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
-        "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
-        "Seeded default Coder template 'ubuntu-vscode-hermes'.",
-    )
+    assert notes == ("Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",)
     consolidated_replacements = template_replacements_by_name[coder_module._default_template_name()]
-    hermes_legacy_replacements = template_replacements_by_name[coder_module._default_hermes_template_name()]
     assert consolidated_replacements["__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"] == "https://coder.example.com"
     assert consolidated_replacements["__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__"] == "ChangeMeSoon"
     assert consolidated_replacements["__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__"] == "wizard-stack-shared"
     assert consolidated_replacements["__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"] == (
         _expected_coder_fallback_models_json_escaped()
     )
-    # The two templates have to agree on how Hermes reaches the gateway. The keys are
-    # named rather than filtered by prefix because the default template now carries a
-    # Hermes key the legacy one never had; a prefix filter turns that into a failure
-    # with no explanation attached.
-    hermes_wiring_keys = (
-        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__",
-        "__DOKPLOY_WIZARD_HERMES_BASE_URL__",
-        "__DOKPLOY_WIZARD_HERMES_API_KEY__",
-    )
-    assert {key: consolidated_replacements[key] for key in hermes_wiring_keys} == {
-        key: hermes_legacy_replacements[key] for key in hermes_wiring_keys
-    }
     assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" in consolidated_replacements
-    assert "__DOKPLOY_WIZARD_HERMES_WEBAPP_PASSWORD__" not in hermes_legacy_replacements
-    assert template_replacements_by_name[coder_module._base_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
-    }
-    assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "litellm-coder-hermes-key",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
-    }
+    # The collapse means one dict, so a stale predecessor must not sneak back in.
+    assert set(template_replacements_by_name) == {coder_module._default_template_name()}
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name
     assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
 
@@ -1848,6 +1080,11 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
         lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
     )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(
+        coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
 
     notes = backend.ensure_application_ready()
 
@@ -1862,11 +1099,6 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
     assert notes == (
         "Provisioned initial Coder admin for 'admin@example.com'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
-        "Seeded default Coder template 'ubuntu-vscode'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
-        "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
-        "Seeded default Coder template 'ubuntu-vscode-hermes'.",
     )
 
 
@@ -1914,6 +1146,11 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
     monkeypatch.setattr(
         coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
+    monkeypatch.setattr(
+        coder_module,
         "_active_template_version_name",
         lambda **kwargs: template_versions.get(str(kwargs["template_name"])),
     )
@@ -1947,17 +1184,17 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
 
     monkeypatch.setattr(coder_module, "_create_default_workspace", fake_create_default_workspace)
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(
+        coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
 
     first_notes = backend.ensure_application_ready()
     second_notes = backend.ensure_application_ready()
 
     expected_template_names = {
         coder_module._default_template_name(),
-        coder_module._opencode_hermes_pi_template_name(),
-        coder_module._base_template_name(),
-        coder_module._default_opencode_web_template_name(),
-        coder_module._default_kdense_byok_template_name(),
-        coder_module._default_hermes_template_name(),
     }
     assert first_user_calls == [("coder.example.com", "admin@openmerge.me", "ChangeMeSoon")]
     assert set(template_copy_calls) == expected_template_names
@@ -1971,11 +1208,6 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
     assert first_notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
-        "Seeded default Coder template 'ubuntu-vscode'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
-        "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
-        "Seeded default Coder template 'ubuntu-vscode-hermes'.",
         "Created default Coder workspace 'openmergeme-workspace' for 'admin@openmerge.me'.",
     )
     assert second_notes == ()
@@ -2016,6 +1248,11 @@ def _patch_coder_template_failure_bootstrap(
     monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
     monkeypatch.setattr(
         coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
+    monkeypatch.setattr(
+        coder_module,
         "_ensure_default_workspace",
         lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
     )
@@ -2049,42 +1286,6 @@ def test_ensure_application_ready_reports_default_workspace_adoption_and_pruning
         "Pruned duplicate wizard-created Coder workspace 'openmergeme-workspace-2026-10-31'."
     ) in notes
 
-
-def test_ensure_application_ready_skips_optional_template_push_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    backend = _coder_backend_for_template_failure_tests()
-    _patch_coder_template_failure_bootstrap(monkeypatch, backend)
-    attempted_templates: list[str] = []
-
-    def fake_seed_template(*, template_name: str, **kwargs: object) -> bool:
-        attempted_templates.append(template_name)
-        if template_name == coder_module._default_kdense_byok_template_name():
-            raise coder_module.CoderError(
-                "Unable to push default Coder template 'ubuntu-vscode-kdense-byok': "
-                "Terraform registry timeout at https://registry.coder.com/.well-known/terraform.json "
-                "CODER_SESSION_TOKEN=session-123 API_KEY=sk-secret "
-                + "x" * 500
-            )
-        return True
-
-    monkeypatch.setattr(coder_module, "_seed_template", fake_seed_template)
-
-    notes = backend.ensure_application_ready()
-
-    assert attempted_templates == list(coder_module._required_template_names())
-    skipped_notes = [note for note in notes if note.startswith("Skipped optional Coder template")]
-    assert len(skipped_notes) == 1
-    skipped_note = skipped_notes[0]
-    assert "ubuntu-vscode-kdense-byok" in skipped_note
-    assert "registry.coder.com" in skipped_note
-    assert "sk-secret" not in skipped_note
-    assert "session-123" not in skipped_note
-    assert "<REDACTED>" in skipped_note
-    # The note stays bounded so a failed push cannot bloat the state file, but a
-    # terraform diagnosis has to survive it: the reason arrives at the end of the CLI's
-    # output, after the banner and the streamed plan.
-    assert len(skipped_note) < 1400
 
 
 def test_ensure_application_ready_keeps_base_template_push_failure_required(
@@ -3194,6 +2395,11 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         lambda hostname: "openmergeme-workspace",
     )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(
+        coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
 
     notes = backend.ensure_application_ready()
 
@@ -3205,31 +2411,6 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             str(coder_module._default_template_dir()),
             coder_module._default_template_name(),
         ),
-        (
-            "wizard-stack-coder-container",
-            str(coder_module._opencode_hermes_pi_template_dir()),
-            coder_module._opencode_hermes_pi_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
-            str(coder_module._base_template_dir()),
-            coder_module._base_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
-            str(coder_module._default_opencode_web_template_dir()),
-            coder_module._default_opencode_web_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
-            str(coder_module._default_kdense_byok_template_dir()),
-            coder_module._default_kdense_byok_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
-            str(coder_module._default_hermes_template_dir()),
-            coder_module._default_hermes_template_name(),
-        ),
     ]
     assert template_push_calls == [
         (
@@ -3238,63 +2419,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
             "session-123",
             coder_module._default_template_name(),
         ),
-        (
-            "wizard-stack-coder-container",
-            "coder.example.com",
-            "session-123",
-            coder_module._opencode_hermes_pi_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
-            "coder.example.com",
-            "session-123",
-            coder_module._base_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
-            "coder.example.com",
-            "session-123",
-            coder_module._default_opencode_web_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
-            "coder.example.com",
-            "session-123",
-            coder_module._default_kdense_byok_template_name(),
-        ),
-        (
-            "wizard-stack-coder-container",
-            "coder.example.com",
-            "session-123",
-            coder_module._default_hermes_template_name(),
-        ),
     ]
-    assert template_replacements_by_name[coder_module._default_kdense_byok_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
-        "__DOKPLOY_WIZARD_KDENSE_LITELLM_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_KDENSE_LITELLM_API_KEY__": "$${LITELLM_VIRTUAL_KEY_CODER_KDENSE}",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-    }
-    assert template_replacements_by_name[coder_module._default_opencode_web_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_PROVIDER__": "opencode-go",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_MODEL__": "deepseek-v4.1-flash",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_AI_DEFAULT_API_KEY__": "",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
-    }
-    assert template_replacements_by_name[coder_module._default_hermes_template_name()] == {
-        "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
-        "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
-        "__DOKPLOY_WIZARD_HERMES_MODEL__": "opencode-go/deepseek-v4.1-flash",
-        "__DOKPLOY_WIZARD_HERMES_BASE_URL__": "http://wizard-stack-shared-litellm:4000",
-        "__DOKPLOY_WIZARD_HERMES_API_KEY__": "",
-        "__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__": _expected_coder_fallback_models_json_escaped(),
-        "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__": "",
-    }
     assert template_replacements_by_name[coder_module._default_hermes_desktop_template_name()] == {
         "__DOKPLOY_WIZARD_SHARED_NETWORK_NAME__": "wizard-stack-shared",
         "__DOKPLOY_WIZARD_HERMES_INFERENCE_PROVIDER__": "dokploy-litellm",
@@ -3339,11 +2464,6 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
     assert notes == (
         "Provisioned initial Coder admin for 'admin@openmerge.me'.",
         "Seeded default Coder template 'ubuntu-vscode-hermes-desktop'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-hermes-pi'.",
-        "Seeded default Coder template 'ubuntu-vscode'.",
-        "Seeded default Coder template 'ubuntu-vscode-opencode-web'.",
-        "Seeded default Coder template 'ubuntu-vscode-kdense-byok'.",
-        "Seeded default Coder template 'ubuntu-vscode-hermes'.",
         "Created default Coder workspace 'openmergeme-workspace' for 'admin@openmerge.me'.",
     )
 
@@ -3371,10 +2491,6 @@ def _write_coder_hash_checkpoint(
     )
 
 _GATEWAY_KEY_TEMPLATE_DIRS = (
-    "default-ubuntu-code-server",
-    "default-ubuntu-code-server-opencode-web",
-    "default-ubuntu-code-server-hermes",
-    "default-ubuntu-vscode-opencode-hermes-pi",
     "default-ubuntu-vscode-hermes-desktop",
 )
 
@@ -3384,9 +2500,12 @@ def test_workspace_key_mint_block_is_baked_into_gateway_key_templates(template_d
     template = Path(f"templates/coder/{template_dir}/main.tf").read_text(encoding="utf-8")
 
     # The issuer token survives as a sentinel when the wizard seeded no issuer,
-    # and the guard rejects both the empty value and the raw token.
+    # and the guard rejects both the empty value and a sentinel that is never
+    # substituted (comparing against a second copy of the replaced marker would
+    # compare the real key to itself and skip minting forever).
     assert 'DOKPLOY_WIZARD_LITELLM_ISSUER_KEY="__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__"' in template
-    assert '!= "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__"' in template
+    assert 'DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL="__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__"' in template
+    assert '"$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL" ' in template + " "
     assert "<<'MINTPY'" in template
     # Deterministic child token: issuer + workspace name, so restarts adopt the
     # existing key and issuer rotations re-mint without extra bookkeeping.
@@ -3404,13 +2523,6 @@ def test_workspace_key_mint_block_is_baked_into_gateway_key_templates(template_d
     assert '|| DOKPLOY_WIZARD_WORKSPACE_API_KEY=""' in template
     assert "import hashlib, json, os, urllib.error, urllib.request" in template
 
-
-def test_kdense_byok_template_skips_workspace_key_mint() -> None:
-    template = Path(
-        "templates/coder/default-ubuntu-code-server-kdense-byok/main.tf"
-    ).read_text(encoding="utf-8")
-    assert "MINTPY" not in template
-    assert "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__" not in template
 
 
 def test_workspace_issuer_key_flows_into_gateway_key_template_replacements(
@@ -3451,6 +2563,11 @@ def test_workspace_issuer_key_flows_into_gateway_key_template_replacements(
     monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
     monkeypatch.setattr(
         coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
+    monkeypatch.setattr(
+        coder_module,
         "_copy_template_into_container",
         lambda *,
         container_name,
@@ -3465,23 +2582,98 @@ def test_workspace_issuer_key_flows_into_gateway_key_template_replacements(
         lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
     )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(
+        coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
 
     backend.ensure_application_ready()
 
-    for name in (
-        coder_module._default_template_name(),
-        coder_module._opencode_hermes_pi_template_name(),
-        coder_module._base_template_name(),
-        coder_module._default_opencode_web_template_name(),
-        coder_module._default_hermes_template_name(),
-    ):
+    for name in (coder_module._default_template_name(),):
         replacements = template_replacements_by_name[name]
         assert replacements is not None
         assert (
             replacements["__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__"]
             == "sk-litellm-coder-workspace-issuer-provided"
         )
-    # BYOK brings its own key; the issuer is none of its business.
-    kdense = template_replacements_by_name[coder_module._default_kdense_byok_template_name()]
-    assert kdense is not None
-    assert "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__" not in kdense
+    # Post-collapse there is exactly one seeded template; nothing else carries tokens.
+    assert set(template_replacements_by_name) == {coder_module._default_template_name()}
+
+
+def test_retirement_migrates_workspaces_off_retired_templates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The home volume is named off the workspace id, so retirement must re-base
+    # workspaces in place; the two survivors here pin both halves of that rule.
+    updated: list[tuple[str, str]] = []
+    templates = {
+        "on-retired": "ubuntu-vscode",
+        "on-survivor": coder_module._default_template_name(),
+        "on-operator-custom": "operator-custom-template",
+    }
+
+    monkeypatch.setattr(
+        coder_module, "_list_workspaces", lambda **kwargs: tuple(sorted(templates))
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_workspace_template_name",
+        lambda **kwargs: templates[kwargs["workspace_name"]],
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_update_workspace_template",
+        lambda **kwargs: updated.append(
+            (kwargs["workspace_name"], kwargs["template_name"])
+        ),
+    )
+
+    migrated = coder_module._migrate_retired_template_workspaces(
+        container_name="stack-coder",
+        hostname="coder.example.com",
+        session_token="tok",
+        template_name=coder_module._default_template_name(),
+    )
+
+    assert migrated == ("on-retired",)
+    assert updated == [("on-retired", coder_module._default_template_name())]
+
+
+def test_workspace_template_migration_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        return subprocess.CompletedProcess(
+            command, returncode=1, stdout="", stderr="error: workspace is locked"
+        )
+
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
+    with pytest.raises(coder_module.CoderError, match="workspace is locked"):
+        coder_module._update_workspace_template(
+            container_name="stack-coder",
+            hostname="coder.example.com",
+            session_token="tok",
+            workspace_name="ws",
+            template_name="ubuntu-vscode-hermes-desktop",
+        )
+
+
+def test_issuer_mint_guard_stays_honest_after_substitution() -> None:
+    # Regression: the substitution pass replaces every occurrence of the marker,
+    # so a guard written as `[ "$VAR" != "__MARKER__" ]` becomes `[ "$VAR" !=
+    # "sk-real" ]` after replacement and rejects the real key. The mint guard must
+    # compare against the never-substituted sentinel instead.
+    template = Path(
+        "templates/coder/default-ubuntu-vscode-hermes-desktop/main.tf"
+    ).read_text(encoding="utf-8")
+    # Same semantics as _rendered_template_dir: every occurrence is replaced.
+    replaced = template.replace("__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__", "sk-real-issuer")
+    assert 'DOKPLOY_WIZARD_LITELLM_ISSUER_KEY="sk-real-issuer"' in replaced
+    assert '!= "sk-real-issuer"' not in replaced
+    # The sentinel marker is absent from the wizard's replacement map, so it
+    # stays literal in the pushed template: assert the map never grows one.
+    import inspect
+
+    source = inspect.getsource(coder_module.DokployCoderBackend.ensure_application_ready)
+    assert "__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__" not in source

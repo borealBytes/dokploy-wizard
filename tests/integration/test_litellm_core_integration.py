@@ -125,6 +125,7 @@ class RecordingManagedDriftLiteLLMAdminApi:
     update_key_calls: list[dict[str, object]] = field(default_factory=list)
     create_key_calls: list[dict[str, object]] = field(default_factory=list)
     delete_key_calls: list[dict[str, object]] = field(default_factory=list)
+    delete_team_calls: list[dict[str, object]] = field(default_factory=list)
 
     def readiness(self) -> dict[str, object]:
         return {"status": "connected", "db": "connected"}
@@ -208,6 +209,12 @@ class RecordingManagedDriftLiteLLMAdminApi:
     def delete_key(self, *, key_alias: str) -> None:
         self.delete_key_calls.append({"key_alias": key_alias})
         self.keys.pop(key_alias, None)
+
+    def delete_team(self, *, team_id: str) -> None:
+        self.delete_team_calls.append({"team_id": team_id})
+        for alias, team in list(self.teams.items()):
+            if team.team_id == team_id:
+                del self.teams[alias]
 
     def update_key(
         self,
@@ -384,7 +391,6 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
 
     assert allowlists == {
         "coder-hermes": shared_models,
-        "coder-kdense": shared_models,
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": shared_models,
         "nextcloud": shared_models,
@@ -424,7 +430,6 @@ def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases
 
     assert allowlists == {
         "coder-hermes": shared_models,
-        "coder-kdense": shared_models,
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": shared_models,
         "nextcloud": shared_models,
@@ -453,7 +458,6 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
 
     assert allowlists == {
         "coder-hermes": shared_models,
-        "coder-kdense": shared_models,
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": shared_models,
         "nextcloud": shared_models,
@@ -601,7 +605,6 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
     assert generated_keys is not None
     assert set(generated_keys.virtual_keys) == {
         "coder-hermes",
-        "coder-kdense",
         "coder-workspace-issuer",
         "dokploy-ai",
         "nextcloud",
@@ -773,10 +776,9 @@ def test_coder_install_persists_consumer_specific_virtual_keys(
     assert generated_keys is not None
     assert set(generated_keys.virtual_keys) == {
         "coder-hermes",
-        "coder-kdense",
         "coder-workspace-issuer",
         "dokploy-ai",
         "nextcloud",
     }
-    assert len(set(generated_keys.virtual_keys.values())) == 5
+    assert len(set(generated_keys.virtual_keys.values())) == 4
     assert coder_backend.existing_service is not None
