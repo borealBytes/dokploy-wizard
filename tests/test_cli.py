@@ -597,10 +597,69 @@ def test_handle_inspect_state_includes_live_drift_and_persists_snapshot(
     payload = json.loads(capsys.readouterr().out)
     assert payload["live_drift"] == expected_live_drift
     assert payload["stack_name"] == "lifecycle-stack"
-    assert json.loads((state_dir / "desired-state.json").read_text(encoding="utf-8")) == payload
-    assert (state_dir / "raw-input.json").exists()
+    # The snapshot rides its own document: inspect-state must not create or
+    # mutate the canonical raw-input/desired-state pair, or the uninstall
+    # fingerprint gate (applied vs persisted desired) breaks for good.
+    snapshot = json.loads((state_dir / "inspection-snapshot.json").read_text(encoding="utf-8"))
+    assert snapshot["desired_state"] == payload
+    assert snapshot["raw_input"]["values"]["STACK_NAME"] == "lifecycle-stack"
+    assert not (state_dir / "desired-state.json").exists()
+    assert not (state_dir / "raw-input.json").exists()
     assert not (state_dir / "applied-state.json").exists()
     assert not (state_dir / "ownership-ledger.json").exists()
+
+
+def test_inspect_state_does_not_mutate_canonical_docs_the_uninstall_gate_needs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The box-measured uninstall killer: inspect-state used to stamp
+    ``<REDACTED>`` report values over the canonical raw-input/desired-state
+    pair. The uninstall gate compares the applied fingerprint against the
+    persisted desired-state document, so once any inspect run landed (the
+    remote helper runs it after EVERY install/modify) uninstall could never
+    pass again. Inspect-state must leave the lifecycle docs byte-identical."""
+    env_file = tmp_path / "inspect.env"
+    env_file.write_text(
+        (FIXTURES_DIR / "lifecycle-headscale.env").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "state"
+    raw_input = parse_env_file(env_file)
+    desired_state = resolve_desired_state(raw_input)
+    write_target_state(state_dir, raw_input, desired_state)
+    write_applied_checkpoint(
+        state_dir,
+        AppliedStateCheckpoint(
+            format_version=STATE_FORMAT_VERSION,
+            desired_state_fingerprint=desired_state.fingerprint(),
+            completed_steps=("preflight", "dokploy_bootstrap"),
+            lifecycle_checkpoint_contract_version=1,
+        ),
+    )
+    write_ownership_ledger(state_dir, OwnershipLedger(format_version=STATE_FORMAT_VERSION, resources=()))
+    canonical_before = {
+        name: (state_dir / name).read_bytes()
+        for name in ("raw-input.json", "desired-state.json", "applied-state.json")
+    }
+    monkeypatch.setattr(cli, "build_live_drift_report", lambda **_: {"status": "clean"})
+
+    assert (
+        cli._handle_inspect_state(
+            argparse.Namespace(env_file=env_file, state_dir=state_dir, dry_run=False)
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    for name, before in canonical_before.items():
+        assert (state_dir / name).read_bytes() == before, name
+    # The uninstall gate's exact comparison still passes after an inspect run.
+    loaded = load_state_dir(state_dir)
+    assert loaded.applied_state is not None
+    assert loaded.desired_state is not None
+    assert (
+        loaded.applied_state.desired_state_fingerprint == loaded.desired_state.fingerprint()
+    )
 
 
 def test_inspect_state_redacts_litellm_generated_secrets(
@@ -637,7 +696,8 @@ def test_inspect_state_redacts_litellm_generated_secrets(
     )
 
     payload = json.loads(capsys.readouterr().out)
-    raw_snapshot = json.loads((tmp_path / "state" / "raw-input.json").read_text(encoding="utf-8"))
+    snapshot = json.loads((tmp_path / "state" / "inspection-snapshot.json").read_text(encoding="utf-8"))
+    raw_snapshot = snapshot["raw_input"]
 
     assert raw_snapshot["values"]["LITELLM_MASTER_KEY"] == "<redacted>"
     assert raw_snapshot["values"]["LITELLM_SALT_KEY"] == "<redacted>"
@@ -683,7 +743,8 @@ def test_inspect_state_redacts_litellm_provider_api_keys(
     )
 
     payload = json.loads(capsys.readouterr().out)
-    raw_snapshot = json.loads((tmp_path / "state" / "raw-input.json").read_text(encoding="utf-8"))
+    snapshot = json.loads((tmp_path / "state" / "inspection-snapshot.json").read_text(encoding="utf-8"))
+    raw_snapshot = snapshot["raw_input"]
 
     assert raw_snapshot["values"]["LITELLM_OPENROUTER_API_KEY"] == "<redacted>"
     assert raw_snapshot["values"]["LITELLM_OPENCODE_GO_API_KEY"] == "<redacted>"

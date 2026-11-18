@@ -53,6 +53,10 @@ LITELLM_IMAGE_PIN_FILE = "litellm-image-pin.json"
 SEAWEEDFS_GENERATED_SECRETS_FILE = "seaweedfs-generated-secrets.json"
 FILEX_PROVISIONER_FILE = "filex-provisioner.json"
 GITEA_PROVISIONER_FILE = "gitea-provisioner.json"
+# Redacted inspection report kept beside (never inside) the lifecycle docs:
+# inspect-state must not mutate the canonical raw-input/desired-state pair the
+# uninstall fingerprint gate compares against.
+INSPECTION_SNAPSHOT_FILE = "inspection-snapshot.json"
 STATE_DOCUMENT_FILES = (
     RAW_INPUT_FILE,
     DESIRED_STATE_FILE,
@@ -457,9 +461,25 @@ def load_state_dir(state_dir: Path) -> LoadedState:
 def write_inspection_snapshot(
     state_dir: Path, raw_input: RawEnvInput, desired_state_snapshot: dict[str, Any]
 ) -> None:
+    """Persist the redacted inspection report WITHOUT touching lifecycle truth.
+
+    This used to overwrite the canonical ``raw-input.json`` / ``desired-state.json``
+    with redacted report values. The uninstall gate compares the applied-state
+    fingerprint against the persisted desired-state document, so once any
+    inspect-state run stamped ``<REDACTED>`` over the real secrets the gate could
+    never pass again — every remote install/modify flow runs inspect-state, so
+    uninstall was permanently disabled on every remotely managed box (measured).
+    The snapshot now rides a dedicated document; the lifecycle docs stay exactly
+    as the engine wrote them.
+    """
     state_dir.mkdir(parents=True, exist_ok=True)
-    _write_document(state_dir / RAW_INPUT_FILE, raw_input.to_dict())
-    _write_document(state_dir / DESIRED_STATE_FILE, redact_data(desired_state_snapshot))
+    _write_document(
+        state_dir / INSPECTION_SNAPSHOT_FILE,
+        {
+            "raw_input": raw_input.to_dict(),
+            "desired_state": redact_data(desired_state_snapshot),
+        },
+    )
 
 
 def load_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys | None:
@@ -788,7 +808,7 @@ def write_outbound_delivery_log(state_dir: Path, delivery_log: OutboundDeliveryL
 def clear_state_documents(state_dir: Path) -> None:
     """Remove all persisted state documents together after full teardown."""
 
-    for file_name in STATE_DOCUMENT_FILES:
+    for file_name in (*STATE_DOCUMENT_FILES, INSPECTION_SNAPSHOT_FILE):
         document_path = state_dir / file_name
         if document_path.exists():
             document_path.unlink()
