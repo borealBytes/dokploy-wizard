@@ -16,6 +16,12 @@ from dokploy_wizard.networking.planner import (
     _build_tunnel_ingress,
     resolve_litellm_admin_hostname,
 )
+from dokploy_wizard.packs.docuseal.models import (
+    DocuSealBootstrapState,
+    DocuSealHealthState,
+    DocuSealManagedResource,
+    DocuSealResult,
+)
 from dokploy_wizard.packs.nextcloud.models import (
     NextcloudCommandCheck,
     NextcloudHealthCheck,
@@ -827,6 +833,86 @@ def test_validate_preserved_phases_accepts_pushed_tunnel_ingress_including_admin
         preserved_phases=("networking",),
         networking_backend=networking_backend,
     )
+
+
+def _docuseal_plan_only_result(initialized: bool | None) -> SimpleNamespace:
+    return SimpleNamespace(
+        result=DocuSealResult(
+            outcome="plan_only",
+            enabled=True,
+            hostname="docuseal.openmerge.me",
+            service=DocuSealManagedResource("reuse_owned", "svc-docuseal", "openmerge-docuseal"),
+            persistent_data=DocuSealManagedResource(
+                "reuse_owned", "vol-docuseal", "openmerge-docuseal-data"
+            ),
+            bootstrap_state=DocuSealBootstrapState(
+                initialized=initialized,
+                secret_key_base_secret_ref="openmerge-docuseal-secret-key-base",
+            ),
+            health_state=DocuSealHealthState(
+                url="https://docuseal.openmerge.me/up", path="/up", passed=None
+            ),
+            config=None,
+            notes=(),
+        )
+    )
+
+
+def _docuseal_drift_raw_env() -> RawEnvInput:
+    return RawEnvInput(
+        format_version=1,
+        values={
+            "STACK_NAME": "openmerge",
+            "ROOT_DOMAIN": "openmerge.me",
+            "ENABLE_DOCUSEAL": "true",
+        },
+    )
+
+
+def test_validate_preserved_phases_accepts_docuseal_dry_run_unknown_bootstrap_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dry-run lane reports ``initialized=None`` (unknown), which is not drift.
+
+    The probe compared the field truthily, so the unknown read as 'not
+    initialized' and every noop-classified modify resumed from 'docuseal'
+    forever (third masked probe bug measured on the box, after the tunnel
+    ingress and virtual-key ones). An explicit False still drifts.
+    """
+    monkeypatch.setattr(
+        "dokploy_wizard.lifecycle.drift.reconcile_docuseal",
+        lambda **_: _docuseal_plan_only_result(None),
+    )
+    raw_env = _docuseal_drift_raw_env()
+    docuseal_backend = SimpleNamespace(check_health=lambda *, service, url: True)
+
+    _validate(
+        raw_env=raw_env,
+        desired_state=resolve_desired_state(raw_env),
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        preserved_phases=("docuseal",),
+        docuseal_backend=docuseal_backend,
+    )
+
+
+def test_validate_preserved_phases_rejects_docuseal_bootstrap_state_not_initialized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "dokploy_wizard.lifecycle.drift.reconcile_docuseal",
+        lambda **_: _docuseal_plan_only_result(False),
+    )
+    raw_env = _docuseal_drift_raw_env()
+    docuseal_backend = SimpleNamespace(check_health=lambda *, service, url: True)
+
+    with pytest.raises(LifecycleDriftError, match="bootstrap state is not initialized"):
+        _validate(
+            raw_env=raw_env,
+            desired_state=resolve_desired_state(raw_env),
+            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+            preserved_phases=("docuseal",),
+            docuseal_backend=docuseal_backend,
+        )
 
 
 def test_validate_preserved_phases_rejects_unhealthy_preserved_seaweedfs_and_coder(

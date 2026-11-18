@@ -879,3 +879,17 @@ tests + a fresh remote proof:
     now prove the match with `_matches_generated_key` (raw equality OR
     `sha256(expected) == record.token`), pinned by tests feeding
     hash-only records to the validator and the reconciler.
+  - With `shared_core` also passing, the noop attempt surfaced a third
+    masked probe bug, at `docuseal`: the preserved-phase check compared
+    `bootstrap_state.initialized` truthily, but the dry-run lane of
+    `reconcile_docuseal` reports `initialized=None` (unknown without a live
+    check — only the applied lane verifies it via
+    `ensure_application_ready`), so `not None` read as drift and every
+    noop-classified modify resumed from `docuseal` forever. The probe now
+    drifts only on an explicit `False`, pinned by a pair of drift tests
+    (accept unknown / reject False). The box-side full-set probe then
+    reported every preserved phase ok, and the following plain modify
+    finally measured the true noop: `"mode": "noop"`, `"phases_to_run": []`
+    (all ten phases preserved, health outcomes `already_present`),
+    completed in 22s with no phase reruns — the full
+    install→modify→noop lifecycle holds with the Gitea pack enabled.

@@ -546,7 +546,12 @@ def _validate_phase(
                     detail=f"DocuSeal expected owned reuse, found actions {sorted(actions)}.",
                 )
             bootstrap_state = getattr(docuseal, "bootstrap_state", None)
-            if bootstrap_state is not None and not bootstrap_state.initialized:
+            # The dry-run lane reports bootstrap_state.initialized=None (unknown
+            # without a live check); only an explicit False is drift. Comparing
+            # truthiness read the unknown as drift, so every noop-classified
+            # modify resumed from 'docuseal' forever (measured on the box, after
+            # the two earlier probe-parity fixes exposed this third one).
+            if bootstrap_state is not None and bootstrap_state.initialized is False:
                 return DriftEntry(
                     phase=phase,
                     status="drift",
