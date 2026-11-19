@@ -459,6 +459,7 @@ def test_ensure_application_ready_reports_login_verification(
     s3 = ScriptedS3(head_script=[200], versioning_script=[(200, "<Status>Enabled</Status>")])
     backend = _filex_backend(tmp_path, s3)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
 
     class _Resp:
         status = 200
@@ -501,6 +502,7 @@ def test_ensure_application_ready_login_rate_limit_is_note_not_failure(
     s3 = ScriptedS3(head_script=[200], versioning_script=[(200, "<Status>Enabled</Status>")])
     backend = _filex_backend(tmp_path, s3)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
 
     from urllib import error as urlerror
 
@@ -589,6 +591,7 @@ def test_provisioner_bootstraps_user_token_and_state(tmp_path: Path, monkeypatch
 
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
     http = _ScriptedFxHttp()
     http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
     http.queue("GET", "/api/admin/users", 200, [])
@@ -647,6 +650,7 @@ def test_provisioner_keeps_alive_token_and_rotates_dead_one(
     )
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
     http = _ScriptedFxHttp()
     http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
     http.queue("GET", "/api/admin/users", 200, [{"id": 7, "username": "wizard-provisioner"}])
@@ -684,6 +688,7 @@ def test_provisioner_degrades_to_note_when_admin_session_missing(
 ) -> None:
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
     from urllib import error as urlerror
 
     def fake_urlopen(req: Any, **kwargs: Any) -> Any:
@@ -695,3 +700,19 @@ def test_provisioner_degrades_to_note_when_admin_session_missing(
     )
     assert state.login_verified is False
     assert any("provisioner step skipped" in note for note in notes)
+
+
+def test_wait_for_container_up_gates_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Cold-install race (true-zero proof, 2026-11): the first image pull can
+    # outlive the health budget entirely, so the container loop is the long
+    # wait and must tolerate ups that arrive late, not early.
+    states = iter([False, False, True])
+    monkeypatch.setattr(filex_module, "_docker_container_is_up", lambda *a, **k: next(states))
+    monkeypatch.setattr(filex_module.time, "sleep", lambda *_a: None)
+    assert filex_module._wait_for_container_up("stack-filex", attempts=5, delay_seconds=0)
+
+
+def test_wait_for_container_up_gives_up_honestly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(filex_module, "_docker_container_is_up", lambda *a, **k: False)
+    monkeypatch.setattr(filex_module.time, "sleep", lambda *_a: None)
+    assert not filex_module._wait_for_container_up("stack-filex", attempts=3, delay_seconds=0)

@@ -338,6 +338,10 @@ class DokployFilexBackend:
                 "FileX FILEX_SECRET_KEY secret ref no longer matches the active Dokploy plan."
             )
         health_url = _health_url(self._hostname)
+        if not _wait_for_container_up(self._compose_name):
+            raise FilexError(
+                "FileX container did not come up before seeding (image pull not finished?).",
+            )
         if not _wait_for_local_https_health(health_url):
             raise FilexError(
                 "FileX /healthz endpoint did not become locally reachable before seeding."
@@ -1016,6 +1020,26 @@ def _wait_for_local_https_health(
 ) -> bool:
     for attempt in range(attempts):
         if _local_https_health_check(url):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return False
+
+
+def _wait_for_container_up(
+    service_name: str, *, attempts: int = 72, delay_seconds: float = 5.0
+) -> bool:
+    """Cold-install gate: a fresh box pulls the pack image DURING this phase.
+
+    Dokploy's deploy is async and the health edge only answers once the task
+    is scheduled and traefik noticed — measured on a true-zero proof, the
+    60-second health budget lost that race. The container-up loop is the
+    honest long wait (six minutes of pulls); the health check keeps its
+    short budget for what it actually covers: the process inside coming to
+    life and the edge catching up.
+    """
+    for attempt in range(attempts):
+        if _docker_container_is_up(service_name):
             return True
         if attempt < attempts - 1:
             time.sleep(delay_seconds)
