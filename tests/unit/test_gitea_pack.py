@@ -640,6 +640,11 @@ def test_provisioner_bootstraps_account_token_and_state(
     # every pass (one credential across surfaces survives a rotation).
     pin = next(call for call in cli.calls if call[:3] == ["admin", "user", "change-password"])
     assert pin[pin.index("--password") + 1] == "StackPw!23"
+    # Box-measured regression: this Gitea build defaults change-password's
+    # --must-change-password to TRUE, so the pin must carry the explicit
+    # false — a flagless pin re-stamps the flag the create just cleared and
+    # the mint one step later dies at 403 (zero-state loop, live box).
+    assert "--must-change-password=false" in pin
 
     stored = load_gitea_provisioner(tmp_path)
     assert stored is not None

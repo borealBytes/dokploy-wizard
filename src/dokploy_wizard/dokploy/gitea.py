@@ -418,7 +418,14 @@ class DokployGiteaBackend:
         # Keep the account password equal to the stack password so the boot
         # lane's basic-auth (one credential across surfaces) survives a
         # rotation; the FileX lane PATCHes adopted accounts the same way on
-        # every boot.
+        # every boot. The must-change flag rides explicitly as false: this
+        # Gitea build defaults `change-password`'s --must-change-password to
+        # TRUE (measured end to end on the live box — a flagless pin flipped
+        # a freshly created flag-clear row back to must-change, and the
+        # mint one step later died at 403 "You must change your password";
+        # the same flag on the pin returned the row to false and basic auth
+        # to 200). Without this flag the CLI create's
+        # --must-change-password=false is undone by the pin on every pass.
         _gitea_cli_exec(
             self._compose_name,
             [
@@ -429,6 +436,7 @@ class DokployGiteaBackend:
                 login,
                 "--password",
                 password,
+                "--must-change-password=false",
             ],
         )
 
@@ -449,7 +457,11 @@ class DokployGiteaBackend:
         documented basic-auth lane then mints again — the whole sequence
         measured live (200/200/201). Drift-gated: an account whose row
         already reads admin and unflagged is not touched; boxes that never
-        ran the previous generation have no legacy token and skip here.
+        ran the previous generation have no legacy token and skip here —
+        their create+pin lane carries --must-change-password=false on both
+        commands (measured the necessity on the live box: this Gitea build
+        defaults change-password's flag to TRUE, so a flagless pin re-stamps
+        the row the create just cleared, and the mint dies at 403).
         """
         if existing is None or existing.username == login:
             return None
