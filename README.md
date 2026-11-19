@@ -371,9 +371,19 @@ signup path) with a deterministic password, plus a single API token minted
 once and persisted at `gitea-provisioner.json` (0600) in the state directory.
 Every later pass verifies the token against `/api/v1/user` and only re-mints
 when it no longer authenticates — the CLI create tolerating "already taken"
-is what lets a lost state document converge. The token is what the next
-identity slice (Coder-as-OIDC-IdP account springing and deleted-user disable)
-drives the API with.
+is what lets a lost state document converge. The token is what the identity
+lane (workspace-boot account springing and deleted-user disable) drives the
+API with.
+
+People sign in with their Coder login and a derived password, not the
+`DOKPLOY_ADMIN_*` pair: the workspace boot lane creates the account as
+`<login>` (email `<login>@coder.wizard.local`) with password `gt-` +
+`sha256(seed + ":" + login)` truncated to 40 hex chars, where the seed is the
+LiteLLM workspace-issuer key from `litellm-generated-keys.json` (falling back
+to the provisioner token only when no issuer exists). The rule is pure, so no
+secret file to lose — and the same derivation protects the FileX per-owner
+account with the `fx-` prefix. A manually created account that already owns
+the name keeps its own password; the lane never resets a human's secret.
 
 The service attaches to the shared-core overlay, so Coder workspaces can
 clone over `http://<stack>-gitea:3000` without leaving the host.

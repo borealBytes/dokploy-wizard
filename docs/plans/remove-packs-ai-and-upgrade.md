@@ -1191,3 +1191,44 @@ repairs, and a plain noop. It found and drove the fixes for two real bugs
     rejected); delete-user is `DELETE /api/v2/users/{id}?convert_to_user=false`
     (legacy `?user_id=` route 405); `POST /api/v2/workspaces` 405 — workspaces
     are created through the in-container `coder create` CLI lane instead.
+
+### From-zero redeploy on the operator env + seed-guard fix (`ffbbbc2`)
+- The operator's login failure at `gitea.showmeseewhy.com`/`filex.` traced to
+  two stacked causes: (1) the box had been driven for ~40 passes against
+  `.install-min-testing.env`, so the applied admin password was the testing
+  one, and (2) `.install-min.env` itself was mis-pointed — Cloudflare
+  account/zone/token belonged to the **openmerge.me** project and
+  `ROOT_DOMAIN=showmeseewhy` lacked the TLD, so a first fresh deploy failed
+  its public-URL health wait against `*.dokploy.showmeseewhy`. Repointed the
+  env trio to the showmeseewhy.com zone (verified via `/zones?name=` before
+  and after) and removed the 7 stray `*.showmeseewhy.openmerge.me` CNAMEs the
+  failed run left in the other project's zone (no stray tunnel).
+- Wiped the box to true zero (uninstall destroy + manual swarm/compose orphan
+  sweep, including the Dokploy bootstrap — a bootstrap keeps the admin
+  credentials it was initialized with, so reusing it would keep the testing
+  password forever) and ran `remote proof` on the corrected env: full green,
+  all phases, verify pass, tailscale online as `showmeseewhy-1`, tuxdesktop
+  local-model endpoint 200 through tailscale.
+- The from-zero proof surfaced a real template bug (pinned + fixed): the
+  FileX/Gitea seed guards listed the **mapped** marker
+  `__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__` inside a `case` pattern list, so
+  after substitution the issuer compared equal to itself and the guard always
+  fell to the provisioner-token seed — workspace-account passwords silently
+  stopped following the documented issuer-derivation rule (and the
+  provisioner token rotates; the mint lane's `!= sentinel` form was never
+  affected, which is why workspace mints always hash-matched). Live proof:
+  baked script showed the issuer inside its own pattern list; deleting the
+  two stale accounts and rerunning modify (which pushed the fixed template
+  and updated the workspace) re-sprung both with the issuer-derived password
+  (gitea basic-auth 200, filex login 200, shared mount ready).
+- `proof`-with-`--fresh` note: the destroy step issues Dokploy compose
+  deletes asynchronously, so install can trip its own live-drift gate while
+  swarm still tears down. On this box the task containers never drained;
+  finishing the teardown manually (rm containers/volumes/networks) converged
+  cleanly. A post-destroy settle/verify in the fresh flow is a candidate
+  follow-up for the remote helper.
+- Post-fix convergence pins: modify44 (`mode: modify`, shared_core+coder,
+  template pushed, workspace updated onto the fixed version, zero WARNINGs)
+  → modify45 (`mode: noop`, 26.9s). Workspace mint present and
+  hash-matches-derived; seeded admin exempt (GRANTED) with
+  `ALLOW_LITELLM_MODELS_FOR_NEW_USERS=FALSE`.
