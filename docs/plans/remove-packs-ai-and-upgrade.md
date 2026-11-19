@@ -1378,3 +1378,54 @@ screenshots must stop reading like a machine placeholder. Delivered:
   and the replacement map (FileX account password key added); issuer-guard
   regression test updated — zero `case`-form issuer guards now survive, the
   FileX seed was the last.
+
+## Phase 11 (2026-11): screenshot studio, ledger convergence, demo teardown (box: 157.173.124.231)
+
+### Studio (README gallery, deterministic redaction)
+
+- `screenshots/studio/` (Playwright capture → sharp blur/caption redact, docker
+  image `dokploy-wizard-screenshot-studio:local`): 39 shots across
+  dokploy/coder/gitea/filex/litellm/docuseal/walkthrough/shared/tailnet/day2,
+  captured with deploy-env credentials, fail-closed on anonymous landings
+  (per-service `loginPaths` guard incl. array/exact-match support for Dokploy
+  v0.31.4, whose sign-in form is served at `/` while `/login` 404s; DocuSeal
+  login measured at `/sign_in` — `/account/sign_in` renders the app's own 404).
+- Auth model: fresh browser context per shot (saved storage states poisoned
+  login shots and LiteLLM deep links); LiteLLM session gate =
+  waitForResponse(/user\/info/) + landing `table tbody tr`;
+  `waitForSelector` honored before `wait`; one automatic retry per shot.
+- Redaction: dotless (`showmeseewhycom`) + hyphenated (`showmeseewhy-com`) +
+  input-value variants, blur of root domain / `clayton` / `superiorbyteworks`
+  / `tuxdesktop` / `felis-aeolian` / box IP; `dokploy-wizard` provisioner stays
+  visible; captions spell `«your-domain»`; finals committed via Git LFS
+  (`.gitattributes` tracks `screenshots/**/*.png`), raw + `.meta.json`
+  gitignored, `redact.env` gitignored 0600.
+- Redaction pass: 39 images, 69 regions (dokploy-projects alone: 18).
+  **Vision review: all 39 finals accepted** (no Nextcloud UI shots; hermes
+  tile-only).
+
+### `modify --force-phase <phase>` (this branch)
+
+The Gitea identity ledger (`gitea-identities.json`) is written inside the
+coder apply, which a no-op modify skips. Added `--force-phase` to
+`dokploy-wizard modify` (and forwarded by the remote helper) on top of the
+existing `force_phase_into_plan` — folds one already-completed phase into the
+plan for one real pass; honest per-caller reason (modify wording vs the
+upgrade's shared-core wording). Five tests (parser, handler pass-through,
+operator-reason build, explicit-reason preservation, remote command builder).
+Full gates: **1150 passed, ruff clean, mypy clean**.
+
+### Ledger convergence + demo teardown (box)
+
+- Forced coder pass #1 (46.2s, mode modify): template re-pushed,
+  `/root/dokploy-wizard/state/gitea-identities.json` written —
+  `{"format_version":1,"usernames":["clayton","demo"]}` (0600).
+- Demo teardown: v2.39.4 workspace DELETE is CLI/transition-based (API
+  `DELETE /api/v2/workspaces/{id}` → 405; first delete-build errored on
+  `home_volume` 30s removal poll — container + volume verified gone anyway).
+  In-container `coder delete --yes <id>` retry: **deleted**. User then
+  `DELETE /api/v2/users/{id}?convert_to_user=false` → 200; roster: clayton.
+- Forced coder pass #2 (45.5s): `"Disabled Gitea account 'demo' (Coder user
+  deleted)."` — the claim persists in the ledger (by design; Gitea accounts
+  are disabled, never deleted).
+- Final plain `modify` (22.8s): `"mode": "noop"` — box fully converged.

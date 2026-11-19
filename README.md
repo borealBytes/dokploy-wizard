@@ -25,6 +25,220 @@ Today this repo is not a scaffold or mock planner. It performs real deployment, 
 
 Optional packs also include Headscale, Matrix, and Tailscale host access. FileX and Gitea require the SeaweedFS pack and turn it on automatically. The AI-advisor packs this repo once shipped (a browser/Telegram agent runtime with its embedded Talk assistant, the farm advisor, and the research/chat pack) were removed in code; the wizard still cleans their ledger entries up on uninstall for older boxes that ran them.
 
+## The stack, as shipped
+
+Every image below was captured from a live box by the screenshot studio in
+`screenshots/` — real URLs, real logins, fail-closed auth checks — then
+redacted deterministically (every rendered pixel of the real root domain, the
+deployer login, and the deployer email gets a character-precise blur; the
+caption spells it `«your-domain»`). `make all` on any proven box reproduces
+the gallery. No mocks, no staging screenshots.
+
+### The control plane
+
+Login at `https://dokploy.<root-domain>/` (the form is served at the root path).
+
+![Dokploy login](screenshots/dokploy/dokploy-login.png)
+
+After login, on the dashboard: every wizard service is a Dokploy project — inspect and restart it by hand whenever you like.
+
+![Dokploy projects](screenshots/dokploy/dokploy-projects.png)
+
+### Coder — one template, one workspace per person
+
+Login at `https://coder.<root-domain>/login` — the same email and password as
+every other surface.
+
+![Coder login](screenshots/coder/coder-login.png)
+
+The wizard seeds one template and one default workspace; the dev box boots in
+seconds.
+
+![Coder dashboard](screenshots/coder/coder-dashboard.png)
+
+App tiles ride the workspace: OpenCode, Hermes, Gitea, FileX, DocuSeal —
+per-person, pre-authenticated.
+
+![Coder app tiles](screenshots/coder/coder-tiles.png)
+
+The template is plain Terraform — the wizard bakes the box topology into it at
+plan time.
+
+![Coder template Terraform](screenshots/coder/coder-template-terraform.png)
+
+Users page: the primary deployer account plus a joined second person — each
+gets their own identity lane.
+
+![Coder users](screenshots/coder/coder-users.png)
+
+Workspace settings are the day-2 knobs — update policy first; schedule and TTL
+controls sit alongside.
+
+![Coder schedule settings](screenshots/coder/coder-schedule.png)
+
+### A second person joins — the identity lane, end to end
+
+Demo account signs in — the primary deployer account created it minutes before.
+
+![Walkthrough login](screenshots/walkthrough/walkthrough-login.png)
+
+One workspace per person, from the one seeded template.
+
+![Walkthrough workspace](screenshots/walkthrough/walkthrough-workspace.png)
+
+The identity lane springs again: the new account gets a Gitea account with its
+own real email primary.
+
+![Walkthrough Gitea profile](screenshots/walkthrough/walkthrough-gitea-profile.png)
+
+Gitea login at `https://gitea.<root-domain>/user/login`; the account page is
+`/user/settings`. A workspace owner wakes up a Gitea account already theirs:
+login name, real email primary and verified.
+
+![Gitea profile](screenshots/gitea/gitea-profile.png)
+
+Emails are managed identities, not placeholders — the boot lane migrates
+anything the pre-fix wizard left behind.
+
+![Gitea identities](screenshots/gitea/gitea-identities.png)
+
+One deploy key pair per (user, workspace), titled by the pair — push over SSH,
+nothing shared.
+
+![Gitea keys](screenshots/gitea/gitea-keys.png)
+
+Every account on the box, listed: the people plus the `dokploy-wizard`
+provisioner — an ordinary admin account, auditable and rotatable.
+
+![Gitea provisioner](screenshots/gitea/gitea-provisioner.png)
+
+Commits authored in the workspace land with the person, over their workspace
+key.
+
+![Gitea repo commits](screenshots/gitea/gitea-repo-commits.png)
+
+Team Git, self-hosted — the pack provisions itself and the wizard keeps its
+admin hat in a state file.
+
+![Gitea home](screenshots/gitea/gitea-home.png)
+
+### `~/shared` — the file story in three images
+
+Workspace A writes into `~/shared` — an ordinary file write over the FUSE
+mount.
+
+![Shared write](screenshots/shared/shared-write.png)
+
+Workspace B sees the same bytes seconds later — one bucket, one identity map,
+no sync daemon.
+
+![Shared seen from B](screenshots/shared/shared-seen-b.png)
+
+FileX login at `https://filex.<root-domain>/admin/login` — the deployer signs
+in as the account the pack bootstrapped; nothing else to remember.
+
+![FileX login](screenshots/filex/filex-login.png)
+
+`~/shared` is FileX: versioned objects on SeaweedFS S3, mounted over rclone
+FUSE.
+
+![FileX files](screenshots/filex/filex-files.png)
+
+Two people edit the same file; FileX keeps every version and every author —
+this is where the act pays off.
+
+![FileX versions](screenshots/filex/filex-versions.png)
+
+The same bucket speaks S3 and WebDAV — official desktop and mobile clients
+connect with the user's own key.
+
+![FileX connect](screenshots/filex/filex-connect.png)
+
+S3 keys are per (user, workspace) — the label names both, and the mount dies
+with the workspace, not the person.
+
+![FileX S3 keys](screenshots/filex/filex-s3keys.png)
+
+People page after a clean install: the admin (the deployer's own email), the
+provisioner, and the joined second person — the machine twin is gone.
+
+![FileX people](screenshots/filex/filex-people.png)
+
+### LiteLLM — one gateway, spend by name
+
+Login at `https://litellm.<root-domain>/ui/login`.
+
+![LiteLLM login](screenshots/litellm/litellm-login.png)
+
+Model autosync registers provider models as `sync/*` — including a tailnet
+vLLM box named for the host that serves it.
+
+![LiteLLM models](screenshots/litellm/litellm-models.png)
+
+Every app gets its own virtual key — `coder-hermes`, `dokploy-ai` — plus one
+minted per (user, workspace), spend tracked per key.
+
+![LiteLLM keys](screenshots/litellm/litellm-keys.png)
+
+A key carries its model allow-list; the team plan grants it, the box enforces
+it.
+
+![LiteLLM key detail](screenshots/litellm/litellm-key-detail.png)
+
+Spend and tokens per key — who called which model, on whose box.
+
+![LiteLLM usage](screenshots/litellm/litellm-usage.png)
+
+Request logs: every completion, keyed to the app and person that issued it.
+
+![LiteLLM logs](screenshots/litellm/litellm-logs.png)
+
+New-user policy is a stack knob: models off by default, grants explicit, the
+admin exempt.
+
+![LiteLLM users](screenshots/litellm/litellm-users.png)
+
+### DocuSeal
+
+Login at `https://docuseal.<root-domain>/sign_in` — forms and signatures on
+your own metal.
+
+![DocuSeal login](screenshots/docuseal/docuseal-login.png)
+
+Form builder, submissions, and audit trail; the wizard bootstraps the deployer
+account.
+
+![DocuSeal forms](screenshots/docuseal/docuseal-forms.png)
+
+### The tailnet
+
+The box joins your tailnet on install — private host access, and private model
+servers become reachable.
+
+![Tailscale status](screenshots/tailnet/tailscale-status.png)
+
+A tailnet vLLM/Ollama endpoint is a first-class sync source: models register
+under the serving host's name.
+
+![Local model sync](screenshots/tailnet/local-model-sync.png)
+
+### Day-2, from the terminal
+
+`modify` re-runs the whole convergence loop — an unchanged box answers in
+seconds, `mode: noop`.
+
+![Modify noop](screenshots/day2/cli-modify-noop.png)
+
+`upgrade --check` is read-only: it tells you the pinned LiteLLM drifted and
+what the bump would touch.
+
+![Upgrade check](screenshots/day2/cli-upgrade-check.png)
+
+Uninstall is ledger-scoped: it removes what it owns, and a confirm file stands
+between you and a typo.
+
+![Uninstall](screenshots/day2/cli-uninstall.png)
+
 ## Current reality
 
 - Fresh-VPS install works
@@ -124,6 +338,48 @@ stateDiagram-v2
     Resume --> Preflight
     Uninstall --> [*]
 ```
+
+## What happens when a person joins
+
+The one flow that ties the stack together: the operator adds a user in Coder,
+and the workspace boot lane springs that person's identity through every other
+pack. No manual account creation on four systems, no shared bot account.
+
+```mermaid
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "primaryColor": "#f5f0fb",
+    "primaryTextColor": "#2a1e3f",
+    "primaryBorderColor": "#b39ddb",
+    "lineColor": "#6f5a94",
+    "fontFamily": "Inter, ui-sans-serif, system-ui, sans-serif"
+  }
+}}%%
+sequenceDiagram
+    autonumber
+    actor Op as Operator (browser)
+    participant CD as Coder
+    participant TF as Workspace provisioner
+    participant GT as Gitea
+    participant FX as FileX
+    participant LT as LiteLLM
+    Op->>CD: sign in (stack admin email + password)
+    Op->>CD: Users → add person (real email)
+    Op->>CD: start their workspace
+    CD->>TF: terraform apply (volume + agent)
+    Note over TF,LT: workspace boot — identity lane
+    TF->>GT: create account <login>, real email primary + verified
+    TF->>GT: password re-synced to the stack password on every boot
+    TF->>FX: account adopted by real email, per-(user, workspace) S3 key minted
+    TF->>LT: POST /key/generate → child key "<login>-<workspace>"
+    TF->>FX: ~/shared mounted over the S3 door (rclone FUSE)
+    Op->>GT: same person signs in with their own email + stack password
+```
+
+Deleting the Coder user later disables exactly the Gitea accounts the wizard
+sprung (the claim roster lives in the state directory as
+`gitea-identities.json`) and never touches a manual one.
 
 ## What each major surface does
 
@@ -474,14 +730,26 @@ Why:
 
 ### Which things have their own login/credentials
 
-| Surface | Credential model | Source |
-|---|---|---|
-| Dokploy | admin email + password, then API key | operator-supplied + wizard-generated API key |
-| Nextcloud | admin user/password and internal service accounts | currently derived from Dokploy admin credentials |
-| OnlyOffice | JWT integration value shared with Nextcloud | currently wired by deployment bootstrap/runtime config |
-| Coder | Coder admin login | currently derived from Dokploy admin credentials |
-| SeaweedFS / S3 | access key + secret key | wizard-generated in guided mode or env-file provided |
-| FileX | FileX admin login | currently derived from Dokploy admin credentials |
+Login matrix, measured on the proven box (paths are the real login routes —
+`/login` on Dokploy, for example, is a 404 page; the form is served at `/`):
+
+| Surface | Sign-in route | Credential model | Source |
+|---|---|---|---|
+| Dokploy | `https://dokploy.<root-domain>/` | admin email + password, then API key | operator-supplied + wizard-generated API key |
+| Coder | `https://coder.<root-domain>/login` | admin login + stack password | derived from Dokploy admin credentials |
+| Gitea | `https://gitea.<root-domain>/user/login` | `<login>` or real email + stack password | identity lane springs accounts at workspace boot; password re-syncs every boot |
+| FileX | `https://filex.<root-domain>/admin/login` | admin email + stack password | the pack bootstraps the deployer's own account as admin |
+| DocuSeal | `https://docuseal.<root-domain>/sign_in` | admin email + stack password | wizard bootstraps the deployer account |
+| LiteLLM | `https://litellm.<root-domain>/ui/login` | admin email + stack password | shared-core operator; optionally OTP-gated by Cloudflare Access |
+| Nextcloud | `https://nextcloud.<root-domain>/` | admin user/password + internal service accounts | derived from Dokploy admin credentials |
+| Moodle | `https://moodle.<root-domain>/` | admin + per-course users | derived from Dokploy admin credentials |
+| OnlyOffice | (no login UI of its own) | JWT integration value shared with Nextcloud | wired by deployment bootstrap/runtime config |
+| SeaweedFS / S3 | (internal-only endpoint) | access key + secret key | wizard-generated in guided mode or env-file provided |
+
+One operator password per box is the design: `DOKPLOY_ADMIN_PASSWORD` is the
+credential for every human-facing login above. Person-level identities (Coder
+→ Gitea → FileX) are the same person across surfaces — login name and real
+email — not a shared bot.
 
 ### Credential sources
 
@@ -514,6 +782,29 @@ chmod 0600 .install.env
 ```
 
 Then edit `.install.env` and replace placeholders with operator-owned values.
+
+### Required keys
+
+A non-interactive install is fully described by these keys — everything else
+is optional, defaulted, or wizard-generated:
+
+| Key | Notes |
+|---|---|
+| `ROOT_DOMAIN` | Zone apex; every hostname and the default `STACK_NAME` derive from it |
+| `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_ZONE_ID` | The one account and zone hosting the stack |
+| `CLOUDFLARE_API_TOKEN` | Zone DNS Edit + account Tunnel Edit (plus Access Apps/Policies Write when OTP is on) |
+| `DOKPLOY_ADMIN_EMAIL` / `DOKPLOY_ADMIN_PASSWORD` | The one operator password every surface shares |
+| `PACKS` | Comma list from `nextcloud,moodle,docuseal,seaweedfs,filex,gitea,coder,matrix,headscale`; `filex`/`gitea` imply `seaweedfs` |
+
+AI is opt-in: at least one of `LITELLM_OPENROUTER_API_KEY`,
+`LITELLM_OPENCODE_GO_API_KEY`, `LITELLM_NVIDIA_API_KEY` (+
+`LITELLM_NVIDIA_BASE_URL`), or `LITELLM_LOCAL_BASE_URL` (a tailnet
+OpenAI-compatible endpoint) turns LiteLLM into a real gateway; none configured
+still installs the gateway with its virtual-key machinery idle.
+`AI_DEFAULT_PROVIDER` / `AI_DEFAULT_MODEL` (or `AI_DEFAULT_MODEL_PATTERN`)
+choose the default alias route. `CLOUDFLARE_ACCESS_OTP_EMAILS`,
+`TAILSCALE_*`, `STACK_NAME`, `TZ`, and the subdomain overrides are the
+optional group.
 
 ### Cloudflare values
 
@@ -618,9 +909,17 @@ Use this when you do not already have an env file. The wizard prompts for domain
 
 ```bash
 ./bin/dokploy-wizard modify --env-file path/to/install.env --non-interactive
+./bin/dokploy-wizard modify --env-file path/to/install.env --non-interactive --force-phase coder
 ./bin/dokploy-wizard uninstall --retain-data --non-interactive --confirm-file fixtures/retain.confirm
 ./bin/dokploy-wizard uninstall --destroy-data --non-interactive --confirm-file fixtures/destroy.confirm
 ```
+
+`--force-phase` folds one already-converged phase back into the plan even when
+classification answers no-op: the phase re-runs once, real, on the next pass.
+It exists because side effects like the Gitea identity roster live inside a
+phase's apply, not in the env diff — out-of-band account changes converge by
+forcing that one phase, not by a full reinstall. The remote helper forwards
+the same flag (`dokploy-wizard-remote modify --force-phase coder`).
 
 Uninstall is ledger-driven, and the retired advisor/research packs are still understood ledger entries: their resource types are kept as literals in the uninstall planner, so an older box that once ran them uninstalls cleanly without resurrecting the removed pack modules.
 
@@ -877,6 +1176,20 @@ mypy .
 - `templates/` — deployment templates, including Coder template assets
 - `tests/` — unit, integration, and lifecycle coverage
 - `.install.env.example` — placeholder-only operator env template
+
+## Where this goes next
+
+- **Nextcloud → FileX + OnlyOffice.** The file-sync and collaboration story has
+  moved: `~/shared` (FileX over SeaweedFS, versioned, attributed per person)
+  already replaces Nextcloud Files for the workspace-centric workflow. The next
+  step is wiring the stack's existing OnlyOffice runtime to edit FileX-versioned
+  documents directly, at which point the `nextcloud` pack becomes genuinely
+  optional rather than the default human surface.
+- **Public S3 re-exposure** needs an identity layer first (the gateway is
+  anonymous-by-default today, hence the internal-only `<stack>-s3.internal`).
+- **Dokploy behind Access** once a machine-auth control path is safe.
+- **`*.coder.<root-domain>`** natively (Advanced Certificate Manager or an
+  off-tunnel TLS path) instead of the wildcard-app-host fallback.
 
 ## Summary
 
