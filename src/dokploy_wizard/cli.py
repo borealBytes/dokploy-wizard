@@ -1168,7 +1168,7 @@ def run_uninstall_flow(
         backend=uninstall_backend or ShellUninstallBackend(loaded_state.raw_input),
         dry_run=dry_run,
     )
-    return {
+    payload = {
         "confirmation_lines": list(confirmation_lines),
         "deleted_resources": [item.to_dict() for item in execution.deleted_resources],
         "destroy_data": destroy_data,
@@ -1181,6 +1181,9 @@ def run_uninstall_flow(
         "state_dir": str(state_dir),
         "warnings": list(plan.warnings),
     }
+    if execution.reclaimed_docker_state is not None:
+        payload["reclaimed_docker_state"] = execution.reclaimed_docker_state
+    return payload
 
 
 def _run_lifecycle_flow(
@@ -1538,6 +1541,8 @@ def _run_lifecycle_flow(
                 ],
                 "warnings": list(disable_plan.warnings),
             }
+            if execution.reclaimed_docker_state is not None:
+                disable_execution["reclaimed_docker_state"] = execution.reclaimed_docker_state
 
     summary = execute_lifecycle_plan(
         state_dir=state_dir,
