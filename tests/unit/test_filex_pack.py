@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -323,6 +322,7 @@ def _render(**overrides: object) -> Any:
     kwargs: dict[str, object] = {
         "stack_name": "wizard-stack",
         "hostname": "filex.example.com",
+        "office_hostname": "office.example.com",
         "admin_email": "admin@example.com",
         "admin_password": "hunter2 pass",
         "s3_endpoint_url": "http://wizard-stack-seaweedfs:8333",
@@ -418,6 +418,7 @@ def _filex_backend(tmp_path: Path, s3: object) -> DokployFilexBackend:
         api_key="key",
         stack_name="wizard-stack",
         hostname="filex.example.com",
+        office_hostname="office.example.com",
         admin_email="admin@example.com",
         admin_password="hunter2",
         s3_endpoint_url="http://wizard-stack-seaweedfs:8333",
@@ -524,8 +525,6 @@ def test_ensure_application_ready_reports_login_verification(
     backend = _filex_backend(tmp_path, s3)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
-    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a, **_k: "office-c")
-    monkeypatch.setattr(filex_module, "_pin_office_relative_url", lambda *_a, **_k: False)
 
     class _Resp:
         status = 200
@@ -569,8 +568,6 @@ def test_ensure_application_ready_login_rate_limit_is_note_not_failure(
     backend = _filex_backend(tmp_path, s3)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
-    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a, **_k: "office-c")
-    monkeypatch.setattr(filex_module, "_pin_office_relative_url", lambda *_a, **_k: False)
 
     from urllib import error as urlerror
 
@@ -669,8 +666,6 @@ def test_provisioner_bootstraps_lane_token_and_retires_legacy_bot(
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
-    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a, **_k: "office-c")
-    monkeypatch.setattr(filex_module, "_pin_office_relative_url", lambda *_a, **_k: False)
     http = _ScriptedFxHttp()
     http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
     http.queue(
@@ -748,8 +743,6 @@ def test_provisioner_keeps_alive_lane_token_and_migrates_legacy_doc(
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
-    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a, **_k: "office-c")
-    monkeypatch.setattr(filex_module, "_pin_office_relative_url", lambda *_a, **_k: False)
     http = _ScriptedFxHttp()
     http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
     http.queue(
@@ -835,8 +828,6 @@ def test_provisioner_degrades_to_note_when_admin_session_missing(
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
-    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a, **_k: "office-c")
-    monkeypatch.setattr(filex_module, "_pin_office_relative_url", lambda *_a, **_k: False)
     from urllib import error as urlerror
 
     def fake_urlopen(req: Any, **kwargs: Any) -> Any:
@@ -885,24 +876,27 @@ def test_render_filex_compose_includes_the_office_sidecar() -> None:
     assert 'ALLOW_PRIVATE_IP_ADDRESS: "true"' in compose
     assert 'WELCOME_PAGE_ENABLED: "false"' in compose
     assert 'GENERATE_FONTS: "false"' in compose
-    # One hostname, one certificate: the editor frame rides a PathPrefix
-    # router on the FileX host, stripped before the container and stamped
-    # into X-Forwarded-Prefix so the app can build absolute editor URLs.
+    # Its own hostname, root-mounted: FileX refuses a frame on its own
+    # origin (measured crash-loop), and docservice does not mount statics
+    # under relative_url in-container anyway — so no PathPrefix, no
+    # stripprefix, no X-Forwarded-Prefix survive here.
     assert "wizard-stack-filex-office:" in compose
     assert (
         'traefik.http.routers.wizard-stack-filex-office.rule: '
-        '"Host(`filex.example.com`) && PathPrefix(`/filex-frame`)"' in compose
+        '"Host(`office.example.com`)"' in compose
     )
+    assert "stripprefix" not in compose
+    assert "X-Forwarded-Prefix" not in compose
     assert (
-        'traefik.http.middlewares.wizard-stack-filex-office-strip.stripprefix.prefixes: '
-        '"/filex-frame"' in compose
+        'traefik.http.middlewares.wizard-stack-filex-office-forwarded-https.headers.'
+        'customrequestheaders.X-Forwarded-Host: "office.example.com"' in compose
     )
-    assert 'X-Forwarded-Prefix: "/filex-frame"' in compose
     assert 'traefik.http.services.wizard-stack-filex-office.loadbalancer.server.port: "80"' in compose
-    # The editing contract: public frame origin, internal callback door,
-    # frame path — three addresses and the secret, all placeholder-ized.
-    assert 'FILEX_ONLYOFFICE_URL: "https://filex.example.com/filex-frame"' in compose
-    assert 'FILEX_ONLYOFFICE_FRAME_ORIGIN: "https://filex.example.com"' in compose
+    # The editing contract: editor origin on the sidecar's own hostname,
+    # internal callback door — three addresses and the secret, all
+    # placeholder-ized.
+    assert 'FILEX_ONLYOFFICE_URL: "https://office.example.com"' in compose
+    assert 'FILEX_ONLYOFFICE_FRAME_ORIGIN: "https://office.example.com"' in compose
     assert 'FILEX_ONLYOFFICE_CALLBACK_URL: "http://wizard-stack-filex:5212"' in compose
     assert "FILEX_ONLYOFFICE_JWT" in compose
     # State mounts: exactly the community-edition trio; the data volume is
@@ -929,22 +923,27 @@ def test_office_jwt_state_doc_round_trips_at_0600(tmp_path: Path) -> None:
     assert (tmp_path / "filex-office-jwt.json").stat().st_mode & 0o777 == 0o600
 
 
-def test_office_sidecar_gate_records_jwt_and_pins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_office_sidecar_gate_writes_jwt_only_after_health(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     s3 = ScriptedS3()
     backend = _filex_backend(tmp_path, s3)
-    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
-    monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
-    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a: "office-c")
-    pinned: list[str] = []
+    order: list[str] = []
+    monkeypatch.setattr(
+        filex_module, "_wait_for_container_up", lambda *a, **k: order.append("up") or True
+    )
     monkeypatch.setattr(
         filex_module,
-        "_pin_office_relative_url",
-        lambda container: pinned.append(container) or True,
+        "_wait_for_local_https_health",
+        lambda *a, **k: order.append("health") or True,
     )
     notes = backend._ensure_office_sidecar()
-    assert pinned == ["office-c"]
-    assert any("Pinned the ONLYOFFICE subpath" in note for note in notes)
-    assert any("/filex-frame/healthcheck" in note for note in notes)
+    # Health must FOLLOW the up-check: the box killed the old design that
+    # docker-exec'd the container mid-boot (supervisor.sock only exists once
+    # supervisord is up, and the subpath is gone entirely anyway).
+    assert order == ["up", "health"]
+    assert any("https://office.example.com/healthcheck" in note for note in notes)
+    assert any("editor at https://office.example.com" in note for note in notes)
     from dokploy_wizard.state.store import load_filex_office_jwt
 
     stored = load_filex_office_jwt(tmp_path)
@@ -962,55 +961,18 @@ def test_office_sidecar_gate_honest_about_a_missing_container(
         backend._ensure_office_sidecar()
 
 
-def test_office_relative_url_pin_never_touches_a_pinned_box(
-    monkeypatch: pytest.MonkeyPatch,
+def test_office_sidecar_gate_honest_when_health_never_answers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    calls: list[list[str]] = []
+    from dokploy_wizard.state.store import load_filex_office_jwt
 
-    def fake_run(command: list[str], **kwargs: object) -> Any:
-        calls.append(list(command))
-        joined = " ".join(command)
-        if "supervisorctl" in joined:
-            return subprocess.CompletedProcess(command, 0, "", "")
-        script = command[command.index("-c") + 1]
-        if "sys.argv[2]" in script:  # merge variant
-            return subprocess.CompletedProcess(command, 0, "unchanged\n", "")
-        return subprocess.CompletedProcess(command, 0, "/filex-frame\n", "")  # read
-
-    monkeypatch.setattr(filex_module.subprocess, "run", fake_run)
-    assert filex_module._pin_office_relative_url("office-c") is False
-    assert len(calls) == 1  # read only: no merge, no restart — editors stay up
-
-
-def test_office_relative_url_pin_merges_and_restarts_only_on_drift(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[list[str]] = []
-
-    def fake_run(command: list[str], **kwargs: object) -> Any:
-        calls.append(list(command))
-        joined = " ".join(command)
-        if "supervisorctl" in joined:
-            return subprocess.CompletedProcess(command, 0, "ds:docservice: started\n", "")
-        script = command[command.index("-c") + 1]
-        if "sys.argv[2]" in script:
-            return subprocess.CompletedProcess(command, 0, "changed\n", "")
-        return subprocess.CompletedProcess(command, 0, "\n", "")  # unset
-
-    monkeypatch.setattr(filex_module.subprocess, "run", fake_run)
-    assert filex_module._pin_office_relative_url("office-c") is True
-    assert len(calls) == 3  # read, merge, restart
-    assert calls[1][:4] == ["docker", "exec", "office-c", "python3"]
-    assert "ds:docservice" in calls[2] and "ds:converter" in calls[2]
-
-
-def test_office_relative_url_pin_snippets_are_valid_python() -> None:
-    import ast
-
-    # The two docker-exec programs must parse as standalone modules; they
-    # broke once before (a 'for' chained after a semicolon), so pin the check.
-    ast.parse(filex_module._OFFICE_RELATIVE_URL_READ)
-    ast.parse(filex_module._OFFICE_RELATIVE_URL_MERGE)
+    backend = _filex_backend(tmp_path, ScriptedS3())
+    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: False)
+    with pytest.raises(FilexError, match="healthcheck did not become reachable"):
+        backend._ensure_office_sidecar()
+    # The JWT document is the gate's proof: a failed gate records nothing.
+    assert load_filex_office_jwt(tmp_path) is None
 
 
 def test_office_volume_ledger_name_matches_the_compose_mount() -> None:

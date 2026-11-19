@@ -2214,7 +2214,8 @@ def _build_filex_backend(
     if not api_url or not api_key or "filex" not in desired_state.enabled_packs:
         return ShellFilexBackend()
     hostname = desired_state.hostnames.get("filex")
-    if hostname is None or "seaweedfs" not in desired_state.enabled_packs:
+    office_hostname = desired_state.hostnames.get("onlyoffice")
+    if hostname is None or office_hostname is None or "seaweedfs" not in desired_state.enabled_packs:
         return ShellFilexBackend()
     access_key = desired_state.seaweedfs_access_key
     secret_key = desired_state.seaweedfs_secret_key
@@ -2230,6 +2231,7 @@ def _build_filex_backend(
         state_dir=state_dir,
         stack_name=desired_state.stack_name,
         hostname=hostname,
+        office_hostname=office_hostname,
         admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
         admin_password=raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD),
         s3_endpoint_url=_seaweedfs_internal_s3_endpoint(desired_state),

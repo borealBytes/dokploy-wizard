@@ -46,6 +46,13 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     assert get_pack_definition("seaweedfs").hostnames == ()
     assert get_pack_definition("filex").depends_on == ("seaweedfs",)
     assert get_pack_definition("filex").hostnames[0].key == "filex"
+    # The ONLYOFFICE editing sidecar rides the filex pack on its own
+    # hostname (FileX refuses a frame on its own origin). The key and
+    # subdomain follow the retired nextcloud pack so upgrade boxes keep
+    # route continuity on the same FQDN.
+    assert get_pack_definition("filex").hostnames[1].key == "onlyoffice"
+    assert get_pack_definition("filex").hostnames[1].default_subdomain == "office"
+    assert get_pack_definition("filex").hostnames[1].env_key == "ONLYOFFICE_SUBDOMAIN"
     assert get_pack_definition("matrix").mutable_env_keys == ()
     # The slot system is gone: no surviving pack occupies a mutual-exclusion slot.
     assert all(pack.slot is None for pack in iter_pack_catalog())
@@ -316,6 +323,7 @@ def test_resolver_full_pack_list_has_no_hostname_collisions() -> None:
         "gitea": "gitea.example.com",
         "matrix": "matrix.example.com",
         "moodle": "moodle.example.com",
+        "onlyoffice": "office.example.com",
     }
     assert len(set(selection.hostnames.values())) == len(selection.hostnames)
 

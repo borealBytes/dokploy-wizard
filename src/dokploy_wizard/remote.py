@@ -722,6 +722,7 @@ def _resolve_expected_service_url_links(env_file: Path) -> tuple[tuple[str, str]
         ("coder", "Coder"),
         ("docuseal", "DocuSeal"),
         ("filex", "FileX"),
+        ("onlyoffice", "ONLYOFFICE"),
         ("gitea", "Gitea"),
         ("moodle", "Moodle"),
     ):

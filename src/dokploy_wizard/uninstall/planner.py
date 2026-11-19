@@ -247,7 +247,7 @@ _PACK_HOSTNAME_KEYS: dict[str, tuple[str, ...]] = {
     "nextcloud": ("nextcloud", "onlyoffice"),
     "moodle": ("moodle",),
     "docuseal": ("docuseal",),
-    "filex": ("filex",),
+    "filex": ("filex", "onlyoffice"),
     "gitea": ("gitea",),
     "seaweedfs": ("s3",),
     "surfsense": ("surfsense", "surfsense-api", "surfsense-zero"),
@@ -357,11 +357,18 @@ def build_pack_disable_plan(
         for pack_name in removed_packs
         for resource_type in _PACK_DATA_RESOURCE_TYPES.get(pack_name, ())
     }
+    # A removed pack's hostname is only actually removed when the requested
+    # state does not want that FQDN under some other key: the ONLYOFFICE
+    # editing sidecar inherited the retired nextcloud pack's `onlyoffice`
+    # hostname (same key, same subdomain default), so its DNS and Access
+    # rows ride the transition untouched.
+    requested_fqdns = set(requested_desired.hostnames.values())
     removed_hostnames = {
         existing_desired.hostnames[key]
         for pack_name in removed_packs
         for key in _PACK_HOSTNAME_KEYS.get(pack_name, ())
         if key in existing_desired.hostnames
+        and existing_desired.hostnames[key] not in requested_fqdns
     }
     if (
         existing_desired.shared_core.requires_reconciliation()

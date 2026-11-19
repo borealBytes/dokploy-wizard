@@ -13,8 +13,8 @@ SeaweedFS S3 bucket the wizard owns. Four responsibilities live here:
   header), exactly like the pack health checks already do;
 * prove the seeded admin can sign in once, through the public JSON login
   endpoint, without tripping the sign-in attempt limiter;
-* prove the editing sidecar is ready (container up, ``/healthcheck`` behind
-  the edge, subpath pinned in-container) and keep its JWT secret recorded at
+* prove the editing sidecar is ready (container up, then ``/healthcheck``
+  behind the edge on its own hostname) and keep its JWT secret recorded at
   mode 0600 in the state dir.
 """
 
@@ -98,22 +98,25 @@ _DEFAULT_FILEX_DATA_ROOT = "/data"
 # Pinned to onlyoffice/documentserver 9.4.0.1; the digest was measured against
 # the registry (manifest list, linux/amd64 resolvable) and the image was
 # booted once on the live box before this line was written: /healthcheck
-# answers "true" ~3-5 min after a cold start, supervisor programs are
-# ds:docservice / ds:converter, and JWT lands in local.json whenever
-# JWT_SECRET is in the environment (update_ds_settings in the entrypoint
-# rewrites it EVERY boot — which is why the subpath config below is pinned
-# post-boot the same way the Gitea provisioner password is: a mounted
-# local.json would be rewritten anyway).
+# answers "true" (seconds with cached layers, minutes on a cold pull),
+# supervisor programs are ds:docservice / ds:converter, and JWT lands in
+# local.json whenever JWT_SECRET is in the environment (update_ds_settings
+# in the entrypoint rewrites it EVERY boot — which is why the sidecar serves
+# at the ROOT of its own hostname: nothing has to be pinned after boot).
 _DEFAULT_OFFICE_IMAGE = (
     "onlyoffice/documentserver:9.4.0.1"
     "@sha256:3ab6ebc7c605e5a32b7ae3ff19daed4925090245acc8100ce2230bd766c88212"
 )
 _DEFAULT_OFFICE_PORT = "80"
-# The editor frame is served under this path prefix on the FileX hostname —
-# one hostname, one certificate, and the editor shares the session cookie
-# scope. DS learns the prefix from services.CoAuthoring.server.relative_url
-# (pinned post-boot); Traefik strips it and sets X-Forwarded-Prefix.
-_OFFICE_FRAME_PREFIX = "/filex-frame"
+# The sidecar serves at the ROOT of its own hostname (pack hostname key
+# 'onlyoffice'). Two measured facts killed the original /filex-frame subpath
+# on the FileX host: FileX's own config guard rejects a frame origin equal
+# to its origin (crash-loop: "a frame on filex's own origin would run its
+# script with filex's session"), and docservice does not mount static assets
+# under services.CoAuthoring.server.relative_url in-container (measured 404
+# on /filex-frame/web-apps/...). A root mount needs no post-boot pin, no
+# stripprefix, and no supervisorctl restart — the cold-boot socket race
+# (unix:///var/run/supervisor.sock no such file) disappears with the subpath.
 # Community edition starts NO bundled database (DB_AVAILABLE is commercial-only
 # — measured), so exactly the three upstream-documented community mounts are
 # needed; rabbitmq/redis/pg stay in the container layer.
@@ -255,6 +258,7 @@ class DokployFilexBackend:
         api_key: str,
         stack_name: str,
         hostname: str,
+        office_hostname: str,
         admin_email: str,
         admin_password: str,
         s3_endpoint_url: str,
@@ -269,6 +273,7 @@ class DokployFilexBackend:
         self._stack_name = stack_name
         self._compose_name = _service_name(stack_name)
         self._hostname = hostname
+        self._office_hostname = office_hostname
         self._admin_email = admin_email
         self._admin_password = admin_password
         self._s3_endpoint_url = s3_endpoint_url
@@ -450,12 +455,16 @@ class DokployFilexBackend:
     def _ensure_office_sidecar(self) -> tuple[str, ...]:
         """Prove the ONLYOFFICE editing sidecar is ready, then record its JWT.
 
-        Wait budgets are the measured ones: the sidecar image is gigabyte
-        class, and a cold DocumentServer boot takes minutes on a small VPS
-        before ``/healthcheck`` answers (live-box probe: READY only at the
-        300-second mark). The ``relative_url`` pin runs BEFORE the health
-        wait — the restart absorbs the outage — and mutates the container
-        only on drift, so a no-op modify never disconnects open editors.
+        Up first, health second, in that order, with measured budgets: the
+        image is gigabyte class, so the container-up loop carries the long
+        wait (fifteen minutes of pulls). The health gate keeps its generous
+        48x10s budget for the cold-first-boot case (the entrypoint runs
+        before supervisord serves anything; warm layers answer /healthcheck
+        in seconds — box-measured ~30s). Nothing mutates the container
+        here: the sidecar serves at the root of its own hostname, so the
+        entrypoint's every-boot rewrite of local.json has nothing to fight
+        with, and the old post-boot subpath pin (and its cold-boot
+        supervisor-socket race) is gone.
         """
         office = _office_service_name(self._stack_name)
         if not _wait_for_container_up(office, attempts=180):
@@ -463,31 +472,18 @@ class DokployFilexBackend:
                 "ONLYOFFICE sidecar container did not come up before verification "
                 "(image pull not finished?)."
             )
-        container = _office_container_id(office)
-        if container is None:
-            raise FilexError(
-                "ONLYOFFICE sidecar container vanished between the up-check and the "
-                "subpath pin; rerun to converge."
-            )
-        pinned = _pin_office_relative_url(container)
-        health_url = _office_health_url(self._hostname)
+        health_url = _office_health_url(self._office_hostname)
         if not _wait_for_local_https_health(health_url, attempts=48, delay_seconds=10.0):
             raise FilexError(
                 "ONLYOFFICE /healthcheck did not become reachable behind the edge; "
                 "a cold DocumentServer boot takes minutes — rerun to converge."
             )
         write_filex_office_jwt(self._state_dir, jwt_secret=_office_jwt_value(self._stack_name))
-        notes: list[str] = []
-        if pinned:
-            notes.append(
-                f"Pinned the ONLYOFFICE subpath '{_OFFICE_FRAME_PREFIX}' in the sidecar "
-                "and restarted its editor services."
-            )
-        notes.append(
+        return (
             f"ONLYOFFICE sidecar ready: /healthcheck answers at {health_url}; "
-            "JWT enforced, secret recorded (0600) in the state dir."
+            f"editor at {_office_editor_url(self._office_hostname)}; "
+            "JWT enforced, secret recorded (0600) in the state dir.",
         )
-        return tuple(notes)
 
     def _s3(self) -> S3Requester:
         if self._s3_client is None:
@@ -769,6 +765,7 @@ class DokployFilexBackend:
         compose_file = _render_compose_file(
             stack_name=self._stack_name,
             hostname=self._hostname,
+            office_hostname=self._office_hostname,
             admin_email=self._admin_email,
             admin_password=self._admin_password,
             s3_endpoint_url=self._s3_endpoint_url,
@@ -1018,17 +1015,18 @@ def _office_jwt_value(stack_name: str) -> str:
 
 
 def _office_health_url(hostname: str) -> str:
-    return f"https://{hostname}{_OFFICE_FRAME_PREFIX}/healthcheck"
+    return f"https://{hostname}/healthcheck"
 
 
 def _office_editor_url(hostname: str) -> str:
-    return f"https://{hostname}{_OFFICE_FRAME_PREFIX}"
+    return f"https://{hostname}"
 
 
 def _render_compose_file(
     *,
     stack_name: str,
     hostname: str,
+    office_hostname: str,
     admin_email: str,
     admin_password: str,
     s3_endpoint_url: str,
@@ -1071,12 +1069,13 @@ def _render_compose_file(
         "      FILEX_VERSIONS_ON_OVERWRITE: '1'\n"
         "      FILEX_TRASH_RETENTION_DAYS: '30'\n"
         # The editing contract, three addresses and one secret: the browser
-        # reaches the editor through this hostname's /filex-frame prefix,
-        # DocumentServer reaches FileX over the compose network (private-IP
-        # allowance below is what makes that callback possible), and every
-        # hop between them carries the JWT.
-        f"      FILEX_ONLYOFFICE_URL: {_yaml_quote(_office_editor_url(hostname))}\n"
-        f"      FILEX_ONLYOFFICE_FRAME_ORIGIN: {_yaml_quote(f'https://{hostname}')}\n"
+        # loads the editor from the sidecar's own hostname (FileX refuses a
+        # frame on its own origin — measured config guard), DocumentServer
+        # reaches FileX over the compose network (private-IP allowance below
+        # is what makes that callback possible), and every hop between them
+        # carries the JWT.
+        f"      FILEX_ONLYOFFICE_URL: {_yaml_quote(_office_editor_url(office_hostname))}\n"
+        f"      FILEX_ONLYOFFICE_FRAME_ORIGIN: {_yaml_quote(f'https://{office_hostname}')}\n"
         f"      FILEX_ONLYOFFICE_CALLBACK_URL: "
         f"{_yaml_quote(f'http://{service_name}:{_DEFAULT_FILEX_PORT}')}\n"
         f"      {office_jwt_env}: \"{_required_placeholder(office_jwt_env)}\"\n"
@@ -1111,23 +1110,20 @@ def _render_compose_file(
         '      traefik.enable: "true"\n'
         f'      traefik.http.routers.{office_name}.entrypoints: "websecure"\n'
         f'      traefik.http.routers.{office_name}.rule: '
-        f'"Host(`{hostname}`) && PathPrefix(`{_OFFICE_FRAME_PREFIX}`)"\n'
+        f'"Host(`{office_hostname}`)"\n'
         f'      traefik.http.routers.{office_name}.tls: "true"\n'
-        # The host-only FileX router and this host-and-prefix router share one
-        # hostname; Traefik scores rules by specificity, so the longer rule
-        # wins for /filex-frame/* without an explicit priority.
+        # Its own hostname, its own certificate route, root-mounted: no
+        # prefix middleware, no stripprefix, no X-Forwarded-Prefix — the
+        # sidecar and the app are separate origins by measured necessity
+        # (FileX's frame-origin guard).
         f'      traefik.http.routers.{office_name}.middlewares: '
-        f'"{office_name}-forwarded-https,{office_name}-strip"\n'
+        f'"{office_name}-forwarded-https"\n'
         f'      traefik.http.middlewares.{office_name}-forwarded-https.headers.'
         'customrequestheaders.X-Forwarded-Proto: "https"\n'
         f'      traefik.http.middlewares.{office_name}-forwarded-https.headers.'
-        f'customrequestheaders.X-Forwarded-Host: "{hostname}"\n'
+        f'customrequestheaders.X-Forwarded-Host: "{office_hostname}"\n'
         f'      traefik.http.middlewares.{office_name}-forwarded-https.headers.'
         'customrequestheaders.X-Forwarded-Port: "443"\n'
-        f'      traefik.http.middlewares.{office_name}-forwarded-https.headers.'
-        f'customrequestheaders.X-Forwarded-Prefix: "{_OFFICE_FRAME_PREFIX}"\n'
-        f'      traefik.http.middlewares.{office_name}-strip.stripprefix.prefixes: '
-        f'"{_OFFICE_FRAME_PREFIX}"\n'
         f'      traefik.http.services.{office_name}.loadbalancer.server.port: '
         f'"{_DEFAULT_OFFICE_PORT}"\n'
         "    volumes:\n"
@@ -1345,109 +1341,6 @@ def _docker_container_is_up(service_name: str) -> bool:
         if status.startswith("Up "):
             return True
     return False
-
-
-def _office_container_id(service_name: str) -> str | None:
-    # First running task of the sidecar service (label identity, same as the
-    # up-check above; a running container is required for the exec below).
-    try:
-        result = subprocess.run(
-            [
-                "docker",
-                "ps",
-                "--filter",
-                f"label=com.docker.compose.service={service_name}",
-                "--format",
-                "{{.ID}}",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
-    for line in result.stdout.splitlines():
-        if line.strip():
-            return line.strip()
-    return None
-
-
-# The entrypoint rewrites JWT settings into local.json on EVERY boot
-# (update_ds_settings in run-document-server.sh — read at the pinned commit),
-# so a mounted local.json would be clobbered and the subpath instead rides
-# the proven in-container pin: read, merge only on drift, restart docservice
-# only when something actually changed (an editor session must not be
-# disconnected by a no-op modify pass). Measured on the box: python3 exists
-# in the image, supervisor programs are 'ds:docservice' and 'ds:converter',
-# and relative_url survives every later entrypoint write because the script
-# only ever sets its own keys.
-_OFFICE_LOCAL_JSON = "/etc/onlyoffice/documentserver/local.json"
-# Expression-only one-liners (no 'for' after a semicolon): python3 -c with
-# argv for every variable so no user data is ever shell-quoted.
-_OFFICE_RELATIVE_URL_READ = (
-    "import json,sys;"
-    "d=json.load(open(sys.argv[1]));c=d.get('services') or {};"
-    "a=c.get('CoAuthoring') or {};s=a.get('server') or {};"
-    "print(s.get('relative_url') or '')"
-)
-_OFFICE_RELATIVE_URL_MERGE = (
-    "import json,sys;"
-    "p=sys.argv[1];url=sys.argv[2];"
-    "d=json.load(open(p));"
-    "c=d.setdefault('services',{});a=c.setdefault('CoAuthoring',{});"
-    "s=a.setdefault('server',{});"
-    "changed=s.get('relative_url')!=url;"
-    "s['relative_url']=url;"
-    "(json.dump(d,open(p,'w')) if changed else None);"
-    "print('changed' if changed else 'unchanged')"
-)
-
-
-def _office_exec(container: str, script: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["docker", "exec", container, "python3", "-c", script, _OFFICE_LOCAL_JSON, *args],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-
-
-def _pin_office_relative_url(container: str) -> bool:
-    """Return True when the pin (merge or restart) actually mutated the box."""
-    read = _office_exec(container, _OFFICE_RELATIVE_URL_READ)
-    current = read.stdout.strip() if read.returncode == 0 else ""
-    if current == _OFFICE_FRAME_PREFIX:
-        return False
-    merged = _office_exec(container, _OFFICE_RELATIVE_URL_MERGE, _OFFICE_FRAME_PREFIX)
-    if merged.returncode != 0:
-        raise FilexError(
-            "Pinning the ONLYOFFICE subpath in local.json failed: "
-            f"{(merged.stdout + merged.stderr).strip()[:200]}"
-        )
-    restart = subprocess.run(
-        [
-            "docker",
-            "exec",
-            container,
-            "supervisorctl",
-            "restart",
-            "ds:docservice",
-            "ds:converter",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if restart.returncode != 0:
-        raise FilexError(
-            "Restarting the ONLYOFFICE editor services after the subpath pin failed: "
-            f"{(restart.stdout + restart.stderr).strip()[:200]}"
-        )
-    return True
 
 
 __all__ = ["DokployFilexBackend", "LoopbackSigV4Client"]

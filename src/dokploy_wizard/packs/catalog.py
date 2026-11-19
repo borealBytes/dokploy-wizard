@@ -148,6 +148,17 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
                 default_subdomain="filex",
                 env_key="FILEX_SUBDOMAIN",
             ),
+            # The ONLYOFFICE editing sidecar needs its own origin: FileX
+            # refuses a frame hosted on its own hostname (config guard —
+            # measured crash-loop: "a frame on filex's own origin would
+            # run its script with filex's session"). The key and env name
+            # follow the retired Nextcloud pack, so upgrade boxes keep
+            # the same office.<root-domain> continuity.
+            PackHostname(
+                key="onlyoffice",
+                default_subdomain="office",
+                env_key="ONLYOFFICE_SUBDOMAIN",
+            ),
         ),
         mutable_env_keys=(),
         mutable_resource_keys=(),
