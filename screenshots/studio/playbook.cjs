@@ -15,6 +15,11 @@ const SERVICE_SUBDOMAINS = {
   coder: 'coder',
   gitea: 'gitea',
   filex: 'filex',
+  // The ONLYOFFICE editing sidecar serves at the root of its own hostname
+  // (FileX refuses a frame on its own origin — measured). No gallery shot
+  // points at it standalone (the welcome page is off); the editor appears
+  // inside the filex-office shots as the frame's origin.
+  onlyoffice: 'office',
   docuseal: 'docuseal',
   litellm: 'litellm',
 };
@@ -80,6 +85,17 @@ const SHOTS = [
 
   // ---- Gitea identities ------------------------------------------------------
   {
+    shot: 'gitea-logged-out', area: 'gitea', service: 'gitea', viewportOnly: true, noAuth: true,
+    caption: 'A logged-out visitor sees the sign-in door and nothing else: repos are private by default and anonymous browsing is off.',
+    // DISABLE_ANONYMOUS_ACCESS + private-by-default: /explore redirects to
+    // the sign-in form — the redirect itself is the proof, so this shot
+    // deliberately photographs the landing.
+    steps: [
+      { goto: '/explore' },
+      { waitForSelector: 'input[name="user_name"]', wait: 1200 },
+    ],
+  },
+  {
     shot: 'gitea-home', area: 'gitea', service: 'gitea',
     caption: 'Team Git, self-hosted — the pack provisions itself and the wizard keeps its admin hat in a state file.',
     steps: [{ goto: '/' }, { wait: 1200 }],
@@ -107,7 +123,7 @@ const SHOTS = [
   },
   {
     shot: 'gitea-provisioner', area: 'gitea', service: 'gitea',
-    caption: 'Every account on the box, listed: the people plus the dokploy-wizard provisioner — an ordinary admin account, auditable and rotatable.',
+    caption: 'Every account on the box, listed: the people and nobody else — the wizard provisions under the deployer\'s own login, so there is no service account to audit.',
     steps: [{ goto: '/explore/users' }, { wait: 1200 }],
   },
   {
@@ -185,6 +201,17 @@ const SHOTS = [
       { click: 'button:has-text("×")', optional: true },
     ],
   },
+  {
+    shot: 'litellm-internal-user', area: 'litellm', service: 'litellm',
+    caption: 'One identity per person across the box: every joined human is an internal_user here and everywhere; the deployer is the only proxy_admin.',
+    // The users table's Role column is the whole story — every non-admin
+    // row must read internal_user, the one-ID contract's LiteLLM side.
+    steps: [
+      { goto: '/ui/?page=users' }, { waitForSelector: 'table tbody tr', wait: 3000 },
+      { click: 'text="Don\'t ask me again"', optional: true },
+      { click: 'button:has-text("×")', optional: true },
+    ],
+  },
 
   // ---- FileX shared drive -----------------------------------------------------
   {
@@ -240,8 +267,38 @@ const SHOTS = [
   },
   {
     shot: 'filex-people', area: 'filex', service: 'filex',
-    caption: 'People page after a clean install: the admin (the deployer\'s own email), the provisioner, and the joined second person — the machine twin is gone.',
+    caption: 'People page after a clean install: only humans — the deployer\'s own email and the joined second person. The provisioner account is gone; its lane rides an admin-scope token on the admin itself.',
     steps: [{ goto: '/admin/users' }, { wait: 2000 }],
+  },
+  {
+    shot: 'filex-office-edit', area: 'filex', service: 'filex',
+    caption: 'Open a document: the bundled ONLYOFFICE editor arrives in a frame on its own hostname — one sidecar per box, JWT on every hop.',
+    // The frame's origin is the whole proof of the sidecar design: FileX
+    // refuses an editor on its own origin (measured crash-loop), so the
+    // iframe src points at office.<root-domain>; the redaction scan
+    // catches the root domain inside the attribute. A .docx must exist in
+    // My files before the shoot (upload during shot prep).
+    steps: [
+      { goto: '/admin/home' }, { wait: 2500 },
+      { click: 'text="My files"' }, { wait: 2000 },
+      { click: 'text=/\\.docx/' }, { wait: 2500 },
+      { click: 'text=/^edit$|open in editor|edit in onlyoffice/i', optional: true },
+      { waitForSelector: 'iframe[src*="web-apps"], iframe[src*="office"]', timeout: 30000 },
+      { wait: 4000 },
+    ],
+  },
+  {
+    shot: 'filex-office-versions', area: 'filex', service: 'filex',
+    caption: 'Every save in the editor becomes a FileX version — the office session signs back into the same bucket as the same person.',
+    steps: [
+      { goto: '/admin/home' }, { wait: 2500 },
+      { click: 'text="My files"' },
+      { waitForSelector: 'text=/\\.docx/', timeout: 25000 }, { wait: 1000 },
+      { click: 'text=/\\.docx/' }, { wait: 2000 },
+      { click: 'button[aria-label*="detail" i], button[aria-label*="info" i], button[title*="detail" i]', optional: true },
+      { click: 'text="Activity"', optional: true },
+      { wait: 2500 },
+    ],
   },
 
   // ---- DocuSeal ---------------------------------------------------------------
