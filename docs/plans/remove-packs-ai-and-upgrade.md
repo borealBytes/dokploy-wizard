@@ -1703,3 +1703,31 @@ carried `Set Gitea account 'demo' visibility to private (privacy default).`
 once, the database converged to visibility=2 with the flag clear, and the
 plain pass after remained `"mode": "noop"`. A side effect that lands can no
 longer act silently.
+
+## Office frame route (2026-11, found in the vision review, fixed `5304f8e`+`5615697`)
+
+The reshoot's `filex-office-edit` final showed FileX's own fallback banner,
+not the ONLYOFFICE canvas — and the banner was right. Measurements on the
+box: `office.<root>/filex-frame/editor` answered an Express `Cannot GET`
+(that is the DocumentServer's docservice, which owns the hostname's
+Host-only router), while a direct probe of the app container at
+`Host: office…` answered 200 with the launcher page — FileX serves
+`/filex-frame/*` itself, but ONLY when the Host header equals
+`FILEX_ONLYOFFICE_FRAME_ORIGIN` (the same guard that killed the original
+frame-on-filex-origin design; the launcher's CSP pins every source to the
+office origin). Nothing anywhere routed the launcher path to the app. The
+iteration-5 `office true` had proved `/healthcheck` — the sidecar's own
+heartbeat — never the editing lane.
+
+Fix at the wizard layer (`5304f8e`): FileX's compose gains a second router
+on the office hostname — `Host(office) && PathPrefix(/filex-frame)`,
+priority 200 over the sidecar's Host rule, forwarded headers pinned to the
+office hostname — and the sidecar gate now proves the launcher route at
+`/filex-frame/editor` before recording the JWT: a green heartbeat with a
+404 lane can no longer narrate readiness. The first redeploy taught one
+more thing (`5615697`): with two routers on one container the docker
+provider refuses to guess the pairing and DROPS BOTH ("cannot be linked
+automatically with multiple Services" — measured: the app hostname itself
+went dark until each router named its service). Box-verified after the
+fix: launcher 200 (launcher HTML with `data-api` against the office
+origin), `/healthcheck` still `true`, FileX `/healthz` `{"status":"ok"}`.
