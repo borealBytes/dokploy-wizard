@@ -287,6 +287,9 @@ class DokployFilexBackend:
         self._s3_client = s3_client
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
+        # Notes minted by the compose no-op guard's verify call (see
+        # `_take_deferred_bootstrap_notes`); handed to the next full call.
+        self._deferred_bootstrap_notes: list[str] = []
 
     # -- DocuSeal-shaped backend surface -------------------------------------
 
@@ -428,7 +431,7 @@ class DokployFilexBackend:
             raise FilexError(
                 "FileX /healthz endpoint did not become locally reachable before seeding."
             )
-        notes: list[str] = []
+        notes: list[str] = self._take_deferred_bootstrap_notes()
         bucket_ready, versioning_enabled, s3_notes = self._ensure_bucket_and_versioning()
         notes.extend(s3_notes)
         login_verified, admin_session, login_note = self._probe_admin_login()
@@ -449,6 +452,20 @@ class DokployFilexBackend:
             ),
             tuple(notes),
         )
+
+    def _take_deferred_bootstrap_notes(self) -> list[str]:
+        """Notes minted by an earlier verify call, once, oldest first.
+
+        `apply_compose_noop_guard` runs the verify lane on a hash match —
+        BEFORE the reconciler's note-keeping `ensure_application_ready` — and
+        a ServiceVerificationResult has no note surface, so side effects
+        executed there would otherwise vanish from the payload. The verify
+        lane therefore stows its notes here and the next full call carries
+        them (the gitea visibility migration documents the box measurement).
+        """
+        deferred = self._deferred_bootstrap_notes
+        self._deferred_bootstrap_notes = []
+        return deferred
 
     # -- bucket provisioning ---------------------------------------------------
 
@@ -897,7 +914,7 @@ class DokployFilexBackend:
 
     def _verify_current_application(self) -> ServiceVerificationResult:
         try:
-            bootstrap_state, _notes = self.ensure_application_ready(
+            bootstrap_state, bootstrap_notes = self.ensure_application_ready(
                 secret_key_secret_ref=self._secret_key_secret_ref,
             )
         except FilexError as error:
@@ -907,6 +924,9 @@ class DokployFilexBackend:
                 status="fail",
                 detail=str(error),
             )
+        # Side effects done, narration owed: hold the notes for the next
+        # note-keeping call (see `_take_deferred_bootstrap_notes`).
+        self._deferred_bootstrap_notes.extend(bootstrap_notes)
         if not bootstrap_state.bucket_ready or not bootstrap_state.versioning_enabled:
             return ServiceVerificationResult(
                 service_name=self._compose_name,

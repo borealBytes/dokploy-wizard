@@ -719,6 +719,76 @@ def test_provisioner_alive_token_short_circuits_everything(
     assert "Set Gitea account 'clayton' visibility to private (privacy default)." in notes
 
 
+def test_verify_lane_flip_narrates_on_the_next_note_keeping_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Box-measured on the second-person proof: apply_compose_noop_guard runs
+    the verify lane on a hash match BEFORE the reconciler's note-keeping call,
+    and ServiceVerificationResult has no note surface — the visibility flip
+    therefore PATCHed the row (gitea logged 200, the database converged) while
+    the modify payload said nothing. The verify lane must stow its notes so
+    the next full call carries them.
+    """
+    write_gitea_provisioner(
+        tmp_path,
+        GiteaProvisionerState(
+            format_version=1,
+            username="clayton",
+            email="clayton@example.com",
+            password="StackPw!23",
+            token="alive-token",
+        ),
+    )
+    backend = _gitea_backend(tmp_path, ScriptedS3(head_script=[200, 200]))
+    monkeypatch.setattr(gitea_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    cli = ScriptedCli([_CliResult(ok=True, output="password updated")])
+    monkeypatch.setattr(gitea_module, "_gitea_cli_exec", cli)
+    http = _ScriptedGiteaHttp()
+    # Verify call: retire gate sees no legacy row, the migration reads a
+    # PUBLIC deployer row and flips it (the one PATCH of the whole test).
+    http.queue("GET", "/api/v1/user", 200, {"username": "clayton"})
+    http.queue(
+        "GET",
+        "/api/v1/admin/users?page=1",
+        200,
+        [{"login": "clayton", "username": "clayton", "visibility": "private"}],
+    )
+    http.queue(
+        "GET",
+        "/api/v1/admin/users?page=1",
+        200,
+        [{"login": "clayton", "username": "clayton", "visibility": "public"}],
+    )
+    http.queue("PATCH", "/api/v1/admin/users/clayton", 200, {"login": "clayton"})
+    # Note-keeping call: every row already private, nothing left to flip.
+    http.queue("GET", "/api/v1/user", 200, {"username": "clayton"})
+    http.queue(
+        "GET",
+        "/api/v1/admin/users?page=1",
+        200,
+        [{"login": "clayton", "username": "clayton", "visibility": "private"}],
+    )
+    http.queue(
+        "GET",
+        "/api/v1/admin/users?page=1",
+        200,
+        [{"login": "clayton", "username": "clayton", "visibility": "private"}],
+    )
+    monkeypatch.setattr(gitea_module.urlrequest, "urlopen", http)
+
+    verification = backend._verify_current_application()
+    assert verification.status == "pass"
+
+    state, notes = backend.ensure_application_ready(
+        secret_key_secret_ref="wizard-stack-gitea-secret-key"
+    )
+    assert state.provisioner_ready is True
+    assert "Set Gitea account 'clayton' visibility to private (privacy default)." in notes
+    # The flip happened once, inside the verify lane; the stowed note is the
+    # only narration the second call adds.
+    assert sum(1 for req in http.requests if req.get_method() == "PATCH") == 1
+
+
 def test_provisioner_rotates_dead_token_and_tolerates_existing_account(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
