@@ -327,7 +327,7 @@ MINTPY
       # unseeded) the provisioner token itself is the derivation seed.
       DOKPLOY_FX_SEED="$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN"
       case "$${DOKPLOY_WIZARD_LITELLM_ISSUER_KEY:-}" in
-        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)
+        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)
           ;;
         *) DOKPLOY_FX_SEED="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" ;;
       esac
@@ -668,7 +668,7 @@ HELPER
       # provisioner token, so an issuer rotation re-derives cleanly.
       DOKPLOY_GT_SEED="$DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN"
       case "$${DOKPLOY_WIZARD_LITELLM_ISSUER_KEY:-}" in
-        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)
+        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)
           ;;
         *) DOKPLOY_GT_SEED="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" ;;
       esac

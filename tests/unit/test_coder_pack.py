@@ -3159,6 +3159,17 @@ def test_issuer_mint_guard_stays_honest_after_substitution() -> None:
     replaced = template.replace("__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__", "sk-real-issuer")
     assert 'DOKPLOY_WIZARD_LITELLM_ISSUER_KEY="sk-real-issuer"' in replaced
     assert '!= "sk-real-issuer"' not in replaced
+    # The same trap has a second shape: the FX/GT seed guards read the issuer
+    # through a `case` list. A bare marker pattern inside that list substitutes
+    # to the real key and self-matches the treat-as-missing branch (measured:
+    # a from-zero box derived every workspace-account password from the
+    # provisioner token because the issuer could never win the case). The seed
+    # case lists must therefore match only the empty value and the sentinel.
+    assert '""|sk-real-issuer' not in replaced
+    assert (
+        replaced.count('case "$${DOKPLOY_WIZARD_LITELLM_ISSUER_KEY:-}" in\n'
+                       '        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)') == 2
+    )
     # The sentinel marker is absent from the wizard's replacement map, so it
     # stays literal in the pushed template: assert the map never grows one.
     import inspect
