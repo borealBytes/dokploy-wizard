@@ -885,6 +885,24 @@ def test_render_filex_compose_includes_the_office_sidecar() -> None:
         'traefik.http.routers.wizard-stack-filex-office.rule: '
         '"Host(`office.example.com`)"' in compose
     )
+    # The office hostname is shared by design: the launcher route belongs to
+    # the APP (FileX serves /filex-frame/* only when Host equals
+    # FILEX_ONLYOFFICE_FRAME_ORIGIN — box-measured on the direct container
+    # probe), everything else stays with the DocumentServer. The explicit
+    # priority beats the Host-only office rule deterministically.
+    assert (
+        'traefik.http.routers.wizard-stack-filex-office-frame.rule: '
+        '"Host(`office.example.com`) && PathPrefix(`/filex-frame`)"' in compose
+    )
+    assert 'traefik.http.routers.wizard-stack-filex-office-frame.priority: "200"' in compose
+    assert (
+        'traefik.http.services.wizard-stack-filex-office-frame.loadbalancer.server.port: '
+        '"5212"' in compose
+    )
+    assert (
+        'traefik.http.middlewares.wizard-stack-filex-office-frame-forwarded-https.headers.'
+        'customrequestheaders.X-Forwarded-Host: "office.example.com"' in compose
+    )
     assert "stripprefix" not in compose
     assert "X-Forwarded-Prefix" not in compose
     assert (
@@ -935,14 +953,22 @@ def test_office_sidecar_gate_writes_jwt_only_after_health(
     monkeypatch.setattr(
         filex_module,
         "_wait_for_local_https_health",
-        lambda *a, **k: order.append("health") or True,
+        lambda url, **k: order.append(url) or True,
     )
     notes = backend._ensure_office_sidecar()
-    # Health must FOLLOW the up-check: the box killed the old design that
-    # docker-exec'd the container mid-boot (supervisor.sock only exists once
-    # supervisord is up, and the subpath is gone entirely anyway).
-    assert order == ["up", "health"]
+    # Up first, then BOTH edge proofs, in that order: the box killed the old
+    # design that docker-exec'd the container mid-boot (supervisor.sock only
+    # exists once supervisord is up, and the subpath is gone entirely anyway).
+    # The second proof is the launcher route — /healthcheck alone was green
+    # on the box while the editor fell back to its banner, because nothing
+    # routed /filex-frame/* to the app.
+    assert order == [
+        "up",
+        "https://office.example.com/healthcheck",
+        "https://office.example.com/filex-frame/editor",
+    ]
     assert any("https://office.example.com/healthcheck" in note for note in notes)
+    assert any("https://office.example.com/filex-frame/editor" in note for note in notes)
     assert any("editor at https://office.example.com" in note for note in notes)
     from dokploy_wizard.state.store import load_filex_office_jwt
 
@@ -972,6 +998,25 @@ def test_office_sidecar_gate_honest_when_health_never_answers(
     with pytest.raises(FilexError, match="healthcheck did not become reachable"):
         backend._ensure_office_sidecar()
     # The JWT document is the gate's proof: a failed gate records nothing.
+    assert load_filex_office_jwt(tmp_path) is None
+
+
+def test_office_sidecar_gate_honest_when_the_launcher_route_never_answers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dokploy_wizard.state.store import load_filex_office_jwt
+
+    backend = _filex_backend(tmp_path, ScriptedS3())
+    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
+
+    def _only_health(url: str, **_k: object) -> bool:
+        return not url.endswith("/filex-frame/editor")
+
+    monkeypatch.setattr(filex_module, "_wait_for_local_https_health", _only_health)
+    with pytest.raises(FilexError, match="launcher route"):
+        backend._ensure_office_sidecar()
+    # Health answering is not enough: the editor lane is the promise, and a
+    # gate that records the JWT while the route 404s would narrate a lie.
     assert load_filex_office_jwt(tmp_path) is None
 
 

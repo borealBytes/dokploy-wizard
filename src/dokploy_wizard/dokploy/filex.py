@@ -108,6 +108,10 @@ _DEFAULT_OFFICE_IMAGE = (
     "@sha256:3ab6ebc7c605e5a32b7ae3ff19daed4925090245acc8100ce2230bd766c88212"
 )
 _DEFAULT_OFFICE_PORT = "80"
+# The editor-launcher route FileX serves on the office hostname (see the
+# module comment): the frame page and every API call it makes stay under
+# this prefix, so one PathPrefix router carries the whole launcher lane.
+_OFFICE_FRAME_PATH = "/filex-frame"
 # The sidecar serves at the ROOT of its own hostname (pack hostname key
 # 'onlyoffice'). Two measured facts killed the original /filex-frame subpath
 # on the FileX host: FileX's own config guard rejects a frame origin equal
@@ -117,6 +121,18 @@ _DEFAULT_OFFICE_PORT = "80"
 # on /filex-frame/web-apps/...). A root mount needs no post-boot pin, no
 # stripprefix, and no supervisorctl restart — the cold-boot socket race
 # (unix:///var/run/supervisor.sock no such file) disappears with the subpath.
+# The office hostname serves TWO origins' worth of paths (box-measured): the
+# DocumentServer answers /web-apps, /coauthoring, /healthcheck at its root,
+# and FileX itself answers the editor launcher at /filex-frame/* — but ONLY
+# when the Host header equals FILEX_ONLYOFFICE_FRAME_ORIGIN (direct probe to
+# the app container: Host: office… → 200 launcher HTML, Host: filex… → 404;
+# the docservice's Express 404 on the office hostname is what shipped here
+# before the frame router existed — a root-only office router left the
+# launcher to the DocumentServer, and the editor fell back to its own banner
+# claiming the frame did not load). So FileX carries a second router:
+# Host(office) && PathPrefix(/filex-frame), explicit priority above the
+# Host-only sidecar router, with its own forwarded-headers middleware pinned
+# to the office hostname.
 # Community edition starts NO bundled database (DB_AVAILABLE is commercial-only
 # — measured), so exactly the three upstream-documented community mounts are
 # needed; rabbitmq/redis/pg stay in the container layer.
@@ -495,9 +511,24 @@ class DokployFilexBackend:
                 "ONLYOFFICE /healthcheck did not become reachable behind the edge; "
                 "a cold DocumentServer boot takes minutes — rerun to converge."
             )
+        # The health answer is the DocumentServer's own; it does NOT prove the
+        # editing lane. The launcher route on the same hostname is the other
+        # half (see the module comment): /healthcheck was green on the box
+        # while the editor fell back to its banner, because nothing routed
+        # /filex-frame/* to the app. Prove it through the edge, loopback,
+        # same lane as the health gate — a 404 from the docservice reads as
+        # not-ready here, and the next pass retries.
+        frame_url = _office_frame_url(self._office_hostname)
+        if not _wait_for_local_https_health(frame_url, attempts=24, delay_seconds=5.0):
+            raise FilexError(
+                "The editor launcher route did not become reachable at "
+                f"{frame_url} — the edge has not picked up the frame router; "
+                "rerun to converge."
+            )
         write_filex_office_jwt(self._state_dir, jwt_secret=_office_jwt_value(self._stack_name))
         return (
             f"ONLYOFFICE sidecar ready: /healthcheck answers at {health_url}; "
+            f"editor launcher answers at {frame_url}; "
             f"editor at {_office_editor_url(self._office_hostname)}; "
             "JWT enforced, secret recorded (0600) in the state dir.",
         )
@@ -1042,6 +1073,10 @@ def _office_editor_url(hostname: str) -> str:
     return f"https://{hostname}"
 
 
+def _office_frame_url(hostname: str) -> str:
+    return f"https://{hostname}{_OFFICE_FRAME_PATH}/editor"
+
+
 def _render_compose_file(
     *,
     stack_name: str,
@@ -1109,6 +1144,26 @@ def _render_compose_file(
         f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Host: "{hostname}"\n'
         f'      traefik.http.middlewares.{service_name}-forwarded-https.headers.customrequestheaders.X-Forwarded-Port: "443"\n'
         f'      traefik.http.services.{service_name}.loadbalancer.server.port: "{_DEFAULT_FILEX_PORT}"\n'
+        # The office hostname is shared by two services on purpose (see the
+        # module comment): the editor launcher route goes back to THIS
+        # service, everything else on that hostname stays with the
+        # DocumentServer router below. The prefix router must win, hence the
+        # explicit priority over the Host-only sidecar rule.
+        f'      traefik.http.routers.{service_name}-office-frame.entrypoints: "websecure"\n'
+        f'      traefik.http.routers.{service_name}-office-frame.rule: '
+        f'"Host(`{office_hostname}`) && PathPrefix(`{_OFFICE_FRAME_PATH}`)"\n'
+        f'      traefik.http.routers.{service_name}-office-frame.priority: "200"\n'
+        f'      traefik.http.routers.{service_name}-office-frame.tls: "true"\n'
+        f'      traefik.http.routers.{service_name}-office-frame.middlewares: '
+        f'"{service_name}-office-frame-forwarded-https"\n'
+        f'      traefik.http.middlewares.{service_name}-office-frame-forwarded-https.headers.'
+        'customrequestheaders.X-Forwarded-Proto: "https"\n'
+        f'      traefik.http.middlewares.{service_name}-office-frame-forwarded-https.headers.'
+        f'customrequestheaders.X-Forwarded-Host: "{office_hostname}"\n'
+        f'      traefik.http.middlewares.{service_name}-office-frame-forwarded-https.headers.'
+        'customrequestheaders.X-Forwarded-Port: "443"\n'
+        f'      traefik.http.services.{service_name}-office-frame.loadbalancer.server.port: '
+        f'"{_DEFAULT_FILEX_PORT}"\n'
         "    volumes:\n"
         f"      - {data_name}:{_DEFAULT_FILEX_DATA_ROOT}\n"
         "    expose:\n"
