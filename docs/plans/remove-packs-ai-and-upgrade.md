@@ -1731,3 +1731,30 @@ automatically with multiple Services" — measured: the app hostname itself
 went dark until each router named its service). Box-verified after the
 fix: launcher 200 (launcher HTML with `data-api` against the office
 origin), `/healthcheck` still `true`, FileX `/healthz` `{"status":"ok"}`.
+
+## Reshoot outcome (2026-11, closes the vision review)
+
+The studio re-shot all 43 finals against the post-upgrade box with no
+carry-overs, and every PNG was eye-reviewed. The review earned its keep
+twice. First finding: the office-edit shot showed FileX's fallback
+banner, not the canvas — that hunt is the "Office frame route" section
+above (`5304f8e` + `5615697`, box-proven, shot re-shot). Second: the
+Connect shot leaked the root domain through an empty key-name field's
+PLACEHOLDER — placeholders are attributes with no text nodes, so the
+scanner's text walk and value lane both missed them. The scanner now
+blurs whole fields on placeholder hits too (`eb7ed33`), the shot was
+re-shot, and the blur is verified by eye.
+
+The playbook lanes were rewritten to measured UI truth (`dbeca57`):
+single click selects (rows open on dblclick), the Details drawer's
+Activity tab renders version rows as number/timestamp/size/Restore with
+NO author column (the author lives in the share — README corrected to
+match), and the office captions speak of the frame and snapshot lane
+rather than keystrokes headless never landed. Four new shots land with
+the finals (`f47dffe`): filex-office-edit, filex-office-versions,
+gitea-logged-out (private-by-default proven from outside), and
+litellm-internal-user (demo is Internal User; the deployer is the only
+human admin). Redaction stayed true to its one exception list —
+dokploy-wizard and wizard-provisioner visible, humans blurred by
+identity, demo visible by design — and every zero-rect NOTE from the
+redactor was eye-verified clean.
