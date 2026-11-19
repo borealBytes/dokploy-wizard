@@ -22,19 +22,19 @@ const SERVICE_SUBDOMAINS = {
 const SHOTS = [
   // ---- Dokploy control plane ---------------------------------------------
   {
-    shot: 'dokploy-login', area: 'dokploy', service: 'dokploy', viewportOnly: true,
+    shot: 'dokploy-login', area: 'dokploy', service: 'dokploy', viewportOnly: true, noAuth: true,
     caption: 'Dokploy — the control plane the wizard itself installs through. One operator password per box.',
     steps: [{ goto: '/' }],
   },
   {
     shot: 'dokploy-projects', area: 'dokploy', service: 'dokploy',
     caption: 'Every wizard service is a Dokploy project — inspect and restart it by hand whenever you like.',
-    steps: [{ goto: '/' }, { wait: 1500 }],
+    steps: [{ waitForSelector: 'text=/Projects/i', timeout: 60000 }, { wait: 2500 }],
   },
 
   // ---- Coder workspaces ----------------------------------------------------
   {
-    shot: 'coder-login', area: 'coder', service: 'coder', viewportOnly: true,
+    shot: 'coder-login', area: 'coder', service: 'coder', viewportOnly: true, noAuth: true,
     caption: 'Coder login — the same email and password as every other surface.',
     steps: [{ goto: '/login' }],
   },
@@ -47,33 +47,34 @@ const SHOTS = [
     shot: 'coder-tiles', area: 'coder', service: 'coder',
     caption: 'App tiles ride the workspace: OpenCode, Hermes, Gitea, FileX, DocuSeal — per-person, pre-authenticated.',
     steps: [
-      { goto: '/workspaces' }, { wait: 1500 },
-      { click: 'a[href*="default"]' }, { waitForSelector: 'table button, [data-testid="workspace-actions"]', wait: 0 },
-      { click: 'button[aria-label="Open menu items"]' }, { wait: 300 },
-      { click: 'text=/^Startup config$/' }, { wait: 1500 },
+      { goto: '/workspaces' }, { wait: 2000 },
+      { click: 'a[href*="/@"]' }, { wait: 2500 },
     ],
   },
   {
     shot: 'coder-template-terraform', area: 'coder', service: 'coder',
     caption: 'The template is plain Terraform — the wizard bakes the box topology into it at plan time.',
     steps: [
-      { goto: '/templates' }, { wait: 1000 },
-      { click: 'text=ubuntu-vscode-hermes-desktop' }, { wait: 1000 },
+      { goto: '/templates/ubuntu-vscode-hermes-desktop' }, { wait: 1500 },
+      { click: 'text=Source Code' }, { wait: 2000 },
     ],
   },
   {
     shot: 'coder-users', area: 'coder', service: 'coder',
     caption: 'Users page: the primary deployer account plus a joined second person — each gets their own identity lane.',
-    steps: [{ goto: '/users' }, { wait: 1200 }],
+    steps: [{ goto: '/users' }, { wait: 1500 }],
   },
   {
     shot: 'coder-schedule', area: 'coder', service: 'coder',
-    caption: 'Day-2 workspace hygiene: auto-start weekdays, auto-stop nights — nothing idles unpaid.',
+    caption: 'Workspace settings are the day-2 knobs — update policy first; schedule and TTL controls sit alongside.',
+    // Box-measured kebab menu: Stop…/Restart…/Settings/… and the settings
+    // page anchors on General / Automatic Updates / Update Policy headings.
     steps: [
-      { goto: '/workspaces' }, { wait: 1500 },
-      { click: 'a[href*="default"]' }, { wait: 800 },
-      { click: 'button[aria-label="Open menu items"]' }, { wait: 300 },
-      { click: 'text=/Schedule$/' }, { wait: 1200 },
+      { goto: '/workspaces' }, { wait: 2500 },
+      { hover: 'table tbody tr' },
+      { click: 'button:has-text("Workspace actions")' }, { wait: 700 },
+      { click: '[role="menuitem"]:has-text("Settings")' },
+      { waitForSelector: 'text=/Automatic Updates/i', timeout: 30000 }, { wait: 1500 },
     ],
   },
 
@@ -86,15 +87,17 @@ const SHOTS = [
   {
     shot: 'gitea-profile', area: 'gitea', service: 'gitea',
     caption: 'A workspace owner wakes up a Gitea account already theirs: login name, real email primary and verified.',
+    // Box-measured: Gitea 28.x serves the profile form at /user/settings
+    // itself (/user/settings/profile 404s — caught in vision review).
     steps: [
-      { goto: '/user/settings/profile' }, { wait: 1200 },
+      { goto: '/user/settings' }, { wait: 1500 },
     ],
   },
   {
     shot: 'gitea-identities', area: 'gitea', service: 'gitea',
     caption: 'Emails are managed identities, not placeholders — the boot lane migrates anything the pre-fix wizard left behind.',
     steps: [
-      { goto: '/user/settings/emails' }, { wait: 1200 },
+      { goto: '/user/settings/account' }, { wait: 1500 },
     ],
   },
   {
@@ -104,105 +107,158 @@ const SHOTS = [
   },
   {
     shot: 'gitea-provisioner', area: 'gitea', service: 'gitea',
-    caption: 'The dokploy-wizard provisioner is an ordinary admin account — audit it, rotate it, delete it.',
-    steps: [{ goto: '/dashboards/admin/users' }, { wait: 1500 }],
+    caption: 'Every account on the box, listed: the people plus the dokploy-wizard provisioner — an ordinary admin account, auditable and rotatable.',
+    steps: [{ goto: '/explore/users' }, { wait: 1200 }],
   },
   {
     shot: 'gitea-repo-commits', area: 'gitea', service: 'gitea',
     caption: 'Commits authored in the workspace land with the person, over their workspace key.',
-    steps: [{ goto: '/{owner}/wizard-demo/commits' }, { wait: 1200 }],
+    steps: [{ goto: '/{owner}/wizard-demo/commits/branch/main' }, { wait: 1500 }],
   },
 
   // ---- LiteLLM gateway -------------------------------------------------------
   {
-    shot: 'litellm-login', area: 'litellm', service: 'litellm', viewportOnly: true,
+    shot: 'litellm-login', area: 'litellm', service: 'litellm', viewportOnly: true, noAuth: true,
     caption: 'LiteLLM admin UI login.',
-    steps: [{ goto: '/ui/login' }],
+    steps: [{ goto: '/ui/login/' }],
   },
   {
     shot: 'litellm-models', area: 'litellm', service: 'litellm',
     caption: 'Model autosync registers provider models as sync/* — including a tailnet vLLM box named for the host that serves it.',
-    steps: [{ goto: '/ui/models' }, { waitForSelector: 'table', wait: 2000 }],
+    // Box-measured: 75 synced models paginate alphabetically and the tailnet
+    // row sits deep; the search filter brings the host-named sync/* model
+    // into frame, and its label then lands inside the redaction rects.
+    steps: [
+      { goto: '/ui/?page=models' }, { waitForSelector: 'table tbody tr', wait: 2000 },
+      { click: 'button:has-text("×")', optional: true },
+      { fill: 'input[placeholder*="Search model" i]', value: 'tux' },
+      { wait: 3000 },
+    ],
   },
   {
     shot: 'litellm-keys', area: 'litellm', service: 'litellm',
-    caption: 'Every app gets its own virtual key — coder-hermes, coder-opencode — minted per (user, workspace), spend tracked per key.',
-    steps: [{ goto: '/ui/virtualKeys' }, { waitForSelector: 'table', wait: 2000 }],
+    caption: 'Every app gets its own virtual key — coder-hermes, dokploy-ai — plus one minted per (user, workspace), spend tracked per key.',
+    // The feedback popup anchors bottom-right over the table; dismissed if
+    // present (optional), and the workspace alias blurs its dotless domain.
+    steps: [
+      { goto: '/ui/?page=api-keys' }, { waitForSelector: 'table tbody tr', wait: 2500 },
+      { click: 'text="Don\'t ask me again"', optional: true },
+      { click: 'button:has-text("×")', optional: true }, { wait: 500 },
+    ],
   },
   {
     shot: 'litellm-key-detail', area: 'litellm', service: 'litellm',
     caption: 'A key carries its model allow-list; the team plan grants it, the box enforces it.',
+    // Box-measured: alias cells render inside a CSS-truncated button, so the
+    // row itself is the reliable click target for the detail drawer.
     steps: [
-      { goto: '/ui/virtualKeys' }, { waitForSelector: 'table', wait: 1500 },
-      { click: 'text=coder-hermes' }, { wait: 1500 },
+      { goto: '/ui/?page=api-keys' }, { waitForSelector: 'table tbody tr', wait: 2500 },
+      { click: 'table tbody tr:has-text("coder-hermes") button' }, { wait: 2500 },
+      { click: 'text="Don\'t ask me again"', optional: true },
+      { click: 'button:has-text("×")', optional: true },
     ],
   },
   {
     shot: 'litellm-usage', area: 'litellm', service: 'litellm',
     caption: 'Spend and tokens per key — who called which model, on whose box.',
-    steps: [{ goto: '/ui/usage' }, { waitForSelector: 'canvas, table', wait: 2500 }],
+    steps: [
+      { goto: '/ui/?page=new_usage' }, { waitForSelector: 'canvas, table', wait: 4000 },
+      { click: 'text="Don\'t ask me again"', optional: true },
+      { click: 'button:has-text("×")', optional: true },
+    ],
   },
   {
     shot: 'litellm-logs', area: 'litellm', service: 'litellm',
     caption: 'Request logs: every completion, keyed to the app and person that issued it.',
-    steps: [{ goto: '/ui/logs' }, { waitForSelector: 'table', wait: 2000 }],
+    steps: [
+      { goto: '/ui/?page=logs' }, { waitForSelector: 'table', wait: 3000 },
+      { click: 'text="Don\'t ask me again"', optional: true },
+      { click: 'button:has-text("×")', optional: true },
+    ],
   },
   {
     shot: 'litellm-users', area: 'litellm', service: 'litellm',
     caption: 'New-user policy is a stack knob: models off by default, grants explicit, the admin exempt.',
-    steps: [{ goto: '/ui/users' }, { waitForSelector: 'table', wait: 2000 }],
-  },
-  {
-    shot: 'hermes-model-picker', area: 'litellm', service: 'coder',
-    caption: 'Workspace apps pick the synced catalog by its honest name — sync/<host>-<model> is a machine you can ping.',
     steps: [
-      { goto: '/workspaces' }, { wait: 1500 },
-      { click: 'a[href*="default"]' }, { wait: 800 },
-      { click: 'button[aria-label="Open menu items"]' }, { wait: 300 },
-      { click: 'text=/^App status$/' }, { wait: 1000 },
+      { goto: '/ui/?page=users' }, { waitForSelector: 'table tbody tr', wait: 3000 },
+      { click: 'text="Don\'t ask me again"', optional: true },
+      { click: 'button:has-text("×")', optional: true },
     ],
   },
 
   // ---- FileX shared drive -----------------------------------------------------
   {
-    shot: 'filex-login', area: 'filex', service: 'filex', viewportOnly: true,
+    shot: 'filex-login', area: 'filex', service: 'filex', viewportOnly: true, noAuth: true,
     caption: 'FileX login — the deployer signs in as the account the pack bootstrapped; nothing else to remember.',
-    steps: [{ goto: '/login' }],
+    // Box-measured: /admin/login hydrates its form ~1s after first paint —
+    // capture before that and you photograph a blank page.
+    steps: [
+      { goto: '/admin/login' },
+      { waitForSelector: 'input[name="email"]' },
+      { wait: 1200 },
+    ],
   },
   {
     shot: 'filex-files', area: 'filex', service: 'filex',
     caption: '~/shared is FileX: versioned objects on SeaweedFS S3, mounted over rclone FUSE.',
-    steps: [{ goto: '/files' }, { wait: 2000 }],
+    steps: [
+      { goto: '/admin/home' }, { wait: 2000 },
+      { click: 'text="My files"' }, { wait: 2000 },
+    ],
   },
   {
     shot: 'filex-versions', area: 'filex', service: 'filex',
     caption: 'Two people edit the same file; FileX keeps every version and every author — this is where the act pays off.',
+    // Box-measured (twice): the /admin/files history-search input hydrates
+    // late (search backend), while /admin/home -> My files renders instantly.
+    // The browser route also shows the shared folder the search page hid.
     steps: [
-      { goto: '/files' }, { wait: 1500 },
-      { click: 'text=shared-act' }, { wait: 1200 },
+      { goto: '/admin/home' }, { wait: 2500 },
+      { click: 'text="My files"' },
+      { waitForSelector: 'text=/shared-act/', timeout: 25000 }, { wait: 1000 },
+      { click: 'text=/shared-act/' }, { wait: 2000 },
+      { click: 'button[aria-label*="detail" i], button[aria-label*="info" i], button[title*="detail" i]', optional: true },
+      { click: 'text="Activity"', optional: true },
+      { wait: 2500 },
     ],
   },
   {
     shot: 'filex-connect', area: 'filex', service: 'filex',
     caption: 'The same bucket speaks S3 and WebDAV — official desktop and mobile clients connect with the user\'s own key.',
-    steps: [{ goto: '/clients' }, { wait: 1500 }],
+    steps: [
+      { goto: '/admin/home' }, { wait: 2000 },
+      { click: 'text="Connections"' }, { wait: 2500 },
+    ],
   },
   {
     shot: 'filex-s3keys', area: 'filex', service: 'filex',
     caption: 'S3 keys are per (user, workspace) — the label names both, and the mount dies with the workspace, not the person.',
-    steps: [{ goto: '/account/settings' }, { wait: 1500 }],
+    steps: [
+      { goto: '/admin/home' }, { wait: 2000 },
+      { click: 'text="API keys"' }, { wait: 2500 },
+    ],
+  },
+  {
+    shot: 'filex-people', area: 'filex', service: 'filex',
+    caption: 'People page after a clean install: the admin (the deployer\'s own email), the provisioner, and the joined second person — the machine twin is gone.',
+    steps: [{ goto: '/admin/users' }, { wait: 2000 }],
   },
 
   // ---- DocuSeal ---------------------------------------------------------------
   {
-    shot: 'docuseal-login', area: 'docuseal', service: 'docuseal', viewportOnly: true,
+    shot: 'docuseal-login', area: 'docuseal', service: 'docuseal', viewportOnly: true, noAuth: true,
     caption: 'DocuSeal — forms and signatures on your own metal.',
-    steps: [{ goto: '/account/sign_in' }],
+    // Box-measured: this build serves login at /sign_in; /account/sign_in
+    // renders the app's own 404 page.
+    steps: [{ goto: '/sign_in' }],
   },
   {
     shot: 'docuseal-forms', area: 'docuseal', service: 'docuseal',
     caption: 'Form builder, submissions, and audit trail; the wizard bootstraps the deployer account.',
-    steps: [{ goto: '/' }, { wait: 1500 }],
+    // Box-measured: '/' doubles as marketing page AND dashboard — the
+    // "Document Templates" heading only renders for a live session, so
+    // waiting on it is the fail-closed proof of authentication.
+    steps: [{ goto: '/' }, { waitForSelector: 'text=/Document Templates/i', wait: 2000 }],
   },
 
   // ---- The ~/shared cross-user act ---------------------------------------------
@@ -316,22 +372,25 @@ const SHOTS = [
 
   // ---- New-account identity lane (walkthrough strip) -------------------------------
   {
-    shot: 'walkthrough-login', area: 'walkthrough', service: 'coder', viewportOnly: true,
+    shot: 'walkthrough-login', area: 'walkthrough', service: 'coder', viewportOnly: true, noAuth: true,
     caption: 'Demo account signs in — the primary deployer account created it minutes before.',
     steps: [{ goto: '/login' }],
-    loginAs: () => ({ email: 'demo@wizard.local.test', password: 'demo-demo-demo' }),
+    loginAs: () => ({ login: 'demo', email: 'demo@wizard.local.test', password: 'demo-demo-demo' }),
   },
   {
     shot: 'walkthrough-workspace', area: 'walkthrough', service: 'coder',
     caption: 'One workspace per person, from the one seeded template.',
     steps: [{ goto: '/workspaces' }, { wait: 1500 }],
-    loginAs: () => ({ email: 'demo@wizard.local.test', password: 'demo-demo-demo' }),
+    loginAs: () => ({ login: 'demo', email: 'demo@wizard.local.test', password: 'demo-demo-demo' }),
   },
   {
     shot: 'walkthrough-gitea-profile', area: 'walkthrough', service: 'gitea',
     caption: 'The identity lane springs again: demo gets a Gitea account with demo\'s own real email primary.',
-    steps: [{ goto: '/user/settings/profile' }, { wait: 1500 }],
-    loginAs: () => ({ email: 'demo@wizard.local.test', password: 'demo-demo-demo' }),
+    steps: [{ goto: '/user/settings' }, { wait: 1500 }],
+    // Box-measured + template lines 678-716/849-860: Gitea accounts ride the
+    // STACK ADMIN password (one operator credential across the stack), while
+    // the Coder shots above sign in with demo's own workspace password.
+    loginAs: (c) => ({ login: 'demo', email: 'demo@wizard.local.test', password: c.password }),
   },
 ];
 
