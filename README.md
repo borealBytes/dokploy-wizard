@@ -617,13 +617,16 @@ wizard wires:
   independent services
 - private by default, opt-in public: `DEFAULT_USER_VISIBILITY: private`
   means people see only their own visibility options, `DEFAULT_PRIVATE`
-  starts every fresh repo private, and `DISABLE_ANONYMOUS_ACCESS` closes the
-  explore page and the anonymous profile pages to logged-out web. A repo or
-  profile the owner makes public stays public — the point is that nothing
-  leaks before the owner chooses, not that the box is hermetic. Accounts
-  that predate the default (the old Gitea default was public) are flipped to
-  private once by the coder pass, and the flip is logged; manual accounts
-  the wizard does not own are never touched
+  starts every fresh repo private, and `DISABLE_ANONYMOUS_ACCESS` leaves
+  logged-out web with nothing to browse — the explore page renders a closed
+  listing and a private repo or profile answers a plain 404 (box-measured on
+  the deployed Gitea 28.4). A repo or profile the owner makes public stays
+  public — the point is that nothing leaks before the owner chooses, not
+  that the box is hermetic. Accounts that predate the default — and the
+  CLI-seeded deployer row, which the admin create leaves public regardless
+  of the option (measured) — are flipped to private once by the gitea
+  phase, and the flip (or a failed admin list read that skips it) is
+  logged; manual accounts the wizard does not own are never touched
 - a `GITEA_SECRET_KEY` derived per stack and kept out of the compose file
 
 Gitea's login lane rides the deployer's own account: the login is derived from

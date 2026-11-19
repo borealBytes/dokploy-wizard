@@ -686,10 +686,26 @@ def test_provisioner_alive_token_short_circuits_everything(
     monkeypatch.setattr(gitea_module, "_gitea_cli_exec", cli)
     http = _ScriptedGiteaHttp()
     http.queue("GET", "/api/v1/user", 200, {"username": "clayton"})
-    # The deployer's own row is visible-public (seeded before the privacy
-    # default): the visibility migration flips it and says so once.
-    http.queue("GET", "/api/v1/admin/users/clayton", 200, {"username": "clayton", "visibility": "public"})
-    http.queue("PATCH", "/api/v1/admin/users/clayton", 200, {"username": "clayton", "visibility": "private"})
+    # The retire gate and the visibility migration both read the paged
+    # admin LIST: the single-row admin GET is 405 on the deployed Gitea 28.4
+    # (measured — the lane that rode it silently skipped for a full pass).
+    # Retire first (no legacy row stands), then the migration: the
+    # deployer's own row is public (the admin CLI create does not consult
+    # DEFAULT_USER_VISIBILITY, box-measured) and the migration flips it,
+    # saying so once.
+    http.queue(
+        "GET",
+        "/api/v1/admin/users?page=1",
+        200,
+        [{"login": "clayton", "username": "clayton", "visibility": "private"}],
+    )
+    http.queue(
+        "GET",
+        "/api/v1/admin/users?page=1",
+        200,
+        [{"login": "clayton", "username": "clayton", "visibility": "public"}],
+    )
+    http.queue("PATCH", "/api/v1/admin/users/clayton", 200, {"login": "clayton"})
     monkeypatch.setattr(gitea_module.urlrequest, "urlopen", http)
     state, notes = backend.ensure_application_ready(
         secret_key_secret_ref="wizard-stack-gitea-secret-key"
@@ -776,17 +792,29 @@ def test_provisioner_bridge_repairs_the_upgrade_box_account(
     )
     monkeypatch.setattr(gitea_module, "_gitea_cli_exec", cli)
     http = _ScriptedGiteaHttp()
-    http.queue("GET", "/api/v1/user", 200, {"username": "dokploy-wizard"})
+    # The bridge gate is the mint refusal itself: the row cannot be
+    # pre-read (single-row admin GET is 405 on this build; the list omits
+    # the must-change column — both measured live). First basic-auth POST
+    # refused at 403, the legacy token PATCHes both columns, the retry
+    # mints; the retire gate then reads the LIST and finds the legacy row
+    # standing, so the CLI delete runs.
     http.queue(
-        "GET",
-        "/api/v1/admin/users/clayton",
-        200,
-        {"username": "clayton", "must_change_password": True, "is_admin": False},
+        "POST",
+        "/api/v1/users/clayton/tokens",
+        403,
+        {"message": "You must change your password. Change it at: /user/settings/change_password"},
     )
-    http.queue("PATCH", "/api/v1/admin/users/clayton", 200, {"username": "clayton"})
+    http.queue("GET", "/api/v1/user", 200, {"username": "dokploy-wizard"})
+    http.queue("PATCH", "/api/v1/admin/users/clayton", 200, {"login": "clayton"})
     http.queue("POST", "/api/v1/users/clayton/tokens", 201, {"sha1": "bridged-token"})
     http.queue(
-        "GET", "/api/v1/admin/users/dokploy-wizard", 200, {"username": "dokploy-wizard"}
+        "GET",
+        "/api/v1/admin/users?page=1",
+        200,
+        [
+            {"login": "clayton", "username": "clayton"},
+            {"login": "dokploy-wizard", "username": "dokploy-wizard"},
+        ],
     )
     monkeypatch.setattr(gitea_module.urlrequest, "urlopen", http)
 
@@ -804,10 +832,15 @@ def test_provisioner_bridge_repairs_the_upgrade_box_account(
     assert cli.calls[2][:3] == ["admin", "user", "delete"]
 
 
-def test_provisioner_bridge_skips_an_account_that_already_reads_admin(
+def test_provisioner_bridge_stays_shut_when_the_mint_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Drift-gated: the PATCH runs only when the row actually needs it."""
+    """The gate is the mint refusal: a healthy upgrade-box account never
+    feels the bridge. (Row pre-reads are off the table on this build — the
+    single-row admin GET is 405 and the list omits the must-change column,
+    both measured — so the 403 *is* the signal, and the idempotent PATCH
+    only ever follows a refused basic-auth call.)
+    """
     write_gitea_provisioner(
         tmp_path,
         GiteaProvisionerState(
@@ -823,20 +856,18 @@ def test_provisioner_bridge_skips_an_account_that_already_reads_admin(
         [
             _CliResult(ok=False, output="Error: user 'clayton' name is already taken"),
             _CliResult(ok=True, output="password updated"),
-            _CliResult(ok=True, output="user deleted"),
         ]
     )
     monkeypatch.setattr(gitea_module, "_gitea_cli_exec", cli)
     http = _ScriptedGiteaHttp()
-    http.queue("GET", "/api/v1/user", 200, {"username": "dokploy-wizard"})
+    http.queue("POST", "/api/v1/users/clayton/tokens", 201, {"sha1": "fresh-token"})
+    # The retire gate reads the LIST; the legacy row is already gone.
     http.queue(
         "GET",
-        "/api/v1/admin/users/clayton",
+        "/api/v1/admin/users?page=1",
         200,
-        {"username": "clayton", "must_change_password": False, "is_admin": True},
+        [{"login": "clayton", "username": "clayton"}],
     )
-    http.queue("POST", "/api/v1/users/clayton/tokens", 201, {"sha1": "fresh-token"})
-    http.queue("GET", "/api/v1/admin/users/dokploy-wizard", 404, {})
     monkeypatch.setattr(gitea_module.urlrequest, "urlopen", http)
 
     ready, note = backend._ensure_provisioner()

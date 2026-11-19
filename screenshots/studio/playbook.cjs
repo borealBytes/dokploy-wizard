@@ -86,13 +86,16 @@ const SHOTS = [
   // ---- Gitea identities ------------------------------------------------------
   {
     shot: 'gitea-logged-out', area: 'gitea', service: 'gitea', viewportOnly: true, noAuth: true,
-    caption: 'A logged-out visitor sees the sign-in door and nothing else: repos are private by default and anonymous browsing is off.',
-    // DISABLE_ANONYMOUS_ACCESS + private-by-default: /explore redirects to
-    // the sign-in form — the redirect itself is the proof, so this shot
-    // deliberately photographs the landing.
+    caption: 'A logged-out visitor meets a 404 on the wizard-seeded repo: private by default, so the anonymous web sees no listing and no page.',
+    // Box-measured: on this Gitea build a logged-out /explore renders a
+    // closed listing (303 to the repos tab, no listing, navbar Sign In —
+    // no sign-in form), and a private repo or profile answers a plain 404
+    // to the anonymous request. The 404 on the boot lane's seed is the
+    // privacy proof that needs no interpretation, so that is what this
+    // shot photographs.
     steps: [
-      { goto: '/explore' },
-      { waitForSelector: 'input[name="user_name"]', wait: 1200 },
+      { goto: '/{owner}/wizard-demo' },
+      { waitForSelector: 'text=/not found/i', wait: 1200 },
     ],
   },
   {

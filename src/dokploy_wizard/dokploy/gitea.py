@@ -80,6 +80,12 @@ _PROVISIONER_TOKEN_NAME = "wizard-provisioner"
 # only. The constant lives on for the migration path — a modify pass finds
 # and deletes the old row once the replacement stands.
 _LEGACY_PROVISIONER_USERNAME = "dokploy-wizard"
+# Admin user list pagination. The single-row admin GET is dead on the
+# deployed Gitea 28.4 (405, measured), so the paged list is the only alive
+# read lane; these mirror the coder phase's identity-sync lane (30/page,
+# 20 pages).
+_GITEA_LIST_PAGE_SIZE = 30
+_GITEA_LIST_MAX_PAGES = 20
 # Admin account, full write access: the provisioner drives identity automation
 # (users, orgs, keys, OIDC bindings) from the box side. Gitea 28's scope grammar
 # takes the bare "all" grant; the "category:access" forms (all:all, write:all,
@@ -352,9 +358,11 @@ class DokployGiteaBackend:
         basic auth, then re-verified on every later pass from the state
         document. A `dokploy-wizard` leftover from the previous generation is
         deleted once its replacement proves alive — and on upgrade boxes the
-        deployer's own account is first repaired through the legacy bridge
-        (see `_bridge_legacy_provisioner`), because the mint has a boot-order
-        enemy the CLI cannot reach.
+        deployer's own account is repaired through the legacy bridge, but
+        only after the basic-auth mint is refused (see
+        `_bridge_legacy_provisioner`): the refusal is the only must-change
+        signal this Gitea build still gives — the list payload omits the
+        flag and the single-row admin GET is gone (405, measured live).
         """
         login = self._provisioner_login()
         email = self._admin_email
@@ -388,9 +396,15 @@ class DokployGiteaBackend:
         if not create.ok and not _cli_reports_existing(create.output):
             return False, f"WARNING: Gitea provisioner account could not be created: {create.output[:200]}"
         self._pin_provisioner_password(login=login, password=password)
-        bridge_note = self._bridge_legacy_provisioner(existing, login=login)
-
         token = self._mint_provisioner_token(login=login, password=password)
+        bridge_note = None
+        if token is None:
+            # The mint's refusal is the drift signal; the bridge repairs
+            # through the legacy token and the mint retries once. A healthy
+            # box never reaches the PATCH.
+            bridge_note = self._bridge_legacy_provisioner(existing, login=login)
+            if bridge_note is not None:
+                token = self._mint_provisioner_token(login=login, password=password)
         if token is None:
             return False, "WARNING: Gitea provisioner API token could not be minted."
         retire_note = self._retire_legacy_provisioner(login=login, token=token)
@@ -455,8 +469,11 @@ class DokployGiteaBackend:
         account's token from the state document: it is still admin until
         the retire step below deletes it. One PATCH, both columns, the
         documented basic-auth lane then mints again — the whole sequence
-        measured live (200/200/201). Drift-gated: an account whose row
-        already reads admin and unflagged is not touched; boxes that never
+        measured live (200/200/201). The gate is the mint refusal itself:
+        this Gitea build answers the single-row admin GET with 405 (no
+        pre-read possible), the list payload omits the flag, and the PATCH
+        is idempotent — so the bridge fires only after a basic-auth mint
+        was refused, and a healthy account never feels it. Boxes that never
         ran the previous generation have no legacy token and skip here —
         their create+pin lane carries --must-change-password=false on both
         commands (measured the necessity on the live box: this Gitea build
@@ -468,17 +485,6 @@ class DokployGiteaBackend:
         if login == _LEGACY_PROVISIONER_USERNAME:
             return None  # the deployer IS the legacy account: nothing to bridge
         if not self._api_token_valid(existing.token, username=existing.username):
-            return None
-        status, row = self._gitea_api(
-            "GET",
-            f"/api/v1/admin/users/{parse.quote(login, safe='')}",
-            token=existing.token,
-        )
-        if status != 200 or not isinstance(row, dict):
-            return None
-        needs_flag_clear = bool(row.get("must_change_password"))
-        needs_admin = row.get("is_admin") is not True
-        if not needs_flag_clear and not needs_admin:
             return None
         status, _body = self._gitea_api(
             "PATCH",
@@ -493,23 +499,47 @@ class DokployGiteaBackend:
             f"'{_LEGACY_PROVISIONER_USERNAME}' bridge (admin hat, must-change flag)."
         )
 
+    def _gitea_admin_user_rows(self, *, token: str) -> tuple[list[dict], int | None]:
+        """Paged admin user list through the loopback edge.
+
+        The single-row admin GET does not exist on this build (405,
+        measured — see `_migrate_identity_visibility`); the paged list is
+        the alive read lane and carries per-row `visibility`. Returns
+        (rows, failed_page_status). Pagination mirrors the coder phase's
+        identity-sync lane (page size 30, 20 pages).
+        """
+        rows: list[dict] = []
+        page = 1
+        while page <= _GITEA_LIST_MAX_PAGES:
+            status, payload = self._gitea_api(
+                "GET", f"/api/v1/admin/users?page={page}", token=token
+            )
+            if status != 200 or not isinstance(payload, list):
+                return rows, status
+            rows.extend(row for row in payload if isinstance(row, dict))
+            if len(payload) < _GITEA_LIST_PAGE_SIZE:
+                return rows, None
+            page += 1
+        return rows, None
+
+    @staticmethod
+    def _gitea_row_login(row: dict) -> str:
+        return str(row.get("username") or row.get("login") or "").lower()
+
     def _retire_legacy_provisioner(self, *, login: str, token: str) -> str | None:
         """Delete the previous generation's service account, once.
 
         The replacement token is the authority: the old row is looked up
-        through the admin API (anything but 200 means already gone) and
-        deleted through the CLI. An account that still owns repositories
-        survives the pass with a visible warning rather than a surprise
-        purge — the wizard never deletes what a human may have moved there.
+        through the paged admin list (an unreadable list reads as absent —
+        the next pass retries) and deleted through the CLI. An account
+        that still owns repositories survives the pass with a visible
+        warning rather than a surprise purge — the wizard never deletes
+        what a human may have moved there.
         """
         if login == _LEGACY_PROVISIONER_USERNAME:
             return None
-        status, _payload = self._gitea_api(
-            "GET",
-            f"/api/v1/admin/users/{_LEGACY_PROVISIONER_USERNAME}",
-            token=token,
-        )
-        if status != 200:
+        rows, _failure = self._gitea_admin_user_rows(token=token)
+        if not any(self._gitea_row_login(row) == _LEGACY_PROVISIONER_USERNAME for row in rows):
             return None
         delete = _gitea_cli_exec(
             self._compose_name,
@@ -553,10 +583,17 @@ class DokployGiteaBackend:
         """Flip wizard-owned accounts to private visibility (privacy default).
 
         Accounts sprung before the privacy default shipped stand public on
-        the box. The same ledger that authorizes the enable/disable sync
+        the box — and so does the fresh CLI-seeded deployer row: the admin
+        CLI does not consult `DEFAULT_USER_VISIBILITY` (measured, the
+        from-zero install's first pass booted 'clayton' public despite the
+        option). The same ledger that authorizes the enable/disable sync
         authorizes this flip, plus the deployer's own seeded account (the
-        pack created it, so it needs no ledger claim). Only rows that are
-        not already private are PATCHed; the route and its 200-on-visibility
+        pack created it, so it needs no ledger claim). Rows are read
+        through the paged admin list — the single-row admin GET answers 405
+        on the deployed Gitea 28.4 (measured; the lane that rode it silently
+        skipped for a full pass, which is why a failed list read says so
+        rather than continuing) — and only rows that are not already
+        private are PATCHed; the PATCH route and its 200-on-visibility
         behavior are measured against the deployed Gitea 28.4.
         """
         from dokploy_wizard.state.store import load_gitea_identities
@@ -567,14 +604,21 @@ class DokployGiteaBackend:
         stored = load_gitea_identities(self._state_dir)
         targets = {login.lower() for login in (stored.usernames if stored else ())}
         targets.add(existing.username.lower())
+        rows, list_failure = self._gitea_admin_user_rows(token=existing.token)
+        if list_failure is not None:
+            return [
+                "Skipped the visibility migration: Gitea admin user list failed "
+                f"(HTTP {list_failure})."
+            ]
+        visibilities = {
+            self._gitea_row_login(row): str(row.get("visibility") or "").lower()
+            for row in rows
+        }
         notes: list[str] = []
         for login in sorted(targets):
-            status, row = self._gitea_api(
-                "GET", f"/api/v1/admin/users/{parse.quote(login, safe='')}", token=existing.token
-            )
-            if status != 200 or not isinstance(row, dict):
-                continue
-            if str(row.get("visibility") or "").lower() == "private":
+            if visibilities.get(login) is None:
+                continue  # row gone (manual delete): nothing to flip
+            if visibilities[login] == "private":
                 continue
             status, _body = self._gitea_api(
                 "PATCH",
