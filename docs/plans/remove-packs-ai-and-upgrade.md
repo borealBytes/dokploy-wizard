@@ -1668,3 +1668,38 @@ public edge, tailscale reported `create`, the deployer workspace built and
 the boot lane seeded `clayton/wizard-demo` minutes after boot, matching
 iteration 3's provenance. The one-time zero-state bar the operator set is
 closed.
+
+## Step 13 (2026-11): second-person proof and the silent-flip audit (box: 157.173.124.231)
+
+The second person arrived through the wizard's own lanes: a `demo` Coder
+user (real email, org-joined) created over `POST /api/v2/users`, and
+`showmeseewhycom-workspace` built with the same in-container CLI the wizard
+uses (`/opt/coder create … --use-parameter-defaults --yes --no-wait`). The
+boot lane then sprang `demo` in Gitea — real-email primary, non-admin,
+must-change clear — and seeded `demo/wizard-demo` person-attributed
+(commit `37e4a5ea`, authored `demo <demo@wizard.local.test>`, private, on
+`main`), re-proving the iteration-3 seed design for a non-deployer. A
+forced coder pass carried `Created FileX account 'demo' (identity
+pre-flight)` and `Created LiteLLM user 'demo' (internal_user)`; the
+`gitea-identities.json` ledger sprang with `["demo"]`; the token table
+still held exactly one row (`wizard-provisioner`); and after the forced
+passes the plain modify answered `"mode": "noop"`. Convergence-first held
+with a second person on the box.
+
+The audit thread the proof exposed: demo's public→private flip left no
+note in any payload, yet gitea's access log showed the wizard's PATCH
+completing 200. Root cause found in code, not on the wire:
+`apply_compose_noop_guard` runs the verify lane on a rendered-hash match,
+BEFORE the reconciler's note-keeping `ensure_application_ready` — and the
+verify lane (`_verify_current_application`) called that same side-effecting
+method while discarding its notes into `_notes`. The flip executed in the
+discarding call; the note-keeping call then saw the row already private and
+narrated nothing. Fixed in `9af2c74`: the four side-effecting pack backends
+(gitea, filex, docuseal, moodle) stow verify-lane notes in a per-backend
+deferred buffer and drain them into the next full call's notes, with a
+gitea regression test that scripts exactly this two-call order. Box
+re-proof: demo re-publiced by hand, one forced gitea pass — the payload
+carried `Set Gitea account 'demo' visibility to private (privacy default).`
+once, the database converged to visibility=2 with the flag clear, and the
+plain pass after remained `"mode": "noop"`. A side effect that lands can no
+longer act silently.
