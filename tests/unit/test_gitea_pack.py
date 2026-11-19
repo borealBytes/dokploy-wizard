@@ -740,6 +740,109 @@ def test_provisioner_rotates_dead_token_and_tolerates_existing_account(
     assert cli.calls[0][:3] == ["admin", "user", "create"]
 
 
+def test_provisioner_bridge_repairs_the_upgrade_box_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Box-measured upgrade path: Gitea 403s basic auth until the bridge PATCH.
+
+    The previous wizard generation left the deployer's account non-admin and
+    flagged must-change; the CLI pin rewrites the password but not the flag
+    (measured twice), and every basic-auth mint then dies at 403. The legacy
+    service account's token is the only credential that can fix the row at
+    boot time — the whole 200/200/201 sequence was measured live.
+    """
+    write_gitea_provisioner(
+        tmp_path,
+        GiteaProvisionerState(
+            format_version=1,
+            username="dokploy-wizard",
+            email="dokploy-wizard@gitea.example.com",
+            password="old-pw",
+            token="legacy-token",
+        ),
+    )
+    backend = _gitea_backend(tmp_path, ScriptedS3(head_script=[200]))
+    cli = ScriptedCli(
+        [
+            _CliResult(ok=False, output="Error: user 'clayton' name is already taken"),
+            _CliResult(ok=True, output="password updated"),
+            _CliResult(ok=True, output="user deleted"),
+        ]
+    )
+    monkeypatch.setattr(gitea_module, "_gitea_cli_exec", cli)
+    http = _ScriptedGiteaHttp()
+    http.queue("GET", "/api/v1/user", 200, {"username": "dokploy-wizard"})
+    http.queue(
+        "GET",
+        "/api/v1/admin/users/clayton",
+        200,
+        {"username": "clayton", "must_change_password": True, "is_admin": False},
+    )
+    http.queue("PATCH", "/api/v1/admin/users/clayton", 200, {"username": "clayton"})
+    http.queue("POST", "/api/v1/users/clayton/tokens", 201, {"sha1": "bridged-token"})
+    http.queue(
+        "GET", "/api/v1/admin/users/dokploy-wizard", 200, {"username": "dokploy-wizard"}
+    )
+    monkeypatch.setattr(gitea_module.urlrequest, "urlopen", http)
+
+    ready, note = backend._ensure_provisioner()
+
+    assert ready is True
+    assert note is not None
+    assert "bridge" in note
+    assert "Deleted the legacy Gitea service account" in note
+    stored = load_gitea_provisioner(tmp_path)
+    assert stored is not None
+    assert stored.username == "clayton"
+    assert stored.token == "bridged-token"
+    # The legacy account dies through the CLI, gated on the admin-API 200.
+    assert cli.calls[2][:3] == ["admin", "user", "delete"]
+
+
+def test_provisioner_bridge_skips_an_account_that_already_reads_admin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drift-gated: the PATCH runs only when the row actually needs it."""
+    write_gitea_provisioner(
+        tmp_path,
+        GiteaProvisionerState(
+            format_version=1,
+            username="dokploy-wizard",
+            email="dokploy-wizard@gitea.example.com",
+            password="old-pw",
+            token="legacy-token",
+        ),
+    )
+    backend = _gitea_backend(tmp_path, ScriptedS3(head_script=[200]))
+    cli = ScriptedCli(
+        [
+            _CliResult(ok=False, output="Error: user 'clayton' name is already taken"),
+            _CliResult(ok=True, output="password updated"),
+            _CliResult(ok=True, output="user deleted"),
+        ]
+    )
+    monkeypatch.setattr(gitea_module, "_gitea_cli_exec", cli)
+    http = _ScriptedGiteaHttp()
+    http.queue("GET", "/api/v1/user", 200, {"username": "dokploy-wizard"})
+    http.queue(
+        "GET",
+        "/api/v1/admin/users/clayton",
+        200,
+        {"username": "clayton", "must_change_password": False, "is_admin": True},
+    )
+    http.queue("POST", "/api/v1/users/clayton/tokens", 201, {"sha1": "fresh-token"})
+    http.queue("GET", "/api/v1/admin/users/dokploy-wizard", 404, {})
+    monkeypatch.setattr(gitea_module.urlrequest, "urlopen", http)
+
+    ready, note = backend._ensure_provisioner()
+
+    assert ready is True
+    assert "bridge" not in (note or "")
+    assert ("PATCH", "https://127.0.0.1/api/v1/admin/users/clayton") not in [
+        (request.get_method(), request.full_url) for request in http.requests
+    ]
+
+
 def test_provisioner_degrades_to_warning_when_cli_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -106,8 +106,9 @@ nothing shared.
 
 ![Gitea keys](screenshots/gitea/gitea-keys.png)
 
-Every account on the box, listed: the people plus the `dokploy-wizard`
-provisioner — an ordinary admin account, auditable and rotatable.
+Every account on the box, listed: the people and nobody else — the wizard
+provisions under the deployer's own login, so there is no service account to
+audit.
 
 ![Gitea provisioner](screenshots/gitea/gitea-provisioner.png)
 
@@ -158,8 +159,9 @@ with the workspace, not the person.
 
 ![FileX S3 keys](screenshots/filex/filex-s3keys.png)
 
-People page after a clean install: the admin (the deployer's own email), the
-provisioner, and the joined second person — the machine twin is gone.
+People page after a clean install: only humans — the deployer's own email and
+the joined second person. The provisioner service account is gone; its lane
+rides an admin-scope token on the admin itself.
 
 ![FileX people](screenshots/filex/filex-people.png)
 
@@ -552,17 +554,21 @@ The FileX environment is a first-boot seed: once the bucket, storage record, and
 admin account exist in FileX's own database, operator edits inside FileX win and
 the wizard does not overwrite them.
 
-Two wizard-managed identities live inside FileX:
+No service account lives inside FileX. The automation lane is an admin-scoped
+API token on the deployer's own admin account (label `workspace-provisioner`,
+persisted at `filex-provisioner.json` (0600) in the state directory): FileX
+grants `/api/admin` delegation to signed-in sessions or admin-scoped tokens
+only, so the scope — not a bot — is what the lane requires. Coder workspaces
+ride this token to materialize owner accounts and mint their keys; if the
+state document is lost, the next pass label-matches the server-side token row,
+deletes it, and mints a replacement (tokens show exactly once at creation).
+The `wizard-provisioner` bot that used to carry this lane is deleted in the
+same pass that proves the replacement alive.
 
-- `wizard-provisioner` — admin role with one admin-scoped API token, persisted
-  at `filex-provisioner.json` (0600) in the state directory. Coder workspaces
-  ride this token to materialize owner accounts and mint their keys; if the
-  state document is lost, the next pass label-matches the server-side token row,
-  deletes it, and mints a replacement (tokens show exactly once at creation).
 - each Coder user's own account (role `user`), created lazily at workspace
   first boot, plus per-(user, workspace) S3 keys and a `read,write` helper
   token — everything a person does through `~/shared` is theirs, not the
-  provisioner's.
+  lane's.
 
 The service attaches to the shared-core overlay network, so workspaces reach it
 (and its S3 door at `{url}/s3`, bucket = the storage name `Files`) by service
@@ -599,15 +605,20 @@ wizard wires:
   independent services
 - a `GITEA_SECRET_KEY` derived per stack and kept out of the compose file
 
-Gitea's own login has one wizard-managed identity: a `dokploy-wizard` admin
-account created through the in-container CLI (an install-locked Gitea has no
-signup path) with a deterministic password, plus a single API token minted
-once and persisted at `gitea-provisioner.json` (0600) in the state directory.
-Every later pass verifies the token against `/api/v1/user` and only re-mints
+Gitea's login lane rides the deployer's own account: the login is derived from
+the admin email (the same derivation the Coder first-user lane uses), the
+account is admin, and its password is the stack admin password — pinned
+through the in-container CLI on every pass (an install-locked Gitea exposes no
+signup path). Its single API token is minted over the loopback edge with basic
+auth and persisted at `gitea-provisioner.json` (0600) in the state directory;
+every later pass verifies the token against `/api/v1/user` and only re-mints
 when it no longer authenticates — the CLI create tolerating "already taken"
 is what lets a lost state document converge. The token is what the identity
 lane (workspace-boot account springing and deleted-user disable) drives the
-API with.
+API with. The previous generation's `dokploy-wizard` service account is
+deleted once the replacement token proves alive; an account that still owns
+repositories survives the pass with a visible warning rather than a surprise
+purge.
 
 People sign in with their Coder login or their real Coder email — which IS
 the account's email: the workspace boot lane creates the account as

@@ -351,7 +351,10 @@ class DokployGiteaBackend:
         and the token is minted through the API over the loopback edge with
         basic auth, then re-verified on every later pass from the state
         document. A `dokploy-wizard` leftover from the previous generation is
-        deleted once its replacement proves alive.
+        deleted once its replacement proves alive — and on upgrade boxes the
+        deployer's own account is first repaired through the legacy bridge
+        (see `_bridge_legacy_provisioner`), because the mint has a boot-order
+        enemy the CLI cannot reach.
         """
         login = self._provisioner_login()
         email = self._admin_email
@@ -385,6 +388,7 @@ class DokployGiteaBackend:
         if not create.ok and not _cli_reports_existing(create.output):
             return False, f"WARNING: Gitea provisioner account could not be created: {create.output[:200]}"
         self._pin_provisioner_password(login=login, password=password)
+        bridge_note = self._bridge_legacy_provisioner(existing, login=login)
 
         token = self._mint_provisioner_token(login=login, password=password)
         if token is None:
@@ -404,6 +408,8 @@ class DokployGiteaBackend:
             note = f"Seeded Gitea admin account '{login}' with an API token."
         else:
             note = "Re-minted the Gitea provisioner API token after verifying the account."
+        if bridge_note:
+            note = f"{bridge_note} {note}"
         if retire_note:
             note = f"{note} {retire_note}"
         return True, note
@@ -424,6 +430,55 @@ class DokployGiteaBackend:
                 "--password",
                 password,
             ],
+        )
+
+    def _bridge_legacy_provisioner(
+        self, existing: GiteaProvisionerState | None, *, login: str
+    ) -> str | None:
+        """Repair the deployer's account on upgrade boxes, through the legacy token.
+
+        Box-measured: on a box the previous wizard generation ran, the
+        deployer's Gitea account arrives non-admin AND carrying the
+        must-change-password flag, and Gitea answers every basic-auth call
+        with 403 "You must change your password" until the flag clears —
+        the token mint is the victim (the CLI pin rewrites the password but
+        does not touch the flag; measured twice). At mint time the only
+        credential able to PATCH those columns is the legacy service
+        account's token from the state document: it is still admin until
+        the retire step below deletes it. One PATCH, both columns, the
+        documented basic-auth lane then mints again — the whole sequence
+        measured live (200/200/201). Drift-gated: an account whose row
+        already reads admin and unflagged is not touched; boxes that never
+        ran the previous generation have no legacy token and skip here.
+        """
+        if existing is None or existing.username == login:
+            return None
+        if login == _LEGACY_PROVISIONER_USERNAME:
+            return None  # the deployer IS the legacy account: nothing to bridge
+        if not self._api_token_valid(existing.token, username=existing.username):
+            return None
+        status, row = self._gitea_api(
+            "GET",
+            f"/api/v1/admin/users/{parse.quote(login, safe='')}",
+            token=existing.token,
+        )
+        if status != 200 or not isinstance(row, dict):
+            return None
+        needs_flag_clear = bool(row.get("must_change_password"))
+        needs_admin = row.get("is_admin") is not True
+        if not needs_flag_clear and not needs_admin:
+            return None
+        status, _body = self._gitea_api(
+            "PATCH",
+            f"/api/v1/admin/users/{parse.quote(login, safe='')}",
+            token=existing.token,
+            body={"must_change_password": False, "admin": True},
+        )
+        if status != 200:
+            return None
+        return (
+            f"Repaired the deployer's Gitea account '{login}' through the legacy "
+            f"'{_LEGACY_PROVISIONER_USERNAME}' bridge (admin hat, must-change flag)."
         )
 
     def _retire_legacy_provisioner(self, *, login: str, token: str) -> str | None:
