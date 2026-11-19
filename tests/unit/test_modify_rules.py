@@ -1397,6 +1397,61 @@ def test_force_phase_ignores_phases_outside_applicable_set() -> None:
     assert force_phase_into_plan(noop, phase="coder", reason="x") is noop
 
 
+def test_modify_pack_gaining_a_hostname_with_no_env_change_reruns_networking_and_pack() -> None:
+    """A wizard upgrade that adds a pack hostname must converge, not reject.
+
+    The live box hit this: the ONLYOFFICE sidecar joined the filex pack
+    under the retired nextcloud pack's 'onlyoffice' key, so the desired
+    state gained a hostname with no env change at all. A static key→phase
+    map could not see the new key (the box rejected the modify outright);
+    the mapping now derives from the catalog.
+    """
+    from dataclasses import replace
+
+    raw = _raw(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,filex",
+        }
+    )
+    legacy_desired = resolve_desired_state(raw)
+    # The box converged BEFORE the sidecar joined the pack: its stored
+    # snapshot carries no onlyoffice key. The upgraded catalog now emits
+    # one with zero env change — that delta is the whole modify.
+    existing_desired = replace(
+        legacy_desired,
+        hostnames={k: v for k, v in legacy_desired.hostnames.items() if k != "onlyoffice"},
+    )
+    requested_desired = legacy_desired
+    assert "onlyoffice" not in existing_desired.hostnames
+    assert requested_desired.hostnames["onlyoffice"] == "office.example.com"
+
+    plan = classify_modify_request(
+        existing_raw=raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=legacy_desired.fingerprint(),
+            completed_steps=(
+                "preflight",
+                "dokploy_bootstrap",
+                "networking",
+                "shared_core",
+                "seaweedfs",
+                "filex",
+            ),
+        ),
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        requested_raw=raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "modify"
+    assert set(plan.phases_to_run) >= {"networking", "filex"}
+    assert "seaweedfs" in plan.preserved_phases
+
+
 def test_modify_filex_addition_and_s3_de_expose_schedules_three_phases() -> None:
     """Migrating an old box: s3 was de-exposed and filex is being added.
 

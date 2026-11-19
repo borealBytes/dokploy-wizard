@@ -69,7 +69,7 @@ _SUPPORTED_HOSTNAME_KEYS = {
     "LITELLM_ADMIN_SUBDOMAIN",
 }
 # The LiteLLM admin hostname is derived from this key on demand instead of being
-# modeled as a desired hostname, so it has no entry in _HOSTNAME_PHASES.
+# modeled as a desired hostname, so it never reaches the hostname-change phases.
 _LITELLM_ADMIN_HOSTNAME_ENV_KEYS = frozenset({"LITELLM_ADMIN_SUBDOMAIN"})
 _SUPPORTED_ENABLEMENT_KEYS = {
     "PACKS",
@@ -117,21 +117,43 @@ _SUPPORTED_MODIFY_KEYS = (
     | _SUPPORTED_MUTABLE_PACK_ENV_KEYS
     | _SUPPORTED_MUTABLE_PACK_RESOURCE_KEYS
 )
-_HOSTNAME_PHASES = {
+_LEGACY_HOSTNAME_PHASES = {
     "dokploy": ("networking",),
-    "headscale": ("networking", "headscale"),
-    "matrix": ("networking", "matrix"),
-    "moodle": ("networking", "moodle"),
-    "docuseal": ("networking", "docuseal"),
-    "filex": ("networking", "filex"),
-    "gitea": ("networking", "gitea"),
     # Legacy public s3 hostname: stacks installed before the de-expose still
     # model it as a desired hostname, and removing it has to schedule the
     # rebind of the SeaweedFS route onto the internal host plus the DNS prune.
     "s3": ("networking", "seaweedfs"),
-    "coder": ("networking", "coder"),
-    "coder-wildcard": ("networking", "coder"),
 }
+
+
+def _hostname_owner_phases(key: str) -> tuple[str, ...]:
+    # Derived from the catalog, never a hand-maintained copy: a hostname key
+    # that appears, moves, or vanishes between desired states always re-runs
+    # networking (route/DNS reconciliation) and the owning pack (its compose
+    # must learn the new public address). A hand-maintained map rotted once —
+    # the ONLYOFFICE editing sidecar joined the filex pack under the
+    # retired nextcloud pack's 'onlyoffice' key and the classifier saw no
+    # phase to run (live-box modify, measured).
+    for pack in iter_pack_catalog():
+        if any(hostname.key == key for hostname in pack.hostnames):
+            return ("networking", pack.name)
+    return _LEGACY_HOSTNAME_PHASES.get(key, ())
+
+
+def _hostname_change_phases(
+    existing_desired: DesiredState, requested_desired: DesiredState
+) -> set[str]:
+    changed: set[str] = set()
+    all_keys = set(existing_desired.hostnames) | set(requested_desired.hostnames)
+    for key in sorted(all_keys):
+        if existing_desired.hostnames.get(key) == requested_desired.hostnames.get(key):
+            continue
+        changed.update(_hostname_owner_phases(key))
+        if key not in requested_desired.hostnames:
+            # A vanished hostname still has to leave through networking even
+            # when no current pack owns the key anymore (pack retirement).
+            changed.add("networking")
+    return changed
 _OUTBOUND_MAIL_ENV_KEYS = {
     "OUTBOUND_SMTP_HOSTNAME",
     "OUTBOUND_SMTP_FROM_ADDRESS",
@@ -594,18 +616,6 @@ def _classify_same_target(
         raw_equivalent=raw_equivalent,
         desired_equivalent=desired_equivalent,
     )
-
-
-def _hostname_change_phases(
-    existing_desired: DesiredState, requested_desired: DesiredState
-) -> set[str]:
-    changed: set[str] = set()
-    all_keys = set(existing_desired.hostnames) | set(requested_desired.hostnames)
-    for key in sorted(all_keys):
-        if existing_desired.hostnames.get(key) == requested_desired.hostnames.get(key):
-            continue
-        changed.update(_HOSTNAME_PHASES.get(key, ()))
-    return changed
 
 
 def _new_pack_phases(existing_desired: DesiredState, requested_desired: DesiredState) -> set[str]:
