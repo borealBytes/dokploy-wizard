@@ -283,6 +283,31 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable interactive pack-selection prompts",
     )
+    modify_parser.add_argument(
+        "--force-phase",
+        choices=tuple(
+            phase
+            for phase in (
+                "networking",
+                "shared_core",
+                "seaweedfs",
+                "headscale",
+                "tailscale",
+                "matrix",
+                "nextcloud",
+                "moodle",
+                "docuseal",
+                "filex",
+                "gitea",
+                "coder",
+                "cloudflare_access",
+            )
+        ),
+        help=(
+            "re-apply one already-converged phase even when the plan classifies as no-op "
+            "(e.g. to refresh the Gitea identity ledger after accounts changed out of band)"
+        ),
+    )
     modify_parser.set_defaults(handler=_handle_modify)
 
     uninstall_parser = subparsers.add_parser(
@@ -640,6 +665,7 @@ def _handle_modify(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             raw_env=raw_env,
             enforce_live_run_contamination_check=True,
+            force_phase=args.force_phase,
         )
     except (
         OSError,
@@ -986,7 +1012,13 @@ def run_modify_flow(
     coder_backend: CoderBackend | None = None,
     enforce_live_run_contamination_check: bool = False,
     force_phase: str | None = None,
+    force_phase_reason: str | None = None,
 ) -> dict[str, Any]:
+    if force_phase is not None and force_phase_reason is None:
+        force_phase_reason = (
+            f"Operator forced one real '{force_phase}' apply pass with --force-phase; "
+            "the phase re-runs even though the plan otherwise classifies as no-op."
+        )
     return _run_lifecycle_flow(
         env_file=env_file,
         state_dir=state_dir,
@@ -1007,6 +1039,7 @@ def run_modify_flow(
         prompt_for_memory_shortfall=False,
         enforce_live_run_contamination_check=enforce_live_run_contamination_check,
         force_phase=force_phase,
+        force_phase_reason=force_phase_reason,
     )
 
 
@@ -1091,6 +1124,10 @@ def run_upgrade_flow(
         raw_env=raw_env_input,
         enforce_live_run_contamination_check=True,
         force_phase="shared_core",
+        force_phase_reason=(
+            "Upgrade repinned shared-core images out of band; forcing one "
+            "real shared_core pass so the compose app renders the new pin."
+        ),
     )
     return report
 
@@ -1182,6 +1219,7 @@ def _run_lifecycle_flow(
     prompt_for_memory_shortfall: bool,
     enforce_live_run_contamination_check: bool,
     force_phase: str | None = None,
+    force_phase_reason: str | None = None,
 ) -> dict[str, Any]:
     loaded_state = load_state_dir(state_dir)
     existing_state = validate_existing_state(loaded_state)
@@ -1216,7 +1254,8 @@ def _run_lifecycle_flow(
             lifecycle_plan = force_phase_into_plan(
                 lifecycle_plan,
                 phase=force_phase,
-                reason=(
+                reason=force_phase_reason
+                or (
                     "Upgrade repinned shared-core images out of band; forcing one "
                     "real shared_core pass so the compose app renders the new pin."
                 ),

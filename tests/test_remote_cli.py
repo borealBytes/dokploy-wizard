@@ -101,6 +101,22 @@ def test_help_lists_expected_subcommands() -> None:
     assert result.stderr == ""
 
 
+def test_build_modify_command_forwards_force_phase() -> None:
+    remote_cli = import_remote_cli_module()
+    session = remote_cli.RemoteTransportSession(
+        transport=object(),
+        remote_root="/root/dokploy-wizard",
+    )
+
+    command = remote_cli._build_modify_command(session, force_phase="coder")
+
+    assert "--force-phase coder" in command
+
+    plain = remote_cli._build_modify_command(session)
+
+    assert "--force-phase" not in plain
+
+
 def test_remote_parser_defaults_match_contract() -> None:
     remote_cli = import_remote_cli_module()
 

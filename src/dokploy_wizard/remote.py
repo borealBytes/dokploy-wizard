@@ -58,6 +58,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_remote_common_arguments(modify_parser)
     _add_fresh_arguments(modify_parser)
+    modify_parser.add_argument(
+        "--force-phase",
+        choices=(
+            "networking",
+            "shared_core",
+            "seaweedfs",
+            "headscale",
+            "tailscale",
+            "matrix",
+            "nextcloud",
+            "moodle",
+            "docuseal",
+            "filex",
+            "gitea",
+            "coder",
+            "cloudflare_access",
+        ),
+        help="forward --force-phase to the remote modify run (re-apply one converged phase)",
+    )
 
     upgrade_parser = subparsers.add_parser(
         "upgrade",
@@ -266,7 +285,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _run_remote_command(
                 session=session,
                 subcommand="modify",
-                command=_build_modify_command(session),
+                command=_build_modify_command(session, force_phase=args.force_phase),
                 password=args.password,
             )
             exit_code = 0
@@ -606,20 +625,23 @@ def _build_install_command(session: RemoteTransportSession) -> str:
     )
 
 
-def _build_modify_command(session: RemoteTransportSession) -> str:
-    return _with_unbuffered_python(
-        _shell_join(
-            [
-                "./bin/dokploy-wizard",
-                "modify",
-                "--env-file",
-                session.remote_install_env_path,
-                "--state-dir",
-                session.remote_state_dir,
-                "--non-interactive",
-            ]
-        )
-    )
+def _build_modify_command(
+    session: RemoteTransportSession,
+    *,
+    force_phase: str | None = None,
+) -> str:
+    command = [
+        "./bin/dokploy-wizard",
+        "modify",
+        "--env-file",
+        session.remote_install_env_path,
+        "--state-dir",
+        session.remote_state_dir,
+        "--non-interactive",
+    ]
+    if force_phase is not None:
+        command.extend(["--force-phase", force_phase])
+    return _with_unbuffered_python(_shell_join(command))
 
 
 def _build_uninstall_command(

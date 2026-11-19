@@ -34,6 +34,12 @@ Use these commands from the repo root on a machine that already has the code and
 ./bin/dokploy-wizard modify --env-file ./.install.env --non-interactive
 ```
 
+`modify` is convergence-first: an unchanged box answers `"mode": "noop"` in
+seconds. Side effects that live inside a phase's apply (e.g. the Gitea
+identity roster) converge with `--force-phase <phase>`, which folds one
+already-completed phase into the plan for one real pass; the remote helper
+forwards the same flag.
+
 ### Upgrade (drift check / gated LiteLLM pin bump)
 
 ```bash

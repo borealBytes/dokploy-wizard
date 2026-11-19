@@ -3017,6 +3017,7 @@ def test_handle_modify_warns_on_broad_env_file_permissions(
             state_dir=tmp_path / "state",
             dry_run=False,
             non_interactive=True,
+            force_phase=None,
         )
     )
 
@@ -3043,6 +3044,7 @@ def test_handle_modify_dry_run_skips_env_file_permission_warning(
             state_dir=tmp_path / "state",
             dry_run=True,
             non_interactive=True,
+            force_phase=None,
         )
     )
 
@@ -5089,6 +5091,7 @@ def test_modify_rejects_mock_contamination_before_auth_bootstrap(
                 state_dir=state_dir,
                 dry_run=False,
                 non_interactive=True,
+                force_phase=None,
             )
         )
 
@@ -5188,6 +5191,7 @@ def test_modify_rejects_host_local_route_drift_before_auth_bootstrap(
                 state_dir=state_dir,
                 dry_run=False,
                 non_interactive=True,
+                force_phase=None,
             )
         )
 
@@ -5243,7 +5247,78 @@ def test_modify_help_lists_task_eleven_flags() -> None:
     assert "--state-dir" in result.stdout
     assert "--dry-run" in result.stdout
     assert "--non-interactive" in result.stdout
+    assert "--force-phase" in result.stdout
     assert result.stderr == ""
+
+
+def test_handle_modify_forwards_force_phase_to_flow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "install.env"
+    env_file.write_text("STACK_NAME=example\nROOT_DOMAIN=example.com\n", encoding="utf-8")
+    env_file.chmod(0o600)
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        cli, "run_modify_flow", lambda **kwargs: calls.append(kwargs) or {"ok": True}
+    )
+
+    result = cli._handle_modify(
+        argparse.Namespace(
+            env_file=env_file,
+            state_dir=tmp_path / "state",
+            dry_run=False,
+            non_interactive=True,
+            force_phase="coder",
+        )
+    )
+
+    assert result == 0
+    assert calls[0]["force_phase"] == "coder"
+
+
+def test_run_modify_flow_builds_operator_force_phase_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli, "_run_lifecycle_flow", lambda **kwargs: captured.update(kwargs) or {}
+    )
+
+    cli.run_modify_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=tmp_path / "state",
+        dry_run=True,
+        force_phase="coder",
+    )
+
+    assert captured["force_phase"] == "coder"
+    reason = captured["force_phase_reason"]
+    assert isinstance(reason, str)
+    assert "--force-phase" in reason
+    assert "'coder'" in reason
+
+
+def test_run_modify_flow_keeps_explicit_force_phase_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli, "_run_lifecycle_flow", lambda **kwargs: captured.update(kwargs) or {}
+    )
+
+    cli.run_modify_flow(
+        env_file=tmp_path / "install.env",
+        state_dir=tmp_path / "state",
+        dry_run=True,
+        force_phase="shared_core",
+        force_phase_reason="upgrade wording",
+    )
+
+    assert captured["force_phase_reason"] == "upgrade wording"
 
 
 def test_uninstall_help_lists_task_twelve_flags() -> None:
