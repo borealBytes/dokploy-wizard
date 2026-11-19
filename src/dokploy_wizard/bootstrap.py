@@ -18,6 +18,19 @@ from dokploy_wizard.state import RawEnvInput, StateValidationError
 
 DOKPLOY_INSTALL_COMMAND = "curl -sSL https://dokploy.com/install.sh | sh"
 LOCAL_HEALTH_URL = "http://127.0.0.1:3000"
+# Dokploy's first-boot migration seeds a placeholder account (no password row)
+# that owns the default organization. Its sign-up endpoint refuses every later
+# creator while that placeholder still owns the org, so the wizard must evict
+# it before it can sign up the operator admin (measured on v0.31.4: sign-in
+# 401 + sign-up 400 "Admin is already created" on a from-zero bootstrap). The
+# account/member/session FKs cascade, so deleting the user row is sufficient;
+# a real operator account carries an account row and never matches.
+DOKPLOY_SETUP_PLACEHOLDER_EMAIL = "nxploited@dokploy.com"
+_DOKPLOY_PLACEHOLDER_CLEANUP_SQL = (
+    'delete from "user" u '
+    "where u.email = $seed$" + DOKPLOY_SETUP_PLACEHOLDER_EMAIL + "$seed$ "
+    "and not exists (select 1 from account a where a.user_id = u.id)"
+)
 
 
 class DokployBootstrapError(RuntimeError):
@@ -104,6 +117,7 @@ class ShellDokployBootstrapBackend:
         admin_password = values.get("DOKPLOY_ADMIN_PASSWORD")
         if not admin_email or not admin_password:
             return
+        self._clear_setup_placeholder()
         try:
             DokployBootstrapAuthClient(base_url=LOCAL_HEALTH_URL).assign_domain_server(
                 admin_email=admin_email,
@@ -115,6 +129,40 @@ class ShellDokployBootstrapBackend:
             )
         except DokployBootstrapAuthError as error:
             raise DokployBootstrapError(str(error)) from error
+
+    def _clear_setup_placeholder(self) -> None:
+        # Best-effort by design: hosts without docker or without the bootstrap
+        # postgres container behave as before (the auth attempt itself then
+        # reports the real failure). Only ever evicts the passwordless
+        # placeholder, so a rerun against a healthy stack changes nothing.
+        if shutil.which("docker") is None:
+            return
+        listing = subprocess.run(
+            ["docker", "ps", "--filter", "name=dokploy-postgres", "--format", "{{.Names}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        names = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+        if not names:
+            return
+        subprocess.run(
+            [
+                "docker",
+                "exec",
+                names[0],
+                "psql",
+                "-U",
+                "dokploy",
+                "-d",
+                "dokploy",
+                "-c",
+                _DOKPLOY_PLACEHOLDER_CLEANUP_SQL,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
 
 
 def reconcile_dokploy(
