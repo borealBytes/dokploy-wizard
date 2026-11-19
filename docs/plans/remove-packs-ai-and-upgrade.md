@@ -1595,3 +1595,42 @@ delete named volumes — pre-fix generations of `showmeseewhy-com-*` data
 volumes stood on the box by the hour. Loop iteration 3's wipe therefore
 takes `^(dokploy|showmeseewhy)` volumes along: true zero, nothing left to
 secretly reuse.
+
+Loop iteration 3 passed the bar: uninstall → wipe-v3 → install, first pass
+581s, output grep-clean — zero WARNING/Skipped/Traceback, `provisioner_ready:
+true` with the mint note, both identity syncs ran, the ONLYOFFICE gate logged
+its ready note, tailscale reported `create`. Box verify afterward: fresh state
+docs only, privacy flags live in app.ini, exactly one Gitea user (the
+deployer, admin, flag clear) with one token, the office sidecar answering
+`/healthcheck` over the public edge, coder workspace running. The
+boot-lane seed proved itself independently: first commit `386e2e08`
+"wizard: private demo seed" authored by the person, repo private, non-empty,
+`main`. One real defect surfaced in the verify, and the probes caught it red-
+handed — see below.
+
+Iteration-3 verify lesson, fixed in `14359fa`: the deployer's Gitea row
+booted PUBLIC and the visibility migration said nothing, because the lane
+rode `GET /api/v1/admin/users/{login}` — and on this Gitea 28.4 build that
+route does not exist (405 with or without trailing slash, measured). The
+admin CLI create does not consult `DEFAULT_USER_VISIBILITY` either, so the
+fresh row arrives public and the dead pre-read made the flip silently skip.
+A controlled on-box experiment mapped the alive surface: the paged admin
+LIST answers with per-row `login`/`username`/`is_admin`/`visibility` but
+omits `must_change_password`; the PATCH lane works (200, DB visibility
+0→2). All three lanes that rode the dead GET now ride the list — the
+migration (and a failed list read now logs a skip note: silence is what hid
+this bug), the legacy bridge (its gate becomes the mint refusal itself — a
+basic-auth 403 is the only must-change signal this build still gives, and
+the PATCH is idempotent so a healthy account never feels it), and the
+retire gate (keys off list presence; an unreadable list reads as absent and
+the next pass retries). The same verify corrected a studio assumption:
+a logged-out `/explore` renders a closed listing with NO sign-in form, so
+the `gitea-logged-out` shot photographs the plain 404 a private repo gives
+the anonymous request — the privacy proof that needs no interpretation.
+
+Gate standing: iteration 4 (uninstall → wipe-v3 → install) must land a
+first pass that carries the visibility-flip note for the deployer's row and
+shows DB visibility 2 — the iteration-3 box already corrected its row and
+can no longer show the note. The identities ledger being absent on a
+deployer-only box is BY DESIGN: the ledger springs with the second tracked
+person, and the deployer's seeded account needs no claim.
