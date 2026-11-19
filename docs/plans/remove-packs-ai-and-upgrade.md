@@ -1250,5 +1250,25 @@ repairs, and a plain noop. It found and drove the fixes for two real bugs
   modify46 pushed the template and the workspace boot logged "synced the
   Gitea password … to the stack admin password" (basic auth username + admin
   password → 200; real email + admin password → 200 after the email
-  registration). A full from-zero `remote proof` on the operator env follows
-  to prove the whole identity lane on a cold box.
+  registration).
+- Second from-zero proof on the operator env (post identity-lane commit): the
+  cold rerun surfaced two more real bootstrap bugs, both fixed and pinned
+  (`44dca64`, `6a47247`): (1) a host whose tailscaled is installed but stopped
+  made `tailscale up` die with "failed to connect to local tailscaled" —
+  the apply path now starts the unit itself; (2) Dokploy's first-boot
+  migration seeds a passwordless placeholder (`nxploited@dokploy.com`) owning
+  the default organization, and its sign-up endpoint refuses creators while
+  that placeholder owns it — whether a from-zero install hits this is a race
+  against the migration (cached images = healthy fast = lose), so the
+  bootstrap now evicts the placeholder (scoped: email match AND no account
+  row; member/account/session FKs cascade) right before authenticating.
+  Related tailnet note: after `tailscale logout` + wiping `/var/lib/tailscale`
+  the box re-registered under the clean `showmeseewhy` name (the earlier
+  `showmeseewhy-1` suffix was Control-side name theft by a ghost device of a
+  prior deploy generation). Final cold proof: every phase green, verify pass,
+  436.4s, zero WARNINGs; the workspace boot lane itself logged creating the
+  account, registering the real email, and the SSH key. Login matrix from
+  zero: gitea by username AND by real email (admin password) 200, filex 200,
+  coder 201, dokploy sign-in 200, docuseal serving; tailscale online as
+  `showmeseewhy` with tuxDesktop peer and the local-model endpoint 200.
+  modify47 converged to `mode: noop` (29.2s).
