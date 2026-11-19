@@ -2599,6 +2599,18 @@ def test_gitea_identity_lane_is_baked_into_the_desktop_template() -> None:
     assert '"# BEGIN dokploy-wizard gitea"' in template
     assert "ssh-keyscan" in template
     assert '"git", "config", "--global", "user.name", login' in template
+    # The private demo seed: created through the OWNER door (basic auth —
+    # the admin token's owner field does not steer POST /api/v1/user/repos,
+    # measured), explicit private, adopted untouched when it already stands,
+    # and the seed push only ever lands in an empty repo over the 'gitea'
+    # SSH alias with the workspace's own key.
+    assert 'demo = "wizard-demo"' in template
+    assert '"/api/v1/repos/" + user_path + "/" + demo, owner_basic' in template
+    assert '"POST", "/api/v1/user/repos", owner_basic' in template
+    assert '"name": demo, "private": True' in template
+    assert 'note("adopted the existing \'" + demo + "\' repo")' in template
+    assert 'repo.get("empty")' in template
+    assert '"git@gitea:" + login + "/" + demo + ".git"' in template
     # The lane must never hold the boot hostage: backgrounded, log to file.
     assert ") > /tmp/gitea-identity.log 2>&1 &" in template
 

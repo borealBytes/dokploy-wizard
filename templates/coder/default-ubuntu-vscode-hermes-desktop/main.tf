@@ -770,7 +770,7 @@ HELPER
           -C "${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}@gitea" \
           -f "$HOME/.ssh/id_ed25519_gitea"
         python3 - <<'GITEAPROV'
-import base64, hashlib, json, os, subprocess, urllib.error, urllib.parse, urllib.request
+import base64, hashlib, json, os, subprocess, tempfile, urllib.error, urllib.parse, urllib.request
 
 base = os.environ["DOKPLOY_GT_URL"].rstrip("/")
 token = os.environ["DOKPLOY_GT_TOKEN"]
@@ -983,6 +983,69 @@ if host and not git_get("user.name"):
     subprocess.run(["git", "config", "--global", "user.name", login], check=False)
 if host and not git_get("user.email"):
     subprocess.run(["git", "config", "--global", "user.email", email], check=False)
+
+# 5) The private demo repo: every wizard-sprung person gets a place to push
+#    from their very first boot. Created through the OWNER door, not the
+#    provisioner token — POST /api/v1/user/repos files the repo under the
+#    authenticated person (the admin token's owner field is honoured by
+#    /api/v1/admin/... routes only — measured), and it rides the privacy
+#    default explicitly: private. A repo that already stands is adopted
+#    untouched, even a public one: the owner's choice beats the seed's
+#    default. The seed push lands only in an empty repo and rides the
+#    workspace's own SSH key through the 'gitea' alias set up above.
+demo = "wizard-demo"
+status, repo = call("GET", "/api/v1/repos/" + user_path + "/" + demo, owner_basic)
+if status == 401:
+    note("skipped demo seed: basic auth refused (password changed outside the lane?)")
+elif status == 404:
+    status, created = call(
+        "POST", "/api/v1/user/repos", owner_basic,
+        {"name": demo, "private": True, "auto_init": False, "default_branch": "main"},
+    )
+    if status in (200, 201) and isinstance(created, dict):
+        note("created the private '" + demo + "' repo for '" + login + "'")
+        repo = created
+    else:
+        note("warning: could not create the '" + demo + "' repo (HTTP %s)" % status)
+        repo = None
+elif status == 200:
+    note("adopted the existing '" + demo + "' repo")
+if host and isinstance(repo, dict) and repo.get("empty"):
+    work = tempfile.mkdtemp(prefix="wizard-demo-")
+
+    def demo_run(args):
+        return subprocess.run(args, cwd=work, capture_output=True, text=True, timeout=30)
+
+    readme = (
+        "# " + demo + "\n\n"
+        "Private demo repository for **" + login + "**, seeded by the Dokploy\n"
+        "Wizard workspace boot lane. Push to it, break it, delete it — it is\n"
+        "yours.\n\n"
+        "    git clone gitea:" + login + "/" + demo + ".git\n"
+    )
+    with open(os.path.join(work, "README.md"), "w", encoding="utf-8") as handle:
+        handle.write(readme)
+    seeded = (
+        demo_run(["git", "init", "-b", "main"]).returncode == 0
+        and demo_run(["git", "add", "README.md"]).returncode == 0
+        and demo_run(
+            [
+                "git",
+                "-c", "user.name=" + login,
+                "-c", "user.email=" + email,
+                "commit",
+                "-m",
+                "wizard: private demo seed",
+            ]
+        ).returncode == 0
+        and demo_run(["git", "remote", "add", "origin",
+                      "git@gitea:" + login + "/" + demo + ".git"]).returncode == 0
+    )
+    pushed = seeded and demo_run(["git", "push", "origin", "main"]).returncode == 0
+    if pushed:
+        note("seeded '" + demo + "' with an initial commit over SSH")
+    elif seeded:
+        note("warning: '" + demo + "' seed push failed; the empty repo is ready to use")
 note("ready: git over the 'gitea' host alias clones as '" + title + "'")
 GITEAPROV
       ) > /tmp/gitea-identity.log 2>&1 &
