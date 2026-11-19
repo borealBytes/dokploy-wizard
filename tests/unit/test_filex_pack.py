@@ -895,6 +895,18 @@ def test_render_filex_compose_includes_the_office_sidecar() -> None:
         '"Host(`office.example.com`) && PathPrefix(`/filex-frame`)"' in compose
     )
     assert 'traefik.http.routers.wizard-stack-filex-office-frame.priority: "200"' in compose
+    # Two routers on one container: the docker provider refuses to guess
+    # which service each links to and drops BOTH (box-measured: "cannot be
+    # linked automatically with multiple Services" — the app hostname went
+    # dark too). Explicit router→service bindings on both.
+    assert (
+        'traefik.http.routers.wizard-stack-filex-office-frame.service: '
+        '"wizard-stack-filex-office-frame"' in compose
+    )
+    assert (
+        'traefik.http.routers.wizard-stack-filex.service: "wizard-stack-filex"'
+        in compose
+    )
     assert (
         'traefik.http.services.wizard-stack-filex-office-frame.loadbalancer.server.port: '
         '"5212"' in compose

@@ -132,7 +132,10 @@ _OFFICE_FRAME_PATH = "/filex-frame"
 # claiming the frame did not load). So FileX carries a second router:
 # Host(office) && PathPrefix(/filex-frame), explicit priority above the
 # Host-only sidecar router, with its own forwarded-headers middleware pinned
-# to the office hostname.
+# to the office hostname. With two routers on the container, BOTH must bind
+# their service explicitly — the docker provider drops ambiguous routers
+# entirely (box-measured: "cannot be linked automatically with multiple
+# Services" took the app hostname down with the frame router).
 # Community edition starts NO bundled database (DB_AVAILABLE is commercial-only
 # — measured), so exactly the three upstream-documented community mounts are
 # needed; rabbitmq/redis/pg stay in the container layer.
@@ -1136,7 +1139,13 @@ def _render_compose_file(
         f"      {office_jwt_env}: \"{_required_placeholder(office_jwt_env)}\"\n"
         "    labels:\n"
         '      traefik.enable: "true"\n'
+        # The router→service pair is bound EXPLICITLY on both routers: with
+        # two routers on this container, the docker provider refuses to
+        # auto-link either one (box-measured: both routers were dropped with
+        # "cannot be linked automatically with multiple Services" and the
+        # app hostname went dark until the binding labels were added).
         f'      traefik.http.routers.{service_name}.entrypoints: "websecure"\n'
+        f'      traefik.http.routers.{service_name}.service: "{service_name}"\n'
         f'      traefik.http.routers.{service_name}.rule: "Host(`{hostname}`)"\n'
         f'      traefik.http.routers.{service_name}.middlewares: "{service_name}-forwarded-https"\n'
         f'      traefik.http.routers.{service_name}.tls: "true"\n'
@@ -1150,6 +1159,8 @@ def _render_compose_file(
         # DocumentServer router below. The prefix router must win, hence the
         # explicit priority over the Host-only sidecar rule.
         f'      traefik.http.routers.{service_name}-office-frame.entrypoints: "websecure"\n'
+        f'      traefik.http.routers.{service_name}-office-frame.service: '
+        f'"{service_name}-office-frame"\n'
         f'      traefik.http.routers.{service_name}-office-frame.rule: '
         f'"Host(`{office_hostname}`) && PathPrefix(`{_OFFICE_FRAME_PATH}`)"\n'
         f'      traefik.http.routers.{service_name}-office-frame.priority: "200"\n'
