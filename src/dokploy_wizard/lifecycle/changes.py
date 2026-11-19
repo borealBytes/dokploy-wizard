@@ -91,6 +91,14 @@ _IGNORED_INSTALL_RAW_ENV_KEYS = {
     "DOKPLOY_ADMIN_PASSWORD",
     "DOKPLOY_BOOTSTRAP_MOCK_API_KEY",
     "DOKPLOY_MOCK_API_MODE",
+    # Ephemeral-by-design: the state directory never persists the docker
+    # pair (cli strips it before writing raw-input.json), so the comparison
+    # must not require it either — measured on the true-zero proof: the
+    # retry of a half-finished install always mismatched whenever the env
+    # carried docker auth (first-pass state lacked the keys, the request
+    # had them). The modify ignore list has always carried these two.
+    "DOCKER_USERNAME",
+    "DOCKER_PAT",
 } | _REMOTE_HELPER_RAW_ENV_KEYS
 _IGNORED_MODIFY_RAW_ENV_KEYS = {
     "DOKPLOY_API_URL",

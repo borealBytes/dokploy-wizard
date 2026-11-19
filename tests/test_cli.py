@@ -2007,6 +2007,40 @@ def test_install_classification_ignores_remote_helper_key_differences() -> None:
     assert plan.desired_equivalent is True
 
 
+def test_install_classification_ignores_docker_auth_pair_differences() -> None:
+    # True-zero proof regression (2026-11): raw-input.json never persists the
+    # docker pair, so a retry whose env carries DOCKER_USERNAME/DOCKER_PAT
+    # always compared "absent in state" against "present in request" and the
+    # half-finished install could never be resumed by a plain rerun.
+    existing_raw = _raw_input({"STACK_NAME": "wizard-stack", "ROOT_DOMAIN": "example.com"})
+    requested_raw = _raw_input(
+        {
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "DOCKER_USERNAME": "pusher",
+            "DOCKER_PAT": "dckr_pat_transient",
+        }
+    )
+    existing_desired = resolve_desired_state(existing_raw)
+    requested_desired = resolve_desired_state(requested_raw)
+
+    plan = classify_install_request(
+        existing_raw=existing_raw,
+        existing_desired=existing_desired,
+        existing_applied=AppliedStateCheckpoint(
+            format_version=1,
+            desired_state_fingerprint=existing_desired.fingerprint(),
+            completed_steps=applicable_phases_for(existing_desired),
+        ),
+        requested_raw=requested_raw,
+        requested_desired=requested_desired,
+    )
+
+    assert plan.mode == "noop"
+    assert plan.raw_equivalent is True
+    assert plan.desired_equivalent is True
+
+
 def test_install_retry_accepts_cloudflare_token_rotation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
