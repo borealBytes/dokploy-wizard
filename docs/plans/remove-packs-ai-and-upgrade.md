@@ -1429,3 +1429,125 @@ Full gates: **1150 passed, ruff clean, mypy clean**.
   deleted)."` — the claim persists in the ledger (by design; Gitea accounts
   are disabled, never deleted).
 - Final plain `modify` (22.8s): `"mode": "noop"` — box fully converged.
+
+## Phase 12 (2026-11): one-ID identity, Gitea privacy default, FileX editing sidecar, Nextcloud retirement (box: 157.173.124.231)
+
+Twelve commits (`3929678` → `9f701e8`), 85 files, +3,843/−8,070. The wave the
+branch name hinted at and then some: every machine identity the box carried
+was either folded into a person's own account or retired, Gitea closed its
+anonymous web, the file story consolidated onto FileX with in-browser
+editing, and Nextcloud retired with its sidecar.
+
+### One-ID identity (3929678, ebca77c, 561a7d1)
+
+- LiteLLM: a person IS one user. Workspace keys carry the owner's `user_id`
+  and ride the alias pattern `coder-<login>-<workspace>`; model access is
+  granted through the named group `all-access` (`WORKSPACE_KEY_ACCESS_GROUP`)
+  instead of per-key model lists. The deployer is the box's only
+  `proxy_admin`; every other person is `internal_user` (spend/log views
+  scoped, own-key management). The retired per-workspace user rows clean up
+  through the identity lane.
+- The coder apply became the fan-out point: one-ID sync pre-stands the
+  Gitea, FileX, and gateway (SeaweedFS) user rows from the live Coder roster
+  before any boot lane needs them, so a first workspace boot never races an
+  account creation.
+- Both service accounts died: the Gitea `dokploy-wizard` bot and the FileX
+  `wizard-provisioner`. The deployer's own account IS the provisioner
+  (login derived from the admin email, password CLI-pinned every pass); the
+  FileX lane token is an admin-scope token on the MAIN user labeled
+  `workspace-provisioner`. Retirement is gated on the replacement token
+  proving alive; an account still owning repositories survives with a
+  visible warning.
+
+### Gitea private by default + boot-lane seed (561a7d1, 056bed7)
+
+- `DEFAULT_USER_VISIBILITY: private`, `DEFAULT_PRIVATE: 'true'`,
+  `DISABLE_ANONYMOUS_ACCESS: 'true'` — opt-in public survives (an owner's
+  explicit choice is never re-closed), but nothing leaks before the owner
+  chooses. The coder pass flips wizard-owned accounts that predate the
+  default to private, once, logged; manual rows are never touched.
+- The workspace boot lane seeds each person with a private `wizard-demo`
+  repository — adopt-or-create: a repo that already stands rides untouched
+  (even a public one), and the seed push lands only in an empty repo, over
+  the workspace's own SSH key. Provenance matters for the reshoot: the seed
+  exists only through the boot lane, so its README commit carries the person
+  who booted, not a bot.
+
+### Nextcloud retirement (1ee15ce)
+
+- Pack removed, ledger authority kept: nextcloud-era rows (DNS, Access apps,
+  compose stacks, volumes) still drain on uninstall like every retired
+  resource. The uninstall planner's `removed_hostnames` set subtracts
+  hostnames a requested pack still owns, so the ONLYOFFICE key riding the
+  filex pack does not get its DNS/Access rows torn by the retirement.
+
+### FileX + ONLYOFFICE editing sidecar (446b522, ca1abb3)
+
+- Shipped as a pack-owned sidecar, digest-pinned
+  (`onlyoffice/documentserver:9.4.0.1@sha256:3ab6ebc…`), JWT enforced on
+  every hop with a deterministic per-stack secret
+  (`sha256("dokploy-wizard:filex-office:{stack}:{stack}-filex-onlyoffice-jwt-secret")`),
+  recorded at `filex-office-jwt.json` (0600); editing round-trips land as
+  ordinary versions in the same versioned bucket.
+- **The same-origin pivot (measured).** The first design mounted the sidecar
+  at `filex.<root-domain>/filex-frame` with a runtime prefix-pin. Two
+  box-measured facts killed it: FileX refuses an editor frame on its own
+  origin (config guard crash-loop), and docservice does not serve its
+  statics under `relative_url` at all. The fix removed 238 lines of pin
+  machinery: the sidecar got its own root-mounted hostname,
+  `office.<root-domain>` (env key `ONLYOFFICE_SUBDOMAIN`, reusing the
+  retired nextcloud naming), no stripsuffix, no supervisorctl.
+- **DS boot timeouts (measured).** DocumentServer's entrypoint runs a
+  migration storm on first boot; a gigabyte-class cold pull precedes it. The
+  pass gates in the order the box teaches: container-up first (180 attempts),
+  then `/healthcheck` behind the edge (48×10s), then the JWT record — and it
+  records nothing until the gate passes.
+
+### Classifier and drift-gate lessons (1bbcab3, a524be6)
+
+- The modify hostname-change classifier now derives hostname→phases from the
+  pack catalog (`_hostname_owner_phases`), never a hand-maintained table: a
+  key that joins, moves, or vanishes between states always re-runs
+  networking + the owning pack. The live box measured the rot — the editing
+  sidecar joined filex under the old `onlyoffice` key and the old table saw
+  no phase to run. `_LEGACY_HOSTNAME_PHASES` keeps only `dokploy` and `s3`.
+- The drift gate learned that a pack's own runtime is drifted BY DESIGN while
+  it is being scheduled: the office sidecar declares itself a managed
+  auxiliary of the filex candidate, and `wizard_managed` unhealthy entries do
+  not block when their own pack's phase is in `phases_to_run`. Manual
+  collisions and host-local routes still always block.
+
+### The upgrade-box repair: legacy-token bridge (915a5b8)
+
+Box-measured: the previous generation left the deployer's Gitea account
+non-admin AND carrying `must_change_password`, and Gitea 403s EVERY
+basic-auth call while the flag is set — the CLI password pin does not clear
+the flag (measured twice), so the token mint died and the converge carried
+one WARNING. The only credential able to fix the row at boot time is the
+legacy bot's own token (still admin until the retire step deletes it): one
+drift-gated `PATCH /api/v1/admin/users/{login}` clears both columns and the
+mint lands (200/200/201, measured live). From-zero boxes never need the
+bridge — the CLI create seeds `--admin --must-change-password=false`.
+
+### Studio rework + README (f56cc0d, 9f701e8)
+
+- Playbook rebuilt for the one-ID world and office editing: 43 shots, new
+  `filex-office-edit` / `filex-office-versions` / `gitea-logged-out` /
+  `litellm-internal-user` recipes, no Nextcloud shots, fail-closed redaction
+  unchanged (`REDACT_KEEP=dokploy-wizard,wizard-provisioner`).
+- README rebuilt around the shipped story (pack list, FileX sidecar section
+  with the measured gate order, Gitea privacy default + seed prose, one-ID
+  identity lanes, office in both not-behind-Access lists, ONLYOFFICE login
+  matrix row, roadmap bullet now saying shipped).
+
+### The zero-state gate (operator directive)
+
+Before the full studio reshoot, the deployment must land **from zero to
+ready on a first pass with no fixes** — a one-time gate for this wave, not a
+standing rule. Execution: remote `uninstall --destroy-data` (new per-env
+fixture `fixtures/destroy.showmeseewhy-com.confirm` — line 3 must carry the
+environment identifier), then a deliberate bootstrap wipe (services, task
+containers, dokploy volumes, `/opt/dokploy`, `/etc/dokploy`), tailscaled left
+installed). Docker image layers intentionally retained — runtime material,
+not deployment state. Then install, and loop zero→ready until the first pass
+is clean; only then the reshoot.
