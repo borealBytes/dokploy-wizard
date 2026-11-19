@@ -68,5 +68,7 @@ make shot SHOT=walkthrough-login && \
 
 The `~/shared` act (`shared/`) needs the same setup twice: write a file from
 the deployer's workspace, join as demo, watch the same bytes appear, restore.
-The FileX versions shot then shows two authors on one file — the whole
-promise of the pack in one image.
+The FileX versions shot then shows one file with two version rows — each
+with its own Restore — the whole promise of the pack in one image. (The
+rows carry number, timestamp, and size; the author column lives in the
+share, not the row — box-measured, keep captions honest to that.)

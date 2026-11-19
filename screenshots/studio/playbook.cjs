@@ -238,18 +238,25 @@ const SHOTS = [
   },
   {
     shot: 'filex-versions', area: 'filex', service: 'filex',
-    caption: 'Two people edit the same file; FileX keeps every version and every author — this is where the act pays off.',
+    caption: 'Two people edit the same file through their own mounts; every version lands in the file\'s own Activity pane, each with its own Restore.',
     // Box-measured (twice): the /admin/files history-search input hydrates
     // late (search backend), while /admin/home -> My files renders instantly.
     // The browser route also shows the shared folder the search page hid.
+    // Probe pass (reshoot): a single click SELECTS the row (toolbar gains
+    // Download/Share/Cut/Copy/Delete); the Details drawer opens through the
+    // toolbar button aria-label="Details", and the drawer's role=tab
+    // "Activity" reveals Versions rows as "Version N · timestamp · size ·
+    // Restore" — no author text on the row, which is why the caption speaks
+    // of mounts, not authors. The two version rows here are real: clayton's
+    // v1 and demo's distinct-bytes v2, each written through its own
+    // workspace's FUSE mount.
     steps: [
       { goto: '/admin/home' }, { wait: 2500 },
       { click: 'text="My files"' },
       { waitForSelector: 'text=/shared-act/', timeout: 25000 }, { wait: 1000 },
-      { click: 'text=/shared-act/' }, { wait: 2000 },
-      { click: 'button[aria-label*="detail" i], button[aria-label*="info" i], button[title*="detail" i]', optional: true },
-      { click: 'text="Activity"', optional: true },
-      { wait: 2500 },
+      { click: 'text=/shared-act/' }, { wait: 1500 },
+      { click: '[aria-label="Details"], [title="Details"]' }, { wait: 1500 },
+      { click: 'text="Activity"' }, { wait: 2000 },
     ],
   },
   {
@@ -278,29 +285,42 @@ const SHOTS = [
     caption: 'Open a document: the bundled ONLYOFFICE editor arrives in a frame on its own hostname — one sidecar per box, JWT on every hop.',
     // The frame's origin is the whole proof of the sidecar design: FileX
     // refuses an editor on its own origin (measured crash-loop), so the
-    // iframe src points at office.<root-domain>; the redaction scan
-    // catches the root domain inside the attribute. A .docx must exist in
-    // My files before the shoot (upload during shot prep).
+    // iframe src points at office.<root-domain>/filex-frame/editor; the
+    // redaction scan catches the root domain inside the attribute. A .docx
+    // must exist in My files before the shoot (screenshots/studio/
+    // upload-office-seed.mjs, through the web UI as the deployer).
+    // Box-measured (reshoot probe): a single click only selects — the embed
+    // opens on a DOUBLE-click (row-scoped .fe-list__name; the same lane the
+    // ⋮ menu's Open item drives), and the frame appears within milliseconds;
+    // the ONLYOFFICE canvas itself boots for several seconds. Headless
+    // typing never landed (the embed self-closes without focus), so this
+    // shot proves the frame, not keystrokes.
     steps: [
       { goto: '/admin/home' }, { wait: 2500 },
       { click: 'text="My files"' }, { wait: 2000 },
-      { click: 'text=/\\.docx/' }, { wait: 2500 },
-      { click: 'text=/^edit$|open in editor|edit in onlyoffice/i', optional: true },
-      { waitForSelector: 'iframe[src*="web-apps"], iframe[src*="office"]', timeout: 30000 },
-      { wait: 4000 },
+      { waitForSelector: 'span.fe-list__name:has-text(".docx")', timeout: 25000 },
+      { dblclick: 'span.fe-list__name:has-text(".docx")' },
+      { waitForSelector: 'iframe[src*="filex-frame"], iframe[src*="web-apps"], iframe[src*="office"]', timeout: 30000 },
+      { wait: 12000 },
     ],
   },
   {
     shot: 'filex-office-versions', area: 'filex', service: 'filex',
-    caption: 'Every save in the editor becomes a FileX version — the office session signs back into the same bucket as the same person.',
+    caption: 'Every write becomes a FileX version with its own Restore — mounts, snapshots, and editor saves all land in the same pane, as the same person.',
+    // Box-measured (reshoot probe): the Activity tab renders a Versions
+    // section with per-version Restore, "Snapshot current state", and
+    // Comments. The docx row shown here was minted by the file's own
+    // snapshot control (headless ONLYOFFICE never landed a save — see the
+    // filex-office-edit note); shared-act.txt proves the same section for
+    // the two-person mount lane. The pane's shape is the claim; the office
+    // JWT lane (gated at install) is what routes editor saves into it.
     steps: [
       { goto: '/admin/home' }, { wait: 2500 },
       { click: 'text="My files"' },
-      { waitForSelector: 'text=/\\.docx/', timeout: 25000 }, { wait: 1000 },
-      { click: 'text=/\\.docx/' }, { wait: 2000 },
-      { click: 'button[aria-label*="detail" i], button[aria-label*="info" i], button[title*="detail" i]', optional: true },
-      { click: 'text="Activity"', optional: true },
-      { wait: 2500 },
+      { waitForSelector: 'span.fe-list__name:has-text(".docx")', timeout: 25000 }, { wait: 1000 },
+      { click: 'span.fe-list__name:has-text(".docx")' }, { wait: 1500 },
+      { click: '[aria-label="Details"], [title="Details"]' }, { wait: 1500 },
+      { click: 'text="Activity"' }, { wait: 2000 },
     ],
   },
 
