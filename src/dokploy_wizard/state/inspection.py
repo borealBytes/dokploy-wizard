@@ -387,33 +387,6 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 f"{desired_state.stack_name}-shared-"
             )
         candidates.append(litellm_candidate)
-    if "nextcloud" in desired_state.enabled_packs:
-        candidates.append(
-            {
-                "aliases": ("nextcloud",),
-                "hostname": None,
-                "managed_container_labels": {
-                    "com.docker.compose.service": f"{desired_state.stack_name}-nextcloud"
-                },
-                "port": None,
-                "expected_service_name": f"{desired_state.stack_name}-nextcloud",
-                "pack": "nextcloud",
-                "scope": f"stack:{desired_state.stack_name}:nextcloud-service",
-            }
-        )
-        candidates.append(
-            {
-                "aliases": ("onlyoffice",),
-                "hostname": desired_state.hostnames.get("onlyoffice"),
-                "managed_container_labels": {
-                    "com.docker.compose.service": f"{desired_state.stack_name}-onlyoffice"
-                },
-                "port": "80",
-                "expected_service_name": f"{desired_state.stack_name}-onlyoffice",
-                "pack": "onlyoffice",
-                "scope": f"stack:{desired_state.stack_name}:onlyoffice-service",
-            }
-        )
     if "moodle" in desired_state.enabled_packs:
         candidates.append(
             {
@@ -779,10 +752,12 @@ def _match_route_file(path: Path, desired_state: DesiredState) -> dict[str, str]
 
 
 def _route_file_candidates(desired_state: DesiredState) -> tuple[dict[str, str], ...]:
+    # Every desired hostname can be shadowed by a host-local route file — the
+    # check is generic over the hostname map (it predates the pack list being
+    # catalog-driven). The name token is the hostname's first label, which is
+    # what an operator-written route file most plausibly carries in its name.
     candidates: list[dict[str, str]] = []
-    onlyoffice_hostname = desired_state.hostnames.get("onlyoffice")
-    if onlyoffice_hostname is not None:
-        candidates.append(
-            {"hostname": onlyoffice_hostname, "pack": "onlyoffice", "token": "onlyoffice"}
-        )
+    for pack, hostname in sorted(desired_state.hostnames.items()):
+        token = hostname.split(".", 1)[0]
+        candidates.append({"hostname": hostname, "pack": pack, "token": token})
     return tuple(candidates)

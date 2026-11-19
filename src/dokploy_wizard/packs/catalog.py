@@ -76,31 +76,6 @@ _PACK_CATALOG: tuple[PackDefinition, ...] = (
         resource_profile="recommended",
     ),
     PackDefinition(
-        name="nextcloud",
-        prompt_label="Nextcloud + OnlyOffice",
-        env_flag="ENABLE_NEXTCLOUD",
-        default_enabled=False,
-        depends_on=(),
-        slot=None,
-        shared_core_requirements=("postgres", "redis"),
-        hostnames=(
-            PackHostname(
-                key="nextcloud",
-                default_subdomain="nextcloud",
-                env_key="NEXTCLOUD_SUBDOMAIN",
-            ),
-            PackHostname(
-                key="onlyoffice",
-                default_subdomain="office",
-                env_key="ONLYOFFICE_SUBDOMAIN",
-            ),
-        ),
-        mutable_env_keys=(),
-        mutable_resource_keys=(),
-        enabled_features=(),
-        resource_profile="recommended",
-    ),
-    PackDefinition(
         name="moodle",
         prompt_label="Moodle",
         env_flag="ENABLE_MOODLE",

@@ -36,12 +36,11 @@ from dokploy_wizard.state import (
 )
 from dokploy_wizard.state.models import LiteLLMGeneratedKeys
 from tests.helpers.litellm_group_fakes import LiteLLMGroupApiStub
-from tests.integration.test_nextcloud_pack import (
+from tests.integration.test_networking_reconciler import (
     FakeCloudflareBackend,
     FakeDokployBackend,
-    FakeSharedCoreBackend,
-    _base_install_values,
 )
+from tests.integration.test_shared_core_reconciler import FakeSharedCoreBackend
 from tests.unit.test_coder_pack import FakeCoderBackend
 
 # Static OpenCode Go routes are just the default alias; the full catalog is
@@ -49,6 +48,35 @@ from tests.unit.test_coder_pack import FakeCoderBackend
 _EXPECTED_OPENCODE_GO_CHAT_ALIASES = (
     "opencode-go/deepseek-v4.1-flash",
 )
+
+
+def _base_install_values(**overrides: str) -> dict[str, str]:
+    values = {
+        "STACK_NAME": "wizard-stack",
+        "ROOT_DOMAIN": "example.com",
+        "HOST_OS_ID": "ubuntu",
+        "HOST_OS_VERSION_ID": "24.04",
+        "HOST_CPU_COUNT": "4",
+        "HOST_MEMORY_GB": "8",
+        "HOST_DISK_GB": "100",
+        "HOST_DOCKER_INSTALLED": "true",
+        "HOST_DOCKER_DAEMON_REACHABLE": "true",
+        "HOST_PORT_80_IN_USE": "false",
+        "HOST_PORT_443_IN_USE": "false",
+        "HOST_PORT_3000_IN_USE": "false",
+        "HOST_ENVIRONMENT": "local",
+        "DOKPLOY_BOOTSTRAP_HEALTHY": "true",
+        "DOKPLOY_API_URL": "https://dokploy.example.com/api",
+        "DOKPLOY_API_KEY": "api-key-123",
+        "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+        "DOKPLOY_ADMIN_PASSWORD": "secret-123",
+        "CLOUDFLARE_API_TOKEN": "token-123",
+        "CLOUDFLARE_ACCOUNT_ID": "account-123",
+        "CLOUDFLARE_ZONE_ID": "zone-123",
+        "CLOUDFLARE_TUNNEL_NAME": "wizard-stack-tunnel",
+    }
+    values.update(overrides)
+    return values
 
 
 
@@ -399,7 +427,6 @@ def test_build_litellm_consumer_model_allowlists_project_routes_across_all_consu
         "coder-hermes": shared_models,
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": shared_models,
-        "nextcloud": shared_models,
     }
     # Consumer allowlists are explicit lists; provider passthrough aliases that
     # are not shared defaults (nvidia) stay invisible until the sidecar merges
@@ -438,7 +465,6 @@ def test_build_litellm_consumer_model_allowlists_include_free_openrouter_aliases
         "coder-hermes": shared_models,
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": shared_models,
-        "nextcloud": shared_models,
     }
 
 
@@ -466,7 +492,6 @@ def test_build_litellm_consumer_model_allowlists_ignore_opencode_go_wildcard_fla
         "coder-hermes": shared_models,
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": shared_models,
-        "nextcloud": shared_models,
     }
     assert "opencode-go/*" not in allowlists["coder-hermes"]
     assert "opencode-go/deepseek-v4.1-flash" in allowlists["coder-hermes"]
@@ -613,7 +638,6 @@ def test_no_ai_pack_install_includes_litellm(tmp_path: Path) -> None:
         "coder-hermes",
         "coder-workspace-issuer",
         "dokploy-ai",
-        "nextcloud",
     }
 
 
@@ -784,7 +808,6 @@ def test_coder_install_persists_consumer_specific_virtual_keys(
         "coder-hermes",
         "coder-workspace-issuer",
         "dokploy-ai",
-        "nextcloud",
     }
-    assert len(set(generated_keys.virtual_keys.values())) == 4
+    assert len(set(generated_keys.virtual_keys.values())) == 3
     assert coder_backend.existing_service is not None

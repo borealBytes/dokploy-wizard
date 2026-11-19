@@ -1035,7 +1035,7 @@ def test_access_only_targets_the_litellm_admin_hostname() -> None:
             values={
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_MOODLE": "true",
                 "ENABLE_CODER": "true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com,ops@example.com",
             },
@@ -1059,7 +1059,7 @@ def test_access_only_targets_the_litellm_admin_hostname() -> None:
             "dokploy.example.com",
             "headscale.example.com",
             "matrix.example.com",
-            "nextcloud.example.com",
+            "moodle.example.com",
             "coder.example.com",
         }
         for hostname in [item.hostname for item in phase.result.applications]
@@ -1073,7 +1073,7 @@ def test_access_rerun_reuses_owned_resources() -> None:
             values={
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_MOODLE": "true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
             },
         )

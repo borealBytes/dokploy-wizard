@@ -165,7 +165,6 @@ def test_litellm_plan_uses_openrouter_default_without_local_upstream() -> None:
         "coder-hermes": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
-        "nextcloud": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
     }
 
 
@@ -193,15 +192,14 @@ def test_litellm_plan_keeps_local_default_when_local_upstream_is_active() -> Non
         "coder-hermes": ("local-model.internal/unsloth-active",),
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": ("local-model.internal/unsloth-active",),
-        "nextcloud": ("local-model.internal/unsloth-active",),
     }
 
 
 def test_litellm_db_allocation_is_dedicated_and_not_a_pack_allocation() -> None:
-    plan = build_shared_core_plan(stack_name="openmerge", enabled_packs=("moodle", "nextcloud"))
+    plan = build_shared_core_plan(stack_name="openmerge", enabled_packs=("matrix", "moodle"))
 
     assert plan.litellm is not None
-    assert [allocation.pack_name for allocation in plan.allocations] == ["moodle", "nextcloud"]
+    assert [allocation.pack_name for allocation in plan.allocations] == ["matrix", "moodle"]
     assert all(allocation.pack_name != "litellm" for allocation in plan.allocations)
     assert all(allocation.postgres != plan.litellm.postgres for allocation in plan.allocations)
     assert plan.litellm.postgres == SharedPostgresAllocation(
@@ -239,7 +237,7 @@ def test_reconcile_repairs_pack_and_litellm_postgres_allocations() -> None:
             values={
                 "STACK_NAME": "openmerge",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_MOODLE": "true",
             },
         )
     )
@@ -266,7 +264,7 @@ def test_reconcile_reuses_desired_network_when_ledger_points_to_stale_name() -> 
             values={
                 "STACK_NAME": "openmerge-me",
                 "ROOT_DOMAIN": "example.com",
-                "PACKS": "nextcloud",
+                "PACKS": "moodle",
             },
         )
     )
@@ -496,7 +494,7 @@ def test_rendered_litellm_local_model_disables_system_role_for_vllm_templates() 
 
 
 def test_rendered_shared_postgres_pins_pgvector_image_without_logical_wal() -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("matrix",))
 
     rendered = _render_compose_file(plan, {}, {})
     compose = rendered.compose_file
@@ -507,7 +505,7 @@ def test_rendered_shared_postgres_pins_pgvector_image_without_logical_wal() -> N
     # Pack roles are LOGIN-scoped to their own database only; the superuser and
     # extension-creation grants existed solely for a retired pack and must not
     # creep back into the shared Postgres init script.
-    assert 'run_sql "ALTER ROLE "wizard_stack_nextcloud" WITH LOGIN PASSWORD' in compose
+    assert 'run_sql "ALTER ROLE "wizard_stack_matrix" WITH LOGIN PASSWORD' in compose
     assert "WITH SUPERUSER" not in compose
     assert "CREATE EXTENSION" not in compose
 
@@ -685,7 +683,7 @@ def test_litellm_ledger_resource_is_owned() -> None:
 def test_shared_core_matching_healthy_hash_skips_update_and_deploy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("matrix",))
     litellm_env = {
         "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
         "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
@@ -765,7 +763,7 @@ def test_shared_core_matching_healthy_hash_skips_update_and_deploy(
 def test_shared_core_unhealthy_litellm_blocks_noop_skip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("matrix",))
     litellm_env = {
         "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
         "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
@@ -1118,7 +1116,7 @@ def test_shared_core_find_container_name_prefers_exact_manual_name(
 def test_shared_core_runtime_ready_uses_resolved_dokploy_container_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan = build_shared_core_plan(stack_name="openmerge", enabled_packs=("nextcloud",))
+    plan = build_shared_core_plan(stack_name="openmerge", enabled_packs=("matrix",))
     readiness_api = _FakeLiteLLMAdminApi({"status": "connected", "db": "connected"})
     postgres_container_names: list[str] = []
     redis_container_names: list[str] = []
@@ -1197,7 +1195,6 @@ def test_litellm_allowlists_keep_local_alias_for_every_consumer() -> None:
         "coder-hermes": ("local-model.internal/unsloth-active",),
         "coder-workspace-issuer": ("*",),
         "dokploy-ai": ("local-model.internal/unsloth-active",),
-        "nextcloud": ("local-model.internal/unsloth-active",),
     }
 
 
@@ -2391,7 +2388,6 @@ def test_consumer_virtual_keys_receive_sync_wildcard() -> None:
     # The wildcard reaches every consumer key, including the two built-in AI
     # surfaces; the provider-row seeder strips it rather than making a "sync/*" row.
     assert key_lists["dokploy-ai"][-1] == "sync/*"
-    assert key_lists["nextcloud"][-1] == "sync/*"
     assert "sync/*" not in allowlists["coder-hermes"]
 
     disabled = shared_core_module._litellm_key_model_allowlists(

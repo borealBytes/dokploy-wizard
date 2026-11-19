@@ -15,7 +15,7 @@ def test_shared_core_plan_is_deterministic_and_services_are_planned_once() -> No
             "STACK_NAME": "shared-stack",
             "ROOT_DOMAIN": "example.com",
             "ENABLE_MATRIX": "true",
-            "ENABLE_NEXTCLOUD": "true",
+            "ENABLE_GITEA": "true",
             "ENABLE_CODER": "true",
         },
     )
@@ -27,20 +27,17 @@ def test_shared_core_plan_is_deterministic_and_services_are_planned_once() -> No
     assert desired_state.shared_core.postgres.service_name == "shared-stack-shared-postgres"
     assert desired_state.shared_core.redis is not None
     assert desired_state.shared_core.redis.service_name == "shared-stack-shared-redis"
-    assert desired_state.selected_packs == ("coder", "matrix", "nextcloud")
+    assert desired_state.selected_packs == ("coder", "gitea", "matrix")
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
         "coder",
+        "gitea",
         "matrix",
-        "nextcloud",
     ]
-    nextcloud_allocation = desired_state.shared_core.allocations[2]
-    assert nextcloud_allocation.postgres is not None
-    assert nextcloud_allocation.postgres.user_name == "shared_stack_nextcloud"
-    assert nextcloud_allocation.postgres.password_secret_ref == (
-        "shared-stack-nextcloud-postgres-password"
-    )
-    assert nextcloud_allocation.redis is not None
-    assert nextcloud_allocation.redis.identity_name == "shared-stack-nextcloud-redis"
+    gitea_allocation = desired_state.shared_core.allocations[1]
+    assert gitea_allocation.postgres is not None
+    assert gitea_allocation.postgres.user_name == "shared_stack_gitea"
+    assert gitea_allocation.postgres.password_secret_ref == "shared-stack-gitea-postgres-password"
+    assert gitea_allocation.redis is None
 
 
 def test_shared_core_plan_is_empty_when_no_selected_pack_needs_it() -> None:
@@ -110,9 +107,9 @@ def test_shared_core_plan_allocates_distinct_postgres_for_moodle_and_docuseal() 
 def test_admin_credential_rejection_for_postgres_allocations() -> None:
     with pytest.raises(ValueError, match="admin/root credentials"):
         SharedPostgresAllocation(
-            database_name="nextcloud",
+            database_name="packapp",
             user_name="postgres",
-            password_secret_ref="nextcloud-postgres-password",
+            password_secret_ref="packapp-postgres-password",
         )
 
 
@@ -120,5 +117,5 @@ def test_admin_identity_rejection_for_redis_allocations() -> None:
     with pytest.raises(ValueError, match="admin/root identities"):
         SharedRedisAllocation(
             identity_name="default",
-            password_secret_ref="nextcloud-redis-password",
+            password_secret_ref="packapp-redis-password",
         )

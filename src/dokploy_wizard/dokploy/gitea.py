@@ -797,7 +797,8 @@ def _find_running_container(service_name: str) -> str | None:
     # Dokploy deploys compose apps as their own projects: container names are
     # '{project}-{service}-{replica}' (project carries a random suffix), not the
     # swarm '<service>.<slot>.<task>' shape. The compose service label is the
-    # stable identity; same lookup the proven Nextcloud occ path uses.
+    # stable identity; the same lookup the in-container CLI lanes have always
+    # used (Gitea seeds through it, and FileX health gates on it).
     try:
         result = subprocess.run(
             [

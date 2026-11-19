@@ -150,7 +150,6 @@ def _stub_install_flow_after_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_coder_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})

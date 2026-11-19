@@ -10,7 +10,7 @@ Opt-in live post-deploy verification:
   LITELLM_QA_KEY_CODER_HERMES=sk-... \
   LITELLM_QA_KEY_CODER_KDENSE=sk-... \
   LITELLM_QA_KEY_DOKPLOY_AI=sk-... \
-  LITELLM_QA_KEY_NEXTCLOUD=sk-... \
+  LITELLM_QA_KEY_CODER_WORKSPACE_ISSUER=sk-... \
   pytest tests/unit/test_litellm_model_restrictions.py -q -k live
 
 The live path intentionally avoids `/health` because LiteLLM docs note that `/health`
@@ -49,10 +49,9 @@ EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
         DEFAULT_LOCAL_CANONICAL_ALIAS,
         "openrouter/anthropic/claude-3.5-sonnet",
     ),
-    "nextcloud": (
-        DEFAULT_LOCAL_CANONICAL_ALIAS,
-        "openrouter/anthropic/claude-3.5-sonnet",
-    ),
+    # coder-workspace-issuer is intentionally absent: it is a minting-scoped
+    # key with a wildcard ("*") allowlist, not a chat consumer, so it has no
+    # fixed visible-model set to pin here.
 }
 # Every consumer key projects the same shared alias set; the built-in AI surfaces
 # are no longer pinned to the single default alias, so the cost-metadata probe runs
@@ -60,7 +59,6 @@ EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
 SHARED_ALIAS_CONSUMERS = (
     "coder-hermes",
     "dokploy-ai",
-    "nextcloud",
 )
 EXPECTED_MODEL_INFO_COSTS: dict[str, dict[str, float]] = {
     "openrouter/anthropic/claude-3.5-sonnet": {
@@ -75,7 +73,7 @@ LIVE_KEY_ENV_BY_CONSUMER = {
     "coder-hermes": "LITELLM_QA_KEY_CODER_HERMES",
     "coder-kdense": "LITELLM_QA_KEY_CODER_KDENSE",
     "dokploy-ai": "LITELLM_QA_KEY_DOKPLOY_AI",
-    "nextcloud": "LITELLM_QA_KEY_NEXTCLOUD",
+    "coder-workspace-issuer": "LITELLM_QA_KEY_CODER_WORKSPACE_ISSUER",
 }
 
 
@@ -340,7 +338,7 @@ def _expected_consumer_keys() -> dict[str, str]:
         "coder-hermes": "sk-test-coder-hermes",
         "coder-kdense": "sk-test-coder-kdense",
         "dokploy-ai": "sk-test-dokploy-ai",
-        "nextcloud": "sk-test-nextcloud",
+        "coder-workspace-issuer": "sk-test-coder-workspace-issuer",
     }
 
 
@@ -608,7 +606,6 @@ def test_fake_opencode_go_wildcard_is_isolated_to_intended_alias_policy(
     assert visible_wildcards == {
         "coder-hermes": (),
         "dokploy-ai": (),
-        "nextcloud": (),
     }
 
 

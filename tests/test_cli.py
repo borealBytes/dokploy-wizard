@@ -27,7 +27,6 @@ from dokploy_wizard.dokploy import (
     DokployProjectSummary,
 )
 from dokploy_wizard.dokploy.compose_noop import persist_compose_artifact_hash
-from dokploy_wizard.dokploy.shared_core import build_litellm_consumer_model_allowlists
 from dokploy_wizard.lifecycle import (
     LifecyclePlan,
     applicable_phases_for,
@@ -43,7 +42,6 @@ from dokploy_wizard.networking.cloudflare import (
 )
 from dokploy_wizard.packs import prompts as prompt_module
 from dokploy_wizard.packs.catalog import get_known_pack_names
-from dokploy_wizard.packs.nextcloud import NextcloudAiIntegration
 from dokploy_wizard.packs.prompts import (
     GuidedInstallValues,
     PromptSelection,
@@ -78,7 +76,6 @@ from dokploy_wizard.state import (
 from dokploy_wizard.state import inspection as inspection_module
 from dokploy_wizard.state.models import (
     STATE_FORMAT_VERSION,
-    LiteLLMGeneratedKeys,
     LiteLLMImagePin,
 )
 from dokploy_wizard.state.store import write_litellm_image_pin
@@ -118,7 +115,7 @@ def _modify_base_values(**overrides: str) -> dict[str, str]:
     values = {
         "STACK_NAME": "wizard-stack",
         "ROOT_DOMAIN": "example.com",
-        "ENABLE_NEXTCLOUD": "true",
+        "ENABLE_MOODLE": "true",
         "AI_DEFAULT_API_KEY": "shared-key",
         "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
     }
@@ -398,7 +395,7 @@ def test_gitea_env_flag_alias_resolves_identical_to_packs_form(
             {
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
-                "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex",
+                "PACKS": "seaweedfs,coder,docuseal,moodle,filex",
                 "ENABLE_GITEA": "true",
             }
         )
@@ -413,7 +410,7 @@ def test_gitea_env_flag_alias_resolves_identical_to_packs_form(
             {
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
-                "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex,gitea",
+                "PACKS": "seaweedfs,coder,docuseal,moodle,filex,gitea",
             }
         )
     )
@@ -458,7 +455,7 @@ def test_modify_same_target_noops_with_pack_phases_preserved() -> None:
 
     assert plan.mode == "noop"
     assert plan.phases_to_run == ()
-    assert "nextcloud" in plan.preserved_phases
+    assert "moodle" in plan.preserved_phases
     assert "coder" in plan.preserved_phases
 
 
@@ -531,8 +528,8 @@ def test_cloudflare_access_names_use_pack_display_labels() -> None:
     pack_app, _ = networking_planner._resolve_access_application(
         dry_run=True,
         account_id="account-123",
-        pack_name="nextcloud",
-        hostname="nextcloud.example.com",
+        pack_name="matrix",
+        hostname="matrix.example.com",
         provider_id="provider-1",
         ownership_ledger=OwnershipLedger(format_version=1, resources=()),
         backend=backend,
@@ -549,8 +546,8 @@ def test_cloudflare_access_names_use_pack_display_labels() -> None:
     pack_policy, _ = networking_planner._resolve_access_policy(
         dry_run=True,
         account_id="account-123",
-        pack_name="nextcloud",
-        hostname="nextcloud.example.com",
+        pack_name="matrix",
+        hostname="matrix.example.com",
         app_id="app-1",
         emails=("operator@example.com",),
         ownership_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -567,9 +564,9 @@ def test_cloudflare_access_names_use_pack_display_labels() -> None:
         backend=backend,
     )
 
-    assert pack_app.name == "nextcloud protected"
+    assert pack_app.name == "matrix protected"
     assert admin_app.name == "LiteLLM Admin protected"
-    assert pack_policy.name == "Allow nextcloud"
+    assert pack_policy.name == "Allow matrix"
     assert admin_policy.name == "Allow LiteLLM Admin"
 
 
@@ -609,12 +606,12 @@ def test_handle_inspect_state_includes_live_drift_and_persists_snapshot(
             {
                 "classification": "manual_collision",
                 "detail": "collision",
-                "expected_service_name": "lifecycle-stack-nextcloud",
+                "expected_service_name": "lifecycle-stack-matrix",
                 "live_kind": "container",
-                "live_name": "nextcloud-manual",
+                "live_name": "matrix-manual",
                 "managed": False,
-                "pack": "nextcloud",
-                "scope": "stack:lifecycle-stack:nextcloud",
+                "pack": "matrix",
+                "scope": "stack:lifecycle-stack:matrix",
                 "status": "Up 2 minutes",
             }
         ],
@@ -1046,7 +1043,7 @@ def test_build_live_drift_report_classifies_required_collision_types(
             **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
             "STACK_NAME": "openmerge",
             "ROOT_DOMAIN": "openmerge.me",
-            "PACKS": "nextcloud,coder,seaweedfs",
+            "PACKS": "moodle,coder,seaweedfs",
             "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
         },
@@ -1062,12 +1059,12 @@ def test_build_live_drift_report_classifies_required_collision_types(
             ),
         ),
     )
-    route_file = tmp_path / "onlyoffice.yaml"
+    route_file = tmp_path / "moodle.yaml"
     route_file.write_text(
         "http:\n"
         "  routers:\n"
         "    office:\n"
-        f"      rule: Host(`{desired_state.hostnames['onlyoffice']}`)\n",
+        f"      rule: Host(`{desired_state.hostnames['moodle']}`)\n",
         encoding="utf-8",
     )
 
@@ -1083,7 +1080,7 @@ def test_build_live_drift_report_classifies_required_collision_types(
         lambda: (
             {"name": "manual-coder", "status": "Up 5 minutes"},
             {
-                "name": f"{desired_state.stack_name}-nextcloud",
+                "name": f"{desired_state.stack_name}-moodle",
                 "status": "Exited (1) 10 seconds ago",
             },
             {"name": f"{desired_state.stack_name}-helper", "status": "Up 1 minute"},
@@ -1124,12 +1121,12 @@ def test_build_live_drift_report_classifies_required_collision_types(
     ]
     assert any(entry["live_name"] == "manual-coder" for entry in manual_entries)
     assert any(
-        entry["live_name"] == f"{desired_state.stack_name}-nextcloud" for entry in manual_entries
+        entry["live_name"] == f"{desired_state.stack_name}-moodle" for entry in manual_entries
     )
     route_entry = next(
         entry for entry in report["entries"] if entry["classification"] == "host_local_route"
     )
-    assert route_entry["pack"] == "onlyoffice"
+    assert route_entry["pack"] == "moodle"
     unknown_entry = next(
         entry for entry in report["entries"] if entry["classification"] == "unknown_unmanaged"
     )
@@ -1145,7 +1142,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
             **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
             "STACK_NAME": "openmerge",
             "ROOT_DOMAIN": "openmerge.me",
-            "PACKS": "nextcloud,coder,seaweedfs",
+            "PACKS": "docuseal,matrix,moodle,coder,seaweedfs",
             "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
         },
@@ -1155,14 +1152,14 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
         format_version=1,
         resources=(
             OwnedResource(
-                "onlyoffice_service",
-                "svc-onlyoffice",
-                f"stack:{desired_state.stack_name}:onlyoffice-service",
+                "docuseal_service",
+                "svc-docuseal",
+                f"stack:{desired_state.stack_name}:docuseal:service",
             ),
             OwnedResource(
-                "nextcloud_service",
-                "svc-nextcloud",
-                f"stack:{desired_state.stack_name}:nextcloud-service",
+                "moodle_service",
+                "svc-moodle",
+                f"stack:{desired_state.stack_name}:moodle:service",
             ),
             OwnedResource(
                 "coder_service",
@@ -1191,8 +1188,8 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
             ),
         ),
     )
-    onlyoffice_container = "openmerge-nextcloud-a5izk5-openmerge-onlyoffice-1"
-    nextcloud_container = "openmerge-nextcloud-a5izk5-openmerge-nextcloud-1"
+    docuseal_container = "openmerge-moodle-a5izk5-openmerge-docuseal-1"
+    moodle_container = "openmerge-moodle-a5izk5-openmerge-moodle-1"
     coder_container = "openmerge-coder-8do2ol-openmerge-coder-1"
     seaweedfs_container = "openmerge-seaweedfs-cr6zrs-openmerge-seaweedfs-1"
     shared_postgres_container = "openmerge-shared-nojgtz-openmerge-shared-postgres-1"
@@ -1201,7 +1198,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     auth_probe_container = "openmerge-dokploy-wizard-auth-probe-ocm4ux-auth-probe-1"
     coder_workspace_container = "coder-adminuser-openmergeme-workspace-2026-04-21"
     coder_named_template_container = "coder-adminuser-openwork"
-    onlyoffice_hostname = desired_state.hostnames["onlyoffice"]
+    docuseal_hostname = desired_state.hostnames["docuseal"]
 
     monkeypatch.setattr(inspection_module, "_docker_cli_available", lambda: True)
     monkeypatch.setattr(inspection_module, "_list_docker_services", lambda: ())
@@ -1210,23 +1207,23 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
         "_list_docker_containers",
         lambda: (
             {
-                "name": nextcloud_container,
+                "name": moodle_container,
                 "status": "Up 21 hours (healthy)",
                 "labels": {
-                    "com.docker.compose.service": "openmerge-nextcloud",
-                    "com.docker.compose.project": "openmerge-nextcloud-a5izk5",
+                    "com.docker.compose.service": "openmerge-moodle",
+                    "com.docker.compose.project": "openmerge-moodle-a5izk5",
                 },
             },
             {
-                "name": onlyoffice_container,
+                "name": docuseal_container,
                 "status": "Up 21 hours (healthy)",
                 "labels": {
-                    "com.docker.compose.service": "openmerge-onlyoffice",
-                    "com.docker.compose.project": "openmerge-nextcloud-a5izk5",
-                    "traefik.http.routers.openmerge-onlyoffice.rule": (
-                        f"Host(`{onlyoffice_hostname}`)"
+                    "com.docker.compose.service": "openmerge-docuseal",
+                    "com.docker.compose.project": "openmerge-moodle-a5izk5",
+                    "traefik.http.routers.openmerge-docuseal.rule": (
+                        f"Host(`{docuseal_hostname}`)"
                     ),
-                    "traefik.http.services.openmerge-onlyoffice.loadbalancer.server.port": "80",
+                    "traefik.http.services.openmerge-docuseal.loadbalancer.server.port": "80",
                 },
             },
             {
@@ -1306,15 +1303,15 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     assert not any(entry["live_name"] == coder_workspace_container for entry in unknown_entries)
 
     assert any(
-        entry["pack"] == "nextcloud"
+        entry["pack"] == "moodle"
         and entry["live_kind"] == "container"
-        and entry["live_name"] == nextcloud_container
+        and entry["live_name"] == moodle_container
         for entry in wizard_entries
     )
     assert any(
-        entry["pack"] == "onlyoffice"
+        entry["pack"] == "docuseal"
         and entry["live_kind"] == "container"
-        and entry["live_name"] == onlyoffice_container
+        and entry["live_name"] == docuseal_container
         for entry in wizard_entries
     )
     assert any(
@@ -1341,7 +1338,7 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
         and entry["live_name"] == shared_redis_container
         for entry in wizard_entries
     )
-    assert not any(entry["live_name"] == onlyoffice_container for entry in manual_entries)
+    assert not any(entry["live_name"] == docuseal_container for entry in manual_entries)
     assert not any(entry["live_name"] == cloudflared_container for entry in manual_entries)
     assert not any(entry["live_name"] == auth_probe_container for entry in manual_entries)
     assert not any(entry["live_name"] == coder_workspace_container for entry in manual_entries)
@@ -1882,7 +1879,6 @@ def test_install_persists_post_auth_target_before_later_failure(
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_qualify_dokploy_mutation_auth", lambda **_: None)
     monkeypatch.setattr(
@@ -1957,7 +1953,6 @@ def test_install_retry_accepts_stale_state_when_only_dokploy_api_url_differs(
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(
         cli,
@@ -2075,7 +2070,6 @@ def test_install_retry_accepts_cloudflare_token_rotation(
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(
         cli,
@@ -2131,7 +2125,6 @@ def test_install_restarts_from_empty_scaffold_when_saved_env_drifted(
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
     monkeypatch.setattr(
@@ -2180,7 +2173,7 @@ def test_install_resume_tolerates_required_ports_used_by_existing_dokploy_stack(
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret-existing",
             "AI_DEFAULT_API_KEY": "shared-key",
             "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
-            "PACKS": "matrix,nextcloud,coder,seaweedfs",
+            "PACKS": "matrix,moodle,coder,seaweedfs",
         },
     )
     existing_desired = resolve_desired_state(existing_raw)
@@ -2236,7 +2229,6 @@ def test_install_resume_tolerates_required_ports_used_by_existing_dokploy_stack(
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
     monkeypatch.setattr(
@@ -2341,7 +2333,7 @@ def test_install_rehydrates_guided_retry_keys_from_persisted_state(
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret-existing",
             "AI_DEFAULT_API_KEY": "shared-key",
             "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
-            "PACKS": "matrix,nextcloud,coder,seaweedfs",
+            "PACKS": "matrix,moodle,coder,seaweedfs",
         },
     )
     existing_desired = resolve_desired_state(existing_raw)
@@ -2393,7 +2385,6 @@ def test_install_rehydrates_guided_retry_keys_from_persisted_state(
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_ensure_dokploy_api_auth", lambda **kwargs: kwargs["raw_env"])
     monkeypatch.setattr(
@@ -2519,7 +2510,7 @@ def test_install_resumes_from_first_preserved_phase_drift(monkeypatch: pytest.Mo
             "cloudflare_access",
             "shared_core",
             "headscale",
-            "nextcloud",
+            "moodle",
             "seaweedfs",
             "coder",
         ),
@@ -2531,7 +2522,7 @@ def test_install_resumes_from_first_preserved_phase_drift(monkeypatch: pytest.Mo
             "cloudflare_access",
             "shared_core",
             "headscale",
-            "nextcloud",
+            "moodle",
             "seaweedfs",
             "coder",
         ),
@@ -2542,7 +2533,7 @@ def test_install_resumes_from_first_preserved_phase_drift(monkeypatch: pytest.Mo
             "cloudflare_access",
             "shared_core",
             "headscale",
-            "nextcloud",
+            "moodle",
             "seaweedfs",
             "coder",
         ),
@@ -2554,18 +2545,18 @@ def test_install_resumes_from_first_preserved_phase_drift(monkeypatch: pytest.Mo
     resumed = cli._resume_plan_from_drift(
         lifecycle_plan=lifecycle_plan,
         drift_error=LifecycleDriftError(
-            "Lifecycle drift detected before mutation: nextcloud: unhealthy",
+            "Lifecycle drift detected before mutation: moodle: unhealthy",
             report=DriftReport(
                 entries=(
                     DriftEntry(phase="preflight", status="ok", detail="ok"),
-                    DriftEntry(phase="nextcloud", status="drift", detail="unhealthy"),
+                    DriftEntry(phase="moodle", status="drift", detail="unhealthy"),
                 )
             ),
         ),
     )
 
     assert resumed.mode == "resume"
-    assert resumed.start_phase == "nextcloud"
+    assert resumed.start_phase == "moodle"
     assert resumed.preserved_phases == (
         "preflight",
         "dokploy_bootstrap",
@@ -2574,7 +2565,7 @@ def test_install_resumes_from_first_preserved_phase_drift(monkeypatch: pytest.Mo
         "shared_core",
         "headscale",
     )
-    assert resumed.phases_to_run == ("nextcloud", "seaweedfs", "coder")
+    assert resumed.phases_to_run == ("moodle", "seaweedfs", "coder")
     assert resumed.initial_completed_steps == resumed.preserved_phases
     assert "resuming from the first unhealthy preserved phase" in resumed.reasons[-1]
 
@@ -2656,11 +2647,11 @@ def test_modify_litellm_provider_model_change_schedules_gateway_and_consumers() 
     assert wildcard_plan.mode == "modify"
     assert "LITELLM_OPENCODE_GO_WILDCARD" in wildcard_plan.reasons[0]
     assert wildcard_plan.phases_to_run == ("shared_core", "coder")
-    assert "nextcloud" not in alias_plan.phases_to_run
+    assert "moodle" not in alias_plan.phases_to_run
     assert "seaweedfs" not in alias_plan.phases_to_run
-    assert "nextcloud" not in key_reconcile_plan.phases_to_run
+    assert "moodle" not in key_reconcile_plan.phases_to_run
     assert "seaweedfs" not in key_reconcile_plan.phases_to_run
-    assert "nextcloud" not in wildcard_plan.phases_to_run
+    assert "moodle" not in wildcard_plan.phases_to_run
     assert "seaweedfs" not in wildcard_plan.phases_to_run
 
 
@@ -2683,7 +2674,7 @@ def test_modify_litellm_coder_removal_reruns_shared_core_without_unrelated_packs
     assert plan.mode == "modify"
     assert "ENABLE_CODER" in plan.reasons[0]
     assert plan.phases_to_run == ("networking", "shared_core")
-    assert "nextcloud" not in plan.phases_to_run
+    assert "moodle" not in plan.phases_to_run
     assert "seaweedfs" not in plan.phases_to_run
 
 
@@ -2850,7 +2841,7 @@ def test_guided_state_dir_sanitizes_caret_notation_arrow_and_paste(
 
 
 def test_guided_install_generates_seaweedfs_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    responses = iter(["n", "n", "y", "n", "n"])
+    responses = iter(["n", "y", "n"])
     monkeypatch.setattr(
         prompt_module,
         "_generate_credential",
@@ -2879,7 +2870,7 @@ def test_prompt_for_pack_selection_lists_gitea_after_storage(
         lambda prefix: f"{prefix}-generated",
     )
     messages: list[str] = []
-    answers = iter(["n", "n", "y", "y"])
+    answers = iter(["n", "y", "y"])
 
     def scripted_prompt(message: str) -> str:
         messages.append(message)
@@ -3645,20 +3636,20 @@ def test_install_rejects_blocking_live_drift_before_auth_bootstrap(
                 },
                 {
                     "classification": "manual_collision",
-                    "detail": "manual nextcloud collision",
+                    "detail": "manual moodle collision",
                     "live_kind": "container",
-                    "live_name": "wizard-stack-nextcloud",
-                    "pack": "nextcloud",
+                    "live_name": "wizard-stack-moodle",
+                    "pack": "moodle",
                 },
                 {
                     "classification": "wizard_managed",
-                    "detail": "managed nextcloud unhealthy",
-                    "expected_service_name": "wizard-stack-nextcloud",
+                    "detail": "managed moodle unhealthy",
+                    "expected_service_name": "wizard-stack-moodle",
                     "health": "unhealthy",
-                    "live_name": "wizard-stack-nextcloud",
+                    "live_name": "wizard-stack-moodle",
                     "managed": True,
-                    "pack": "nextcloud",
-                    "scope": "stack:wizard-stack:nextcloud-service",
+                    "pack": "moodle",
+                    "scope": "stack:wizard-stack:moodle-service",
                 },
             ],
             "inspection": {
@@ -3690,7 +3681,7 @@ def test_install_rejects_blocking_live_drift_before_auth_bootstrap(
     message = str(error.value)
     assert not state_dir.exists()
     assert "coder-manual" in message
-    assert "wizard-stack-nextcloud" in message
+    assert "wizard-stack-moodle" in message
     assert "Migrate or remove the unowned runtime" in message
     assert "inspect-state reports clean" in message
 
@@ -4288,7 +4279,6 @@ def test_install_does_not_persist_docker_hub_auth_to_raw_input(
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_docker_login_if_configured", lambda credentials: None)
@@ -4349,7 +4339,6 @@ def test_install_bootstraps_missing_docker_before_strict_preflight_rerun(
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})
 
@@ -4451,7 +4440,6 @@ def test_install_bootstraps_missing_docker_on_supported_ubuntu_patch_release(
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})
     monkeypatch.setattr(
@@ -4509,7 +4497,6 @@ def test_install_waits_for_docker_readiness_after_remediation(
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})
     monkeypatch.setattr(
@@ -4597,7 +4584,6 @@ def test_install_attempts_docker_service_readiness_before_strict_preflight_rerun
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})
 
@@ -4766,7 +4752,6 @@ def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
     monkeypatch.setattr(cli, "_build_shared_core_backend", record_backend)
     monkeypatch.setattr(cli, "_build_headscale_backend", record_backend)
     monkeypatch.setattr(cli, "_build_matrix_backend", record_backend)
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", record_backend)
     monkeypatch.setattr(cli, "_build_moodle_backend", record_backend)
     monkeypatch.setattr(cli, "_build_docuseal_backend", record_backend)
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", record_backend)
@@ -4784,7 +4769,6 @@ def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
         shared_core_backend=None,
         headscale_backend=None,
         matrix_backend=None,
-        nextcloud_backend=None,
         seaweedfs_backend=None,
         coder_backend=None,
         allow_modify=False,
@@ -4794,11 +4778,11 @@ def test_run_lifecycle_flow_reuses_one_dokploy_session_client_across_backends(
         enforce_live_run_contamination_check=False,
     )
 
-    assert len(seen_session_clients) == 8
+    assert len(seen_session_clients) == 7
     assert all(client is sentinel_session_client for client in seen_session_clients)
 
 
-def test_run_lifecycle_flow_passes_state_dir_to_nextcloud_moodle_and_docuseal_builders(
+def test_run_lifecycle_flow_passes_state_dir_to_moodle_and_docuseal_builders(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     raw_env = parse_env_file(FIXTURES_DIR / "moodle-docuseal.env")
@@ -4843,11 +4827,6 @@ def test_run_lifecycle_flow_passes_state_dir_to_nextcloud_moodle_and_docuseal_bu
 
     monkeypatch.setattr(
         cli,
-        "_build_nextcloud_backend",
-        lambda **kwargs: seen.setdefault("nextcloud", kwargs["state_dir"]) or cast(Any, object()),
-    )
-    monkeypatch.setattr(
-        cli,
         "_build_moodle_backend",
         lambda **kwargs: seen.setdefault("moodle", kwargs["state_dir"]) or cast(Any, object()),
     )
@@ -4868,7 +4847,6 @@ def test_run_lifecycle_flow_passes_state_dir_to_nextcloud_moodle_and_docuseal_bu
         shared_core_backend=None,
         headscale_backend=None,
         matrix_backend=None,
-        nextcloud_backend=None,
         seaweedfs_backend=None,
         coder_backend=None,
         allow_modify=False,
@@ -4879,7 +4857,6 @@ def test_run_lifecycle_flow_passes_state_dir_to_nextcloud_moodle_and_docuseal_bu
     )
 
     assert seen == {
-        "nextcloud": state_dir,
         "moodle": state_dir,
         "docuseal": state_dir,
     }
@@ -5164,10 +5141,10 @@ def test_modify_rejects_host_local_route_drift_before_auth_bootstrap(
                 },
                 {
                     "classification": "host_local_route",
-                    "detail": "manual onlyoffice route file",
-                    "hostname": "office.example.net",
-                    "pack": "onlyoffice",
-                    "path": "/etc/traefik/dynamic/openmerge-onlyoffice.yml",
+                    "detail": "manual docuseal route file",
+                    "hostname": "forms.example.net",
+                    "pack": "docuseal",
+                    "path": "/etc/traefik/dynamic/openmerge-docuseal.yml",
                 },
             ],
             "inspection": {
@@ -5197,7 +5174,7 @@ def test_modify_rejects_host_local_route_drift_before_auth_bootstrap(
 
     message = str(error.value)
     assert "/etc/traefik/dynamic/openmerge-moodle.yml" in message
-    assert "/etc/traefik/dynamic/openmerge-onlyoffice.yml" in message
+    assert "/etc/traefik/dynamic/openmerge-docuseal.yml" in message
     assert "Dokploy-managed ingress" in message
 
 
@@ -5341,109 +5318,6 @@ def test_invalid_subcommand_fails_cleanly() -> None:
     assert "usage:" in combined_output
     assert "invalid choice" in combined_output
     assert "unknown-command" in combined_output
-
-
-def test_build_nextcloud_backend_passes_state_dir_to_dokploy_backend(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, _, backend_kwargs, state_dir = _capture_nextcloud_backend_kwargs(monkeypatch)
-
-    assert backend_kwargs["state_dir"] == state_dir
-
-
-def test_build_nextcloud_backend_omits_ai_integration_without_generated_keys(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, _, backend_kwargs, _ = _capture_nextcloud_backend_kwargs(monkeypatch)
-
-    assert backend_kwargs["ai_integration"] is None
-
-
-def _nextcloud_test_generated_keys() -> LiteLLMGeneratedKeys:
-    return LiteLLMGeneratedKeys(
-        format_version=STATE_FORMAT_VERSION,
-        master_key="sk-master-fake-test-key",
-        salt_key="sk-salt-fake-test-key",
-        virtual_keys={"nextcloud": "sk-litellm-nextcloud-abcdef"},
-    )
-
-
-def test_build_nextcloud_backend_wires_ai_integration_from_generated_keys(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    raw_env = _nextcloud_backend_raw_env()
-    desired_state = resolve_desired_state(raw_env)
-    recorded: dict[str, Any] = {}
-
-    def record_backend(**kwargs: Any) -> object:
-        recorded.update(kwargs)
-        return cast(Any, object())
-
-    monkeypatch.setattr(cli, "DokployNextcloudBackend", record_backend)
-    monkeypatch.setattr(cli, "_build_dokploy_api_client", lambda **_: cast(Any, object()))
-
-    cli._build_nextcloud_backend(
-        raw_env=raw_env,
-        state_dir=Path("/tmp/test-state"),
-        desired_state=desired_state,
-        litellm_generated_keys=_nextcloud_test_generated_keys(),
-    )
-
-    integration = recorded["ai_integration"]
-    assert isinstance(integration, NextcloudAiIntegration)
-    assert integration.service_url == "http://lifecycle-stack-shared-litellm:4000/v1"
-    assert integration.api_key == "sk-litellm-nextcloud-abcdef"
-    assert integration.service_name == "LiteLLM (Dokploy Wizard)"
-    assert integration.models_probe_url == "http://127.0.0.1:4000/v1/models"
-    assert integration.expected_models == build_litellm_consumer_model_allowlists(
-        flat_env=dict(raw_env.values),
-        plan=desired_state.shared_core,
-        include_default_chat_alias=True,
-    ).get("nextcloud", ())
-
-
-def test_build_nextcloud_ai_integration_requires_litellm_plan_and_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from dataclasses import replace
-
-    raw_env = _nextcloud_backend_raw_env()
-    desired_state = resolve_desired_state(raw_env)
-    keys = _nextcloud_test_generated_keys()
-
-    assert (
-        cli._build_nextcloud_ai_integration(
-            raw_env=raw_env,
-            desired_state=desired_state,
-            litellm_generated_keys=None,
-        )
-        is None
-    )
-
-    keys_without_nextcloud = replace(
-        keys, virtual_keys={"dokploy-ai": "sk-dokploy-ai-fake-test-key"}
-    )
-    assert (
-        cli._build_nextcloud_ai_integration(
-            raw_env=raw_env,
-            desired_state=desired_state,
-            litellm_generated_keys=keys_without_nextcloud,
-        )
-        is None
-    )
-
-    no_litellm_state = replace(
-        desired_state,
-        shared_core=replace(desired_state.shared_core, litellm=None),
-    )
-    assert (
-        cli._build_nextcloud_ai_integration(
-            raw_env=raw_env,
-            desired_state=no_litellm_state,
-            litellm_generated_keys=keys,
-        )
-        is None
-    )
 
 
 def test_build_moodle_backend_passes_state_dir_to_dokploy_backend(
@@ -5595,7 +5469,6 @@ def test_execute_lifecycle_plan_initializes_checkpoint_before_compose_hash_persi
             shared_core=cast(Any, object()),
             headscale=cast(Any, object()),
             matrix=cast(Any, object()),
-            nextcloud=cast(Any, object()),
             moodle=cast(Any, object()),
             docuseal=cast(Any, object()),
             filex=cast(Any, object()),
@@ -5626,11 +5499,11 @@ def test_execute_lifecycle_plan_initializes_checkpoint_before_compose_hash_persi
     )
 
 
-def _nextcloud_backend_raw_env() -> RawEnvInput:
+def _pack_backend_raw_env() -> RawEnvInput:
     values = {
         **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
         "DOKPLOY_MOCK_API_MODE": "false",
-        "PACKS": "nextcloud",
+        "PACKS": "moodle",
     }
     return RawEnvInput(format_version=1, values=values)
 
@@ -5640,7 +5513,7 @@ def _shared_core_backend_litellm_env(
     state_dir: Path,
     extra_env: dict[str, str],
 ) -> dict[str, Any]:
-    values = {**_nextcloud_backend_raw_env().values, **extra_env}
+    values = {**_pack_backend_raw_env().values, **extra_env}
     raw_env = RawEnvInput(format_version=1, values=values)
     desired_state = resolve_desired_state(raw_env)
     recorded: dict[str, Any] = {}
@@ -5691,34 +5564,6 @@ def test_build_shared_core_backend_without_pin_keeps_env_value(
     assert litellm_env["LITELLM_IMAGE_TAG"] == "v1.80.0-stable"
 
 
-def _capture_nextcloud_backend_kwargs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> tuple[RawEnvInput, Any, dict[str, Any], Path]:
-    raw_env = _nextcloud_backend_raw_env()
-    desired_state = resolve_desired_state(raw_env)
-    recorded: dict[str, Any] = {}
-    sentinel_backend = object()
-    sentinel_client = object()
-    state_dir = Path("/tmp/test-state")
-
-    def record_backend(**kwargs: Any) -> object:
-        recorded.update(kwargs)
-        return sentinel_backend
-
-    monkeypatch.setattr(cli, "DokployNextcloudBackend", record_backend)
-    monkeypatch.setattr(cli, "_build_dokploy_api_client", lambda **_: sentinel_client)
-
-    backend = cli._build_nextcloud_backend(
-        raw_env=raw_env,
-        state_dir=state_dir,
-        desired_state=desired_state,
-    )
-
-    assert backend is sentinel_backend
-    assert recorded["client"] is sentinel_client
-    return raw_env, desired_state, recorded, state_dir
-
-
 class _FakeBootstrapBackend:
     def is_healthy(self) -> bool:
         return True
@@ -5737,7 +5582,6 @@ def _stub_install_flow_after_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "_build_shared_core_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_headscale_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_matrix_backend", lambda **_: cast(Any, object()))
-    monkeypatch.setattr(cli, "_build_nextcloud_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "_build_seaweedfs_backend", lambda **_: cast(Any, object()))
     monkeypatch.setattr(cli, "execute_lifecycle_plan", lambda **kwargs: {"ok": True})
 

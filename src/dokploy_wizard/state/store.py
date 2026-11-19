@@ -732,6 +732,9 @@ def _validate_state_document_set(loaded_state: LoadedState) -> None:
         "headscale",
         "tailscale",
         "matrix",
+        # Legacy: boxes installed while the Nextcloud pack existed carry the
+        # step in their checkpoint. The pack is gone; the name stays legal so
+        # their modify passes load without tripping the unsupported-step guard.
         "nextcloud",
         "moodle",
         "docuseal",

@@ -44,11 +44,6 @@ from dokploy_wizard.packs.headscale import (
 )
 from dokploy_wizard.packs.matrix import MatrixBackend, build_matrix_ledger, reconcile_matrix
 from dokploy_wizard.packs.moodle import MoodleBackend, build_moodle_ledger, reconcile_moodle
-from dokploy_wizard.packs.nextcloud import (
-    NextcloudBackend,
-    build_nextcloud_ledger,
-    reconcile_nextcloud,
-)
 from dokploy_wizard.packs.seaweedfs import (
     SeaweedFsBackend,
     build_seaweedfs_ledger,
@@ -77,7 +72,6 @@ class LifecycleBackends:
     shared_core: SharedCoreBackend
     headscale: HeadscaleBackend
     matrix: MatrixBackend
-    nextcloud: NextcloudBackend
     moodle: MoodleBackend
     docuseal: DocuSealBackend
     filex: FilexBackend
@@ -251,24 +245,6 @@ def execute_lifecycle_plan(
                     stack_name=desired_state.stack_name,
                     service_resource_id=seaweedfs.service_resource_id,
                     data_resource_id=seaweedfs.data_resource_id,
-                )
-                write_ownership_ledger(state_dir, current_ledger)
-        elif phase == "nextcloud":
-            nextcloud = reconcile_nextcloud(
-                dry_run=dry_run,
-                desired_state=desired_state,
-                ownership_ledger=current_ledger,
-                backend=backends.nextcloud,
-            )
-            phase_results[phase] = nextcloud.result.to_dict()
-            if not dry_run:
-                current_ledger = build_nextcloud_ledger(
-                    existing_ledger=current_ledger,
-                    stack_name=desired_state.stack_name,
-                    nextcloud_service_resource_id=nextcloud.nextcloud_service_resource_id,
-                    onlyoffice_service_resource_id=nextcloud.onlyoffice_service_resource_id,
-                    nextcloud_volume_resource_id=nextcloud.nextcloud_volume_resource_id,
-                    onlyoffice_volume_resource_id=nextcloud.onlyoffice_volume_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "moodle":
@@ -466,7 +442,6 @@ def _build_summary(
             "start_phase": lifecycle_plan.start_phase,
         },
         "matrix": phase_results.get("matrix", {"outcome": "not_run"}),
-        "nextcloud": phase_results.get("nextcloud", {"outcome": "not_run"}),
         "moodle": phase_results.get("moodle", {"outcome": "not_run"}),
         "docuseal": phase_results.get("docuseal", {"outcome": "not_run"}),
         "filex": phase_results.get("filex", {"outcome": "not_run"}),
@@ -550,16 +525,6 @@ def _preserved_result(
             desired_state=desired_state,
             ownership_ledger=ownership_ledger,
             backend=backends.seaweedfs,
-        ).result.to_dict()
-        if result["outcome"] != "skipped":
-            result["outcome"] = "already_present"
-        return result
-    if phase == "nextcloud":
-        result = reconcile_nextcloud(
-            dry_run=True,
-            desired_state=desired_state,
-            ownership_ledger=ownership_ledger,
-            backend=backends.nextcloud,
         ).result.to_dict()
         if result["outcome"] != "skipped":
             result["outcome"] = "already_present"

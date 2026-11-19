@@ -97,7 +97,7 @@ def test_run_service_verification_passes_state_dir_to_compose_builders(
                 "DOKPLOY_API_KEY=dokploy-key",
                 "DOKPLOY_ADMIN_EMAIL=admin@example.com",
                 "DOKPLOY_ADMIN_PASSWORD=secret-123",
-                "PACKS=nextcloud,moodle,docuseal",
+                "PACKS=matrix,docuseal,gitea,moodle",
                 "",
             ]
         ),
@@ -154,8 +154,8 @@ def test_run_service_verification_passes_state_dir_to_compose_builders(
         record_verified_backend,
     )
     monkeypatch.setattr(
-        "dokploy_wizard.service_verification_runner.cli._build_nextcloud_backend",
-        lambda **kwargs: seen.setdefault("nextcloud", kwargs["state_dir"]),
+        "dokploy_wizard.service_verification_runner.cli._build_gitea_backend",
+        lambda **kwargs: seen.setdefault("gitea", kwargs["state_dir"]),
     )
     monkeypatch.setattr(
         "dokploy_wizard.service_verification_runner.cli._build_moodle_backend",
@@ -170,13 +170,14 @@ def test_run_service_verification_passes_state_dir_to_compose_builders(
 
     assert payload["passed"] is True
     assert seen == {
-        "nextcloud": state_dir,
+        "gitea": state_dir,
         "moodle": state_dir,
         "docuseal": state_dir,
     }
-    # Disabled packs (seaweedfs, coder) build backends but are never verified;
+    # Disabled packs (coder, matrix) are never verified, and the SeaweedFS
+    # expansion that Gitea pulls in verifies without an extra compose builder;
     # verification is gated on the enabled pack set.
-    assert verified_services == ["nextcloud", "moodle", "docuseal"]
+    assert verified_services == ["moodle", "docuseal", "gitea", "seaweedfs"]
 
 
 class _FakePackBackend:
@@ -189,17 +190,17 @@ class _FakePackBackend:
 
 def test_verify_backend_method_returns_the_backend_result_verbatim() -> None:
     expected: ServiceVerificationResult = make_verification_result(
-        service_name="nextcloud",
+        service_name="matrix",
         tier="app",
         passed=True,
-        detail="Nextcloud migrations, cron, and OnlyOffice readiness checks passed.",
+        detail="Matrix synapse health and route readiness checks passed.",
     )
 
     result = _verify_backend_method(
         backend=_FakePackBackend(expected),
         method_name="_verify_current_application",
-        service_name="nextcloud",
-        unavailable_detail="Nextcloud verification backend is unavailable.",
+        service_name="matrix",
+        unavailable_detail="Matrix verification backend is unavailable.",
     )
 
     assert result is expected

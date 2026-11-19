@@ -26,10 +26,10 @@ def test_desired_state_resolution_is_deterministic(tmp_path: Path) -> None:
             [
                 "STACK_NAME=my-stack",
                 "ROOT_DOMAIN=example.com",
-                "ENABLE_NEXTCLOUD=true",
-                "ENABLE_MOODLE=true",
+                "ENABLE_DOCUSEAL=true",
+                "ENABLE_MATRIX=true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,Owner@Example.COM,owner@example.com",
-                "ENABLE_MATRIX=false",
+                "ENABLE_MOODLE=false",
             ]
         )
         + "\n",
@@ -38,12 +38,12 @@ def test_desired_state_resolution_is_deterministic(tmp_path: Path) -> None:
     env_b.write_text(
         "\n".join(
             [
-                "ENABLE_MATRIX=false",
+                "ENABLE_MATRIX=true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com",
-                "ENABLE_MOODLE=true",
+                "ENABLE_DOCUSEAL=true",
                 "ROOT_DOMAIN=example.com",
                 "STACK_NAME=my-stack",
-                "ENABLE_NEXTCLOUD=true",
+                "ENABLE_MOODLE=false",
             ]
         )
         + "\n",
@@ -55,17 +55,17 @@ def test_desired_state_resolution_is_deterministic(tmp_path: Path) -> None:
 
     assert desired_a.to_dict() == desired_b.to_dict()
     assert desired_a.fingerprint() == desired_b.fingerprint()
-    assert desired_a.selected_packs == ("moodle", "nextcloud")
-    assert desired_a.enabled_packs == ("moodle", "nextcloud")
-    assert desired_a.hostnames["onlyoffice"] == "office.example.com"
+    assert desired_a.selected_packs == ("docuseal", "matrix")
+    assert desired_a.enabled_packs == ("docuseal", "matrix")
+    assert desired_a.hostnames["docuseal"] == "docuseal.example.com"
     assert desired_a.dokploy_api_url is None
     assert desired_a.cloudflare_access_otp_emails == ("owner@example.com",)
     assert desired_a.shared_core.network_name == "my-stack-shared"
     assert desired_a.shared_core.postgres is not None
     assert desired_a.shared_core.redis is not None
     assert [allocation.pack_name for allocation in desired_a.shared_core.allocations] == [
-        "moodle",
-        "nextcloud",
+        "docuseal",
+        "matrix",
     ]
 
 
@@ -76,7 +76,7 @@ def test_explicitly_disabled_dependency_is_not_silently_reenabled() -> None:
             values={
                 "STACK_NAME": "my-stack",
                 "ROOT_DOMAIN": "example.com",
-                "PACKS": "nextcloud,matrix,seaweedfs,coder",
+                "PACKS": "moodle,matrix,seaweedfs,coder",
                 "ENABLE_HEADSCALE": "false",
                 "ENABLE_TAILSCALE": "false",
                 "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
@@ -85,13 +85,13 @@ def test_explicitly_disabled_dependency_is_not_silently_reenabled() -> None:
         )
     )
 
-    assert desired_state.selected_packs == ("coder", "matrix", "nextcloud", "seaweedfs")
-    assert desired_state.enabled_packs == ("coder", "matrix", "nextcloud", "seaweedfs")
+    assert desired_state.selected_packs == ("coder", "matrix", "moodle", "seaweedfs")
+    assert desired_state.enabled_packs == ("coder", "matrix", "moodle", "seaweedfs")
     assert "headscale" not in desired_state.hostnames
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
         "coder",
         "matrix",
-        "nextcloud",
+        "moodle",
     ]
 
 

@@ -386,7 +386,7 @@ def _resolve_access_otp_emails(values: dict[str, str]) -> tuple[str, ...]:
     raw_value = _get_configured_value(values, "CLOUDFLARE_ACCESS_OTP_EMAILS") or ""
     if raw_value == "":
         # Access OTP is opt-in. Every public surface the wizard ships today
-        # (Dokploy, Coder, Nextcloud, Moodle, DocuSeal, the LiteLLM admin UI)
+        # (Dokploy, Coder, Moodle, DocuSeal, the LiteLLM admin UI)
         # sits behind its own application login, so wrapping them in Cloudflare
         # Access would only add a second, weaker identity gate. Operators who
         # want the extra layer for a future unauthenticated surface list their

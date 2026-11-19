@@ -514,8 +514,6 @@ def managed_service_candidates(desired_state: DesiredState) -> tuple[dict[str, s
         {"service_name": f"{stack}-cloudflared", "pack": "networking", "component": "tunnel"}
     )
     pack_services = {
-        "nextcloud": (f"{stack}-nextcloud", "nextcloud"),
-        "onlyoffice": (f"{stack}-onlyoffice", "nextcloud"),
         "moodle": (f"{stack}-moodle", "moodle"),
         "docuseal": (f"{stack}-docuseal", "docuseal"),
         "coder": (f"{stack}-coder", "coder"),
@@ -525,7 +523,7 @@ def managed_service_candidates(desired_state: DesiredState) -> tuple[dict[str, s
     }
     enabled = set(desired_state.enabled_packs)
     for pack, (service_name, pack_label) in pack_services.items():
-        if pack in enabled or (pack == "onlyoffice" and "nextcloud" in enabled):
+        if pack in enabled:
             candidates.append({"service_name": service_name, "pack": pack_label, "component": pack})
     return tuple(candidates)
 

@@ -9,7 +9,7 @@ def root_install_env() -> RawEnvInput:
         values={
             "STACK_NAME": "openmerge",
             "ROOT_DOMAIN": "openmerge.me",
-            "PACKS": "nextcloud,coder,seaweedfs",
+            "PACKS": "coder,seaweedfs",
             "CODER_WILDCARD_SUBDOMAIN": "*",
             "ENABLE_HEADSCALE": "false",
             "ENABLE_TAILSCALE": "true",

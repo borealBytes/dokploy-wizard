@@ -9,10 +9,9 @@ from dokploy_wizard.cli import run_install_flow
 from dokploy_wizard.state import RawEnvInput
 from tests.helpers.root_install_env import root_install_env
 from tests.integration.test_networking_reconciler import FakeCoderBackend
-from tests.integration.test_nextcloud_pack import (
+from tests.integration.test_shared_core_reconciler import (
     FakeCloudflareBackend,
     FakeDokployBackend,
-    FakeNextcloudBackend,
     FakeSharedCoreBackend,
 )
 from tests.unit.test_seaweedfs_pack import FakeSeaweedFsBackend
@@ -23,8 +22,6 @@ _CORE_ONLY_STRIPPED_PREFIXES = (
     "HEADSCALE_",
     "MATRIX_",
     "MOODLE_",
-    "NEXTCLOUD_",
-    "ONLYOFFICE_",
     "SEAWEEDFS_",
     "CODER_",
     "LITELLM_",
@@ -83,7 +80,7 @@ def _load_env_with_host_facts(*, packs: str, strip_pack_env: bool = False) -> Ra
 
 
 def _load_mvp_env_with_host_facts() -> RawEnvInput:
-    return _load_env_with_host_facts(packs="nextcloud,seaweedfs,coder")
+    return _load_env_with_host_facts(packs="seaweedfs,coder")
 
 
 def test_root_mvp_env_emits_current_install_order_contract(tmp_path: Path) -> None:
@@ -95,19 +92,16 @@ def test_root_mvp_env_emits_current_install_order_contract(tmp_path: Path) -> No
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=FakeCloudflareBackend(),
         shared_core_backend=FakeSharedCoreBackend(),
-        nextcloud_backend=FakeNextcloudBackend(),
         seaweedfs_backend=FakeSeaweedFsBackend(),
         coder_backend=FakeCoderBackend(),
     )
 
     assert summary["desired_state"]["selected_packs"] == [
         "coder",
-        "nextcloud",
         "seaweedfs",
     ]
     assert summary["desired_state"]["enabled_packs"] == [
         "coder",
-        "nextcloud",
         "seaweedfs",
     ]
     assert summary["lifecycle"]["applicable_phases"] == [
@@ -116,7 +110,6 @@ def test_root_mvp_env_emits_current_install_order_contract(tmp_path: Path) -> No
         "networking",
         "shared_core",
         "seaweedfs",
-        "nextcloud",
         "coder",
         "cloudflare_access",
     ]
@@ -133,11 +126,10 @@ def test_litellm_phase_precedes_ai_consumers(tmp_path: Path) -> None:
         env_file=_repo_root() / ".install.env",
         state_dir=tmp_path / "state-ai",
         dry_run=True,
-        raw_env=_load_env_with_host_facts(packs="nextcloud,seaweedfs,coder"),
+        raw_env=_load_env_with_host_facts(packs="seaweedfs,coder"),
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=FakeCloudflareBackend(),
         shared_core_backend=FakeSharedCoreBackend(),
-        nextcloud_backend=FakeNextcloudBackend(),
         seaweedfs_backend=FakeSeaweedFsBackend(),
         coder_backend=FakeCoderBackend(),
     )
@@ -149,14 +141,12 @@ def test_litellm_phase_precedes_ai_consumers(tmp_path: Path) -> None:
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=FakeCloudflareBackend(),
         shared_core_backend=FakeSharedCoreBackend(),
-        nextcloud_backend=FakeNextcloudBackend(),
         seaweedfs_backend=FakeSeaweedFsBackend(),
         coder_backend=FakeCoderBackend(),
     )
 
     applicable_phases = ai_summary["lifecycle"]["applicable_phases"]
     assert applicable_phases.index("shared_core") < applicable_phases.index("coder")
-    assert applicable_phases.index("shared_core") < applicable_phases.index("nextcloud")
     assert ai_summary["desired_state"]["shared_core"]["litellm"]["service_name"].endswith(
         "-shared-litellm"
     )

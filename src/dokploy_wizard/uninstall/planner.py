@@ -35,12 +35,6 @@ from dokploy_wizard.packs.gitea import (
 from dokploy_wizard.packs.headscale import HEADSCALE_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.matrix import MATRIX_DATA_RESOURCE_TYPE, MATRIX_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.moodle import MOODLE_DATA_RESOURCE_TYPE, MOODLE_SERVICE_RESOURCE_TYPE
-from dokploy_wizard.packs.nextcloud import (
-    NEXTCLOUD_SERVICE_RESOURCE_TYPE,
-    NEXTCLOUD_VOLUME_RESOURCE_TYPE,
-    ONLYOFFICE_SERVICE_RESOURCE_TYPE,
-    ONLYOFFICE_VOLUME_RESOURCE_TYPE,
-)
 from dokploy_wizard.packs.seaweedfs import (
     SEAWEEDFS_DATA_RESOURCE_TYPE,
     SEAWEEDFS_SERVICE_RESOURCE_TYPE,
@@ -106,6 +100,16 @@ class UninstallPlan:
             "warnings": list(self.warnings),
         }
 
+
+# Retired-pack ledger literals. The Nextcloud + OnlyOffice pack shipped in the
+# first generation and its module is gone, but every ledger written by those
+# installs still carries these rows and the uninstall sweep must keep honoring
+# them — the ownership ledger is the uninstall authority, and an unmapped type
+# there strands a volume with no deletion plan.
+NEXTCLOUD_SERVICE_RESOURCE_TYPE = "nextcloud_service"
+ONLYOFFICE_SERVICE_RESOURCE_TYPE = "onlyoffice_service"
+NEXTCLOUD_VOLUME_RESOURCE_TYPE = "nextcloud_volume"
+ONLYOFFICE_VOLUME_RESOURCE_TYPE = "onlyoffice_volume"
 
 _RULES: dict[str, DeletionRule] = {
     TAILSCALE_NODE_RESOURCE_TYPE: DeletionRule(phase="tailscale", retain_safe=True, priority=5),
@@ -486,16 +490,6 @@ def compute_remaining_completed_steps(
         if not _has_resource_type(resources_by_type, MATRIX_DATA_RESOURCE_TYPE):
             return tuple(prefix)
         prefix.append("matrix")
-    if "nextcloud" in desired_state.enabled_packs:
-        for resource_type in (
-            NEXTCLOUD_SERVICE_RESOURCE_TYPE,
-            ONLYOFFICE_SERVICE_RESOURCE_TYPE,
-            NEXTCLOUD_VOLUME_RESOURCE_TYPE,
-            ONLYOFFICE_VOLUME_RESOURCE_TYPE,
-        ):
-            if not _has_resource_type(resources_by_type, resource_type):
-                return tuple(prefix)
-        prefix.append("nextcloud")
     if "moodle" in desired_state.enabled_packs:
         if not _has_resource_type(resources_by_type, MOODLE_SERVICE_RESOURCE_TYPE):
             return tuple(prefix)

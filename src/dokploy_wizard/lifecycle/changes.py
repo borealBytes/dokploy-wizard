@@ -31,7 +31,6 @@ PHASE_ORDER: tuple[str, ...] = (
     "headscale",
     "tailscale",
     "matrix",
-    "nextcloud",
     "moodle",
     "docuseal",
     "filex",
@@ -122,8 +121,6 @@ _HOSTNAME_PHASES = {
     "dokploy": ("networking",),
     "headscale": ("networking", "headscale"),
     "matrix": ("networking", "matrix"),
-    "nextcloud": ("networking", "nextcloud"),
-    "onlyoffice": ("networking", "nextcloud"),
     "moodle": ("networking", "moodle"),
     "docuseal": ("networking", "docuseal"),
     "filex": ("networking", "filex"),
@@ -222,8 +219,6 @@ def applicable_phases_for(desired_state: DesiredState) -> tuple[str, ...]:
         phases.add("tailscale")
     if "matrix" in desired_state.enabled_packs:
         phases.add("matrix")
-    if "nextcloud" in desired_state.enabled_packs:
-        phases.add("nextcloud")
     if "moodle" in desired_state.enabled_packs:
         phases.add("moodle")
     if "docuseal" in desired_state.enabled_packs:
@@ -351,8 +346,17 @@ def classify_modify_request(
     if effective_changed_keys & _SUPPORTED_TAILSCALE_KEYS and requested_desired.enable_tailscale:
         phases_to_run.add("tailscale")
     if effective_changed_keys & {"DOKPLOY_ADMIN_EMAIL", "DOKPLOY_ADMIN_PASSWORD"}:
-        if "nextcloud" in requested_desired.enabled_packs:
-            phases_to_run.add("nextcloud")
+        # The admin credentials are runtime inputs, not just bootstrap ones:
+        # the Gitea provisioner pin rides the login and stack password, the
+        # FileX lane document and adopted accounts carry them, and the Coder
+        # first-user/template bake derives from them. Any enabled consumer
+        # re-runs on drift so the whole stack re-converges on the new pair.
+        if "gitea" in requested_desired.enabled_packs:
+            phases_to_run.add("gitea")
+        if "filex" in requested_desired.enabled_packs:
+            phases_to_run.add("filex")
+        if "coder" in requested_desired.enabled_packs:
+            phases_to_run.add("coder")
     if effective_changed_keys & _SUPPORTED_AUTH_KEYS:
         phases_to_run.add("networking")
     if effective_changed_keys & (_SUPPORTED_AUTH_KEYS | _SUPPORTED_ACCESS_KEYS) and _access_enabled(

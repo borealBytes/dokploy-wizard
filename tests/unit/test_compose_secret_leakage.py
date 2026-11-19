@@ -10,8 +10,7 @@ from dataclasses import dataclass, field
 import pytest
 
 import dokploy_wizard.dokploy.docuseal as docuseal_module
-import dokploy_wizard.dokploy.nextcloud as nextcloud_module
-from dokploy_wizard.core.models import SharedPostgresAllocation, SharedRedisAllocation
+from dokploy_wizard.core.models import SharedPostgresAllocation
 from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.dokploy.cloudflared import _render_compose_file as render_cloudflared_compose
 from dokploy_wizard.dokploy.coder import _render_compose_file as render_coder_compose
@@ -66,12 +65,6 @@ _SENTINEL_SECRETS = (
         expected_target_services=("wizard-stack-shared-litellm",),
     ),
     _SentinelSecret(
-        key="NEXTCLOUD_ADMIN_PASSWORD",
-        value="SECRET_TEST_NEXTCLOUD_ADMIN_VALUE",
-        expected_owner="nextcloud",
-        expected_target_services=("wizard-stack-nextcloud",),
-    ),
-    _SentinelSecret(
         key="SEAWEEDFS_SECRET_KEY",
         value="SECRET_TEST_SEAWEEDFS_SECRET_VALUE",
         expected_owner="seaweedfs",
@@ -103,14 +96,6 @@ def _postgres_allocation(pack_name: str) -> SharedPostgresAllocation:
     )
 
 
-def _redis_allocation(pack_name: str) -> SharedRedisAllocation:
-    normalized = pack_name.replace("-", "_")
-    return SharedRedisAllocation(
-        identity_name=f"wizard_stack_{normalized}",
-        password_secret_ref=f"wizard-stack-{pack_name}-redis-password",
-    )
-
-
 def _litellm_generated_keys() -> LiteLLMGeneratedKeys:
     return LiteLLMGeneratedKeys(
         format_version=1,
@@ -138,10 +123,8 @@ def _artifact_from_rendered(
 def _representative_artifacts() -> tuple[_RenderedArtifact, ...]:
     shared_plan = build_shared_core_plan(
         stack_name="wizard-stack",
-        enabled_packs=("coder", "docuseal", "nextcloud"),
+        enabled_packs=("coder", "docuseal", "matrix"),
     )
-    nextcloud_postgres = _postgres_allocation("nextcloud")
-    nextcloud_redis = _redis_allocation("nextcloud")
 
     return (
         _artifact_from_rendered(
@@ -167,22 +150,6 @@ def _representative_artifacts() -> tuple[_RenderedArtifact, ...]:
                     "LITELLM_LOCAL_MODEL": "unsloth-active",
                 },
                 _litellm_generated_keys(),
-            ),
-        ),
-        _artifact_from_rendered(
-            owner="nextcloud",
-            service_names=("wizard-stack-nextcloud", "wizard-stack-onlyoffice"),
-            rendered=nextcloud_module._render_compose_file(
-                stack_name="wizard-stack",
-                nextcloud_hostname="nextcloud.example.com",
-                onlyoffice_hostname="office.example.com",
-                postgres_service_name="wizard-stack-shared-postgres",
-                redis_service_name="wizard-stack-shared-redis",
-                postgres=nextcloud_postgres,
-                redis=nextcloud_redis,
-                integration_secret_ref="wizard-stack-nextcloud-onlyoffice-jwt-secret",
-                admin_user="admin",
-                admin_password="SECRET_TEST_NEXTCLOUD_ADMIN_VALUE",
             ),
         ),
         _artifact_from_rendered(
@@ -296,13 +263,10 @@ def _service_environment(compose: str, service_name: str) -> dict[str, str]:
 def test_representative_compose_uses_explicit_service_environment_mappings() -> None:
     artifacts_by_owner = {artifact.owner: artifact for artifact in _representative_artifacts()}
     shared_core = artifacts_by_owner["shared-core"].compose_file
-    nextcloud = artifacts_by_owner["nextcloud"].compose_file
     docuseal = artifacts_by_owner["docuseal"].compose_file
     postgres_env = _service_environment(shared_core, "wizard-stack-shared-postgres")
     redis_env = _service_environment(shared_core, "wizard-stack-shared-redis")
     litellm_env = _service_environment(shared_core, "wizard-stack-shared-litellm")
-    nextcloud_env = _service_environment(nextcloud, "wizard-stack-nextcloud")
-    onlyoffice_env = _service_environment(nextcloud, "wizard-stack-onlyoffice")
     docuseal_env = _service_environment(docuseal, "wizard-stack-docuseal")
 
     expected_mappings = {
@@ -321,22 +285,6 @@ def test_representative_compose_uses_explicit_service_environment_mappings() -> 
         "shared-core-litellm:LITELLM_SALT_KEY": (
             litellm_env.get("LITELLM_SALT_KEY"),
             "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY is required}",
-        ),
-        "nextcloud:NEXTCLOUD_ADMIN_PASSWORD": (
-            nextcloud_env.get("NEXTCLOUD_ADMIN_PASSWORD"),
-            "${NEXTCLOUD_ADMIN_PASSWORD:?NEXTCLOUD_ADMIN_PASSWORD is required}",
-        ),
-        "nextcloud:POSTGRES_PASSWORD": (
-            nextcloud_env.get("POSTGRES_PASSWORD"),
-            "${NEXTCLOUD_POSTGRES_PASSWORD:?NEXTCLOUD_POSTGRES_PASSWORD is required}",
-        ),
-        "nextcloud:REDIS_HOST_PASSWORD": (
-            nextcloud_env.get("REDIS_HOST_PASSWORD"),
-            "${NEXTCLOUD_REDIS_HOST_PASSWORD:?NEXTCLOUD_REDIS_HOST_PASSWORD is required}",
-        ),
-        "onlyoffice:JWT_SECRET": (
-            onlyoffice_env.get("JWT_SECRET"),
-            "${ONLYOFFICE_JWT_SECRET:?ONLYOFFICE_JWT_SECRET is required}",
         ),
         "docuseal:DATABASE_URL": (
             docuseal_env.get("DATABASE_URL"),
@@ -361,7 +309,7 @@ def test_representative_compose_uses_explicit_service_environment_mappings() -> 
 def test_future_renderer_contract_returns_safe_compose_plus_env_specs() -> None:
     from dokploy_wizard.dokploy.env_spec import RenderedCompose  # type: ignore[import-not-found]
 
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("matrix",))
     artifact: RenderedCompose = render_shared_core_compose(
         plan,
         {},

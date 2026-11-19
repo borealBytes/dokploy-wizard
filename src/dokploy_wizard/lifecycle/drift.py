@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from dokploy_wizard.bootstrap import DokployBootstrapBackend, reconcile_dokploy
 from dokploy_wizard.core import SharedCoreBackend, reconcile_shared_core
@@ -41,11 +40,6 @@ from dokploy_wizard.packs.headscale import (
 )
 from dokploy_wizard.packs.matrix import MatrixBackend, reconcile_matrix
 from dokploy_wizard.packs.moodle import MoodleBackend, MoodleResourceRecord, reconcile_moodle
-from dokploy_wizard.packs.nextcloud import (
-    NextcloudBackend,
-    NextcloudResourceRecord,
-    reconcile_nextcloud,
-)
 from dokploy_wizard.packs.seaweedfs import (
     SeaweedFsBackend,
     SeaweedFsResourceRecord,
@@ -96,7 +90,6 @@ def validate_preserved_phases(
     shared_core_backend: SharedCoreBackend,
     headscale_backend: HeadscaleBackend,
     matrix_backend: MatrixBackend,
-    nextcloud_backend: NextcloudBackend,
     seaweedfs_backend: SeaweedFsBackend,
     coder_backend: CoderBackend,
     moodle_backend: MoodleBackend | None = None,
@@ -121,7 +114,6 @@ def validate_preserved_phases(
                 shared_core_backend=shared_core_backend,
                 headscale_backend=headscale_backend,
                 matrix_backend=matrix_backend,
-                nextcloud_backend=nextcloud_backend,
                 moodle_backend=moodle_backend,
                 docuseal_backend=docuseal_backend,
                 filex_backend=filex_backend,
@@ -154,7 +146,6 @@ def _validate_phase(
     shared_core_backend: SharedCoreBackend,
     headscale_backend: HeadscaleBackend,
     matrix_backend: MatrixBackend,
-    nextcloud_backend: NextcloudBackend,
     seaweedfs_backend: SeaweedFsBackend,
     coder_backend: CoderBackend,
     moodle_backend: MoodleBackend | None = None,
@@ -441,53 +432,6 @@ def _validate_phase(
                     detail=f"Matrix expected owned reuse, found actions {sorted(actions)}.",
                 )
             return DriftEntry(phase=phase, status="ok", detail="Matrix ownership remains aligned.")
-        if phase == "nextcloud":
-            nextcloud = reconcile_nextcloud(
-                dry_run=True,
-                desired_state=desired_state,
-                ownership_ledger=ownership_ledger,
-                backend=nextcloud_backend,
-            ).result
-            if nextcloud.outcome == "skipped":
-                return DriftEntry(phase=phase, status="ok", detail="Nextcloud remains skipped.")
-            actions = {resource["action"] for resource in _nextcloud_actions(nextcloud)}
-            if actions != {"reuse_owned"}:
-                return DriftEntry(
-                    phase=phase,
-                    status="drift",
-                    detail=f"Nextcloud expected owned reuse, found actions {sorted(actions)}.",
-                )
-            if (
-                nextcloud.nextcloud is None
-                or nextcloud.onlyoffice is None
-                or nextcloud.nextcloud.health_check is None
-                or nextcloud.onlyoffice.health_check is None
-                or not nextcloud_backend.check_health(
-                    service=NextcloudResourceRecord(
-                        resource_id=nextcloud.nextcloud.service.resource_id,
-                        resource_name=nextcloud.nextcloud.service.resource_name,
-                    ),
-                    url=nextcloud.nextcloud.health_check.url,
-                )
-                or not nextcloud_backend.check_health(
-                    service=NextcloudResourceRecord(
-                        resource_id=nextcloud.onlyoffice.service.resource_id,
-                        resource_name=nextcloud.onlyoffice.service.resource_name,
-                    ),
-                    url=nextcloud.onlyoffice.health_check.url,
-                )
-            ):
-                return DriftEntry(
-                    phase=phase,
-                    status="drift",
-                    detail=(
-                        "Nextcloud or OnlyOffice is no longer healthy enough to "
-                        "preserve; rerun the phase."
-                    ),
-                )
-            return DriftEntry(
-                phase=phase, status="ok", detail="Nextcloud ownership remains aligned."
-            )
         if phase == "moodle":
             if moodle_backend is None:
                 return DriftEntry(phase=phase, status="drift", detail="Moodle backend is unavailable.")
@@ -748,18 +692,6 @@ def _validate_phase(
     except RuntimeError as error:
         return DriftEntry(phase=phase, status="drift", detail=str(error))
     return DriftEntry(phase=phase, status="ok", detail=f"Phase '{phase}' validated.")
-
-
-def _nextcloud_actions(result: Any) -> tuple[dict[str, str], ...]:
-    nextcloud = result.nextcloud
-    onlyoffice = result.onlyoffice
-    resources: list[dict[str, str]] = []
-    for service in (nextcloud, onlyoffice):
-        if service is None:
-            continue
-        resources.append(service.service.to_dict())
-        resources.append(service.data_volume.to_dict())
-    return tuple(resources)
 
 
 def _is_repairable_legacy_cloudflare_access_gap(

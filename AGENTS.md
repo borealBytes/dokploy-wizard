@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Dokploy Wizard is a Python-first installer that stands up a real self-hosted stack on a single fresh Ubuntu VPS. It deploys Dokploy as the control plane, wires Cloudflare Tunnel for public ingress, optionally enables Cloudflare Access OTP and Tailscale host access, and installs opinionated application packs including Nextcloud, Moodle, DocuSeal, SeaweedFS, and Coder. The wizard supports full lifecycle operations: install, modify, rerun, inspect-state, and uninstall.
+Dokploy Wizard is a Python-first installer that stands up a real self-hosted stack on a single fresh Ubuntu VPS. It deploys Dokploy as the control plane, wires Cloudflare Tunnel for public ingress, optionally enables Cloudflare Access OTP and Tailscale host access, and installs opinionated application packs including Moodle, DocuSeal, SeaweedFS, FileX, Gitea, and Coder. The wizard supports full lifecycle operations: install, modify, rerun, inspect-state, and uninstall.
 
 This guide covers day-to-day commands, secret handling, testing, and safety rules. For bin-level wrapper details, see [bin/AGENTS.md](bin/AGENTS.md).
 
@@ -167,8 +167,8 @@ mypy .
 Focused modules that matter most:
 
 ```bash
-pytest tests/unit/test_nextcloud_pack.py -q
-pytest tests/integration/test_nextcloud_pack.py -q
+pytest tests/unit/test_filex_pack.py -q
+pytest tests/unit/test_gitea_pack.py -q
 pytest tests/test_cli.py -q
 ```
 

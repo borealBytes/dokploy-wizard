@@ -49,14 +49,14 @@ def test_modify_domain_change_starts_at_networking() -> None:
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_NEXTCLOUD": "true",
+            "ENABLE_MOODLE": "true",
         }
     )
     requested_raw = _raw(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.net",
-            "ENABLE_NEXTCLOUD": "true",
+            "ENABLE_MOODLE": "true",
         }
     )
     existing_desired = resolve_desired_state(existing_raw)
@@ -73,7 +73,7 @@ def test_modify_domain_change_starts_at_networking() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "nextcloud",
+                "moodle",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -84,7 +84,7 @@ def test_modify_domain_change_starts_at_networking() -> None:
     assert plan.mode == "modify"
     assert plan.start_phase == "networking"
     assert plan.initial_completed_steps == ("preflight", "dokploy_bootstrap")
-    assert plan.phases_to_run == ("networking", "nextcloud")
+    assert plan.phases_to_run == ("networking", "shared_core", "moodle")
 
 
 def test_modify_cloudflare_auth_rotation_only_reruns_networking() -> None:
@@ -325,12 +325,12 @@ def test_modify_rejects_legacy_checkpoint_contract_even_when_steps_match_old_pre
         )
 
 
-def test_modify_dokploy_admin_credential_change_reruns_nextcloud() -> None:
+def test_modify_dokploy_admin_credential_change_reruns_pack_consumers() -> None:
     existing_raw = _raw(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_NEXTCLOUD": "true",
+            "PACKS": "gitea,coder",
             "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
             "DOKPLOY_ADMIN_PASSWORD": "ChangeMeSoon",
         }
@@ -339,7 +339,7 @@ def test_modify_dokploy_admin_credential_change_reruns_nextcloud() -> None:
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_NEXTCLOUD": "true",
+            "PACKS": "gitea,coder",
             "DOKPLOY_ADMIN_EMAIL": "adminuser@example.com",
             "DOKPLOY_ADMIN_PASSWORD": "ChangeMeSoon",
         }
@@ -358,7 +358,9 @@ def test_modify_dokploy_admin_credential_change_reruns_nextcloud() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "nextcloud",
+                "seaweedfs",
+                "gitea",
+                "coder",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -366,8 +368,8 @@ def test_modify_dokploy_admin_credential_change_reruns_nextcloud() -> None:
         requested_desired=requested_desired,
     )
 
-    assert plan.start_phase == "nextcloud"
-    assert plan.phases_to_run == ("nextcloud",)
+    assert plan.start_phase == "gitea"
+    assert plan.phases_to_run == ("gitea", "coder")
 
 
 def test_modify_rejects_stack_name_change() -> None:
@@ -394,19 +396,19 @@ def test_modify_rejects_stack_name_change() -> None:
         )
 
 
-def test_modify_disabling_nextcloud_is_supported_via_networking_only() -> None:
+def test_modify_disabling_matrix_is_supported_via_networking_only() -> None:
     existing_raw = _raw(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_NEXTCLOUD": "true",
+            "ENABLE_MATRIX": "true",
         }
     )
     requested_raw = _raw(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_NEXTCLOUD": "false",
+            "ENABLE_MATRIX": "false",
         }
     )
 
@@ -424,7 +426,7 @@ def test_modify_disabling_nextcloud_is_supported_via_networking_only() -> None:
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "nextcloud",
+                "matrix",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -899,14 +901,14 @@ def test_modify_enabling_matrix_adds_networking_shared_core_and_matrix_phases() 
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "nextcloud",
+            "PACKS": "moodle",
         }
     )
     requested_raw = _raw(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "matrix,nextcloud",
+            "PACKS": "matrix,moodle",
         }
     )
 
@@ -924,7 +926,7 @@ def test_modify_enabling_matrix_adds_networking_shared_core_and_matrix_phases() 
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "nextcloud",
+                "moodle",
             ),
         ),
         existing_ledger=OwnershipLedger(format_version=1, resources=()),
@@ -935,7 +937,7 @@ def test_modify_enabling_matrix_adds_networking_shared_core_and_matrix_phases() 
     assert plan.mode == "modify"
     assert "PACKS" in plan.reasons[0]
     assert plan.phases_to_run == ("networking", "shared_core", "matrix")
-    assert "nextcloud" in plan.preserved_phases
+    assert "moodle" in plan.preserved_phases
 
 
 def test_modify_enabling_gitea_schedules_shared_core_and_gitea_phases() -> None:
@@ -951,14 +953,14 @@ def test_modify_enabling_gitea_schedules_shared_core_and_gitea_phases() -> None:
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex",
+            "PACKS": "seaweedfs,coder,docuseal,moodle,filex",
         }
     )
     requested_raw = _raw(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex,gitea",
+            "PACKS": "seaweedfs,coder,docuseal,moodle,filex,gitea",
         }
     )
 
@@ -1000,7 +1002,7 @@ def test_modify_gitea_flag_to_packs_alias_flip_is_noop() -> None:
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex",
+            "PACKS": "seaweedfs,coder,docuseal,moodle,filex",
             "ENABLE_GITEA": "true",
         }
     )
@@ -1008,7 +1010,7 @@ def test_modify_gitea_flag_to_packs_alias_flip_is_noop() -> None:
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "seaweedfs,coder,docuseal,nextcloud,filex,gitea",
+            "PACKS": "seaweedfs,coder,docuseal,moodle,filex,gitea",
         }
     )
 
@@ -1040,7 +1042,7 @@ def test_modify_litellm_desired_only_local_alias_removal_reruns_consumers() -> N
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "coder,nextcloud",
+            "PACKS": "coder,moodle",
             "AI_DEFAULT_PROVIDER": "openrouter",
             "AI_DEFAULT_MODEL": "deepseek/deepseek-v4.1-flash:free",
             "LITELLM_OPENROUTER_API_KEY": "sk-test-openrouter",
@@ -1076,7 +1078,7 @@ def test_modify_litellm_desired_only_local_alias_removal_reruns_consumers() -> N
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "nextcloud",
+                "moodle",
                 "coder",
             ),
         ),
@@ -1230,13 +1232,13 @@ def test_modify_litellm_admin_hostname_reapplies_cloudflare_access_when_enabled(
     assert plan.phases_to_run == ("networking", "shared_core", "cloudflare_access")
 
 
-def test_modify_nextcloud_hostname_change_reconciles_networking_and_nextcloud_only() -> None:
+def test_modify_matrix_hostname_change_reconciles_networking_and_matrix_only() -> None:
     existing_raw = _raw(
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_NEXTCLOUD": "true",
-            "NEXTCLOUD_SUBDOMAIN": "cloud",
+            "ENABLE_MATRIX": "true",
+            "MATRIX_SUBDOMAIN": "chat",
             "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
         }
     )
@@ -1244,8 +1246,8 @@ def test_modify_nextcloud_hostname_change_reconciles_networking_and_nextcloud_on
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "ENABLE_NEXTCLOUD": "true",
-            "NEXTCLOUD_SUBDOMAIN": "files",
+            "ENABLE_MATRIX": "true",
+            "MATRIX_SUBDOMAIN": "talk",
             "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
         }
     )
@@ -1264,7 +1266,7 @@ def test_modify_nextcloud_hostname_change_reconciles_networking_and_nextcloud_on
                 "dokploy_bootstrap",
                 "networking",
                 "shared_core",
-                "nextcloud",
+                "matrix",
                 "cloudflare_access",
             ),
         ),
@@ -1274,9 +1276,9 @@ def test_modify_nextcloud_hostname_change_reconciles_networking_and_nextcloud_on
     )
 
     assert plan.mode == "modify"
-    assert "NEXTCLOUD_SUBDOMAIN" in plan.reasons[0]
+    assert "MATRIX_SUBDOMAIN" in plan.reasons[0]
     assert plan.start_phase == "networking"
-    assert plan.phases_to_run == ("networking", "nextcloud")
+    assert plan.phases_to_run == ("networking", "matrix")
 
 
 def test_modify_schedules_shared_core_for_projection_drift_and_unfinished_tail() -> None:
@@ -1284,7 +1286,7 @@ def test_modify_schedules_shared_core_for_projection_drift_and_unfinished_tail()
         {
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "seaweedfs,coder,nextcloud",
+            "PACKS": "seaweedfs,coder,moodle",
             "LITELLM_OPENROUTER_API_KEY": "or-key",
         }
     )
@@ -1318,7 +1320,7 @@ def test_modify_schedules_shared_core_for_projection_drift_and_unfinished_tail()
 
     assert plan.mode == "modify"
     assert plan.phases_to_run == ("shared_core", "coder")
-    assert "nextcloud" in plan.preserved_phases
+    assert "moodle" in plan.preserved_phases
 
 
 def _noop_plan(applicable: tuple[str, ...]) -> LifecyclePlan:

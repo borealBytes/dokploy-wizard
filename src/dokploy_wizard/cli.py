@@ -44,7 +44,6 @@ from dokploy_wizard.dokploy import (
     DokployHeadscaleBackend,
     DokployMatrixBackend,
     DokployMoodleBackend,
-    DokployNextcloudBackend,
     DokploySeaweedFsBackend,
     DokploySharedCoreBackend,
     build_litellm_consumer_model_allowlists,
@@ -97,12 +96,6 @@ from dokploy_wizard.packs.matrix import (
     ShellMatrixBackend,
 )
 from dokploy_wizard.packs.moodle import MoodleBackend, ShellMoodleBackend
-from dokploy_wizard.packs.nextcloud import (
-    NextcloudAiIntegration,
-    NextcloudBackend,
-    NextcloudError,
-    ShellNextcloudBackend,
-)
 from dokploy_wizard.packs.prompts import (
     apply_prompt_selection,
     prompt_for_initial_install_values,
@@ -294,7 +287,6 @@ def build_parser() -> argparse.ArgumentParser:
                 "headscale",
                 "tailscale",
                 "matrix",
-                "nextcloud",
                 "moodle",
                 "docuseal",
                 "filex",
@@ -465,7 +457,6 @@ def _handle_install(args: argparse.Namespace) -> int:
         DokployBootstrapAuthError,
         LifecycleDriftError,
         MatrixError,
-        NextcloudError,
         SeaweedFsError,
     ) as error:
         raise SystemExit(_redacted_cli_error(error)) from error
@@ -679,7 +670,6 @@ def _handle_modify(args: argparse.Namespace) -> int:
         CoderError,
         LifecycleDriftError,
         MatrixError,
-        NextcloudError,
         SeaweedFsError,
     ) as error:
         raise SystemExit(_redacted_cli_error(error)) from error
@@ -713,7 +703,6 @@ def _handle_upgrade(args: argparse.Namespace) -> int:
         CoderError,
         LifecycleDriftError,
         MatrixError,
-        NextcloudError,
         SeaweedFsError,
     ) as error:
         raise SystemExit(_redacted_cli_error(error)) from error
@@ -966,7 +955,6 @@ def run_install_flow(
     shared_core_backend: SharedCoreBackend | None = None,
     headscale_backend: HeadscaleBackend | None = None,
     matrix_backend: MatrixBackend | None = None,
-    nextcloud_backend: NextcloudBackend | None = None,
     seaweedfs_backend: SeaweedFsBackend | None = None,
     coder_backend: CoderBackend | None = None,
     allow_memory_shortfall: bool = False,
@@ -984,7 +972,6 @@ def run_install_flow(
         shared_core_backend=shared_core_backend,
         headscale_backend=headscale_backend,
         matrix_backend=matrix_backend,
-        nextcloud_backend=nextcloud_backend,
         seaweedfs_backend=seaweedfs_backend,
         coder_backend=coder_backend,
         allow_modify=False,
@@ -1007,7 +994,6 @@ def run_modify_flow(
     shared_core_backend: SharedCoreBackend | None = None,
     headscale_backend: HeadscaleBackend | None = None,
     matrix_backend: MatrixBackend | None = None,
-    nextcloud_backend: NextcloudBackend | None = None,
     seaweedfs_backend: SeaweedFsBackend | None = None,
     coder_backend: CoderBackend | None = None,
     enforce_live_run_contamination_check: bool = False,
@@ -1030,7 +1016,6 @@ def run_modify_flow(
         shared_core_backend=shared_core_backend,
         headscale_backend=headscale_backend,
         matrix_backend=matrix_backend,
-        nextcloud_backend=nextcloud_backend,
         seaweedfs_backend=seaweedfs_backend,
         coder_backend=coder_backend,
         allow_modify=True,
@@ -1210,7 +1195,6 @@ def _run_lifecycle_flow(
     shared_core_backend: SharedCoreBackend | None,
     headscale_backend: HeadscaleBackend | None,
     matrix_backend: MatrixBackend | None,
-    nextcloud_backend: NextcloudBackend | None,
     seaweedfs_backend: SeaweedFsBackend | None,
     coder_backend: CoderBackend | None,
     allow_modify: bool,
@@ -1368,7 +1352,6 @@ def _run_lifecycle_flow(
         shared_core_backend=shared_core_backend,
         headscale_backend=headscale_backend,
         matrix_backend=matrix_backend,
-        nextcloud_backend=nextcloud_backend,
         seaweedfs_backend=seaweedfs_backend,
         coder_backend=coder_backend,
     )
@@ -1428,13 +1411,6 @@ def _run_lifecycle_flow(
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
-    nextcloud_phase_backend = nextcloud_backend or _build_nextcloud_backend(
-        raw_env=raw_env,
-        state_dir=state_dir,
-        desired_state=desired_state,
-        session_client=dokploy_session_client,
-        litellm_generated_keys=litellm_generated_keys,
-    )
     moodle_phase_backend = _build_moodle_backend(
         raw_env=raw_env,
         state_dir=state_dir,
@@ -1479,7 +1455,6 @@ def _run_lifecycle_flow(
         shared_core=shared_core_phase_backend,
         headscale=headscale_phase_backend,
         matrix=matrix_phase_backend,
-        nextcloud=nextcloud_phase_backend,
         moodle=moodle_phase_backend,
         docuseal=docuseal_phase_backend,
         filex=filex_phase_backend,
@@ -1500,7 +1475,6 @@ def _run_lifecycle_flow(
             shared_core_backend=shared_core_phase_backend,
             headscale_backend=headscale_phase_backend,
             matrix_backend=matrix_phase_backend,
-            nextcloud_backend=nextcloud_phase_backend,
             moodle_backend=moodle_phase_backend,
             docuseal_backend=docuseal_phase_backend,
             filex_backend=filex_phase_backend,
@@ -2088,93 +2062,6 @@ def _build_headscale_backend(
     return ShellHeadscaleBackend(raw_env)
 
 
-def _build_nextcloud_backend(
-    *,
-    raw_env: RawEnvInput,
-    state_dir: Path,
-    desired_state: DesiredState,
-    session_client: DokployBootstrapAuthClient | None = None,
-    litellm_generated_keys: LiteLLMGeneratedKeys | None = None,
-) -> NextcloudBackend:
-    if raw_env.values.get("DOKPLOY_MOCK_API_MODE") == "true":
-        return ShellNextcloudBackend(raw_env)
-    api_url = desired_state.dokploy_api_url
-    api_key = raw_env.values.get("DOKPLOY_API_KEY")
-    if not api_url or not api_key or "nextcloud" not in desired_state.enabled_packs:
-        return ShellNextcloudBackend(raw_env)
-    nextcloud_hostname = desired_state.hostnames.get("nextcloud")
-    onlyoffice_hostname = desired_state.hostnames.get("onlyoffice")
-    allocation = next(
-        (item for item in desired_state.shared_core.allocations if item.pack_name == "nextcloud"),
-        None,
-    )
-    if nextcloud_hostname is None or onlyoffice_hostname is None or allocation is None:
-        return ShellNextcloudBackend(raw_env)
-    if (
-        allocation.postgres is None
-        or allocation.redis is None
-        or desired_state.shared_core.postgres is None
-        or desired_state.shared_core.redis is None
-    ):
-        return ShellNextcloudBackend(raw_env)
-    admin_user = raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin")
-    admin_password = raw_env.values.get("DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD)
-    return DokployNextcloudBackend(
-        api_url=api_url,
-        api_key=api_key,
-        state_dir=state_dir,
-        stack_name=desired_state.stack_name,
-        nextcloud_hostname=nextcloud_hostname,
-        onlyoffice_hostname=onlyoffice_hostname,
-        postgres_service_name=desired_state.shared_core.postgres.service_name,
-        redis_service_name=desired_state.shared_core.redis.service_name,
-        postgres=allocation.postgres,
-        redis=allocation.redis,
-        integration_secret_ref=f"{desired_state.stack_name}-nextcloud-onlyoffice-jwt-secret",
-        admin_user=admin_user,
-        admin_password=admin_password,
-        ai_integration=_build_nextcloud_ai_integration(
-            raw_env=raw_env,
-            desired_state=desired_state,
-            litellm_generated_keys=litellm_generated_keys,
-        ),
-        client=_build_dokploy_api_client(
-            raw_env=raw_env,
-            api_url=api_url,
-            api_key=api_key,
-            session_client=session_client,
-        ),
-    )
-
-
-def _build_nextcloud_ai_integration(
-    *,
-    raw_env: RawEnvInput,
-    desired_state: DesiredState,
-    litellm_generated_keys: LiteLLMGeneratedKeys | None,
-) -> NextcloudAiIntegration | None:
-    litellm_plan = desired_state.shared_core.litellm
-    if litellm_plan is None or litellm_generated_keys is None:
-        return None
-    api_key = litellm_generated_keys.virtual_keys.get("nextcloud")
-    if not api_key:
-        return None
-    allowlists = build_litellm_consumer_model_allowlists(
-        flat_env=dict(raw_env.values),
-        plan=desired_state.shared_core,
-        # The same consumer-key view the sidecar enforces, so the app's picker is
-        # seeded with what the key can actually call even before any live probe.
-        include_default_chat_alias=True,
-    )
-    return NextcloudAiIntegration(
-        service_name="LiteLLM (Dokploy Wizard)",
-        service_url=f"http://{litellm_plan.service_name}:4000/v1",
-        api_key=api_key,
-        models_probe_url="http://127.0.0.1:4000/v1/models",
-        expected_models=allowlists.get("nextcloud", ()),
-    )
-
-
 def _build_matrix_backend(
     *,
     raw_env: RawEnvInput,
@@ -2567,7 +2454,6 @@ def _dokploy_api_auth_required(
     shared_core_backend: SharedCoreBackend | None,
     headscale_backend: HeadscaleBackend | None,
     matrix_backend: MatrixBackend | None,
-    nextcloud_backend: NextcloudBackend | None,
     seaweedfs_backend: SeaweedFsBackend | None,
     coder_backend: CoderBackend | None,
 ) -> bool:
@@ -2576,8 +2462,6 @@ def _dokploy_api_auth_required(
     if headscale_backend is None and "headscale" in desired_state.enabled_packs:
         return True
     if matrix_backend is None and "matrix" in desired_state.enabled_packs:
-        return True
-    if nextcloud_backend is None and "nextcloud" in desired_state.enabled_packs:
         return True
     if seaweedfs_backend is None and "seaweedfs" in desired_state.enabled_packs:
         return True

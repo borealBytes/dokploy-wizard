@@ -81,9 +81,9 @@ def test_several_packs_can_be_selected_together(tmp_path: Path) -> None:
                 "AI_DEFAULT_BASE_URL=https://opencode.ai/zen/go/v1",
                 "HOST_OS_ID=ubuntu",
                 "HOST_OS_VERSION_ID=24.04",
-                "HOST_CPU_COUNT=4",
-                "HOST_MEMORY_GB=8",
-                "HOST_DISK_GB=100",
+                "HOST_CPU_COUNT=6",
+                "HOST_MEMORY_GB=12",
+                "HOST_DISK_GB=150",
                 "HOST_DOCKER_INSTALLED=true",
                 "HOST_DOCKER_DAEMON_REACHABLE=true",
                 "HOST_PORT_80_IN_USE=false",
@@ -197,7 +197,7 @@ def test_apply_prompt_selection_marks_disabled_pack_with_env_flag_and_drops_cred
     raw_env = RawEnvInput(
         format_version=1,
         values={
-            "PACKS": "nextcloud,coder",
+            "PACKS": "matrix,coder",
             "SEAWEEDFS_ACCESS_KEY": "seaweed-access-existing",
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret-existing",
         },
@@ -207,7 +207,7 @@ def test_apply_prompt_selection_marks_disabled_pack_with_env_flag_and_drops_cred
         raw_env,
         PromptSelection(
             selected_packs=(),
-            disabled_packs=("nextcloud",),
+            disabled_packs=("matrix",),
             seaweedfs_access_key=None,
             seaweedfs_secret_key=None,
             generated_secrets={},
@@ -215,7 +215,7 @@ def test_apply_prompt_selection_marks_disabled_pack_with_env_flag_and_drops_cred
     )
 
     assert "PACKS" not in updated.values
-    assert updated.values["ENABLE_NEXTCLOUD"] == "false"
+    assert updated.values["ENABLE_MATRIX"] == "false"
     assert "SEAWEEDFS_ACCESS_KEY" not in updated.values
     assert "SEAWEEDFS_SECRET_KEY" not in updated.values
 

@@ -67,7 +67,6 @@ def build_parser() -> argparse.ArgumentParser:
             "headscale",
             "tailscale",
             "matrix",
-            "nextcloud",
             "moodle",
             "docuseal",
             "filex",
@@ -720,7 +719,6 @@ def _resolve_expected_service_url_links(env_file: Path) -> tuple[tuple[str, str]
     desired_state = resolve_desired_state(parse_env_file(env_file))
     links: list[tuple[str, str]] = [("Dokploy", _user_facing_url(desired_state.dokploy_url))]
     for hostname_key, label in (
-        ("nextcloud", "Nextcloud"),
         ("coder", "Coder"),
         ("docuseal", "DocuSeal"),
         ("filex", "FileX"),

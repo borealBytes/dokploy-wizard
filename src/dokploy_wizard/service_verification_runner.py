@@ -66,13 +66,6 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
         session_client=dokploy_session_client,
         litellm_generated_keys=litellm_generated_keys,
     )
-    nextcloud_backend = cli._build_nextcloud_backend(
-        raw_env=raw_env,
-        state_dir=state_dir,
-        desired_state=desired_state,
-        session_client=dokploy_session_client,
-        litellm_generated_keys=litellm_generated_keys,
-    )
     moodle_backend = cli._build_moodle_backend(
         raw_env=raw_env,
         state_dir=state_dir,
@@ -114,15 +107,6 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
     ]
     if desired_state.shared_core.litellm is not None:
         results.append(_verify_litellm_admin_ui())
-    if "nextcloud" in desired_state.enabled_packs:
-        results.append(
-            _verify_backend_method(
-                backend=nextcloud_backend,
-                method_name="_verify_current_application",
-                service_name="nextcloud",
-                unavailable_detail="Nextcloud verification backend is unavailable.",
-            )
-        )
     if "moodle" in desired_state.enabled_packs:
         results.append(
             _verify_backend_method(

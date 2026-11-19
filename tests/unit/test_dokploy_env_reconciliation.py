@@ -12,12 +12,12 @@ _PACK_SECRET_KEY = "CODER_PROVIDER_API_KEY"
 _PACK_SECRET_VALUE = "SECRET_TEST_CODER_PROVIDER_VALUE"
 _OWNER_SECRET_KEY = "DOCUSEAL_PROVIDER_API_KEY"
 _OWNER_SECRET_VALUE = "SECRET_TEST_DOCUSEAL_PROVIDER_VALUE"
-_NEXTCLOUD_SECRET_KEY = "NEXTCLOUD_ADMIN_PASSWORD"
-_NEXTCLOUD_SECRET_VALUE = "SECRET_TEST_NEXTCLOUD_ADMIN_VALUE"
+_MATRIX_SECRET_KEY = "MATRIX_ADMIN_PASSWORD"
+_MATRIX_SECRET_VALUE = "SECRET_TEST_MATRIX_ADMIN_VALUE"
 _SENTINEL_SECRET_VALUES = (
     _PACK_SECRET_VALUE,
     _OWNER_SECRET_VALUE,
-    _NEXTCLOUD_SECRET_VALUE,
+    _MATRIX_SECRET_VALUE,
 )
 
 
@@ -256,8 +256,8 @@ def test_reconciler_rejects_unrelated_service_receiving_unrelated_secret() -> No
     ) = _future_env_contract()
     rendered = RenderedCompose(
         compose_file=f"""services:
-  wizard-stack-nextcloud:
-    image: nextcloud:29-apache
+  wizard-stack-matrix:
+    image: matrixdotorg/synapse:latest
     environment:
       {_OWNER_SECRET_KEY}: \"${{{_OWNER_SECRET_KEY}:?{_OWNER_SECRET_KEY} is required}}\"
   wizard-stack-docuseal:
@@ -286,6 +286,6 @@ def test_reconciler_rejects_unrelated_service_receiving_unrelated_secret() -> No
 
     message = str(exc_info.value)
     assert _OWNER_SECRET_KEY in message
-    assert "wizard-stack-nextcloud" in message
+    assert "wizard-stack-matrix" in message
     assert "docuseal" in message
     _assert_message_redacts_sentinels(message)

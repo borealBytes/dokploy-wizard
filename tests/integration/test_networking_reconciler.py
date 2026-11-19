@@ -22,14 +22,9 @@ from dokploy_wizard.networking import (
 from dokploy_wizard.packs.coder import CoderResourceRecord
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.moodle import MoodleResourceRecord
-from dokploy_wizard.packs.nextcloud import (
-    NextcloudBundleVerification,
-    NextcloudCommandCheck,
-    NextcloudResourceRecord,
-    TalkRuntime,
-)
 from dokploy_wizard.preflight import HostFacts, PreflightCheck, PreflightReport, ResourceProfile
 from dokploy_wizard.state import load_state_dir
+from tests.integration.test_matrix_pack import FakeMatrixBackend
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -327,104 +322,6 @@ class FakeHeadscaleBackend:
         return True
 
 
-@dataclass
-class FakeNextcloudBackend:
-    services: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
-    volumes: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
-
-    def get_service(self, resource_id: str) -> NextcloudResourceRecord | None:
-        for record in self.services.values():
-            if record.resource_id == resource_id:
-                return record
-        return None
-
-    def find_service_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
-        return self.services.get(resource_name)
-
-    def create_service(
-        self,
-        *,
-        resource_name: str,
-        hostname: str,
-        data_volume_name: str,
-        config: dict[str, str],
-    ) -> NextcloudResourceRecord:
-        del hostname, data_volume_name, config
-        record = NextcloudResourceRecord(
-            resource_id=f"service:{resource_name}",
-            resource_name=resource_name,
-        )
-        self.services[resource_name] = record
-        return record
-
-    def update_service(
-        self,
-        *,
-        resource_id: str,
-        resource_name: str,
-        hostname: str,
-        data_volume_name: str,
-        config: dict[str, str],
-    ) -> NextcloudResourceRecord:
-        del resource_id
-        return self.create_service(
-            resource_name=resource_name,
-            hostname=hostname,
-            data_volume_name=data_volume_name,
-            config=config,
-        )
-
-    def get_volume(self, resource_id: str) -> NextcloudResourceRecord | None:
-        for record in self.volumes.values():
-            if record.resource_id == resource_id:
-                return record
-        return None
-
-    def find_volume_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
-        return self.volumes.get(resource_name)
-
-    def create_volume(self, *, resource_name: str) -> NextcloudResourceRecord:
-        record = NextcloudResourceRecord(
-            resource_id=f"volume:{resource_name}",
-            resource_name=resource_name,
-        )
-        self.volumes[resource_name] = record
-        return record
-
-    def check_health(self, *, service: NextcloudResourceRecord, url: str) -> bool:
-        del service, url
-        return True
-
-    def ensure_application_ready(
-        self, *, nextcloud_url: str, onlyoffice_url: str
-    ) -> NextcloudBundleVerification:
-        del nextcloud_url, onlyoffice_url
-        return NextcloudBundleVerification(
-            onlyoffice_document_server_check=NextcloudCommandCheck(
-                command="php occ onlyoffice:documentserver --check",
-                passed=True,
-            ),
-            talk=TalkRuntime(
-                app_id="spreed",
-                enabled=True,
-                enabled_check=NextcloudCommandCheck(
-                    command="php occ app:list --output=json",
-                    passed=True,
-                ),
-                signaling_check=NextcloudCommandCheck(
-                    command="php occ talk:signaling:list --output=json",
-                    passed=True,
-                ),
-                stun_check=NextcloudCommandCheck(
-                    command="php occ talk:stun:list --output=json",
-                    passed=True,
-                ),
-                turn_check=NextcloudCommandCheck(
-                    command="php occ talk:turn:list --output=json",
-                    passed=True,
-                ),
-            ),
-        )
 
 
 def test_install_non_dry_run_reconciles_networking_and_persists_ledger(tmp_path: Path) -> None:
@@ -536,7 +433,7 @@ def test_install_applies_access_only_for_the_litellm_admin_hostname(tmp_path: Pa
                 "STACK_NAME=wizard-stack",
                 "ROOT_DOMAIN=example.com",
                 "DOKPLOY_BOOTSTRAP_MOCK_API_KEY=dokp-test-key",
-                "ENABLE_NEXTCLOUD=true",
+                "ENABLE_MATRIX=true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,ops@example.com",
                 "HOST_OS_ID=ubuntu",
                 "HOST_OS_VERSION_ID=24.04",
@@ -561,7 +458,7 @@ def test_install_applies_access_only_for_the_litellm_admin_hostname(tmp_path: Pa
         encoding="utf-8",
     )
     backend = FakeCloudflareBackend()
-    nextcloud_backend = FakeNextcloudBackend()
+    matrix_backend = FakeMatrixBackend()
 
     summary = run_install_flow(
         env_file=env_file,
@@ -570,7 +467,7 @@ def test_install_applies_access_only_for_the_litellm_admin_hostname(tmp_path: Pa
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=backend,
         headscale_backend=FakeHeadscaleBackend(),
-        nextcloud_backend=nextcloud_backend,
+        matrix_backend=matrix_backend,
     )
 
     loaded_state = load_state_dir(state_dir)
@@ -584,7 +481,7 @@ def test_install_applies_access_only_for_the_litellm_admin_hostname(tmp_path: Pa
         "dokploy_bootstrap",
         "networking",
         "shared_core",
-        "nextcloud",
+        "matrix",
         "cloudflare_access",
     )
     assert loaded_state.ownership_ledger is not None
@@ -595,7 +492,7 @@ def test_install_applies_access_only_for_the_litellm_admin_hostname(tmp_path: Pa
     }
 
 
-def test_install_keeps_onlyoffice_out_of_access_while_moodle_stays_public_by_dns_routing(
+def test_install_keeps_pack_hostnames_out_of_access_while_public_by_dns_routing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -644,14 +541,14 @@ def test_install_keeps_onlyoffice_out_of_access_while_moodle_stays_public_by_dns
         lambda **kwargs: cast(Any, _HealthyFakeMoodleBackend()),
     )
     state_dir = tmp_path / "state"
-    env_file = tmp_path / "access-nextcloud-moodle.env"
+    env_file = tmp_path / "access-matrix-moodle.env"
     env_file.write_text(
         "\n".join(
             [
                 "STACK_NAME=wizard-stack",
                 "ROOT_DOMAIN=example.com",
                 "DOKPLOY_BOOTSTRAP_MOCK_API_KEY=dokp-test-key",
-                "ENABLE_NEXTCLOUD=true",
+                "ENABLE_MATRIX=true",
                 "ENABLE_MOODLE=true",
                 "MOODLE_SUBDOMAIN=moodle",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,ops@example.com",
@@ -678,7 +575,7 @@ def test_install_keeps_onlyoffice_out_of_access_while_moodle_stays_public_by_dns
         encoding="utf-8",
     )
     backend = FakeCloudflareBackend()
-    nextcloud_backend = FakeNextcloudBackend()
+    matrix_backend = FakeMatrixBackend()
 
     summary = run_install_flow(
         env_file=env_file,
@@ -687,16 +584,16 @@ def test_install_keeps_onlyoffice_out_of_access_while_moodle_stays_public_by_dns
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=backend,
         headscale_backend=FakeHeadscaleBackend(),
-        nextcloud_backend=nextcloud_backend,
+        matrix_backend=matrix_backend,
     )
 
     dns_hostnames = [item["hostname"] for item in summary["networking"]["dns_records"]]
     access_hostnames = [item["hostname"] for item in summary["cloudflare_access"]["applications"]]
 
     assert "moodle.example.com" in dns_hostnames
-    assert "office.example.com" in dns_hostnames
+    assert "matrix.example.com" in dns_hostnames
     assert access_hostnames == ["litellm.example.com"]
-    assert "office.example.com" not in access_hostnames
+    assert "matrix.example.com" not in access_hostnames
     assert "moodle.example.com" not in access_hostnames
 
 

@@ -590,12 +590,12 @@ def test_dokploy_client_lists_compose_schedules_with_query_string() -> None:
             "data": [
                 {
                     "scheduleId": "sch-1",
-                    "name": "wizard-nextcloud-files-scan",
-                    "serviceName": "wizard-nextcloud",
+                    "name": "wizard-gitea-backup",
+                    "serviceName": "wizard-gitea",
                     "cronExpression": "*/15 * * * *",
                     "timezone": "UTC",
                     "shellType": "bash",
-                    "command": "php /var/www/html/occ files:scan --path=...",
+                    "command": "gitea dump -c /app.ini",
                     "enabled": True,
                 }
             ]
@@ -613,7 +613,7 @@ def test_dokploy_client_lists_compose_schedules_with_query_string() -> None:
         "https://dokploy.example.com/api/schedule.list?id=cmp-1&scheduleType=compose"
     )
     assert schedules[0].schedule_id == "sch-1"
-    assert schedules[0].service_name == "wizard-nextcloud"
+    assert schedules[0].service_name == "wizard-gitea"
 
 
 def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None:
@@ -626,12 +626,12 @@ def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None
         return {
             "data": {
                 "scheduleId": "sch-1",
-                "name": "wizard-nextcloud-files-scan",
-                "serviceName": "wizard-nextcloud",
+                "name": "wizard-gitea-backup",
+                "serviceName": "wizard-gitea",
                 "cronExpression": "*/15 * * * *",
                 "timezone": "UTC",
                 "shellType": "bash",
-                "command": "php /var/www/html/occ files:scan --path=...",
+                "command": "gitea dump -c /app.ini",
                 "enabled": True,
             }
         }
@@ -643,25 +643,25 @@ def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None
     )
 
     record = client.create_schedule(
-        name="wizard-nextcloud-files-scan",
+        name="wizard-gitea-backup",
         compose_id="cmp-1",
-        service_name="wizard-nextcloud",
+        service_name="wizard-gitea",
         cron_expression="*/15 * * * *",
         timezone="UTC",
         shell_type="bash",
-        command="php /var/www/html/occ files:scan --path=...",
+        command="gitea dump -c /app.ini",
         enabled=True,
     )
 
     assert captured["url"] == "https://dokploy.example.com/api/schedule.create"
     assert captured["body"] == {
-        "name": "wizard-nextcloud-files-scan",
+        "name": "wizard-gitea-backup",
         "composeId": "cmp-1",
-        "serviceName": "wizard-nextcloud",
+        "serviceName": "wizard-gitea",
         "cronExpression": "*/15 * * * *",
         "timezone": "UTC",
         "shellType": "bash",
-        "command": "php /var/www/html/occ files:scan --path=...",
+        "command": "gitea dump -c /app.ini",
         "scheduleType": "compose",
         "enabled": True,
     }
@@ -678,12 +678,12 @@ def test_dokploy_client_updates_compose_schedule_with_expected_payload() -> None
         return {
             "data": {
                 "scheduleId": "sch-1",
-                "name": "wizard-nextcloud-files-scan",
-                "serviceName": "wizard-nextcloud",
+                "name": "wizard-gitea-backup",
+                "serviceName": "wizard-gitea",
                 "cronExpression": "0 * * * *",
                 "timezone": "America/Detroit",
                 "shellType": "bash",
-                "command": "php /var/www/html/occ files:scan --path=...",
+                "command": "gitea dump -c /app.ini",
                 "enabled": True,
             }
         }
@@ -696,26 +696,26 @@ def test_dokploy_client_updates_compose_schedule_with_expected_payload() -> None
 
     record = client.update_schedule(
         schedule_id="sch-1",
-        name="wizard-nextcloud-files-scan",
+        name="wizard-gitea-backup",
         compose_id="cmp-1",
-        service_name="wizard-nextcloud",
+        service_name="wizard-gitea",
         cron_expression="0 * * * *",
         timezone="America/Detroit",
         shell_type="bash",
-        command="php /var/www/html/occ files:scan --path=...",
+        command="gitea dump -c /app.ini",
         enabled=True,
     )
 
     assert captured["url"] == "https://dokploy.example.com/api/schedule.update"
     assert captured["body"] == {
         "scheduleId": "sch-1",
-        "name": "wizard-nextcloud-files-scan",
+        "name": "wizard-gitea-backup",
         "composeId": "cmp-1",
-        "serviceName": "wizard-nextcloud",
+        "serviceName": "wizard-gitea",
         "cronExpression": "0 * * * *",
         "timezone": "America/Detroit",
         "shellType": "bash",
-        "command": "php /var/www/html/occ files:scan --path=...",
+        "command": "gitea dump -c /app.ini",
         "scheduleType": "compose",
         "enabled": True,
     }

@@ -180,7 +180,7 @@ def test_remote_stream_lines_are_shown_by_default(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="nextcloud")
+    env_file = _write_remote_env(tmp_path, packs="moodle")
     captured = _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -207,7 +207,7 @@ def test_quiet_remote_output_suppresses_stream_lines(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="nextcloud")
+    env_file = _write_remote_env(tmp_path, packs="moodle")
     captured = _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -237,7 +237,7 @@ def test_successful_lifecycle_prints_expected_service_urls_for_enabled_service_l
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="docuseal,nextcloud,moodle,coder")
+    env_file = _write_remote_env(tmp_path, packs="docuseal,matrix,moodle,coder")
     _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -257,12 +257,13 @@ def test_successful_lifecycle_prints_expected_service_urls_for_enabled_service_l
     assert "[remote] expected service URLs:" in stderr
     assert "ready for use" not in stderr
     dokploy_link = stderr.index("[remote]   Dokploy: https://dokploy.openmerge.me/")
-    nextcloud_link = stderr.index("[remote]   Nextcloud: https://nextcloud.openmerge.me/")
     coder_link = stderr.index("[remote]   Coder: https://coder.openmerge.me/")
     docuseal_link = stderr.index("[remote]   DocuSeal: https://docuseal.openmerge.me/")
     moodle_link = stderr.index("[remote]   Moodle: https://moodle.openmerge.me/")
     # Links print in the helper's fixed survivor order regardless of pack selection order.
-    assert dokploy_link < nextcloud_link < coder_link < docuseal_link < moodle_link
+    assert dokploy_link < coder_link < docuseal_link < moodle_link
+    # Matrix is chat infrastructure, not a headline service: no link slot.
+    assert "Matrix:" not in stderr
 
 
 @pytest.mark.parametrize(
@@ -281,7 +282,7 @@ def test_lifecycle_prints_expected_service_urls_before_long_mutation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="docuseal,nextcloud")
+    env_file = _write_remote_env(tmp_path, packs="docuseal,matrix")
     _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -312,7 +313,7 @@ def test_successful_lifecycle_expected_service_urls_omits_disabled_pack_links(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="nextcloud")
+    env_file = _write_remote_env(tmp_path, packs="moodle")
     _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -332,7 +333,7 @@ def test_successful_lifecycle_expected_service_urls_omits_disabled_pack_links(
     assert "[remote] expected service URLs:" in stderr
     assert "ready for use" not in stderr
     assert "[remote]   Dokploy: https://dokploy.openmerge.me/" in stderr
-    assert "[remote]   Nextcloud: https://nextcloud.openmerge.me/" in stderr
+    assert "[remote]   Moodle: https://moodle.openmerge.me/" in stderr
     assert "Coder:" not in stderr
     assert "DocuSeal:" not in stderr
 
@@ -587,28 +588,28 @@ def test_create_repo_archive_excludes_local_env_backups(tmp_path: Path) -> None:
 def test_runtime_error_redaction_masks_env_payload_values() -> None:
     remote_cli = import_remote_cli_module()
     password = "super-secret-password"
-    sentinel = "SECRET_TEST_NEXTCLOUD_SMTP_VALUE"
+    sentinel = "SECRET_TEST_MOODLE_SMTP_VALUE"
 
     message = remote_cli._redact_runtime_message(
         (
             f"ssh failed with {password}\n"
-            "# dokploy-wizard-env marker=dokploy-wizard owner=nextcloud "
-            "key=NEXTCLOUD_SMTP_PASSWORD fingerprint=sha256:def456\n"
-            f"NEXTCLOUD_SMTP_PASSWORD={sentinel}"
+            "# dokploy-wizard-env marker=dokploy-wizard owner=moodle "
+            "key=MOODLE_SMTP_PASSWORD fingerprint=sha256:def456\n"
+            f"MOODLE_SMTP_PASSWORD={sentinel}"
         ),
         password=password,
     )
 
     assert password not in message
     assert sentinel not in message
-    assert "NEXTCLOUD_SMTP_PASSWORD=<REDACTED>" in message
+    assert "MOODLE_SMTP_PASSWORD=<REDACTED>" in message
     assert "fingerprint=sha256:def456" in message
 
 
 def test_verbose_progress_output_redacts_password_env_payload_and_docker_pat() -> None:
     remote_cli = import_remote_cli_module()
     password = "super-secret-password"
-    env_secret = "SECRET_TEST_NEXTCLOUD_SMTP_VALUE"
+    env_secret = "SECRET_TEST_MOODLE_SMTP_VALUE"
     docker_pat = "ghp_SECRETTESTDOCKERPATVALUE"
     stream = io.StringIO()
     reporter = remote_cli._RemoteProgressReporter(
@@ -621,13 +622,13 @@ def test_verbose_progress_output_redacts_password_env_payload_and_docker_pat() -
     reporter.remote_output(
         "mutate-install",
         "stdout",
-        "# dokploy-wizard-env marker=dokploy-wizard owner=nextcloud "
-        "key=NEXTCLOUD_SMTP_PASSWORD fingerprint=sha256:def456",
+        "# dokploy-wizard-env marker=dokploy-wizard owner=moodle "
+        "key=MOODLE_SMTP_PASSWORD fingerprint=sha256:def456",
     )
     reporter.remote_output(
         "mutate-install",
         "stdout",
-        f"NEXTCLOUD_SMTP_PASSWORD={env_secret}",
+        f"MOODLE_SMTP_PASSWORD={env_secret}",
     )
     reporter.remote_output("mutate-install", "stderr", f"DOCKER_PAT={docker_pat}")
 
@@ -635,7 +636,7 @@ def test_verbose_progress_output_redacts_password_env_payload_and_docker_pat() -
     assert password not in output
     assert env_secret not in output
     assert docker_pat not in output
-    assert "NEXTCLOUD_SMTP_PASSWORD=<REDACTED>" in output
+    assert "MOODLE_SMTP_PASSWORD=<REDACTED>" in output
     assert "DOCKER_PAT=<REDACTED>" in output
 
 
@@ -686,7 +687,7 @@ def test_remote_upgrade_check_builds_read_only_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="nextcloud,coder")
+    env_file = _write_remote_env(tmp_path, packs="moodle,coder")
     transport = _patch_recording_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -717,7 +718,7 @@ def test_remote_upgrade_apply_passes_tag_allow_major_and_uploaded_confirm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="nextcloud,coder")
+    env_file = _write_remote_env(tmp_path, packs="moodle,coder")
     confirm_file = tmp_path / "upgrade.confirm"
     confirm_file.write_text("upgrade the stack\n", encoding="utf-8")
     transport = _patch_recording_remote_run(monkeypatch, remote_cli)
@@ -753,7 +754,7 @@ def test_remote_upgrade_litellm_requires_confirm_file(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="nextcloud,coder")
+    env_file = _write_remote_env(tmp_path, packs="moodle,coder")
 
     with pytest.raises(SystemExit) as exit_info:
         remote_cli.main(

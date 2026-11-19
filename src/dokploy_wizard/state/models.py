@@ -566,7 +566,6 @@ LITELLM_CONSUMER_VIRTUAL_KEY_NAMES = (
     "coder-hermes",
     "coder-workspace-issuer",
     "dokploy-ai",
-    "nextcloud",
 )
 
 LITELLM_GENERATED_MASTER_KEY_PREFIX = "sk-litellm-master"
@@ -574,7 +573,6 @@ LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES = {
     "coder-hermes": "sk-litellm-coder-hermes",
     "coder-workspace-issuer": "sk-litellm-coder-workspace-issuer",
     "dokploy-ai": "sk-litellm-dokploy-ai",
-    "nextcloud": "sk-litellm-nextcloud",
 }
 
 SEAWEEDFS_GENERATED_SECRET_PREFIXES = {

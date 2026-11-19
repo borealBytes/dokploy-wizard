@@ -27,7 +27,6 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     assert names == [
         "headscale",
         "matrix",
-        "nextcloud",
         "moodle",
         "docuseal",
         "seaweedfs",
@@ -47,7 +46,7 @@ def test_catalog_exposes_expected_pack_metadata() -> None:
     assert get_pack_definition("seaweedfs").hostnames == ()
     assert get_pack_definition("filex").depends_on == ("seaweedfs",)
     assert get_pack_definition("filex").hostnames[0].key == "filex"
-    assert get_pack_definition("nextcloud").mutable_env_keys == ()
+    assert get_pack_definition("matrix").mutable_env_keys == ()
     # The slot system is gone: no surviving pack occupies a mutual-exclusion slot.
     assert all(pack.slot is None for pack in iter_pack_catalog())
     assert get_pack_definition("coder").hostnames[1].key == "coder-wildcard"
@@ -193,17 +192,16 @@ def test_resolver_keeps_explicit_selection_separate_from_expanded_packs() -> Non
         {
             "ROOT_DOMAIN": "example.com",
             "STACK_NAME": "pack-stack",
-            "ENABLE_NEXTCLOUD": "true",
+            "ENABLE_MOODLE": "true",
         },
         root_domain="example.com",
     )
 
-    assert selection.selected_packs == ("nextcloud",)
-    assert selection.enabled_packs == ("nextcloud",)
+    assert selection.selected_packs == ("moodle",)
+    assert selection.enabled_packs == ("moodle",)
     assert selection.enabled_features == ("dokploy",)
     assert selection.hostnames == {
-        "nextcloud": "nextcloud.example.com",
-        "onlyoffice": "office.example.com",
+        "moodle": "moodle.example.com",
     }
 
 
@@ -295,7 +293,7 @@ def test_resolver_preserves_explicit_nested_coder_wildcard_opt_in() -> None:
 def test_resolver_full_pack_list_has_no_hostname_collisions() -> None:
     selection = resolve_pack_selection(
         {
-            "PACKS": "nextcloud,seaweedfs,filex,gitea,coder,docuseal,matrix",
+            "PACKS": "moodle,seaweedfs,filex,gitea,coder,docuseal,matrix",
         },
         root_domain="example.com",
     )
@@ -306,7 +304,7 @@ def test_resolver_full_pack_list_has_no_hostname_collisions() -> None:
         "filex",
         "gitea",
         "matrix",
-        "nextcloud",
+        "moodle",
         "seaweedfs",
     )
     assert selection.enabled_packs == selection.selected_packs
@@ -317,8 +315,7 @@ def test_resolver_full_pack_list_has_no_hostname_collisions() -> None:
         "filex": "filex.example.com",
         "gitea": "gitea.example.com",
         "matrix": "matrix.example.com",
-        "nextcloud": "nextcloud.example.com",
-        "onlyoffice": "office.example.com",
+        "moodle": "moodle.example.com",
     }
     assert len(set(selection.hostnames.values())) == len(selection.hostnames)
 
@@ -330,7 +327,7 @@ def test_full_pack_lifecycle_orders_application_packs_after_shared_core() -> Non
             values={
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
-                "PACKS": "nextcloud,seaweedfs,coder,docuseal,matrix,gitea",
+                "PACKS": "moodle,seaweedfs,coder,docuseal,matrix,gitea",
             },
         )
     )
@@ -347,7 +344,7 @@ def test_full_pack_lifecycle_orders_application_packs_after_shared_core() -> Non
         "shared_core",
         "seaweedfs",
         "matrix",
-        "nextcloud",
+        "moodle",
         "docuseal",
         "gitea",
         "coder",
@@ -355,7 +352,7 @@ def test_full_pack_lifecycle_orders_application_packs_after_shared_core() -> Non
     for application_pack in (
         "seaweedfs",
         "matrix",
-        "nextcloud",
+        "moodle",
         "docuseal",
         "gitea",
         "coder",
@@ -367,7 +364,7 @@ def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
     values = {
         "STACK_NAME": "catalog-stack",
         "ROOT_DOMAIN": "example.com",
-        "PACKS": "matrix,nextcloud",
+        "PACKS": "matrix,moodle",
     }
     desired_state = resolve_desired_state(
         RawEnvInput(
@@ -376,11 +373,11 @@ def test_resolved_state_and_shared_core_use_catalog_requirements() -> None:
         )
     )
 
-    assert desired_state.selected_packs == ("matrix", "nextcloud")
-    assert desired_state.enabled_packs == ("matrix", "nextcloud")
+    assert desired_state.selected_packs == ("matrix", "moodle")
+    assert desired_state.enabled_packs == ("matrix", "moodle")
     assert [allocation.pack_name for allocation in desired_state.shared_core.allocations] == [
         "matrix",
-        "nextcloud",
+        "moodle",
     ]
     assert (
         build_shared_core_plan("catalog-stack", desired_state.enabled_packs, values=values)

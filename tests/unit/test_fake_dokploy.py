@@ -8,7 +8,7 @@ from .fake_dokploy import ComposeMutationCounts, FakeDokployApiClient
 def test_fake_dokploy_lists_seeded_existing_service_for_already_present_paths() -> None:
     client = FakeDokployApiClient()
     client.seed_existing_service(
-        service_name="wizard-stack-nextcloud",
+        service_name="wizard-stack-matrix",
         compose_id="cmp-existing",
         project_name="wizard-stack",
         status="done",
@@ -20,10 +20,10 @@ def test_fake_dokploy_lists_seeded_existing_service_for_already_present_paths() 
     assert len(projects) == 1
     assert projects[0].name == "wizard-stack"
     assert projects[0].environments[0].composes[0].compose_id == "cmp-existing"
-    assert projects[0].environments[0].composes[0].name == "wizard-stack-nextcloud"
+    assert projects[0].environments[0].composes[0].name == "wizard-stack-matrix"
     assert projects[0].environments[0].composes[0].status == "done"
-    assert client.compose_id_for("wizard-stack-nextcloud") == "cmp-existing"
-    client.assert_unchanged_service("wizard-stack-nextcloud")
+    assert client.compose_id_for("wizard-stack-matrix") == "cmp-existing"
+    client.assert_unchanged_service("wizard-stack-matrix")
 
 
 def test_fake_dokploy_proves_zero_update_and_deploy_calls_for_unchanged_service() -> None:

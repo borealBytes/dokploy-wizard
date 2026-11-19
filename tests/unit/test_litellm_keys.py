@@ -47,7 +47,6 @@ _EXPECTED_LITELLM_CONSUMERS = {
     # child key with (see the template MINTPY block).
     "coder-workspace-issuer",
     "dokploy-ai",
-    "nextcloud",
 }
 _EXPECTED_SEAWEEDFS_GENERATED_SECRET_NAMES = {"access_key", "secret_key"}
 
@@ -111,7 +110,11 @@ def test_empty_state_generates_consumer_keys_and_existing_state_reuses_them(
 
     assert (state_dir / LITELLM_GENERATED_KEYS_FILE).exists()
     assert set(generated_keys.virtual_keys) == _EXPECTED_LITELLM_CONSUMERS
-    assert generated_keys.virtual_keys["nextcloud"].startswith("sk-litellm-nextcloud")
+    assert (
+        generated_keys.virtual_keys["coder-workspace-issuer"].startswith(
+            "sk-litellm-coder-workspace-issuer"
+        )
+    )
     assert generated_keys.master_key.startswith("sk-litellm-master-")
     assert generated_keys.salt_key.startswith("litellm-salt-")
     assert generated_keys.virtual_keys["coder-hermes"].startswith("sk-litellm-coder-hermes-")
@@ -131,14 +134,16 @@ def test_empty_state_generates_consumer_keys_and_existing_state_reuses_them(
 
     reused_keys = ensure_litellm_generated_keys(state_dir)
 
-    # Pre-nextcloud state reuses every existing value verbatim and only grows
-    # the new consumer slot.
+    # A state that predates a consumer slot reuses every existing value
+    # verbatim and only grows the new consumer slot.
     assert reused_keys.master_key == existing_keys.master_key
     assert reused_keys.salt_key == existing_keys.salt_key
     for consumer, key in existing_keys.virtual_keys.items():
         assert reused_keys.virtual_keys[consumer] == key
     assert set(reused_keys.virtual_keys) == _EXPECTED_LITELLM_CONSUMERS
-    assert reused_keys.virtual_keys["nextcloud"].startswith("sk-litellm-nextcloud-")
+    assert reused_keys.virtual_keys["coder-workspace-issuer"].startswith(
+        "sk-litellm-coder-workspace-issuer-"
+    )
 
 
 def test_ensure_litellm_generated_keys_repairs_legacy_non_sk_values(tmp_path: Path) -> None:
@@ -149,7 +154,7 @@ def test_ensure_litellm_generated_keys_repairs_legacy_non_sk_values(tmp_path: Pa
         salt_key="existing-salt-key",
         virtual_keys={
             "coder-hermes": "sk-<redacted-coder-hermes-existing>",
-            "nextcloud": "legacy-nextcloud-key",
+            "coder-workspace-issuer": "legacy-workspace-issuer-key",
             "dokploy-ai": "345elegacy5043",
         },
     )
@@ -161,8 +166,9 @@ def test_ensure_litellm_generated_keys_repairs_legacy_non_sk_values(tmp_path: Pa
     assert repaired_keys.master_key != legacy_keys.master_key
     assert repaired_keys.salt_key == legacy_keys.salt_key
     assert repaired_keys.virtual_keys["coder-hermes"] == "sk-<redacted-coder-hermes-existing>"
-    assert repaired_keys.virtual_keys["nextcloud"].startswith("sk-litellm-nextcloud-")
-    assert repaired_keys.virtual_keys["nextcloud"] != "legacy-nextcloud-key"
+    issuer_key = repaired_keys.virtual_keys["coder-workspace-issuer"]
+    assert issuer_key.startswith("sk-litellm-coder-workspace-issuer-")
+    assert issuer_key != "legacy-workspace-issuer-key"
     assert repaired_keys.virtual_keys["dokploy-ai"].startswith("sk-litellm-dokploy-ai-")
     assert repaired_keys.virtual_keys["dokploy-ai"] != "345elegacy5043"
 

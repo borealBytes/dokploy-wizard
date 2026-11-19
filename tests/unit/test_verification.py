@@ -116,16 +116,16 @@ def test_redact_command_supports_pre_rendered_shell_text() -> None:
 
 def test_redact_dokploy_env_payload_masks_wizard_owned_assignment_values() -> None:
     raw = (
-        "# dokploy-wizard-env marker=dokploy-wizard owner=nextcloud "
-        "key=NEXTCLOUD_SMTP_PASSWORD fingerprint=sha256:abc123\n"
-        "NEXTCLOUD_SMTP_PASSWORD=SECRET_TEST_NEXTCLOUD_SMTP_VALUE\n"
+        "# dokploy-wizard-env marker=dokploy-wizard owner=moodle "
+        "key=MOODLE_SMTP_PASSWORD fingerprint=sha256:abc123\n"
+        "MOODLE_SMTP_PASSWORD=SECRET_TEST_MOODLE_SMTP_VALUE\n"
         "PUBLIC_SETTING=not-secret\n"
     )
 
     redacted = redact_dokploy_env_payload(raw)
 
-    assert "SECRET_TEST_NEXTCLOUD_SMTP_VALUE" not in redacted
-    assert "NEXTCLOUD_SMTP_PASSWORD=<REDACTED>" in redacted
+    assert "SECRET_TEST_MOODLE_SMTP_VALUE" not in redacted
+    assert "MOODLE_SMTP_PASSWORD=<REDACTED>" in redacted
     assert "fingerprint=sha256:abc123" in redacted
     assert "PUBLIC_SETTING=not-secret" in redacted
 

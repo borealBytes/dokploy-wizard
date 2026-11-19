@@ -50,7 +50,7 @@ def _upgrade_raw_env() -> RawEnvInput:
         values={
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "nextcloud,coder",
+            "PACKS": "matrix,moodle,coder",
         },
     )
 
@@ -239,7 +239,7 @@ def test_build_upgrade_drift_report_classifies_digest_drift(tmp_path: Path) -> N
         digests={
             "ghcr.io/berriai/litellm:v1.83.14-stable": FAKE_SHA_B,
             "registry-1.docker.io/library/redis:7-alpine": FAKE_SHA_A,
-            "registry-1.docker.io/library/nextcloud:apache": FAKE_SHA_B,
+            "registry-1.docker.io/library/moodle:latest": FAKE_SHA_B,
         },
         tags={"ghcr.io/berriai/litellm": ("v1.83.14-stable", "v1.84.0-stable", "latest")},
     )
@@ -247,7 +247,7 @@ def test_build_upgrade_drift_report_classifies_digest_drift(tmp_path: Path) -> N
         images={
             "wizard-stack-shared-litellm": f"ghcr.io/berriai/litellm:v1.83.14-stable@{FAKE_SHA_A}",
             "wizard-stack-shared-redis": f"redis:7-alpine@{FAKE_SHA_A}",
-            "wizard-stack-nextcloud": f"nextcloud:apache@{FAKE_SHA_A}",
+            "wizard-stack-moodle": f"moodle:latest@{FAKE_SHA_A}",
             "wizard-stack-coder": "ghcr.io/coder/coder:latest",
         },
     )
@@ -262,14 +262,13 @@ def test_build_upgrade_drift_report_classifies_digest_drift(tmp_path: Path) -> N
 
     by_service = {entry["service_name"]: entry for entry in report["images"]}
     assert by_service["wizard-stack-shared-redis"]["drift"] == "current"
-    assert by_service["wizard-stack-nextcloud"]["drift"] == "digest_stale"
+    assert by_service["wizard-stack-moodle"]["drift"] == "digest_stale"
     # A floating tag running from a bare ref cannot be digest-compared.
     assert by_service["wizard-stack-coder"]["drift"] == "tag_only_ref"
-    # The OnlyOffice service is a candidate (nextcloud pack implies it) but the
-    # fake host reports nothing running.
-    assert by_service["wizard-stack-onlyoffice"]["status"] == "missing"
+    # A candidate the fake host reports nothing for still shows up as missing.
+    assert by_service["wizard-stack-cloudflared"]["status"] == "missing"
     # Packs that are not enabled never appear as candidates.
-    assert "wizard-stack-matrix" not in by_service
+    assert "wizard-stack-gitea" not in by_service
 
     litellm = report["litellm"]
     assert litellm["pin_source"] == "default"
@@ -535,8 +534,8 @@ def test_apply_litellm_pin_writes_document_and_clears_shared_core_hash(tmp_path:
                     service_id=desired_state.shared_core.network_name,
                     rendered_compose_sha256="c" * 64,
                 ),
-                "wizard-stack-nextcloud": ComposeArtifactHashState(
-                    service_id="wizard-stack-nextcloud",
+                "wizard-stack-moodle": ComposeArtifactHashState(
+                    service_id="wizard-stack-moodle",
                     rendered_compose_sha256="d" * 64,
                 ),
             },
@@ -560,7 +559,7 @@ def test_apply_litellm_pin_writes_document_and_clears_shared_core_hash(tmp_path:
     assert updated is not None
     # Only the shared-core compose hash is cleared; other packs stay noop-skippable.
     assert desired_state.shared_core.network_name not in updated.compose_artifact_hashes
-    assert "wizard-stack-nextcloud" in updated.compose_artifact_hashes
+    assert "wizard-stack-moodle" in updated.compose_artifact_hashes
 
 
 def test_clear_compose_artifact_hash_is_idempotent_without_checkpoint(tmp_path: Path) -> None:
@@ -922,7 +921,7 @@ def test_handle_upgrade_prints_json_summary(
     state_dir, _ = _flow_state_dir(tmp_path)
     env_file = tmp_path / "stack.env"
     env_file.write_text(
-        "STACK_NAME=wizard-stack\nROOT_DOMAIN=example.com\nPACKS=nextcloud,coder\n",
+        "STACK_NAME=wizard-stack\nROOT_DOMAIN=example.com\nPACKS=matrix,moodle\n",
         encoding="utf-8",
     )
     monkey_registry = FakeRegistry(

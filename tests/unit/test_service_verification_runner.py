@@ -22,13 +22,13 @@ def test_service_verification_runner_passes_all_enabled_services() -> None:
             ),
         ),
         ServiceVerificationCheck(
-            service_id="nextcloud",
-            label="Nextcloud / OnlyOffice",
+            service_id="matrix",
+            label="Matrix",
             verify=lambda: make_verification_result(
-                service_name="wizard-nextcloud",
+                service_name="wizard-matrix",
                 tier="downstream",
                 passed=True,
-                detail="Nextcloud is ready.",
+                detail="Matrix is ready.",
             ),
         ),
         ServiceVerificationCheck(
@@ -81,7 +81,7 @@ def test_service_verification_runner_passes_all_enabled_services() -> None:
     assert payload["summary"] == {"fail": 0, "pass": 6}
     assert [entry["service_id"] for entry in payload["entries"]] == [
         "shared-core",
-        "nextcloud",
+        "matrix",
         "coder",
         "matrix",
         "docuseal",

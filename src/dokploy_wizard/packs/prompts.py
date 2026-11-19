@@ -87,8 +87,6 @@ def prompt_for_pack_selection(
             disabled.append("headscale")
     if _prompt_yes_no(prompt, "Enable Matrix? [y/N]: ", default=False):
         selected.append("matrix")
-    if _prompt_yes_no(prompt, "Enable Nextcloud + OnlyOffice? [Y/n]: ", default=True):
-        selected.append("nextcloud")
     seaweedfs_access_key: str | None = None
     seaweedfs_secret_key: str | None = None
     generated_secrets: dict[str, str] = {}

@@ -22,19 +22,6 @@ from dokploy_wizard.packs.docuseal.models import (
     DocuSealManagedResource,
     DocuSealResult,
 )
-from dokploy_wizard.packs.nextcloud.models import (
-    NextcloudCommandCheck,
-    NextcloudHealthCheck,
-    NextcloudManagedResource,
-    NextcloudPostgresBinding,
-    NextcloudRedisBinding,
-    NextcloudResult,
-    NextcloudServiceConfig,
-    NextcloudServiceRuntime,
-    OnlyofficeServiceConfig,
-    OnlyofficeServiceRuntime,
-    TalkRuntime,
-)
 from dokploy_wizard.packs.seaweedfs.models import (
     SeaweedFsHealthCheck,
     SeaweedFsManagedResource,
@@ -63,7 +50,6 @@ def _validate(
     shared_core_backend: Any = _UNUSED_BACKEND,
     headscale_backend: Any = _UNUSED_BACKEND,
     matrix_backend: Any = _UNUSED_BACKEND,
-    nextcloud_backend: Any = _UNUSED_BACKEND,
     seaweedfs_backend: Any = _UNUSED_BACKEND,
     coder_backend: Any = _UNUSED_BACKEND,
     moodle_backend: Any | None = None,
@@ -80,7 +66,6 @@ def _validate(
         shared_core_backend=shared_core_backend,
         headscale_backend=headscale_backend,
         matrix_backend=matrix_backend,
-        nextcloud_backend=nextcloud_backend,
         seaweedfs_backend=seaweedfs_backend,
         coder_backend=coder_backend,
         moodle_backend=moodle_backend,
@@ -182,96 +167,6 @@ def test_validate_preserved_phases_still_rejects_cloudflare_access_drift_when_ow
         )
 
 
-def test_validate_preserved_phases_rejects_unhealthy_preserved_nextcloud(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    desired_state = resolve_desired_state(
-        RawEnvInput(
-            format_version=1,
-            values={
-                "STACK_NAME": "openmerge",
-                "ROOT_DOMAIN": "openmerge.me",
-                "ENABLE_NEXTCLOUD": "true",
-            },
-        )
-    )
-    nextcloud_runtime = NextcloudServiceRuntime(
-        hostname="nextcloud.openmerge.me",
-        url="https://nextcloud.openmerge.me",
-        service=NextcloudManagedResource("reuse_owned", "svc-1", "openmerge-nextcloud"),
-        data_volume=NextcloudManagedResource("reuse_owned", "vol-1", "openmerge-nextcloud-data"),
-        health_check=NextcloudHealthCheck(
-            url="https://nextcloud.openmerge.me/status.php", passed=None
-        ),
-        config=NextcloudServiceConfig(
-            onlyoffice_url="https://office.openmerge.me",
-            postgres=NextcloudPostgresBinding("db", "user", "secret"),
-            redis=NextcloudRedisBinding("redis", "secret"),
-        ),
-    )
-    onlyoffice_runtime = OnlyofficeServiceRuntime(
-        hostname="office.openmerge.me",
-        url="https://office.openmerge.me",
-        service=NextcloudManagedResource("reuse_owned", "svc-2", "openmerge-onlyoffice"),
-        data_volume=NextcloudManagedResource("reuse_owned", "vol-2", "openmerge-onlyoffice-data"),
-        health_check=NextcloudHealthCheck(
-            url="https://office.openmerge.me/healthcheck", passed=None
-        ),
-        config=OnlyofficeServiceConfig(
-            nextcloud_url="https://nextcloud.openmerge.me",
-            integration_secret_ref="jwt",
-        ),
-        document_server_check=NextcloudCommandCheck(
-            command="php occ onlyoffice:documentserver --check",
-            passed=True,
-        ),
-    )
-    monkeypatch.setattr(
-        "dokploy_wizard.lifecycle.drift.reconcile_nextcloud",
-        lambda **_: SimpleNamespace(
-            result=NextcloudResult(
-                outcome="already_present",
-                enabled=True,
-                nextcloud=nextcloud_runtime,
-                onlyoffice=onlyoffice_runtime,
-                talk=TalkRuntime(
-                    app_id="spreed",
-                    enabled=True,
-                    enabled_check=NextcloudCommandCheck(
-                        command="php occ app:list --output=json",
-                        passed=True,
-                    ),
-                    signaling_check=NextcloudCommandCheck(
-                        command="php occ talk:signaling:list --output=json",
-                        passed=True,
-                    ),
-                    stun_check=NextcloudCommandCheck(
-                        command="php occ talk:stun:list --output=json",
-                        passed=True,
-                    ),
-                    turn_check=NextcloudCommandCheck(
-                        command="php occ talk:turn:list --output=json",
-                        passed=True,
-                    ),
-                ),
-                notes=(),
-            )
-        ),
-    )
-    nextcloud_backend = SimpleNamespace(check_health=lambda *, service, url: False)
-
-    with pytest.raises(LifecycleDriftError, match="Nextcloud or OnlyOffice is no longer healthy"):
-        _validate(
-            raw_env=RawEnvInput(
-                format_version=1, values={"STACK_NAME": "openmerge", "ROOT_DOMAIN": "openmerge.me"}
-            ),
-            desired_state=desired_state,
-            ownership_ledger=OwnershipLedger(format_version=1, resources=()),
-            preserved_phases=("nextcloud",),
-            nextcloud_backend=nextcloud_backend,
-        )
-
-
 def test_validate_preserved_phases_rejects_invalid_shared_core_postgres_allocations() -> None:
     desired_state = resolve_desired_state(
         RawEnvInput(
@@ -279,7 +174,8 @@ def test_validate_preserved_phases_rejects_invalid_shared_core_postgres_allocati
             values={
                 "STACK_NAME": "openmerge",
                 "ROOT_DOMAIN": "openmerge.me",
-                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_MATRIX": "true",
+                "MATRIX_SUBDOMAIN": "matrix.openmerge.me",
             },
         )
     )

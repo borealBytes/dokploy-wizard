@@ -17,7 +17,6 @@ from dokploy_wizard.dokploy import (
     DokployCoderBackend,
     DokployDocuSealBackend,
     DokployMoodleBackend,
-    DokployNextcloudBackend,
     DokploySeaweedFsBackend,
     DokploySharedCoreBackend,
 )
@@ -48,12 +47,6 @@ from dokploy_wizard.state import (
     write_applied_checkpoint,
 )
 from dokploy_wizard.verification import ServiceVerificationResult
-from tests.integration.test_nextcloud_pack import (
-    FakeDokployApiClient as RecordingNextcloudApi,
-)
-from tests.integration.test_nextcloud_pack import (
-    NextcloudOccRecorder,
-)
 from tests.unit.fake_dokploy import FakeDokployApiClient
 from tests.unit.test_docuseal_pack import FakeDokployDocuSealApiClient
 from tests.unit.test_litellm_shared_core import _FakeLiteLLMAdminApi
@@ -336,7 +329,7 @@ def _auth_email_only_raw_env() -> RawEnvInput:
             "DOKPLOY_SUBDOMAIN": "dokploy",
             "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
             "ENABLE_HEADSCALE": "true",
-            "PACKS": "nextcloud,seaweedfs,coder",
+            "PACKS": "seaweedfs,coder",
             "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
         },
@@ -654,7 +647,6 @@ def test_install_rejects_partial_existing_state(tmp_path: Path) -> None:
 @dataclass
 class _FullStackClients:
     shared_core: FakeDokployApiClient
-    nextcloud: RecordingNextcloudApi
     moodle: FakeDokployMoodleApiClient
     docuseal: FakeDokployDocuSealApiClient
     seaweedfs: FakeDokployApiClient
@@ -664,7 +656,6 @@ class _FullStackClients:
 @dataclass
 class _FullStackBackends:
     shared_core: DokploySharedCoreBackend
-    nextcloud: DokployNextcloudBackend
     moodle: DokployMoodleBackend
     docuseal: DokployDocuSealBackend
     seaweedfs: DokploySeaweedFsBackend
@@ -692,20 +683,17 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=networking_backend,
         shared_core_backend=first_backends.shared_core,
-        nextcloud_backend=first_backends.nextcloud,
         seaweedfs_backend=first_backends.seaweedfs,
         coder_backend=first_backends.coder,
     )
 
     assert first_summary["shared_core"]["outcome"] == "applied"
-    assert first_summary["nextcloud"]["outcome"] == "applied"
     assert first_summary["moodle"]["outcome"] == "applied"
     assert first_summary["docuseal"]["outcome"] == "applied"
     assert first_summary["seaweedfs"]["outcome"] == "applied"
     assert first_summary["coder"]["outcome"] == "applied"
     assert _mutation_counts(clients, service_names) == {
         "shared_core": (1, 1, 1),
-        "nextcloud": (1, 2, 1),
         "moodle": (1, 1, 1),
         "docuseal": (1, 1, 1),
         "seaweedfs": (1, 1, 1),
@@ -742,7 +730,6 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=networking_backend,
         shared_core_backend=second_backends.shared_core,
-        nextcloud_backend=second_backends.nextcloud,
         seaweedfs_backend=second_backends.seaweedfs,
         coder_backend=second_backends.coder,
     )
@@ -750,21 +737,18 @@ def test_full_stack_second_deploy_proof_rerun_skips_targeted_service_mutations(
 
     assert {
         "shared_core",
-        "nextcloud",
         "moodle",
         "docuseal",
         "seaweedfs",
         "coder",
     }.issubset(set(second_summary["lifecycle"]["phases_to_run"]))
     assert second_summary["shared_core"]["outcome"] == "already_present"
-    assert second_summary["nextcloud"]["outcome"] == "already_present"
     assert second_summary["moodle"]["outcome"] == "already_present"
     assert second_summary["docuseal"]["outcome"] == "already_present"
     assert second_summary["seaweedfs"]["outcome"] == "already_present"
     assert second_summary["coder"]["outcome"] == "already_present"
     assert _mutation_deltas(second_clients_before, second_clients_after) == {
         "shared_core": (0, 0, 0),
-        "nextcloud": (0, 0, 0),
         "moodle": (0, 0, 0),
         "docuseal": (0, 0, 0),
         "seaweedfs": (0, 0, 0),
@@ -794,7 +778,6 @@ def test_full_stack_deploy_rerun_only_redeploys_service_with_changed_compose(
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=networking_backend,
         shared_core_backend=first_backends.shared_core,
-        nextcloud_backend=first_backends.nextcloud,
         seaweedfs_backend=first_backends.seaweedfs,
         coder_backend=first_backends.coder,
     )
@@ -823,7 +806,6 @@ def test_full_stack_deploy_rerun_only_redeploys_service_with_changed_compose(
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=networking_backend,
         shared_core_backend=modify_backends.shared_core,
-        nextcloud_backend=modify_backends.nextcloud,
         seaweedfs_backend=modify_backends.seaweedfs,
         coder_backend=modify_backends.coder,
     )
@@ -831,14 +813,12 @@ def test_full_stack_deploy_rerun_only_redeploys_service_with_changed_compose(
 
     assert "coder" in modify_summary["lifecycle"]["phases_to_run"]
     assert modify_summary["shared_core"]["outcome"] == "already_present"
-    assert modify_summary["nextcloud"]["outcome"] == "already_present"
     assert modify_summary["moodle"]["outcome"] == "already_present"
     assert modify_summary["docuseal"]["outcome"] == "already_present"
     assert modify_summary["seaweedfs"]["outcome"] == "already_present"
     assert modify_summary["coder"]["outcome"] == "already_present"
     assert _mutation_deltas(mutation_counts_before, mutation_counts_after) == {
         "shared_core": (0, 0, 0),
-        "nextcloud": (0, 0, 0),
         "moodle": (0, 0, 0),
         "docuseal": (0, 0, 0),
         "seaweedfs": (0, 0, 0),
@@ -867,7 +847,6 @@ def test_full_stack_deploy_rerun_redeploys_unhealthy_service_instead_of_skipping
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=networking_backend,
         shared_core_backend=first_backends.shared_core,
-        nextcloud_backend=first_backends.nextcloud,
         seaweedfs_backend=first_backends.seaweedfs,
         coder_backend=first_backends.coder,
     )
@@ -897,7 +876,6 @@ def test_full_stack_deploy_rerun_redeploys_unhealthy_service_instead_of_skipping
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=networking_backend,
         shared_core_backend=unhealthy_backends.shared_core,
-        nextcloud_backend=unhealthy_backends.nextcloud,
         seaweedfs_backend=unhealthy_backends.seaweedfs,
         coder_backend=unhealthy_backends.coder,
     )
@@ -906,7 +884,6 @@ def test_full_stack_deploy_rerun_redeploys_unhealthy_service_instead_of_skipping
     assert rerun_summary["coder"]["outcome"] == "already_present"
     assert _mutation_deltas(mutation_counts_before, mutation_counts_after) == {
         "shared_core": (0, 0, 0),
-        "nextcloud": (0, 0, 0),
         "moodle": (0, 0, 0),
         "docuseal": (0, 0, 0),
         "seaweedfs": (0, 0, 0),
@@ -939,7 +916,6 @@ def _full_stack_raw_env(**overrides: str) -> RawEnvInput:
         "CLOUDFLARE_ZONE_ID": "zone-123",
         "CLOUDFLARE_TUNNEL_NAME": "wizard-stack-tunnel",
         "CLOUDFLARE_ACCESS_OTP_EMAILS": "admin@example.com",
-        "ENABLE_NEXTCLOUD": "true",
         "ENABLE_MOODLE": "true",
         "ENABLE_DOCUSEAL": "true",
         "ENABLE_CODER": "true",
@@ -966,20 +942,15 @@ def _build_full_stack_backends(
     unhealthy = unhealthy_services or set()
     service_names = {
         "shared_core": desired_state.shared_core.network_name,
-        "nextcloud": f"{desired_state.stack_name}-nextcloud",
         "moodle": f"{desired_state.stack_name}-moodle",
         "docuseal": f"{desired_state.stack_name}-docuseal",
         "seaweedfs": f"{desired_state.stack_name}-seaweedfs",
         "coder": f"{desired_state.stack_name}-coder",
     }
-    nextcloud_allocation = _shared_allocation(desired_state=desired_state, pack_name="nextcloud")
     moodle_allocation = _shared_allocation(desired_state=desired_state, pack_name="moodle")
     docuseal_allocation = _shared_allocation(desired_state=desired_state, pack_name="docuseal")
     coder_allocation = _shared_allocation(desired_state=desired_state, pack_name="coder")
     assert desired_state.shared_core.postgres is not None
-    assert desired_state.shared_core.redis is not None
-    assert nextcloud_allocation.postgres is not None
-    assert nextcloud_allocation.redis is not None
     assert moodle_allocation.postgres is not None
     assert docuseal_allocation.postgres is not None
     assert coder_allocation.postgres is not None
@@ -989,15 +960,12 @@ def _build_full_stack_backends(
     if clients is None:
         clients = _FullStackClients(
             shared_core=FakeDokployApiClient(),
-            nextcloud=RecordingNextcloudApi(),
             moodle=FakeDokployMoodleApiClient(),
             docuseal=FakeDokployDocuSealApiClient(),
             seaweedfs=FakeDokployApiClient(),
             coder=FakeDokployApiClient(),
         )
 
-    occ = NextcloudOccRecorder()
-    occ.patch(monkeypatch)
     monkeypatch.setattr(coder_module, "_local_https_health_check", lambda url: True)
     monkeypatch.setattr(coder_module, "_public_https_health_check", lambda url: True)
     monkeypatch.setattr(
@@ -1056,24 +1024,6 @@ def _build_full_stack_backends(
         lambda: "shared_core" not in unhealthy,
     )
     monkeypatch.setattr(shared_core_backend, "_wait_for_shared_core_containers", lambda: None)
-
-    nextcloud_backend = DokployNextcloudBackend(
-        api_url="https://dokploy.example.com/api",
-        api_key="api-key-123",
-        stack_name=desired_state.stack_name,
-        nextcloud_hostname=desired_state.hostnames["nextcloud"],
-        onlyoffice_hostname=desired_state.hostnames["onlyoffice"],
-        postgres_service_name=desired_state.shared_core.postgres.service_name,
-        redis_service_name=desired_state.shared_core.redis.service_name,
-        postgres=nextcloud_allocation.postgres,
-        redis=nextcloud_allocation.redis,
-        integration_secret_ref=f"{desired_state.stack_name}-nextcloud-onlyoffice-jwt-secret",
-        admin_user=raw_env.values["DOKPLOY_ADMIN_EMAIL"],
-        admin_password=raw_env.values["DOKPLOY_ADMIN_PASSWORD"],
-        state_dir=state_dir,
-        client=clients.nextcloud,
-    )
-    monkeypatch.setattr(nextcloud_backend, "check_health", lambda *, service, url: True)
 
     moodle_backend = DokployMoodleBackend(
         api_url="https://dokploy.example.com/api",
@@ -1173,7 +1123,6 @@ def _build_full_stack_backends(
 
     return clients, _FullStackBackends(
         shared_core=shared_core_backend,
-        nextcloud=nextcloud_backend,
         moodle=moodle_backend,
         docuseal=docuseal_backend,
         seaweedfs=seaweedfs_backend,
@@ -1186,8 +1135,6 @@ def _shared_allocation(*, desired_state: Any, pack_name: str) -> Any:
         item for item in desired_state.shared_core.allocations if item.pack_name == pack_name
     )
     assert allocation.postgres is not None
-    if pack_name == "nextcloud":
-        assert allocation.redis is not None
     return allocation
 
 
@@ -1220,7 +1167,6 @@ def _persist_missing_compose_hashes(
         service_names["shared_core"]: clients.shared_core.compose_files_by_name[
             service_names["shared_core"]
         ],
-        service_names["nextcloud"]: next(iter(clients.nextcloud.compose_files_by_id.values())),
         service_names["moodle"]: (
             clients.moodle.last_create_compose_file or clients.moodle.last_update_compose_file
         ),
@@ -1261,11 +1207,6 @@ def _mutation_counts(
     coder_counts = clients.coder.mutation_counts(service_names["coder"])
     return {
         "shared_core": (shared_counts.create, shared_counts.update, shared_counts.deploy),
-        "nextcloud": (
-            clients.nextcloud.create_compose_calls,
-            clients.nextcloud.update_compose_calls,
-            clients.nextcloud.deploy_calls,
-        ),
         "moodle": (
             clients.moodle.create_compose_calls,
             clients.moodle.update_compose_calls,

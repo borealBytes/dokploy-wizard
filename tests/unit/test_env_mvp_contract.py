@@ -47,8 +47,8 @@ _DEFAULTED_KEYS = frozenset(
         "STACK_NAME",
         "DOKPLOY_SUBDOMAIN",
         "LITELLM_ADMIN_SUBDOMAIN",
-        "NEXTCLOUD_SUBDOMAIN",
-        "ONLYOFFICE_SUBDOMAIN",
+        "MATRIX_SUBDOMAIN",
+        "MOODLE_SUBDOMAIN",
     }
 )
 _OPTIONAL_COMMENTED_KEYS = frozenset(
@@ -126,7 +126,7 @@ def _load_active_env_keys(relative_path: str) -> frozenset[str]:
 def _minimal_env(**overrides: str) -> RawEnvInput:
     values = {
         "ROOT_DOMAIN": "example.test",
-        "PACKS": "nextcloud,coder",
+        "PACKS": "moodle,coder",
     }
     values.update(overrides)
     return RawEnvInput(format_version=1, values=values)
@@ -189,7 +189,7 @@ def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> No
     # and SeaweedFS object storage, with Gitea riding that same storage layer
     # (no new service class of its own); heavier packs stay opt-in.
     required_proof_packs = ["seaweedfs", "coder", "gitea"]
-    optional_proof_packs = {"nextcloud"}
+    optional_proof_packs: set[str] = set()
 
     assert active_packs[: len(required_proof_packs)] == required_proof_packs
     assert len(active_packs) == len(set(active_packs))
@@ -200,24 +200,23 @@ def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> No
 
 
 def test_minimal_env_uses_packs_for_enablement_and_defaults_optional_hostnames() -> None:
-    raw_env = _minimal_env(PACKS="nextcloud,coder")
+    raw_env = _minimal_env(PACKS="moodle,coder")
     selection = resolve_pack_selection(raw_env.values, root_domain=raw_env.values["ROOT_DOMAIN"])
     desired_state = resolve_desired_state(raw_env)
 
-    assert "ENABLE_NEXTCLOUD" not in raw_env.values
+    assert "ENABLE_MOODLE" not in raw_env.values
     assert "ENABLE_CODER" not in raw_env.values
     assert "STACK_NAME" not in raw_env.values
     assert "DOKPLOY_SUBDOMAIN" not in raw_env.values
-    assert selection.selected_packs == ("coder", "nextcloud")
+    assert selection.selected_packs == ("coder", "moodle")
     assert desired_state.stack_name == "example-test"
     assert desired_state.shared_core.network_name == "example-test-shared"
-    assert desired_state.enabled_packs == ("coder", "nextcloud")
+    assert desired_state.enabled_packs == ("coder", "moodle")
     assert desired_state.enable_tailscale is False
     assert desired_state.tailscale_hostname is None
     assert desired_state.hostnames["coder"] == "coder.example.test"
     assert desired_state.hostnames["coder-wildcard"] == "*.example.test"
-    assert desired_state.hostnames["nextcloud"] == "nextcloud.example.test"
-    assert desired_state.hostnames["onlyoffice"] == "office.example.test"
+    assert desired_state.hostnames["moodle"] == "moodle.example.test"
     assert desired_state.hostnames["dokploy"] == "dokploy.example.test"
 
 
@@ -338,14 +337,14 @@ def test_public_examples_do_not_make_default_subdomains_active_inputs() -> None:
 
 
 def test_omitted_optional_integrations_pass_when_features_are_disabled_or_unconfigured() -> None:
-    raw_env = _minimal_env(PACKS="nextcloud,coder")
+    raw_env = _minimal_env(PACKS="moodle,coder")
     desired_state = resolve_desired_state(raw_env)
 
     assert cli._docker_hub_credentials_from_env(raw_env) is None
     assert desired_state.enable_tailscale is False
     assert desired_state.tailscale_tags == ()
     assert desired_state.tailscale_subnet_routes == ()
-    assert "moodle" not in desired_state.enabled_packs
+    assert "docuseal" not in desired_state.enabled_packs
     assert "LITELLM_LOCAL_BASE_URL" not in raw_env.values
     assert "LITELLM_NVIDIA_API_KEY" not in raw_env.values
     assert _OPTIONAL_COMMENTED_KEYS.isdisjoint(raw_env.values)

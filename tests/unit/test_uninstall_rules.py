@@ -25,6 +25,10 @@ from dokploy_wizard.uninstall import (
 )
 from dokploy_wizard.uninstall.planner import (
     MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
+    NEXTCLOUD_SERVICE_RESOURCE_TYPE,
+    NEXTCLOUD_VOLUME_RESOURCE_TYPE,
+    ONLYOFFICE_SERVICE_RESOURCE_TYPE,
+    ONLYOFFICE_VOLUME_RESOURCE_TYPE,
     OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
     OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
     OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
@@ -38,7 +42,7 @@ def _raw(values: dict[str, str]) -> RawEnvInput:
     return RawEnvInput(format_version=1, values=values)
 
 
-def _desired(*, nextcloud: bool = False, matrix: bool = False, coder: bool = False) -> DesiredState:
+def _desired(*, matrix: bool = False, coder: bool = False) -> DesiredState:
     from dokploy_wizard.state import resolve_desired_state
 
     values = {
@@ -48,18 +52,17 @@ def _desired(*, nextcloud: bool = False, matrix: bool = False, coder: bool = Fal
     }
     if matrix:
         values["ENABLE_MATRIX"] = "true"
-    if nextcloud:
-        values["ENABLE_NEXTCLOUD"] = "true"
     if coder:
         values["ENABLE_CODER"] = "true"
     return resolve_desired_state(_raw(values))
 
 
 def test_uninstall_plan_retains_data_by_default() -> None:
-    # Legacy-ledger fixture: the retired packs are gone from the catalog, but a box
-    # whose ledger still names their resource types must plan a clean uninstall, so
-    # the planner keeps the deletion rules as literal insurance constants.
-    desired = _desired(nextcloud=True, coder=True)
+    # Legacy-ledger fixture: the Nextcloud + OnlyOffice pack (and the other retired
+    # packs) are gone from the catalog, but a box whose ledger still names their
+    # resource types must plan a clean uninstall, so the planner keeps the deletion
+    # rules as literal insurance constants.
+    desired = _desired(coder=True)
     ledger = OwnershipLedger(
         format_version=1,
         resources=(
@@ -95,16 +98,24 @@ def test_uninstall_plan_retains_data_by_default() -> None:
             ),
             OwnedResource("headscale_service", "headscale-1", "stack:nextcloud-stack:headscale"),
             OwnedResource(
-                "nextcloud_service", "nextcloud-1", "stack:nextcloud-stack:nextcloud-service"
+                NEXTCLOUD_SERVICE_RESOURCE_TYPE,
+                "nextcloud-1",
+                "stack:nextcloud-stack:nextcloud-service",
             ),
             OwnedResource(
-                "onlyoffice_service", "onlyoffice-1", "stack:nextcloud-stack:onlyoffice-service"
+                ONLYOFFICE_SERVICE_RESOURCE_TYPE,
+                "onlyoffice-1",
+                "stack:nextcloud-stack:onlyoffice-service",
             ),
             OwnedResource(
-                "nextcloud_volume", "nextcloud-volume", "stack:nextcloud-stack:nextcloud-volume"
+                NEXTCLOUD_VOLUME_RESOURCE_TYPE,
+                "nextcloud-volume",
+                "stack:nextcloud-stack:nextcloud-volume",
             ),
             OwnedResource(
-                "onlyoffice_volume", "onlyoffice-volume", "stack:nextcloud-stack:onlyoffice-volume"
+                ONLYOFFICE_VOLUME_RESOURCE_TYPE,
+                "onlyoffice-volume",
+                "stack:nextcloud-stack:onlyoffice-volume",
             ),
             OwnedResource("coder_service", "coder-1", "stack:nextcloud-stack:coder:service"),
             OwnedResource("coder_data", "coder-data", "stack:nextcloud-stack:coder:data"),
@@ -163,8 +174,8 @@ def test_uninstall_plan_retains_data_by_default() -> None:
         OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
         OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
         MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
-        "nextcloud_service",
-        "onlyoffice_service",
+        NEXTCLOUD_SERVICE_RESOURCE_TYPE,
+        ONLYOFFICE_SERVICE_RESOURCE_TYPE,
         SURFSENSE_SERVICE_RESOURCE_TYPE,
         "coder_service",
         "headscale_service",
@@ -196,8 +207,8 @@ def test_uninstall_plan_retains_data_by_default() -> None:
     ]
     assert [resource.resource_type for resource in plan.retained_resources] == [
         "coder_data",
-        "nextcloud_volume",
-        "onlyoffice_volume",
+        NEXTCLOUD_VOLUME_RESOURCE_TYPE,
+        ONLYOFFICE_VOLUME_RESOURCE_TYPE,
         "shared_core_postgres",
         "shared_core_redis",
         SURFSENSE_DATA_RESOURCE_TYPE,
@@ -234,7 +245,7 @@ def test_uninstall_plan_rejects_unknown_ledger_resource_type() -> None:
 
 
 def test_compute_remaining_completed_steps_shrinks_after_runtime_delete() -> None:
-    desired = _desired(nextcloud=True)
+    desired = _desired()
     remaining = OwnershipLedger(
         format_version=1,
         resources=(
@@ -271,10 +282,14 @@ def test_compute_remaining_completed_steps_shrinks_after_runtime_delete() -> Non
                 "stack:nextcloud-stack:my-farm-advisor",
             ),
             OwnedResource(
-                "nextcloud_volume", "nextcloud-volume", "stack:nextcloud-stack:nextcloud-volume"
+                NEXTCLOUD_VOLUME_RESOURCE_TYPE,
+                "nextcloud-volume",
+                "stack:nextcloud-stack:nextcloud-volume",
             ),
             OwnedResource(
-                "onlyoffice_volume", "onlyoffice-volume", "stack:nextcloud-stack:onlyoffice-volume"
+                ONLYOFFICE_VOLUME_RESOURCE_TYPE,
+                "onlyoffice-volume",
+                "stack:nextcloud-stack:onlyoffice-volume",
             ),
         ),
     )

@@ -33,7 +33,7 @@ def _load_root_env() -> RawEnvInput:
         for key, value in raw_env.values.items()
         if key != "ENABLE_TAILSCALE" and not key.startswith("TAILSCALE_")
     }
-    values["PACKS"] = "nextcloud,moodle,seaweedfs,coder"
+    values["PACKS"] = "matrix,moodle,seaweedfs,coder"
     return RawEnvInput(format_version=raw_env.format_version, values=values)
 
 
@@ -45,7 +45,7 @@ def test_phase_order_preserves_infra_prereqs_but_uses_required_mvp_pack_sequence
     assert _index("preflight") < _index("dokploy_bootstrap") < _index("networking")
     assert _index("networking") < _index("shared_core") < _index("seaweedfs")
     assert _index("seaweedfs") < _index("headscale") < _index("tailscale")
-    assert _index("tailscale") < _index("matrix") < _index("nextcloud") < _index("moodle")
+    assert _index("tailscale") < _index("matrix") < _index("moodle")
     assert _index("moodle") < _index("docuseal")
     assert _index("docuseal") < _index("coder")
     assert _index("coder") < _index("cloudflare_access")
@@ -55,7 +55,7 @@ def test_root_mvp_env_applicable_phases_follow_required_order_and_keep_coder() -
     raw_env = _load_root_env()
     desired_state = resolve_desired_state(raw_env)
 
-    assert raw_env.values["PACKS"] == "nextcloud,moodle,seaweedfs,coder"
+    assert raw_env.values["PACKS"] == "matrix,moodle,seaweedfs,coder"
     assert "coder" in desired_state.enabled_packs
     assert desired_state.enable_tailscale is False
 
@@ -65,7 +65,7 @@ def test_root_mvp_env_applicable_phases_follow_required_order_and_keep_coder() -
         "networking",
         "shared_core",
         "seaweedfs",
-        "nextcloud",
+        "matrix",
         "moodle",
         "coder",
         "cloudflare_access",

@@ -15,7 +15,6 @@ Today this repo is not a scaffold or mock planner. It performs real deployment, 
   - Redis
   - Postfix mail relay
   - LiteLLM AI gateway
-- **Nextcloud + OnlyOffice + Talk** for human file sync and collaboration
 - **Moodle**
 - **DocuSeal**
 - **SeaweedFS** for S3-compatible object storage
@@ -244,7 +243,7 @@ between you and a typo.
 - Fresh-VPS install works
 - Same-host rerun / noop proof works
 - fresh-VPS install, rerun, and inspect-state flows are part of the validation path
-- Nextcloud Talk, OnlyOffice, SeaweedFS, Matrix, Moodle, DocuSeal, FileX, Gitea, and Coder are all part of the wizard-managed path
+- SeaweedFS, Matrix, Moodle, DocuSeal, FileX, Gitea, and Coder are all part of the wizard-managed path
 - Unchanged healthy services skip Dokploy update/deploy on rerun through compose artifact hash tracking
 
 ## High-level architecture
@@ -272,8 +271,6 @@ flowchart LR
     Host --> Dokploy[📦 Dokploy]
 
     subgraph Apps[Wizard-managed application surfaces]
-      Nextcloud[🗂️ Nextcloud]
-      OnlyOffice[📝 OnlyOffice]
       Moodle[🎓 Moodle]
       DocuSeal[✍️ DocuSeal]
       Coder[💻 Coder]
@@ -285,19 +282,15 @@ flowchart LR
       ModelSync[♻️ LiteLLM model-sync\nsidecar]
     end
 
-    Traefik --> Nextcloud
-    Traefik --> OnlyOffice
     Traefik --> Moodle
     Traefik --> DocuSeal
     Traefik --> Coder
     Traefik --> Seaweed
     Dokploy --> Shared
-    Dokploy --> Nextcloud
     Dokploy --> Coder
     Dokploy --> Seaweed
 
     Shared --> ModelSync
-    Nextcloud --> OnlyOffice
     Apps --> Shared
 ```
 
@@ -325,8 +318,7 @@ stateDiagram-v2
     Headscale --> Tailscale
     Tailscale --> Matrix
     Matrix --> SeaweedFS
-    SeaweedFS --> NextcloudOnlyOffice
-    NextcloudOnlyOffice --> DocuSeal
+    SeaweedFS --> DocuSeal
     DocuSeal --> Coder
     Coder --> CloudflareAccess
     CloudflareAccess --> Installed
@@ -395,28 +387,14 @@ Shared Core is the common substrate for packs that need databases, cache, mail r
 
 Today Shared Core includes:
 
-- **PostgreSQL** for Coder, Nextcloud, Moodle, and other packs that need wizard-owned relational storage. The wizard keeps the pg16 pgvector image unchanged for continuity but no longer grants the vector extension, superuser role, or `wal_level=logical` that the retired advisor runtimes required.
-- **Redis** for Nextcloud and packs that need cache or queue backing.
+- **PostgreSQL** for Coder, Moodle, and other packs that need wizard-owned relational storage. The wizard keeps the pg16 pgvector image unchanged for continuity but no longer grants the vector extension, superuser role, or `wal_level=logical` that the retired advisor runtimes required.
+- **Redis** for packs that need cache or queue backing.
 - **Postfix** as the wizard-managed mail relay surface for services that need SMTP/mail delivery. It centralizes the relay endpoint inside the stack; it does not imply every application has complete mail workflows configured by default.
 - **LiteLLM** as the central AI passthrough/gateway for wizard-managed services deployed through Dokploy.
 
 These are wizard-owned resources, tracked in the ownership ledger, and reused across modify / rerun operations.
 
 LiteLLM is the AI boundary for the stack. Services use the internal Docker-network URL `http://<stack-name>-shared-litellm:4000` and receive wizard-managed virtual keys or generated gateway defaults. Upstream provider keys terminate at LiteLLM instead of being copied into each application container. The public `litellm.<root-domain>` admin hostname exists for operator management and stays Cloudflare Access-protected; service-to-service traffic should stay on the shared internal network.
-
-### Nextcloud + OnlyOffice + Talk
-
-The `nextcloud` pack always includes OnlyOffice as its paired document editor runtime and Talk for real-time chat/voice/video. These surfaces serve human users; the agent runtime that once mounted a workspace into Nextcloud was removed, so no bot accounts or agent mounts are wired here anymore.
-
-What the wizard wires today:
-
-- Nextcloud service + persistent volume
-- OnlyOffice service + persistent volume
-- shared-core Postgres + Redis bindings
-- trusted domain configuration
-- OnlyOffice JWT configuration wiring
-- Nextcloud Talk app verification
-- built-in AI wiring: the OpenAI/LocalAI integration app (`integration_openai`) is enabled and pointed at the internal LiteLLM gateway with the dedicated `nextcloud` virtual key, so Nextcloud's AI features list every gateway-visible model
 
 ### Coder
 
@@ -531,7 +509,7 @@ Why the fallback exists:
 Current decision:
 
 - Keep the fallback `*.<root-domain>` for live installs until a future architecture change is chosen.
-- Preserve a strict router pattern so service hosts like `dokploy.<root-domain>`, `nextcloud.<root-domain>`, and `moodle.<root-domain>` are not hijacked by Coder.
+- Preserve a strict router pattern so service hosts like `dokploy.<root-domain>`, `gitea.<root-domain>`, and `moodle.<root-domain>` are not hijacked by Coder.
 
 Future architecture options:
 
@@ -672,7 +650,6 @@ flowchart TD
 
     subgraph AppLogins[Own login surfaces]
       Dokploy[Dokploy admin login]
-      Nextcloud[Nextcloud admin + users]
       Moodle[Moodle admin + users]
       DocuSeal[DocuSeal admin login]
       Coder[Coder admin login]
@@ -692,13 +669,11 @@ Current Cloudflare Access scope:
 
 - `litellm.<root-domain>` for LiteLLM admin access
 
-OTP recipients come from `CLOUDFLARE_ACCESS_OTP_EMAILS`, and Access is opt-in: with the list unset no hostname is gated, because every surface the wizard ships (Dokploy, Coder, Nextcloud, Moodle, DocuSeal, the LiteLLM admin UI) already sits behind its own application login. Listing one or more emails turns the phase on for the LiteLLM admin hostname; clearing the list on a modify run takes the Access application and policy back down. The retired advisor hostnames no longer get Access apps; on older boxes that ran them, the Access apps and pack resources stay recorded in the ownership ledger and are removed on uninstall.
+OTP recipients come from `CLOUDFLARE_ACCESS_OTP_EMAILS`, and Access is opt-in: with the list unset no hostname is gated, because every surface the wizard ships (Dokploy, Coder, Moodle, DocuSeal, the LiteLLM admin UI) already sits behind its own application login. Listing one or more emails turns the phase on for the LiteLLM admin hostname; clearing the list on a modify run takes the Access application and policy back down. The retired advisor hostnames no longer get Access apps; on older boxes that ran them, the Access apps and pack resources stay recorded in the ownership ledger and are removed on uninstall.
 
 Not behind Cloudflare Access in the current implementation:
 
 - `dokploy.<root-domain>`
-- `nextcloud.<root-domain>`
-- `office.<root-domain>`
 - `filex.<root-domain>`
 - `gitea.<root-domain>`
 - `coder.<root-domain>`
@@ -722,7 +697,6 @@ origin apps whose login flow pins its CSRF origin to the `https://` URL
 Why:
 
 - Dokploy still needs a usable API/control plane path
-- Nextcloud and OnlyOffice have client/protocol concerns
 - FileX has its own application login
 - SeaweedFS is an object-storage protocol surface and is not exposed publicly at all
 - Coder has its own application login
@@ -741,9 +715,7 @@ Login matrix, measured on the proven box (paths are the real login routes —
 | FileX | `https://filex.<root-domain>/admin/login` | admin email + stack password | the pack bootstraps the deployer's own account as admin |
 | DocuSeal | `https://docuseal.<root-domain>/sign_in` | admin email + stack password | wizard bootstraps the deployer account |
 | LiteLLM | `https://litellm.<root-domain>/ui/login` | admin email + stack password | shared-core operator; optionally OTP-gated by Cloudflare Access |
-| Nextcloud | `https://nextcloud.<root-domain>/` | admin user/password + internal service accounts | derived from Dokploy admin credentials |
 | Moodle | `https://moodle.<root-domain>/` | admin + per-course users | derived from Dokploy admin credentials |
-| OnlyOffice | (no login UI of its own) | JWT integration value shared with Nextcloud | wired by deployment bootstrap/runtime config |
 | SeaweedFS / S3 | (internal-only endpoint) | access key + secret key | wizard-generated in guided mode or env-file provided |
 
 One operator password per box is the design: `DOKPLOY_ADMIN_PASSWORD` is the
@@ -767,7 +739,6 @@ The wizard currently uses three broad credential sources:
    - Dokploy API key after bootstrap
 
 3. **Server-owned runtime secrets**
-   - Nextcloud runtime integration values
    - shared Postfix relay configuration consumed by services that need SMTP/mail delivery
 
 ## Current install file expectations
@@ -794,7 +765,7 @@ is optional, defaulted, or wizard-generated:
 | `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_ZONE_ID` | The one account and zone hosting the stack |
 | `CLOUDFLARE_API_TOKEN` | Zone DNS Edit + account Tunnel Edit (plus Access Apps/Policies Write when OTP is on) |
 | `DOKPLOY_ADMIN_EMAIL` / `DOKPLOY_ADMIN_PASSWORD` | The one operator password every surface shares |
-| `PACKS` | Comma list from `nextcloud,moodle,docuseal,seaweedfs,filex,gitea,coder,matrix,headscale`; `filex`/`gitea` imply `seaweedfs` |
+| `PACKS` | Comma list from `moodle,docuseal,seaweedfs,filex,gitea,coder,matrix,headscale`; `filex`/`gitea` imply `seaweedfs` |
 
 AI is opt-in: at least one of `LITELLM_OPENROUTER_API_KEY`,
 `LITELLM_OPENCODE_GO_API_KEY`, `LITELLM_NVIDIA_API_KEY` (+
@@ -818,7 +789,7 @@ Important details:
 - `.install.env` contains real Cloudflare credentials, Dokploy credentials, optional Tailscale values, and optional upstream model-provider keys. Keep it `0600` and uncommitted.
 - `.install.env` stays flat. It contains `key=value` pairs, not nested LiteLLM config or generated app state.
 - `STACK_NAME` defaults from `ROOT_DOMAIN` by lowercasing it and replacing dots or other unsafe characters with hyphens, so `openmerge.me` becomes `openmerge-me`. Wizard-managed Dokploy projects, Docker networks, services, volumes, and tunnel names use that prefix. Set `STACK_NAME` only to preserve an existing explicit stack name.
-- `PACKS` selects optional packs: `nextcloud`, `moodle`, `docuseal`, `seaweedfs`, `filex`, `gitea`, `coder`, `matrix`, and `headscale`. Each pack also honors its matching `ENABLE_*` flag (e.g. `ENABLE_HEADSCALE=true`) instead of a `PACKS` entry. `filex` and `gitea` imply `seaweedfs`. `ENABLE_GITEA` is the exception: it folds into the same enabled set but is deprecated and stops being read one release later, so list `gitea` in `PACKS`.
+- `PACKS` selects optional packs: `moodle`, `docuseal`, `seaweedfs`, `filex`, `gitea`, `coder`, `matrix`, and `headscale`. Each pack also honors its matching `ENABLE_*` flag (e.g. `ENABLE_HEADSCALE=true`) instead of a `PACKS` entry. `filex` and `gitea` imply `seaweedfs`. `ENABLE_GITEA` is the exception: it folds into the same enabled set but is deprecated and stops being read one release later, so list `gitea` in `PACKS`.
 - Generated values such as Dokploy API keys, SeaweedFS secrets, and LiteLLM virtual keys are state-backed. Do not hand-fill them for normal installs.
 - `DOKPLOY_SUBDOMAIN` defaults to `dokploy`; set it only when you need a different Dokploy hostname.
 - `LITELLM_ADMIN_SUBDOMAIN` defaults to `litellm`; set it only when you need a different LiteLLM admin hostname. The admin UI already has its own login; it becomes a Cloudflare Access OTP target only when you set `CLOUDFLARE_ACCESS_OTP_EMAILS`.
@@ -990,8 +961,8 @@ mypy .
 Focused modules that matter most for the current stack:
 
 ```bash
-pytest tests/unit/test_nextcloud_pack.py -q
-pytest tests/integration/test_nextcloud_pack.py -q
+pytest tests/unit/test_filex_pack.py -q
+pytest tests/unit/test_gitea_pack.py -q
 pytest tests/test_cli.py -q
 ```
 
@@ -1001,7 +972,7 @@ pytest tests/test_cli.py -q
 - Docker can be bootstrap-remediated by the wizard on supported Ubuntu hosts.
 - The chosen state directory stores wizard metadata and the generated env file, not the Docker volumes themselves.
 - The ownership ledger is the uninstall authority.
-- Every wizard-managed pack (Nextcloud, Moodle, DocuSeal, SeaweedFS, FileX, Matrix, Headscale, Coder) is state-tracked and reconciled on rerun, not just manually drifted on one VPS.
+- Every wizard-managed pack (Moodle, DocuSeal, SeaweedFS, FileX, Gitea, Matrix, Headscale, Coder) is state-tracked and reconciled on rerun, not just manually drifted on one VPS.
 - Reruns and modify operations skip Dokploy update/deploy for services whose rendered compose hash matches the stored hash and whose verification checks pass. Changed compose or unhealthy services still redeploy normally.
 - The LiteLLM image tag resolves as: state pin (`litellm-image-pin.json`, written by `upgrade`) > `LITELLM_IMAGE`/`LITELLM_IMAGE_TAG` env > built-in default. Rotate it with `upgrade --litellm`, not by editing the env file behind the pin.
 
@@ -1017,7 +988,6 @@ LiteLLM is always installed as core infrastructure. It is not a pack you opt int
 Primary consumers today are:
 
 - Dokploy's built-in AI provider (`Dokploy Wizard LiteLLM`)
-- Nextcloud's built-in AI (`integration_openai` app, via the `nextcloud` virtual key)
 - Coder Hermes
 - Coder OpenCode Web through generated template gateway defaults
 
@@ -1049,7 +1019,7 @@ How autosynced models behave:
 - Autosynced deployments are named `sync/<source>-<model-id>`, with the upstream id's slashes written as `->` (e.g. `sync/nvidia-google->gemma-4-31b-it:free`), so they never collide with the explicit config-file aliases. The source leads the name inside one flat segment because pickers that shorten model ids render only the last path segment: nesting the source as its own segment would hide which bill — subscription or pay-as-you-go — every alias touches.
 - Each synced deployment records the provider's per-token cost (`input_cost_per_token`/`output_cost_per_token`) wherever a catalog can price the model: OpenRouter ships pricing on its own catalog rows, while NVIDIA and OpenCode Go are priced from the models.dev registry (USD per million tokens, converted down). LiteLLM spend reports and cost-aware pickers therefore show what an alias actually bills; a model no catalog prices carries no cost fields at all rather than a claimed zero, and the `:free` name tail still marks the zero-cost NVIDIA endpoints the registry verified.
 - Deployments created by autosync are tagged internally; when a source drops a model, only wizard-created `sync/...` deployments are pruned. Config-file aliases and models you added yourself in the admin UI are never touched.
-- Consumer virtual keys are explicit-alias allowlists refreshed by the sidecar each cycle with the current `sync/*` names (plus a `sync/*` wildcard for runtime calls), because LiteLLM's `/v1/models` does not expand wildcards and workspace tooling seeds its model picker from that endpoint. Autosynced models are therefore immediately callable from Coder Hermes, and the built-in AI surfaces (Dokploy provider rows and the Nextcloud AI picker) are seeded from the same key-level visibility.
+- Consumer virtual keys are explicit-alias allowlists refreshed by the sidecar each cycle with the current `sync/*` names (plus a `sync/*` wildcard for runtime calls), because LiteLLM's `/v1/models` does not expand wildcards and workspace tooling seeds its model picker from that endpoint. Autosynced models are therefore immediately callable from Coder Hermes, and the built-in AI surfaces (Dokploy provider rows and the workspace key allowlists) are seeded from the same key-level visibility.
 - `sync/default-chat` is a stable alias whose upstream is *selected* rather than listed: the sidecar matches `AI_DEFAULT_MODEL_PATTERN` against the provider's live catalog, ranks matches by version number, and promotes the newest one that answers a real completion request. Upstream renames therefore cost a sync cycle instead of a reinstall, and a client can name `sync/default-chat` and never move. The new target is registered before the old one is retired, so there is no window with no working upstream; when nothing confirms (a brownout, a catalog outage) the current target stays put. Set `AI_DEFAULT_MODEL_PATTERN=` to empty to turn the alias off, which also deletes it.
 - Rendered LiteLLM config sets `general_settings.store_model_in_db` so admin-API-registered models survive proxy restarts.
 - Coder workspaces resolve their model lists live from the gateway at boot and re-run the same fetch from a background refresher roughly every 12 hours — retrying every 5 minutes after any failed refresh until the gateway is reachable again — so autosynced models appear in OpenCode, Pi, Hermes, and Copilot BYOK even in long-running workspaces. If the gateway is briefly unreachable during a refresh, the last good model list is kept.
@@ -1101,7 +1071,6 @@ Local model compatibility is handled in the generated LiteLLM config. For a priv
 The wizard auto-generates stable virtual keys for each consumer:
 
 - `dokploy-ai` — Dokploy's built-in AI provider rows, one per gateway-visible alias
-- `nextcloud` — Nextcloud's built-in AI (`integration_openai` app)
 - `coder-hermes` — the Coder Hermes template (the baked fallback every workspace ships with)
 - `coder-workspace-issuer` — not a chat consumer: the scoped minting credential each
   workspace uses to create its own child key (its only allowed routes are
@@ -1179,12 +1148,11 @@ mypy .
 
 ## Where this goes next
 
-- **Nextcloud → FileX + OnlyOffice.** The file-sync and collaboration story has
+- **FileX + ONLYOFFICE editing.** The file-sync and collaboration story has
   moved: `~/shared` (FileX over SeaweedFS, versioned, attributed per person)
-  already replaces Nextcloud Files for the workspace-centric workflow. The next
-  step is wiring the stack's existing OnlyOffice runtime to edit FileX-versioned
-  documents directly, at which point the `nextcloud` pack becomes genuinely
-  optional rather than the default human surface.
+  already replaces the retired Nextcloud Files for the workspace-centric
+  workflow. The next step is wiring an ONLYOFFICE DocumentServer sidecar into
+  the FileX pack so FileX-versioned documents edit directly in the browser.
 - **Public S3 re-exposure** needs an identity layer first (the gateway is
   anonymous-by-default today, hence the internal-only `<stack>-s3.internal`).
 - **Dokploy behind Access** once a machine-auth control path is safe.

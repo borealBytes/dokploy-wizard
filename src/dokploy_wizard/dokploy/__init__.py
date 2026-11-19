@@ -34,7 +34,6 @@ from dokploy_wizard.dokploy.gitea import DokployGiteaBackend
 from dokploy_wizard.dokploy.headscale import DokployHeadscaleBackend
 from dokploy_wizard.dokploy.matrix import DokployMatrixBackend
 from dokploy_wizard.dokploy.moodle import DokployMoodleBackend
-from dokploy_wizard.dokploy.nextcloud import DokployNextcloudBackend
 from dokploy_wizard.dokploy.seaweedfs import DokploySeaweedFsBackend
 from dokploy_wizard.dokploy.shared_core import (
     DokploySharedCoreBackend,
@@ -61,7 +60,6 @@ __all__ = [
     "DokployHeadscaleBackend",
     "DokployMatrixBackend",
     "DokployMoodleBackend",
-    "DokployNextcloudBackend",
     "DokploySeaweedFsBackend",
     "DokployEnvironmentSummary",
     "DokployProjectSummary",
