@@ -1315,3 +1315,17 @@ and let the autosync sidecar rescan it like any other provider. Delivered:
   keyless listing + placeholder key, provider-subset respect, the
   disabled override, plan inclusion for local-only stacks, and a sidecar
   create/prune round trip asserting `sync/tuxdesktop-Qwen3.8-...` exactly.
+- Box proof (showmeseewhy, modify48/49): the operator env commented its
+  `LITELLM_LOCAL_MODEL` line; the modify pass applied (173s, "Supported modify
+  keys changed: ['LITELLM_LOCAL_MODEL']") and the sidecar's boot cycle
+  registered the discovered model live — `/model/info` shows
+  `sync/tuxdesktop-Qwen3.8-Flash-Next-Uncensored` →
+  `openai/Qwen3.8-Flash-Next-Uncensored` @
+  `http://tuxdesktop.felis-aeolian.ts.net:30000/v1`, tagged
+  `managed_by=dokploy-wizard-model-sync` `sync_source=tuxdesktop`,
+  `supports_system_message: false` applied; the static
+  `local-model.internal/unsloth-active` is gone with the pin; the sync
+  service env carries `LITELLM_LOCAL_API_KEY` (creds rails cover it); the
+  `coder-hermes` workspace key's `/v1/models` lists the alias by name, and a
+  chat completion through it answered from the serving box. Second modify:
+  `mode: noop` (21.4s).
