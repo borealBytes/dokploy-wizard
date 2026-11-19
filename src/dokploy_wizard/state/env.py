@@ -230,16 +230,19 @@ def _validate_litellm_nvidia_env(values: dict[str, str]) -> None:
 
 def _validate_litellm_local_env(values: dict[str, str]) -> None:
     if _has_configured_value(values, "LITELLM_LOCAL_BASE_URL"):
-        missing_local_keys = sorted(
-            key
-            for key in ("LITELLM_LOCAL_MODEL", "LITELLM_LOCAL_API_KEY")
-            if not _has_configured_value(values, key)
-        )
-        if missing_local_keys:
-            joined = ", ".join(missing_local_keys)
+        # The base URL alone is a complete local lane: the autosync sidecar scans
+        # the endpoint's /v1/models and registers every served model by name as
+        # sync/<host-label>-<id>, rescanned each cycle. LITELLM_LOCAL_MODEL only
+        # adds the static alias (local-model.internal/unsloth-active) pinned to
+        # that id, and that deployment carries an api_key, so MODEL and KEY stay
+        # a pair.
+        if _has_configured_value(values, "LITELLM_LOCAL_MODEL") and not _has_configured_value(
+            values, "LITELLM_LOCAL_API_KEY"
+        ):
             raise StateValidationError(
-                "Local LiteLLM routing requires LITELLM_LOCAL_BASE_URL, "
-                f"LITELLM_LOCAL_MODEL, and LITELLM_LOCAL_API_KEY. Missing: {joined}."
+                "The static local LiteLLM alias requires LITELLM_LOCAL_API_KEY alongside "
+                "LITELLM_LOCAL_MODEL. Leave LITELLM_LOCAL_MODEL commented to expose only "
+                "the auto-discovered endpoint models."
             )
         return
     provider = _get_configured_value(values, "AI_DEFAULT_PROVIDER")

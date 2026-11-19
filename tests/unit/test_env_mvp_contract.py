@@ -488,6 +488,36 @@ def test_litellm_canonical_env_rejects_missing_local_endpoint_with_actionable_er
         )
 
 
+def test_local_base_url_alone_is_a_complete_local_lane() -> None:
+    # Autosync discovers whatever the endpoint serves; MODEL and KEY are only
+    # needed for the static pinned alias, so URL-only must validate clean.
+    raw_env = _litellm_env(
+        LITELLM_LOCAL_BASE_URL="http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+        LITELLM_LOCAL_MODEL="",
+        LITELLM_LOCAL_API_KEY="",
+    )
+
+    assert "coder" in resolve_desired_state(raw_env).enabled_packs
+
+
+def test_local_static_alias_requires_its_key_but_key_needs_no_model() -> None:
+    with pytest.raises(StateValidationError, match="LITELLM_LOCAL_API_KEY"):
+        resolve_desired_state(
+            _litellm_env(
+                LITELLM_LOCAL_BASE_URL="http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+                LITELLM_LOCAL_MODEL="unsloth-active",
+                LITELLM_LOCAL_API_KEY="",
+            )
+        )
+
+    keyless_of_model = _litellm_env(
+        LITELLM_LOCAL_BASE_URL="http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+        LITELLM_LOCAL_MODEL="",
+        LITELLM_LOCAL_API_KEY="sk-no-key-required",
+    )
+    assert "coder" in resolve_desired_state(keyless_of_model).enabled_packs
+
+
 def test_ai_default_provider_and_model_resolve_local_alias_but_requires_local_base_url() -> None:
     raw_env = _litellm_env(
         AI_DEFAULT_API_KEY="",

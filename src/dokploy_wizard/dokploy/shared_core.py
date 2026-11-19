@@ -1393,11 +1393,6 @@ def _render_compose_file(
                 extra_target_services=(sync_service,) if sync_enabled else (),
             )
         )
-        local_api_key_lines = (
-            f'      LITELLM_LOCAL_API_KEY: "{_required_placeholder("LITELLM_LOCAL_API_KEY")}"\n'
-            if _optional_value(litellm_env, "LITELLM_LOCAL_API_KEY") is not None
-            else ""
-        )
         master_key_lines = (
             f'      LITELLM_MASTER_KEY: "{_required_placeholder("LITELLM_MASTER_KEY")}"\n'
             f'      MASTER_KEY: "{_required_placeholder("LITELLM_MASTER_KEY")}"\n'
@@ -1447,7 +1442,6 @@ def _render_compose_file(
             "    environment:\n"
             f'      DATABASE_URL: "postgresql://{plan.litellm.postgres.user_name}:{_required_placeholder(postgres_password_env)}@{postgres_service_name}:5432/{plan.litellm.postgres.database_name}"\n'
             '      ENFORCE_PRISMA_MIGRATION_CHECK: "true"\n'
-            f"{local_api_key_lines}"
             f"{provider_env_lines}"
             f"{master_key_lines}"
             f"{salt_key_lines}"
@@ -1607,6 +1601,12 @@ def _build_litellm_upstream_creds(litellm_env: dict[str, str]) -> dict[str, str]
     )
     if nvidia_env_name is not None:
         upstream_creds["nvidia_api_key_env"] = nvidia_env_name
+    # The local endpoint's key rides the same rails as the provider keys: one env
+    # line on the gateway and on the autosync sidecar (which lists /v1/models and
+    # registers deployments with that key). Absence just means the endpoint answers
+    # keyless, and the local sync source carries no api_key_env.
+    if _first_configured_env_name(litellm_env, "LITELLM_LOCAL_API_KEY") is not None:
+        upstream_creds["local_api_key_env"] = "LITELLM_LOCAL_API_KEY"
     return upstream_creds
 
 
@@ -1646,17 +1646,6 @@ def _litellm_env_specs(
     extra_target_services: tuple[str, ...] = (),
 ) -> tuple[DokployEnvSpec, ...]:
     specs: list[DokployEnvSpec] = []
-    local_api_key = _optional_value(litellm_env, "LITELLM_LOCAL_API_KEY")
-    if local_api_key is not None:
-        specs.append(
-            _shared_core_env_spec(
-                name="LITELLM_LOCAL_API_KEY",
-                value=local_api_key,
-                owner="shared-core-litellm",
-                target_services=(service_name,),
-                source="operator-input",
-            )
-        )
     for env_name in dict.fromkeys(upstream_creds.values()):
         value = _resolve_litellm_secret_ref_value(litellm_env, env_name)
         if value is None:

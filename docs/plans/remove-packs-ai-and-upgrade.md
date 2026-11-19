@@ -1272,3 +1272,46 @@ repairs, and a plain noop. It found and drove the fixes for two real bugs
   coder 201, dokploy sign-in 200, docuseal serving; tailscale online as
   `showmeseewhy` with tuxDesktop peer and the local-model endpoint 200.
   modify47 converged to `mode: noop` (29.2s).
+
+### Phase 10b (2026-11): the local endpoint became a real sync source
+
+Operator request: stop swapping a `LITELLM_LOCAL_MODEL` value every time the
+served model changes — expose whatever the endpoint serves, by its own name,
+and let the autosync sidecar rescan it like any other provider. Delivered:
+
+- `model_sync.py`: `"local"` joins `MODEL_SYNC_DEFAULT_PROVIDERS`; a
+  `LITELLM_LOCAL_BASE_URL` alone appends a source whose `list_url` is the
+  endpoint's own `/v1/models`. The source is NAMED for the serving host's
+  first label (tuxdesktop.felis-aeolian.ts.net → `sync/tuxdesktop-<id>`),
+  not a generic "local": the picker names the machine that answers, and two
+  operators get two honest names. IPs keep their dotted form; a hostless
+  URL falls back to `local`. Cap 50 (`MODEL_SYNC_LOCAL_MAX_MODELS`); model
+  ids arrive in the OpenAI `data[].id` shape the sidecar already parses,
+  so registration/alias-slug/prune/`_alias_source` worked untouched.
+- Key handling: with `LITELLM_LOCAL_API_KEY` set the source carries
+  `api_key_env` and the key now rides `_build_litellm_upstream_creds`
+  (`local_api_key_env`) — one env line on BOTH the gateway and the sidecar
+  (the dedicated local spec/compose lines collapsed into the generic
+  provider rails). Without a key the source ships `default_api_key:
+  sk-no-key-required` (new `deployment_params` support) because LiteLLM's
+  OpenAI-compatible client refuses to build a request with no key; auth-
+  skipping servers discard the placeholder — the same value the static
+  lane has always used.
+- Local sources declare `litellm_params_extra:
+  {supports_system_message: false}` (new generic passthrough in
+  `deployment_params`), mirroring the renderer's static-local posture for
+  vLLM-family templates that reject non-leading system messages.
+- env validation relaxed (`state/env.py`): the base URL alone is a complete
+  lane; MODEL+KEY remain a pair (they pin the static
+  `local-model.internal/unsloth-active` alias), dangling MODEL/KEY without a
+  URL still error. Planner/renderer trio semantics untouched — the static
+  alias still renders iff all three are set, and
+  `_litellm_local_upstream_configured` keeps matching that exactly.
+- Swap-in-the-picker story: consumer keys keep `sync/*`; the sidecar merges
+  discovered names per cycle, and a swap on the serving box needs no wizard
+  rerun at all — the next cycle (or the consumer-keys mtime wake) prunes
+  the gone alias via `managed_by` tagging and registers the new one.
+- Gates: 1143 passed / ruff / mypy clean; 8 new tests cover host naming,
+  keyless listing + placeholder key, provider-subset respect, the
+  disabled override, plan inclusion for local-only stacks, and a sidecar
+  create/prune round trip asserting `sync/tuxdesktop-Qwen3.8-...` exactly.

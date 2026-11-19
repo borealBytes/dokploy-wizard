@@ -54,7 +54,10 @@ _SENTINEL_SECRETS = (
         key="LITELLM_MASTER_KEY",
         value="SECRET_TEST_LITELLM_MASTER_VALUE",
         expected_owner="shared-core",
-        expected_target_services=("wizard-stack-shared-litellm",),
+        # The fixture sets LITELLM_LOCAL_BASE_URL, and the base URL alone runs the
+        # autosync sidecar (local endpoint discovery), so the sidecar's master key
+        # reference must be covered by the env spec too.
+        expected_target_services=("wizard-stack-shared-litellm", "wizard-stack-shared-litellm-sync"),
     ),
     _SentinelSecret(
         key="LITELLM_SALT_KEY",

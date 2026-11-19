@@ -15,6 +15,8 @@ from dokploy_wizard.litellm.model_sync import (
     MODEL_SYNC_DEFAULT_CHAT_ALIAS,
     MODEL_SYNC_DEFAULT_CHAT_PATTERN,
     MODEL_SYNC_DEFAULT_PROBE_TTL_DAYS,
+    MODEL_SYNC_LOCAL_KEYLESS_API_KEY,
+    MODEL_SYNC_LOCAL_MAX_MODELS,
     MODEL_SYNC_NVIDIA_MAX_MODELS_DEFAULT,
     MODEL_SYNC_OPENCODE_GO_MAX_MODELS,
     MODEL_SYNC_OPENROUTER_MAX_MODELS,
@@ -198,6 +200,162 @@ def test_sources_document_lists_selected_providers_and_wildcard() -> None:
 
 def test_sidecar_script_is_valid_python() -> None:
     compile(model_sync_script_text(), str(_SIDECAR_PATH), "exec")
+
+
+# --- local endpoint: discovered, host-named, keyless-friendly --------------------------
+
+
+def test_local_endpoint_syncs_by_serving_host_label() -> None:
+    env = {
+        "LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+        "LITELLM_LOCAL_API_KEY": "local-key",
+    }
+    creds = {"local_api_key_env": "LITELLM_LOCAL_API_KEY"}
+
+    sources = build_model_sync_sources(env, creds)
+
+    # Named for the machine that answers, not a generic "local": pickers show
+    # which host each alias routes to, and two operators get two honest names.
+    assert [source["name"] for source in sources] == ["tuxdesktop"]
+    local = sources[0]
+    assert local["list_url"] == "http://tuxdesktop.felis-aeolian.ts.net:30000/v1/models"
+    assert local["api_base"] == "http://tuxdesktop.felis-aeolian.ts.net:30000/v1"
+    assert local["model_ref_template"] == "openai/{model}"
+    assert local["max_models"] == MODEL_SYNC_LOCAL_MAX_MODELS
+    assert local["litellm_params_extra"] == {"supports_system_message": False}
+    assert local["api_key_env"] == "LITELLM_LOCAL_API_KEY"
+    assert "default_api_key" not in local
+    assert model_sync_enabled(env, creds) is True
+
+
+def test_local_endpoint_without_a_key_gets_the_placeholder_lane() -> None:
+    sources = build_model_sync_sources(
+        {"LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1/"}, {}
+    )
+
+    assert [source["name"] for source in sources] == ["vllm"]
+    local = sources[0]
+    # Trailing slash on the base URL does not double up on /models.
+    assert local["list_url"] == "http://vllm.internal:8000/v1/models"
+    assert "api_key_env" not in local
+    assert local["default_api_key"] == MODEL_SYNC_LOCAL_KEYLESS_API_KEY
+    assert model_sync_enabled({"LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1"}, {}) is True
+
+
+def test_local_source_name_falls_back_for_ips_and_hostless_urls() -> None:
+    ip_sources = build_model_sync_sources(
+        {"LITELLM_LOCAL_BASE_URL": "http://192.168.1.10:11434/v1"}, {}
+    )
+    assert ip_sources[0]["name"] == "192.168.1.10"
+
+    hostless = build_model_sync_sources({"LITELLM_LOCAL_BASE_URL": "not a url"}, {})
+    assert hostless[0]["name"] == "local"
+
+    odd = build_model_sync_sources({"LITELLM_LOCAL_BASE_URL": "http://My_Host.local/v1"}, {})
+    assert odd[0]["name"] == "my_host"  # lowercased; underscores are legal in model names
+
+
+def test_local_lane_honors_explicit_provider_subset_and_disable_flag() -> None:
+    env = {
+        "LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+        "LITELLM_MODEL_SYNC_PROVIDERS": "openrouter",
+    }
+    creds = {"openrouter_api_key_env": "LITELLM_OPENROUTER_API_KEY"}
+    # Only what the operator listed; the local endpoint is not smuggled in.
+    assert [source["name"] for source in build_model_sync_sources(env, creds)] == ["openrouter"]
+
+    off = build_model_sync_sources(
+        {
+            "LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+            "LITELLM_MODEL_SYNC_ENABLED": "false",
+        },
+        {},
+    )
+    # The disable flag gates the service, not the document builder (same rule
+    # every other provider follows): callers ask model_sync_enabled.
+    assert [source["name"] for source in off] == ["tuxdesktop"]
+    assert model_sync_enabled(
+        {
+            "LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+            "LITELLM_MODEL_SYNC_ENABLED": "false",
+        },
+        {},
+    ) is False
+
+
+def test_shared_core_plan_includes_model_sync_for_a_local_endpoint_only() -> None:
+    from dokploy_wizard.core.planner import build_shared_core_plan
+
+    plan = build_shared_core_plan(
+        stack_name="openmerge-me",
+        enabled_packs=(),
+        values={"LITELLM_LOCAL_BASE_URL": "http://tuxdesktop.felis-aeolian.ts.net:30000/v1"},
+    )
+
+    assert plan.model_sync is not None
+    assert plan.model_sync.service_name == "openmerge-me-shared-litellm-sync"
+
+
+def test_sidecar_registers_local_models_under_host_alias_and_prunes_gone_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = _load_sidecar(tmp_path, monkeypatch)
+    document = {
+        "interval_minutes": 360,
+        "max_models_per_provider": 50,
+        "sources": [
+            {
+                "name": "tuxdesktop",
+                "list_url": "http://tuxdesktop.felis-aeolian.ts.net:30000/v1/models",
+                "api_base": "http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+                "model_ref_template": "openai/{model}",
+                "max_models": 50,
+                "default_api_key": "sk-no-key-required",
+                "litellm_params_extra": {"supports_system_message": False},
+            }
+        ],
+    }
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_http_json(
+        method: str, url: str, *, token: str | None = None, payload: dict | None = None
+    ):
+        calls.append((method, url, payload))
+        if url.endswith("/v1/models"):
+            # A keyless personal endpoint: listing must not require auth.
+            assert token is None
+            return {"data": [{"id": "Qwen3.8-Flash-Next-Uncensored"}]}
+        if url.endswith("/model/info"):
+            return {
+                "data": [
+                    {
+                        "model_name": "sync/tuxdesktop-retired-model",
+                        "model_info": {
+                            "id": "db-id-retired",
+                            "metadata": {"managed_by": "dokploy-wizard-model-sync"},
+                        },
+                    }
+                ]
+            }
+        return {}
+
+    monkeypatch.setattr(sidecar, "http_json", fake_http_json)
+
+    summary = sidecar.sync_once(document)
+
+    assert summary["created"] == 1
+    assert summary["pruned"] == 1
+    create = next(call for call in calls if call[1].endswith("/model/new"))
+    assert create[2]["model_name"] == "sync/tuxdesktop-Qwen3.8-Flash-Next-Uncensored"
+    assert create[2]["litellm_params"] == {
+        "model": "openai/Qwen3.8-Flash-Next-Uncensored",
+        "api_base": "http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+        "api_key": "sk-no-key-required",
+        "supports_system_message": False,
+    }
+    assert create[2]["model_info"]["metadata"]["managed_by"] == "dokploy-wizard-model-sync"
+    delete = next(call for call in calls if call[1].endswith("/model/delete"))
+    assert delete[2] == {"id": "db-id-retired"}
 
 
 def test_shared_core_plan_includes_model_sync_when_provider_key_configured() -> None:

@@ -431,7 +431,12 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
     )
     assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "opencode-go-upstream-key"
     assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "legacy-openrouter-upstream-key"
-    assert env_specs["LITELLM_LOCAL_API_KEY"].target_services == ("wizard-stack-shared-litellm",)
+    # The local key rides the provider env rails: the sync sidecar needs it too,
+    # to scan the endpoint's /v1/models and register what it finds.
+    assert env_specs["LITELLM_LOCAL_API_KEY"].target_services == (
+        "wizard-stack-shared-litellm",
+        "wizard-stack-shared-litellm-sync",
+    )
     assert env_specs["LITELLM_MASTER_KEY"].target_services == (
         "wizard-stack-shared-litellm",
         "wizard-stack-shared-litellm-sync",

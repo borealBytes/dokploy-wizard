@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Dokploy Wizard LiteLLM model autosync sidecar.
 
-Polls the configured model catalog sources (OpenRouter, OpenCode Zen, NVIDIA),
+Polls the configured model catalog sources (OpenRouter, OpenCode Zen, NVIDIA,
+the operator's own OpenAI-compatible endpoint),
 registers models the gateway does not expose yet through the LiteLLM admin
 API, and prunes managed deployments that disappeared from their source.
 Sources that declare a rankings_url (OpenRouter) register the leaderboard's
@@ -580,6 +581,16 @@ def deployment_params(source: dict[str, Any], model_id: str) -> dict[str, Any]:
         # is only a fallback.
         resolved_key = os.environ.get(api_key_env)
         params["api_key"] = resolved_key if resolved_key else f"os.environ/{api_key_env}"
+    else:
+        # Keyless sources (a personal endpoint that ignores auth) still need the
+        # field: LiteLLM's OpenAI-compatible client refuses to build a request
+        # without a key, so the source ships a placeholder the endpoint discards.
+        default_key = source.get("default_api_key")
+        if isinstance(default_key, str) and default_key:
+            params["api_key"] = default_key
+    extra_params = source.get("litellm_params_extra")
+    if isinstance(extra_params, dict) and extra_params:
+        params.update({str(key): value for key, value in extra_params.items()})
     extra_headers = source.get("extra_headers")
     if isinstance(extra_headers, dict) and extra_headers:
         params["extra_headers"] = {str(key): str(value) for key, value in extra_headers.items()}

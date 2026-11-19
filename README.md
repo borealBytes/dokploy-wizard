@@ -729,7 +729,7 @@ The operator env file stays flat. `.install.env` contains only key=value pairs. 
 
 The generated LiteLLM config enforces a strict precedence:
 
-1. `local-model.internal/unsloth-active` — a private OpenAI-compatible endpoint, when `LITELLM_LOCAL_BASE_URL` is configured
+1. `local-model.internal/unsloth-active` — a private OpenAI-compatible endpoint, when `LITELLM_LOCAL_BASE_URL`, `LITELLM_LOCAL_MODEL`, and `LITELLM_LOCAL_API_KEY` are all configured (this one static alias is the pin; the endpoint's other served models arrive via autosync, see below)
 2. `opencode-go/<AI_DEFAULT_MODEL>` — the resolved default alias route, so the workspace default and `dokploy-ai` key resolve the moment LiteLLM boots; the rest of the OpenCode Go fleet arrives via autosync (see below), not from a pinned list
 3. `openrouter/*` — explicit OpenRouter aliases, each declared individually with `alias=target-model` pairs in `LITELLM_OPENROUTER_MODELS` (optional manual extras; the synced set covers the popular models automatically)
 4. `nvidia/<AI_DEFAULT_MODEL>` — when `AI_DEFAULT_PROVIDER=nvidia`, the resolved default alias route is auto-pinned from `AI_DEFAULT_*` (same boot-time guarantee as the OpenCode Go default route); `LITELLM_NVIDIA_MODELS` adds optional manual aliases on top, and the live NVIDIA free-endpoint fleet arrives via autosync (see below), not from a pinned list
@@ -740,7 +740,7 @@ Surviving consumers receive the same approved alias list through their generated
 
 ### Model autosync
 
-Besides the explicit aliases above, the wizard runs a model autosync sidecar beside the LiteLLM service so newly published provider models appear without a wizard rerun. The sidecar (`<stack-name>-shared-litellm-sync`) runs a full cycle the moment it boots, then repeats on a schedule, polling the model catalogs of every upstream provider whose key is configured (OpenRouter, OpenCode Go/Zen, NVIDIA), and registers models the gateway does not expose yet through the LiteLLM admin API. For OpenRouter the sidecar tracks the public weekly leaderboard instead of an arbitrary catalog slice: the top 20 paid (standard-variant) models plus the top 10 `:free` models, so the synced set stays a curated ~30 frontier picks that reshuffle automatically as popularity changes. OpenCode Go needs no configuration at all: whenever `LITELLM_OPENCODE_GO_API_KEY` is set, the entire live catalog is synced in full (no env model list is consulted). NVIDIA likewise needs no env model list: `LITELLM_NVIDIA_API_KEY` plus `LITELLM_NVIDIA_BASE_URL` are the only required inputs, and `LITELLM_NVIDIA_MODELS` stays optional manual aliases layered on top of the synced free set.
+Besides the explicit aliases above, the wizard runs a model autosync sidecar beside the LiteLLM service so newly published provider models appear without a wizard rerun. The sidecar (`<stack-name>-shared-litellm-sync`) runs a full cycle the moment it boots, then repeats on a schedule, polling the model catalogs of every configured upstream (OpenRouter, OpenCode Go/Zen, NVIDIA, and your own OpenAI-compatible endpoint), and registers models the gateway does not expose yet through the LiteLLM admin API. For OpenRouter the sidecar tracks the public weekly leaderboard instead of an arbitrary catalog slice: the top 20 paid (standard-variant) models plus the top 10 `:free` models, so the synced set stays a curated ~30 frontier picks that reshuffle automatically as popularity changes. OpenCode Go needs no configuration at all: whenever `LITELLM_OPENCODE_GO_API_KEY` is set, the entire live catalog is synced in full (no env model list is consulted). NVIDIA likewise needs no env model list: `LITELLM_NVIDIA_API_KEY` plus `LITELLM_NVIDIA_BASE_URL` are the only required inputs, and `LITELLM_NVIDIA_MODELS` stays optional manual aliases layered on top of the synced free set. A personal endpoint needs only `LITELLM_LOCAL_BASE_URL`: the sidecar asks that endpoint's own `/v1/models` what it serves and registers every id under `sync/<host>-<id>`, where `<host>` is the first label of the base URL's hostname (`http://tuxdesktop.felis-aeolian.ts.net:30000/v1` serves as `sync/tuxdesktop-*`), so the picker names the machine that answers. Swap the loaded model on the box and the next cycle follows — no env change, no rerun, and nothing to declare for a friend whose endpoint serves different names. `LITELLM_LOCAL_MODEL` + `LITELLM_LOCAL_API_KEY` stay an optional pair that additionally pins the static `local-model.internal/unsloth-active` alias to one served id; an endpoint that needs no key is listed and called with a placeholder, since OpenAI-compatible servers that skip auth discard it.
 
 How autosynced models behave:
 
@@ -752,12 +752,12 @@ How autosynced models behave:
 - Rendered LiteLLM config sets `general_settings.store_model_in_db` so admin-API-registered models survive proxy restarts.
 - Coder workspaces resolve their model lists live from the gateway at boot and re-run the same fetch from a background refresher roughly every 12 hours — retrying every 5 minutes after any failed refresh until the gateway is reachable again — so autosynced models appear in OpenCode, Pi, Hermes, and Copilot BYOK even in long-running workspaces. If the gateway is briefly unreachable during a refresh, the last good model list is kept.
 
-Autosync is on whenever at least one upstream provider key is configured. Optional env knobs:
+Autosync is on whenever at least one upstream provider key is configured or `LITELLM_LOCAL_BASE_URL` names an endpoint. Optional env knobs:
 
 ```bash
 LITELLM_MODEL_SYNC_ENABLED=1                # set to 0/false to disable the sidecar
 LITELLM_MODEL_SYNC_INTERVAL_MINUTES=360     # sync loop interval (min 5)
-LITELLM_MODEL_SYNC_PROVIDERS=openrouter,opencode-go,nvidia  # subset of sources
+LITELLM_MODEL_SYNC_PROVIDERS=openrouter,opencode-go,nvidia,local  # subset of sources
 LITELLM_MODEL_SYNC_MAX_MODELS=50            # cap of new models registered per provider per cycle
 LITELLM_MODEL_SYNC_NVIDIA_PROBE=1           # set to 0 to skip the NVIDIA liveness probe
 LITELLM_MODEL_SYNC_NVIDIA_FREE_ONLY=1       # set to 0 to also sync paid NVIDIA endpoints
@@ -792,7 +792,7 @@ For LiteLLM upstream API keys, the canonical names are `LITELLM_OPENROUTER_API_K
 
 `LITELLM_OPENCODE_GO_API_KEY` is the OpenCode Go upstream credential. When it is set, generated OpenCode Go aliases are exposed through LiteLLM to approved consumers such as Coder Hermes, without copying that upstream key into the app container. The gateway sends the `x-opencode-session` routing header and a dedicated User-Agent on every OpenCode Go request (required by the OpenCode Go API), and forwards per-conversation session headers when clients provide their own.
 
-Local model compatibility is handled in the generated LiteLLM config. For a private local-model path such as `local-model.internal/unsloth-active`, LiteLLM adapts system-message handling before forwarding to the local OpenAI-compatible endpoint, which keeps chats working with local unsloth templates that reject non-leading system messages.
+Local model compatibility is handled in the generated LiteLLM config. For a private local-model path such as `local-model.internal/unsloth-active`, LiteLLM adapts system-message handling before forwarding to the local OpenAI-compatible endpoint, which keeps chats working with local unsloth templates that reject non-leading system messages. Autosynced `sync/<host>-*` aliases get the same posture.
 
 ### Virtual keys
 
