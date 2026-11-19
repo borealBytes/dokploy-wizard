@@ -8,13 +8,36 @@ from pathlib import Path
 import pytest
 
 from dokploy_wizard.state import (
+    PACK_STATE_DOCUMENT_FILES,
+    STATE_DOCUMENT_FILES,
     AppliedStateCheckpoint,
     DesiredState,
     RawEnvInput,
     StateValidationError,
+    clear_state_documents,
     parse_env_file,
     resolve_desired_state,
 )
+
+
+def test_clear_state_documents_removes_pack_documents_too(tmp_path: Path) -> None:
+    """Full teardown erases every document, not just the core four.
+
+    Measured on the zero-state loop: a destroy-mode uninstall reported
+    state_cleared=true while a stale gitea-provisioner.json survived (its
+    dead token then poisoned the next from-zero install's identity lane).
+    """
+
+    names = [*STATE_DOCUMENT_FILES, *PACK_STATE_DOCUMENT_FILES, "inspection-snapshot.json"]
+    for name in names:
+        (tmp_path / name).write_text("{}", encoding="utf-8")
+    unrelated = tmp_path / "compose-artifacts.json"
+    unrelated.write_text("{}", encoding="utf-8")
+
+    clear_state_documents(tmp_path)
+
+    assert not any((tmp_path / name).exists() for name in names)
+    assert unrelated.exists()
 
 
 def test_desired_state_resolution_is_deterministic(tmp_path: Path) -> None:

@@ -66,6 +66,26 @@ STATE_DOCUMENT_FILES = (
     APPLIED_STATE_FILE,
     OWNERSHIP_LEDGER_FILE,
 )
+# Pack and runtime documents written after the lifecycle core. The tuple
+# above is the canonical fingerprint inventory the install/modify/inspect
+# flows read as a set; this one is the teardown remainder: full removal must
+# erase every document, not just the core four. Measured on the zero-state
+# loop — a destroy-mode uninstall reported "state_cleared": true while the
+# state dir kept a stale gitea-provisioner.json (mtime predated the
+# install by hours): the next from-zero pass read the dead token, burned
+# its verification, and the coder phase's identity syncs died at 401 on it.
+PACK_STATE_DOCUMENT_FILES = (
+    INBOX_EVENTS_FILE,
+    JOB_QUEUE_FILE,
+    OUTBOUND_DELIVERIES_FILE,
+    LITELLM_GENERATED_KEYS_FILE,
+    LITELLM_IMAGE_PIN_FILE,
+    SEAWEEDFS_GENERATED_SECRETS_FILE,
+    FILEX_PROVISIONER_FILE,
+    FILEX_OFFICE_JWT_FILE,
+    GITEA_PROVISIONER_FILE,
+    GITEA_IDENTITIES_FILE,
+)
 
 _DocumentT = TypeVar("_DocumentT")
 
@@ -854,7 +874,7 @@ def write_outbound_delivery_log(state_dir: Path, delivery_log: OutboundDeliveryL
 def clear_state_documents(state_dir: Path) -> None:
     """Remove all persisted state documents together after full teardown."""
 
-    for file_name in (*STATE_DOCUMENT_FILES, INSPECTION_SNAPSHOT_FILE):
+    for file_name in (*STATE_DOCUMENT_FILES, *PACK_STATE_DOCUMENT_FILES, INSPECTION_SNAPSHOT_FILE):
         document_path = state_dir / file_name
         if document_path.exists():
             document_path.unlink()
