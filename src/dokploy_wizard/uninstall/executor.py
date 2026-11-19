@@ -128,13 +128,57 @@ class UninstallExecutionResult:
     deleted_resources: tuple[PlannedDeletion, ...]
     remaining_completed_steps: tuple[str, ...]
     state_cleared: bool
+    reclaimed_docker_state: dict[str, list[str]] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "deleted_resources": [item.to_dict() for item in self.deleted_resources],
             "remaining_completed_steps": list(self.remaining_completed_steps),
             "state_cleared": self.state_cleared,
         }
+        if self.reclaimed_docker_state is not None:
+            payload["reclaimed_docker_state"] = self.reclaimed_docker_state
+        return payload
+
+
+def _docker(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["docker", *args], check=False, capture_output=True, text=True)
+
+
+def _reclaim_docker_state(*, stack_name: str, destroy_volumes: bool) -> dict[str, list[str]]:
+    """Reclaim daemon state Dokploy's stack teardown abandons: project networks,
+    and (destroy mode) named volumes.
+
+    Measured on the zero-state loop, iteration 4: every compose project leaves
+    its `<project>_default` bridge network when its services go away, and
+    stack removal spares named volumes (the same leak iteration 2 caught —
+    the ledger records them, but Dokploy's own teardown never deletes them).
+    The wizard owns these by name: they all carry the stack prefix. After
+    four install generations the leaked allocations drained Docker's
+    predefined address pool, and the next stack died at deploy with 'all
+    predefined address pools have been fully subnetted' (35 networks stood on
+    the box, ~31 of them stale wizard-era generations). The sweep is
+    best-effort (an in-use resource belongs to a stack that is still tearing
+    down; skip, the next pass retries) and never fails a teardown.
+    """
+    reclaimed: dict[str, list[str]] = {"networks": [], "volumes": [], "skipped": []}
+    try:
+        networks = _docker(["network", "ls", "-q", "--filter", f"name=^{stack_name}-"])
+    except FileNotFoundError:
+        return reclaimed
+    for network_id in networks.stdout.split():
+        if _docker(["network", "rm", network_id]).returncode == 0:
+            reclaimed["networks"].append(network_id)
+        else:
+            reclaimed["skipped"].append(network_id)
+    if destroy_volumes:
+        volumes = _docker(["volume", "ls", "-q", "--filter", f"name=^{stack_name}-"])
+        for volume_name in volumes.stdout.split():
+            if _docker(["volume", "rm", volume_name]).returncode == 0:
+                reclaimed["volumes"].append(volume_name)
+            else:
+                reclaimed["skipped"].append(volume_name)
+    return reclaimed
 
 
 def execute_uninstall_plan(
@@ -215,6 +259,15 @@ def execute_uninstall_plan(
     except OSError:
         pass
 
+    # Dokploy's stack teardown spares the compose project networks (and in
+    # retain terms the named volumes): sweep the stack-prefixed leftovers or
+    # every future install generation leaks another daemon allocation. See
+    # _reclaim_docker_state for the iteration-4 measurement.
+    reclaimed = _reclaim_docker_state(
+        stack_name=plan.environment,
+        destroy_volumes=plan.mode == "destroy",
+    )
+
     state_cleared = not current_ledger.resources
     if state_cleared:
         clear_state_documents(state_dir)
@@ -223,6 +276,7 @@ def execute_uninstall_plan(
         deleted_resources=tuple(deleted_resources),
         remaining_completed_steps=remaining_completed_steps,
         state_cleared=state_cleared,
+        reclaimed_docker_state=reclaimed,
     )
 
 
