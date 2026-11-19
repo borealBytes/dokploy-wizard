@@ -36,6 +36,10 @@ class LiteLLMVirtualKeyRecord:
     team_id: str | None
     models: tuple[str, ...]
     metadata: Mapping[str, object] = field(default_factory=dict)
+    # The gateway's user attribution (measured: /key/generate and /key/update
+    # both accept `user_id`, and /key/list returns it). Workspace keys must
+    # carry the person's login so spend, logs, and group grants name a human.
+    user_id: str | None = None
     # Live /key/list payloads carry no raw token material: `token` is the
     # sha256 hex of the accepted key (measured on the box). Records parsed
     # from such payloads set this field so callers can prove a match without
@@ -58,11 +62,19 @@ def _matches_generated_key(record: LiteLLMVirtualKeyRecord, generated_key: str) 
     return record.token is not None and hashlib.sha256(generated_key.encode()).hexdigest() == record.token
 
 
+# The named access group that carries the operator's full model grant.
+# Measured on the deployed box (LiteLLM v1.83.14): an access group is a
+# name -> registered-model-names mapping (creation rejects unregistered
+# literals, wildcards included), so the wizard reconciles the group with the
+# autosync-resolved sync/* names on every pass and workspace keys reference
+# the GROUP rather than enumerating models. Per-person model sets later are
+# one group swap on the person, not a key re-mint.
+WORKSPACE_KEY_ACCESS_GROUP = "all-access"
 # The grant a workspace-minted key (template MINTPY lane) carries when its
-# owner has model access: the model-sync wildcard plus the synced default-chat
-# alias. The template hardcodes the same pair — test_coder_pack pins both
-# sides so they cannot drift apart silently.
-WORKSPACE_KEY_GRANTED_MODELS: tuple[str, ...] = ("sync/*", "sync/default-chat")
+# owner has model access: the access group itself. The template reads the
+# grant from the wizard's replacement map (single source) — test_coder_pack
+# pins the wiring so the sides cannot drift apart silently.
+WORKSPACE_KEY_GRANTED_MODELS: tuple[str, ...] = (WORKSPACE_KEY_ACCESS_GROUP,)
 # The deny lane is a real key scoped to one model name the gateway does not
 # deploy. The workspace still gets its personal key (boot stays healthy,
 # spend stays attributed); inference fails honestly at the gateway with a
@@ -145,6 +157,7 @@ class LiteLLMAdminApi(Protocol):
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord: ...
 
     def update_key(
@@ -156,7 +169,18 @@ class LiteLLMAdminApi(Protocol):
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord: ...
+
+    def list_model_names(self) -> tuple[str, ...]: ...
+
+    def list_access_groups(self) -> tuple[str, ...]: ...
+
+    def access_group_model_names(self, *, name: str) -> tuple[str, ...] | None: ...
+
+    def create_access_group(self, *, name: str, model_names: tuple[str, ...]) -> None: ...
+
+    def update_access_group(self, *, name: str, model_names: tuple[str, ...]) -> None: ...
 
     def delete_key(self, *, key_alias: str) -> None: ...
     def delete_team(self, *, team_id: str) -> None: ...
@@ -268,6 +292,7 @@ class LiteLLMAdminClient:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         body: dict[str, object] = {
             "key": key,
@@ -276,6 +301,8 @@ class LiteLLMAdminClient:
             "models": list(models),
             "metadata": dict(metadata or {}),
         }
+        if user_id is not None:
+            body["user_id"] = user_id
         if allowed_routes is not None:
             body["allowed_routes"] = list(allowed_routes)
         payload = self._request_json("POST", "/key/generate", body)
@@ -301,6 +328,7 @@ class LiteLLMAdminClient:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         body: dict[str, object] = {
             "key_alias": key_alias,
@@ -309,6 +337,8 @@ class LiteLLMAdminClient:
             "models": list(models),
             "metadata": dict(metadata or {}),
         }
+        if user_id is not None:
+            body["user_id"] = user_id
         if allowed_routes is not None:
             body["allowed_routes"] = list(allowed_routes)
         payload = self._request_json("POST", "/key/update", body)
@@ -330,6 +360,62 @@ class LiteLLMAdminClient:
 
     def delete_team(self, *, team_id: str) -> None:
         self._request_json("POST", "/team/delete", {"team_ids": [team_id]})
+
+    def list_model_names(self) -> tuple[str, ...]:
+        # /model/info answers {"data": [{model_name, ...}, ...]} (measured);
+        # the group reconcile needs the registry's real names — access-group
+        # creation rejects literals it does not serve, wildcards included.
+        payload = self._request_json("GET", "/model/info")
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise LiteLLMAdminError("LiteLLM model.info response must carry a data list.")
+        names = {
+            str(row.get("model_name"))
+            for row in rows
+            if isinstance(row, dict) and row.get("model_name")
+        }
+        return tuple(sorted(names))
+
+    def list_access_groups(self) -> tuple[str, ...]:
+        payload = self._request_json("GET", "/access_group/list")
+        if not isinstance(payload, dict):
+            raise LiteLLMAdminError("LiteLLM access_group.list response must be an object.")
+        groups = payload.get("access_groups")
+        if not isinstance(groups, list):
+            return ()
+        names: list[str] = []
+        for item in groups:
+            if isinstance(item, str):
+                names.append(item)
+            elif isinstance(item, dict):
+                name = item.get("access_group") or item.get("name")
+                if name:
+                    names.append(str(name))
+        return tuple(sorted(names))
+
+    def access_group_model_names(self, *, name: str) -> tuple[str, ...] | None:
+        payload = self._request_json("GET", f"/access_group/{parse.quote(name, safe='')}/info")
+        record = payload.get("info") if isinstance(payload, dict) else None
+        if not isinstance(record, dict):
+            record = payload if isinstance(payload, dict) else None
+        if record is None:
+            return None
+        models = record.get("model_names") or record.get("models")
+        return _tuple_of_strings(models)
+
+    def create_access_group(self, *, name: str, model_names: tuple[str, ...]) -> None:
+        self._request_json(
+            "POST",
+            "/access_group/new",
+            {"access_group": name, "model_names": list(model_names)},
+        )
+
+    def update_access_group(self, *, name: str, model_names: tuple[str, ...]) -> None:
+        self._request_json(
+            "PUT",
+            f"/access_group/{parse.quote(name, safe='')}/update",
+            {"model_names": list(model_names)},
+        )
 
     def _request_json(
         self,
@@ -513,6 +599,36 @@ class LiteLLMGatewayManager:
             self._apply_workspace_key_policy(existing_keys, generated_keys, workspace_key_policy)
         return reconciled
 
+    def ensure_workspace_access_group(
+        self, *, group: str = WORKSPACE_KEY_ACCESS_GROUP
+    ) -> tuple[str, ...]:
+        """Converge the named access group onto the gateway's sync-served models.
+
+        Measured on the deployed build (v1.83.14): group creation accepts only
+        registered model names (wildcard literals are rejected), so the wizard
+        resolves the sync/* set from /model/info and PUTs the current names on
+        every pass. Autosync adding a model therefore re-grants it to every
+        workspace key without touching the keys themselves — and a future
+        per-person grant is one group swap on the person, not a re-mint.
+        """
+        served = self._api.list_model_names()
+        expected = tuple(sorted(name for name in served if name.startswith("sync/")))
+        if not expected:
+            # Model sync has not registered anything yet (cold gateway, or sync
+            # disabled for lack of upstream creds). An empty group cannot be
+            # created (measured: creation resolves every literal against the
+            # registry), so simply wait — the next pass converges it, and no
+            # key needs the group until a sync model exists to serve.
+            return ()
+        groups = self._api.list_access_groups()
+        if group not in groups:
+            self._api.create_access_group(name=group, model_names=expected)
+            return expected
+        current = self._api.access_group_model_names(name=group)
+        if current is not None and tuple(sorted(current)) != expected:
+            self._api.update_access_group(name=group, model_names=expected)
+        return expected
+
     def _apply_workspace_key_policy(
         self,
         existing_keys: Mapping[str, LiteLLMVirtualKeyRecord],
@@ -526,7 +642,10 @@ class LiteLLMGatewayManager:
         re-scope one after a policy flip. The MINTPY token is deterministic —
         sha256(issuer + ":" + login + "-" + workspace) — so the master key can
         address the raw token and /key/update the grant without rebooting the
-        workspace. Owners that cannot be attributed are spared: guessing a
+        workspace. The same update carries the identity-identity migrations:
+        the `coder-<login>-<workspace>` alias and the owner's user_id (a key
+        minted before person attribution predates it and is renamed in place).
+        Owners that cannot be attributed are spared: guessing a
         policy for an anonymous key could revoke a real user's access.
         """
         issuer = generated_keys.get(LITELLM_WORKSPACE_ISSUER_CONSUMER)
@@ -543,18 +662,25 @@ class LiteLLMGatewayManager:
                 continue
             if not isinstance(owner, str) or not owner:
                 continue
-            expected = policy.models_for_owner(owner)
-            if tuple(sorted(record.models)) == tuple(sorted(expected)):
+            expected_models = policy.models_for_owner(owner)
+            expected_alias = f"coder-{owner}-{workspace}"
+            drifted = (
+                tuple(sorted(record.models)) != tuple(sorted(expected_models))
+                or alias != expected_alias
+                or record.user_id != owner
+            )
+            if not drifted:
                 continue
             label = f"{owner}-{workspace}"
             token = "sk-" + hashlib.sha256((issuer + ":" + label).encode()).hexdigest()[:40]
             try:
                 self._api.update_key(
-                    key_alias=alias,
+                    key_alias=expected_alias,
                     key=token,
                     team_id=record.team_id,
-                    models=expected,
+                    models=expected_models,
                     metadata=record.metadata,
+                    user_id=owner,
                 )
             except LiteLLMAdminError:
                 # Best-effort: an unreachable gateway or a record the update
@@ -625,6 +751,7 @@ def _parse_key(
         models=_tuple_of_strings(payload.get("models")),
         metadata=_metadata_mapping(payload.get("metadata")),
         token=_optional_string(payload, "token"),
+        user_id=_optional_string(payload, "user_id"),
     )
 
 

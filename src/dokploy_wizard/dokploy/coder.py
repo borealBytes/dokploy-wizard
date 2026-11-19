@@ -41,7 +41,10 @@ from dokploy_wizard.dokploy.compose_noop import (
 from dokploy_wizard.dokploy.container_resolution import resolve_compose_container_name
 from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
 from dokploy_wizard.identity import display_name_from_email, username_from_email
-from dokploy_wizard.litellm.admin import WORKSPACE_KEY_DENY_MODEL
+from dokploy_wizard.litellm.admin import (
+    WORKSPACE_KEY_DENY_MODEL,
+    WORKSPACE_KEY_GRANTED_MODELS,
+)
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
 from dokploy_wizard.state import load_state_dir
@@ -433,6 +436,14 @@ class DokployCoderBackend:
                     ),
                     "__DOKPLOY_WIZARD_LITELLM_DENY_MODEL__": _shell_double_quote_escape(
                         WORKSPACE_KEY_DENY_MODEL
+                    ),
+                    # The allow-side grant is the named access group (single
+                    # source: litellm.admin). The group carries every synced
+                    # model, reconciled on the shared-core pass, so a per-person
+                    # model story later is a group swap on the person, not a
+                    # key re-mint.
+                    "__DOKPLOY_WIZARD_LITELLM_GRANTED_MODELS__": _shell_double_quote_escape(
+                        ",".join(WORKSPACE_KEY_GRANTED_MODELS)
                     ),
                     # ~/shared: the FileX internal door (empty when the pack is off,
                     # which the startup script treats as "no mount, no warnings") and

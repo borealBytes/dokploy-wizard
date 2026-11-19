@@ -11,6 +11,7 @@ import pytest
 
 import dokploy_wizard.cli as cli
 from dokploy_wizard.litellm.admin import (
+    WORKSPACE_KEY_ACCESS_GROUP,
     WORKSPACE_KEY_DENY_MODEL,
     WORKSPACE_KEY_GRANTED_MODELS,
     LiteLLMAdminError,
@@ -35,6 +36,7 @@ from dokploy_wizard.state.models import (
     LITELLM_WORKSPACE_ISSUER_CONSUMER,
     SEAWEEDFS_GENERATED_SECRET_PREFIXES,
 )
+from tests.helpers.litellm_group_fakes import LiteLLMGroupApiStub
 
 _MANAGED_METADATA = {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"}
 _EXPECTED_LITELLM_CONSUMERS = {
@@ -46,6 +48,9 @@ _EXPECTED_LITELLM_CONSUMERS = {
     "nextcloud",
 }
 _EXPECTED_SEAWEEDFS_GENERATED_SECRET_NAMES = {"access_key", "secret_key"}
+
+
+
 
 
 def _raw_env() -> RawEnvInput:
@@ -234,7 +239,7 @@ def test_seaweedfs_generated_s3_credentials_are_state_backed_and_repaired(
     assert install_env.read_text(encoding="utf-8") == original_install_env
     assert (state_dir / SEAWEEDFS_GENERATED_SECRETS_FILE).stat().st_mode & 0o777 == 0o600
 
-class FakeLiteLLMAdminApi:
+class FakeLiteLLMAdminApi(LiteLLMGroupApiStub):
     def __init__(
         self,
         *,
@@ -307,6 +312,7 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         if self.fail_create_key_for == key_alias:
             raise LiteLLMAdminError(f"failed to create key {key_alias}")
@@ -317,6 +323,7 @@ class FakeLiteLLMAdminApi:
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
         self._keys[key_alias] = record
         self.created_keys.append(record)
@@ -331,6 +338,7 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -338,8 +346,22 @@ class FakeLiteLLMAdminApi:
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
         self.updated_key_routes[key_alias] = allowed_routes
+        # Alias migration: the gateway moves the record itself, so a renamed
+        # key leaves no ghost under the old alias. The store is alias-keyed,
+        # so identify the row the way the lane does — one mint per
+        # (owner, workspace) pair — and drop its prior name.
+        pair = (record.metadata.get("coder_owner"), record.metadata.get("coder_workspace"))
+        if pair[0] is not None:
+            for stale in [
+                a
+                for a, r in self._keys.items()
+                if a != key_alias
+                and (r.metadata.get("coder_owner"), r.metadata.get("coder_workspace")) == pair
+            ]:
+                del self._keys[stale]
         self._keys[key_alias] = record
         self.updated_keys.append(record)
         return record
@@ -952,6 +974,7 @@ def _minted_workspace_key(
     workspace: str,
     models: tuple[str, ...],
     key: str,
+    user_id: str | None = None,
 ) -> LiteLLMVirtualKeyRecord:
     metadata: dict[str, object] = {
         "managed_by": "dokploy-wizard",
@@ -965,6 +988,7 @@ def _minted_workspace_key(
         team_id=None,
         models=models,
         metadata=metadata,
+        user_id=user_id,
     )
 
 
@@ -974,7 +998,8 @@ def test_workspace_key_policy_sweep_degrades_out_of_policy_mint_without_reboot()
     The minted token is deterministic (sha256 of issuer + ``<login>-<workspace>``),
     so the master-key sweep can address the raw token and /key/update the grant
     on any shared_core pass. The key is spared by the retired sweep (it stays)
-    and updated in place; a second pass proves the re-scope converged.
+    and updated in place; the same update carries the identity migration (the
+    coder- alias and the owner's user_id). A second pass proves convergence.
     """
     issuer = "sk-litellm-coder-workspace-issuer-generated"
     api = FakeLiteLLMAdminApi(
@@ -1002,7 +1027,10 @@ def test_workspace_key_policy_sweep_degrades_out_of_policy_mint_without_reboot()
     assert api.deleted_key_aliases == []
     assert len(api.updated_keys) == 1
     updated = api.updated_keys[0]
-    assert updated.key_alias == "guest-dev"
+    # Alias and attribution migrate with the re-scope; the token seed stays
+    # the bare label, so the deterministic address below is unchanged.
+    assert updated.key_alias == "coder-guest-dev"
+    assert updated.user_id == "guest"
     assert updated.models == (WORKSPACE_KEY_DENY_MODEL,)
     assert updated.key == (
         "sk-" + hashlib.sha256((issuer + ":guest-dev").encode()).hexdigest()[:40]
@@ -1055,11 +1083,12 @@ def test_workspace_key_policy_sweep_spares_exempt_unattributed_and_foreign_keys(
     api = FakeLiteLLMAdminApi(
         keys=(
             _minted_workspace_key(
-                alias="clayton-dev",
+                alias="coder-clayton-dev",
                 owner="clayton",
                 workspace="dev",
                 models=WORKSPACE_KEY_GRANTED_MODELS,
                 key="sk-admin-mint",
+                user_id="clayton",
             ),
             _minted_workspace_key(
                 alias="orphan-dev",
@@ -1093,6 +1122,134 @@ def test_workspace_key_policy_sweep_spares_exempt_unattributed_and_foreign_keys(
     assert api.updated_keys == []
     assert api.deleted_key_aliases == []
     assert api.deleted_team_ids == []
+
+
+def test_workspace_key_policy_sweep_migrates_alias_and_owner_without_model_drift() -> None:
+    """Identity fields migrate on their own — a correctly-scoped key is not done.
+
+    A key minted before person attribution carries the bare ``<login>-<ws>``
+    alias and no user_id even though its models already match the policy. The
+    same in-place /key/update that would fix a scope flip renames it and
+    attaches the owner, so an already-running workspace converges to the
+    one-ID shape with no reboot.
+    """
+    issuer = "sk-litellm-coder-workspace-issuer-generated"
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            _minted_workspace_key(
+                alias="bob-dev",
+                owner="bob",
+                workspace="dev",
+                models=WORKSPACE_KEY_GRANTED_MODELS,
+                key="sk-bob-mint",
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+    policy = build_litellm_workspace_key_policy(
+        allow_new_users=True, allowed_users=(), admin_email="admin@example.com"
+    )
+
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=policy,
+    )
+
+    assert len(api.updated_keys) == 1
+    updated = api.updated_keys[0]
+    assert updated.key_alias == "coder-bob-dev"
+    assert updated.user_id == "bob"
+    assert updated.models == WORKSPACE_KEY_GRANTED_MODELS
+
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=policy,
+    )
+    assert len(api.updated_keys) == 1
+
+
+class GroupRecordingLiteLLMApi(FakeLiteLLMAdminApi):
+    """Fake with a model registry and a mutable access-group table."""
+
+    def __init__(
+        self,
+        *,
+        served: tuple[str, ...],
+        groups: dict[str, tuple[str, ...]] | None = None,
+    ) -> None:
+        super().__init__()
+        self._served = served
+        self._groups = dict(groups or {})
+        self.created_groups: list[tuple[str, tuple[str, ...]]] = []
+        self.updated_groups: list[tuple[str, tuple[str, ...]]] = []
+
+    def list_model_names(self) -> tuple[str, ...]:
+        return self._served
+
+    def list_access_groups(self) -> tuple[str, ...]:
+        return tuple(sorted(self._groups))
+
+    def access_group_model_names(self, *, name: str) -> tuple[str, ...] | None:
+        return self._groups.get(name)
+
+    def create_access_group(self, *, name: str, model_names: tuple[str, ...]) -> None:
+        self._groups[name] = tuple(model_names)
+        self.created_groups.append((name, model_names))
+
+    def update_access_group(self, *, name: str, model_names: tuple[str, ...]) -> None:
+        self._groups[name] = tuple(model_names)
+        self.updated_groups.append((name, model_names))
+
+
+def _group_manager(api: GroupRecordingLiteLLMApi) -> LiteLLMGatewayManager:
+    return LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+
+def test_workspace_access_group_created_with_registered_sync_names_only() -> None:
+    """Cold gateway: the group stands up with the sync set, never a wildcard.
+
+    Measured on the deployed build: /access_group/new resolves every literal
+    against the registry (wildcards included are rejected), so the wizard
+    seeds the group from /model/info's real sync/* names.
+    """
+    api = GroupRecordingLiteLLMApi(
+        served=("gpt-tokenizer", "sync/default-chat", "sync/nvidia-gemma", "sync/x")
+    )
+
+    expected = _group_manager(api).ensure_workspace_access_group()
+
+    assert expected == ("sync/default-chat", "sync/nvidia-gemma", "sync/x")
+    assert api.created_groups == [(WORKSPACE_KEY_ACCESS_GROUP, expected)]
+    assert api.updated_groups == []
+
+
+def test_workspace_access_group_regrants_added_models_and_converges_quietly() -> None:
+    api = GroupRecordingLiteLLMApi(
+        served=("sync/default-chat", "sync/new-model"),
+        groups={WORKSPACE_KEY_ACCESS_GROUP: ("sync/default-chat",)},
+    )
+    manager = _group_manager(api)
+
+    expected = manager.ensure_workspace_access_group()
+    assert api.updated_groups == [(WORKSPACE_KEY_ACCESS_GROUP, expected)]
+
+    # Autosync added nothing new on the next pass: no PUT at all.
+    api.updated_groups.clear()
+    api.created_groups.clear()
+    manager.ensure_workspace_access_group()
+    assert api.updated_groups == []
+    assert api.created_groups == []
+
+
+def test_workspace_access_group_inert_until_models_register() -> None:
+    """No sync models registered (cold sidecar) means no empty group."""
+    api = GroupRecordingLiteLLMApi(served=("gpt-tokenizer",))
+
+    assert _group_manager(api).ensure_workspace_access_group() == ()
+    assert api.created_groups == []
+    assert api.updated_groups == []
 
 
 def test_workspace_key_policy_sweep_is_inert_without_issuer_material() -> None:

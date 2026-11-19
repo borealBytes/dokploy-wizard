@@ -38,6 +38,7 @@ from dokploy_wizard.state.models import (
     OwnershipLedger,
     RawEnvInput,
 )
+from tests.helpers.litellm_group_fakes import LiteLLMGroupApiStub
 
 from .fake_dokploy import FakeDokployApiClient
 
@@ -1200,7 +1201,7 @@ def test_litellm_allowlists_keep_local_alias_for_every_consumer() -> None:
     }
 
 
-class _FakeLiteLLMAdminApi:
+class _FakeLiteLLMAdminApi(LiteLLMGroupApiStub):
     def __init__(
         self,
         readiness_payload: dict[str, object],
@@ -1265,6 +1266,7 @@ class _FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -1272,6 +1274,7 @@ class _FakeLiteLLMAdminApi:
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
         self._keys[key_alias] = record
         return record
@@ -1285,6 +1288,7 @@ class _FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -1292,6 +1296,7 @@ class _FakeLiteLLMAdminApi:
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
         self._keys[key_alias] = record
         return record

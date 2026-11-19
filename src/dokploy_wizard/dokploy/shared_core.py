@@ -48,6 +48,7 @@ from dokploy_wizard.litellm import (
     render_litellm_config_yaml,
 )
 from dokploy_wizard.litellm.admin import (
+    LiteLLMAdminError,
     LiteLLMWorkspaceKeyPolicy,
     _matches_generated_key,
 )
@@ -572,6 +573,16 @@ class DokploySharedCoreBackend:
             )
             write_litellm_generated_keys(self._state_dir, self._litellm_generated_keys)
         self._reconcile_model_sync_visibility()
+        # The workspace key grant is a named access group (all registered
+        # sync/* models), not a per-key model list: the boot lane mints keys
+        # referencing the group, so it must converge here, after the sync
+        # first-cycle wait has made the sync/* names real. A no-op pass
+        # re-PUTs only on drift.
+        if self._litellm_workspace_key_policy is not None:
+            try:
+                manager.ensure_workspace_access_group()
+            except LiteLLMAdminError as error:
+                raise SharedCoreError(str(error)) from error
         if isinstance(self._client, DokployAiProviderApi):
             try:
                 _ensure_dokploy_ai_provider(

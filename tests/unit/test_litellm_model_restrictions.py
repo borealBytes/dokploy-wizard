@@ -38,6 +38,7 @@ from dokploy_wizard.litellm.admin import (
 )
 from dokploy_wizard.litellm.config_renderer import build_litellm_config
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
+from tests.helpers.litellm_group_fakes import LiteLLMGroupApiStub
 
 EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
     "coder-hermes": (
@@ -78,13 +79,16 @@ LIVE_KEY_ENV_BY_CONSUMER = {
 }
 
 
+
+
+
 @dataclass(frozen=True)
 class HarnessResponse:
     status_code: int
     json_body: object
 
 
-class FakeLiteLLMAdminApi:
+class FakeLiteLLMAdminApi(LiteLLMGroupApiStub):
     def __init__(self) -> None:
         self._teams: dict[str, LiteLLMTeamRecord] = {}
         self._keys: dict[str, LiteLLMVirtualKeyRecord] = {}
@@ -140,6 +144,7 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -147,6 +152,7 @@ class FakeLiteLLMAdminApi:
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
         self._keys[key_alias] = record
         return record
@@ -160,6 +166,7 @@ class FakeLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -167,6 +174,7 @@ class FakeLiteLLMAdminApi:
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
         self._keys[key_alias] = record
         return record

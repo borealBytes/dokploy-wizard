@@ -35,6 +35,7 @@ from dokploy_wizard.state import (
     resolve_desired_state,
 )
 from dokploy_wizard.state.models import LiteLLMGeneratedKeys
+from tests.helpers.litellm_group_fakes import LiteLLMGroupApiStub
 from tests.integration.test_nextcloud_pack import (
     FakeCloudflareBackend,
     FakeDokployBackend,
@@ -48,6 +49,9 @@ from tests.unit.test_coder_pack import FakeCoderBackend
 _EXPECTED_OPENCODE_GO_CHAT_ALIASES = (
     "opencode-go/deepseek-v4.1-flash",
 )
+
+
+
 
 
 @dataclass
@@ -118,7 +122,7 @@ class RecordingDokploySharedCoreApi:
 
 
 @dataclass
-class RecordingManagedDriftLiteLLMAdminApi:
+class RecordingManagedDriftLiteLLMAdminApi(LiteLLMGroupApiStub):
     teams: dict[str, LiteLLMTeamRecord]
     keys: dict[str, LiteLLMVirtualKeyRecord]
     update_team_calls: list[dict[str, object]] = field(default_factory=list)
@@ -186,6 +190,7 @@ class RecordingManagedDriftLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         self.create_key_calls.append(
             {
@@ -225,6 +230,7 @@ class RecordingManagedDriftLiteLLMAdminApi:
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
         allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         self.update_key_calls.append(
             {

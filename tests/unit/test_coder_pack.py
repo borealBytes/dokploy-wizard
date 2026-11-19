@@ -2867,6 +2867,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         "__DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS__": "",
         "__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__": "admin",
         "__DOKPLOY_WIZARD_LITELLM_DENY_MODEL__": "dokploy-wizard-model-access-denied",
+        "__DOKPLOY_WIZARD_LITELLM_GRANTED_MODELS__": "all-access",
     }
     assert "ubuntu-vscode-openwork" not in template_replacements_by_name
     assert "ubuntu-vscode-pi-web" not in template_replacements_by_name
@@ -2943,14 +2944,21 @@ def test_workspace_key_mint_block_is_baked_into_gateway_key_templates(template_d
     # spend attributes per person and machine by construction.
     assert '"${data.coder_workspace.me.name}"' in template
     assert '"${data.coder_workspace_owner.me.name}"' in template
-    assert '"key_alias": label' in template
+    assert '"key_alias": "coder-" + label' in template
+    assert '"user_id": owner,' in template
     assert '"coder_owner": owner' in template
-    # The grant is the model-sync pair; the deny lane is a sentinel model the
-    # gateway does not deploy. The Python sweep pins the same constants, so
-    # template and admin-side re-scope can never drift apart silently.
-    assert 'granted_models = ["sync/*", "sync/default-chat"]' in template
+    # The grant is the wizard's named access group, read from the baked
+    # replacement marker (single source: WORKSPACE_KEY_GRANTED_MODELS); the
+    # deny lane is a sentinel model the gateway does not deploy. The Python
+    # sweep pins the same constant, so template and admin-side re-scope can
+    # never drift apart silently.
+    assert (
+        'DOKPLOY_WIZARD_LITELLM_GRANTED_MODELS="__DOKPLOY_WIZARD_LITELLM_GRANTED_MODELS__"'
+        in template
+    )
+    assert 'os.environ.get("DOKPLOY_WIZARD_LITELLM_GRANTED_MODELS", "").split(",")' in template
     assert '"models": models,' in template
-    assert WORKSPACE_KEY_GRANTED_MODELS == ("sync/*", "sync/default-chat")
+    assert WORKSPACE_KEY_GRANTED_MODELS == ("all-access",)
     assert WORKSPACE_KEY_DENY_MODEL == "dokploy-wizard-model-access-denied"
     # Per-user model access policy (baked at seed time): the flag, the
     # allowlist, and the always-exempt seeded admin login. A denied owner
@@ -2979,9 +2987,13 @@ def test_workspace_key_mint_block_is_baked_into_gateway_key_templates(template_d
     assert '|| DOKPLOY_WIZARD_WORKSPACE_API_KEY=""' in template
     assert "import hashlib, json, os, urllib.error, urllib.request" in template
     # Policy-mismatch lane: the issuer route set has /key/delete but no
-    # /key/update, so a moved policy swaps the mint under the same
-    # deterministic token (spend attribution survives the swap).
-    assert 'current != sorted(str(item) for item in models)' in template
+    # /key/update, so a moved policy — or a key predating the coder- alias /
+    # owner attribution — swaps the mint under the same deterministic token
+    # (spend attribution survives the swap). Unknown fields are spared: only
+    # a visible mismatch retires.
+    assert 'current_models != sorted(str(item) for item in models)' in template
+    assert 'current_alias != expected_alias' in template
+    assert 'current_user != owner' in template
     assert 'mint_request("POST", "/key/delete", {"keys": [token]})' in template
     # Upgrade path: the pre owner-scoping token (issuer + bare workspace) is
     # deterministic too, so retire it once the scoped key stands — otherwise

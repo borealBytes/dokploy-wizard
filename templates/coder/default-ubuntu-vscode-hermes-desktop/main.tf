@@ -144,8 +144,9 @@ resource "coder_agent" "main" {
     # -- wizard: per-workspace LiteLLM identity --------------------------------
     # The baked template key is shared by every workspace. When the wizard
     # provided an issuer key, this workspace mints its own virtual key named
-    # <login>-<workspace>: spend attributes per person and machine, and
-    # rotating one workspace's key touches no other. The pair is the honest
+    # coder-<login>-<workspace> and owned by the person's gateway user: spend
+    # attributes per person and machine, and rotating one workspace's key
+    # touches no other. The pair is the honest
     # identity — Coder workspace names are unique only PER OWNER, so a bare
     # workspace name let a second owner's "dev" adopt the first owner's key.
     # The token derives from issuer + that label, so restarts adopt the same
@@ -172,6 +173,7 @@ resource "coder_agent" "main" {
         DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS="__DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS__" \
         DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN="__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__" \
         DOKPLOY_WIZARD_LITELLM_DENY_MODEL="__DOKPLOY_WIZARD_LITELLM_DENY_MODEL__" \
+        DOKPLOY_WIZARD_LITELLM_GRANTED_MODELS="__DOKPLOY_WIZARD_LITELLM_GRANTED_MODELS__" \
         python3 - <<'MINTPY'
 import hashlib, json, os, urllib.error, urllib.request
 
@@ -186,8 +188,19 @@ owner = os.environ.get("DOKPLOY_WORKSPACE_OWNER", "")
 # stays attributed, and inference fails honestly at the gateway — rather than
 # the no-key fallback handing the workspace the shared baked key, which would
 # bypass the policy entirely. The shared-core reconcile sweep re-scopes
-# existing keys the same way when the policy flips, so no reboot is needed.
-granted_models = ["sync/*", "sync/default-chat"]
+# existing keys the same way when the policy flips — and migrates their alias
+# and owner attribution in place — so no reboot is needed.
+# The grant itself is the wizard's named access group (baked from
+# WORKSPACE_KEY_GRANTED_MODELS, single source): the group carries every synced
+# model, so autosync re-grants new models to standing keys without a re-mint.
+granted_models = [
+    item.strip()
+    for item in os.environ.get("DOKPLOY_WIZARD_LITELLM_GRANTED_MODELS", "").split(",")
+    if item.strip()
+]
+if any(item.startswith("__DOKPLOY_WIZARD") for item in granted_models):
+    # Unmapped marker (pre-group template build): keep the legacy grant.
+    granted_models = ["sync/*", "sync/default-chat"]
 allow_new_users = os.environ.get("DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS", "") == "true"
 allowed_users = {
     item.strip().lower()
@@ -236,7 +249,8 @@ if base and issuer and workspace and owner:
             "/key/generate",
             {
                 "key": token,
-                "key_alias": label,
+                "key_alias": "coder-" + label,
+                "user_id": owner,
                 "models": models,
                 "metadata": {
                     "managed_by": "dokploy-wizard",
@@ -246,30 +260,49 @@ if base and issuer and workspace and owner:
             },
         )
 
-    def minted_models(info):
+    def minted_fields(info):
         # /key/info exposes the grant flat or nested under "info" depending on
         # the LiteLLM build; absence means unknown, not mismatched — the
         # admin-side sweep is what enforces policy without a reboot anyway.
-        if not isinstance(info, dict):
-            return None
-        for holder in (info, info.get("info")):
-            if isinstance(holder, dict) and isinstance(holder.get("models"), list):
-                return sorted(str(item) for item in holder["models"])
-        return None
+        # The alias and owner reads follow the same unknown-then-spare rule: a
+        # build that hides a field never triggers a retire on that field.
+        holders = [info]
+        if isinstance(info, dict) and isinstance(info.get("info"), dict):
+            holders.append(info["info"])
+        models = alias = user = None
+        for holder in holders:
+            if not isinstance(holder, dict):
+                continue
+            if models is None and isinstance(holder.get("models"), list):
+                models = sorted(str(item) for item in holder["models"])
+            if alias is None and holder.get("key_alias"):
+                alias = str(holder["key_alias"])
+            if user is None and holder.get("user_id"):
+                user = str(holder["user_id"])
+        return models, alias, user
 
     # info-then-generate: a previous boot (or a recreate under the same
     # workspace identity) already owns this deterministic token; adopt it
-    # rather than collide. When the policy moved since the key was minted,
-    # the issuer route set has /key/delete but no /key/update, so retire and
+    # rather than collide. When the policy moved since the key was minted —
+    # or the key predates the coder- alias / owner attribution — retire and
     # re-mint under the same deterministic token (spend attribution survives
     # the swap). The final re-info is what decides: if minting was refused
     # for any reason the fallback below keeps the baked shared key.
+    expected_alias = "coder-" + label
     status, info = mint_request("GET", "/key/info?key=" + token)
     if status != 200:
         mint_generate()
     else:
-        current = minted_models(info)
-        if current is not None and current != sorted(str(item) for item in models):
+        current_models, current_alias, current_user = minted_fields(info)
+        drifted = (
+            (
+                current_models is not None
+                and current_models != sorted(str(item) for item in models)
+            )
+            or (current_alias is not None and current_alias != expected_alias)
+            or (current_user is not None and current_user != owner)
+        )
+        if drifted:
             mint_request("POST", "/key/delete", {"keys": [token]})
             mint_generate()
     if mint_request("GET", "/key/info?key=" + token)[0] == 200:
