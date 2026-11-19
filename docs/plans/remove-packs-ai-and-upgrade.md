@@ -1652,3 +1652,19 @@ The wipe recipe gains the same sweep plus a daemon restart (leaked
 allocations inside the running daemon's IPAM only free on restart) and a
 pool canary. Iteration 5 (next) must land the fully clean first pass the
 gate asks for — flip note included.
+
+Iteration 5 PASSED the gate: 536.9s, one first pass, text-clean
+(zero WARNING/Skipped/Traceback lines) — and the gitea phase carried
+`Set Gitea account 'clayton' visibility to private (privacy default).` on
+that first pass, DB showing visibility=2 and must-change=f without any
+operator PATCH: the corrected list-lane migration proven from zero. The
+reclaim fix worked inside this iteration's own uninstall — the v4 wipe
+found only the five current-generation networks still attached at teardown
+(30+ stale generations were already reclaimed by the wizard). Box verify
+after: exactly one API token (`wizard-provisioner`, read from the
+`access_token` table), LiteLLM roster holds only the synthetic default and
+`clayton` (proxy_admin), office `/healthcheck` answers `true` over the
+public edge, tailscale reported `create`, the deployer workspace built and
+the boot lane seeded `clayton/wizard-demo` minutes after boot, matching
+iteration 3's provenance. The one-time zero-state bar the operator set is
+closed.
