@@ -2542,8 +2542,23 @@ def test_gitea_identity_lane_is_baked_into_the_desktop_template() -> None:
     # through the paginated collection list instead.
     assert '"/api/v1/admin/users?page=%d" % page' in template
     assert "if len(rows) < 30" in template
-    # Same seed rule as the FileX account: issuer when present, else token.
-    assert 'DOKPLOY_GT_SEED="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY"' in template
+    # The account password is the stack admin password (one operator
+    # credential across the stack), baked from the replacement map and
+    # re-synced through the admin API on every boot for wizard-owned accounts.
+    assert (
+        'DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD="__DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD__"'
+        in template
+    )
+    assert 'password = os.environ["DOKPLOY_GT_PASSWORD"]' in template
+    assert '"password": password, "must_change_password": False' in template
+    # The owner's real email registers as a verified secondary login identity
+    # through the owner route (box-measured on 28.4.0: POST /api/v1/user/emails
+    # with {"emails": [..]} returns 201 verified; the convention email stays
+    # primary so the admin-list ownership guard keeps telling manual accounts
+    # off). 422 (already registered) is tolerated, not fatal.
+    assert 'export DOKPLOY_GT_REAL_EMAIL="${data.coder_workspace_owner.me.email}"' in template
+    assert '"/api/v1/user/emails", owner_basic, {"emails": [real_email]}' in template
+    assert "elif status != 422:" in template
     # One key per (user, workspace): title is the shared label, adoption is by
     # key material, replacement goes through the owner's own credentials.
     assert 'title = login + "-" + workspace' in template
@@ -2800,6 +2815,9 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         # GITEAPROV boot lane is disabled and the coder phase runs no sync.
         "__DOKPLOY_WIZARD_GITEA_INTERNAL_URL__": "",
         "__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN__": "",
+        # The Gitea account password rides the stack admin password whenever
+        # the lane is armed (see the identity-lane template test).
+        "__DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD__": "ChangeMeSoon",
         # Default policy lane: deny for new users, empty allowlist, the
         # seeded admin login derived from the admin email, and the sentinel
         # deny model the sweep and the template both recognize.
@@ -3159,16 +3177,18 @@ def test_issuer_mint_guard_stays_honest_after_substitution() -> None:
     replaced = template.replace("__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__", "sk-real-issuer")
     assert 'DOKPLOY_WIZARD_LITELLM_ISSUER_KEY="sk-real-issuer"' in replaced
     assert '!= "sk-real-issuer"' not in replaced
-    # The same trap has a second shape: the FX/GT seed guards read the issuer
+    # The same trap has a second shape: the FileX seed guard reads the issuer
     # through a `case` list. A bare marker pattern inside that list substitutes
     # to the real key and self-matches the treat-as-missing branch (measured:
     # a from-zero box derived every workspace-account password from the
     # provisioner token because the issuer could never win the case). The seed
-    # case lists must therefore match only the empty value and the sentinel.
+    # case list must therefore match only the empty value and the sentinel.
+    # (The gitea lane dropped derivation entirely — its account password is
+    # the stack admin password now — so exactly one issuer case remains.)
     assert '""|sk-real-issuer' not in replaced
     assert (
         replaced.count('case "$${DOKPLOY_WIZARD_LITELLM_ISSUER_KEY:-}" in\n'
-                       '        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)') == 2
+                       '        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)') == 1
     )
     # The sentinel marker is absent from the wizard's replacement map, so it
     # stays literal in the pushed template: assert the map never grows one.

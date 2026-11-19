@@ -636,8 +636,13 @@ HELPER
     # -- wizard: Gitea identity lane --------------------------------------------
     # The person who owns this workspace gets a Gitea account, springing at
     # first boot: username = the coder login, email the wizard convention
-    # ({login}@coder.wizard.local), password derived from the same seed rule
-    # as the ~/shared account (issuer key, else the provisioner token). The
+    # ({login}@coder.wizard.local), password the stack admin password (one
+    # operator credential across the stack, re-synced every boot — same
+    # choice as the OpenCode server and Hermes webapp). The owner's real Coder
+    # email registers as a verified secondary so it works as a login
+    # identifier too; the convention email stays primary — it is the marker
+    # the ownership guard reads (the admin list only ever shows the primary).
+    # The
     # change-password flag is OFF because a pending must-change turns every
     # basic-auth API call into a 403 (measured). A manual account that already
     # owns the name keeps its own secret and its own meaning — this lane skips
@@ -655,6 +660,7 @@ HELPER
     DOKPLOY_WIZARD_GITEA_URL_SENTINEL="__DOKPLOY_WIZARD_GITEA_INTERNAL_URL_SENTINEL__"
     DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN="__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN__"
     DOKPLOY_WIZARD_GITEA_PROVISIONER_SENTINEL="__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN_SENTINEL__"
+    DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD="__DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD__"
     if [ -n "$DOKPLOY_WIZARD_GITEA_URL" ] && \
        [ "$DOKPLOY_WIZARD_GITEA_URL" != "$DOKPLOY_WIZARD_GITEA_URL_SENTINEL" ] && \
        [ -n "$DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN" ] && \
@@ -664,15 +670,13 @@ HELPER
       export DOKPLOY_GT_TOKEN="$DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN"
       export DOKPLOY_GT_LOGIN="${data.coder_workspace_owner.me.name}"
       export DOKPLOY_GT_WORKSPACE="${data.coder_workspace.me.name}"
-      # Same seed rule as the FileX account: issuer when present, else the
-      # provisioner token, so an issuer rotation re-derives cleanly.
-      DOKPLOY_GT_SEED="$DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN"
-      case "$${DOKPLOY_WIZARD_LITELLM_ISSUER_KEY:-}" in
-        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)
-          ;;
-        *) DOKPLOY_GT_SEED="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" ;;
-      esac
-      export DOKPLOY_GT_SEED
+      export DOKPLOY_GT_REAL_EMAIL="${data.coder_workspace_owner.me.email}"
+      # The person signs in with the stack admin password — the same choice
+      # the OpenCode server and Hermes webapp tiles make: one operator
+      # credential, not a second secret to lose. Wizard-owned accounts get
+      # the password re-synced every boot; a manual account that owns the
+      # name keeps its own (email-mismatch guard below).
+      export DOKPLOY_GT_PASSWORD="$DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD"
       (
         # Background on purpose, same rule as ~/shared: identity calls and
         # apt locks must never hold the IDE hostage. set -e inside so the
@@ -700,8 +704,7 @@ base = os.environ["DOKPLOY_GT_URL"].rstrip("/")
 token = os.environ["DOKPLOY_GT_TOKEN"]
 login = os.environ["DOKPLOY_GT_LOGIN"]
 workspace = os.environ["DOKPLOY_GT_WORKSPACE"]
-seed = os.environ["DOKPLOY_GT_SEED"]
-password = "gt-" + hashlib.sha256((seed + ":" + login).encode()).hexdigest()[:40]
+password = os.environ["DOKPLOY_GT_PASSWORD"]
 email = login + "@coder.wizard.local"
 title = login + "-" + workspace
 
@@ -778,6 +781,33 @@ else:
         )
         if status == 200:
             note("re-enabled the Gitea account for '" + login + "' (Coder user returned)")
+    # Wizard-owned account (the convention email proves it): the password
+    # rides the stack admin password on every boot, so the operator has one
+    # credential across the stack and an interim box rebuild can never strand
+    # the account on a stale derivation.
+    status, _body = call(
+        "PATCH", "/api/v1/admin/users/" + user_path, provisioner_auth,
+        {"login": login, "password": password, "must_change_password": False},
+    )
+    if status == 200:
+        note("synced the Gitea password for '" + login + "' to the stack admin password")
+    else:
+        note("warning: password sync for '" + login + "' refused (HTTP %s)" % status)
+
+# 1b) The owner's real Coder email rides along as a verified secondary, so
+#     gitea accepts it as a login identifier too. The convention email stays
+#     primary — it is the marker that tells this lane "the account is mine",
+#     and the admin list only ever shows the primary. Tolerated: 422 (already
+#     registered or used by another account; Gitea hides which).
+real_email = os.environ.get("DOKPLOY_GT_REAL_EMAIL", "").strip().lower()
+if real_email and real_email != email.lower():
+    status, _body = call(
+        "POST", "/api/v1/user/emails", owner_basic, {"emails": [real_email]},
+    )
+    if status == 201:
+        note("registered '" + real_email + "' as a gitea login email")
+    elif status != 422:
+        note("warning: gitea email registration for '" + real_email + "' refused (HTTP %s)" % status)
 
 # 2) One SSH key per (user, workspace): content adopts, title replaces. The
 #    keypair lives on the home volume, so it survives restarts; a fresh home

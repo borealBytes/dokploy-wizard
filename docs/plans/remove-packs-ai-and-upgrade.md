@@ -1232,3 +1232,23 @@ repairs, and a plain noop. It found and drove the fixes for two real bugs
   → modify45 (`mode: noop`, 26.9s). Workspace mint present and
   hash-matches-derived; seeded admin exempt (GRANTED) with
   `ALLOW_LITELLM_MODELS_FOR_NEW_USERS=FALSE`.
+- Operator steer after the above: the gitea human account must sign in with
+  the stack admin password, not a derivation. The GITEAPROV lane now bakes
+  `__DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD__` (the same value the OpenCode
+  server and Hermes webapp markers carry), creates the account with it, and
+  re-syncs it through the admin API on every boot for wizard-owned accounts
+  (email-convention guard preserved: manual accounts are never reset). The
+  gitea half of the issuer-seed case block is gone with the derivation,
+  leaving exactly one issuer `case` (FileX); the per-owner FileX account
+  `~/shared` mounts with keeps the `fx-` derivation (machine credential).
+  The owner's real Coder email is additionally registered as a verified
+  secondary (box-measured on 28.4.0: `POST /api/v1/user/emails` with
+  `{"emails": [..]}` → 201 `verified: true`, and basic auth with the email as
+  identifier answers 200), so gitea accepts username or real email; the
+  convention email stays primary because the admin user list only ever shows
+  the primary and that is what the ownership guard reads. Box proof:
+  modify46 pushed the template and the workspace boot logged "synced the
+  Gitea password … to the stack admin password" (basic auth username + admin
+  password → 200; real email + admin password → 200 after the email
+  registration). A full from-zero `remote proof` on the operator env follows
+  to prove the whole identity lane on a cold box.

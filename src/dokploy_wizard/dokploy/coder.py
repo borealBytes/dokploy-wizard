@@ -419,13 +419,17 @@ class DokployCoderBackend:
                         provisioner.token if (provisioner := self._filex_provisioner_state()) else ""
                     ),
                     # Gitea identity lane: the overlay door + provisioner token
-                    # for the GITEAPROV boot lane (account spring, SSH key). The
-                    # *_SENTINEL__ markers stay unmapped (same guard trick).
+                    # for the GITEAPROV boot lane (account spring with the stack
+                    # admin password, SSH key). The *_SENTINEL__ markers stay
+                    # unmapped (same guard trick).
                     "__DOKPLOY_WIZARD_GITEA_INTERNAL_URL__": self._gitea_internal_url(),
                     "__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN__": _shell_double_quote_escape(
                         gitea_provisioner.token
                         if (gitea_provisioner := self._gitea_provisioner_state())
                         else ""
+                    ),
+                    "__DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD__": _shell_double_quote_escape(
+                        self._admin_password or "ChangeMeSoon"
                     ),
                     "__DOKPLOY_WIZARD_OPENCODE_SERVER_PASSWORD__": _shell_double_quote_escape(
                         self._admin_password or "ChangeMeSoon"
