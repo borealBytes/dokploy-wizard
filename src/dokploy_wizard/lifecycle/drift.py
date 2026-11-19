@@ -527,7 +527,7 @@ def _validate_phase(
                 return DriftEntry(phase=phase, status="ok", detail="FileX remains skipped.")
             actions = {
                 resource.action
-                for resource in (filex.service, filex.persistent_data)
+                for resource in (filex.service, filex.persistent_data, filex.office_volume)
                 if resource is not None
             }
             if actions != {"reuse_owned"}:

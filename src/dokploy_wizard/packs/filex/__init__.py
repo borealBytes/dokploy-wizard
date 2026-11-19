@@ -12,6 +12,7 @@ from dokploy_wizard.packs.filex.models import (
 from dokploy_wizard.packs.filex.reconciler import (
     FILEX_BUCKET,
     FILEX_DATA_RESOURCE_TYPE,
+    FILEX_OFFICE_VOLUME_RESOURCE_TYPE,
     FILEX_S3_REGION,
     FILEX_SERVICE_RESOURCE_TYPE,
     FILEX_STORAGE_PREFIX,
@@ -19,12 +20,14 @@ from dokploy_wizard.packs.filex.reconciler import (
     FilexError,
     ShellFilexBackend,
     build_filex_ledger,
+    filex_office_volume_name,
     reconcile_filex,
 )
 
 __all__ = [
     "FILEX_BUCKET",
     "FILEX_DATA_RESOURCE_TYPE",
+    "FILEX_OFFICE_VOLUME_RESOURCE_TYPE",
     "FILEX_S3_REGION",
     "FILEX_SERVICE_RESOURCE_TYPE",
     "FILEX_STORAGE_PREFIX",
@@ -39,5 +42,6 @@ __all__ = [
     "FilexStorageBinding",
     "ShellFilexBackend",
     "build_filex_ledger",
+    "filex_office_volume_name",
     "reconcile_filex",
 ]

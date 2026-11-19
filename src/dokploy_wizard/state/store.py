@@ -53,6 +53,7 @@ LITELLM_GENERATED_KEYS_FILE = "litellm-generated-keys.json"
 LITELLM_IMAGE_PIN_FILE = "litellm-image-pin.json"
 SEAWEEDFS_GENERATED_SECRETS_FILE = "seaweedfs-generated-secrets.json"
 FILEX_PROVISIONER_FILE = "filex-provisioner.json"
+FILEX_OFFICE_JWT_FILE = "filex-office-jwt.json"
 GITEA_PROVISIONER_FILE = "gitea-provisioner.json"
 GITEA_IDENTITIES_FILE = "gitea-identities.json"
 # Redacted inspection report kept beside (never inside) the lifecycle docs:
@@ -537,6 +538,32 @@ def write_filex_provisioner(state_dir: Path, provisioner: FilexProvisionerState)
     path = state_dir / FILEX_PROVISIONER_FILE
     _write_document(path, provisioner.to_dict())
     path.chmod(0o600)
+
+
+def load_filex_office_jwt(state_dir: Path) -> dict[str, Any] | None:
+    """The ONLYOFFICE sidecar JWT document, as stored (or None when absent)."""
+
+    return _load_optional_document(state_dir / FILEX_OFFICE_JWT_FILE, lambda payload: payload)
+
+
+def write_filex_office_jwt(state_dir: Path, *, jwt_secret: str) -> dict[str, Any]:
+    """Persist the sidecar JWT secret at 0600 and return the stored document.
+
+    The value itself is derived deterministically from the stack name (see the
+    filex backend); the document exists for operator visibility and as the
+    rotation record, the same role the provisioner document plays for the lane
+    token.
+    """
+
+    document = {
+        "format_version": STATE_FORMAT_VERSION,
+        "jwt_secret": jwt_secret,
+    }
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / FILEX_OFFICE_JWT_FILE
+    _write_document(path, document)
+    path.chmod(0o600)
+    return document
 
 
 def load_gitea_provisioner(state_dir: Path) -> GiteaProvisionerState | None:

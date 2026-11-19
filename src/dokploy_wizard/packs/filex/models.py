@@ -83,6 +83,11 @@ class FilexResult:
     health_state: FilexHealthState | None
     storage: FilexStorageBinding | None
     notes: tuple[str, ...]
+    # The ONLYOFFICE sidecar's named volume group, tracked as one row exactly
+    # like the retired Nextcloud pack tracked its DocumentServer volume. The
+    # ephemeral cache/log volumes stay unrowed on purpose: same teardown as
+    # any compose project volume, no user state to protect.
+    office_volume: FilexManagedResource | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,6 +98,9 @@ class FilexResult:
             "persistent_data": None
             if self.persistent_data is None
             else self.persistent_data.to_dict(),
+            "office_volume": None
+            if self.office_volume is None
+            else self.office_volume.to_dict(),
             "bootstrap_state": None
             if self.bootstrap_state is None
             else self.bootstrap_state.to_dict(),
@@ -107,6 +115,7 @@ class FilexPhase:
     result: FilexResult
     service_resource_id: str | None
     data_resource_id: str | None
+    office_volume_resource_id: str | None = None
 
 
 @dataclass(frozen=True)

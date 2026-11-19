@@ -26,6 +26,7 @@ from dokploy_wizard.packs.docuseal import (
 )
 from dokploy_wizard.packs.filex import (
     FILEX_DATA_RESOURCE_TYPE,
+    FILEX_OFFICE_VOLUME_RESOURCE_TYPE,
     FILEX_SERVICE_RESOURCE_TYPE,
 )
 from dokploy_wizard.packs.gitea import (
@@ -151,6 +152,9 @@ _RULES: dict[str, DeletionRule] = {
     DOCUSEAL_DATA_RESOURCE_TYPE: DeletionRule(phase="docuseal", retain_safe=False, priority=27),
     FILEX_SERVICE_RESOURCE_TYPE: DeletionRule(phase="filex", retain_safe=True, priority=32),
     FILEX_DATA_RESOURCE_TYPE: DeletionRule(phase="filex", retain_safe=False, priority=33),
+    FILEX_OFFICE_VOLUME_RESOURCE_TYPE: DeletionRule(
+        phase="filex", retain_safe=False, priority=34
+    ),
     GITEA_SERVICE_RESOURCE_TYPE: DeletionRule(phase="gitea", retain_safe=True, priority=34),
     GITEA_DATA_RESOURCE_TYPE: DeletionRule(phase="gitea", retain_safe=False, priority=35),
     SEAWEEDFS_SERVICE_RESOURCE_TYPE: DeletionRule(phase="seaweedfs", retain_safe=True, priority=28),
@@ -227,7 +231,7 @@ _PACK_DATA_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "nextcloud": (NEXTCLOUD_VOLUME_RESOURCE_TYPE, ONLYOFFICE_VOLUME_RESOURCE_TYPE),
     "moodle": (MOODLE_DATA_RESOURCE_TYPE,),
     "docuseal": (DOCUSEAL_DATA_RESOURCE_TYPE,),
-    "filex": (FILEX_DATA_RESOURCE_TYPE,),
+    "filex": (FILEX_DATA_RESOURCE_TYPE, FILEX_OFFICE_VOLUME_RESOURCE_TYPE),
     "gitea": (GITEA_DATA_RESOURCE_TYPE,),
     "seaweedfs": (SEAWEEDFS_DATA_RESOURCE_TYPE,),
     "surfsense": (SURFSENSE_DATA_RESOURCE_TYPE,),

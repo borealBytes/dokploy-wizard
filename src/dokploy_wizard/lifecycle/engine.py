@@ -293,6 +293,7 @@ def execute_lifecycle_plan(
                     stack_name=desired_state.stack_name,
                     service_resource_id=filex.service_resource_id,
                     data_resource_id=filex.data_resource_id,
+                    office_volume_resource_id=filex.office_volume_resource_id,
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "gitea":

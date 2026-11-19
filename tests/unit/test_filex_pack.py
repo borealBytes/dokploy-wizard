@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from dokploy_wizard.dokploy.filex import DokployFilexBackend, _render_compose_fi
 from dokploy_wizard.packs.filex import (
     FILEX_BUCKET,
     FILEX_DATA_RESOURCE_TYPE,
+    FILEX_OFFICE_VOLUME_RESOURCE_TYPE,
     FILEX_SERVICE_RESOURCE_TYPE,
     FilexBootstrapState,
     FilexError,
@@ -49,6 +51,7 @@ def _filex_desired_state() -> Any:
 class FakeFilexBackend:
     existing_service: FilexResourceRecord | None = None
     existing_data: FilexResourceRecord | None = None
+    existing_office: FilexResourceRecord | None = None
     health_ok: bool = True
     health_results: list[bool] | None = None
     ensure_calls: int = 0
@@ -93,6 +96,25 @@ class FakeFilexBackend:
             resource_id="filex-data-1", resource_name=resource_name
         )
         return self.existing_data
+
+    def get_office_volume(self, resource_id: str) -> FilexResourceRecord | None:
+        if self.existing_office is not None and self.existing_office.resource_id == resource_id:
+            return self.existing_office
+        return None
+
+    def find_office_volume_by_name(self, resource_name: str) -> FilexResourceRecord | None:
+        if (
+            self.existing_office is not None
+            and self.existing_office.resource_name == resource_name
+        ):
+            return self.existing_office
+        return None
+
+    def create_office_volume(self, resource_name: str) -> FilexResourceRecord:
+        self.existing_office = FilexResourceRecord(
+            resource_id="filex-office-1", resource_name=resource_name
+        )
+        return self.existing_office
 
     def check_health(self, *, service: FilexResourceRecord, url: str) -> bool:
         del service, url
@@ -171,7 +193,13 @@ def test_reconcile_filex_dry_run_plans_create_with_storage_binding() -> None:
     assert result.hostname == "filex.example.com"
     assert result.service is not None and result.service.action == "create"
     assert result.persistent_data is not None and result.persistent_data.action == "create"
+    assert result.office_volume is not None and result.office_volume.action == "create"
+    assert (
+        result.office_volume is not None
+        and result.office_volume.resource_name == "wizard-stack-filex-office-data"
+    )
     assert phase.service_resource_id is None and phase.data_resource_id is None
+    assert phase.office_volume_resource_id is None
     storage = result.storage
     assert storage is not None
     assert storage.bucket == FILEX_BUCKET
@@ -205,12 +233,16 @@ def test_reconcile_filex_applies_create_and_owns_resources() -> None:
         stack_name="wizard-stack",
         service_resource_id=phase.service_resource_id,
         data_resource_id=phase.data_resource_id,
+        office_volume_resource_id=phase.office_volume_resource_id,
     )
     scopes = {resource.scope: resource.resource_type for resource in ledger.resources}
     assert scopes == {
         "stack:wizard-stack:filex:service": FILEX_SERVICE_RESOURCE_TYPE,
         "stack:wizard-stack:filex:data": FILEX_DATA_RESOURCE_TYPE,
+        "stack:wizard-stack:filex:office-volume": FILEX_OFFICE_VOLUME_RESOURCE_TYPE,
     }
+    assert phase.result.office_volume is not None
+    assert phase.result.office_volume.resource_id == "filex-office-1"
 
 
 def test_reconcile_filex_owned_reuse_is_already_present() -> None:
@@ -223,6 +255,10 @@ def test_reconcile_filex_owned_reuse_is_already_present() -> None:
         existing_data=FilexResourceRecord(
             resource_id="dokploy-compose:cmp-1:data",
             resource_name="wizard-stack-filex-data",
+        ),
+        existing_office=FilexResourceRecord(
+            resource_id="dokploy-compose:cmp-1:office-data",
+            resource_name="wizard-stack-filex-office-data",
         ),
     )
     ledger = OwnershipLedger(
@@ -238,6 +274,11 @@ def test_reconcile_filex_owned_reuse_is_already_present() -> None:
                 resource_id="dokploy-compose:cmp-1:data",
                 scope="stack:wizard-stack:filex:data",
             ),
+            OwnedResource(
+                resource_type=FILEX_OFFICE_VOLUME_RESOURCE_TYPE,
+                resource_id="dokploy-compose:cmp-1:office-data",
+                scope="stack:wizard-stack:filex:office-volume",
+            ),
         ),
     )
     phase = reconcile_filex(
@@ -250,6 +291,13 @@ def test_reconcile_filex_owned_reuse_is_already_present() -> None:
     assert phase.result.service is not None and phase.result.service.action == "update_owned"
     assert phase.result.persistent_data is not None
     assert phase.result.persistent_data.action == "reuse_owned"
+    assert phase.result.office_volume is not None
+    assert phase.result.office_volume.action == "reuse_owned"
+    assert phase.office_volume_resource_id == "dokploy-compose:cmp-1:office-data"
+    assert any(
+        "ONLYOFFICE editing state persists in 'wizard-stack-filex-office-data'" in note
+        for note in phase.result.notes
+    )
 
 
 def test_reconcile_filex_fails_when_health_never_passes() -> None:
@@ -329,11 +377,27 @@ def test_render_filex_env_specs_carry_real_secrets_and_hash_anchor() -> None:
         "FILEX_SECRET_KEY",
         "FILEX_DEFAULT_STORAGE_S3_ACCESS_KEY",
         "FILEX_DEFAULT_STORAGE_S3_SECRET_KEY",
+        "FILEX_ONLYOFFICE_JWT",
     ]
     values = {spec.variable.name: spec.variable.value for spec in rendered.env_specs}
     assert values["FILEX_ADMIN_PASSWORD"] == "hunter2 pass"
     assert values["FILEX_DEFAULT_STORAGE_S3_ACCESS_KEY"] == "ak"
     assert values["FILEX_DEFAULT_STORAGE_S3_SECRET_KEY"] == "sk"
+    # ONE variable, BOTH containers: compose interpolation resolves the same
+    # secret on the FileX side (editor config + callback signatures) and on
+    # the DocumentServer side (its entrypoint writes it into local.json).
+    office_spec = next(s for s in rendered.env_specs if s.variable.name == "FILEX_ONLYOFFICE_JWT")
+    assert office_spec.target_services == (
+        "wizard-stack-filex",
+        "wizard-stack-filex-office",
+    )
+    office_jwt = values["FILEX_ONLYOFFICE_JWT"]
+    assert office_jwt == filex_module._office_jwt_value("wizard-stack")
+    assert len(office_jwt) == 64
+    int(office_jwt, 16)
+    # The rendered compose carries only the placeholder; the secret itself
+    # never rides the compose text (it is Dokploy env, redacted at rest).
+    assert office_jwt not in rendered.compose_file
     secret_key = values["FILEX_SECRET_KEY"]
     # Deterministic per stack+ref, 32+ bytes, hex.
     assert secret_key != "hunter2 pass"
@@ -460,6 +524,8 @@ def test_ensure_application_ready_reports_login_verification(
     backend = _filex_backend(tmp_path, s3)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a, **_k: "office-c")
+    monkeypatch.setattr(filex_module, "_pin_office_relative_url", lambda *_a, **_k: False)
 
     class _Resp:
         status = 200
@@ -503,6 +569,8 @@ def test_ensure_application_ready_login_rate_limit_is_note_not_failure(
     backend = _filex_backend(tmp_path, s3)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a, **_k: "office-c")
+    monkeypatch.setattr(filex_module, "_pin_office_relative_url", lambda *_a, **_k: False)
 
     from urllib import error as urlerror
 
@@ -601,6 +669,8 @@ def test_provisioner_bootstraps_lane_token_and_retires_legacy_bot(
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a, **_k: "office-c")
+    monkeypatch.setattr(filex_module, "_pin_office_relative_url", lambda *_a, **_k: False)
     http = _ScriptedFxHttp()
     http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
     http.queue(
@@ -678,6 +748,8 @@ def test_provisioner_keeps_alive_lane_token_and_migrates_legacy_doc(
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a, **_k: "office-c")
+    monkeypatch.setattr(filex_module, "_pin_office_relative_url", lambda *_a, **_k: False)
     http = _ScriptedFxHttp()
     http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
     http.queue(
@@ -763,6 +835,8 @@ def test_provisioner_degrades_to_note_when_admin_session_missing(
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a, **_k: "office-c")
+    monkeypatch.setattr(filex_module, "_pin_office_relative_url", lambda *_a, **_k: False)
     from urllib import error as urlerror
 
     def fake_urlopen(req: Any, **kwargs: Any) -> Any:
@@ -790,3 +864,196 @@ def test_wait_for_container_up_gives_up_honestly(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(filex_module, "_docker_container_is_up", lambda *a, **k: False)
     monkeypatch.setattr(filex_module.time, "sleep", lambda *_a: None)
     assert not filex_module._wait_for_container_up("stack-filex", attempts=3, delay_seconds=0)
+
+
+# -- ONLYOFFICE editing sidecar -----------------------------------------------
+
+
+def test_render_filex_compose_includes_the_office_sidecar() -> None:
+    rendered = _render()
+    compose = rendered.compose_file
+    assert (
+        "image: onlyoffice/documentserver:9.4.0.1"
+        "@sha256:3ab6ebc7c605e5a32b7ae3ff19daed4925090245acc8100ce2230bd766c88212"
+    ) in compose
+    assert 'JWT_ENABLED: "true"' in compose
+    assert (
+        'JWT_SECRET: "${FILEX_ONLYOFFICE_JWT:?FILEX_ONLYOFFICE_JWT is required}"' in compose
+    )
+    # Callbacks ride the compose-internal overlay (private IPs) — the DS must
+    # be told to trust them or every save round-trips fail with a SSRF guard.
+    assert 'ALLOW_PRIVATE_IP_ADDRESS: "true"' in compose
+    assert 'WELCOME_PAGE_ENABLED: "false"' in compose
+    assert 'GENERATE_FONTS: "false"' in compose
+    # One hostname, one certificate: the editor frame rides a PathPrefix
+    # router on the FileX host, stripped before the container and stamped
+    # into X-Forwarded-Prefix so the app can build absolute editor URLs.
+    assert "wizard-stack-filex-office:" in compose
+    assert (
+        'traefik.http.routers.wizard-stack-filex-office.rule: '
+        '"Host(`filex.example.com`) && PathPrefix(`/filex-frame`)"' in compose
+    )
+    assert (
+        'traefik.http.middlewares.wizard-stack-filex-office-strip.stripprefix.prefixes: '
+        '"/filex-frame"' in compose
+    )
+    assert 'X-Forwarded-Prefix: "/filex-frame"' in compose
+    assert 'traefik.http.services.wizard-stack-filex-office.loadbalancer.server.port: "80"' in compose
+    # The editing contract: public frame origin, internal callback door,
+    # frame path — three addresses and the secret, all placeholder-ized.
+    assert 'FILEX_ONLYOFFICE_URL: "https://filex.example.com/filex-frame"' in compose
+    assert 'FILEX_ONLYOFFICE_FRAME_ORIGIN: "https://filex.example.com"' in compose
+    assert 'FILEX_ONLYOFFICE_CALLBACK_URL: "http://wizard-stack-filex:5212"' in compose
+    assert "FILEX_ONLYOFFICE_JWT" in compose
+    # State mounts: exactly the community-edition trio; the data volume is
+    # ledger-tracked, log and lib are plain caches riding compose teardown.
+    assert "- wizard-stack-filex-office-data:/var/www/onlyoffice/Data" in compose
+    assert "- wizard-stack-filex-office-log:/var/log/onlyoffice" in compose
+    assert "- wizard-stack-filex-office-lib:/var/lib/onlyoffice" in compose
+    assert "  wizard-stack-filex-office-data:\n" in compose
+    assert "  wizard-stack-filex-office-log:\n" in compose
+    assert "  wizard-stack-filex-office-lib:\n" in compose
+
+
+def test_office_jwt_state_doc_round_trips_at_0600(tmp_path: Path) -> None:
+    from dokploy_wizard.state.store import load_filex_office_jwt, write_filex_office_jwt
+
+    secret = filex_module._office_jwt_value("wizard-stack")
+    # Deterministic per stack: losing the state dir never orphans running
+    # editor sessions from their key (same contract as FILEX_SECRET_KEY).
+    assert secret == filex_module._office_jwt_value("wizard-stack")
+    assert secret != filex_module._office_jwt_value("other-stack")
+    document = write_filex_office_jwt(tmp_path, jwt_secret=secret)
+    assert document["jwt_secret"] == secret
+    assert load_filex_office_jwt(tmp_path) == document
+    assert (tmp_path / "filex-office-jwt.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_office_sidecar_gate_records_jwt_and_pins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    s3 = ScriptedS3()
+    backend = _filex_backend(tmp_path, s3)
+    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_office_container_id", lambda *_a: "office-c")
+    pinned: list[str] = []
+    monkeypatch.setattr(
+        filex_module,
+        "_pin_office_relative_url",
+        lambda container: pinned.append(container) or True,
+    )
+    notes = backend._ensure_office_sidecar()
+    assert pinned == ["office-c"]
+    assert any("Pinned the ONLYOFFICE subpath" in note for note in notes)
+    assert any("/filex-frame/healthcheck" in note for note in notes)
+    from dokploy_wizard.state.store import load_filex_office_jwt
+
+    stored = load_filex_office_jwt(tmp_path)
+    assert stored is not None
+    assert stored["jwt_secret"] == filex_module._office_jwt_value("wizard-stack")
+    assert (tmp_path / "filex-office-jwt.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_office_sidecar_gate_honest_about_a_missing_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    backend = _filex_backend(tmp_path, ScriptedS3())
+    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: False)
+    with pytest.raises(FilexError, match="did not come up"):
+        backend._ensure_office_sidecar()
+
+
+def test_office_relative_url_pin_never_touches_a_pinned_box(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> Any:
+        calls.append(list(command))
+        joined = " ".join(command)
+        if "supervisorctl" in joined:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        script = command[command.index("-c") + 1]
+        if "sys.argv[2]" in script:  # merge variant
+            return subprocess.CompletedProcess(command, 0, "unchanged\n", "")
+        return subprocess.CompletedProcess(command, 0, "/filex-frame\n", "")  # read
+
+    monkeypatch.setattr(filex_module.subprocess, "run", fake_run)
+    assert filex_module._pin_office_relative_url("office-c") is False
+    assert len(calls) == 1  # read only: no merge, no restart — editors stay up
+
+
+def test_office_relative_url_pin_merges_and_restarts_only_on_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> Any:
+        calls.append(list(command))
+        joined = " ".join(command)
+        if "supervisorctl" in joined:
+            return subprocess.CompletedProcess(command, 0, "ds:docservice: started\n", "")
+        script = command[command.index("-c") + 1]
+        if "sys.argv[2]" in script:
+            return subprocess.CompletedProcess(command, 0, "changed\n", "")
+        return subprocess.CompletedProcess(command, 0, "\n", "")  # unset
+
+    monkeypatch.setattr(filex_module.subprocess, "run", fake_run)
+    assert filex_module._pin_office_relative_url("office-c") is True
+    assert len(calls) == 3  # read, merge, restart
+    assert calls[1][:4] == ["docker", "exec", "office-c", "python3"]
+    assert "ds:docservice" in calls[2] and "ds:converter" in calls[2]
+
+
+def test_office_relative_url_pin_snippets_are_valid_python() -> None:
+    import ast
+
+    # The two docker-exec programs must parse as standalone modules; they
+    # broke once before (a 'for' chained after a semicolon), so pin the check.
+    ast.parse(filex_module._OFFICE_RELATIVE_URL_READ)
+    ast.parse(filex_module._OFFICE_RELATIVE_URL_MERGE)
+
+
+def test_office_volume_ledger_name_matches_the_compose_mount() -> None:
+    from dokploy_wizard.packs.filex import filex_office_volume_name
+
+    assert filex_office_volume_name("wizard-stack") == "wizard-stack-filex-office-data"
+    assert filex_office_volume_name("wizard-stack") == filex_module._office_volume_name(
+        "wizard-stack", "data"
+    )
+
+
+def test_build_filex_ledger_replaces_the_office_row_and_omits_it_when_none() -> None:
+    first = build_filex_ledger(
+        existing_ledger=OwnershipLedger(format_version=1, resources=()),
+        stack_name="wizard-stack",
+        service_resource_id="s-1",
+        data_resource_id="d-1",
+        office_volume_resource_id="o-1",
+    )
+    second = build_filex_ledger(
+        existing_ledger=first,
+        stack_name="wizard-stack",
+        service_resource_id="s-1",
+        data_resource_id="d-1",
+        office_volume_resource_id="o-2",
+    )
+    office_rows = [
+        resource
+        for resource in second.resources
+        if resource.resource_type == FILEX_OFFICE_VOLUME_RESOURCE_TYPE
+    ]
+    assert [(r.resource_id, r.scope) for r in office_rows] == [
+        ("o-2", "stack:wizard-stack:filex:office-volume")
+    ]
+    # A build that carries no office id drops the row (the pack's own scopes
+    # are owned wholesale by the builder — no stale half-state survives).
+    third = build_filex_ledger(
+        existing_ledger=first,
+        stack_name="wizard-stack",
+        service_resource_id="s-1",
+        data_resource_id="d-1",
+    )
+    assert {resource.resource_type for resource in third.resources} == {
+        FILEX_SERVICE_RESOURCE_TYPE,
+        FILEX_DATA_RESOURCE_TYPE,
+    }

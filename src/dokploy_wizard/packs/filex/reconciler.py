@@ -22,6 +22,16 @@ from dokploy_wizard.state.models import DesiredState, OwnedResource, OwnershipLe
 
 FILEX_SERVICE_RESOURCE_TYPE = "filex_service"
 FILEX_DATA_RESOURCE_TYPE = "filex_data"
+# The ONLYOFFICE sidecar's state volume ({stack}-filex-office-data: certs and
+# the generated WOPI keypair). The log/lib mounts are pure caches and ride
+# ordinary compose teardown unrowed. One row, same authority as filex_data:
+# with --retain-data the volume survives (retain_safe=False); destroy takes
+# it with the compose app.
+FILEX_OFFICE_VOLUME_RESOURCE_TYPE = "filex_office_volume"
+
+
+def filex_office_volume_name(stack_name: str) -> str:
+    return f"{stack_name}-filex-office-data"
 
 # The SeaweedFS bucket FileX is seeded with as its only storage. Names are fixed
 # so every stack can be found the same way; the wizard owns the bucket from the
@@ -65,6 +75,12 @@ class FilexBackend(Protocol):
 
     def create_persistent_data(self, resource_name: str) -> FilexResourceRecord: ...
 
+    def get_office_volume(self, resource_id: str) -> FilexResourceRecord | None: ...
+
+    def find_office_volume_by_name(self, resource_name: str) -> FilexResourceRecord | None: ...
+
+    def create_office_volume(self, resource_name: str) -> FilexResourceRecord: ...
+
     def check_health(self, *, service: FilexResourceRecord, url: str) -> bool: ...
 
     def ensure_application_ready(
@@ -76,6 +92,7 @@ class ShellFilexBackend:
     def __init__(self) -> None:
         self._service: FilexResourceRecord | None = None
         self._data: FilexResourceRecord | None = None
+        self._office: FilexResourceRecord | None = None
 
     def get_service(self, resource_id: str) -> FilexResourceRecord | None:
         if self._service is not None and self._service.resource_id == resource_id:
@@ -133,6 +150,20 @@ class ShellFilexBackend:
         self._data = FilexResourceRecord(resource_id=resource_name, resource_name=resource_name)
         return self._data
 
+    def get_office_volume(self, resource_id: str) -> FilexResourceRecord | None:
+        if self._office is not None and self._office.resource_id == resource_id:
+            return self._office
+        return FilexResourceRecord(resource_id=resource_id, resource_name=resource_id)
+
+    def find_office_volume_by_name(self, resource_name: str) -> FilexResourceRecord | None:
+        if self._office is not None and self._office.resource_name == resource_name:
+            return self._office
+        return None
+
+    def create_office_volume(self, resource_name: str) -> FilexResourceRecord:
+        self._office = FilexResourceRecord(resource_id=resource_name, resource_name=resource_name)
+        return self._office
+
     def check_health(self, *, service: FilexResourceRecord, url: str) -> bool:
         del service
         return _http_health_check(url)
@@ -171,9 +202,11 @@ def reconcile_filex(
                 health_state=None,
                 storage=None,
                 notes=("FileX pack is explicitly disabled for this install.",),
+                office_volume=None,
             ),
             service_resource_id=None,
             data_resource_id=None,
+            office_volume_resource_id=None,
         )
 
     hostname = desired_state.hostnames.get("filex")
@@ -211,6 +244,19 @@ def reconcile_filex(
         find_by_name=backend.find_persistent_data_by_name,
         create_resource=backend.create_persistent_data,
     )
+    office_volume_record, office_volume_id = _resolve_owned_resource(
+        dry_run=dry_run,
+        resource_name=filex_office_volume_name(desired_state.stack_name),
+        resource_type=FILEX_OFFICE_VOLUME_RESOURCE_TYPE,
+        owned_resource=_find_owned_resource(
+            ownership_ledger=ownership_ledger,
+            resource_type=FILEX_OFFICE_VOLUME_RESOURCE_TYPE,
+            scope=_office_volume_scope(desired_state.stack_name),
+        ),
+        get_resource=backend.get_office_volume,
+        find_by_name=backend.find_office_volume_by_name,
+        create_resource=backend.create_office_volume,
+    )
     service, service_id = _resolve_service(
         dry_run=dry_run,
         service_name=service_name,
@@ -230,6 +276,7 @@ def reconcile_filex(
                 hostname=hostname,
                 service=service,
                 persistent_data=persistent_data,
+                office_volume=office_volume_record,
                 bootstrap_state=FilexBootstrapState(
                     initialized=None,
                     secret_key_secret_ref=secret_key_secret_ref,
@@ -247,6 +294,7 @@ def reconcile_filex(
             ),
             service_resource_id=None,
             data_resource_id=None,
+            office_volume_resource_id=None,
         )
 
     service_record = FilexResourceRecord(resource_id=service_id, resource_name=service.resource_name)
@@ -266,15 +314,19 @@ def reconcile_filex(
         (
             f"FileX service '{service_name}' is reconciled and healthy.",
             f"FileX data persists in '{data_name}' and files in bucket '{storage.bucket}'.",
+            f"ONLYOFFICE editing state persists in '{filex_office_volume_name(desired_state.stack_name)}'.",
         )
     )
     return FilexPhase(
         result=FilexResult(
-            outcome="applied" if "create" in {service.action, persistent_data.action} else "already_present",
+            outcome="applied"
+            if "create" in {service.action, persistent_data.action, office_volume_record.action}
+            else "already_present",
             enabled=True,
             hostname=hostname,
             service=service,
             persistent_data=persistent_data,
+            office_volume=office_volume_record,
             bootstrap_state=bootstrap_state,
             health_state=FilexHealthState(url=health_url, path="/healthz", passed=True),
             storage=storage,
@@ -282,6 +334,7 @@ def reconcile_filex(
         ),
         service_resource_id=service_id,
         data_resource_id=data_id,
+        office_volume_resource_id=office_volume_id,
     )
 
 
@@ -291,6 +344,7 @@ def build_filex_ledger(
     stack_name: str,
     service_resource_id: str | None,
     data_resource_id: str | None,
+    office_volume_resource_id: str | None = None,
 ) -> OwnershipLedger:
     resources = [
         resource
@@ -303,6 +357,10 @@ def build_filex_ledger(
             or (
                 resource.resource_type == FILEX_DATA_RESOURCE_TYPE
                 and resource.scope == _data_scope(stack_name)
+            )
+            or (
+                resource.resource_type == FILEX_OFFICE_VOLUME_RESOURCE_TYPE
+                and resource.scope == _office_volume_scope(stack_name)
             )
         )
     ]
@@ -320,6 +378,14 @@ def build_filex_ledger(
                 resource_type=FILEX_DATA_RESOURCE_TYPE,
                 resource_id=data_resource_id,
                 scope=_data_scope(stack_name),
+            )
+        )
+    if office_volume_resource_id is not None:
+        resources.append(
+            OwnedResource(
+                resource_type=FILEX_OFFICE_VOLUME_RESOURCE_TYPE,
+                resource_id=office_volume_resource_id,
+                scope=_office_volume_scope(stack_name),
             )
         )
     return OwnershipLedger(
@@ -544,6 +610,10 @@ def _service_scope(stack_name: str) -> str:
 
 def _data_scope(stack_name: str) -> str:
     return f"stack:{stack_name}:filex:data"
+
+
+def _office_volume_scope(stack_name: str) -> str:
+    return f"stack:{stack_name}:filex:office-volume"
 
 
 def _http_health_check(url: str) -> bool:
