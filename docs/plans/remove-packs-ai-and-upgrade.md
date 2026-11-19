@@ -1547,7 +1547,18 @@ ready on a first pass with no fixes** — a one-time gate for this wave, not a
 standing rule. Execution: remote `uninstall --destroy-data` (new per-env
 fixture `fixtures/destroy.showmeseewhy-com.confirm` — line 3 must carry the
 environment identifier), then a deliberate bootstrap wipe (services, task
-containers, dokploy volumes, `/opt/dokploy`, `/etc/dokploy`), tailscaled left
-installed). Docker image layers intentionally retained — runtime material,
-not deployment state. Then install, and loop zero→ready until the first pass
-is clean; only then the reshoot.
+containers, dokploy volumes, `/opt/dokploy`, `/etc/dokploy`). Docker image
+layers intentionally retained — runtime material, not deployment state.
+Then install, and loop zero→ready until the first pass is clean; only then
+the reshoot.
+
+Loop iteration 1 failed at 339s in the tailscale phase:
+`Refusing to adopt existing unowned Tailscale node 'showmeseewhy'` — and the
+guard was **right**. Uninstall deletes the tailscale ledger row retain-safe
+(`tailscale down`, never logout: tailnet membership is operator state), so a
+logged-in daemon survives teardown; the reinstall found an authenticated node
+the fresh state document did not own and refused to hijack it. A logged-in
+tailscaled is not zero state: the wipe recipe now ends with
+`tailscale logout` (loop iteration 2 chained uninstall → wipe-v2 → install
+under way). The fail-closed behavior stays — the wizard never claims
+machines it did not mint.
