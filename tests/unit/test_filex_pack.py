@@ -586,7 +586,16 @@ def _provisioner_backend(tmp_path: Path) -> DokployFilexBackend:
     return _filex_backend(tmp_path, s3)
 
 
-def test_provisioner_bootstraps_user_token_and_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_provisioner_bootstraps_lane_token_and_retires_legacy_bot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh generation: the lane token rides the MAIN user, the bot dies with it.
+
+    The pack used to own a service account; this pass replaces it with an
+    admin-scope token on the deployer's own row (measured: an admin-scoped
+    token owned by the main user answers every /api/admin route), and the
+    bot's deletion happens in the same pass that proves the replacement.
+    """
     from dokploy_wizard.state.store import load_filex_provisioner
 
     backend = _provisioner_backend(tmp_path)
@@ -594,29 +603,44 @@ def test_provisioner_bootstraps_user_token_and_state(tmp_path: Path, monkeypatch
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
     http = _ScriptedFxHttp()
     http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
-    http.queue("GET", "/api/admin/users", 200, [])
     http.queue(
-        "POST",
+        "GET",
         "/api/admin/users",
-        201,
-        {"id": 7, "username": "wizard-provisioner", "email": "wizard-provisioner@filex.example.com"},
+        200,
+        [
+            {"id": 1, "username": "admin", "email": "Admin@Example.com"},
+            {"id": 7, "username": "wizard-provisioner", "email": "wp@filex.example.com"},
+        ],
     )
-    http.queue("GET", "/api/admin/ai-tokens", 200, {"tokens": []})
-    http.queue("POST", "/api/admin/ai-tokens", 201, {"token": "prov-token-1", "row": {"id": 9}})
+    http.queue(
+        "GET",
+        "/api/admin/ai-tokens",
+        200,
+        {"tokens": [{"id": 9, "label": "wizard-provisioner", "user_id": 7}]},
+    )
+    http.queue("DELETE", "/api/admin/ai-tokens/9", 200, {"ok": True})
+    http.queue("POST", "/api/admin/ai-tokens", 201, {"token": "lane-token-1", "row": {"id": 11}})
+    http.queue("DELETE", "/api/admin/users/7", 200, {"ok": True})
     monkeypatch.setattr(filex_module.urlrequest, "urlopen", http)
 
     state, notes = backend.ensure_application_ready(
         secret_key_secret_ref="wizard-stack-filex-secret-key"
     )
     assert state.login_verified is True
-    assert any("wizard-provisioner" in note for note in notes)
+    assert any("lane token 'workspace-provisioner'" in note for note in notes)
+    assert any(
+        "Deleted the legacy FileX service account 'wizard-provisioner'" in note
+        for note in notes
+    )
 
     stored = load_filex_provisioner(tmp_path)
     assert stored is not None
-    assert stored.username == "wizard-provisioner"
-    assert stored.user_id == 7
-    assert stored.token_id == 9
-    assert stored.token == "prov-token-1"
+    # The document now describes the deployer's own row (adopted by email,
+    # case-insensitively — the row above proves it).
+    assert stored.username == "admin"
+    assert stored.user_id == 1
+    assert stored.token_id == 11
+    assert stored.token == "lane-token-1"
     # The token is asked for with the admin scope: /api/admin delegation is
     # session-or-admin-scope only, and workspace scripts ride it to provision.
     mint = next(
@@ -624,18 +648,21 @@ def test_provisioner_bootstraps_user_token_and_state(tmp_path: Path, monkeypatch
         if req.full_url.endswith("/api/admin/ai-tokens") and req.get_method() == "POST"
     )
     body = json.loads(mint.data.decode())
+    assert body["label"] == "workspace-provisioner"
     assert body["scopes"] == "read,write,delete,admin"
     assert body["kind"] == "user"
-    assert body["user_id"] == 7
+    assert body["user_id"] == 1
     assert (tmp_path / "filex-provisioner.json").stat().st_mode & 0o777 == 0o600
 
 
-def test_provisioner_keeps_alive_token_and_rotates_dead_one(
+def test_provisioner_keeps_alive_lane_token_and_migrates_legacy_doc(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dokploy_wizard.state.models import STATE_FORMAT_VERSION, FilexProvisionerState
     from dokploy_wizard.state.store import load_filex_provisioner, write_filex_provisioner
 
+    # Pass 1: a doc from the previous generation (username = the bot) forces
+    # the migration mint even though its token still authenticates.
     write_filex_provisioner(
         tmp_path,
         FilexProvisionerState(
@@ -653,34 +680,81 @@ def test_provisioner_keeps_alive_token_and_rotates_dead_one(
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
     http = _ScriptedFxHttp()
     http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
-    http.queue("GET", "/api/admin/users", 200, [{"id": 7, "username": "wizard-provisioner"}])
-    http.queue("GET", "/api/admin/ai-tokens", 200, {"tokens": [{"id": 9, "label": "wizard-provisioner"}]})
-    # Stored token still authenticates → reused, no re-mint.
-    http.queue("GET", "/api/auth/s3-keys", 200, {"keys": []})
+    http.queue(
+        "GET",
+        "/api/admin/users",
+        200,
+        [
+            {"id": 1, "username": "admin", "email": "admin@example.com"},
+            {"id": 7, "username": "wizard-provisioner", "email": "wp@filex.example.com"},
+        ],
+    )
+    http.queue(
+        "GET",
+        "/api/admin/ai-tokens",
+        200,
+        {"tokens": [{"id": 9, "label": "wizard-provisioner", "user_id": 7}]},
+    )
+    http.queue("DELETE", "/api/admin/ai-tokens/9", 200, {"ok": True})
+    http.queue("POST", "/api/admin/ai-tokens", 201, {"token": "lane-token-1", "row": {"id": 11}})
+    http.queue("DELETE", "/api/admin/users/7", 200, {"ok": True})
     monkeypatch.setattr(filex_module.urlrequest, "urlopen", http)
-    state, _notes = backend.ensure_application_ready(
+    state, notes = backend.ensure_application_ready(
         secret_key_secret_ref="wizard-stack-filex-secret-key"
     )
     assert state.login_verified is True
-    assert load_filex_provisioner(tmp_path).token == "old-token"
+    migrated = load_filex_provisioner(tmp_path)
+    assert migrated.token == "lane-token-1"
+    assert migrated.username == "admin"
+    assert any(
+        "Deleted the legacy FileX service account" in note for note in notes
+    )
 
-    # Second pass: the row was deleted server-side → label-match rotation.
+    # Pass 2: the new doc's token still authenticates and the bot is gone →
+    # short-circuit, no re-mint.
     http2 = _ScriptedFxHttp()
     http2.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
-    http2.queue("GET", "/api/admin/users", 200, [{"id": 7, "username": "wizard-provisioner"}])
-    http2.queue("GET", "/api/admin/ai-tokens", 200, {"tokens": [{"id": 12, "label": "wizard-provisioner"}]})
-    http2.queue("DELETE", "/api/admin/ai-tokens/12", 200, {"ok": True})
-    http2.queue("POST", "/api/admin/ai-tokens", 200, {"token": "new-token", "row": {"id": 13}})
+    http2.queue(
+        "GET", "/api/admin/users", 200,
+        [{"id": 1, "username": "admin", "email": "admin@example.com"}],
+    )
+    http2.queue(
+        "GET", "/api/admin/ai-tokens", 200,
+        {"tokens": [{"id": 11, "label": "workspace-provisioner", "user_id": 1}]},
+    )
+    http2.queue("GET", "/api/auth/s3-keys", 200, {"keys": []})
     monkeypatch.setattr(filex_module.urlrequest, "urlopen", http2)
     backend2 = _provisioner_backend(tmp_path)
     state2, notes2 = backend2.ensure_application_ready(
         secret_key_secret_ref="wizard-stack-filex-secret-key"
     )
     assert state2.login_verified is True
+    assert load_filex_provisioner(tmp_path).token == "lane-token-1"
+    assert not any(
+        req.get_method() == "POST" and req.full_url.endswith("/api/admin/ai-tokens")
+        for req in http2.requests
+    )
+    assert not any("lane token" in note for note in notes2)
+
+    # Pass 3: the row was deleted server-side → label-match rotation.
+    http3 = _ScriptedFxHttp()
+    http3.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
+    http3.queue(
+        "GET", "/api/admin/users", 200,
+        [{"id": 1, "username": "admin", "email": "admin@example.com"}],
+    )
+    http3.queue("GET", "/api/admin/ai-tokens", 200, {"tokens": []})
+    http3.queue("POST", "/api/admin/ai-tokens", 200, {"token": "lane-token-2", "row": {"id": 14}})
+    monkeypatch.setattr(filex_module.urlrequest, "urlopen", http3)
+    backend3 = _provisioner_backend(tmp_path)
+    state3, notes3 = backend3.ensure_application_ready(
+        secret_key_secret_ref="wizard-stack-filex-secret-key"
+    )
+    assert state3.login_verified is True
     rotated = load_filex_provisioner(tmp_path)
-    assert rotated.token == "new-token"
-    assert rotated.token_id == 13
-    assert any("Rotated" in note for note in notes2)
+    assert rotated.token == "lane-token-2"
+    assert rotated.token_id == 14
+    assert any("lane token 'workspace-provisioner'" in note for note in notes3)
 
 
 def test_provisioner_degrades_to_note_when_admin_session_missing(

@@ -2401,6 +2401,12 @@ def _build_gitea_backend(
         state_dir=state_dir,
         stack_name=desired_state.stack_name,
         hostname=hostname,
+        # The provisioner IS the deployer now: login derived from this email,
+        # password is the stack admin password (no bot account anymore).
+        admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
+        admin_password=raw_env.values.get(
+            "DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD
+        ),
         postgres_service_name=desired_state.shared_core.postgres.service_name,
         postgres=allocation.postgres,
         s3_endpoint_url=_seaweedfs_internal_s3_endpoint(desired_state),

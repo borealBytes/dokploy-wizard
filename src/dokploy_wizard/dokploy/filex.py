@@ -67,12 +67,19 @@ from dokploy_wizard.verification import ServiceVerificationResult
 #     https://ghcr.io/v2/brf-tech/filex/manifests/v0.61.2 | grep -i docker-content-digest
 # v0.61.x is also the floor for S3-key attribution in the audit log, which the
 # ~/shared workspace mount depends on.
-# Service account the wizard manages inside FileX. Workspace boot scripts use
-# its admin-scoped API token to materialize the workspace owner's FileX account
-# and that person's own credentials; the token is the only credential baked into
-# the Coder template, and /api/admin delegation requires the admin scope (a
-# plain user token is refused by FileX by design).
+# Service account the FIRST generation of this pack managed inside FileX.
+# Dead as of the one-ID upgrade: the lane token is now an admin-scoped AI
+# token owned by the main user (label below), and the boot pass deletes the
+# bot once the replacement proves alive. The constant remains as the
+# migration match. Workspace boot scripts use the lane token to materialize
+# the workspace owner's FileX account and that person's own credentials; the
+# token is the only credential baked into the Coder template, and /api/admin
+# delegation requires the admin scope (a plain user token is refused by
+# FileX by design — measured).
 FILEX_PROVISIONER_USERNAME = "wizard-provisioner"
+# The lane token's row label. Distinct from any person's `coder-<login>`
+# ai-token so the account list keeps one privileged row, clearly named.
+FILEX_LANE_TOKEN_LABEL = "workspace-provisioner"
 _DEFAULT_FILEX_IMAGE = (
     "ghcr.io/brf-tech/filex:v0.61.2"
     "@sha256:e8756486300542bcfb7f8cf1a323a583c2444815da09c8947389197d43b04c8d"
@@ -461,65 +468,61 @@ class DokployFilexBackend:
     def _ensure_provisioner(
         self, admin_session: str | None
     ) -> tuple[FilexProvisionerState | None, str | None]:
-        """Guarantee the wizard's FileX service account and its admin-scoped token.
+        """Guarantee the wizard's admin-scoped lane token — owned by the main user.
 
         Workspace boot scripts use this token to materialize each owner's FileX
-        account and per-(user, workspace) credentials at first boot, so every
-        write carries both a person and a machine. /api/admin delegation is
-        session-or-admin-scope only, hence the admin scope on this one account;
+        account and per-(user, workspace) credentials, so every write carries
+        both a person and a machine. /api/admin delegation is
+        session-or-admin-scope only, hence the admin scope on this token;
         everything below it (owner accounts, their tokens) is a plain user.
+        The pack used to run this automation as the `wizard-provisioner`
+        service account; the account is dead (measured on the deployed build:
+        an admin-scoped AI token minted for the MAIN user answers every
+        /api/admin route the lane calls — the scope, not the bot, was what the
+        delegation required). The token now belongs to the person whose email
+        bootstrapped the install, the account list shows humans only, and the
+        bot's deletion happens in the same pass that proves the replacement
+        alive.
         """
         if admin_session is None:
             return (
                 load_filex_provisioner(self._state_dir),
                 "FileX provisioner step skipped: no admin session (login probe did not verify).",
             )
-        email = f"{FILEX_PROVISIONER_USERNAME}@{self._hostname}"
-        password = _provisioner_password(self._stack_name, self._secret_key_secret_ref)
+        existing = load_filex_provisioner(self._state_dir)
         status, users = self._fx_api("GET", "/api/admin/users", token=admin_session)
         if status != 200:
             return (
-                load_filex_provisioner(self._state_dir),
+                existing,
                 f"FileX provisioner step skipped: user listing answered HTTP {status}.",
             )
-        user = _find_user_by_username(users, FILEX_PROVISIONER_USERNAME)
-        if user is None:
-            status, created = self._fx_api(
-                "POST",
-                "/api/admin/users",
-                token=admin_session,
-                body={
-                    "email": email,
-                    "username": FILEX_PROVISIONER_USERNAME,
-                    "role": "admin",
-                    "password": password,
-                },
+        rows = users if isinstance(users, list) else (users or {}).get("users", [])
+        main = _find_user_by_email(rows, self._admin_email)
+        if main is None or main.get("id") is None:
+            return existing, (
+                "FileX lane token step skipped: the admin account "
+                f"'{self._admin_email}' is not listed."
             )
-            if status not in {200, 201} or not isinstance(created, dict) or "id" not in created:
-                detail = "" if isinstance(created, dict) else str(created)[:120]
-                return (
-                    None,
-                    f"FileX provisioner account could not be created (HTTP {status}); {detail}",
-                )
-            user = created
-        user_id = int(user["id"])
 
-        existing = load_filex_provisioner(self._state_dir)
         status, tokens_payload = self._fx_api("GET", "/api/admin/ai-tokens", token=admin_session)
-        rows: list[dict] = []
+        token_rows: list[dict] = []
         if status == 200 and isinstance(tokens_payload, dict):
-            rows = [r for r in tokens_payload.get("tokens", []) if isinstance(r, dict)]
-        mine = [r for r in rows if r.get("label") == FILEX_PROVISIONER_USERNAME]
+            token_rows = [r for r in tokens_payload.get("tokens", []) if isinstance(r, dict)]
+        mine = [r for r in token_rows if r.get("label") == FILEX_LANE_TOKEN_LABEL]
 
-        if existing is not None and any(r.get("id") == existing.token_id for r in mine):
+        if (
+            existing is not None
+            and existing.username != FILEX_PROVISIONER_USERNAME
+            and any(r.get("id") == existing.token_id for r in mine)
+        ):
             alive_status, _ = self._fx_api("GET", "/api/auth/s3-keys", token=existing.token)
             if alive_status == 200:
-                return existing, None
+                return existing, self._retire_legacy_provisioner(admin_session, rows, token_rows)
 
-        # State lost, token rotated server-side, or the stored secret died:
-        # label-match every provisioner row away and mint a replacement. The
-        # token is shown exactly once by FileX, so the state document written
-        # here is the durable copy.
+        # State lost, token rotated server-side, or the doc still describing
+        # the old bot: label-match every lane-token row away and mint a
+        # replacement on the main user. FileX shows the token exactly once,
+        # so the state document written here is its durable copy.
         for row in mine:
             row_id = row.get("id")
             if row_id is not None:
@@ -529,8 +532,8 @@ class DokployFilexBackend:
             "/api/admin/ai-tokens",
             token=admin_session,
             body={
-                "label": FILEX_PROVISIONER_USERNAME,
-                "user_id": user_id,
+                "label": FILEX_LANE_TOKEN_LABEL,
+                "user_id": int(main["id"]),
                 # read/write/delete for file attribution flows; admin for the
                 # /api/admin delegation the workspace provisioner scripts ride.
                 "scopes": "read,write,delete,admin",
@@ -539,29 +542,62 @@ class DokployFilexBackend:
         )
         token = minted.get("token") if isinstance(minted, dict) else None
         row = minted.get("row") if isinstance(minted, dict) else None
-        # FileX answers 201 Created for the mint (measured live).
+        # FileX answers 200/201 for the mint (measured live).
         if status not in (200, 201) or not isinstance(token, str) or not isinstance(row, dict):
             return None, f"FileX provisioner token mint failed (HTTP {status}); ~/shared mounts will warn."
         state = FilexProvisionerState(
             format_version=STATE_FORMAT_VERSION,
-            username=FILEX_PROVISIONER_USERNAME,
-            email=email,
-            password=password,
-            user_id=user_id,
+            username=str(main.get("username") or ""),
+            email=self._admin_email,
+            password=self._admin_password,
+            user_id=int(main["id"]),
             token=token,
             token_id=int(row.get("id", 0) or 0),
         )
         write_filex_provisioner(self._state_dir, state)
         note = (
-            "Provisioned FileX service account 'wizard-provisioner' with an admin-scoped "
-            "token (workspace ~/shared identity automation)."
+            f"Provisioned FileX lane token '{FILEX_LANE_TOKEN_LABEL}' owned by the main "
+            "user (workspace ~/shared identity automation)."
         )
-        if existing is not None:
-            note = (
-                "Rotated the FileX provisioner token (stored secret or server row was gone); "
-                "workspace mounts adopt the new key on their next boot."
-            )
+        retire_note = self._retire_legacy_provisioner(admin_session, rows, token_rows)
+        if retire_note:
+            note = f"{note} {retire_note}"
         return state, note
+
+    def _retire_legacy_provisioner(
+        self, admin_session: str, user_rows: list[object], token_rows: list[dict]
+    ) -> str | None:
+        """Delete the previous generation's service account and its rows, once.
+
+        The lane-token label changed with ownership, so any row still wearing
+        the old label belongs to the bot; the account goes after its tokens
+        do. An account that refuses to delete keeps the warning visible —
+        the wizard never force-purges what a human may have attached.
+        """
+        bot = _find_user_by_username(user_rows, FILEX_PROVISIONER_USERNAME)
+        stale_token_rows = [
+            r for r in token_rows if r.get("label") == FILEX_PROVISIONER_USERNAME
+        ]
+        if bot is None and not stale_token_rows:
+            return None
+        for row in stale_token_rows:
+            row_id = row.get("id")
+            if row_id is not None:
+                self._fx_api("DELETE", f"/api/admin/ai-tokens/{row_id}", token=admin_session)
+        if bot is None or bot.get("id") is None:
+            return "Deleted the legacy FileX service account's token rows."
+        status, _body = self._fx_api(
+            "DELETE", f"/api/admin/users/{bot['id']}", token=admin_session
+        )
+        if status in (200, 204):
+            return (
+                f"Deleted the legacy FileX service account '{FILEX_PROVISIONER_USERNAME}' "
+                "(its lane now rides the main user's token)."
+            )
+        return (
+            f"WARNING: legacy FileX account '{FILEX_PROVISIONER_USERNAME}' could not be "
+            f"deleted (HTTP {status})."
+        )
 
     def _fx_api(
         self,
@@ -958,12 +994,6 @@ def _yaml_quote(value: str) -> str:
     return f'"{escaped}"'
 
 
-def _provisioner_password(stack_name: str, secret_key_secret_ref: str) -> str:
-    """Deterministic provisioner password: stable across reruns, derivable, no new secret."""
-    material = f"dokploy-wizard:filex-provisioner:{stack_name}:{secret_key_secret_ref}"
-    return sha256(material.encode("utf-8")).hexdigest()
-
-
 def _find_user_by_username(payload: object, username: str) -> dict | None:
     rows: list = []
     if isinstance(payload, list):
@@ -976,6 +1006,22 @@ def _find_user_by_username(payload: object, username: str) -> dict | None:
                 break
     for row in rows:
         if isinstance(row, dict) and row.get("username") == username:
+            return row
+    return None
+
+
+def _find_user_by_email(payload: object, email: str) -> dict | None:
+    rows: list = []
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        for key in ("users", "data", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                rows = value
+                break
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("email") or "").lower() == email.lower():
             return row
     return None
 

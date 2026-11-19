@@ -45,6 +45,7 @@ from dokploy_wizard.dokploy.compose_noop import (
 )
 from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
 from dokploy_wizard.dokploy.filex import LoopbackSigV4Client
+from dokploy_wizard.identity import username_from_email
 from dokploy_wizard.packs.gitea import (
     GITEA_BUCKET,
     GITEA_S3_REGION,
@@ -72,8 +73,13 @@ _GITEA_CONFIG_ROOT = "/etc/gitea"
 _GITEA_RUN_USER = "1000:1000"
 _GITEA_HEALTH_PATH = "/api/healthz"
 _GITEA_SHARED_DB_PASSWORD = "change-me"
-_PROVISIONER_USERNAME = "dokploy-wizard"
-_PROVISIONER_TOKEN_NAME = "dokploy-wizard-provisioner"
+_PROVISIONER_TOKEN_NAME = "wizard-provisioner"
+# The service account this pack used to run its lanes as is dead: the
+# deployer's own admin account (login derived silently from the admin
+# email's local part) now owns the token, so the account list shows humans
+# only. The constant lives on for the migration path — a modify pass finds
+# and deletes the old row once the replacement stands.
+_LEGACY_PROVISIONER_USERNAME = "dokploy-wizard"
 # Admin account, full write access: the provisioner drives identity automation
 # (users, orgs, keys, OIDC bindings) from the box side. Gitea 28's scope grammar
 # takes the bare "all" grant; the "category:access" forms (all:all, write:all,
@@ -125,6 +131,8 @@ class DokployGiteaBackend:
         smtp_host: str | None = None,
         smtp_port: int | None = None,
         smtp_from_address: str | None = None,
+        admin_email: str = "",
+        admin_password: str = "",
         bucket: str = GITEA_BUCKET,
         state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployGiteaApi | None = None,
@@ -142,6 +150,8 @@ class DokployGiteaBackend:
         self._smtp_host = smtp_host
         self._smtp_port = smtp_port
         self._smtp_from_address = smtp_from_address
+        self._admin_email = admin_email
+        self._admin_password = admin_password
         self._bucket = bucket
         self._secret_key_secret_ref = _secret_key_secret_ref(stack_name)
         self._state_dir = state_dir
@@ -266,6 +276,8 @@ class DokployGiteaBackend:
             provisioner_ready, provisioner_note = self._ensure_provisioner()
             if provisioner_note is not None:
                 notes.append(provisioner_note)
+            if provisioner_ready:
+                notes.extend(self._migrate_identity_visibility())
         return (
             GiteaBootstrapState(
                 initialized=initialized,
@@ -321,25 +333,38 @@ class DokployGiteaBackend:
 
     # -- provisioner account -----------------------------------------------------
 
-    def _provisioner_password(self) -> str:
-        material = (
-            f"dokploy-wizard:gitea-provisioner:{self._stack_name}:{self._secret_key_secret_ref}"
-        )
-        return sha256(material.encode("utf-8")).hexdigest()
+    def _provisioner_login(self) -> str:
+        # The deployer's Gitea login, derived silently from the admin email's
+        # local part (no new env key) — the same derivation the Coder
+        # first-user lane and the template's admin-login bake use. Their
+        # Gitea password is the stack admin password: one credential, every
+        # surface.
+        return username_from_email(self._admin_email or "admin@example.com")
 
     def _ensure_provisioner(self) -> tuple[bool, str | None]:
-        """Seed (or verify) the wizard admin account and its API token.
+        """Seed (or verify) the deployer's admin account and its API token.
 
-        The account is created through the in-container CLI because an
-        install-locked Gitea exposes no signup path; the token is minted
-        through the API over the loopback edge with basic auth, then
-        re-verified on every later pass from the state document.
+        The wizard runs no bot account anymore: the person who installed the
+        stack IS the provisioner. The account is created through the
+        in-container CLI (an install-locked Gitea exposes no signup path),
+        its password is pinned to the stack admin password on every pass,
+        and the token is minted through the API over the loopback edge with
+        basic auth, then re-verified on every later pass from the state
+        document. A `dokploy-wizard` leftover from the previous generation is
+        deleted once its replacement proves alive.
         """
-        email = f"{_PROVISIONER_USERNAME}@{self._hostname}"
-        password = self._provisioner_password()
+        login = self._provisioner_login()
+        email = self._admin_email
+        password = self._admin_password
         existing = load_gitea_provisioner(self._state_dir)
-        if existing is not None and self._api_token_valid(existing.token):
-            return True, None
+        if (
+            existing is not None
+            and existing.username == login
+            and self._api_token_valid(existing.token, username=login)
+        ):
+            self._pin_provisioner_password(login=login, password=password)
+            retire_note = self._retire_legacy_provisioner(login=login, token=existing.token)
+            return True, retire_note
 
         create = _gitea_cli_exec(
             self._compose_name,
@@ -348,7 +373,7 @@ class DokployGiteaBackend:
                 "user",
                 "create",
                 "--username",
-                _PROVISIONER_USERNAME,
+                login,
                 "--email",
                 email,
                 "--password",
@@ -359,60 +384,140 @@ class DokployGiteaBackend:
         )
         if not create.ok and not _cli_reports_existing(create.output):
             return False, f"WARNING: Gitea provisioner account could not be created: {create.output[:200]}"
+        self._pin_provisioner_password(login=login, password=password)
 
-        token = self._mint_provisioner_token(email=email, password=password)
+        token = self._mint_provisioner_token(login=login, password=password)
         if token is None:
             return False, "WARNING: Gitea provisioner API token could not be minted."
+        retire_note = self._retire_legacy_provisioner(login=login, token=token)
         write_gitea_provisioner(
             self._state_dir,
             GiteaProvisionerState(
                 format_version=1,
-                username=_PROVISIONER_USERNAME,
+                username=login,
                 email=email,
                 password=password,
                 token=token,
             ),
         )
-        if existing is None:
-            return True, f"Seeded Gitea provisioner account '{_PROVISIONER_USERNAME}' with an API token."
-        return True, "Re-minted the Gitea provisioner API token after verifying the account."
+        if existing is None or existing.username != login:
+            note = f"Seeded Gitea admin account '{login}' with an API token."
+        else:
+            note = "Re-minted the Gitea provisioner API token after verifying the account."
+        if retire_note:
+            note = f"{note} {retire_note}"
+        return True, note
 
-    def _mint_provisioner_token(self, *, email: str, password: str) -> str | None:
-        login = f"{_PROVISIONER_USERNAME}:{password}"
+    def _pin_provisioner_password(self, *, login: str, password: str) -> None:
+        # Keep the account password equal to the stack password so the boot
+        # lane's basic-auth (one credential across surfaces) survives a
+        # rotation; the FileX lane PATCHes adopted accounts the same way on
+        # every boot.
+        _gitea_cli_exec(
+            self._compose_name,
+            [
+                "admin",
+                "user",
+                "change-password",
+                "--username",
+                login,
+                "--password",
+                password,
+            ],
+        )
+
+    def _retire_legacy_provisioner(self, *, login: str, token: str) -> str | None:
+        """Delete the previous generation's service account, once.
+
+        The replacement token is the authority: the old row is looked up
+        through the admin API (anything but 200 means already gone) and
+        deleted through the CLI. An account that still owns repositories
+        survives the pass with a visible warning rather than a surprise
+        purge — the wizard never deletes what a human may have moved there.
+        """
+        if login == _LEGACY_PROVISIONER_USERNAME:
+            return None
+        status, _payload = self._gitea_api(
+            "GET",
+            f"/api/v1/admin/users/{_LEGACY_PROVISIONER_USERNAME}",
+            token=token,
+        )
+        if status != 200:
+            return None
+        delete = _gitea_cli_exec(
+            self._compose_name,
+            ["admin", "user", "delete", "--username", _LEGACY_PROVISIONER_USERNAME],
+        )
+        if delete.ok:
+            return (
+                f"Deleted the legacy Gitea service account "
+                f"'{_LEGACY_PROVISIONER_USERNAME}' (its token now rides '{login}')."
+            )
+        return (
+            f"WARNING: legacy Gitea account '{_LEGACY_PROVISIONER_USERNAME}' could not be "
+            f"deleted ({delete.output[:120]}); it likely still owns repositories."
+        )
+
+    def _mint_provisioner_token(self, *, login: str, password: str) -> str | None:
+        basic = f"{login}:{password}"
+        body = {"name": _PROVISIONER_TOKEN_NAME, "scopes": [_PROVISIONER_TOKEN_SCOPES]}
         status, payload = self._gitea_api(
-            "POST",
-            f"/api/v1/users/{_PROVISIONER_USERNAME}/tokens",
-            basic=login,
-            body={
-                "name": _PROVISIONER_TOKEN_NAME,
-                "scopes": [_PROVISIONER_TOKEN_SCOPES],
-            },
+            "POST", f"/api/v1/users/{login}/tokens", basic=basic, body=body
         )
         if status == 201 and isinstance(payload, dict) and payload.get("sha1"):
             return str(payload["sha1"])
         if status == 409:
             # A stale token row from a lost state document: drop and re-mint.
             self._gitea_api(
-                "DELETE",
-                f"/api/v1/users/{_PROVISIONER_USERNAME}/tokens/{_PROVISIONER_TOKEN_NAME}",
-                basic=login,
+                "DELETE", f"/api/v1/users/{login}/tokens/{_PROVISIONER_TOKEN_NAME}", basic=basic
             )
             status, payload = self._gitea_api(
-                "POST",
-                f"/api/v1/users/{_PROVISIONER_USERNAME}/tokens",
-                basic=login,
-                body={
-                    "name": _PROVISIONER_TOKEN_NAME,
-                    "scopes": [_PROVISIONER_TOKEN_SCOPES],
-                },
+                "POST", f"/api/v1/users/{login}/tokens", basic=basic, body=body
             )
             if status == 201 and isinstance(payload, dict) and payload.get("sha1"):
                 return str(payload["sha1"])
         return None
 
-    def _api_token_valid(self, token: str) -> bool:
+    def _api_token_valid(self, token: str, *, username: str) -> bool:
         status, payload = self._gitea_api("GET", "/api/v1/user", token=token)
-        return status == 200 and isinstance(payload, dict) and payload.get("username") == _PROVISIONER_USERNAME
+        return status == 200 and isinstance(payload, dict) and payload.get("username") == username
+
+    def _migrate_identity_visibility(self) -> list[str]:
+        """Flip wizard-owned accounts to private visibility (privacy default).
+
+        Accounts sprung before the privacy default shipped stand public on
+        the box. The same ledger that authorizes the enable/disable sync
+        authorizes this flip, plus the deployer's own seeded account (the
+        pack created it, so it needs no ledger claim). Only rows that are
+        not already private are PATCHed; the route and its 200-on-visibility
+        behavior are measured against the deployed Gitea 28.4.
+        """
+        from dokploy_wizard.state.store import load_gitea_identities
+
+        existing = load_gitea_provisioner(self._state_dir)
+        if existing is None:
+            return []
+        stored = load_gitea_identities(self._state_dir)
+        targets = {login.lower() for login in (stored.usernames if stored else ())}
+        targets.add(existing.username.lower())
+        notes: list[str] = []
+        for login in sorted(targets):
+            status, row = self._gitea_api(
+                "GET", f"/api/v1/admin/users/{parse.quote(login, safe='')}", token=existing.token
+            )
+            if status != 200 or not isinstance(row, dict):
+                continue
+            if str(row.get("visibility") or "").lower() == "private":
+                continue
+            status, _body = self._gitea_api(
+                "PATCH",
+                f"/api/v1/admin/users/{parse.quote(login, safe='')}",
+                token=existing.token,
+                body={"visibility": "private"},
+            )
+            if status == 200:
+                notes.append(f"Set Gitea account '{login}' visibility to private (privacy default).")
+        return notes
 
     def _gitea_api(
         self,
@@ -832,6 +937,16 @@ def _render_compose_file(
         f"      {secret_key_env}: \"{_required_placeholder(secret_key_env)}\"\n"
         f"      GITEA__security__SECRET_KEY: \"{_required_placeholder(secret_key_env)}\"\n"
         "      GITEA__service__DISABLE_REGISTRATION: 'true'\n"
+        # Private by default, opt-in public: new users see only their own
+        # visibility options (nothing is force-published), freshly created
+        # repos start private, and the explore page is closed to anonymous
+        # web. A repo or profile the owner makes public stays public — the
+        # point is that nothing leaks before the owner chooses, not that the
+        # box is hermetic. (Identities arrive only through Coder's roster,
+        # so registration has stayed off since the pack began.)
+        "      GITEA__options__DEFAULT_USER_VISIBILITY: private\n"
+        "      GITEA__repository__DEFAULT_PRIVATE: 'true'\n"
+        "      GITEA__explore__DISABLE_ANONYMOUS_ACCESS: 'true'\n"
         "      GITEA__repository__DEFAULT_BRANCH: main\n"
         # Storage redirection, modern (1.20+) schema measured live on the box:
         # the consumer sections name the driver and their bucket; the shared

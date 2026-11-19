@@ -342,6 +342,12 @@ def test_render_gitea_compose_locks_install_routes_storage_and_keeps_ssh_interna
     assert 'GITEA__server__ROOT_URL: "https://gitea.example.com/"' in compose
     assert 'GITEA__security__INSTALL_LOCK: \'true\'' in compose
     assert 'GITEA__service__DISABLE_REGISTRATION: \'true\'' in compose
+    # Private by default (opt-in public stays possible): user visibility
+    # defaults to private, new repos start private, and the explore page is
+    # closed to anonymous visitors.
+    assert 'GITEA__options__DEFAULT_USER_VISIBILITY: private' in compose
+    assert 'GITEA__repository__DEFAULT_PRIVATE: \'true\'' in compose
+    assert 'GITEA__explore__DISABLE_ANONYMOUS_ACCESS: \'true\'' in compose
     assert 'GITEA__server__START_SSH_SERVER: \'true\'' in compose
     assert 'GITEA__server__SSH_PORT: \'2222\'' in compose
     assert 'GITEA__server__LFS_START_SERVER: \'true\'' in compose
@@ -417,12 +423,18 @@ def test_render_gitea_env_specs_carry_real_secrets_and_hash_anchor() -> None:
 # -- Dokploy backend: bucket provisioning ---------------------------------------
 
 
-def _gitea_backend(tmp_path: Path, s3: object, client: object | None = None) -> DokployGiteaBackend:
+def _gitea_backend(
+    tmp_path: Path, s3: object, client: object | None = None
+) -> DokployGiteaBackend:
     return DokployGiteaBackend(
         api_url="https://127.0.0.1:3000",
         api_key="key",
         stack_name="wizard-stack",
         hostname="gitea.example.com",
+        # The provisioner is the deployer: the account login derives from
+        # this email's local part and its password is the stack password.
+        admin_email="clayton@example.com",
+        admin_password="StackPw!23",
         postgres_service_name="wizard-stack-shared-postgres",
         postgres=_gitea_desired_state().shared_core.allocations[0].postgres,
         s3_endpoint_url="http://wizard-stack-seaweedfs:8333",
@@ -604,9 +616,9 @@ def test_provisioner_bootstraps_account_token_and_state(
     http = _ScriptedGiteaHttp()
     http.queue(
         "POST",
-        "/api/v1/users/dokploy-wizard/tokens",
+        "/api/v1/users/clayton/tokens",
         201,
-        {"name": "dokploy-wizard-provisioner", "sha1": "prov-token-1"},
+        {"name": "wizard-provisioner", "sha1": "prov-token-1"},
     )
     monkeypatch.setattr(gitea_module.urlrequest, "urlopen", http)
 
@@ -615,21 +627,29 @@ def test_provisioner_bootstraps_account_token_and_state(
     )
     assert state.bucket_ready is True
     assert state.provisioner_ready is True
-    assert any("Seeded Gitea provisioner" in note for note in notes)
+    assert any("Seeded Gitea admin account 'clayton'" in note for note in notes)
 
     args = _provisioner_args(cli)
     assert args[:3] == ["admin", "user", "create"]
     assert "--admin" in args and "--must-change-password=false" in args
+    username_index = args.index("--username") + 1
+    assert args[username_index] == "clayton"
     email_index = args.index("--email") + 1
-    assert args[email_index] == "dokploy-wizard@gitea.example.com"
+    assert args[email_index] == "clayton@example.com"
+    # The account password is the stack password, and the CLI pins it on
+    # every pass (one credential across surfaces survives a rotation).
+    pin = next(call for call in cli.calls if call[:3] == ["admin", "user", "change-password"])
+    assert pin[pin.index("--password") + 1] == "StackPw!23"
 
     stored = load_gitea_provisioner(tmp_path)
     assert stored is not None
-    assert stored.username == "dokploy-wizard"
+    assert stored.username == "clayton"
+    assert stored.email == "clayton@example.com"
+    assert stored.password == "StackPw!23"
     assert stored.token == "prov-token-1"
     mint = next(req for req in http.requests if req.get_method() == "POST")
     body = json.loads(mint.data.decode())
-    assert body["name"] == "dokploy-wizard-provisioner"
+    assert body["name"] == "wizard-provisioner"
     # Gitea 28's API accepts only the bare "all" grant; category:access forms
     # are rejected with 400 (measured live).
     assert body["scopes"] == ["all"]
@@ -637,7 +657,7 @@ def test_provisioner_bootstraps_account_token_and_state(
 
     auth = mint.get_header("Authorization")
     assert auth.startswith("Basic ")
-    assert base64.b64decode(auth.split(" ", 1)[1]).decode().startswith("dokploy-wizard:")
+    assert base64.b64decode(auth.split(" ", 1)[1]).decode().startswith("clayton:")
     assert (tmp_path / "gitea-provisioner.json").stat().st_mode & 0o777 == 0o600
 
 
@@ -648,27 +668,34 @@ def test_provisioner_alive_token_short_circuits_everything(
         tmp_path,
         GiteaProvisionerState(
             format_version=1,
-            username="dokploy-wizard",
-            email="dokploy-wizard@gitea.example.com",
-            password="pw",
+            username="clayton",
+            email="clayton@example.com",
+            password="StackPw!23",
             token="alive-token",
         ),
     )
     backend = _gitea_backend(tmp_path, ScriptedS3(head_script=[200]))
     monkeypatch.setattr(gitea_module, "_wait_for_local_https_health", lambda *a, **k: True)
 
-    def no_cli(service_name: str, args: list[str]) -> _CliResult:
-        raise AssertionError("CLI must not run while the stored token works")
-
-    monkeypatch.setattr(gitea_module, "_gitea_cli_exec", no_cli)
+    cli = ScriptedCli([_CliResult(ok=True, output="password updated")])
+    monkeypatch.setattr(gitea_module, "_gitea_cli_exec", cli)
     http = _ScriptedGiteaHttp()
-    http.queue("GET", "/api/v1/user", 200, {"username": "dokploy-wizard"})
+    http.queue("GET", "/api/v1/user", 200, {"username": "clayton"})
+    # The deployer's own row is visible-public (seeded before the privacy
+    # default): the visibility migration flips it and says so once.
+    http.queue("GET", "/api/v1/admin/users/clayton", 200, {"username": "clayton", "visibility": "public"})
+    http.queue("PATCH", "/api/v1/admin/users/clayton", 200, {"username": "clayton", "visibility": "private"})
     monkeypatch.setattr(gitea_module.urlrequest, "urlopen", http)
     state, notes = backend.ensure_application_ready(
         secret_key_secret_ref="wizard-stack-gitea-secret-key"
     )
     assert state.provisioner_ready is True
     assert load_gitea_provisioner(tmp_path).token == "alive-token"
+    # No re-mint, no CLI create — but the password pin runs and the legacy
+    # account (absent from the script: 404) is not mourned.
+    assert not any(call[:3] == ["admin", "user", "create"] for call in cli.calls)
+    assert any(call[:3] == ["admin", "user", "change-password"] for call in cli.calls)
+    assert "Set Gitea account 'clayton' visibility to private (privacy default)." in notes
 
 
 def test_provisioner_rotates_dead_token_and_tolerates_existing_account(
@@ -678,25 +705,25 @@ def test_provisioner_rotates_dead_token_and_tolerates_existing_account(
         tmp_path,
         GiteaProvisionerState(
             format_version=1,
-            username="dokploy-wizard",
-            email="dokploy-wizard@gitea.example.com",
-            password="pw",
+            username="clayton",
+            email="clayton@example.com",
+            password="StackPw!23",
             token="dead-token",
         ),
     )
     backend = _gitea_backend(tmp_path, ScriptedS3(head_script=[200]))
     monkeypatch.setattr(gitea_module, "_wait_for_local_https_health", lambda *a, **k: True)
     cli = ScriptedCli(
-        [_CliResult(ok=False, output="Error: user 'dokploy-wizard' name is already taken")]
+        [_CliResult(ok=False, output="Error: user 'clayton' name is already taken")]
     )
     monkeypatch.setattr(gitea_module, "_gitea_cli_exec", cli)
     http = _ScriptedGiteaHttp()
     http.queue("GET", "/api/v1/user", 401, {"message": "invalid token"})
-    http.queue("POST", "/api/v1/users/dokploy-wizard/tokens", 409, {})
-    http.queue("DELETE", "/api/v1/users/dokploy-wizard/tokens/dokploy-wizard-provisioner", 204, {})
+    http.queue("POST", "/api/v1/users/clayton/tokens", 409, {})
+    http.queue("DELETE", "/api/v1/users/clayton/tokens/wizard-provisioner", 204, {})
     http.queue(
         "POST",
-        "/api/v1/users/dokploy-wizard/tokens",
+        "/api/v1/users/clayton/tokens",
         201,
         {"sha1": "fresh-token"},
     )
