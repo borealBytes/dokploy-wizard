@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib import error, parse, request
@@ -70,6 +70,15 @@ def _matches_generated_key(record: LiteLLMVirtualKeyRecord, generated_key: str) 
 # the GROUP rather than enumerating models. Per-person model sets later are
 # one group swap on the person, not a key re-mint.
 WORKSPACE_KEY_ACCESS_GROUP = "all-access"
+# The gateway's UI roles for roster identities (measured on v1.83.14):
+# `proxy_admin` is the admin spelling the login JWT carries; non-admin people
+# are `internal_user` — spend/log views scoped, key management on their own
+# surface. The per-user `permissions` object is deliberately NOT sent: the
+# deployed storage adapter rejects it at user upsert (400 "Could not find
+# field at upsertOneLiteLLM_UserTable.create.permissions"), so the role is
+# the whole (and only API-settable) RBAC story in this build.
+LITELLM_USER_ROLE_ADMIN = "proxy_admin"
+LITELLM_USER_ROLE_INTERNAL = "internal_user"
 # The grant a workspace-minted key (template MINTPY lane) carries when its
 # owner has model access: the access group itself. The template reads the
 # grant from the wizard's replacement map (single source) — test_coder_pack
@@ -122,6 +131,23 @@ def build_litellm_workspace_key_policy(
         ),
         admin_login=username_from_email(admin_email),
     )
+
+
+@dataclass(frozen=True)
+class LiteLLMUserRecord:
+    user_id: str
+    user_email: str
+    user_role: str
+
+
+@dataclass(frozen=True)
+class LiteLLMUserAssignment:
+    """One roster person's gateway identity: login, real email, role, password."""
+
+    user_id: str
+    user_email: str
+    user_role: str
+    password: str
 
 
 class LiteLLMAdminApi(Protocol):
@@ -181,6 +207,12 @@ class LiteLLMAdminApi(Protocol):
     def create_access_group(self, *, name: str, model_names: tuple[str, ...]) -> None: ...
 
     def update_access_group(self, *, name: str, model_names: tuple[str, ...]) -> None: ...
+
+    def list_users(self) -> tuple[LiteLLMUserRecord, ...]: ...
+
+    def upsert_user(
+        self, *, user_id: str, user_email: str, user_role: str, password: str
+    ) -> None: ...
 
     def delete_key(self, *, key_alias: str) -> None: ...
     def delete_team(self, *, team_id: str) -> None: ...
@@ -417,6 +449,45 @@ class LiteLLMAdminClient:
             {"model_names": list(model_names)},
         )
 
+    def list_users(self) -> tuple[LiteLLMUserRecord, ...]:
+        # Measured: /user/list answers {"users": [...]} with the raw user rows
+        # (user_id, user_email, user_role). No pagination flags were needed at
+        # box scale; the parse stays defensive on shape, not on volume.
+        payload = self._request_json("GET", "/user/list")
+        rows = payload.get("users") if isinstance(payload, dict) else payload
+        if not isinstance(rows, list):
+            raise LiteLLMAdminError("LiteLLM user.list response must carry a users list.")
+        records: list[LiteLLMUserRecord] = []
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("user_id"):
+                continue
+            records.append(
+                LiteLLMUserRecord(
+                    user_id=str(row["user_id"]),
+                    user_email=str(row.get("user_email") or ""),
+                    user_role=str(row.get("user_role") or ""),
+                )
+            )
+        return tuple(records)
+
+    def upsert_user(
+        self, *, user_id: str, user_email: str, user_role: str, password: str
+    ) -> None:
+        # /user/update is THE identity upsert (measured): an unknown user_id
+        # creates the row without auto-minting a key, and a password set here
+        # is what makes /v2/login work (the auto-mint key of /user/new is a
+        # side effect this route does not have).
+        self._request_json(
+            "POST",
+            "/user/update",
+            {
+                "user_id": user_id,
+                "user_email": user_email,
+                "user_role": user_role,
+                "password": password,
+            },
+        )
+
     def _request_json(
         self,
         method: str,
@@ -628,6 +699,38 @@ class LiteLLMGatewayManager:
         if current is not None and tuple(sorted(current)) != expected:
             self._api.update_access_group(name=group, model_names=expected)
         return expected
+
+    def ensure_user_identities(self, assignments: Sequence[LiteLLMUserAssignment]) -> list[str]:
+        """Stand every roster person up as a gateway user, before first boot.
+
+        One ID across surfaces means the LiteLLM row exists the moment the
+        Coder roster gains a person: workspace keys can attribute to a real
+        user immediately, and the person can sign into the gateway UI (the
+        password rides with the create; /v2/login by their email). Existing
+        rows converge on the roster's email and role; the password is only
+        re-synced when something else drifts, so a person who rotated their
+        gateway password in the UI keeps it on otherwise-quiet passes. The
+        deployment's admin login alone rides the admin role.
+        """
+        existing = {record.user_id: record for record in self._api.list_users()}
+        notes: list[str] = []
+        for item in sorted(assignments, key=lambda assignment: assignment.user_id):
+            current = existing.get(item.user_id)
+            if (
+                current is not None
+                and current.user_email == item.user_email
+                and current.user_role == item.user_role
+            ):
+                continue
+            self._api.upsert_user(
+                user_id=item.user_id,
+                user_email=item.user_email,
+                user_role=item.user_role,
+                password=item.password,
+            )
+            verb = "Updated" if current is not None else "Created"
+            notes.append(f"{verb} LiteLLM user '{item.user_id}' ({item.user_role}).")
+        return notes
 
     def _apply_workspace_key_policy(
         self,

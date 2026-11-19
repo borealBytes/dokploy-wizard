@@ -17,6 +17,8 @@ from dokploy_wizard.litellm.admin import (
     LiteLLMAdminError,
     LiteLLMGatewayManager,
     LiteLLMTeamRecord,
+    LiteLLMUserAssignment,
+    LiteLLMUserRecord,
     LiteLLMVirtualKeyRecord,
     build_litellm_workspace_key_policy,
 )
@@ -1250,6 +1252,86 @@ def test_workspace_access_group_inert_until_models_register() -> None:
     assert _group_manager(api).ensure_workspace_access_group() == ()
     assert api.created_groups == []
     assert api.updated_groups == []
+
+
+class UserRecordingLiteLLMApi(FakeLiteLLMAdminApi):
+    def __init__(self, *, users: tuple[LiteLLMUserRecord, ...] = ()) -> None:
+        super().__init__()
+        self._users = {user.user_id: user for user in users}
+        self.upserted_users: list[LiteLLMUserRecord] = []
+        self.upserted_passwords: dict[str, str] = {}
+
+    def list_users(self) -> tuple[LiteLLMUserRecord, ...]:
+        return tuple(self._users.values())
+
+    def upsert_user(
+        self, *, user_id: str, user_email: str, user_role: str, password: str
+    ) -> None:
+        record = LiteLLMUserRecord(
+            user_id=user_id, user_email=user_email, user_role=user_role
+        )
+        self._users[user_id] = record
+        self.upserted_users.append(record)
+        self.upserted_passwords[user_id] = password
+
+
+def _assignment(
+    user_id: str, email: str, role: str, password: str = "StackPw123"
+) -> LiteLLMUserAssignment:
+    return LiteLLMUserAssignment(
+        user_id=user_id, user_email=email, user_role=role, password=password
+    )
+
+
+def test_ensure_user_identities_creates_missing_rows_with_password() -> None:
+    api = UserRecordingLiteLLMApi()
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    notes = manager.ensure_user_identities(
+        (
+            _assignment("bob", "bob@example.com", "internal_user"),
+            _assignment("clayton", "clayton@example.com", "proxy_admin"),
+        )
+    )
+
+    assert sorted(notes) == [
+        "Created LiteLLM user 'bob' (internal_user).",
+        "Created LiteLLM user 'clayton' (proxy_admin).",
+    ]
+    assert {record.user_id for record in api.upserted_users} == {"bob", "clayton"}
+    assert set(api.upserted_passwords.values()) == {"StackPw123"}
+
+
+def test_ensure_user_identities_converges_drift_and_spares_quiet_rows() -> None:
+    """Email/role drift re-upserts; a converged row is not touched at all.
+
+    The row's password is not comparable from the list payload, so the lane
+    only re-syncs it when identity fields move or the row is new — a person
+    who rotated their gateway password in the UI keeps it on quiet passes.
+    """
+    api = UserRecordingLiteLLMApi(
+        users=(
+            LiteLLMUserRecord("old", "stale@old.test", "internal_user"),
+            LiteLLMUserRecord("fine", "fine@example.com", "internal_user"),
+            LiteLLMUserRecord("switch", "switch@example.com", "internal_user"),
+        )
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    notes = manager.ensure_user_identities(
+        (
+            _assignment("old", "old@example.com", "internal_user"),
+            _assignment("fine", "fine@example.com", "internal_user"),
+            _assignment("switch", "switch@example.com", "proxy_admin"),
+        )
+    )
+
+    assert notes == [
+        "Updated LiteLLM user 'old' (internal_user).",
+        "Updated LiteLLM user 'switch' (proxy_admin).",
+    ]
+    assert [record.user_id for record in api.upserted_users] == ["old", "switch"]
+    assert api.upserted_passwords.get("fine") is None
 
 
 def test_workspace_key_policy_sweep_is_inert_without_issuer_material() -> None:

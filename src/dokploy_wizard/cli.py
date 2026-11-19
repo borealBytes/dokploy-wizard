@@ -2537,6 +2537,14 @@ def _build_coder_backend(
         filex_provisioner=filex_provisioner,
         gitea_provisioner=gitea_provisioner,
         gitea_hostname=desired_state.hostnames.get("gitea") or "",
+        # One-ID lanes: the coder phase pre-stands roster people in FileX and
+        # the gateway itself. The loopback:4000 door is the same one the
+        # shared-core reconciler rides; master key comes from state.
+        filex_hostname=desired_state.hostnames.get("filex") or "",
+        litellm_admin_api=LiteLLMAdminClient(
+            api_url="http://127.0.0.1:4000",
+            master_key=litellm_generated_keys.master_key,
+        ),
         state_dir=state_dir,
         client=_build_dokploy_api_client(
             raw_env=raw_env,

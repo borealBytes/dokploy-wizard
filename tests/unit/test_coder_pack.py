@@ -853,6 +853,7 @@ def test_ensure_application_ready_reseeds_templates_for_healthy_existing_coder(
         or coder_module.DefaultWorkspaceOutcome(action="exists"),
     )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_coder_roster", lambda **kwargs: {})
     monkeypatch.setattr(
         coder_module,
         "_migrate_retired_template_workspaces",
@@ -1087,6 +1088,7 @@ def test_ensure_application_ready_waits_for_first_user_endpoint_on_fresh_apply(
         lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
     )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_coder_roster", lambda **kwargs: {})
     monkeypatch.setattr(
         coder_module,
         "_migrate_retired_template_workspaces",
@@ -1191,6 +1193,7 @@ def test_ensure_application_ready_is_idempotent_on_second_bootstrap_pass(
 
     monkeypatch.setattr(coder_module, "_create_default_workspace", fake_create_default_workspace)
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_coder_roster", lambda **kwargs: {})
     monkeypatch.setattr(
         coder_module,
         "_migrate_retired_template_workspaces",
@@ -2655,6 +2658,11 @@ def test_ensure_application_ready_runs_gitea_identity_sync_and_degrades_cleanly(
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
     monkeypatch.setattr(
         coder_module,
+        "_coder_roster",
+        lambda **kwargs: {"clayton": "clayton@example.com"},
+    )
+    monkeypatch.setattr(
+        coder_module,
         "_migrate_retired_template_workspaces",
         lambda **kwargs: (),
     )
@@ -2686,6 +2694,8 @@ def test_ensure_application_ready_runs_gitea_identity_sync_and_degrades_cleanly(
             "provisioner_token": "gt-token-9",
             "provisioner_username": "dokploy-wizard",
             "tracked": set(),
+            # The roster is read once per pass and handed to every surface.
+            "coder_users": {"clayton": "clayton@example.com"},
         }
     ]
     if sync_failure:
@@ -2699,6 +2709,149 @@ def test_ensure_application_ready_runs_gitea_identity_sync_and_degrades_cleanly(
         ledger = load_gitea_identities(tmp_path)
         assert ledger is not None
         assert ledger.usernames == ("clayton", "purged")
+
+
+def test_sync_filex_identities_pre_stands_free_logins_and_spares_owners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-flight mirrors the boot lane: email match adopts, any other
+    owner of the username is left alone, only free logins are created."""
+    calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def fake_request(*, hostname, method, path, token, body=None):  # noqa: ANN001, ANN003
+        calls.append((method, path, body))
+        if method == "GET":
+            return (
+                200,
+                {
+                    "users": [
+                        {"id": 1, "username": "person", "email": "Person@Example.com"},
+                        {"id": 2, "username": "bob", "email": "bob@manual.test"},
+                        {"id": 3, "username": "legacy", "email": "legacy@coder.wizard.local"},
+                    ]
+                },
+            )
+        return (201, {"id": 4})
+
+    monkeypatch.setattr(coder_module, "_filex_api_request", fake_request)
+
+    notes = coder_module._sync_filex_identities(
+        hostname="files.example.com",
+        provisioner_token="fx-token",
+        coder_users={
+            "person": "person@example.com",  # row already standing for the person
+            "bob": "bob@example.com",  # manual account owns the login
+            "legacy": "legacy@example.com",  # pre-fix twin row owns the login
+            "carol": "carol@example.com",  # free login: created
+        },
+        password="StackPw123",
+    )
+
+    assert notes == ["Created FileX account 'carol' (identity pre-flight)."]
+    creates = [call for call in calls if call[0] == "POST"]
+    assert creates == [
+        (
+            "POST",
+            "/api/admin/users",
+            {
+                "email": "carol@example.com",
+                "username": "carol",
+                "role": "user",
+                "password": "StackPw123",
+            },
+        )
+    ]
+
+
+def test_sync_filex_identities_raises_when_list_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        coder_module, "_filex_api_request", lambda **kwargs: (401, {"detail": "nope"})
+    )
+    with pytest.raises(coder_module.CoderError, match="HTTP 401"):
+        coder_module._sync_filex_identities(
+            hostname="files.example.com",
+            provisioner_token="fx-token",
+            coder_users={"bob": "bob@example.com"},
+            password="pw",
+        )
+
+
+def test_ensure_application_ready_fans_identity_sync_out_and_isolates_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One roster, three surfaces: a broken surface notes, the others run."""
+    backend = DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        state_dir=tmp_path,
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(
+        coder_module, "_coder_container_name", lambda service_name: "container"
+    )
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_copy_template_into_container", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
+    )
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(
+        coder_module,
+        "_migrate_retired_template_workspaces",
+        lambda **kwargs: (),
+    )
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_roster",
+        lambda **kwargs: {"clayton": "clayton@example.com"},
+    )
+
+    seen: list[str] = []
+
+    def gitea_lane(session_token, coder_users=None):  # noqa: ANN001, ANN003
+        seen.append("gitea")
+        return ["Gitea lane note."]
+
+    def filex_lane(coder_users):  # noqa: ANN001
+        seen.append("filex")
+        raise coder_module.CoderError("HTTP 503")
+
+    def litellm_lane(coder_users):  # noqa: ANN001
+        seen.append("litellm")
+        return ["Created LiteLLM user 'clayton' (proxy_admin)."]
+
+    monkeypatch.setattr(backend, "_sync_gitea_identities", gitea_lane)
+    monkeypatch.setattr(backend, "_sync_filex_identities", filex_lane)
+    monkeypatch.setattr(backend, "_sync_litellm_identities", litellm_lane)
+
+    notes = backend.ensure_application_ready()
+
+    assert seen == ["gitea", "filex", "litellm"]
+    assert "Gitea lane note." in notes
+    assert "Created LiteLLM user 'clayton' (proxy_admin)." in notes
+    assert any(note.startswith("Skipped FileX identity sync:") for note in notes)
 
 
 def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_credentials(
@@ -2800,6 +2953,7 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         lambda hostname: "openmergeme-workspace",
     )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_coder_roster", lambda **kwargs: {})
     monkeypatch.setattr(
         coder_module,
         "_migrate_retired_template_workspaces",
@@ -3063,6 +3217,7 @@ def test_workspace_issuer_key_flows_into_gateway_key_template_replacements(
         lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
     )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_coder_roster", lambda **kwargs: {})
     monkeypatch.setattr(
         coder_module,
         "_migrate_retired_template_workspaces",
@@ -3148,6 +3303,7 @@ def test_workspace_key_policy_replacements_bake_operator_grant(
         lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
     )
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_coder_roster", lambda **kwargs: {})
 
     backend.ensure_application_ready()
 
@@ -3415,6 +3571,7 @@ def test_ensure_application_ready_updates_workspace_on_verified_bootstrap_path(
     monkeypatch.setattr(coder_module, "_seed_template", lambda **kwargs: False)
     monkeypatch.setattr(coder_module, "_migrate_retired_template_workspaces", lambda **kwargs: ())
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_coder_roster", lambda **kwargs: {})
     monkeypatch.setattr(coder_module, "_default_workspace_name", lambda hostname: "examplecom-workspace")
     monkeypatch.setattr(
         backend, "_verify_current_compose_application", lambda: SimpleNamespace(passed=True)
@@ -3528,6 +3685,7 @@ def test_ensure_application_ready_adopts_legacy_workspaces_on_verified_path(
     monkeypatch.setattr(coder_module, "_seed_template", lambda **kwargs: False)
     monkeypatch.setattr(coder_module, "_migrate_retired_template_workspaces", lambda **kwargs: ())
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_coder_roster", lambda **kwargs: {})
     monkeypatch.setattr(coder_module, "_default_workspace_name", lambda hostname: "examplecom-workspace")
     monkeypatch.setattr(
         backend, "_verify_current_compose_application", lambda: SimpleNamespace(passed=True)
@@ -3605,6 +3763,7 @@ def test_ensure_application_ready_verified_path_survives_update_failure(
     monkeypatch.setattr(coder_module, "_seed_template", lambda **kwargs: False)
     monkeypatch.setattr(coder_module, "_migrate_retired_template_workspaces", lambda **kwargs: ())
     monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_coder_roster", lambda **kwargs: {})
     monkeypatch.setattr(coder_module, "_default_workspace_name", lambda hostname: "examplecom-workspace")
     monkeypatch.setattr(
         backend, "_verify_current_compose_application", lambda: SimpleNamespace(passed=True)

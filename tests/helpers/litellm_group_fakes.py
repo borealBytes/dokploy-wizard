@@ -12,6 +12,8 @@ override the methods with recording behavior instead.
 
 from __future__ import annotations
 
+from dokploy_wizard.litellm.admin import LiteLLMUserRecord
+
 
 class LiteLLMGroupApiStub:
     def list_model_names(self) -> tuple[str, ...]:
@@ -27,4 +29,12 @@ class LiteLLMGroupApiStub:
         return None
 
     def update_access_group(self, *, name: str, model_names: tuple[str, ...]) -> None:
+        return None
+
+    def list_users(self) -> tuple[LiteLLMUserRecord, ...]:
+        return ()
+
+    def upsert_user(
+        self, *, user_id: str, user_email: str, user_role: str, password: str
+    ) -> None:
         return None

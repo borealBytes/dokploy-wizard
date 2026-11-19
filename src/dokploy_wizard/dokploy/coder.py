@@ -42,8 +42,13 @@ from dokploy_wizard.dokploy.container_resolution import resolve_compose_containe
 from dokploy_wizard.dokploy.env_spec import DokployEnvSpec, DokployEnvVar, RenderedCompose
 from dokploy_wizard.identity import display_name_from_email, username_from_email
 from dokploy_wizard.litellm.admin import (
+    LITELLM_USER_ROLE_ADMIN,
+    LITELLM_USER_ROLE_INTERNAL,
     WORKSPACE_KEY_DENY_MODEL,
     WORKSPACE_KEY_GRANTED_MODELS,
+    LiteLLMAdminApi,
+    LiteLLMGatewayManager,
+    LiteLLMUserAssignment,
 )
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
 from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
@@ -125,6 +130,8 @@ class DokployCoderBackend:
         filex_provisioner: FilexProvisionerState | None = None,
         gitea_provisioner: GiteaProvisionerState | None = None,
         gitea_hostname: str = "",
+        filex_hostname: str = "",
+        litellm_admin_api: LiteLLMAdminApi | None = None,
         state_dir: Path = Path(".dokploy-wizard-state"),
         client: DokployCoderApi | None = None,
     ) -> None:
@@ -164,6 +171,12 @@ class DokployCoderBackend:
         # can run the identity sync (deleted-user disable / return re-enable).
         self._gitea_provisioner = gitea_provisioner
         self._gitea_hostname = gitea_hostname
+        # One-ID lanes: the coder phase pre-stands each roster person's FileX
+        # account and gateway user, so identities exist before first boot.
+        # Empty hostname / absent api (packs off, no key material) makes each
+        # lane quietly inert.
+        self._filex_hostname = filex_hostname
+        self._litellm_admin_api = litellm_admin_api
         self._state_dir = state_dir
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
@@ -221,7 +234,9 @@ class DokployCoderBackend:
             return ""
         return f"http://{self._stack_name}-gitea:{_GITEA_INTERNAL_PORT}"
 
-    def _sync_gitea_identities(self, session_token: str) -> list[str]:
+    def _sync_gitea_identities(
+        self, session_token: str, coder_users: Mapping[str, str] | None = None
+    ) -> list[str]:
         """Align Gitea wizard-sprung accounts with the Coder user roster.
 
         Ownership lives in the state ledger (`gitea-identities.json`): Gitea's
@@ -249,6 +264,7 @@ class DokployCoderBackend:
             provisioner_token=provisioner.token,
             provisioner_username=provisioner.username,
             tracked=tracked,
+            coder_users=coder_users,
         )
         if updated != tracked:
             write_gitea_identities(
@@ -259,6 +275,50 @@ class DokployCoderBackend:
                 ),
             )
         return notes
+
+    def _sync_filex_identities(self, coder_users: Mapping[str, str]) -> list[str]:
+        """Pre-stand each roster person's FileX account (one-ID plan).
+
+        The boot lane keeps its adopt-or-create rules untouched; this pass
+        only removes the surprise of a first boot with no account at all.
+        Inert when the pack is off (no provisioner document, no hostname).
+        """
+        provisioner = self._filex_provisioner_state()
+        if provisioner is None or not self._filex_hostname:
+            return []
+        return _sync_filex_identities(
+            hostname=self._filex_hostname,
+            provisioner_token=provisioner.token,
+            coder_users=coder_users,
+            password=self._admin_password,
+        )
+
+    def _sync_litellm_identities(self, coder_users: Mapping[str, str]) -> list[str]:
+        """Upsert each roster person as a gateway user (one-ID plan).
+
+        Every login gets `user_id=<login>`, the person's real email, the
+        stack password, and `internal_user` — the deployer's own login alone
+        rides `proxy_admin`. Workspace keys can attribute to the row from
+        the first mint because the row predates the boot.
+        """
+        if self._litellm_admin_api is None or not coder_users:
+            return []
+        admin_login = username_from_email(self._admin_email).lower()
+        assignments = tuple(
+            LiteLLMUserAssignment(
+                user_id=login,
+                user_email=email,
+                user_role=(
+                    LITELLM_USER_ROLE_ADMIN
+                    if login == admin_login
+                    else LITELLM_USER_ROLE_INTERNAL
+                ),
+                password=self._admin_password,
+            )
+            for login, email in sorted(coder_users.items())
+        )
+        manager = LiteLLMGatewayManager(api=self._litellm_admin_api, sleep_fn=lambda _: None)
+        return manager.ensure_user_identities(assignments)
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "service")
@@ -515,12 +575,29 @@ class DokployCoderBackend:
             notes.append(note)
             retired_templates = ()
         notes.extend(f"Retired removed Coder template '{name}'." for name in retired_templates)
+        # One-ID identity sync: one roster read feeds all three surfaces, and
+        # each surface fails alone (the doctrine the Gitea lane established —
+        # identity convenience must never take a coder pass down). An empty
+        # roster (unreadable users API) skips every lane with one honest note.
+        roster: dict[str, str] = {}
         try:
-            notes.extend(self._sync_gitea_identities(session_token))
-        except Exception as exc:  # noqa: BLE001 - identity sync must never take the pass down
-            note = f"Skipped Gitea identity sync: {_safe_progress_reason(str(exc))}"
+            roster = _coder_roster(coder_hostname=self._hostname, session_token=session_token)
+        except Exception as exc:  # noqa: BLE001 - see above
+            note = f"Skipped identity sync: Coder roster unreadable ({_safe_progress_reason(str(exc))})"
             _emit_coder_progress(note)
             notes.append(note)
+        if roster:
+            for label, lane in (
+                ("Gitea", lambda: self._sync_gitea_identities(session_token, coder_users=roster)),
+                ("FileX", lambda: self._sync_filex_identities(roster)),
+                ("LiteLLM", lambda: self._sync_litellm_identities(roster)),
+            ):
+                try:
+                    notes.extend(lane())
+                except Exception as exc:  # noqa: BLE001 - see above
+                    note = f"Skipped {label} identity sync: {_safe_progress_reason(str(exc))}"
+                    _emit_coder_progress(note)
+                    notes.append(note)
         workspace_name = _default_workspace_name(self._hostname)
         # The adopt-or-create lane rides every coder pass, healthy included: on
         # a box upgraded from a pre-fix wizard the compose application verifies
@@ -1261,6 +1338,126 @@ def _gitea_admin_user_rows(*, hostname: str, token: str) -> list[dict[str, objec
     return rows
 
 
+def _coder_roster(*, coder_hostname: str, session_token: str) -> dict[str, str]:
+    """Current (non-deleted) Coder users as ``login -> real email``.
+
+    Deleted rows carry status ``deleted`` on the list (measured, v2.39.4) and
+    every identity surface treats them as absent; disable-not-delete then
+    lives on each surface's own claim mechanism.
+    """
+    users = _coder_request(
+        hostname=coder_hostname,
+        method="GET",
+        path="/api/v2/users",
+        session_token=session_token,
+    )
+    rows = users.get("users")
+    roster: dict[str, str] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or str(row.get("status") or "") == "deleted":
+            continue
+        login = str(row.get("username") or "").lower()
+        email = str(row.get("email") or "").lower()
+        if login and email:
+            roster[login] = email
+    return roster
+
+
+# The pre-email-fix lane value (see FILEXPROV): an account row riding this
+# email is the lane's own legacy twin, not a manual account — the lane's
+# rules own it, the identity pre-flight never touches it.
+_FILEX_LEGACY_EMAIL_SUFFIX = "@coder.wizard.local"
+
+
+def _filex_api_request(
+    *,
+    hostname: str,
+    method: str,
+    path: str,
+    token: str,
+    body: dict[str, object] | None = None,
+) -> tuple[int | None, object]:
+    """One FileX API call with the provisioner token through the loopback edge.
+
+    Same door the FileX pack itself uses (UFW blocks host->overlay; the
+    HTTPS-only edge answers on loopback with the pack hostname as Host).
+    """
+    headers = {"Host": hostname, "Accept": "application/json", "Authorization": f"Bearer {token}"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urlrequest.Request(f"https://127.0.0.1{path}", data=data, method=method, headers=headers)
+    try:
+        context = ssl._create_unverified_context()
+        opener = urlrequest.build_opener(urlrequest.HTTPSHandler(context=context))
+        with opener.open(req, timeout=20) as response:
+            raw = response.read().decode("utf-8", "ignore")
+            return response.status, (json.loads(raw) if raw else None)
+    except urlerror.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read().decode("utf-8", "ignore") or "null")
+        except Exception:
+            return exc.code, None
+    except (urlerror.URLError, TimeoutError, OSError):
+        return None, None
+
+
+def _sync_filex_identities(
+    *,
+    hostname: str,
+    provisioner_token: str,
+    coder_users: Mapping[str, str],
+    password: str,
+) -> list[str]:
+    """Pre-stand each roster person's FileX account (the one-ID plan).
+
+    The lookup mirrors the boot lane exactly — find the person's row by their
+    real email; a username owned by any other email is a manual account (or
+    a legacy twin) and keeps its own secret and meaning; only a fully free
+    login gets created, with the stack password the lane would have used. A
+    person whose account already stands changes nothing here, so the pre-flight
+    and the boot lane converge on the same row and never twin.
+    """
+    status, users = _filex_api_request(
+        hostname=hostname, method="GET", path="/api/admin/users", token=provisioner_token
+    )
+    if status != 200:
+        raise CoderError(f"FileX identity pre-flight list failed (HTTP {status}).")
+    rows = (
+        users
+        if isinstance(users, list)
+        else (users or {}).get("users", [])
+        if isinstance(users, dict)
+        else []
+    )
+    emails = {
+        str(row.get("email") or "").lower() for row in rows if isinstance(row, dict)
+    }
+    names = {
+        str(row.get("username") or "").lower() for row in rows if isinstance(row, dict)
+    }
+    notes: list[str] = []
+    for login in sorted(coder_users):
+        email = coder_users[login]
+        if email in emails:
+            continue
+        if login in names:
+            # Manual owner or legacy twin: the lane's rules already cover it.
+            continue
+        status, _body = _filex_api_request(
+            hostname=hostname,
+            method="POST",
+            path="/api/admin/users",
+            token=provisioner_token,
+            body={"email": email, "username": login, "role": "user", "password": password},
+        )
+        if status not in (200, 201):
+            raise CoderError(f"FileX identity pre-flight create for '{login}' failed (HTTP {status}).")
+        notes.append(f"Created FileX account '{login}' (identity pre-flight).")
+    return notes
+
+
 def _identity_sync_actions(
     *,
     gitea_rows: Sequence[object],
@@ -1311,32 +1508,25 @@ def _sync_gitea_identities(
     provisioner_token: str,
     provisioner_username: str,
     tracked: set[str],
+    coder_users: Mapping[str, str] | None = None,
 ) -> tuple[list[str], set[str]]:
     """Keep wizard-sprung Gitea accounts aligned with the Coder roster.
 
-    Returns the human-readable notes and the updated claim set to persist in
-    the state ledger.
+    ``coder_users`` (login -> email) may be supplied by the caller when the
+    roster was already read for another identity surface; fetching it here is
+    the fallback. Returns the human-readable notes and the updated claim set
+    to persist in the state ledger.
     """
-    users = _coder_request(
-        hostname=coder_hostname,
-        method="GET",
-        path="/api/v2/users",
-        session_token=session_token,
+    roster = (
+        dict(coder_users)
+        if coder_users is not None
+        else _coder_roster(coder_hostname=coder_hostname, session_token=session_token)
     )
-    rows = users.get("users")
-    coder_users: dict[str, str] = {}
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict) or str(row.get("status") or "") == "deleted":
-            continue
-        login = str(row.get("username") or "").lower()
-        email = str(row.get("email") or "").lower()
-        if login and email:
-            coder_users[login] = email
     gitea_rows = _gitea_admin_user_rows(hostname=gitea_hostname, token=provisioner_token)
     notes: list[str] = []
     actions, claimed = _identity_sync_actions(
         gitea_rows=gitea_rows,
-        coder_users=coder_users,
+        coder_users=roster,
         provisioner_username=provisioner_username,
         tracked=tracked,
     )
