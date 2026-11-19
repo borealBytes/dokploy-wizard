@@ -1634,3 +1634,21 @@ shows DB visibility 2 — the iteration-3 box already corrected its row and
 can no longer show the note. The identities ledger being absent on a
 deployer-only box is BY DESIGN: the ledger springs with the second tracked
 person, and the deployer's seeded account needs no claim.
+
+Iteration 4 failed the bar, and the loop caught a fifth real leak doing it.
+The gitea phase raised `Gitea health check failed` — and the deployment log
+inside Dokploy said why: `failed to create network …_default: all
+predefined address pools have been fully subnetted`. The network inventory
+explained everything: 35 networks on the box, ~31 of them stale
+compose-project generations (ten auth-probe projects, three-to-five
+generations per pack). Dokploy's stack teardown removes services, spares
+volumes (the iteration-2 lesson) — and spares the project's `_default`
+network; every uninstall cycle leaked another daemon allocation until the
+finite default address pool finally drained. Fixed at the wizard layer
+(`80dd116`): uninstall now sweeps docker networks and (in destroy mode)
+volumes whose names carry the stack prefix — ownership by name, best-effort,
+never fails a teardown, and the reclaim counts land in the audit payload.
+The wipe recipe gains the same sweep plus a daemon restart (leaked
+allocations inside the running daemon's IPAM only free on restart) and a
+pool canary. Iteration 5 (next) must land the fully clean first pass the
+gate asks for — flip note included.
