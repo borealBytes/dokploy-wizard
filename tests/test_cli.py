@@ -1347,6 +1347,106 @@ def test_build_live_drift_report_recognizes_label_backed_managed_compose_contain
     assert report["summary"]["unknown_unmanaged"] == 0
 
 
+def test_live_drift_health_gate_lets_the_scheduled_repair_pass_proceed() -> None:
+    """Box-measured deadlock: an unhealthy managed filex blocked the modify
+    that was about to recompose it healthy. A wizard_managed health entry
+    for a pack this exact plan re-runs must not block; a manual collision
+    still does, and an unhealthy entry for an UNSCHEDULED pack still does —
+    the relaxation is scoped to the repair, not to the whole run."""
+    unhealthy_filex = {
+        "classification": "wizard_managed",
+        "pack": "filex",
+        "health": "unhealthy",
+        "live_name": "wizard-stack-filex",
+    }
+    assert cli._live_drift_entry_blocks_mutation(unhealthy_filex, scheduled_phases=set()) is True
+    assert (
+        cli._live_drift_entry_blocks_mutation(unhealthy_filex, scheduled_phases={"filex"}) is False
+    )
+    assert (
+        cli._live_drift_entry_blocks_mutation(unhealthy_filex, scheduled_phases={"coder"}) is True
+    )
+    manual = {"classification": "manual_collision", "pack": "filex", "live_name": "x"}
+    assert cli._live_drift_entry_blocks_mutation(manual, scheduled_phases={"filex"}) is True
+    route = {"classification": "host_local_route", "pack": "filex", "path": "/etc/traefik/x.yml"}
+    assert cli._live_drift_entry_blocks_mutation(route, scheduled_phases={"filex"}) is True
+
+
+def test_build_live_drift_report_treats_filex_office_sidecar_as_managed_filex_auxiliary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ONLYOFFICE sidecar is wizard runtime, not a manual collision.
+
+    Box-measured: after the sidecar joined the filex compose app, the
+    mutating preflight gate rejected its own repair pass because the
+    sidecar task container matched the filex alias but no candidate owned
+    it — classified manual_collision, which always blocks. The fix
+    declares it as expected auxiliary runtime of the filex candidate (the
+    litellm model-sync precedent), so it never enters the entries list.
+    """
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            **parse_env_file(FIXTURES_DIR / "lifecycle-headscale.env").values,
+            "STACK_NAME": "wizard-stack",
+            "ROOT_DOMAIN": "example.com",
+            "PACKS": "seaweedfs,filex",
+        },
+    )
+    desired_state = resolve_desired_state(raw_env)
+    assert desired_state.hostnames["onlyoffice"] == "office.example.com"
+    project = "wizard-stack-filex-olx5aq"
+    ownership_ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                "filex_service",
+                "svc-filex",
+                "stack:wizard-stack:filex:service",
+            ),
+        ),
+    )
+
+    monkeypatch.setattr(inspection_module, "_docker_cli_available", lambda: True)
+    monkeypatch.setattr(inspection_module, "_list_docker_services", lambda: ())
+    monkeypatch.setattr(
+        inspection_module,
+        "_list_docker_containers",
+        lambda: (
+            {
+                "name": f"{project}-wizard-stack-filex-1",
+                "status": "Up 2 minutes",
+                "labels": {
+                    "com.docker.compose.service": "wizard-stack-filex",
+                    "com.docker.compose.project": project,
+                },
+            },
+            {
+                "name": f"{project}-wizard-stack-filex-office-1",
+                "status": "Up 2 minutes",
+                "labels": {
+                    "com.docker.compose.service": "wizard-stack-filex-office",
+                    "com.docker.compose.project": project,
+                },
+            },
+        ),
+    )
+    monkeypatch.setattr(inspection_module, "_list_service_task_statuses", lambda service_name: ())
+    monkeypatch.setattr(inspection_module, "_ROUTE_SEARCH_DIRS", (tmp_path,))
+
+    report = inspection_module.build_live_drift_report(
+        desired_state=desired_state,
+        ownership_ledger=ownership_ledger,
+    )
+
+    assert report["summary"]["manual_collision"] == 0
+    assert report["summary"]["unknown_unmanaged"] == 0
+    assert all(
+        entry.get("live_name") != f"{project}-wizard-stack-filex-office-1"
+        for entry in report["entries"]
+    )
+
+
 def test_build_live_drift_report_treats_model_sync_sidecar_as_managed_litellm_auxiliary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3979,7 +4079,8 @@ def test_live_drift_entry_blocks_mutation_allows_missing_managed_service() -> No
                 "pack": "coder",
                 "health": "missing",
                 "live_name": "openmerge-coder",
-            }
+            },
+            scheduled_phases=set(),
         )
         is False
     )
@@ -3990,7 +4091,8 @@ def test_live_drift_entry_blocks_mutation_allows_missing_managed_service() -> No
                 "pack": "coder",
                 "health": "unhealthy",
                 "live_name": "openmerge-coder",
-            }
+            },
+            scheduled_phases=set(),
         )
         is True
     )
@@ -4001,7 +4103,8 @@ def test_live_drift_entry_blocks_mutation_allows_missing_managed_service() -> No
                 "pack": "coder",
                 "health": "unknown",
                 "live_name": "openmerge-coder",
-            }
+            },
+            scheduled_phases=set(),
         )
         is True
     )

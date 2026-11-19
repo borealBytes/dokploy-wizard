@@ -427,6 +427,14 @@ def _service_candidates(desired_state: DesiredState) -> tuple[dict[str, Any], ..
                 "expected_service_name": f"{desired_state.stack_name}-filex",
                 "pack": "filex",
                 "scope": f"stack:{desired_state.stack_name}:filex:service",
+                # The ONLYOFFICE editing sidecar ships inside the same compose
+                # app (same project label) — the litellm model-sync sidecar set
+                # the precedent. Without this the sidecar container reads as a
+                # manual collision and blocks every mutating run.
+                "expected_auxiliary_compose_services": frozenset(
+                    {f"{desired_state.stack_name}-filex-office"}
+                ),
+                "managed_compose_project_prefix": f"{desired_state.stack_name}-filex",
             }
         )
     if "gitea" in desired_state.enabled_packs:

@@ -1886,7 +1886,9 @@ def _validate_live_drift_for_mutation(
         ownership_ledger=ownership_ledger,
     )
     blocking_entries = [
-        entry for entry in live_drift["entries"] if _live_drift_entry_blocks_mutation(entry)
+        entry
+        for entry in live_drift["entries"]
+        if _live_drift_entry_blocks_mutation(entry, scheduled_phases=set(lifecycle_plan.phases_to_run))
     ]
     if not blocking_entries:
         return
@@ -1901,11 +1903,20 @@ def _validate_live_drift_for_mutation(
     )
 
 
-def _live_drift_entry_blocks_mutation(entry: dict[str, Any]) -> bool:
+def _live_drift_entry_blocks_mutation(
+    entry: dict[str, Any], *, scheduled_phases: set[str]
+) -> bool:
     classification = entry.get("classification")
     if classification in {"manual_collision", "host_local_route"}:
         return True
     if classification != "wizard_managed":
+        return False
+    if entry.get("pack") in scheduled_phases:
+        # This exact modify plan re-runs the pack that owns the unhealthy or
+        # unknown runtime — the drift is the thing under repair, so refusing
+        # the repair would deadlock it. The phase's own health gate still
+        # decides convergence. (Box-measured: a crash-looping managed filex
+        # blocked the modify that would have recomposed it healthy.)
         return False
     return entry.get("health") in {"unhealthy", "unknown"}
 
