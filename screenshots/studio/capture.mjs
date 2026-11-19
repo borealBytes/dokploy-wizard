@@ -227,21 +227,31 @@ async function collectRedactionRects(page) {
         }
       };
       walk(document.body);
-      // Form field VALUES are text the walker can't reach (no text nodes) —
-      // the Coder settings Name input leaked 'showmeseewhycom-workspace' right
-      // under the blurred breadcrumb. Masked password fields render dots, so
-      // they are skipped; everything else gets a conservative whole-field
-      // blur when its value matches the redaction set.
+      // Form field VALUES and PLACEHOLDERS are text the walker can't reach
+      // (no text nodes) — the Coder settings Name input leaked
+      // 'showmeseewhycom-workspace' right under the blurred breadcrumb, and
+      // FileX's Connections modal leaked the root domain through an empty
+      // key-name field's PLACEHOLDER ('WEBDAV - filex.<root>'). Both render
+      // glyphs the camera sees. Masked password fields render dots, so they
+      // are skipped; everything else gets a conservative whole-field blur
+      // when its value or placeholder matches the redaction set (a
+      // placeholder only fires when the field is empty, so the value lane
+      // wins whenever both could).
       for (const el of document.querySelectorAll('input, textarea')) {
         const input = el;
         if (input.type === 'password') continue;
         const value = input.value ?? '';
         regex.lastIndex = 0;
-        if (!regex.test(value)) continue;
+        let hit = value;
+        if (!regex.test(value)) {
+          hit = input.placeholder ?? '';
+          regex.lastIndex = 0;
+          if (!regex.test(hit)) continue;
+        }
         const box = input.getBoundingClientRect();
         if (box.width < 1 || box.height < 1) continue;
         rects.push({
-          text: value,
+          text: hit,
           x: box.left + window.scrollX,
           y: box.top + window.scrollY,
           w: box.width,
@@ -314,6 +324,14 @@ async function runShot(browser, shot, credentials) {
           if (step.wait) await page.waitForTimeout(step.wait);
         } else if (step.hover) {
           await page.locator(step.hover).first().hover();
+        } else if (step.dblclick) {
+          // Box-measured: FileX single-click SELECTS a row; the editor (and
+          // the preview) open on double-click — a probe against the live box
+          // timed out the frame wait 90s on a single click, then the frame
+          // appeared 6ms after dblclick.
+          await page.locator(step.dblclick).first().dblclick().catch((err) => {
+            if (!step.optional) throw err;
+          });
         } else if (step.click) {
           await page.locator(step.click).first().click().catch((err) => {
             if (!step.optional) throw err;
