@@ -18,11 +18,11 @@ Today this repo is not a scaffold or mock planner. It performs real deployment, 
 - **Moodle**
 - **DocuSeal**
 - **SeaweedFS** for S3-compatible object storage
-- **FileX** lightweight web file manager, storing files in a wizard-owned SeaweedFS bucket
+- **FileX** lightweight web file manager, storing files in a wizard-owned SeaweedFS bucket, with in-browser editing through a bundled ONLYOFFICE DocumentServer sidecar on its own hostname
 - **Gitea** self-hosted git hosting (rootless image, repos on its own volume, LFS/attachments in a wizard-owned SeaweedFS bucket)
 - **Coder** with a single seeded Ubuntu + VS Code workspace template (Hermes Desktop)
 
-Optional packs also include Headscale, Matrix, and Tailscale host access. FileX and Gitea require the SeaweedFS pack and turn it on automatically. The AI-advisor packs this repo once shipped (a browser/Telegram agent runtime with its embedded Talk assistant, the farm advisor, and the research/chat pack) were removed in code; the wizard still cleans their ledger entries up on uninstall for older boxes that ran them.
+Optional packs also include Headscale, Matrix, and Tailscale host access. FileX and Gitea require the SeaweedFS pack and turn it on automatically. The AI-advisor packs this repo once shipped (a browser/Telegram agent runtime with its embedded Talk assistant, the farm advisor, and the research/chat pack) were removed in code; the wizard still cleans their ledger entries up on uninstall for older boxes that ran them. The Nextcloud Files pack and its standalone ONLYOFFICE sidecar retired the same way: FileX — now with its own bundled editing sidecar — is the file story, and nextcloud-era ledger rows clean up on uninstall like the rest.
 
 ## The stack, as shipped
 
@@ -546,6 +546,18 @@ FileX is a single-binary web file manager (browse, upload, share) that stores it
 files in the SeaweedFS bucket the wizard owns. The wizard wires:
 
 - service + data volume, exposed at `filex.<root-domain>`
+- an ONLYOFFICE DocumentServer editing sidecar on its own hostname,
+  `office.<root-domain>`, served at the root: FileX refuses an editor frame
+  on its own origin (its config guard crash-looped the same-origin design the
+  first time — measured), and docservice does not mount its statics under a
+  subpath anyway, so the sidecar gets a clean origin instead of a pinned
+  prefix. JWT is enforced between the app and the sidecar on a deterministic
+  per-stack secret, recorded at `filex-office-jwt.json` (0600) in the state
+  directory; the editing round-trip lands as ordinary versions in the same
+  versioned bucket. The pass verifies the sidecar the way the box taught us:
+  container-up first (the image is gigabyte class, the wait belongs to the
+  pull), then `/healthcheck` behind the edge, then the JWT record — and it
+  records nothing until the gate passes.
 - a `filex` bucket with prefix `files` seeded as the default storage on first boot, with native object versioning turned on so overwrites and deletes are recoverable
 - admin login using the same Dokploy admin email + password as Dokploy and Coder
 - a `FILEX_SECRET_KEY` derived per stack and kept out of the compose file
@@ -603,6 +615,15 @@ wizard wires:
   only (git-over-HTTPS rides the public route; publishing SSH to the host is
   an operator choice), and the wizard's `~/shared` mount and FileX stay
   independent services
+- private by default, opt-in public: `DEFAULT_USER_VISIBILITY: private`
+  means people see only their own visibility options, `DEFAULT_PRIVATE`
+  starts every fresh repo private, and `DISABLE_ANONYMOUS_ACCESS` closes the
+  explore page and the anonymous profile pages to logged-out web. A repo or
+  profile the owner makes public stays public — the point is that nothing
+  leaks before the owner chooses, not that the box is hermetic. Accounts
+  that predate the default (the old Gitea default was public) are flipped to
+  private once by the coder pass, and the flip is logged; manual accounts
+  the wizard does not own are never touched
 - a `GITEA_SECRET_KEY` derived per stack and kept out of the compose file
 
 Gitea's login lane rides the deployer's own account: the login is derived from
@@ -633,7 +654,11 @@ secret; pre-fix accounts carrying the old `<login>@coder.wizard.local` primary
 are migrated in place. The coder phase keeps a roster of wizard-sprung
 usernames at `gitea-identities.json` (0600) — the durable ownership signal
 Coder's API cannot give back for deleted users — so deleting a user disables
-exactly their account and never a manual one. The FileX account `~/shared`
+exactly their account and never a manual one. The same boot lane seeds each
+person's account with one private `wizard-demo` repository — adopt-or-create,
+so a repo that already stands (even one its owner opened to the world) rides
+untouched; the seed push lands only in an empty repo and rides the
+workspace's own SSH key. The FileX account `~/shared`
 mounts with is the person's own too: found by real email, which for the
 deployer is the pack's admin account itself, and holding the same stack admin
 password — the pre-fix machine twin and its `fx-` derivation rule are retired.
@@ -686,6 +711,7 @@ Not behind Cloudflare Access in the current implementation:
 
 - `dokploy.<root-domain>`
 - `filex.<root-domain>`
+- `office.<root-domain>`
 - `gitea.<root-domain>`
 - `coder.<root-domain>`
 
@@ -703,6 +729,7 @@ origin apps whose login flow pins its CSRF origin to the `https://` URL
 - `moodle.<root-domain>`
 - `docuseal.<root-domain>`
 - `filex.<root-domain>`
+- `office.<root-domain>`
 - `gitea.<root-domain>`
 
 Why:
@@ -724,6 +751,7 @@ Login matrix, measured on the proven box (paths are the real login routes —
 | Coder | `https://coder.<root-domain>/login` | admin login + stack password | derived from Dokploy admin credentials |
 | Gitea | `https://gitea.<root-domain>/user/login` | `<login>` or real email + stack password | identity lane springs accounts at workspace boot; password re-syncs every boot |
 | FileX | `https://filex.<root-domain>/admin/login` | admin email + stack password | the pack bootstraps the deployer's own account as admin |
+| ONLYOFFICE | `https://office.<root-domain>` (no login page) | none — JWT on every hop | the editing sidecar the FileX pack owns; opens only from an authenticated FileX editor session |
 | DocuSeal | `https://docuseal.<root-domain>/sign_in` | admin email + stack password | wizard bootstraps the deployer account |
 | LiteLLM | `https://litellm.<root-domain>/ui/login` | admin email + stack password | shared-core operator; optionally OTP-gated by Cloudflare Access |
 | Moodle | `https://moodle.<root-domain>/` | admin + per-course users | derived from Dokploy admin credentials |
@@ -1159,11 +1187,12 @@ mypy .
 
 ## Where this goes next
 
-- **FileX + ONLYOFFICE editing.** The file-sync and collaboration story has
-  moved: `~/shared` (FileX over SeaweedFS, versioned, attributed per person)
-  already replaces the retired Nextcloud Files for the workspace-centric
-  workflow. The next step is wiring an ONLYOFFICE DocumentServer sidecar into
-  the FileX pack so FileX-versioned documents edit directly in the browser.
+- **FileX + ONLYOFFICE editing — shipped.** The file-sync and collaboration
+  story has moved: `~/shared` (FileX over SeaweedFS, versioned, attributed per
+  person) replaces the retired Nextcloud Files for the workspace-centric
+  workflow, and the ONLYOFFICE DocumentServer sidecar now rides the FileX pack
+  on `office.<root-domain>`, so FileX-versioned documents edit directly in the
+  browser and the round-trip lands as ordinary versions in the same bucket.
 - **Public S3 re-exposure** needs an identity layer first (the gateway is
   anonymous-by-default today, hence the internal-only `<stack>-s3.internal`).
 - **Dokploy behind Access** once a machine-auth control path is safe.
