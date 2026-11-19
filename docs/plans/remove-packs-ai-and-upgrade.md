@@ -1562,3 +1562,36 @@ tailscaled is not zero state: the wipe recipe now ends with
 `tailscale logout` (loop iteration 2 chained uninstall → wipe-v2 → install
 under way). The fail-closed behavior stays — the wizard never claims
 machines it did not mint.
+
+Loop iteration 2 reached the end of the first pass (535s) but not the bar:
+the gitea lane logged `WARNING: Gitea provisioner API token could not be
+minted`, and the coder phase skipped both identity syncs at HTTP 401. Two
+wizard bugs, both caught by the loop existing to catch them, both nailed
+shut with controlled on-box experiments rather than theories:
+
+- **The password pin re-stamped the must-change flag** (`3fad887`). The
+  box ran the experiment: create WITH `--must-change-password=false` → row
+  false (the wizard's create argv was always right); a flagless
+  `change-password` (the pin's shape) → row TRUE again; the same pin with
+  the explicit false → row false, basic auth back to 200. This Gitea build
+  defaults the flag to TRUE on change-password — so the pin undid the
+  create every pass, and the mint died at 403 one step later. Same stamp,
+  same 403, as the upgrade box's flagged `clayton` years earlier: one root
+  cause, both lanes. The legacy bridge stays for upgrade paths (the hat is
+  not the pin's job).
+- **Full teardown spared every pack document** (`143401f`).
+  `STATE_DOCUMENT_FILES` is the fingerprint inventory (four core docs),
+  and `clear_state_documents` treated it as the teardown list — so
+  `state_cleared: true` unlinked gitea-provisioner.json and friends into
+  a fresh install's path. The box proved it with mtimes: a doc written
+  hours before the uninstall, read by the install minutes after. New
+  `PACK_STATE_DOCUMENT_FILES` (exported, consumed only by the clear path);
+  the fingerprint tuple untouched, so the install/modify/inspect set
+  semantics hold. The stale provisioner doc is what burned the token
+  verification, and the identity syncs' 401s rode it.
+
+Also measured during the same diagnosis: Dokploy's stack removal does not
+delete named volumes — pre-fix generations of `showmeseewhy-com-*` data
+volumes stood on the box by the hour. Loop iteration 3's wipe therefore
+takes `^(dokploy|showmeseewhy)` volumes along: true zero, nothing left to
+secretly reuse.
