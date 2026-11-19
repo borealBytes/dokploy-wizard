@@ -22,6 +22,7 @@ from dokploy_wizard.state.models import (
     AppliedStateCheckpoint,
     DesiredState,
     FilexProvisionerState,
+    GiteaIdentityLedger,
     GiteaProvisionerState,
     LiteLLMGeneratedKeys,
     LiteLLMImagePin,
@@ -53,6 +54,7 @@ LITELLM_IMAGE_PIN_FILE = "litellm-image-pin.json"
 SEAWEEDFS_GENERATED_SECRETS_FILE = "seaweedfs-generated-secrets.json"
 FILEX_PROVISIONER_FILE = "filex-provisioner.json"
 GITEA_PROVISIONER_FILE = "gitea-provisioner.json"
+GITEA_IDENTITIES_FILE = "gitea-identities.json"
 # Redacted inspection report kept beside (never inside) the lifecycle docs:
 # inspect-state must not mutate the canonical raw-input/desired-state pair the
 # uninstall fingerprint gate compares against.
@@ -548,6 +550,20 @@ def write_gitea_provisioner(state_dir: Path, provisioner: GiteaProvisionerState)
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / GITEA_PROVISIONER_FILE
     _write_document(path, provisioner.to_dict())
+    path.chmod(0o600)
+
+
+def load_gitea_identities(state_dir: Path) -> GiteaIdentityLedger | None:
+    return _load_optional_document(
+        state_dir / GITEA_IDENTITIES_FILE,
+        GiteaIdentityLedger.from_dict,
+    )
+
+
+def write_gitea_identities(state_dir: Path, ledger: GiteaIdentityLedger) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / GITEA_IDENTITIES_FILE
+    _write_document(path, ledger.to_dict())
     path.chmod(0o600)
 
 

@@ -2406,33 +2406,50 @@ def test_coder_backend_reads_gitea_provisioner_lazily_from_state(tmp_path: Path)
 
 
 def test_identity_sync_actions_scopes_to_wizard_sprung_accounts() -> None:
-    # Scope is the email convention alone: the provisioner and any manual
-    # account (whatever its active flag) are never touched.
+    # Scope is the state ledger plus this-pass claims: a row is wizard-owned
+    # when its username AND primary email exactly match a current Coder user,
+    # or when the ledger already carries it. Manual accounts (a different
+    # email, never claimed), the drifting pre-fix rows, and the provisioner
+    # itself are never touched.
     rows = [
-        {"username": "clayton", "email": "clayton@coder.wizard.local", "active": True},
-        {"username": "ghost", "email": "ghost@coder.wizard.local", "active": True},
-        {"username": "returner", "email": "returner@coder.wizard.local", "active": False},
+        {"username": "clayton", "email": "clayton@superiorbyteworks.com", "active": True},
+        {"username": "ghost", "email": "ghost@corp.example", "active": True},
+        {"username": "returner", "email": "returner@corp.example", "active": False},
+        {"username": "drifted", "email": "drifted@coder.wizard.local", "active": True},
         {"username": "operator-manual", "email": "ops@example.com", "active": True},
         {"username": "dokploy-wizard", "email": "dokploy-wizard@gitea.example.com", "active": True},
     ]
+    coder_users = {
+        "clayton": "clayton@superiorbyteworks.com",  # match: claimed, stays active
+        "returner": "returner@corp.example",  # tracked + present: re-enable
+        "drifted": "drifted@corp.example",  # email moved on: untracked row is not ours
+    }
 
-    actions = coder_module._identity_sync_actions(
+    actions, claimed = coder_module._identity_sync_actions(
         gitea_rows=rows,
-        present_logins={"clayton", "returner"},
+        coder_users=coder_users,
         provisioner_username="dokploy-wizard",
+        tracked={"ghost", "returner"},
     )
 
-    # Present+active stays; deleted gets disabled; returned gets re-enabled.
+    # Present+active stays; tracked+deleted gets disabled; returned gets re-enabled.
     assert actions == [("ghost", False), ("returner", True)]
+    # Claims land in the ledger for the next pass; drift and manual stay out.
+    assert claimed == {"ghost", "returner", "clayton"}
 
 
 def test_identity_sync_actions_treats_deleted_status_as_absent() -> None:
-    actions = coder_module._identity_sync_actions(
-        gitea_rows=[{"username": "gone", "email": "gone@coder.wizard.local", "active": True}],
-        present_logins={"gone"},  # caller already filtered status == "deleted"
+    actions, claimed = coder_module._identity_sync_actions(
+        gitea_rows=[{"username": "gone", "email": "gone@corp.example", "active": True}],
+        coder_users={},  # caller already dropped status == "deleted" rows
         provisioner_username="dokploy-wizard",
+        tracked={"gone"},
     )
-    assert actions == []
+    # Measured: deleted Coder users are unqueryable, so the ledger's memory
+    # is what lets a still-active Gitea account be recognised as ours and
+    # disabled at all.
+    assert actions == [("gone", False)]
+    assert claimed == {"gone"}
 
 
 def test_sync_gitea_identities_patches_and_reports(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2446,9 +2463,9 @@ def test_sync_gitea_identities_patches_and_reports(monkeypatch: pytest.MonkeyPat
         assert kwargs["session_token"] == "session-123"
         return {
             "users": [
-                {"username": "clayton", "status": "active"},
-                {"username": "returner", "status": "dormant"},
-                {"username": "purged", "status": "deleted"},
+                {"username": "clayton", "email": "clayton@corp.example", "status": "active"},
+                {"username": "returner", "email": "returner@corp.example", "status": "dormant"},
+                {"username": "purged", "email": "purged@corp.example", "status": "deleted"},
             ]
         }
 
@@ -2462,27 +2479,33 @@ def test_sync_gitea_identities_patches_and_reports(monkeypatch: pytest.MonkeyPat
                     "email": "dokploy-wizard@gitea.example.com",
                     "active": True,
                 },
-                {"username": "clayton", "email": "clayton@coder.wizard.local", "active": True},
-                {"username": "purged", "email": "purged@coder.wizard.local", "active": True},
-                {"username": "returner", "email": "returner@coder.wizard.local", "active": False},
+                {"username": "clayton", "email": "clayton@corp.example", "active": True},
+                {"username": "purged", "email": "purged@corp.example", "active": True},
+                {"username": "returner", "email": "returner@corp.example", "active": False},
             ]
         return 200, None
 
     monkeypatch.setattr(coder_module, "_coder_request", fake_coder_request)
     monkeypatch.setattr(coder_module, "_gitea_api_request", fake_gitea_request)
 
-    notes = coder_module._sync_gitea_identities(
+    # The ledger starts holding the account the lane sprung before its Coder
+    # user was deleted (purged) and the one that later returned; clayton is a
+    # fresh claim (username + email match the live roster).
+    notes, claimed = coder_module._sync_gitea_identities(
         coder_hostname="coder.example.com",
         session_token="session-123",
         gitea_hostname="gitea.example.com",
         provisioner_token="gt-token-9",
         provisioner_username="dokploy-wizard",
+        tracked={"purged", "returner"},
     )
 
     assert notes == [
         "Disabled Gitea account 'purged' (Coder user deleted).",
         "Re-enabled Gitea account 'returner' (Coder user returned).",
     ]
+    # purged/returner carry over, clayton is claimed this pass.
+    assert claimed == {"purged", "returner", "clayton"}
     assert calls[0] == ("GET", "/api/v1/admin/users?page=1", {})
     assert ("PATCH", "/api/v1/admin/users/purged", {"active": False}) in calls
     assert ("PATCH", "/api/v1/admin/users/returner", {"active": True}) in calls
@@ -2500,7 +2523,7 @@ def test_sync_gitea_identities_raises_when_patch_fails(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         coder_module,
         "_gitea_admin_user_rows",
-        lambda **kwargs: [{"username": "ghost", "email": "ghost@coder.wizard.local", "active": True}],
+        lambda **kwargs: [{"username": "ghost", "email": "ghost@corp.example", "active": True}],
     )
     monkeypatch.setattr(
         coder_module,
@@ -2515,6 +2538,7 @@ def test_sync_gitea_identities_raises_when_patch_fails(monkeypatch: pytest.Monke
             gitea_hostname="gitea.example.com",
             provisioner_token="gt-token-9",
             provisioner_username="dokploy-wizard",
+            tracked={"ghost"},
         )
 
 
@@ -2531,10 +2555,12 @@ def test_gitea_identity_lane_is_baked_into_the_desktop_template() -> None:
         in template
     )
     assert "<<'GITEAPROV'" in template
-    # Account spring through the admin API: username = coder login, email the
-    # convention the coder-phase sync scopes on, and must-change OFF (measured:
-    # a pending must-change turns basic-auth API calls into 403).
-    assert 'email = login + "@coder.wizard.local"' in template
+    # Account spring through the admin API under the REAL coder email (identity
+    # fix: no coder.wizard.local primary), must-change OFF (measured: a pending
+    # must-change turns basic-auth API calls into 403), and the legacy
+    # convention email is retained only as the migration marker.
+    assert 'email = os.environ.get("DOKPLOY_GT_REAL_EMAIL", "").strip().lower()' in template
+    assert 'legacy_email = login + "@coder.wizard.local"' in template
     assert '"must_change_password": False' in template
     assert '"/api/v1/admin/users", provisioner_auth' in template
     # Box-measured: GET /api/v1/admin/users/<name> is NOT routed (405; missing
@@ -2551,14 +2577,15 @@ def test_gitea_identity_lane_is_baked_into_the_desktop_template() -> None:
     )
     assert 'password = os.environ["DOKPLOY_GT_PASSWORD"]' in template
     assert '"password": password, "must_change_password": False' in template
-    # The owner's real email registers as a verified secondary login identity
-    # through the owner route (box-measured on 28.4.0: POST /api/v1/user/emails
-    # with {"emails": [..]} returns 201 verified; the convention email stays
-    # primary so the admin-list ownership guard keeps telling manual accounts
-    # off). 422 (already registered) is tolerated, not fatal.
+    # The owner's real email IS the primary login identity from creation
+    # (box-measured on 28.4.0: an admin-API create with a real email returns it
+    # verified+primary and it authenticates basic-auth). A pre-fix spring
+    # (legacy primary) is migrated through PATCH /admin/users (200) and a
+    # taken email (409) is tolerated, not fatal — the real email already rides
+    # the account as a verified secondary that logs in.
     assert 'export DOKPLOY_GT_REAL_EMAIL="${data.coder_workspace_owner.me.email}"' in template
-    assert '"/api/v1/user/emails", owner_basic, {"emails": [real_email]}' in template
-    assert "elif status != 422:" in template
+    assert '"/api/v1/admin/users/" + user_path, provisioner_auth, {"email": email}' in template
+    assert "elif status == 409:" in template
     # One key per (user, workspace): title is the shared label, adoption is by
     # key material, replacement goes through the owner's own credentials.
     assert 'title = login + "-" + workspace' in template
@@ -2632,13 +2659,16 @@ def test_ensure_application_ready_runs_gitea_identity_sync_and_degrades_cleanly(
         lambda **kwargs: (),
     )
 
-    sync_calls: list[dict[str, str]] = []
+    sync_calls: list[dict[str, object]] = []
 
-    def fake_sync(**kwargs: str) -> list[str]:
+    def fake_sync(**kwargs: object) -> tuple[list[str], set[str]]:
         sync_calls.append(dict(kwargs))
         if sync_failure:
             raise coder_module.CoderError("HTTP 500")
-        return ["Disabled Gitea account 'purged' (Coder user deleted)."]
+        return (
+            ["Disabled Gitea account 'purged' (Coder user deleted)."],
+            {"purged", "clayton"},
+        )
 
     monkeypatch.setattr(coder_module, "_sync_gitea_identities", fake_sync)
 
@@ -2646,6 +2676,8 @@ def test_ensure_application_ready_runs_gitea_identity_sync_and_degrades_cleanly(
 
     # The provisioner document baked at construction (plus the pack hostname)
     # drives the sync directly: no re-read of a missing state file needed.
+    # The ledger starts empty (no state file yet) and the sync's claim set is
+    # persisted back so deletions stay visible on later passes.
     assert sync_calls == [
         {
             "coder_hostname": "coder.example.com",
@@ -2653,13 +2685,20 @@ def test_ensure_application_ready_runs_gitea_identity_sync_and_degrades_cleanly(
             "gitea_hostname": "gitea.example.com",
             "provisioner_token": "gt-token-9",
             "provisioner_username": "dokploy-wizard",
+            "tracked": set(),
         }
     ]
     if sync_failure:
         assert any(note.startswith("Skipped Gitea identity sync:") for note in notes)
         assert "Disabled Gitea account 'purged' (Coder user deleted)." not in notes
+        assert not (tmp_path / "gitea-identities.json").exists()
     else:
         assert "Disabled Gitea account 'purged' (Coder user deleted)." in notes
+        from dokploy_wizard.state.store import load_gitea_identities
+
+        ledger = load_gitea_identities(tmp_path)
+        assert ledger is not None
+        assert ledger.usernames == ("clayton", "purged")
 
 
 def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_credentials(
@@ -2811,6 +2850,9 @@ def test_ensure_application_ready_bootstraps_first_user_with_shared_admin_creden
         # so both door values render empty and the startup script skips ~/shared.
         "__DOKPLOY_WIZARD_FILEX_INTERNAL_URL__": "",
         "__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN__": "",
+        # The FileX account password rides the stack admin password whenever
+        # the lane is armed (the account IS the person, one credential).
+        "__DOKPLOY_WIZARD_FILEX_ACCOUNT_PASSWORD__": "ChangeMeSoon",
         # Same for the Gitea identity lane: no provisioner document, so the
         # GITEAPROV boot lane is disabled and the coder phase runs no sync.
         "__DOKPLOY_WIZARD_GITEA_INTERNAL_URL__": "",
@@ -3177,19 +3219,16 @@ def test_issuer_mint_guard_stays_honest_after_substitution() -> None:
     replaced = template.replace("__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__", "sk-real-issuer")
     assert 'DOKPLOY_WIZARD_LITELLM_ISSUER_KEY="sk-real-issuer"' in replaced
     assert '!= "sk-real-issuer"' not in replaced
-    # The same trap has a second shape: the FileX seed guard reads the issuer
-    # through a `case` list. A bare marker pattern inside that list substitutes
-    # to the real key and self-matches the treat-as-missing branch (measured:
-    # a from-zero box derived every workspace-account password from the
-    # provisioner token because the issuer could never win the case). The seed
-    # case list must therefore match only the empty value and the sentinel.
-    # (The gitea lane dropped derivation entirely — its account password is
-    # the stack admin password now — so exactly one issuer case remains.)
+    # The same trap had a second shape: the pre-identity-fix FileX seed guard
+    # read the issuer through a `case` list. A bare marker pattern inside that
+    # list substituted to the real key and self-matched the treat-as-missing
+    # branch (measured: a from-zero box derived every workspace-account
+    # password from the provisioner token because the issuer could never win
+    # the case). The seed derivation is gone — FileX accounts carry the stack
+    # admin password, like gitea's — so no issuer `case` survives anywhere and
+    # the single honest guard is the `if`-form sentinel compare above.
     assert '""|sk-real-issuer' not in replaced
-    assert (
-        replaced.count('case "$${DOKPLOY_WIZARD_LITELLM_ISSUER_KEY:-}" in\n'
-                       '        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)') == 1
-    )
+    assert replaced.count('case "$${DOKPLOY_WIZARD_LITELLM_ISSUER_KEY:-}" in') == 0
     # The sentinel marker is absent from the wizard's replacement map, so it
     # stays literal in the pushed template: assert the map never grows one.
     import inspect

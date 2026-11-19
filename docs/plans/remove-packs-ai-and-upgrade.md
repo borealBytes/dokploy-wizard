@@ -1329,3 +1329,52 @@ and let the autosync sidecar rescan it like any other provider. Delivered:
   `coder-hermes` workspace key's `/v1/models` lists the alias by name, and a
   chat completion through it answered from the serving box. Second modify:
   `mode: noop` (21.4s).
+
+### Phase 10c (2026-11): Gitea identity fix — the account IS the person
+
+Operator request: retire the `coder.wizard.local` convention — every surface
+of the stack should take the real login email, and the Gitea profile shown in
+screenshots must stop reading like a machine placeholder. Delivered:
+
+- Gitea lane: the admin-API create now takes the owner's REAL Coder email as
+  the account email. Box-measured on 28.4.0: a create with a real email lands
+  `verified: true, primary: true` instantly and basic-auth login by that
+  email answers 200 — so the old "register the real email as a verified
+  secondary, keep the convention primary" dance (lane step 1b) is gone, and
+  the real email is itself the ownership marker. The guard flips accordingly:
+  existing account with a DIFFERENT email is manual (skip, as before); one
+  carrying the legacy `{login}@coder.wizard.local` primary is a pre-fix
+  spring and gets `PATCH /admin/users {email}` (200 moves the primary,
+  measured; 409 means the email is already registered — on pre-fix boxes it
+  sits on the same account as a verified secondary that logs in fine, and
+  this build has no owner per-email routes at all: GET/DELETE
+  `/api/v1/user/emails/{email}` and every make-primary spelling 404, all
+  measured).
+- Ownership guard reroot: the coder-phase sync no longer scopes on the email
+  convention. It claims a Gitea row when username AND primary email match a
+  live Coder user and persists the claim set to `gitea-identities.json`
+  (0600, `GiteaIdentityLedger`). The ledger is REQUIRED, not stylistic:
+  deleted Coder users are unqueryable (measured: `q=probeuser`,
+  `status:disabled`, `type:system` all come back empty on v2.39.4), so
+  without durable memory the sync could not disable the accounts it sprung —
+  and with real emails everywhere it can no longer tell ours from manual by
+  inspection either. Enable/disable semantics unchanged: tracked ∧ absent →
+  disable; tracked ∧ present ∧ inactive → enable.
+- FileX lane: the mount account is the person, not a twin. Lookup is by real
+  email first (the deployer's IS an account — the pack's admin bootstrap —
+  and the mount rides it; box-shape: admin id 1 real email, provisioner id 2,
+  the pre-fix lane twin id 3 carried the convention email), create-with-real-
+  email when missing, manual-name-under-other-email skips. The derived
+  `fx-`-sha256 seed is retired: the lane re-PATCHes the adopted account's
+  password to the stack admin password (`PATCH /api/admin/users/{id}` →
+  200 `{"ok":true}` measured) and signs in with it — one operator credential
+  on this surface too. The issuer-key seed case in the startup script died
+  with it (the workspace-key mint guard is the only issuer consumer left).
+- Root-cause note for the record: the "401 on the derived password" mystery
+  was two accounts — probes had locked the ADMIN account (real email) while
+  the derivation belonged to the lane twin; FileX locks an identifier after
+  repeated failures (`"too many attempts","locked":true`, measured).
+- Gates: unit pins updated for the ledger signatures, the new template text,
+  and the replacement map (FileX account password key added); issuer-guard
+  regression test updated — zero `case`-form issuer guards now survive, the
+  FileX seed was the last.

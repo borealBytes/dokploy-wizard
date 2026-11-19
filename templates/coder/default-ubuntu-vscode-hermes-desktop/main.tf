@@ -298,10 +298,12 @@ MINTPY
     # workspace mints its own S3 key labeled <login>-<workspace>, so every
     # write names a person and a machine: file rows record the key's owner,
     # overwrites snapshot into FileX's version catalogue, and the label ties
-    # the write to one workspace. The account belongs to the coder login and
-    # springs into existence at first boot when the person has no FileX
-    # account yet — a manual account with the same name keeps its own secret
-    # and its own meaning (the mount then skips, never resets). Every
+    # the write to one workspace. The account IS the person — their real
+    # Coder email, springing at first boot if they have no FileX account yet
+    # (the deployer's does exist: the pack's admin bootstrap, which the lane
+    # then adopts rather than duplicating) — and a manual account owning the
+    # login name under a different email keeps its own secret and its own
+    # meaning (the mount then skips, never resets). Every
     # workspace, the admin's included, rides these same rules. Nothing in the
     # setup can take a workspace down: the whole thing runs in the background,
     # every failure logs and exits, and ~/shared simply stays a plain folder.
@@ -313,25 +315,24 @@ MINTPY
     DOKPLOY_WIZARD_FILEX_URL_SENTINEL="__DOKPLOY_WIZARD_FILEX_INTERNAL_URL_SENTINEL__"
     DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN="__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN__"
     DOKPLOY_WIZARD_FILEX_PROVISIONER_SENTINEL="__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN_SENTINEL__"
+    DOKPLOY_WIZARD_FILEX_ACCOUNT_PASSWORD="__DOKPLOY_WIZARD_FILEX_ACCOUNT_PASSWORD__"
     if [ -n "$DOKPLOY_WIZARD_FILEX_URL" ] && \
        [ "$DOKPLOY_WIZARD_FILEX_URL" != "$DOKPLOY_WIZARD_FILEX_URL_SENTINEL" ] && \
        [ -n "$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN" ] && \
-       [ "$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN" != "$DOKPLOY_WIZARD_FILEX_PROVISIONER_SENTINEL" ]; then
+       [ "$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN" != \
+         "$DOKPLOY_WIZARD_FILEX_PROVISIONER_SENTINEL" ]; then
       export DOKPLOY_FX_URL="$DOKPLOY_WIZARD_FILEX_URL"
       export DOKPLOY_FX_TOKEN="$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN"
       export DOKPLOY_FX_LOGIN="${data.coder_workspace_owner.me.name}"
       export DOKPLOY_FX_WORKSPACE="${data.coder_workspace.me.name}"
-      # Account passwords derive: hash(issuer + ":" + login). Re-runs and
-      # re-mints reproduce the same value without a new secret to store, and
-      # an issuer rotation re-derives cleanly. Without an issuer (LiteLLM
-      # unseeded) the provisioner token itself is the derivation seed.
-      DOKPLOY_FX_SEED="$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN"
-      case "$${DOKPLOY_WIZARD_LITELLM_ISSUER_KEY:-}" in
-        ""|__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__*)
-          ;;
-        *) DOKPLOY_FX_SEED="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" ;;
-      esac
-      export DOKPLOY_FX_SEED
+      # The account IS the person: email = their real Coder email (the same
+      # identity the pack bootstrapped as the FileX admin for the deployer,
+      # so the deployer's mount rides their own human account, not a twin).
+      # Password = the stack admin password, one operator credential across
+      # the stack (the gitea lane's choice); a boot-time PATCH keeps it true
+      # after rotation. The pre-identity-fix derivation seed is retired.
+      export DOKPLOY_FX_REAL_EMAIL="${data.coder_workspace_owner.me.email}"
+      export DOKPLOY_FX_PASSWORD="$DOKPLOY_WIZARD_FILEX_ACCOUNT_PASSWORD"
       (
         # Background on purpose: identity calls and the first rclone download
         # must never hold the IDE hostage. set -e inside so the first real
@@ -370,15 +371,15 @@ RCLONEPY
         fi
 
         python3 - <<'FILEXPROV'
-import hashlib, json, os, urllib.error, urllib.request
+import json, os, urllib.error, urllib.request
 
 base = os.environ["DOKPLOY_FX_URL"].rstrip("/")
 token = os.environ["DOKPLOY_FX_TOKEN"]
 login = os.environ["DOKPLOY_FX_LOGIN"]
 workspace = os.environ["DOKPLOY_FX_WORKSPACE"]
-seed = os.environ["DOKPLOY_FX_SEED"]
-password = "fx-" + hashlib.sha256((seed + ":" + login).encode()).hexdigest()[:40]
-email = login + "@coder.wizard.local"
+password = os.environ["DOKPLOY_FX_PASSWORD"]
+email = os.environ["DOKPLOY_FX_REAL_EMAIL"].strip().lower()
+legacy_email = login + "@coder.wizard.local"  # pre-fix lane value; never minted again
 label = login + "-" + workspace
 env_path = os.path.expanduser("~/.config/dokploy/shared-mount.env")
 
@@ -420,18 +421,42 @@ def read_env(path):
 
 
 existing = read_env(env_path)
+if not email:
+    note("skipped: no real email for '" + login + "'; ~/shared stays a plain folder")
+    raise SystemExit
 
-# 1) The owner's account, lazily created through the provisioner. A pre-
-#    existing manual account keeps its own secret: the derived password then
-#    simply does not fit, and the mount is skipped for this workspace rather
-#    than resetting a human's password.
+# 1) The person's own FileX account, found by their real email, lazily
+#    created through the provisioner when missing. The deployer's email
+#    already IS a FileX account — the admin the pack bootstrapped — so the
+#    deployer's mount rides that human account instead of springing a twin
+#    under a machine email (measured: the pre-fix twin is exactly what
+#    made the account list confusing). A manual account owning the login
+#    name under a different email keeps its own secret and its own meaning:
+#    this lane skips it, never resets it.
 status, users = call("GET", "/api/admin/users", token)
 if status != 200:
     note("skipped: provisioner token rejected by /api/admin/users (HTTP %s)" % status)
     raise SystemExit
 rows = users if isinstance(users, list) else (users or {}).get("users", [])
-user = next((row for row in rows if isinstance(row, dict) and row.get("username") == login), None)
+user = next(
+    (
+        row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("email") or "").lower() == email
+    ),
+    None,
+)
 if user is None:
+    by_name = next(
+        (row for row in rows if isinstance(row, dict) and row.get("username") == login),
+        None,
+    )
+    if by_name is not None:
+        if str(by_name.get("email") or "").lower() == legacy_email:
+            note("skipped: '" + login + "' still rides the pre-fix coder.wizard.local account")
+        else:
+            note("skipped: a manual FileX account owns '" + login + "'")
+        raise SystemExit
     status, user = call(
         "POST", "/api/admin/users", token,
         {"email": email, "username": login, "role": "user", "password": password},
@@ -440,15 +465,26 @@ if user is None:
         note("skipped: could not create the FileX account (HTTP %s)" % status)
         raise SystemExit
     note("created the FileX account for '" + login + "'")
+else:
+    # Adopted account (the deployer's admin included): re-sync the password
+    # to the stack admin password, so one rotation strands neither the mount
+    # nor the web sign-in (admin-route password PATCH measured live).
+    status, _body = call(
+        "PATCH", "/api/admin/users/%s" % user.get("id"), token, {"password": password}
+    )
+    if status == 200:
+        note("synced the FileX password for '" + login + "' to the stack admin password")
+    else:
+        note("warning: password sync for '" + login + "' refused (HTTP %s)" % status)
 
 # 2) Sign in as the owner: every credential below belongs to that person, not
 #    to the provisioner — this is where the provisioner's admin power retires.
 status, session = call(
     "POST", "/api/auth/login",
-    body={"email": user.get("email") or email, "password": password},
+    body={"email": email, "password": password},
 )
 if status != 200 or not isinstance(session, dict) or not session.get("token"):
-    note("skipped: FileX sign-in as '" + login + "' refused (manual account owns that name?)")
+    note("skipped: FileX sign-in as '" + login + "' refused (password not ours?)")
     raise SystemExit
 user_jwt = session["token"]
 
@@ -635,22 +671,25 @@ HELPER
 
     # -- wizard: Gitea identity lane --------------------------------------------
     # The person who owns this workspace gets a Gitea account, springing at
-    # first boot: username = the coder login, email the wizard convention
-    # ({login}@coder.wizard.local), password the stack admin password (one
+    # first boot: username = the coder login, email = their real Coder email —
+    # the same identity they already sign the rest of the stack in with. An
+    # admin-API create verifies and primaries the email instantly (measured),
+    # so it works as a login identifier from the first second and the wizard
+    # never needs a synthetic domain. Password the stack admin password (one
     # operator credential across the stack, re-synced every boot — same
-    # choice as the OpenCode server and Hermes webapp). The owner's real Coder
-    # email registers as a verified secondary so it works as a login
-    # identifier too; the convention email stays primary — it is the marker
-    # the ownership guard reads (the admin list only ever shows the primary).
-    # The
-    # change-password flag is OFF because a pending must-change turns every
-    # basic-auth API call into a 403 (measured). A manual account that already
-    # owns the name keeps its own secret and its own meaning — this lane skips
-    # it, never resets it. One SSH key per (user, workspace) rides the home
-    # volume: pushes over the built-in SSH server (overlay port 2222) name a
+    # choice as the OpenCode server and Hermes webapp). The change-password
+    # flag is OFF because a pending must-change turns every basic-auth API
+    # call into a 403 (measured). The real email is itself the ownership
+    # marker: an existing account under a different email is a manual one —
+    # this lane skips it, never resets it — and one carrying the legacy
+    # convention email is a pre-fix wizard account, migrated in place. One
+    # SSH key per (user, workspace) rides the home volume: pushes over the
+    # built-in SSH server (overlay port 2222) name a
     # person and a machine, and an ssh_config Host alias makes
     # `git clone gitea:owner/repo.git` work out of the box. When the coder
-    # user is deleted the coder phase disables the account; re-adding the
+    # user is deleted the coder phase disables the account (wizard-sprung is
+    # proven by the state ledger, not by any roster signal — measured: none
+    # exists); re-adding the
     # user re-enables it here at the next boot. Nothing here can take a
     # workspace down: the whole lane runs in the background and every failure
     # logs and exits.
@@ -705,7 +744,8 @@ token = os.environ["DOKPLOY_GT_TOKEN"]
 login = os.environ["DOKPLOY_GT_LOGIN"]
 workspace = os.environ["DOKPLOY_GT_WORKSPACE"]
 password = os.environ["DOKPLOY_GT_PASSWORD"]
-email = login + "@coder.wizard.local"
+email = os.environ.get("DOKPLOY_GT_REAL_EMAIL", "").strip().lower()
+legacy_email = login + "@coder.wizard.local"  # pre-fix spring value; never minted again
 title = login + "-" + workspace
 
 
@@ -737,8 +777,12 @@ provisioner_auth = "Token " + token
 owner_basic = "Basic " + base64.b64encode((login + ":" + password).encode()).decode()
 user_path = urllib.parse.quote(login, safe="")
 
-# 1) The owner's account, lazily created through the provisioner. A manual
-#    account owning the name is left exactly as it is. The admin route serves
+# 1) The owner's account, lazily created through the provisioner — under
+#    their REAL email, which an admin-API create verifies and primaries on
+#    the spot (measured), so it doubles as a login identifier from the first
+#    second. A manual account owning the name under a different email is left
+#    exactly as it is; one carrying the pre-fix convention email is a legacy
+#    spring and gets its email migrated. The admin route serves
 #    GET only on the collection (GET /admin/users/<name> is a 405 and a missing
 #    name 404s from the redirect middleware — measured on the box), so the
 #    list is the only honest existence probe.
@@ -757,6 +801,9 @@ def admin_user_row():
     return None, 200
 
 
+if not email:
+    note("skipped: no real email for '" + login + "'; no gitea identity to spring")
+    raise SystemExit
 user, status = admin_user_row()
 if user is None and status != 200:
     note("skipped: provisioner token rejected by /api/v1/admin/users (HTTP %s)" % status)
@@ -770,21 +817,39 @@ if user is None:
     if status not in (200, 201):
         note("skipped: could not create the Gitea account (HTTP %s)" % status)
         raise SystemExit
-    note("created the Gitea account for '" + login + "'")
+    note("created the Gitea account for '" + login + "' as '" + email + "'")
 else:
-    if str(user.get("email") or "").lower() != email.lower():
+    primary = str(user.get("email") or "").lower()
+    if primary not in (email, legacy_email):
         note("skipped: a manual Gitea account owns '" + login + "'")
         raise SystemExit
+    if primary == legacy_email and email != legacy_email:
+        # Pre-fix spring: move the primary onto the real email. Measured:
+        # PATCH with an unused email verifies it, primaries it, and drops the
+        # old primary. A 409 means the real email already sits on some account
+        # (for pre-fix springs, on this one as a verified secondary — gitea
+        # refuses to promote its own secondaries through this door, and the
+        # per-email owner routes 404 in this build); the secondary still logs
+        # in, so note and carry on.
+        status, _body = call(
+            "PATCH", "/api/v1/admin/users/" + user_path, provisioner_auth, {"email": email}
+        )
+        if status == 200:
+            note("migrated the account email to '" + email + "'")
+        elif status == 409:
+            note("kept legacy primary: '" + email + "' is already registered on the account")
+        else:
+            note("warning: email migration for '" + login + "' refused (HTTP %s)" % status)
     if not user.get("active"):
         status, _body = call(
             "PATCH", "/api/v1/admin/users/" + user_path, provisioner_auth, {"active": True}
         )
         if status == 200:
             note("re-enabled the Gitea account for '" + login + "' (Coder user returned)")
-    # Wizard-owned account (the convention email proves it): the password
+    # Wizard-owned account (the real email proves it): the password
     # rides the stack admin password on every boot, so the operator has one
     # credential across the stack and an interim box rebuild can never strand
-    # the account on a stale derivation.
+    # the account on a stale secret.
     status, _body = call(
         "PATCH", "/api/v1/admin/users/" + user_path, provisioner_auth,
         {"login": login, "password": password, "must_change_password": False},
@@ -793,21 +858,6 @@ else:
         note("synced the Gitea password for '" + login + "' to the stack admin password")
     else:
         note("warning: password sync for '" + login + "' refused (HTTP %s)" % status)
-
-# 1b) The owner's real Coder email rides along as a verified secondary, so
-#     gitea accepts it as a login identifier too. The convention email stays
-#     primary — it is the marker that tells this lane "the account is mine",
-#     and the admin list only ever shows the primary. Tolerated: 422 (already
-#     registered or used by another account; Gitea hides which).
-real_email = os.environ.get("DOKPLOY_GT_REAL_EMAIL", "").strip().lower()
-if real_email and real_email != email.lower():
-    status, _body = call(
-        "POST", "/api/v1/user/emails", owner_basic, {"emails": [real_email]},
-    )
-    if status == 201:
-        note("registered '" + real_email + "' as a gitea login email")
-    elif status != 422:
-        note("warning: gitea email registration for '" + real_email + "' refused (HTTP %s)" % status)
 
 # 2) One SSH key per (user, workspace): content adopts, title replaces. The
 #    keypair lives on the home volume, so it survives restarts; a fresh home

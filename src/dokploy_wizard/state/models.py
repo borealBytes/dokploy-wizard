@@ -817,6 +817,47 @@ class GiteaProvisionerState:
 
 
 @dataclass(frozen=True)
+class GiteaIdentityLedger:
+    """Gitea usernames the wizard has ever provisioned or adopted.
+
+    The identity sync needs an ownership signal the APIs cannot give it:
+    Gitea's admin list shows every account alike, and Coder v2.39.4 makes
+    deleted users unqueryable (measured), so neither side can answer "was
+    this account mine?". Whatever the sync claims (username and primary
+    email exactly matching a current Coder user) lands here and stays, so a
+    later deletion can still disable the account the wizard itself springs —
+    and never a manual one.
+    """
+
+    format_version: int
+    usernames: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        if any(name == "" for name in self.usernames):
+            msg = "Gitea identity ledger usernames must be non-empty strings."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format_version": self.format_version,
+            "usernames": list(self.usernames),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> GiteaIdentityLedger:
+        return cls(
+            format_version=_require_format_version(payload),
+            usernames=_require_string_list(payload, "usernames"),
+        )
+
+
+@dataclass(frozen=True)
 class AppliedStateCheckpoint:
     """Last known successfully applied state."""
 

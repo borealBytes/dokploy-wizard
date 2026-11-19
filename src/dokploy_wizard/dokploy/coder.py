@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,17 +219,43 @@ class DokployCoderBackend:
         return f"http://{self._stack_name}-gitea:{_GITEA_INTERNAL_PORT}"
 
     def _sync_gitea_identities(self, session_token: str) -> list[str]:
-        """Align Gitea wizard-sprung accounts with the Coder user roster."""
+        """Align Gitea wizard-sprung accounts with the Coder user roster.
+
+        Ownership lives in the state ledger (`gitea-identities.json`): Gitea's
+        admin list cannot tell a wizard account from a manual one once emails
+        carry real values, and Coder deleted users are unqueryable (measured),
+        so the ledger is the only durable "this account is mine" signal. The
+        sync claims every Gitea row whose username and primary email match a
+        current Coder user, tracks it, and only ever flips accounts it knows.
+        """
         provisioner = self._gitea_provisioner_state()
         if provisioner is None or not self._gitea_hostname:
             return []
-        return _sync_gitea_identities(
+        from dokploy_wizard.state.models import STATE_FORMAT_VERSION, GiteaIdentityLedger
+        from dokploy_wizard.state.store import (
+            load_gitea_identities,
+            write_gitea_identities,
+        )
+
+        stored = load_gitea_identities(self._state_dir)
+        tracked = set(stored.usernames) if stored is not None else set()
+        notes, updated = _sync_gitea_identities(
             coder_hostname=self._hostname,
             session_token=session_token,
             gitea_hostname=self._gitea_hostname,
             provisioner_token=provisioner.token,
             provisioner_username=provisioner.username,
+            tracked=tracked,
         )
+        if updated != tracked:
+            write_gitea_identities(
+                self._state_dir,
+                GiteaIdentityLedger(
+                    format_version=STATE_FORMAT_VERSION,
+                    usernames=tuple(sorted(updated)),
+                ),
+            )
+        return notes
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "service")
@@ -417,6 +443,12 @@ class DokployCoderBackend:
                     "__DOKPLOY_WIZARD_FILEX_INTERNAL_URL__": self._filex_internal_url(),
                     "__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN__": _shell_double_quote_escape(
                         provisioner.token if (provisioner := self._filex_provisioner_state()) else ""
+                    ),
+                    # The lane's per-person FileX accounts sign in with the stack
+                    # admin password (the gitea lane's choice, one credential),
+                    # so the derived-password seed is gone.
+                    "__DOKPLOY_WIZARD_FILEX_ACCOUNT_PASSWORD__": _shell_double_quote_escape(
+                        self._admin_password or "ChangeMeSoon"
                     ),
                     # Gitea identity lane: the overlay door + provisioner token
                     # for the GITEAPROV boot lane (account spring with the stack
@@ -1150,9 +1182,6 @@ def _coder_request(
 # Gitea's compose exposes 3000 on the shared overlay (no publish); workspaces
 # reach the identity lane door at that service DNS name.
 _GITEA_INTERNAL_PORT = 3000
-# The boot lane's account-email convention; the identity sync scopes itself to
-# accounts that carry it and never touches anyone else's.
-_IDENTITY_EMAIL_DOMAIN = "coder.wizard.local"
 # Gitea's admin user list defaults to 30 rows per page; paginate to stay
 # correct at stack scale (the box scale is tiny, the cap keeps bugs bounded).
 _GITEA_PAGE_SIZE = 30
@@ -1224,31 +1253,43 @@ def _gitea_admin_user_rows(*, hostname: str, token: str) -> list[dict[str, objec
 def _identity_sync_actions(
     *,
     gitea_rows: Sequence[object],
-    present_logins: set[str],
+    coder_users: Mapping[str, str],
     provisioner_username: str,
-) -> list[tuple[str, bool]]:
-    """Accounts to flip, as (username, desired-active) pairs.
+    tracked: set[str],
+) -> tuple[list[tuple[str, bool]], set[str]]:
+    """Accounts to flip, as (username, desired-active) pairs, plus the claim set.
 
-    Scope: only wizard-sprung accounts, identified by the email convention
-    ({login}@coder.wizard.local). Manual accounts and the provisioner itself
-    are never touched. A login present in Coder's default users list must be
-    active in Gitea; absent (deleted — measured: v2.39.4 drops deleted rows
-    from the default list) must be inactive.
+    Scope: only wizard-sprung accounts. A Gitea row is claimed as wizard-owned
+    when its username and primary email exactly match a current (non-deleted)
+    Coder user; the ledger's tracked set carries that claim forward, so an
+    account stays managed after its Coder user is deleted (measured: v2.39.4
+    drops deleted rows from the default list, and they are unqueryable by any
+    status/type/name filter — the roster has no durable deleted-user signal,
+    which is exactly why the ledger is the ownership authority). Manual
+    accounts, the provisioner itself, and accounts never claimed are never
+    touched. A tracked login present in Coder's users list must be active in
+    Gitea; absent (deleted) must be inactive.
     """
     actions: list[tuple[str, bool]] = []
+    claimed = set(tracked)
     for row in gitea_rows:
         if not isinstance(row, dict):
             continue
         username = str(row.get("username") or "")
+        login = username.lower()
         email = str(row.get("email") or "").lower()
-        if not username or username == provisioner_username:
+        if not login or login == provisioner_username.lower():
             continue
-        if not email.endswith("@" + _IDENTITY_EMAIL_DOMAIN):
+        if email and coder_users.get(login) == email:
+            claimed.add(login)
+        if login not in claimed:
+            # Not ours this pass and never claimed before: a manual account
+            # (or one we have not adopted). Leave its secret and meaning alone.
             continue
-        desired_active = username.lower() in present_logins
+        desired_active = login in coder_users
         if bool(row.get("active")) is not desired_active:
             actions.append((username, desired_active))
-    return actions
+    return actions, claimed
 
 
 def _sync_gitea_identities(
@@ -1258,8 +1299,13 @@ def _sync_gitea_identities(
     gitea_hostname: str,
     provisioner_token: str,
     provisioner_username: str,
-) -> list[str]:
-    """Keep wizard-sprung Gitea accounts aligned with the Coder roster."""
+    tracked: set[str],
+) -> tuple[list[str], set[str]]:
+    """Keep wizard-sprung Gitea accounts aligned with the Coder roster.
+
+    Returns the human-readable notes and the updated claim set to persist in
+    the state ledger.
+    """
     users = _coder_request(
         hostname=coder_hostname,
         method="GET",
@@ -1267,18 +1313,23 @@ def _sync_gitea_identities(
         session_token=session_token,
     )
     rows = users.get("users")
-    present_logins = {
-        str(row.get("username") or "").lower()
-        for row in (rows if isinstance(rows, list) else [])
-        if isinstance(row, dict) and str(row.get("status") or "") != "deleted"
-    }
+    coder_users: dict[str, str] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or str(row.get("status") or "") == "deleted":
+            continue
+        login = str(row.get("username") or "").lower()
+        email = str(row.get("email") or "").lower()
+        if login and email:
+            coder_users[login] = email
     gitea_rows = _gitea_admin_user_rows(hostname=gitea_hostname, token=provisioner_token)
     notes: list[str] = []
-    for username, desired_active in _identity_sync_actions(
+    actions, claimed = _identity_sync_actions(
         gitea_rows=gitea_rows,
-        present_logins=present_logins,
+        coder_users=coder_users,
         provisioner_username=provisioner_username,
-    ):
+        tracked=tracked,
+    )
+    for username, desired_active in actions:
         status, _payload = _gitea_api_request(
             hostname=gitea_hostname,
             method="PATCH",
@@ -1292,7 +1343,7 @@ def _sync_gitea_identities(
             notes.append(f"Re-enabled Gitea account '{username}' (Coder user returned).")
         else:
             notes.append(f"Disabled Gitea account '{username}' (Coder user deleted).")
-    return notes
+    return notes, claimed
 
 
 def _coder_container_name(service_name: str) -> str | None:

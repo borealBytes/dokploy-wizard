@@ -375,20 +375,23 @@ is what lets a lost state document converge. The token is what the identity
 lane (workspace-boot account springing and deleted-user disable) drives the
 API with.
 
-People sign in with their Coder login (or their real Coder email — the boot
-lane registers it as a verified secondary so Gitea accepts it as a login
-identifier) and the stack admin password (`DOKPLOY_ADMIN_PASSWORD`) — the
-same credential the Dokploy, Coder, DocuSeal, and FileX web logins use, so an
-operator holds exactly one password per box. The workspace boot lane creates
-the account as `<login>` (primary email `<login>@coder.wizard.local`, the
-wizard-ownership marker) and re-syncs the password through the admin API on
-every boot; a manually created account that already owns the name keeps its
-own password — the lane never resets a human's secret. The per-owner FileX
-account that `~/shared` mounts with is machine-internal and keeps the pure
-derivation rule: `fx-` + `sha256(seed + ":" + login)` truncated to 40 hex
-chars, seeded from the LiteLLM workspace-issuer key in
-`litellm-generated-keys.json` (falling back to the provisioner token only
-when no issuer exists).
+People sign in with their Coder login or their real Coder email — which IS
+the account's email: the workspace boot lane creates the account as
+`<login>` with the real email primary, verified on the spot (measured on the
+admin API), so it works as a login identifier from the first second — and the
+stack admin password (`DOKPLOY_ADMIN_PASSWORD`), the same credential the
+Dokploy, Coder, DocuSeal, and FileX web logins use, so an operator holds
+exactly one password per box. That password re-syncs through the admin API on
+every boot. The real email is itself the wizard-ownership marker: an existing
+account under a different email is manual, and the lane never resets a human's
+secret; pre-fix accounts carrying the old `<login>@coder.wizard.local` primary
+are migrated in place. The coder phase keeps a roster of wizard-sprung
+usernames at `gitea-identities.json` (0600) — the durable ownership signal
+Coder's API cannot give back for deleted users — so deleting a user disables
+exactly their account and never a manual one. The FileX account `~/shared`
+mounts with is the person's own too: found by real email, which for the
+deployer is the pack's admin account itself, and holding the same stack admin
+password — the pre-fix machine twin and its `fx-` derivation rule are retired.
 
 The service attaches to the shared-core overlay, so Coder workspaces can
 clone over `http://<stack>-gitea:3000` without leaving the host.
