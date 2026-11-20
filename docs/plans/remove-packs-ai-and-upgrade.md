@@ -1758,3 +1758,56 @@ human admin). Redaction stayed true to its one exception list —
 dokploy-wizard and wizard-provisioner visible, humans blurred by
 identity, demo visible by design — and every zero-rect NOTE from the
 redactor was eye-verified clean.
+
+## Office lockdown, the real fixture, and the demo teardown (2026-11, operator reopening)
+
+The operator reopened the lane with three demands, and all three landed on
+box-measured facts.
+
+**ONLYOFFICE is only reachable through FileX** (`fb082f4`): the office
+hostname's DocumentServer router went Host-only → path-scoped to exactly
+what a real editor session fetches (studio-probed): `/web-apps`,
+`/coauthoring`, `/cache`, the version segment `/9.4.0`, and `/healthcheck`
+for the gate's own heartbeat. Root, `/welcome`, `/favicon.ico` now 404 at
+the edge (box-matrixed); the launcher, api.js, and the versioned tree
+serve 200. The gate grew a third proof (api.js) because the launcher only
+*references* it — the browser fetches it. The rebuild changed the build
+token (7cec→a80c), vindicating the `/9.4.0` prefix over any full token.
+
+**The stuck canvas was self-inflicted** (`57d23a6`): the reported "junk"
+editor sat on gray loading bars forever because the wizard itself set
+`GENERATE_FONTS=false` — the entrypoint (box-read
+`/app/ds/run-document-server.sh:837`) then never generates
+`{version}/sdkjs/common/AllFonts.js`, the browser's post-api.js fetch
+404s *silently*, and ONLYOFFICE never leaves its placeholder. Three green
+proofs and a broken product — so the flag went true and the gate grew its
+fourth proof: parse the volatile build token out of the live api.js
+(three distinct tokens observed across two rebuilds and one font
+regen — parsed, never pinned) and demand the manifest URL answer. Forced
+filex pass on the box narrated all four proofs; a live studio session
+then showed the full ribbon, seven canvases, status bar, and the
+`/9.4.0-…/doc/…/c/` coauthoring websocket — all inside the lockdown's
+allowed paths.
+
+**The fixture swap** (`63f7bc2`) put a real python-docx document
+(kickoff-checklist.docx, 37.2 KB) in the lane; the uploader grew
+--replace/--cull/--snapshot on measured lanes (row hover → kebab →
+Delete → "Move to Trash"; the upload toast intercepts clicks). The
+office-edit final now shows the actual canvas with the checklist laid
+out, and the versions/files shots match the new fixture.
+
+**Demo became a capture prop with an owner** (`0afd5a0`, `1da7ba3`):
+`make all` ends with `demo-teardown`; `demo-seed` + one forced coder pass
+re-primes. `screenshots/demo_prop.py` rides each service's own door; the
+measured surprises: Coder's user-DELETE refuses to cascade (417 — the
+CLI lane is the only cascade path), CLI-created users land DORMANT (the
+agent 401s forever and the boot lane never springs Gitea — activate!),
+workspace names are owner-scoped (one unqualified delete ate the
+deployer's workspace; the pack's ensure lane rebuilt it — the tool
+qualifies owner/name now), Gitea needs `?purge=true` for users holding
+repos, FileX deletes by numeric id, LiteLLM wants `user_ids` arrays. The
+ledger rule that makes this converge is `0afd5a0`: a claim whose account
+exists nowhere is dropped by the identity sync, box-verified (["demo"] →
+[] on the next coder pass). All four demo-dependent finals were re-shot
+against the seeded box before the teardown, so gallery and box agree in
+both states.
