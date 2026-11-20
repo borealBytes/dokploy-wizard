@@ -44,26 +44,43 @@ cp screenshots/redact.env.example screenshots/redact.env   # fill YOUR values
 chmod 600 screenshots/redact.env
 cd screenshots
 make build
-make all                       # or: make shot SHOT=gitea-profile
+make demo-seed                 # re-prime the demo capture prop (below)
+                               # + one forced coder pass for identity pre-flight:
+                               #   dokploy-wizard-remote modify … --force-phase coder
+make all                       # every shot, then the demo teardown
+                               # or: make shot SHOT=gitea-profile
 ```
 
 Point the studio at non-default URLs with `--url=service=https://…` appended
 to the capture command, and record a demo reel with `--video` (raw WebMs land
 in `raw/video/`, also gitignored until a reel is cut).
 
+## The demo prop (seed → capture → teardown)
+
+Several surfaces only prove anything with a *second person* present
+(`coder-users`, `filex-people`, `litellm-users`, the walkthrough strip), so a
+`demo` account is seeded for capture. It is a prop, not a fixture: `make all`
+ends with `make demo-teardown`, and nothing demo-shaped survives the run —
+`make demo-status` reports the footprint across coder, gitea (incl. the
+ledger), filex, and litellm. `studio/../demo_prop.py` rides each service's
+own door with the wizard's own tokens (measured API/CLI shapes in its module
+docstring), so the removal is the same lane a real person's would be, and the
+gitea-identities ledger converges by itself on the next coder pass (the
+identity sync untracks a claim whose account exists nowhere).
+
 ## Walkthrough lane (second person)
 
 The strip under `walkthrough/` proves the identity lane for a *new* account.
-Create the demo user before capturing, delete after — the wizard's own
-Coder UI does both (`coder-users` shot shows them side by side):
+`make demo-seed` before capturing, teardown after (`make all` does the
+teardown for you):
 
 ```bash
-# create: Coder UI → Users → Create User  (login: demo, email: demo@<root>,
-#   password: any throwaway, no must-change)
+make demo-seed   # coder user + workspace; the workspace boot lane springs
+                 # demo's Gitea account, a forced coder pass runs the
+                 # identity pre-flight (filex/litellm + the ledger claim)
 make shot SHOT=walkthrough-login && \
   make shot SHOT=walkthrough-workspace && make shot SHOT=walkthrough-gitea-profile
-# then delete the demo user again (convert-to-user off): the gallery shows a
-# visitor, the box keeps no stranger.
+make demo-teardown   # the gallery showed a visitor; the box keeps no stranger
 ```
 
 The `~/shared` act (`shared/`) needs the same setup twice: write a file from
