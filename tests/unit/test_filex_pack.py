@@ -881,15 +881,23 @@ def test_render_filex_compose_includes_the_office_sidecar() -> None:
     # under relative_url in-container anyway — so no PathPrefix, no
     # stripprefix, no X-Forwarded-Prefix survive here.
     assert "wizard-stack-filex-office:" in compose
+    # Path-scoped, not Host-only: the studio probe measured the editor's
+    # browser fetching nothing beyond the frame route, /web-apps, and the
+    # versioned asset tree — so the hostname serves only the editing surface
+    # (+ /coauthoring and /cache for the save/download lane, and /healthcheck
+    # for the wizard's own gate) and 404s everything else. No bare
+    # ONLYOFFICE to browse; access runs through the FileX frame lane.
     assert (
         'traefik.http.routers.wizard-stack-filex-office.rule: '
-        '"Host(`office.example.com`)"' in compose
+        '"Host(`office.example.com`) && (PathPrefix(`/web-apps`) || '
+        'PathPrefix(`/coauthoring`) || PathPrefix(`/cache`) || '
+        'PathPrefix(`/9.4.0`) || PathPrefix(`/healthcheck`))"' in compose
     )
     # The office hostname is shared by design: the launcher route belongs to
     # the APP (FileX serves /filex-frame/* only when Host equals
     # FILEX_ONLYOFFICE_FRAME_ORIGIN — box-measured on the direct container
-    # probe), everything else stays with the DocumentServer. The explicit
-    # priority beats the Host-only office rule deterministically.
+    # probe). The rule sets are disjoint; the explicit priority is the
+    # belt-and-braces guard for any future prefix drift.
     assert (
         'traefik.http.routers.wizard-stack-filex-office-frame.rule: '
         '"Host(`office.example.com`) && PathPrefix(`/filex-frame`)"' in compose
@@ -968,19 +976,25 @@ def test_office_sidecar_gate_writes_jwt_only_after_health(
         lambda url, **k: order.append(url) or True,
     )
     notes = backend._ensure_office_sidecar()
-    # Up first, then BOTH edge proofs, in that order: the box killed the old
-    # design that docker-exec'd the container mid-boot (supervisor.sock only
-    # exists once supervisord is up, and the subpath is gone entirely anyway).
-    # The second proof is the launcher route — /healthcheck alone was green
-    # on the box while the editor fell back to its banner, because nothing
-    # routed /filex-frame/* to the app.
+    # Up first, then ALL THREE edge proofs, in that order: the box killed the
+    # old design that docker-exec'd the container mid-boot (supervisor.sock
+    # only exists once supervisord is up, and the subpath is gone entirely
+    # anyway). The second proof is the launcher route — /healthcheck alone was
+    # green on the box while the editor fell back to its banner, because
+    # nothing routed /filex-frame/* to the app. The third is api.js: the
+    # launcher only references it, the browser fetches it, and the studio
+    # probe measured it as the first DocumentServer path every real editor
+    # session needs — a path-scoped office router that lost /web-apps must
+    # not narrate readiness.
     assert order == [
         "up",
         "https://office.example.com/healthcheck",
         "https://office.example.com/filex-frame/editor",
+        "https://office.example.com/web-apps/apps/api/documents/api.js",
     ]
     assert any("https://office.example.com/healthcheck" in note for note in notes)
     assert any("https://office.example.com/filex-frame/editor" in note for note in notes)
+    assert any("editor assets answer at" in note for note in notes)
     assert any("editor at https://office.example.com" in note for note in notes)
     from dokploy_wizard.state.store import load_filex_office_jwt
 
@@ -1029,6 +1043,26 @@ def test_office_sidecar_gate_honest_when_the_launcher_route_never_answers(
         backend._ensure_office_sidecar()
     # Health answering is not enough: the editor lane is the promise, and a
     # gate that records the JWT while the route 404s would narrate a lie.
+    assert load_filex_office_jwt(tmp_path) is None
+
+
+def test_office_sidecar_gate_honest_when_the_editor_assets_never_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dokploy_wizard.state.store import load_filex_office_jwt
+
+    backend = _filex_backend(tmp_path, ScriptedS3())
+    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
+
+    def _no_assets(url: str, **_k: object) -> bool:
+        return not url.endswith("/web-apps/apps/api/documents/api.js")
+
+    monkeypatch.setattr(filex_module, "_wait_for_local_https_health", _no_assets)
+    with pytest.raises(FilexError, match="editor assets"):
+        backend._ensure_office_sidecar()
+    # The launcher HTML only REFERENCES api.js; if the path-scoped office
+    # router lost /web-apps, every real editor session 404s in the browser
+    # while both prior proofs stay green. The gate proves the browser's lane.
     assert load_filex_office_jwt(tmp_path) is None
 
 

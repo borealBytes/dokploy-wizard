@@ -131,11 +131,28 @@ _OFFICE_FRAME_PATH = "/filex-frame"
 # launcher to the DocumentServer, and the editor fell back to its own banner
 # claiming the frame did not load). So FileX carries a second router:
 # Host(office) && PathPrefix(/filex-frame), explicit priority above the
-# Host-only sidecar router, with its own forwarded-headers middleware pinned
+# sidecar router, with its own forwarded-headers middleware pinned
 # to the office hostname. With two routers on the container, BOTH must bind
 # their service explicitly — the docker provider drops ambiguous routers
 # entirely (box-measured: "cannot be linked automatically with multiple
 # Services" took the app hostname down with the frame router).
+# The DocumentServer router is PATH-SCOPED, not Host-only: a studio probe
+# against a real editor session measured exactly which office-origin paths
+# the browser fetches — /filex-frame/* (FileX), /web-apps (api.js), and the
+# versioned asset tree /<version>-<buildhash>/* (the token here starts
+# 9.4.0-; the image is digest-pinned so the segment is fixed). Nothing else.
+# So the sidecar rule serves only the editing surface the editor pulls
+# (web-apps, coauthoring, cache, the version-prefixed tree, and /healthcheck
+# — the wizard gate's own heartbeat proof) and the hostname 404s everywhere
+# else, root included: ONLYOFFICE is reachable through the FileX frame lane
+# and nowhere else, so nobody browses a bare document server on the edge.
+_OFFICE_DS_PATHS = (
+    "/web-apps",
+    "/coauthoring",
+    "/cache",
+    "/9.4.0",  # version segment of the digest-pinned image above
+    "/healthcheck",
+)
 # Community edition starts NO bundled database (DB_AVAILABLE is commercial-only
 # — measured), so exactly the three upstream-documented community mounts are
 # needed; rabbitmq/redis/pg stay in the container layer.
@@ -491,14 +508,14 @@ class DokployFilexBackend:
     def _ensure_office_sidecar(self) -> tuple[str, ...]:
         """Prove the ONLYOFFICE editing sidecar is ready, then record its JWT.
 
-        Up first, health second, in that order, with measured budgets: the
-        image is gigabyte class, so the container-up loop carries the long
-        wait (fifteen minutes of pulls). The health gate keeps its generous
-        48x10s budget for the cold-first-boot case (the entrypoint runs
-        before supervisord serves anything; warm layers answer /healthcheck
-        in seconds — box-measured ~30s). Nothing mutates the container
-        here: the sidecar serves at the root of its own hostname, so the
-        entrypoint's every-boot rewrite of local.json has nothing to fight
+        Up first, then the three edge proofs, in that order, with measured
+        budgets: the image is gigabyte class, so the container-up loop carries
+        the long wait (fifteen minutes of pulls). The health gate keeps its
+        generous 48x10s budget for the cold-first-boot case (the entrypoint
+        runs before supervisord serves anything; warm layers answer
+        /healthcheck in seconds — box-measured ~30s). Nothing mutates the
+        container here: the sidecar serves at the root of its own hostname, so
+        the entrypoint's every-boot rewrite of local.json has nothing to fight
         with, and the old post-boot subpath pin (and its cold-boot
         supervisor-socket race) is gone.
         """
@@ -528,10 +545,23 @@ class DokployFilexBackend:
                 f"{frame_url} — the edge has not picked up the frame router; "
                 "rerun to converge."
             )
+        # The launcher HTML references api.js but does not fetch it — the
+        # browser does, through the DocumentServer router's path-scoped rule.
+        # Prove that half too: an api.js 404 means the office router lost the
+        # editor's own surface (the studio probe measured it as the first
+        # DocumentServer path every real editor session fetches).
+        assets_url = _office_editor_assets_url(self._office_hostname)
+        if not _wait_for_local_https_health(assets_url, attempts=24, delay_seconds=5.0):
+            raise FilexError(
+                "The DocumentServer editor assets did not become reachable at "
+                f"{assets_url} — the office hostname is not serving the editing "
+                "surface; rerun to converge."
+            )
         write_filex_office_jwt(self._state_dir, jwt_secret=_office_jwt_value(self._stack_name))
         return (
             f"ONLYOFFICE sidecar ready: /healthcheck answers at {health_url}; "
             f"editor launcher answers at {frame_url}; "
+            f"editor assets answer at {assets_url}; "
             f"editor at {_office_editor_url(self._office_hostname)}; "
             "JWT enforced, secret recorded (0600) in the state dir.",
         )
@@ -1080,6 +1110,15 @@ def _office_frame_url(hostname: str) -> str:
     return f"https://{hostname}{_OFFICE_FRAME_PATH}/editor"
 
 
+def _office_editor_assets_url(hostname: str) -> str:
+    return f"https://{hostname}/web-apps/apps/api/documents/api.js"
+
+
+def _office_ds_rule(hostname: str) -> str:
+    paths = " || ".join(f"PathPrefix(`{path}`)" for path in _OFFICE_DS_PATHS)
+    return f"Host(`{hostname}`) && ({paths})"
+
+
 def _render_compose_file(
     *,
     stack_name: str,
@@ -1155,9 +1194,10 @@ def _render_compose_file(
         f'      traefik.http.services.{service_name}.loadbalancer.server.port: "{_DEFAULT_FILEX_PORT}"\n'
         # The office hostname is shared by two services on purpose (see the
         # module comment): the editor launcher route goes back to THIS
-        # service, everything else on that hostname stays with the
-        # DocumentServer router below. The prefix router must win, hence the
-        # explicit priority over the Host-only sidecar rule.
+        # service; the DocumentServer keeps the editing paths in its
+        # path-scoped router below (the two rule sets are disjoint — the
+        # explicit priority is a belt-and-braces guard so a future prefix
+        # tweak can never quietly hand /filex-frame to the docservice).
         f'      traefik.http.routers.{service_name}-office-frame.entrypoints: "websecure"\n'
         f'      traefik.http.routers.{service_name}-office-frame.service: '
         f'"{service_name}-office-frame"\n'
@@ -1196,7 +1236,7 @@ def _render_compose_file(
         '      traefik.enable: "true"\n'
         f'      traefik.http.routers.{office_name}.entrypoints: "websecure"\n'
         f'      traefik.http.routers.{office_name}.rule: '
-        f'"Host(`{office_hostname}`)"\n'
+        f'"{_office_ds_rule(office_hostname)}"\n'
         f'      traefik.http.routers.{office_name}.tls: "true"\n'
         # Its own hostname, its own certificate route, root-mounted: no
         # prefix middleware, no stripprefix, no X-Forwarded-Prefix — the
