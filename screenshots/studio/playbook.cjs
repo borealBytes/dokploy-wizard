@@ -282,26 +282,31 @@ const SHOTS = [
   },
   {
     shot: 'filex-office-edit', area: 'filex', service: 'filex',
-    caption: 'Open a document: the bundled ONLYOFFICE editor arrives in a frame on its own hostname — one sidecar per box, JWT on every hop.',
+    caption: 'Open a document: FileX previews it inline, and Edit mounts the ONLYOFFICE canvas in a frame on its own hostname — one sidecar per box, JWT on every hop.',
     // The frame's origin is the whole proof of the sidecar design: FileX
     // refuses an editor on its own origin (measured crash-loop), so the
     // iframe src points at office.<root-domain>/filex-frame/editor; the
     // redaction scan catches the root domain inside the attribute. A .docx
     // must exist in My files before the shoot (screenshots/studio/
-    // upload-office-seed.mjs, through the web UI as the deployer).
-    // Box-measured (reshoot probe): a single click only selects — the embed
-    // opens on a DOUBLE-click (row-scoped .fe-list__name; the same lane the
-    // ⋮ menu's Open item drives), and the frame appears within milliseconds;
-    // the ONLYOFFICE canvas itself boots for several seconds. Headless
-    // typing never landed (the embed self-closes without focus), so this
-    // shot proves the frame, not keystrokes.
+    // upload-office-seed.mjs, through the web UI as the deployer — the real
+    // fixture is kickoff-checklist.docx; the 405-byte synthetic it replaced
+    // rendered as gray bars and made this shot look like a skeleton screen).
+    // Box-measured (studio probe, twice): a single click only selects; a
+    // DOUBLE-click opens the preview modal and mounts the office launcher
+    // iframe within milliseconds; the modal's own "Edit" control (aria-label
+    // measured in the probe's control dump) then boots the documenteditor
+    // inside that frame over /9.4.0-<buildhash>/web-apps. The nested canvas
+    // boots for several seconds headless — 16s of settle proved enough on
+    // the box; headless typing never lands (the embed self-closes without
+    // focus), so this shot proves the frame and the document, not
+    // keystrokes.
     steps: [
       { goto: '/admin/home' }, { wait: 2500 },
       { click: 'text="My files"' }, { wait: 2000 },
       { waitForSelector: 'span.fe-list__name:has-text(".docx")', timeout: 25000 },
       { dblclick: 'span.fe-list__name:has-text(".docx")' },
       { waitForSelector: 'iframe[src*="filex-frame"], iframe[src*="web-apps"], iframe[src*="office"]', timeout: 30000 },
-      { wait: 12000 },
+      { click: '[aria-label="Edit"], [title="Edit"]' }, { wait: 16000 },
     ],
   },
   {
