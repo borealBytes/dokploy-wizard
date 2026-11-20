@@ -524,6 +524,11 @@ def test_ensure_application_ready_reports_login_verification(
     s3 = ScriptedS3(head_script=[200], versioning_script=[(200, "<Status>Enabled</Status>")])
     backend = _filex_backend(tmp_path, s3)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    monkeypatch.setattr(
+        filex_module,
+        "_wait_for_office_allfonts",
+        lambda url, **k: "https://office.example.com/9.4.0-42049ab32d904f88f4c5f281b82d0a96/sdkjs/common/AllFonts.js",
+    )
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
 
     class _Resp:
@@ -567,6 +572,11 @@ def test_ensure_application_ready_login_rate_limit_is_note_not_failure(
     s3 = ScriptedS3(head_script=[200], versioning_script=[(200, "<Status>Enabled</Status>")])
     backend = _filex_backend(tmp_path, s3)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    monkeypatch.setattr(
+        filex_module,
+        "_wait_for_office_allfonts",
+        lambda url, **k: "https://office.example.com/9.4.0-42049ab32d904f88f4c5f281b82d0a96/sdkjs/common/AllFonts.js",
+    )
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
 
     from urllib import error as urlerror
@@ -665,6 +675,11 @@ def test_provisioner_bootstraps_lane_token_and_retires_legacy_bot(
 
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    monkeypatch.setattr(
+        filex_module,
+        "_wait_for_office_allfonts",
+        lambda url, **k: "https://office.example.com/9.4.0-42049ab32d904f88f4c5f281b82d0a96/sdkjs/common/AllFonts.js",
+    )
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
     http = _ScriptedFxHttp()
     http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
@@ -742,6 +757,11 @@ def test_provisioner_keeps_alive_lane_token_and_migrates_legacy_doc(
     )
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    monkeypatch.setattr(
+        filex_module,
+        "_wait_for_office_allfonts",
+        lambda url, **k: "https://office.example.com/9.4.0-42049ab32d904f88f4c5f281b82d0a96/sdkjs/common/AllFonts.js",
+    )
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
     http = _ScriptedFxHttp()
     http.queue("POST", "/api/auth/login", 200, {"token": "admin-jwt"})
@@ -827,6 +847,11 @@ def test_provisioner_degrades_to_note_when_admin_session_missing(
 ) -> None:
     backend = _provisioner_backend(tmp_path)
     monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda *a, **k: True)
+    monkeypatch.setattr(
+        filex_module,
+        "_wait_for_office_allfonts",
+        lambda url, **k: "https://office.example.com/9.4.0-42049ab32d904f88f4c5f281b82d0a96/sdkjs/common/AllFonts.js",
+    )
     monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
     from urllib import error as urlerror
 
@@ -875,7 +900,7 @@ def test_render_filex_compose_includes_the_office_sidecar() -> None:
     # be told to trust them or every save round-trips fail with a SSRF guard.
     assert 'ALLOW_PRIVATE_IP_ADDRESS: "true"' in compose
     assert 'WELCOME_PAGE_ENABLED: "false"' in compose
-    assert 'GENERATE_FONTS: "false"' in compose
+    assert 'GENERATE_FONTS: "true"' in compose
     # Its own hostname, root-mounted: FileX refuses a frame on its own
     # origin (measured crash-loop), and docservice does not mount statics
     # under relative_url in-container anyway — so no PathPrefix, no
@@ -975,8 +1000,14 @@ def test_office_sidecar_gate_writes_jwt_only_after_health(
         "_wait_for_local_https_health",
         lambda url, **k: order.append(url) or True,
     )
+    monkeypatch.setattr(
+        filex_module,
+        "_wait_for_office_allfonts",
+        lambda url, **k: order.append(f"allfonts@{url}")
+        or "https://office.example.com/9.4.0-42049ab32d904f88f4c5f281b82d0a96/sdkjs/common/AllFonts.js",
+    )
     notes = backend._ensure_office_sidecar()
-    # Up first, then ALL THREE edge proofs, in that order: the box killed the
+    # Up first, then ALL FOUR edge proofs, in that order: the box killed the
     # old design that docker-exec'd the container mid-boot (supervisor.sock
     # only exists once supervisord is up, and the subpath is gone entirely
     # anyway). The second proof is the launcher route — /healthcheck alone was
@@ -985,16 +1016,25 @@ def test_office_sidecar_gate_writes_jwt_only_after_health(
     # launcher only references it, the browser fetches it, and the studio
     # probe measured it as the first DocumentServer path every real editor
     # session needs — a path-scoped office router that lost /web-apps must
-    # not narrate readiness.
+    # not narrate readiness. The fourth is the versioned AllFonts.js that
+    # api.js embeds: the box proved a missing manifest 404s silently and
+    # leaves every canvas on its loading placeholder with all older proofs
+    # green.
     assert order == [
         "up",
         "https://office.example.com/healthcheck",
         "https://office.example.com/filex-frame/editor",
         "https://office.example.com/web-apps/apps/api/documents/api.js",
+        "allfonts@https://office.example.com/web-apps/apps/api/documents/api.js",
     ]
     assert any("https://office.example.com/healthcheck" in note for note in notes)
     assert any("https://office.example.com/filex-frame/editor" in note for note in notes)
     assert any("editor assets answer at" in note for note in notes)
+    assert any("font manifest answers at" in note for note in notes)
+    assert any(
+        "9.4.0-42049ab32d904f88f4c5f281b82d0a96/sdkjs/common/AllFonts.js" in note
+        for note in notes
+    )
     assert any("editor at https://office.example.com" in note for note in notes)
     from dokploy_wizard.state.store import load_filex_office_jwt
 
@@ -1064,6 +1104,47 @@ def test_office_sidecar_gate_honest_when_the_editor_assets_never_answer(
     # router lost /web-apps, every real editor session 404s in the browser
     # while both prior proofs stay green. The gate proves the browser's lane.
     assert load_filex_office_jwt(tmp_path) is None
+
+
+def test_office_sidecar_gate_honest_when_the_font_manifest_never_answers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dokploy_wizard.state.store import load_filex_office_jwt
+
+    backend = _filex_backend(tmp_path, ScriptedS3())
+    monkeypatch.setattr(filex_module, "_wait_for_container_up", lambda *a, **k: True)
+    monkeypatch.setattr(filex_module, "_wait_for_local_https_health", lambda url, **k: True)
+    monkeypatch.setattr(filex_module, "_wait_for_office_allfonts", lambda url, **k: None)
+    with pytest.raises(FilexError, match="font manifest"):
+        backend._ensure_office_sidecar()
+    # The exact box-measured failure: GENERATE_FONTS=false left AllFonts.js
+    # ungenerated, its 404 raised no banner anywhere, and every editor
+    # session sat on its loading placeholder while health, launcher, and
+    # api.js all stayed green. A gate that records the JWT through that is
+    # narrating a lie.
+    assert load_filex_office_jwt(tmp_path) is None
+
+
+def test_allfonts_url_is_derived_from_the_live_api_js_token() -> None:
+    # Real body fragment from the box: api.js embeds the versioned asset
+    # root, and the token changed across every observed boot — it can be
+    # parsed, never pinned.
+    body = 'var a = "/9.4.0-42049ab32d904f88f4c5f281b82d0a96/sdkjs/";'
+    url = filex_module._office_allfonts_url(
+        "https://office.example.com/web-apps/apps/api/documents/api.js", body
+    )
+    assert url == (
+        "https://office.example.com/9.4.0-42049ab32d904f88f4c5f281b82d0a96"
+        "/sdkjs/common/AllFonts.js"
+    )
+    # An api.js without the versioned root is not a guess-worthy manifest.
+    assert (
+        filex_module._office_allfonts_url(
+            "https://office.example.com/web-apps/apps/api/documents/api.js",
+            "var v = '9.4.0-129';",
+        )
+        is None
+    )
 
 
 def test_office_volume_ledger_name_matches_the_compose_mount() -> None:

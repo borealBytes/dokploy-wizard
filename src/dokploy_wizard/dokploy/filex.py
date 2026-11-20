@@ -24,6 +24,7 @@ import datetime
 import hashlib
 import hmac
 import json
+import re
 import ssl
 import subprocess
 import time
@@ -508,7 +509,7 @@ class DokployFilexBackend:
     def _ensure_office_sidecar(self) -> tuple[str, ...]:
         """Prove the ONLYOFFICE editing sidecar is ready, then record its JWT.
 
-        Up first, then the three edge proofs, in that order, with measured
+        Up first, then the four edge proofs, in that order, with measured
         budgets: the image is gigabyte class, so the container-up loop carries
         the long wait (fifteen minutes of pulls). The health gate keeps its
         generous 48x10s budget for the cold-first-boot case (the entrypoint
@@ -557,11 +558,26 @@ class DokployFilexBackend:
                 f"{assets_url} — the office hostname is not serving the editing "
                 "surface; rerun to converge."
             )
+        # The fourth proof is the one the browser actually needs to boot a
+        # canvas: api.js embeds a versioned build token and the editor then
+        # fetches AllFonts.js under it. Box-measured: a missing manifest 404s
+        # with no banner, no console error, and an editor stuck on its
+        # loading placeholder forever — three green proofs and a broken
+        # product. This proof reads the live token, so a rebuild that
+        # changes it cannot quietly invalidate the promise.
+        allfonts_url = _wait_for_office_allfonts(assets_url)
+        if allfonts_url is None:
+            raise FilexError(
+                "The editor font manifest did not become reachable through "
+                f"{assets_url} — the DocumentServer is serving an editor that "
+                "silently never finishes loading; rerun to converge."
+            )
         write_filex_office_jwt(self._state_dir, jwt_secret=_office_jwt_value(self._stack_name))
         return (
             f"ONLYOFFICE sidecar ready: /healthcheck answers at {health_url}; "
             f"editor launcher answers at {frame_url}; "
             f"editor assets answer at {assets_url}; "
+            f"editor font manifest answers at {allfonts_url}; "
             f"editor at {_office_editor_url(self._office_hostname)}; "
             "JWT enforced, secret recorded (0600) in the state dir.",
         )
@@ -1119,6 +1135,26 @@ def _office_ds_rule(hostname: str) -> str:
     return f"Host(`{hostname}`) && ({paths})"
 
 
+_OFFICE_BUILD_TOKEN_RE = re.compile(r"(\d+\.\d+\.\d+-[0-9a-f]{16,})")
+
+
+def _office_allfonts_url(assets_url: str, api_js_body: str) -> str | None:
+    """The browser's AllFonts.js URL, derived — never guessed.
+
+    api.js embeds the versioned asset root (box-measured: ``9.4.0-<32 hex>``)
+    and that token is VOLATILE — rebuilding the sidecar changed it once, and
+    running the font generator reloaded nginx and changed it again (three
+    distinct tokens observed in one day). It must be parsed from the live
+    api.js the launcher itself is loading, and the manifest only exists when
+    GENERATE_FONTS=true let the entrypoint generate it at boot.
+    """
+    match = _OFFICE_BUILD_TOKEN_RE.search(api_js_body)
+    if match is None:
+        return None
+    origin = parse.urlsplit(assets_url)
+    return f"https://{origin.netloc}/{match.group(1)}/sdkjs/common/AllFonts.js"
+
+
 def _render_compose_file(
     *,
     stack_name: str,
@@ -1231,7 +1267,16 @@ def _render_compose_file(
         f"      JWT_SECRET: \"{_required_placeholder(office_jwt_env)}\"\n"
         '      ALLOW_PRIVATE_IP_ADDRESS: "true"\n'
         '      WELCOME_PAGE_ENABLED: "false"\n'
-        '      GENERATE_FONTS: "false"\n'
+        # Font generation ON, deliberately: the entrypoint (measured at
+        # /app/ds/run-document-server.sh:837) only runs
+        # documentserver-generate-allfonts.sh when GENERATE_FONTS=true, and
+        # the browser fetches the generated AllFonts.js on EVERY editor
+        # boot. With "false" the file simply does not exist: its 404 raises
+        # no banner, and the ONLYOFFICE canvas sits on its loading
+        # placeholder forever (box-measured — the exact stuck-editor the
+        # operator reported). The old "false" was a boot-speed shortcut that
+        # broke the one feature the sidecar exists for.
+        '      GENERATE_FONTS: "true"\n'
         "    labels:\n"
         '      traefik.enable: "true"\n'
         f'      traefik.http.routers.{office_name}.entrypoints: "websecure"\n'
@@ -1407,6 +1452,49 @@ def _local_https_health_check(url: str) -> bool:
         return False
     except (urlerror.URLError, TimeoutError):
         return False
+
+
+def _local_https_body(url: str) -> str | None:
+    """Body of a loopback-edge GET, or None when anything says no."""
+    parsed = parse.urlsplit(url)
+    if not parsed.hostname:
+        return None
+    request_path = parsed.path or "/"
+    if parsed.query:
+        request_path = f"{request_path}?{parsed.query}"
+    req = urlrequest.Request(
+        f"https://127.0.0.1{request_path}",
+        headers={"Host": parsed.hostname},
+        method="GET",
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=15, context=_https_context()) as response:  # noqa: S310
+            return str(response.read().decode("utf-8", "replace"))
+    except (urlerror.HTTPError, urlerror.URLError, TimeoutError):
+        return None
+
+
+def _wait_for_office_allfonts(
+    assets_url: str, *, attempts: int = 24, delay_seconds: float = 5.0
+) -> str | None:
+    """Prove the editor's font manifest serves; return its exact URL.
+
+    The fourth sidecar proof, and the only one that catches the stuck-canvas
+    failure the operator reported: a browser boots ONLYOFFICE by loading
+    api.js, then fetching the versioned AllFonts.js it embeds. A missing
+    manifest (GENERATE_FONTS=false) 404s silently — the editor never renders
+    and nothing anywhere errors. Returns the proven URL so the readiness
+    note can cite the token actually served.
+    """
+    for attempt in range(attempts):
+        body = _local_https_body(assets_url)
+        if body is not None:
+            url = _office_allfonts_url(assets_url, body)
+            if url is not None and _local_https_health_check(url):
+                return url
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return None
 
 
 def _wait_for_local_https_health(
