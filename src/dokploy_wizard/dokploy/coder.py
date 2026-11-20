@@ -1476,10 +1476,17 @@ def _identity_sync_actions(
     which is exactly why the ledger is the ownership authority). Manual
     accounts, the provisioner itself, and accounts never claimed are never
     touched. A tracked login present in Coder's users list must be active in
-    Gitea; absent (deleted) must be inactive.
+    Gitea; absent (deleted) must be inactive. A tracked login that has gone
+    from BOTH rosters — no Gitea row and no Coder user — is untracked: an
+    operator teardown (e.g. the demo prop removed after a screenshot run)
+    deletes the account outright, and a claim over a nonexistent account is
+    ledger noise, not ownership. The history rule that motivated carrying
+    claims through deletion still holds while the Gitea row exists to be
+    disabled, re-enabled, or audited.
     """
     actions: list[tuple[str, bool]] = []
     claimed = set(tracked)
+    seen: set[str] = set()
     for row in gitea_rows:
         if not isinstance(row, dict):
             continue
@@ -1488,6 +1495,7 @@ def _identity_sync_actions(
         email = str(row.get("email") or "").lower()
         if not login or login == provisioner_username.lower():
             continue
+        seen.add(login)
         if email and coder_users.get(login) == email:
             claimed.add(login)
         if login not in claimed:
@@ -1497,6 +1505,14 @@ def _identity_sync_actions(
         desired_active = login in coder_users
         if bool(row.get("active")) is not desired_active:
             actions.append((username, desired_active))
+    claimed &= seen | {
+        # A claimed login with no Gitea row at all (deleted outright) stays
+        # claimed only while its Coder user lives — the workspace boot lane
+        # will spring the account again, and the claim must survive that gap.
+        login
+        for login in claimed & tracked
+        if login in coder_users
+    }
     return actions, claimed
 
 

@@ -2455,6 +2455,25 @@ def test_identity_sync_actions_treats_deleted_status_as_absent() -> None:
     assert claimed == {"gone"}
 
 
+def test_identity_sync_actions_untracks_fully_vanished_claims() -> None:
+    # The demo-prop teardown lane: an operator deletes the Gitea account
+    # outright, and the Coder user is gone too. A claim over an account that
+    # exists nowhere is ledger noise — the next full reseed re-claims it when
+    # the boot lane springs a fresh row. But a tracked login whose Coder user
+    # still lives (workspace mid-boot, Gitea not yet sprung) must NOT be
+    # dropped: that gap is exactly what the claim exists to survive.
+    actions, claimed = coder_module._identity_sync_actions(
+        gitea_rows=[
+            {"username": "returning", "email": "r@corp.example", "active": True},
+        ],
+        coder_users={"returning": "r@corp.example", "respawn": "s@corp.example"},
+        provisioner_username="dokploy-wizard",
+        tracked={"demo", "respawn", "returning"},
+    )
+    assert actions == []  # 'demo' has no row to disable; nothing else differs
+    assert claimed == {"returning", "respawn"}  # 'demo' fully gone: untracked
+
+
 def test_sync_gitea_identities_patches_and_reports(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, str, object]] = []
 
