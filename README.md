@@ -77,7 +77,10 @@ controls sit alongside.
 
 ### A second person joins — the identity lane, end to end
 
-Demo account signs in — the primary deployer account created it minutes before.
+The deployer adds a user on the Coder users page; the on-host identity timer
+reconciles that person into Gitea, FileX, and the gateway within minutes —
+before the first login, not at it. The demo account here signs in on a box
+where that pass already ran.
 
 ![Walkthrough login](screenshots/walkthrough/walkthrough-login.png)
 
@@ -85,8 +88,9 @@ One workspace per person, from the one seeded template.
 
 ![Walkthrough workspace](screenshots/walkthrough/walkthrough-workspace.png)
 
-The identity lane springs again: the new account gets a Gitea account with its
-own real email primary.
+The Gitea account was pre-stood by the timer, not sprung at first boot: the
+new account already carries its real email as the verified primary, and the
+workspace boot only claims and adopts — it never resets a personal password.
 
 ![Walkthrough Gitea profile](screenshots/walkthrough/walkthrough-gitea-profile.png)
 
@@ -122,6 +126,11 @@ admin hat in a state file.
 
 ![Gitea home](screenshots/gitea/gitea-home.png)
 
+A logged-out visitor meets a 404 on the wizard-seeded repo: private by
+default, so the anonymous web sees no listing and no page.
+
+![Gitea logged out](screenshots/gitea/gitea-logged-out.png)
+
 ### `~/shared` — the file story in three images
 
 Workspace A writes into `~/shared` — an ordinary file write over the FUSE
@@ -143,6 +152,16 @@ in as the account the pack bootstrapped; nothing else to remember.
 FUSE.
 
 ![FileX files](screenshots/filex/filex-files.png)
+
+Open a document: FileX previews it inline, and Edit mounts the ONLYOFFICE
+canvas in a frame on its own hostname — one sidecar per box, JWT on every hop.
+
+![FileX office edit](screenshots/filex/filex-office-edit.png)
+
+Every write becomes a FileX version with its own Restore — mounts, snapshots,
+and editor saves all land in the same pane, as the same person.
+
+![FileX office versions](screenshots/filex/filex-office-versions.png)
 
 Two people edit the same file; FileX keeps every version and every author —
 this is where the act pays off.
@@ -198,6 +217,11 @@ New-user policy is a stack knob: models off by default, grants explicit, the
 admin exempt.
 
 ![LiteLLM users](screenshots/litellm/litellm-users.png)
+
+One identity per person across the box: every joined human is an
+`internal_user` here and everywhere; the deployer is the only `proxy_admin`.
+
+![LiteLLM internal user](screenshots/litellm/litellm-internal-user.png)
 
 ### DocuSeal
 
@@ -336,8 +360,12 @@ stateDiagram-v2
 ## What happens when a person joins
 
 The one flow that ties the stack together: the operator adds a user in Coder,
-and the workspace boot lane springs that person's identity through every other
-pack. No manual account creation on four systems, no shared bot account.
+and the identity surfaces reconcile themselves — the on-host systemd timer
+(the wizard installs it during the Coder phase) pre-stands that person's
+accounts in Gitea, FileX, and the gateway within minutes, before the first
+login. The workspace boot lane then claims and adopts; it never stomps a
+personal password. No manual account creation on four systems, no shared bot
+account.
 
 ```mermaid
 %%{init: {
@@ -354,21 +382,27 @@ sequenceDiagram
     autonumber
     actor Op as Operator (browser)
     participant CD as Coder
+    participant TM as Identity timer (systemd, every 5 min)
     participant TF as Workspace provisioner
     participant GT as Gitea
     participant FX as FileX
     participant LT as LiteLLM
     Op->>CD: sign in (stack admin email + password)
     Op->>CD: Users → add person (real email)
+    Note over TM,LT: sync-identities — accounts exist before first login
+    TM->>CD: GET /api/v2/users (the roster)
+    TM->>GT: create missing account <login>, real email primary + verified
+    TM->>FX: create account by real email (stack seed password)
+    TM->>LT: POST /user → internal_user <login> (+ budget from stack policy)
     Op->>CD: start their workspace
     CD->>TF: terraform apply (volume + agent)
-    Note over TF,LT: workspace boot — identity lane
-    TF->>GT: create account <login>, real email primary + verified
-    TF->>GT: password re-synced to the stack password on every boot
-    TF->>FX: account adopted by real email, per-(user, workspace) S3 key minted
+    Note over TF,LT: workspace boot — claim and adopt, no account surprise
+    TF->>GT: claim the pre-stood account; re-enable if the person returned
+    TF->>GT: password re-sync only for the deployer's own login
+    TF->>FX: per-(user, workspace) S3 key minted
     TF->>LT: POST /key/generate → child key "<login>-<workspace>"
     TF->>FX: ~/shared mounted over the S3 door (rclone FUSE)
-    Op->>GT: same person signs in with their own email + stack password
+    Op->>GT: same person signs in with their own email and password
 ```
 
 Deleting the Coder user later disables exactly the Gitea accounts the wizard
