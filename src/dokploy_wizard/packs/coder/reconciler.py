@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import http.client
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -22,6 +22,11 @@ from dokploy_wizard.state.models import DesiredState, OwnedResource, OwnershipLe
 
 CODER_SERVICE_RESOURCE_TYPE = "coder_service"
 CODER_DATA_RESOURCE_TYPE = "coder_data"
+# The coder phase installs one host-level systemd pair so identity lanes re-run
+# without another wizard pass (see `_install_identity_timer` in dokploy/coder.py).
+# It is ledger-owned like everything else: uninstall must take it back down.
+CODER_IDENTITY_TIMER_RESOURCE_TYPE = "coder_identity_timer"
+CODER_IDENTITY_TIMER_UNIT = "dokploy-wizard-identity.timer"
 
 
 class CoderError(RuntimeError):
@@ -283,6 +288,7 @@ def build_coder_ledger(
     stack_name: str,
     service_resource_id: str | None,
     data_resource_id: str | None,
+    extra_resources: Sequence[OwnedResource] = (),
 ) -> OwnershipLedger:
     resources = [
         resource
@@ -296,8 +302,15 @@ def build_coder_ledger(
                 resource.resource_type == CODER_DATA_RESOURCE_TYPE
                 and resource.scope == _data_scope(stack_name)
             )
+            or resource.resource_type == CODER_IDENTITY_TIMER_RESOURCE_TYPE
         )
     ]
+    # Extra resources ride the apply itself (the identity timer units are
+    # installed from inside `ensure_application_ready`): rebuilding the coder
+    # ledger without them would strand host units uninstall can no longer
+    # name. The strip above keeps the re-add idempotent across reruns.
+    for resource in extra_resources:
+        resources.append(resource)
     if service_resource_id is not None:
         resources.append(
             OwnedResource(
@@ -523,6 +536,19 @@ def _service_scope(stack_name: str) -> str:
 
 def _data_scope(stack_name: str) -> str:
     return f"stack:{stack_name}:coder:data"
+
+
+def coder_identity_timer_resource(stack_name: str) -> OwnedResource:
+    """The ledger row for the coder phase's identity timer unit pair.
+
+    One source for the type/id/scope triple so the backend claim, the ledger
+    rebuild, the uninstall rule, and the executor branch can never drift apart.
+    """
+    return OwnedResource(
+        resource_type=CODER_IDENTITY_TIMER_RESOURCE_TYPE,
+        resource_id=CODER_IDENTITY_TIMER_UNIT,
+        scope=_service_scope(stack_name),
+    )
 
 
 def _http_health_check(url: str) -> bool:

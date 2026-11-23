@@ -725,3 +725,106 @@ def test_shell_uninstall_backend_without_cloudflare_stays_ledger_only() -> None:
     deleter = ShellUninstallBackend(RawEnvInput(format_version=1, values={"ROOT_DOMAIN": "example.com"}))
     app = _access_ledger().resources[1]
     deleter.delete(PlannedDeletion(resource=app, phase="cloudflare_access", policy="retain_safe"))
+
+
+def test_uninstall_plan_removes_identity_timer_in_both_modes() -> None:
+    """The coder phase's host timer goes with the pack, data mode aside."""
+    desired = _desired(coder=True)
+    ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                "coder_identity_timer",
+                "dokploy-wizard-identity.timer",
+                "stack:nextcloud-stack:coder:service",
+            ),
+            OwnedResource("coder_service", "coder-1", "stack:nextcloud-stack:coder:service"),
+            OwnedResource("coder_data", "coder-data", "stack:nextcloud-stack:coder:data"),
+        ),
+    )
+
+    retain = build_uninstall_plan(
+        raw_input=_raw({"STACK_NAME": "nextcloud-stack"}),
+        desired_state=desired,
+        ownership_ledger=ledger,
+        destroy_data=False,
+    )
+    assert [
+        (item.resource.resource_type, item.phase, item.policy) for item in retain.deletions
+    ] == [
+        ("coder_identity_timer", "coder", "retain_safe"),
+        ("coder_service", "coder", "retain_safe"),
+    ]
+    assert [resource.resource_type for resource in retain.retained_resources] == ["coder_data"]
+
+    destroy = build_uninstall_plan(
+        raw_input=_raw({"STACK_NAME": "nextcloud-stack"}),
+        desired_state=desired,
+        ownership_ledger=ledger,
+        destroy_data=True,
+    )
+    assert destroy.retained_resources == ()
+    timer_deletions = [
+        item for item in destroy.deletions if item.resource.resource_type == "coder_identity_timer"
+    ]
+    assert len(timer_deletions) == 1
+    assert timer_deletions[0].policy == "retain_safe"
+
+
+def test_remove_identity_timer_units_disables_unlinks_and_survives_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    from dokploy_wizard.uninstall.executor import _remove_identity_timer_units
+
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("dokploy_wizard.uninstall.executor.subprocess.run", fake_run)
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    (unit_dir / "dokploy-wizard-identity.service").write_text("x\n", encoding="utf-8")
+    (unit_dir / "dokploy-wizard-identity.timer").write_text("x\n", encoding="utf-8")
+
+    _remove_identity_timer_units(unit_dir=unit_dir)
+
+    assert calls[0] == ["systemctl", "disable", "--now", "dokploy-wizard-identity.timer"]
+    assert calls[-1] == ["systemctl", "daemon-reload"]
+    assert not (unit_dir / "dokploy-wizard-identity.service").exists()
+    assert not (unit_dir / "dokploy-wizard-identity.timer").exists()
+
+    # Already gone: nothing raises, the host just no-ops the unit calls.
+    calls.clear()
+    _remove_identity_timer_units(unit_dir=unit_dir)
+    assert calls == [
+        ["systemctl", "disable", "--now", "dokploy-wizard-identity.timer"],
+        ["systemctl", "daemon-reload"],
+    ]
+
+
+def test_shell_uninstall_backend_routes_identity_timer_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dokploy_wizard.uninstall import ShellUninstallBackend
+    from dokploy_wizard.uninstall.planner import PlannedDeletion
+
+    removed: list[str] = []
+    monkeypatch.setattr(
+        "dokploy_wizard.uninstall.executor._remove_identity_timer_units",
+        lambda *, timer_unit: removed.append(timer_unit),
+    )
+
+    deleter = ShellUninstallBackend(RawEnvInput(format_version=1, values={"ROOT_DOMAIN": "example.com"}))
+    resource = OwnedResource(
+        "coder_identity_timer", "dokploy-wizard-identity.timer", "stack:demo:coder:service"
+    )
+    deleter.delete(PlannedDeletion(resource=resource, phase="coder", policy="retain_safe"))
+
+    # The unit name rides the ledger row itself: no second namebook.
+    assert removed == ["dokploy-wizard-identity.timer"]

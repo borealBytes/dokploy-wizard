@@ -43,6 +43,20 @@ def _expected_coder_fallback_models_json_escaped() -> str:
     return coder_module._shell_double_quote_escape(_expected_coder_fallback_models_json())
 
 
+@pytest.fixture(autouse=True)
+def identity_timer(monkeypatch: pytest.MonkeyPatch):
+    """Keep the host systemd timer out of coder-apply tests by default.
+
+    The installer writes /etc/systemd/system and shells out to systemctl, so
+    asserting on apply notes must not depend on who runs the suite. Timer
+    tests take the fixture value (the real installer) and drive it against a
+    tmp state dir themselves.
+    """
+    real = coder_module._install_identity_timer
+    monkeypatch.setattr(coder_module, "_install_identity_timer", lambda **kwargs: ([], False))
+    return real
+
+
 def test_coder_litellm_fallback_models_json_is_minimal_default_alias() -> None:
     aliases = json.loads(_expected_coder_fallback_models_json())
 
@@ -2727,6 +2741,8 @@ def test_ensure_application_ready_runs_gitea_identity_sync_and_degrades_cleanly(
             "tracked": set(),
             # The roster is read once per pass and handed to every surface.
             "coder_users": {"clayton": "clayton@example.com"},
+            # The lane seeds missing accounts too, so the stack password rides along.
+            "password": "ChangeMeSoon",
         }
     ]
     if sync_failure:
@@ -3810,3 +3826,525 @@ def test_ensure_application_ready_verified_path_survives_update_failure(
 
     notes = backend.ensure_application_ready()
     assert any("Coder default workspace step did not complete" in note for note in notes)
+
+
+# ---------------------------------------------------------------------------
+# Identity reconciliation: Gitea pre-flight spring, the standalone sync body,
+# and the host timer that runs it between wizard passes.
+# ---------------------------------------------------------------------------
+
+
+def test_prestand_gitea_identities_creates_free_logins_and_spares_owners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Gitea pre-stand mirrors the FileX lane's rules exactly."""
+    calls: list[dict[str, object]] = []
+
+    def fake_rows(*, hostname: str, token: str) -> list[dict[str, object]]:
+        del hostname, token
+        return [
+            {"username": "dokploy-wizard", "email": "dokploy-wizard@gitea.example.com"},
+            {"username": "person", "email": "Person@Example.com"},
+            {"username": "bob", "email": "bob@manual.test"},
+            {"username": "legacy", "email": "legacy@coder.wizard.local"},
+        ]
+
+    def fake_request(**kwargs: object) -> tuple[int, object]:
+        calls.append(dict(kwargs))
+        return (201, {"id": 7})
+
+    monkeypatch.setattr(coder_module, "_gitea_admin_user_rows", fake_rows)
+    monkeypatch.setattr(coder_module, "_gitea_api_request", fake_request)
+
+    notes, created = coder_module._prestand_gitea_identities(
+        gitea_hostname="gitea.example.com",
+        provisioner_token="gt-token",
+        coder_users={
+            "person": "person@example.com",  # email already standing
+            "bob": "bob@example.com",  # manual account owns the login
+            "legacy": "legacy@example.com",  # pre-fix twin owns the login
+            "carol": "carol@example.com",  # free login: created
+        },
+        password="StackPw123",
+    )
+
+    assert notes == ["Created Gitea account 'carol' (identity pre-flight)."]
+    assert created == {"carol"}
+    assert calls == [
+        {
+            "hostname": "gitea.example.com",
+            "method": "POST",
+            "path": "/api/v1/admin/users",
+            "token": "gt-token",
+            "payload": {
+                "username": "carol",
+                "email": "carol@example.com",
+                "password": "StackPw123",
+                # A pending must-change turns every basic-auth call into a 403
+                # (measured); the lane's whole point is a working login.
+                "must_change_password": False,
+                "send_notify_email": False,
+            },
+        }
+    ]
+
+
+def test_prestand_gitea_identities_raises_when_create_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(coder_module, "_gitea_admin_user_rows", lambda **kwargs: [])
+    monkeypatch.setattr(coder_module, "_gitea_api_request", lambda **kwargs: (500, None))
+    with pytest.raises(coder_module.CoderError, match="HTTP 500"):
+        coder_module._prestand_gitea_identities(
+            gitea_hostname="gitea.example.com",
+            provisioner_token="gt-token",
+            coder_users={"carol": "carol@example.com"},
+            password="pw",
+        )
+
+
+def test_prestand_gitea_identities_races_note_keeps_the_claim_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 409 (boot lane won the race) notes honestly and claims nothing."""
+    monkeypatch.setattr(coder_module, "_gitea_admin_user_rows", lambda **kwargs: [])
+    monkeypatch.setattr(coder_module, "_gitea_api_request", lambda **kwargs: (409, None))
+    notes, created = coder_module._prestand_gitea_identities(
+        gitea_hostname="gitea.example.com",
+        provisioner_token="gt-token",
+        coder_users={"carol": "carol@example.com"},
+        password="pw",
+    )
+    assert created == set()
+    assert len(notes) == 1 and notes[0].startswith("Skipped Gitea account for 'carol'")
+
+
+def test_sync_gitea_identities_springs_missing_rows_and_claims_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full lane pass: re-enable claims, spring fresh logins, claim both."""
+    monkeypatch.setattr(
+        coder_module,
+        "_gitea_admin_user_rows",
+        lambda **kwargs: [
+            {"username": "dokploy-wizard", "email": "prov@gitea.example.com", "active": True},
+            {"username": "clayton", "email": "clayton@example.com", "active": False},
+        ],
+    )
+
+    def fake_request(**kwargs: object) -> tuple[int, object]:
+        return (200, {}) if kwargs["method"] == "PATCH" else (201, {"id": 9})
+
+    monkeypatch.setattr(coder_module, "_gitea_api_request", fake_request)
+
+    notes, claimed = coder_module._sync_gitea_identities(
+        coder_hostname="coder.example.com",
+        session_token="session-123",
+        gitea_hostname="gitea.example.com",
+        provisioner_token="gt-token",
+        provisioner_username="dokploy-wizard",
+        tracked={"clayton", "purged"},
+        coder_users={
+            "clayton": "clayton@example.com",
+            "purged": "purged@example.com",  # Coder user lives on; row was deleted outright
+            "newcomer": "newcomer@example.com",
+        },
+        password="StackPw123",
+    )
+
+    assert "Re-enabled Gitea account 'clayton' (Coder user returned)." in notes
+    assert "Created Gitea account 'newcomer' (identity pre-flight)." in notes
+    # The created row was not in the snapshot the claim prune ran against;
+    # without the union the ledger write would drop it on this very pass.
+    assert claimed == {"clayton", "purged", "newcomer"}
+
+
+def test_sync_gitea_identities_without_password_does_not_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The flips-only fallback stays intact for callers without a secret."""
+    monkeypatch.setattr(coder_module, "_gitea_admin_user_rows", lambda **kwargs: [])
+    monkeypatch.setattr(
+        coder_module, "_gitea_api_request", lambda **kwargs: pytest.fail("no API calls expected")
+    )
+    notes, claimed = coder_module._sync_gitea_identities(
+        coder_hostname="coder.example.com",
+        session_token="session-123",
+        gitea_hostname="gitea.example.com",
+        provisioner_token="gt-token",
+        provisioner_username="dokploy-wizard",
+        tracked=set(),
+        coder_users={"newcomer": "newcomer@example.com"},
+    )
+    assert notes == []
+    assert claimed == set()
+
+
+def test_gitea_identity_lane_persists_sprung_claims_to_state_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from dokploy_wizard.state.models import STATE_FORMAT_VERSION, GiteaProvisionerState
+    from dokploy_wizard.state.store import load_gitea_identities
+
+    monkeypatch.setattr(
+        coder_module,
+        "_gitea_admin_user_rows",
+        lambda **kwargs: [
+            {"username": "dokploy-wizard", "email": "prov@gitea.example.com", "active": True}
+        ],
+    )
+    monkeypatch.setattr(coder_module, "_gitea_api_request", lambda **kwargs: (201, {"id": 9}))
+
+    notes = coder_module._gitea_identity_lane(
+        state_dir=tmp_path,
+        coder_hostname="coder.example.com",
+        session_token="session-123",
+        gitea_hostname="gitea.example.com",
+        provisioner=GiteaProvisionerState(
+            format_version=STATE_FORMAT_VERSION,
+            username="dokploy-wizard",
+            email="dokploy-wizard@gitea.example.com",
+            password="pw",
+            token="gt-token",
+        ),
+        coder_users={"newcomer": "newcomer@example.com"},
+        password="StackPw123",
+    )
+
+    assert "Created Gitea account 'newcomer' (identity pre-flight)." in notes
+    ledger = load_gitea_identities(tmp_path)
+    assert ledger is not None
+    assert ledger.usernames == ("newcomer",)
+
+
+def test_sync_stack_identities_isolates_lanes_and_ends_the_login_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import dokploy_wizard.state.store as state_store
+    from dokploy_wizard.state.models import (
+        STATE_FORMAT_VERSION,
+        FilexProvisionerState,
+        GiteaProvisionerState,
+    )
+
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-9")
+    monkeypatch.setattr(
+        coder_module,
+        "_coder_roster",
+        lambda **kwargs: {"clayton": "clayton@example.com"},
+    )
+
+    def failing_gitea_lane(**kwargs: object) -> list[str]:
+        raise coder_module.CoderError("gitea down")
+
+    monkeypatch.setattr(coder_module, "_gitea_identity_lane", failing_gitea_lane)
+    monkeypatch.setattr(
+        coder_module,
+        "_sync_filex_identities",
+        lambda **kwargs: ["Created FileX account 'clayton' (identity pre-flight)."],
+    )
+    logged_out: list[str] = []
+    monkeypatch.setattr(
+        coder_module, "_coder_logout", lambda **kwargs: logged_out.append(kwargs["session_token"])
+    )
+    monkeypatch.setattr(
+        state_store,
+        "load_gitea_provisioner",
+        lambda state_dir: GiteaProvisionerState(
+            format_version=STATE_FORMAT_VERSION,
+            username="dokploy-wizard",
+            email="dokploy-wizard@gitea.example.com",
+            password="pw",
+            token="gt-token",
+        ),
+    )
+    monkeypatch.setattr(
+        state_store,
+        "load_filex_provisioner",
+        lambda state_dir: FilexProvisionerState(
+            format_version=STATE_FORMAT_VERSION,
+            username="dokploy-wizard",
+            email="dokploy-wizard@filex.example.com",
+            password="pw",
+            user_id=2,
+            token="fx-token",
+            token_id=3,
+        ),
+    )
+
+    notes = coder_module.sync_stack_identities(
+        coder_hostname="coder.example.com",
+        admin_email="admin@example.com",
+        admin_password="pw",
+        gitea_hostname="gitea.example.com",
+        filex_hostname="files.example.com",
+        state_dir=tmp_path,
+    )
+
+    # One surface down, the others still ran, and the pass left no login behind.
+    assert any(note.startswith("Skipped Gitea identity sync:") for note in notes)
+    assert "Created FileX account 'clayton' (identity pre-flight)." in notes
+    assert logged_out == ["session-9"]
+
+
+def test_sync_stack_identities_logs_out_when_the_roster_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-9")
+    monkeypatch.setattr(
+        coder_module, "_coder_roster", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    logged_out: list[str] = []
+    monkeypatch.setattr(
+        coder_module, "_coder_logout", lambda **kwargs: logged_out.append(kwargs["session_token"])
+    )
+
+    notes = coder_module.sync_stack_identities(
+        coder_hostname="coder.example.com",
+        admin_email="admin@example.com",
+        admin_password="pw",
+        gitea_hostname="",
+        filex_hostname="",
+        state_dir=tmp_path,
+    )
+
+    assert any(note.startswith("Skipped identity sync: Coder roster unreadable") for note in notes)
+    assert logged_out == ["session-9"]
+
+
+def test_coder_logout_prefers_delete_and_falls_back_to_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+
+    def fake_request(**kwargs: object) -> dict[str, object]:
+        attempts.append(str(kwargs["method"]))
+        if kwargs["method"] == "DELETE":
+            raise coder_module._CoderHTTPError(status=405)
+        return {}
+
+    monkeypatch.setattr(coder_module, "_coder_request", fake_request)
+    coder_module._coder_logout(hostname="coder.example.com", session_token="session-9")
+    assert attempts == ["DELETE", "POST"]
+
+
+def test_gitea_boot_lane_password_resync_is_admin_gated() -> None:
+    """The boot lane re-syncs the stack password for the deployer login only."""
+    template = Path(
+        "templates/coder/default-ubuntu-vscode-hermes-desktop/main.tf"
+    ).read_text(encoding="utf-8")
+    assert 'export DOKPLOY_GT_ADMIN_LOGIN="__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__"' in template
+    assert 'admin_login = os.environ.get("DOKPLOY_GT_ADMIN_LOGIN", "").strip().lower()' in template
+    assert "if login == admin_login:" in template
+    assert 'note("kept the personal Gitea password' in template
+    # The unconditional resync must be gone: the stomp is what stranded Mailson.
+    assert (
+        template.count(
+            'note("synced the Gitea password for \'" + login + "\' to the stack admin password")'
+        )
+        == 1
+    )
+    gate_start = template.index("admin_login = os.environ.get")
+    gate_end = template.index("kept the personal Gitea password")
+    assert template.index('{"login": login, "password": password, "must_change_password": False}') > gate_start
+    assert template.index('{"login": login, "password": password, "must_change_password": False}') < gate_end
+
+
+def _identity_timer_backend(tmp_path: Path) -> DokployCoderBackend:
+    return DokployCoderBackend(
+        api_url="https://dokploy.example.com/api",
+        api_key="key-123",
+        stack_name="wizard-stack",
+        hostname="coder.example.com",
+        wildcard_hostname="*.coder.example.com",
+        admin_email="admin@openmerge.me",
+        admin_password="ChangeMeSoon",
+        postgres_service_name="wizard-stack-shared-postgres",
+        postgres=SharedPostgresAllocation(
+            database_name="wizard_stack_coder",
+            user_name="wizard_stack_coder",
+            password_secret_ref="wizard-stack-coder-postgres-password",
+        ),
+        state_dir=tmp_path,
+        client=cast(DokployCoderApi, FakeCoderApi()),
+    )
+
+
+def _stub_timer_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralize the host-side steps of a coder apply (the fan-out test's setup)."""
+    monkeypatch.setattr(coder_module, "_coder_first_user_exists", lambda hostname: False)
+    monkeypatch.setattr(coder_module, "_create_coder_first_user", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_coder_login", lambda **kwargs: "session-123")
+    monkeypatch.setattr(coder_module, "_coder_container_name", lambda service_name: "container")
+    monkeypatch.setattr(coder_module, "_active_template_version_name", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_template_version_names", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_sync_hermes_workspace_secrets", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_copy_template_into_container", lambda **kwargs: None)
+    monkeypatch.setattr(coder_module, "_push_default_template", lambda **kwargs: None)
+    monkeypatch.setattr(
+        coder_module,
+        "_ensure_default_workspace",
+        lambda **kwargs: coder_module.DefaultWorkspaceOutcome(action="exists"),
+    )
+    monkeypatch.setattr(coder_module, "_retire_removed_templates", lambda **kwargs: ())
+    monkeypatch.setattr(coder_module, "_migrate_retired_template_workspaces", lambda **kwargs: ())
+    monkeypatch.setattr(
+        coder_module, "_coder_roster", lambda **kwargs: {"clayton": "clayton@example.com"}
+    )
+
+
+def test_ensure_application_ready_records_identity_timer_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from dokploy_wizard.packs.coder import coder_identity_timer_resource
+
+    backend = _identity_timer_backend(tmp_path)
+    _stub_timer_host(monkeypatch)
+    monkeypatch.setattr(
+        coder_module, "_install_identity_timer", lambda **kwargs: (["Identity timer note."], True)
+    )
+
+    notes = backend.ensure_application_ready()
+
+    assert "Identity timer note." in notes
+    assert backend.apply_time_owned_resources == (coder_identity_timer_resource("wizard-stack"),)
+
+
+def test_ensure_application_ready_without_timer_owns_nothing_extra(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # `identity_timer` (autouse) already answers ([], False) for every test.
+    backend = _identity_timer_backend(tmp_path)
+    _stub_timer_host(monkeypatch)
+
+    backend.ensure_application_ready()
+
+    assert backend.apply_time_owned_resources == ()
+
+
+def test_identity_timer_unit_texts_bake_the_canonical_paths(tmp_path: Path) -> None:
+    env_file = tmp_path / ".install.env"
+    state_dir = tmp_path / "state"
+    service, timer = coder_module._identity_timer_unit_texts(
+        env_file=env_file, state_dir=state_dir
+    )
+    src_dir = str(Path(coder_module.__file__).resolve().parents[2])
+    assert f"ConditionPathExists={env_file}" in service
+    assert f"Environment=PYTHONPATH={src_dir}" in service
+    assert (
+        "ExecStart=/usr/bin/python3 -m dokploy_wizard sync-identities "
+        in service
+    )
+    assert f"--env-file {env_file} --state-dir {state_dir}" in service
+    assert "Type=oneshot" in service
+    assert "OnBootSec=3min" in timer
+    assert "OnUnitActiveSec=5min" in timer
+    assert "WantedBy=timers.target" in timer
+
+
+def test_install_identity_timer_writes_enables_and_stays_quiet_on_rerun(
+    identity_timer: object,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    env_file = tmp_path / ".install.env"
+    env_file.write_text("STACK_NAME=x\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(coder_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(coder_module, "_SYSTEMD_UNIT_DIR", unit_dir)
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
+    notes, owned = identity_timer(state_dir=state_dir)  # type: ignore[operator]
+    assert owned is True
+    assert any("Enabled the identity reconciliation timer" in note for note in notes)
+    assert (unit_dir / "dokploy-wizard-identity.service").is_file()
+    assert (unit_dir / "dokploy-wizard-identity.timer").is_file()
+    assert ["systemctl", "daemon-reload"] in calls
+    assert ["systemctl", "enable", "--now", "dokploy-wizard-identity.timer"] in calls
+
+    calls.clear()
+    notes, owned = identity_timer(state_dir=state_dir)  # type: ignore[operator]
+    assert owned is True
+    # Same rendered text: no daemon-reload churn; enable stays re-affirmed.
+    assert ["systemctl", "daemon-reload"] not in calls
+    assert ["systemctl", "enable", "--now", "dokploy-wizard-identity.timer"] in calls
+
+    # A vanished env file with standing units keeps the ownership claim (the
+    # pair is still ours to remove); the Condition keeps the journal quiet.
+    env_file.unlink()
+    _notes, owned = identity_timer(state_dir=state_dir)  # type: ignore[operator]
+    assert owned is True
+
+
+def test_install_identity_timer_skips_without_root_or_env_file(
+    identity_timer: object,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    monkeypatch.setattr(coder_module, "_SYSTEMD_UNIT_DIR", unit_dir)
+
+    monkeypatch.setattr(coder_module.os, "geteuid", lambda: 1000)
+    notes, owned = identity_timer(state_dir=state_dir)  # type: ignore[operator]
+    assert owned is False
+    assert any("not running as root" in note for note in notes)
+
+    monkeypatch.setattr(coder_module.os, "geteuid", lambda: 0)
+    notes, owned = identity_timer(state_dir=state_dir)  # type: ignore[operator]
+    assert owned is False
+    assert any("no .install.env" in note for note in notes)
+    assert not (unit_dir / "dokploy-wizard-identity.service").exists()
+
+
+def test_build_coder_ledger_rebuilds_identity_timer_extras() -> None:
+    from dokploy_wizard.packs.coder import coder_identity_timer_resource
+
+    existing = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource("coder_service", "svc-old", "stack:demo:coder:service"),
+            coder_identity_timer_resource("demo"),
+        ),
+    )
+
+    rebuilt = build_coder_ledger(
+        existing_ledger=existing,
+        stack_name="demo",
+        service_resource_id="svc-new",
+        data_resource_id="data-new",
+        extra_resources=(coder_identity_timer_resource("demo"),),
+    )
+
+    rows = [(item.resource_type, item.resource_id) for item in rebuilt.resources]
+    assert rows.count(("coder_identity_timer", "dokploy-wizard-identity.timer")) == 1
+    assert ("coder_service", "svc-old") not in rows
+    assert ("coder_service", "svc-new") in rows
+    assert ("coder_data", "data-new") in rows
+
+    # No extras (e.g. the coder apply ran unrooted): the stale row is stripped,
+    # never left behind as uninstall noise.
+    stripped = build_coder_ledger(
+        existing_ledger=existing,
+        stack_name="demo",
+        service_resource_id="svc-new",
+        data_resource_id="data-new",
+    )
+    assert [item.resource_type for item in stripped.resources] == ["coder_service", "coder_data"]

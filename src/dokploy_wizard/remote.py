@@ -108,6 +108,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to a typed confirmation file used for the remote apply step",
     )
 
+    sync_identities_parser = subparsers.add_parser(
+        "sync-identities",
+        help="run identity reconciliation remotely",
+        description=(
+            "Upload the repo and reconcile FileX/Gitea/LiteLLM accounts against the live "
+            "Coder roster remotely. Same lanes as the coder phase; also what the host "
+            "identity timer runs every few minutes. Defaults: --user root, --remote-path "
+            "/root/dokploy-wizard, --env-file .install.env."
+        ),
+    )
+    _add_remote_common_arguments(sync_identities_parser)
+
     uninstall_parser = subparsers.add_parser(
         "uninstall",
         help="run uninstall against a remote host",
@@ -172,8 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.epilog = (
-        "Lifecycle commands: install, modify, uninstall, upgrade, inspect-state, proof. "
-        "Remote defaults: /root/dokploy-wizard and .install.env."
+        "Lifecycle commands: install, modify, uninstall, upgrade, inspect-state, proof, "
+        "sync-identities. Remote defaults: /root/dokploy-wizard and .install.env."
     )
     return parser
 
@@ -193,7 +205,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     reporter.progress(f"starting remote {args.command}")
 
     try:
-        if args.command in {"install", "modify", "uninstall", "upgrade", "proof"}:
+        if args.command in {
+            "install",
+            "modify",
+            "uninstall",
+            "upgrade",
+            "proof",
+            "sync-identities",
+        }:
             _require_local_env_file(args.env_file)
     except (OSError, ValueError) as error:
         print(_redact_runtime_message(str(error), password=args.password), file=sys.stderr)
@@ -228,7 +247,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     exit_code = 1
 
     try:
-        if args.command in {"install", "modify", "uninstall", "upgrade", "proof"}:
+        if args.command in {
+            "install",
+            "modify",
+            "uninstall",
+            "upgrade",
+            "proof",
+            "sync-identities",
+        }:
             _upload_remote_bundle(args=args, session=session, reporter=reporter)
             _extract_remote_bundle(session=session, password=args.password)
         if args.command == "install":
@@ -285,6 +311,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 session=session,
                 subcommand="modify",
                 command=_build_modify_command(session, force_phase=args.force_phase),
+                password=args.password,
+            )
+            exit_code = 0
+            return exit_code
+        if args.command == "sync-identities":
+            _run_remote_command(
+                session=session,
+                subcommand="sync-identities",
+                command=_build_sync_identities_command(session),
                 password=args.password,
             )
             exit_code = 0
@@ -641,6 +676,21 @@ def _build_modify_command(
     if force_phase is not None:
         command.extend(["--force-phase", force_phase])
     return _with_unbuffered_python(_shell_join(command))
+
+
+def _build_sync_identities_command(session: RemoteTransportSession) -> str:
+    return _with_unbuffered_python(
+        _shell_join(
+            [
+                "./bin/dokploy-wizard",
+                "sync-identities",
+                "--env-file",
+                session.remote_install_env_path,
+                "--state-dir",
+                session.remote_state_dir,
+            ]
+        )
+    )
 
 
 def _build_uninstall_command(

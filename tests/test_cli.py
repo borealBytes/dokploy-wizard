@@ -3144,6 +3144,101 @@ def test_handle_modify_dry_run_skips_env_file_permission_warning(
     assert captured.err == ""
 
 
+def test_handle_sync_identities_forwards_state_and_prints_notes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "install.env"
+    env_file.write_text(
+        "STACK_NAME=example\n"
+        "ROOT_DOMAIN=example.com\n"
+        "DOKPLOY_ADMIN_EMAIL=admin@example.com\n"
+        "DOKPLOY_ADMIN_PASSWORD=pw\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    monkeypatch.setattr(
+        cli,
+        "load_state_dir",
+        lambda path: SimpleNamespace(
+            desired_state=SimpleNamespace(
+                hostnames={
+                    "coder": "coder.example.com",
+                    "coder-wildcard": "*.coder.example.com",
+                    "gitea": "gitea.example.com",
+                    "filex": "files.example.com",
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "ensure_litellm_generated_keys",
+        lambda state_dir: SimpleNamespace(master_key="mk-1"),
+    )
+    captured_kwargs: dict[str, Any] = {}
+
+    def fake_sync(**kwargs: Any) -> list[str]:
+        captured_kwargs.update(kwargs)
+        return ["Created Gitea account 'newcomer' (identity pre-flight)."]
+
+    monkeypatch.setattr(cli, "sync_stack_identities", fake_sync)
+
+    result = cli._handle_sync_identities(
+        argparse.Namespace(env_file=env_file, state_dir=tmp_path / "state")
+    )
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "identity pre-flight" in out
+    assert captured_kwargs["coder_hostname"] == "coder.example.com"
+    assert captured_kwargs["admin_email"] == "admin@example.com"
+    assert captured_kwargs["admin_password"] == "pw"
+    assert captured_kwargs["gitea_hostname"] == "gitea.example.com"
+    assert captured_kwargs["filex_hostname"] == "files.example.com"
+    assert captured_kwargs["state_dir"] == tmp_path / "state"
+    # The gateway door is built from the state master key, not a fresh guess.
+    assert isinstance(captured_kwargs["litellm_admin_api"], cli.LiteLLMAdminClient)
+
+
+def test_handle_sync_identities_noops_when_coder_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "install.env"
+    env_file.write_text("STACK_NAME=example\nROOT_DOMAIN=example.com\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    monkeypatch.setattr(
+        cli,
+        "load_state_dir",
+        lambda path: SimpleNamespace(desired_state=SimpleNamespace(hostnames={})),
+    )
+
+    def fail_sync(**kwargs: Any) -> list[str]:
+        raise AssertionError("sync must not run without a coder hostname")
+
+    monkeypatch.setattr(cli, "sync_stack_identities", fail_sync)
+
+    result = cli._handle_sync_identities(
+        argparse.Namespace(env_file=env_file, state_dir=tmp_path / "state")
+    )
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "not part of this stack" in out
+    assert '"coder": null' in out
+
+
+def test_sync_identities_subcommand_wires_parser() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["sync-identities", "--env-file", "x.env", "--state-dir", "s"])
+    assert args.handler is cli._handle_sync_identities
+    assert args.env_file == Path("x.env")
+    assert args.state_dir == Path("s")
+
+
 def test_ensure_dokploy_api_auth_rewrites_env_with_generated_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

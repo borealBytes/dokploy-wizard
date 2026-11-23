@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import os
 import re
 import shutil
 import ssl
@@ -51,9 +52,17 @@ from dokploy_wizard.litellm.admin import (
     LiteLLMUserAssignment,
 )
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
-from dokploy_wizard.packs.coder import CoderError, CoderResourceRecord
+from dokploy_wizard.packs.coder import (
+    CoderError,
+    CoderResourceRecord,
+    coder_identity_timer_resource,
+)
 from dokploy_wizard.state import load_state_dir
-from dokploy_wizard.state.models import FilexProvisionerState, GiteaProvisionerState
+from dokploy_wizard.state.models import (
+    FilexProvisionerState,
+    GiteaProvisionerState,
+    OwnedResource,
+)
 from dokploy_wizard.verification import make_verification_result, redact_text
 
 
@@ -245,36 +254,21 @@ class DokployCoderBackend:
         so the ledger is the only durable "this account is mine" signal. The
         sync claims every Gitea row whose username and primary email match a
         current Coder user, tracks it, and only ever flips accounts it knows.
+        Missing accounts spring here too (pre-flight create), so a new person
+        can sign into Gitea before their first workspace boot.
         """
         provisioner = self._gitea_provisioner_state()
         if provisioner is None or not self._gitea_hostname:
             return []
-        from dokploy_wizard.state.models import STATE_FORMAT_VERSION, GiteaIdentityLedger
-        from dokploy_wizard.state.store import (
-            load_gitea_identities,
-            write_gitea_identities,
-        )
-
-        stored = load_gitea_identities(self._state_dir)
-        tracked = set(stored.usernames) if stored is not None else set()
-        notes, updated = _sync_gitea_identities(
+        return _gitea_identity_lane(
+            state_dir=self._state_dir,
             coder_hostname=self._hostname,
             session_token=session_token,
             gitea_hostname=self._gitea_hostname,
-            provisioner_token=provisioner.token,
-            provisioner_username=provisioner.username,
-            tracked=tracked,
+            provisioner=provisioner,
             coder_users=coder_users,
+            password=self._admin_password,
         )
-        if updated != tracked:
-            write_gitea_identities(
-                self._state_dir,
-                GiteaIdentityLedger(
-                    format_version=STATE_FORMAT_VERSION,
-                    usernames=tuple(sorted(updated)),
-                ),
-            )
-        return notes
 
     def _sync_filex_identities(self, coder_users: Mapping[str, str]) -> list[str]:
         """Pre-stand each roster person's FileX account (one-ID plan).
@@ -303,22 +297,24 @@ class DokployCoderBackend:
         """
         if self._litellm_admin_api is None or not coder_users:
             return []
-        admin_login = username_from_email(self._admin_email).lower()
-        assignments = tuple(
-            LiteLLMUserAssignment(
-                user_id=login,
-                user_email=email,
-                user_role=(
-                    LITELLM_USER_ROLE_ADMIN
-                    if login == admin_login
-                    else LITELLM_USER_ROLE_INTERNAL
-                ),
-                password=self._admin_password,
-            )
-            for login, email in sorted(coder_users.items())
+        return _litellm_identity_lane(
+            coder_users=coder_users,
+            admin_email=self._admin_email,
+            password=self._admin_password,
+            api=self._litellm_admin_api,
         )
-        manager = LiteLLMGatewayManager(api=self._litellm_admin_api, sleep_fn=lambda _: None)
-        return manager.ensure_user_identities(assignments)
+
+    @property
+    def apply_time_owned_resources(self) -> tuple[OwnedResource, ...]:
+        """Ledger rows for host resources claimed during this apply.
+
+        The identity timer units are installed from inside
+        `ensure_application_ready`, but the coder ledger is rebuilt by the
+        engine after the apply returns — so the engine harvests this tuple
+        and folds it into `build_coder_ledger` (a mid-apply direct ledger
+        write would be clobbered by that rebuild).
+        """
+        return tuple(getattr(self, "_apply_time_owned_resources", ()))
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "service")
@@ -598,6 +594,18 @@ class DokployCoderBackend:
                     note = f"Skipped {label} identity sync: {_safe_progress_reason(str(exc))}"
                     _emit_coder_progress(note)
                     notes.append(note)
+        # The identity timer is what turns "we ran a coder pass" into "new Coder
+        # users get FileX/Gitea/gateway accounts automatically": a host systemd
+        # pair that re-runs exactly the lanes above every few minutes (see the
+        # `sync-identities` command). Its ledger row rides `apply_time_owned_resources`
+        # because the engine rebuilds this phase's ledger after the apply.
+        timer_notes, timer_installed = _install_identity_timer(state_dir=self._state_dir)
+        for timer_note in timer_notes:
+            _emit_coder_progress(timer_note)
+        notes.extend(timer_notes)
+        self._apply_time_owned_resources = (
+            [coder_identity_timer_resource(self._stack_name)] if timer_installed else []
+        )
         workspace_name = _default_workspace_name(self._hostname)
         # The adopt-or-create lane rides every coder pass, healthy included: on
         # a box upgraded from a pre-fix wizard the compose application verifies
@@ -1228,6 +1236,30 @@ def _coder_login(*, hostname: str, email: str, password: str) -> str:
     return token
 
 
+def _coder_logout(*, hostname: str, session_token: str) -> None:
+    """Delete a login-session token created by `_coder_login` (best effort).
+
+    `/api/v2/users/login` mints a PERSISTENT session (unlike the one Coder's
+    own UI cookie flow issues at sign-in): leaving every sync pass logged in
+    piles a visible row onto the user's tokens page each run. DELETE is the
+    documented verb on current Coder; the POST fallback costs one extra probe
+    only on builds that predate the rename, and a miss either way is a leak to
+    tolerate, not a reason to fail an identity pass.
+    """
+    for method in ("DELETE", "POST"):
+        try:
+            _coder_request(
+                hostname=hostname,
+                method=method,
+                path="/api/v2/users/logout",
+                expected_statuses={200, 204},
+                session_token=session_token,
+            )
+            return
+        except (CoderError, _CoderHTTPError):
+            continue
+
+
 def _coder_request(
     *,
     hostname: str,
@@ -1516,6 +1548,70 @@ def _identity_sync_actions(
     return actions, claimed
 
 
+def _prestand_gitea_identities(
+    *,
+    gitea_hostname: str,
+    provisioner_token: str,
+    coder_users: Mapping[str, str],
+    password: str,
+) -> tuple[list[str], set[str]]:
+    """Spring missing roster accounts into Gitea (the one-ID pre-flight lane).
+
+    Mirrors `_sync_filex_identities` across the Gitea surface: email-first
+    lookup, the same manual-owner/legacy-twin skip, and the same stack-password
+    seed — with one addition the FileX lane does not need: the create carries
+    `must_change_password: False` because a pending must-change turns every
+    basic-auth call into a 403 (measured). An admin-API create verifies and
+    primaries the given email instantly (measured), so the person signs in
+    with username or email from the first second and the sync lane's own
+    email match claims the row on this very pass. The workspace boot lane
+    keeps its spring untouched: this only removes the surprise of an account
+    that does not exist yet. Returns notes plus the logins created this pass
+    (the caller unions them into the ledger claims — the sync above pruned
+    against the pre-create snapshot, so a fresh row would otherwise be lost).
+    """
+    rows = _gitea_admin_user_rows(hostname=gitea_hostname, token=provisioner_token)
+    emails = {
+        str(row.get("email") or "").lower() for row in rows if isinstance(row, dict)
+    }
+    names = {
+        str(row.get("username") or "").lower() for row in rows if isinstance(row, dict)
+    }
+    notes: list[str] = []
+    created: set[str] = set()
+    for login in sorted(coder_users):
+        email = coder_users[login]
+        if email in emails:
+            continue
+        if login in names:
+            # Manual owner or legacy twin: the sync and boot lanes' rules cover it.
+            continue
+        status, _body = _gitea_api_request(
+            hostname=gitea_hostname,
+            method="POST",
+            path="/api/v1/admin/users",
+            token=provisioner_token,
+            payload={
+                "username": login,
+                "email": email,
+                "password": password,
+                "must_change_password": False,
+                "send_notify_email": False,
+            },
+        )
+        if status in (200, 201):
+            notes.append(f"Created Gitea account '{login}' (identity pre-flight).")
+            created.add(login)
+        elif status in (409, 422):
+            # Raced with a boot lane or a manual create; leave the row alone.
+            notes.append(
+                f"Skipped Gitea account for '{login}': identity already taken (HTTP {status})."
+            )
+        else:
+            raise CoderError(f"Gitea identity pre-flight create for '{login}' failed (HTTP {status}).")
+    return notes, created
+
+
 def _sync_gitea_identities(
     *,
     coder_hostname: str,
@@ -1525,13 +1621,16 @@ def _sync_gitea_identities(
     provisioner_username: str,
     tracked: set[str],
     coder_users: Mapping[str, str] | None = None,
+    password: str = "",
 ) -> tuple[list[str], set[str]]:
     """Keep wizard-sprung Gitea accounts aligned with the Coder roster.
 
     ``coder_users`` (login -> email) may be supplied by the caller when the
     roster was already read for another identity surface; fetching it here is
-    the fallback. Returns the human-readable notes and the updated claim set
-    to persist in the state ledger.
+    the fallback. ``password`` seeds accounts this pass springs (empty keeps
+    the lane to flips-only, for callers with no secret to hand). Returns the
+    human-readable notes and the updated claim set to persist in the state
+    ledger.
     """
     roster = (
         dict(coder_users)
@@ -1560,7 +1659,275 @@ def _sync_gitea_identities(
             notes.append(f"Re-enabled Gitea account '{username}' (Coder user returned).")
         else:
             notes.append(f"Disabled Gitea account '{username}' (Coder user deleted).")
+    if password:
+        preflight_notes, created = _prestand_gitea_identities(
+            gitea_hostname=gitea_hostname,
+            provisioner_token=provisioner_token,
+            coder_users=roster,
+            password=password,
+        )
+        notes.extend(preflight_notes)
+        # Freshly created rows were not in the snapshot the claim prune above
+        # worked from; union them in so this pass's ledger write keeps them.
+        claimed |= created
     return notes, claimed
+
+
+def _gitea_identity_lane(
+    *,
+    state_dir: Path,
+    coder_hostname: str,
+    session_token: str,
+    gitea_hostname: str,
+    provisioner: GiteaProvisionerState,
+    coder_users: Mapping[str, str] | None,
+    password: str,
+) -> list[str]:
+    """The Gitea identity surface end to end: sync, spring, persist claims.
+
+    Shared by the coder phase backend and the `sync-identities` command so the
+    timer pass and the wizard pass can never drift on what "in sync" means.
+    """
+    from dokploy_wizard.state.models import STATE_FORMAT_VERSION, GiteaIdentityLedger
+    from dokploy_wizard.state.store import load_gitea_identities, write_gitea_identities
+
+    stored = load_gitea_identities(state_dir)
+    tracked = set(stored.usernames) if stored is not None else set()
+    notes, updated = _sync_gitea_identities(
+        coder_hostname=coder_hostname,
+        session_token=session_token,
+        gitea_hostname=gitea_hostname,
+        provisioner_token=provisioner.token,
+        provisioner_username=provisioner.username,
+        tracked=tracked,
+        coder_users=coder_users,
+        password=password,
+    )
+    if updated != tracked:
+        write_gitea_identities(
+            state_dir,
+            GiteaIdentityLedger(
+                format_version=STATE_FORMAT_VERSION,
+                usernames=tuple(sorted(updated)),
+            ),
+        )
+    return notes
+
+
+def _litellm_identity_lane(
+    *,
+    coder_users: Mapping[str, str],
+    admin_email: str,
+    password: str,
+    api: LiteLLMAdminApi,
+) -> list[str]:
+    """The gateway identity surface: upsert every roster person as a user.
+
+    Password re-sync is drift-only inside `ensure_user_identities`, so a
+    person's personal password survives later passes (measured on the box).
+    """
+    admin_login = username_from_email(admin_email).lower()
+    assignments = tuple(
+        LiteLLMUserAssignment(
+            user_id=login,
+            user_email=email,
+            user_role=(
+                LITELLM_USER_ROLE_ADMIN
+                if login == admin_login
+                else LITELLM_USER_ROLE_INTERNAL
+            ),
+            password=password,
+        )
+        for login, email in sorted(coder_users.items())
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+    return manager.ensure_user_identities(assignments)
+
+
+_CODER_IDENTITY_TIMER_NAME = "dokploy-wizard-identity"
+_SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
+
+
+def _identity_timer_unit_texts(*, env_file: Path, state_dir: Path) -> tuple[str, str]:
+    """Render the (service, timer) unit texts for the identity reconciliation pair.
+
+    The service invokes the package the same way `bin/dokploy-wizard` does
+    (module invocation over the repo's `src`), so the timer rides whichever
+    checkout produced it — on the box, the `/root/dokploy-wizard` bundle the
+    remote helper maintains. `ConditionPathExists` keeps a vanished env file
+    (operator cleanup, partial uninstall) from spamming the journal: the unit
+    refuses cleanly and the next wizard pass re-decides.
+    """
+    repo_src = Path(__file__).resolve().parents[2]
+    service = (
+        "[Unit]\n"
+        "Description=Dokploy Wizard identity reconciliation (Coder roster -> FileX, Gitea, LiteLLM)\n"
+        f"ConditionPathExists={env_file}\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"Environment=PYTHONPATH={repo_src}\n"
+        f"ExecStart=/usr/bin/python3 -m dokploy_wizard sync-identities "
+        f"--env-file {env_file} --state-dir {state_dir}\n"
+        "Nice=10\n"
+    )
+    timer = (
+        "[Unit]\n"
+        "Description=Dokploy Wizard identity reconciliation timer\n"
+        "\n"
+        "[Timer]\n"
+        # Boot delay lets Dokploy/Coder/Gitea/traefik finish coming up on a
+        # power-cycled host; the short period is what makes "new Coder user ->
+        # accounts appear" feel automatic without being noisy on the box.
+        "OnBootSec=3min\n"
+        "OnUnitActiveSec=5min\n"
+        "AccuracySec=30s\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+    return service, timer
+
+
+def _systemctl(*args: str) -> bool:
+    result = subprocess.run(
+        ["systemctl", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _install_identity_timer(*, state_dir: Path) -> tuple[list[str], bool]:
+    """Install or refresh the identity timer pair; report (notes, ledger-owned).
+
+    Idempotent by content: units are rewritten only when the rendered text
+    changed, and the ledger row is owned whenever the pair stands on disk —
+    enable failures warn but do not drop ownership (the files are ours to
+    remove, whoever enabled them).
+    """
+    resolved_state = state_dir.expanduser().resolve()
+    env_file = resolved_state.parent / ".install.env"
+    service_path = _SYSTEMD_UNIT_DIR / f"{_CODER_IDENTITY_TIMER_NAME}.service"
+    timer_path = _SYSTEMD_UNIT_DIR / f"{_CODER_IDENTITY_TIMER_NAME}.timer"
+    present = service_path.is_file() and timer_path.is_file()
+    if os.geteuid() != 0:
+        return (
+            ["Identity timer skipped: not running as root (every coder pass still syncs)."],
+            False,
+        )
+    if not env_file.is_file() and not present:
+        return (
+            ["Identity timer skipped: no .install.env beside the state directory to bake into the unit."],
+            False,
+        )
+    service_text, timer_text = _identity_timer_unit_texts(env_file=env_file, state_dir=resolved_state)
+    notes: list[str] = []
+    changed = False
+    for path, text in ((service_path, service_text), (timer_path, timer_text)):
+        try:
+            if path.is_file() and path.read_text(encoding="utf-8") == text:
+                continue
+            path.write_text(text, encoding="utf-8")
+            changed = True
+        except OSError as exc:
+            return ([f"Identity timer skipped: cannot write '{path.name}' ({exc})."], False)
+    if changed and not _systemctl("daemon-reload"):
+        notes.append(
+            "Identity timer warning: systemctl daemon-reload failed; the new unit text lands on next boot."
+        )
+    if _systemctl("enable", "--now", f"{_CODER_IDENTITY_TIMER_NAME}.timer"):
+        notes.append(f"Enabled the identity reconciliation timer ({_CODER_IDENTITY_TIMER_NAME}.timer).")
+    else:
+        notes.append(
+            f"Identity timer warning: systemctl enable --now {_CODER_IDENTITY_TIMER_NAME}.timer failed; "
+            "run it by hand to activate the pair."
+        )
+    return notes, True
+
+
+def sync_stack_identities(
+    *,
+    coder_hostname: str,
+    admin_email: str,
+    admin_password: str,
+    gitea_hostname: str,
+    filex_hostname: str,
+    state_dir: Path,
+    litellm_admin_api: LiteLLMAdminApi | None = None,
+) -> list[str]:
+    """Reconcile every identity surface against the live Coder roster.
+
+    The standalone twin of the coder phase's identity block — the exact body
+    the host timer runs, and what `sync-identities` exposes for operators.
+    One login, one roster read, then the three lanes each fail alone (the
+    doctrine the Gitea lane established). The login session created here is
+    logged out on the way: `/api/v2/users/login` mints a persistent session
+    per call, and a timer pass must not pile them up (measured: each login
+    row shows in the Coder access tokens UI).
+    """
+    from dokploy_wizard.state.store import load_filex_provisioner, load_gitea_provisioner
+
+    session_token = _coder_login(hostname=coder_hostname, email=admin_email, password=admin_password)
+    notes: list[str] = []
+    try:
+        try:
+            roster = _coder_roster(coder_hostname=coder_hostname, session_token=session_token)
+        except Exception as exc:  # noqa: BLE001 - lane doctrine
+            notes.append(f"Skipped identity sync: Coder roster unreadable ({_safe_progress_reason(str(exc))})")
+            return notes
+        if not roster:
+            notes.append("Skipped identity sync: Coder roster is empty.")
+            return notes
+        gitea_provisioner = load_gitea_provisioner(state_dir) if gitea_hostname else None
+        if gitea_provisioner is not None:
+            try:
+                notes.extend(
+                    _gitea_identity_lane(
+                        state_dir=state_dir,
+                        coder_hostname=coder_hostname,
+                        session_token=session_token,
+                        gitea_hostname=gitea_hostname,
+                        provisioner=gitea_provisioner,
+                        coder_users=roster,
+                        password=admin_password,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - lane doctrine
+                notes.append(f"Skipped Gitea identity sync: {_safe_progress_reason(str(exc))}")
+        else:
+            notes.append("Gitea identity sync skipped: no provisioner token in state (pack off?).")
+        filex_provisioner = load_filex_provisioner(state_dir) if filex_hostname else None
+        if filex_provisioner is not None:
+            try:
+                notes.extend(
+                    _sync_filex_identities(
+                        hostname=filex_hostname,
+                        provisioner_token=filex_provisioner.token,
+                        coder_users=roster,
+                        password=admin_password,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - lane doctrine
+                notes.append(f"Skipped FileX identity sync: {_safe_progress_reason(str(exc))}")
+        else:
+            notes.append("FileX identity sync skipped: no provisioner token in state (pack off?).")
+        if litellm_admin_api is not None:
+            try:
+                notes.extend(
+                    _litellm_identity_lane(
+                        coder_users=roster,
+                        admin_email=admin_email,
+                        password=admin_password,
+                        api=litellm_admin_api,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - lane doctrine
+                notes.append(f"Skipped LiteLLM identity sync: {_safe_progress_reason(str(exc))}")
+        return notes
+    finally:
+        _coder_logout(hostname=coder_hostname, session_token=session_token)
 
 
 def _coder_container_name(service_name: str) -> str | None:

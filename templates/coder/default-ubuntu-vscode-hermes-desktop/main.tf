@@ -708,9 +708,10 @@ HELPER
     # the same identity they already sign the rest of the stack in with. An
     # admin-API create verifies and primaries the email instantly (measured),
     # so it works as a login identifier from the first second and the wizard
-    # never needs a synthetic domain. Password the stack admin password (one
-    # operator credential across the stack, re-synced every boot — same
-    # choice as the OpenCode server and Hermes webapp). The change-password
+    # never needs a synthetic domain. Create-time password is the stack admin
+    # password (same choice as the OpenCode server and Hermes webapp), but the
+    # every-boot re-sync is admin-login-only: personal accounts keep whatever
+    # password their owner sets. The change-password
     # flag is OFF because a pending must-change turns every basic-auth API
     # call into a 403 (measured). The real email is itself the ownership
     # marker: an existing account under a different email is a manual one —
@@ -743,11 +744,16 @@ HELPER
       export DOKPLOY_GT_LOGIN="${data.coder_workspace_owner.me.name}"
       export DOKPLOY_GT_WORKSPACE="${data.coder_workspace.me.name}"
       export DOKPLOY_GT_REAL_EMAIL="${data.coder_workspace_owner.me.email}"
+      # The deployer's own login is the only account whose password rides the
+      # stack admin secret on every boot; everyone else keeps the personal
+      # password they were seeded with (their Coder login is theirs to change).
+      export DOKPLOY_GT_ADMIN_LOGIN="__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__"
       # The person signs in with the stack admin password — the same choice
       # the OpenCode server and Hermes webapp tiles make: one operator
       # credential, not a second secret to lose. Wizard-owned accounts get
-      # the password re-synced every boot; a manual account that owns the
-      # name keeps its own (email-mismatch guard below).
+      # the password re-synced every boot only for the deployer's own login;
+      # everyone else's personal password survives, and a manual account that
+      # owns the name keeps its own (email-mismatch guard below).
       export DOKPLOY_GT_PASSWORD="$DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD"
       (
         # Background on purpose, same rule as ~/shared: identity calls and
@@ -879,18 +885,25 @@ else:
         )
         if status == 200:
             note("re-enabled the Gitea account for '" + login + "' (Coder user returned)")
-    # Wizard-owned account (the real email proves it): the password
-    # rides the stack admin password on every boot, so the operator has one
-    # credential across the stack and an interim box rebuild can never strand
-    # the account on a stale secret.
-    status, _body = call(
-        "PATCH", "/api/v1/admin/users/" + user_path, provisioner_auth,
-        {"login": login, "password": password, "must_change_password": False},
-    )
-    if status == 200:
-        note("synced the Gitea password for '" + login + "' to the stack admin password")
+    # Wizard-owned account (the real email proves it). The password rule is
+    # admin-only: the deployer's own login rides the stack admin password on
+    # every boot (one operator credential, and an interim box rebuild can
+    # never strand it on a stale secret); everyone else keeps the personal
+    # password their account was created with — stomping a human's own login
+    # with the stack secret on every boot is how "username and passwords
+    # incorrect" happens to the person who just changed it.
+    admin_login = os.environ.get("DOKPLOY_GT_ADMIN_LOGIN", "").strip().lower()
+    if login == admin_login:
+        status, _body = call(
+            "PATCH", "/api/v1/admin/users/" + user_path, provisioner_auth,
+            {"login": login, "password": password, "must_change_password": False},
+        )
+        if status == 200:
+            note("synced the Gitea password for '" + login + "' to the stack admin password")
+        else:
+            note("warning: password sync for '" + login + "' refused (HTTP %s)" % status)
     else:
-        note("warning: password sync for '" + login + "' refused (HTTP %s)" % status)
+        note("kept the personal Gitea password for '" + login + "'")
 
 # 2) One SSH key per (user, workspace): content adopts, title replaces. The
 #    keypair lives on the home volume, so it survives restarts; a fresh home

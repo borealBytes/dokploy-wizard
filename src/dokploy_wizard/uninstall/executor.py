@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from dokploy_wizard.networking.edge_https import EDGE_HTTPS_FILENAME, TRAEFIK_DYNAMIC_DIR
+from dokploy_wizard.packs.coder import (
+    CODER_IDENTITY_TIMER_RESOURCE_TYPE,
+    CODER_IDENTITY_TIMER_UNIT,
+)
 from dokploy_wizard.state import (
     LIFECYCLE_CHECKPOINT_CONTRACT_VERSION,
     AppliedStateCheckpoint,
@@ -53,6 +57,39 @@ def _parse_access_scope(scope: str) -> tuple[str, str] | None:
     return parts[1], parts[3]
 
 
+def _systemctl_noinput(*args: str) -> None:
+    subprocess.run(
+        ["systemctl", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _remove_identity_timer_units(
+    *,
+    timer_unit: str = CODER_IDENTITY_TIMER_UNIT,
+    unit_dir: Path = Path("/etc/systemd/system"),
+) -> None:
+    """Take the coder phase's identity timer pair down for good.
+
+    Best effort by design: `disable --now` on an absent unit and unlink of an
+    absent file are both no-ops, so a half-torn-down host (or one where the
+    timer never activated) still comes out clean, and uninstall must not die
+    on housekeeping it already finished. The service unit is derived from the
+    ledger's own resource id, so coder.py and this branch can never disagree
+    on names.
+    """
+    stem = timer_unit.removesuffix(".timer")
+    _systemctl_noinput("disable", "--now", timer_unit)
+    for unit in (f"{stem}.service", timer_unit):
+        try:
+            (unit_dir / unit).unlink(missing_ok=True)
+        except OSError:
+            pass
+    _systemctl_noinput("daemon-reload")
+
+
 class ShellUninstallBackend:
     """Deterministic default backend for ledger-driven teardown execution."""
 
@@ -92,6 +129,9 @@ class ShellUninstallBackend:
             return
         if resource.resource_type in _ACCESS_DELETION_TYPES:
             self._delete_access_resource(resource)
+            return
+        if resource.resource_type == CODER_IDENTITY_TIMER_RESOURCE_TYPE:
+            _remove_identity_timer_units(timer_unit=resource.resource_id)
             return
         if resource.resource_type in self._failing_types:
             raise UninstallExecutionError(

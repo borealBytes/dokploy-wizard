@@ -40,6 +40,20 @@ identity roster) converge with `--force-phase <phase>`, which folds one
 already-completed phase into the plan for one real pass; the remote helper
 forwards the same flag.
 
+### Sync identities
+
+```bash
+./bin/dokploy-wizard sync-identities --env-file ./.install.env --state-dir .dokploy-wizard-state
+```
+
+`sync-identities` runs the coder phase's identity lanes (FileX pre-stand, Gitea
+pre-flight spring + claim ledger, LiteLLM user upsert) standalone, with no
+Dokploy client. The coder phase installs the pair as on-host systemd units
+(`dokploy-wizard-identity.timer`, ledger type `coder_identity_timer`) that run
+this command every 5 minutes, so new Coder users get working accounts without
+any wizard pass. `dokploy-wizard-remote sync-identities` forwards the same run
+with a fresh bundle upload.
+
 ### Upgrade (drift check / gated LiteLLM pin bump)
 
 ```bash

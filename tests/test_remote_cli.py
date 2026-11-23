@@ -98,7 +98,22 @@ def test_help_lists_expected_subcommands() -> None:
     assert "upgrade" in result.stdout
     assert "inspect-state" in result.stdout
     assert "proof" in result.stdout
+    assert "sync-identities" in result.stdout
     assert result.stderr == ""
+
+
+def test_build_sync_identities_command_targets_remote_state() -> None:
+    remote_cli = import_remote_cli_module()
+    session = remote_cli.RemoteTransportSession(
+        transport=object(),
+        remote_root="/root/dokploy-wizard",
+    )
+
+    command = remote_cli._build_sync_identities_command(session)
+
+    assert "sync-identities" in command
+    assert "--env-file /root/dokploy-wizard/.install.env" in command
+    assert "--state-dir /root/dokploy-wizard/state" in command
 
 
 def test_build_modify_command_forwards_force_phase() -> None:

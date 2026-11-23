@@ -1811,3 +1811,45 @@ exists nowhere is dropped by the identity sync, box-verified (["demo"] →
 [] on the next coder pass). All four demo-dependent finals were re-shot
 against the seeded box before the teardown, so gallery and box agree in
 both states.
+
+## Addendum: one-ID automation (identity timer + Gitea pre-flight spring + personal-password rule)
+
+The operator's first real second user (Mailson, created in Coder's UI) exposed
+the promise we had not actually kept: "new Coder account → FileX and Gitea
+logins appear automatically" was only true inside a coder-phase apply (FileX)
+or a workspace boot (Gitea). There was no timer, no daemon — a converged
+`modify` answers noop and seeds nobody, and the boot lane then re-stomped the
+new person's password with the stack secret on every start. Fix, shipped in
+this change set:
+
+- **Gitea pre-flight spring lane** (`_prestand_gitea_identities`): the coder
+  identity block now creates missing roster accounts itself (email-first
+  lookup, manual/legacy skip rules, `must_change_password: False` — a pending
+  must-change turns basic-auth into 403, measured). Freshly created rows are
+  unioned into the claim set after `_identity_sync_actions`, whose prune only
+  trusts the pre-create snapshot.
+- **Standalone `sync-identities` command**: the same three lanes, no Dokploy
+  client, logs the session it mints back out (`_coder_logout`, DELETE with a
+  POST fallback) so timer passes never pile up login rows.
+- **On-host timer**: the coder apply installs
+  `dokploy-wizard-identity.{service,timer}` (OnBootSec=3min,
+  OnUnitActiveSec=5min, `ConditionPathExists` on the env file, PYTHONPATH →
+  the bundle that rendered it). Ledger type `coder_identity_timer` rides
+  `apply_time_owned_resources` → `build_coder_ledger(extra_resources=...)`
+  (a mid-apply ledger write would be clobbered by the engine's rebuild);
+  uninstall rule `retain_safe=True, priority=29` + an executor branch that
+  disables, unlinks, and reloads. Unmapped ledger types hard-error, so the
+  rule was load-bearing.
+- **Personal passwords survive**: the boot lane's unconditional password PATCH
+  is now gated to the deployer's own login (`DOKPLOY_GT_ADMIN_LOGIN` from the
+  existing replacement token). The FileX lane and the gateway lane already
+  skipped existing emails / synced passwords on drift only; the Gitea boot
+  lane was the one stomp left. Accepted trade: the demo-repo seed authenticates
+  with the stack password, so a non-admin's first boot notes "skipped demo
+  seed: basic auth refused" — honest, not fatal.
+- **Mailson, sequenced**: pre-seeded directly (FileX `role:"user"` create +
+  Gitea admin-API create, his personal password, loopback edge + provisioner
+  tokens from on-box state) **before** the coder pass ran, so the lanes found
+  his email standing and skipped-claimed him instead of baking the stack
+  secret. The roster email (`mailson.oliveira@unesp.br`) is the match key on
+  every surface; username alone never claims.

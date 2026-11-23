@@ -47,6 +47,7 @@ from dokploy_wizard.dokploy import (
     DokploySeaweedFsBackend,
     DokploySharedCoreBackend,
     build_litellm_consumer_model_allowlists,
+    sync_stack_identities,
 )
 from dokploy_wizard.host_prereqs import (
     DOCKER_APT_PACKAGES,
@@ -301,6 +302,27 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     modify_parser.set_defaults(handler=_handle_modify)
+
+    sync_identities_parser = subparsers.add_parser(
+        "sync-identities",
+        help=(
+            "reconcile FileX/Gitea/LiteLLM accounts against the live Coder roster "
+            "(the same lanes the coder phase runs; this is what the host identity timer invokes)"
+        ),
+    )
+    sync_identities_parser.add_argument(
+        "--env-file",
+        type=Path,
+        required=True,
+        help="path to the reusable env file",
+    )
+    sync_identities_parser.add_argument(
+        "--state-dir",
+        type=Path,
+        default=Path(".dokploy-wizard-state"),
+        help="directory containing persisted wizard state documents",
+    )
+    sync_identities_parser.set_defaults(handler=_handle_sync_identities)
 
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -675,6 +697,69 @@ def _handle_modify(args: argparse.Namespace) -> int:
         raise SystemExit(_redacted_cli_error(error)) from error
 
     print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0
+
+
+def _handle_sync_identities(args: argparse.Namespace) -> int:
+    try:
+        raw_env = _load_install_raw_env(
+            args.env_file,
+            non_interactive=True,
+            warn_on_broad_permissions=True,
+        )
+        loaded_state = load_state_dir(args.state_dir)
+        desired_state = loaded_state.desired_state
+    except (OSError, StateValidationError) as error:
+        raise SystemExit(_redacted_cli_error(error)) from error
+    if desired_state is None:
+        raise SystemExit(
+            _redacted_cli_error(RuntimeError("No desired state found in the state directory."))
+        )
+    coder_hostname = desired_state.hostnames.get("coder")
+    notes: list[str] = []
+    if coder_hostname is None:
+        notes = ["Coder is not part of this stack; nothing to sync."]
+    else:
+        litellm_keys: LiteLLMGeneratedKeys | None = None
+        try:
+            litellm_keys = ensure_litellm_generated_keys(args.state_dir)
+        except (OSError, StateValidationError) as error:
+            # Gateway rows are one lane; the command keeps going without them.
+            notes = [f"LiteLLM identity sync skipped: {error}"]
+        try:
+            notes.extend(
+                sync_stack_identities(
+                    coder_hostname=coder_hostname,
+                    admin_email=raw_env.values.get("DOKPLOY_ADMIN_EMAIL", "admin@example.com"),
+                    admin_password=raw_env.values.get(
+                        "DOKPLOY_ADMIN_PASSWORD", _DEFAULT_DOKPLOY_ADMIN_PASSWORD
+                    ),
+                    gitea_hostname=desired_state.hostnames.get("gitea") or "",
+                    filex_hostname=desired_state.hostnames.get("filex") or "",
+                    state_dir=args.state_dir,
+                    litellm_admin_api=(
+                        None
+                        if litellm_keys is None
+                        else LiteLLMAdminClient(
+                            api_url="http://127.0.0.1:4000",
+                            master_key=litellm_keys.master_key,
+                        )
+                    ),
+                )
+            )
+        except CoderError as error:
+            raise SystemExit(_redacted_cli_error(error)) from error
+    print(
+        json.dumps(
+            {
+                "mode": "sync-identities",
+                "coder": coder_hostname,
+                "notes": notes,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 

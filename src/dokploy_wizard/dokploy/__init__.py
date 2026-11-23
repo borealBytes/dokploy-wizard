@@ -21,7 +21,7 @@ from dokploy_wizard.dokploy.client import (
     DokployScheduleRecord,
 )
 from dokploy_wizard.dokploy.cloudflared import DokployCloudflaredBackend
-from dokploy_wizard.dokploy.coder import DokployCoderBackend
+from dokploy_wizard.dokploy.coder import DokployCoderBackend, sync_stack_identities
 from dokploy_wizard.dokploy.compose_noop import (
     ComposeApplyResult,
     apply_compose_noop_guard,
@@ -66,6 +66,7 @@ __all__ = [
     "DokployScheduleRecord",
     "DokploySharedCoreBackend",
     "build_litellm_consumer_model_allowlists",
+    "sync_stack_identities",
     "apply_compose_noop_guard",
     "load_compose_artifact_hash",
     "persist_compose_artifact_hash",

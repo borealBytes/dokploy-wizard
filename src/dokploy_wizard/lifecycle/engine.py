@@ -326,6 +326,10 @@ def execute_lifecycle_plan(
                     stack_name=desired_state.stack_name,
                     service_resource_id=coder.service_resource_id,
                     data_resource_id=coder.data_resource_id,
+                    # The backend claims host resources (the identity timer) from
+                    # inside the apply; the ledger must learn them in the same
+                    # rebuild or uninstall would strand the units.
+                    extra_resources=getattr(backends.coder, "apply_time_owned_resources", ()),
                 )
                 write_ownership_ledger(state_dir, current_ledger)
         elif phase == "cloudflare_access":

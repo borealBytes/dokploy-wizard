@@ -19,7 +19,11 @@ from dokploy_wizard.networking import (
     DNS_RESOURCE_TYPE,
     TUNNEL_RESOURCE_TYPE,
 )
-from dokploy_wizard.packs.coder import CODER_DATA_RESOURCE_TYPE, CODER_SERVICE_RESOURCE_TYPE
+from dokploy_wizard.packs.coder import (
+    CODER_DATA_RESOURCE_TYPE,
+    CODER_IDENTITY_TIMER_RESOURCE_TYPE,
+    CODER_SERVICE_RESOURCE_TYPE,
+)
 from dokploy_wizard.packs.docuseal import (
     DOCUSEAL_DATA_RESOURCE_TYPE,
     DOCUSEAL_SERVICE_RESOURCE_TYPE,
@@ -162,6 +166,12 @@ _RULES: dict[str, DeletionRule] = {
     SURFSENSE_SERVICE_RESOURCE_TYPE: DeletionRule(phase="surfsense", retain_safe=True, priority=30),
     SURFSENSE_DATA_RESOURCE_TYPE: DeletionRule(phase="surfsense", retain_safe=False, priority=31),
     CODER_SERVICE_RESOURCE_TYPE: DeletionRule(phase="coder", retain_safe=True, priority=30),
+    # The identity timer pair is host runtime state, not data: it goes with the
+    # pack in both modes (a timer syncing accounts into a torn-down stack is
+    # just journal noise). First coder deletion, before the service itself.
+    CODER_IDENTITY_TIMER_RESOURCE_TYPE: DeletionRule(
+        phase="coder", retain_safe=True, priority=29
+    ),
     CODER_DATA_RESOURCE_TYPE: DeletionRule(phase="coder", retain_safe=False, priority=31),
     MATRIX_SERVICE_RESOURCE_TYPE: DeletionRule(phase="matrix", retain_safe=True, priority=30),
     MATRIX_DATA_RESOURCE_TYPE: DeletionRule(phase="matrix", retain_safe=False, priority=31),
@@ -210,7 +220,7 @@ _PACK_RUNTIME_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "gitea": (GITEA_SERVICE_RESOURCE_TYPE,),
     "seaweedfs": (SEAWEEDFS_SERVICE_RESOURCE_TYPE,),
     "surfsense": (SURFSENSE_SERVICE_RESOURCE_TYPE,),
-    "coder": (CODER_SERVICE_RESOURCE_TYPE,),
+    "coder": (CODER_SERVICE_RESOURCE_TYPE, CODER_IDENTITY_TIMER_RESOURCE_TYPE),
     "openclaw": (
         OPENCLAW_SERVICE_RESOURCE_TYPE,
         OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,

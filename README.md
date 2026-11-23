@@ -936,6 +936,28 @@ the same flag (`dokploy-wizard-remote modify --force-phase coder`).
 
 Uninstall is ledger-driven, and the retired advisor/research packs are still understood ledger entries: their resource types are kept as literals in the uninstall planner, so an older box that once ran them uninstalls cleanly without resurrecting the removed pack modules.
 
+### Sync identities
+
+```bash
+./bin/dokploy-wizard sync-identities --env-file path/to/install.env --state-dir .dokploy-wizard-state
+```
+
+`sync-identities` reconciles every Coder-persona identity surface against the
+live Coder roster in one pass, without any lifecycle machinery: FileX accounts
+pre-stand, Gitea accounts spring (and claimed rows re-enable), and the LiteLLM
+gateway upserts user rows. It is the same lane body the coder phase runs, minus
+the Dokploy client — the login session it opens is logged out on the way
+before it exits. On a deployed host, the coder phase installs a systemd pair
+(`dokploy-wizard-identity.timer` / `.service`, ledger-owned as
+`coder_identity_timer`) that invokes it every 5 minutes, which is what makes
+"new Coder user -> working FileX and Gitea logins" happen automatically within
+minutes, no wizard rerun required. Password rules: auto-sprung accounts start
+on the stack admin password, a non-admin's password is never re-stomped (by
+either the timer or a workspace boot), and the deployer login keeps riding the
+stack secret on every boot. The remote helper mirrors the command:
+`dokploy-wizard-remote sync-identities` uploads the repo bundle and runs it
+against the host's state directory.
+
 ### Upgrade
 
 ```bash
