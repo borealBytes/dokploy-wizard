@@ -270,6 +270,7 @@ between you and a typo.
 - Same-host rerun / noop proof works
 - fresh-VPS install, rerun, and inspect-state flows are part of the validation path
 - SeaweedFS, Matrix, Moodle, DocuSeal, FileX, Gitea, and Coder are all part of the wizard-managed path
+- FileX ships with a bundled ONLYOFFICE editing sidecar on its own hostname (JWT on every hop), and the Coder phase installs the on-host identity timer that reconciles Gitea, FileX, and gateway accounts
 - Unchanged healthy services skip Dokploy update/deploy on rerun through compose artifact hash tracking
 
 ## High-level architecture
@@ -299,6 +300,8 @@ flowchart LR
     subgraph Apps[Wizard-managed application surfaces]
       Moodle[🎓 Moodle]
       DocuSeal[✍️ DocuSeal]
+      FileX[📁 FileX]
+      Gitea[🎱 Gitea]
       Coder[💻 Coder]
       Seaweed[🪣 SeaweedFS / S3]
     end
@@ -306,15 +309,26 @@ flowchart LR
     subgraph Internal[Internal-only sidecars and shared services]
       Shared[(🧱 Shared Core\nPostgres + Redis + Postfix + LiteLLM)]
       ModelSync[♻️ LiteLLM model-sync\nsidecar]
+      Office[📝 ONLYOFFICE sidecar<br/>own hostname, JWT on every hop]
+      Timer[⏱ identity timer<br/>sync-identities every 5 min]
     end
 
     Traefik --> Moodle
     Traefik --> DocuSeal
+    Traefik --> FileX
+    Traefik --> Gitea
     Traefik --> Coder
     Traefik --> Seaweed
+    Traefik --> Office
     Dokploy --> Shared
     Dokploy --> Coder
     Dokploy --> Seaweed
+    FileX -->|editor frame + JWT| Office
+    FileX -->|files| Seaweed
+    Gitea -->|LFS| Seaweed
+    Timer -->|pre-stand lanes| Gitea
+    Timer --> FileX
+    Timer --> Shared
 
     Shared --> ModelSync
     Apps --> Shared
