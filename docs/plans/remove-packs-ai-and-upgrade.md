@@ -1853,3 +1853,27 @@ this change set:
   his email standing and skipped-claimed him instead of baking the stack
   secret. The roster email (`mailson.oliveira@unesp.br`) is the match key on
   every surface; username alone never claims.
+- **Box-proven the same afternoon** (`6f5b6ec` + `54801d4`, showmeseewhy): a
+  throwaway Coder user (`seedtest`, dormant, never logged in) hit every
+  surface by the **timer's own next activation, 120s later** — journal shows
+  exactly three notes: `Created Gitea account (identity pre-flight)`,
+  `Created FileX account (identity pre-flight)`,
+  `Created LiteLLM user (internal_user)`. Gitea login verified basic-auth
+  with `is_admin=False`, FileX login `200` on the stack password, claims
+  ledger picked the row up. Teardown across all three surfaces + one pass
+  collapsed claims back to `["mailsonoliveira"]` — the vanished-claim rule
+  works on timer-written rows too.
+- **Measured API truths along the way**: logout at the v2.39.4 pin is
+  **POST** `/api/v2/users/logout` (200 "Logged out!", token dead; DELETE is
+  404 — code tries POST first); Coder's build-API user create requires
+  `organization_ids` (the operator UI's "no org selected" error at 400
+  level), so prop scripts must pass the default org; a `login_type=password`
+  created user is DORMANT, and dormancy does not gate the lanes — seeding is
+  keyed to account *existence*, which is strictly friendlier than the
+  promised "first login" trigger. Gateway side note, confirmed the same run:
+  `ensure_user_identities` upserts but never sweeps vanished roster names
+  (disable-not-delete doctrine; a stale gateway row is inert since new users
+  are denied by default), so the prop's gateway row was deleted explicitly
+  via `POST /user/delete {"user_ids": [...]}` — the box now carries exactly
+  the three real identities: mailsonoliveira (internal), clayton
+  (proxy_admin), default_user_id.
