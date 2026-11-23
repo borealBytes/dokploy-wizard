@@ -4115,20 +4115,21 @@ def test_sync_stack_identities_logs_out_when_the_roster_is_unreadable(
     assert logged_out == ["session-9"]
 
 
-def test_coder_logout_prefers_delete_and_falls_back_to_post(
+def test_coder_logout_prefers_post_and_falls_back_to_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Measured at the box pin (v2.39.4): POST answers 200, DELETE answers 404.
     attempts: list[str] = []
 
     def fake_request(**kwargs: object) -> dict[str, object]:
         attempts.append(str(kwargs["method"]))
-        if kwargs["method"] == "DELETE":
-            raise coder_module._CoderHTTPError(status=405)
+        if kwargs["method"] == "POST":
+            raise coder_module._CoderHTTPError(status=404)
         return {}
 
     monkeypatch.setattr(coder_module, "_coder_request", fake_request)
     coder_module._coder_logout(hostname="coder.example.com", session_token="session-9")
-    assert attempts == ["DELETE", "POST"]
+    assert attempts == ["POST", "DELETE"]
 
 
 def test_gitea_boot_lane_password_resync_is_admin_gated() -> None:

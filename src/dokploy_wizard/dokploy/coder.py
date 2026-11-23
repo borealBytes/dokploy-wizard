@@ -1241,12 +1241,13 @@ def _coder_logout(*, hostname: str, session_token: str) -> None:
 
     `/api/v2/users/login` mints a PERSISTENT session (unlike the one Coder's
     own UI cookie flow issues at sign-in): leaving every sync pass logged in
-    piles a visible row onto the user's tokens page each run. DELETE is the
-    documented verb on current Coder; the POST fallback costs one extra probe
-    only on builds that predate the rename, and a miss either way is a leak to
-    tolerate, not a reason to fail an identity pass.
+    piles a visible row onto the user's tokens page each run. Measured on the
+    box at the v2.39.4 pin: POST /api/v2/users/logout answers 200 "Logged
+    out!" and the token is dead on reuse (401); DELETE answers 404. The DELETE
+    fallback keeps the lane honest on newer builds that renamed the verb, and
+    a miss either way is a leak to tolerate, not a reason to fail a pass.
     """
-    for method in ("DELETE", "POST"):
+    for method in ("POST", "DELETE"):
         try:
             _coder_request(
                 hostname=hostname,
