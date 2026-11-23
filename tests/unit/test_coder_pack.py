@@ -120,6 +120,9 @@ class FakeCoderBackend:
     health_ok: bool = True
     health_results: list[bool] | None = None
     ensure_calls: int = 0
+    # Protocol member the lifecycle engine harvests after the coder apply;
+    # this fake installs no host units.
+    apply_time_owned_resources: tuple[OwnedResource, ...] = ()
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         if self.existing_service is not None and self.existing_service.resource_id == resource_id:
@@ -4308,11 +4311,34 @@ def test_install_identity_timer_skips_without_root_or_env_file(
     assert owned is False
     assert any("not running as root" in note for note in notes)
 
+    # An unrooted pass with the pair already on disk still reports ownership:
+    # the files are ours to remove at uninstall even if this pass could not
+    # refresh them (review catch: dropping the row here strands the timer).
+    (unit_dir / "dokploy-wizard-identity.service").write_text("[Service]\n", encoding="utf-8")
+    (unit_dir / "dokploy-wizard-identity.timer").write_text("[Timer]\n", encoding="utf-8")
+    _notes, owned = identity_timer(state_dir=state_dir)  # type: ignore[operator]
+    assert owned is True
+
     monkeypatch.setattr(coder_module.os, "geteuid", lambda: 0)
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(coder_module.subprocess, "run", fake_run)
+
     notes, owned = identity_timer(state_dir=state_dir)  # type: ignore[operator]
-    assert owned is False
-    assert any("no .install.env" in note for note in notes)
-    assert not (unit_dir / "dokploy-wizard-identity.service").exists()
+    assert owned is True
+    assert not any("no .install.env" in note for note in notes)
+
+    # A write failure on a pair that already stands keeps the claim too.
+    (tmp_path / ".install.env").write_text("STACK_NAME=x\n", encoding="utf-8")
+
+    def failing_write(*args: object, **kwargs: object) -> None:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(coder_module.Path, "write_text", failing_write)
+    _notes, owned = identity_timer(state_dir=tmp_path / "state")  # type: ignore[operator]
+    assert owned is True
 
 
 def test_build_coder_ledger_rebuilds_identity_timer_extras() -> None:
@@ -4340,12 +4366,18 @@ def test_build_coder_ledger_rebuilds_identity_timer_extras() -> None:
     assert ("coder_service", "svc-new") in rows
     assert ("coder_data", "data-new") in rows
 
-    # No extras (e.g. the coder apply ran unrooted): the stale row is stripped,
-    # never left behind as uninstall noise.
-    stripped = build_coder_ledger(
+    # No extras (e.g. the coder apply ran unrooted, or a unit write failed):
+    # the prior row survives the rebuild. The pair still stands on disk in
+    # every such case — dropping the row there is exactly what strands an
+    # enabled timer against a torn-down stack, because uninstall deletes only
+    # what the ledger can name (and the executor's unconditional unit
+    # teardown is the backstop of last resort).
+    kept = build_coder_ledger(
         existing_ledger=existing,
         stack_name="demo",
         service_resource_id="svc-new",
         data_resource_id="data-new",
     )
-    assert [item.resource_type for item in stripped.resources] == ["coder_service", "coder_data"]
+    assert ("coder_identity_timer", "dokploy-wizard-identity.timer") in [
+        (item.resource_type, item.resource_id) for item in kept.resources
+    ]

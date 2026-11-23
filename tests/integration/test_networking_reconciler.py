@@ -23,7 +23,7 @@ from dokploy_wizard.packs.coder import CoderResourceRecord
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
 from dokploy_wizard.packs.moodle import MoodleResourceRecord
 from dokploy_wizard.preflight import HostFacts, PreflightCheck, PreflightReport, ResourceProfile
-from dokploy_wizard.state import load_state_dir
+from dokploy_wizard.state import OwnedResource, load_state_dir
 from tests.integration.test_matrix_pack import FakeMatrixBackend
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
@@ -48,6 +48,9 @@ class FakeDokployBackend:
 class FakeCoderBackend:
     existing_service: CoderResourceRecord | None = None
     existing_data: CoderResourceRecord | None = None
+    # Protocol member the engine harvests after the coder apply; the fake
+    # installs no host units.
+    apply_time_owned_resources: tuple[OwnedResource, ...] = ()
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         if self.existing_service is not None and self.existing_service.resource_id == resource_id:

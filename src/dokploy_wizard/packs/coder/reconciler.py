@@ -71,11 +71,27 @@ class CoderBackend(Protocol):
 
     def ensure_application_ready(self) -> tuple[str, ...]: ...
 
+    @property
+    def apply_time_owned_resources(self) -> tuple[OwnedResource, ...]:
+        """Host resources the most recent apply installed.
+
+        The engine harvests this into `build_coder_ledger(extra_resources=...)`
+        because mid-apply ledger writes are clobbered by the rebuild; the
+        ledger merge keeps prior timer rows when a pass reports nothing (a
+        non-root pass or failed unit write still leaves the units standing).
+        Implementations must answer this before any apply has run.
+        """
+        ...
+
 
 class ShellCoderBackend:
     def __init__(self) -> None:
         self._service: CoderResourceRecord | None = None
         self._data: CoderResourceRecord | None = None
+        # Protocol member: the shell backend installs no host units, and a
+        # pass that reports nothing must read as "nothing new owned", never
+        # as a missing attribute.
+        self.apply_time_owned_resources: tuple[OwnedResource, ...] = ()
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         if self._service is not None and self._service.resource_id == resource_id:
@@ -290,6 +306,11 @@ def build_coder_ledger(
     data_resource_id: str | None,
     extra_resources: Sequence[OwnedResource] = (),
 ) -> OwnershipLedger:
+    timer_scopes = {
+        resource.scope
+        for resource in extra_resources
+        if resource.resource_type == CODER_IDENTITY_TIMER_RESOURCE_TYPE
+    }
     resources = [
         resource
         for resource in existing_ledger.resources
@@ -302,13 +323,20 @@ def build_coder_ledger(
                 resource.resource_type == CODER_DATA_RESOURCE_TYPE
                 and resource.scope == _data_scope(stack_name)
             )
-            or resource.resource_type == CODER_IDENTITY_TIMER_RESOURCE_TYPE
+            or (
+                resource.resource_type == CODER_IDENTITY_TIMER_RESOURCE_TYPE
+                and resource.scope in timer_scopes
+            )
         )
     ]
     # Extra resources ride the apply itself (the identity timer units are
-    # installed from inside `ensure_application_ready`): rebuilding the coder
-    # ledger without them would strand host units uninstall can no longer
-    # name. The strip above keeps the re-add idempotent across reruns.
+    # installed from inside `ensure_application_ready`). The timer strip above
+    # is deliberately narrow: it only replaces rows for scopes this pass
+    # re-asserted, because a pass that could not report (non-root, a failed
+    # unit write, the coder phase skipped) leaves the units standing on disk —
+    # dropping their row there would strand an enabled timer that uninstall
+    # can no longer name. The narrow strip keeps the re-add idempotent across
+    # reruns of a stack that does report.
     for resource in extra_resources:
         resources.append(resource)
     if service_resource_id is not None:

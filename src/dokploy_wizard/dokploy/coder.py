@@ -190,6 +190,11 @@ class DokployCoderBackend:
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
+        # Protocol member (`CoderBackend.apply_time_owned_resources`): set
+        # inside `ensure_application_ready`; initialized empty so the engine
+        # harvest before any apply reads as "nothing claimed", not an
+        # AttributeError.
+        self._apply_time_owned_resources: list[OwnedResource] = []
 
     def _filex_provisioner_state(self) -> FilexProvisionerState | None:
         """The provisioner record to bake, re-reading state when needed.
@@ -312,9 +317,10 @@ class DokployCoderBackend:
         `ensure_application_ready`, but the coder ledger is rebuilt by the
         engine after the apply returns — so the engine harvests this tuple
         and folds it into `build_coder_ledger` (a mid-apply direct ledger
-        write would be clobbered by that rebuild).
+        write would be clobbered by that rebuild). Initialized empty in the
+        constructor so reads before any apply return no rows.
         """
-        return tuple(getattr(self, "_apply_time_owned_resources", ()))
+        return tuple(self._apply_time_owned_resources)
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "service")
@@ -1814,9 +1820,13 @@ def _install_identity_timer(*, state_dir: Path) -> tuple[list[str], bool]:
     timer_path = _SYSTEMD_UNIT_DIR / f"{_CODER_IDENTITY_TIMER_NAME}.timer"
     present = service_path.is_file() and timer_path.is_file()
     if os.geteuid() != 0:
+        # A pass without root cannot install or refresh the pair, but when the
+        # pair already stands on disk it is still ours: ownership rides the
+        # files (the uninstaller removes them with root later), and dropping
+        # the row here would strand an enabled timer against a torn-down stack.
         return (
             ["Identity timer skipped: not running as root (every coder pass still syncs)."],
-            False,
+            present,
         )
     if not env_file.is_file() and not present:
         return (
@@ -1833,7 +1843,9 @@ def _install_identity_timer(*, state_dir: Path) -> tuple[list[str], bool]:
             path.write_text(text, encoding="utf-8")
             changed = True
         except OSError as exc:
-            return ([f"Identity timer skipped: cannot write '{path.name}' ({exc})."], False)
+            # Same rule as the non-root branch: a failed refresh of a pair
+            # that already stands leaves the old (owned) units in place.
+            return ([f"Identity timer skipped: cannot write '{path.name}' ({exc})."], present)
     if changed and not _systemctl("daemon-reload"):
         notes.append(
             "Identity timer warning: systemctl daemon-reload failed; the new unit text lands on next boot."

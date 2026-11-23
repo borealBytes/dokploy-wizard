@@ -299,6 +299,14 @@ def execute_uninstall_plan(
     except OSError:
         pass
 
+    # Belt and braces for the identity timer: the ledger-driven deletion above
+    # only fires when the coder_identity_timer row survived to this point,
+    # but every known way to lose the row (a non-root coder pass predating
+    # the present-report fix, a failed unit write) leaves the enabled pair
+    # standing on disk. The teardown is idempotent, so run it unconditionally
+    # here too: an orphaned timer must not outlive the stack it reconciles.
+    _remove_identity_timer_units()
+
     # Dokploy's stack teardown spares the compose project networks (and in
     # retain terms the named volumes): sweep the stack-prefixed leftovers or
     # every future install generation leaks another daemon allocation. See

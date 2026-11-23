@@ -18,8 +18,13 @@ for (const line of fs.readFileSync(argValue('--install-env'), 'utf8').split(/\r?
 }
 const prefs = {};
 for (const pair of (argValue('--prefs') || '').split(',').filter(Boolean)) {
-  const [k, v] = pair.split('=');
-  prefs[k.trim()] = v === 'true' ? true : v === 'false' ? false : Number.isNaN(Number(v)) ? v : Number(v);
+  // Split on the first '=' only: pref values legitimately carry '=' (URLs
+  // with query strings) and a naive split('=') truncates them silently.
+  const eq = pair.indexOf('=');
+  if (eq <= 0) continue;
+  const k = pair.slice(0, eq).trim();
+  const v = pair.slice(eq + 1);
+  prefs[k] = v === 'true' ? true : v === 'false' ? false : Number.isNaN(Number(v)) ? v : Number(v);
 }
 console.log('PREFS:', JSON.stringify(prefs));
 const base = `https://filex.${values.ROOT_DOMAIN}`;

@@ -120,6 +120,78 @@ def _no_real_docker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(executor, "_docker", _FakeDocker())
 
 
+@pytest.fixture(autouse=True)
+def _no_real_systemd(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    # Uninstall now takes the identity timer pair down unconditionally (belt
+    # and braces for a lost ledger row); unit tests record the call instead
+    # of driving the host's systemctl and /etc.
+    calls: list[dict[str, Any]] = []
+
+    def fake_remove(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(executor, "_remove_identity_timer_units", fake_remove)
+    return calls
+
+
+def test_uninstall_takes_identity_timer_down_without_a_ledger_row(
+    tmp_path: Path, _no_real_systemd: list[dict[str, Any]]
+) -> None:
+    # The strand case the review caught: a coder pass that could not re-assert
+    # ownership leaves the enabled pair on disk with no row. The planned
+    # deletions never name it, so the unconditional teardown must.
+    result = _run_uninstall(tmp_path, "destroy-data")
+    assert result.state_cleared
+    assert _no_real_systemd == [{}]  # default timer_unit from the shared constant
+
+
+def test_uninstall_identity_timer_deletion_rides_the_ledger_row(
+    tmp_path: Path, _no_real_systemd: list[dict[str, Any]]
+) -> None:
+    from dokploy_wizard.packs.coder import (
+        CODER_IDENTITY_TIMER_RESOURCE_TYPE,
+        coder_identity_timer_resource,
+    )
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    desired_state = resolve_desired_state(
+        RawEnvInput(format_version=1, values={"STACK_NAME": "s", "ROOT_DOMAIN": "example.com"})
+    )
+    timer_row = coder_identity_timer_resource("s")
+    plan = UninstallPlan(
+        mode="destroy-data",
+        environment="local",
+        deletions=(
+            PlannedDeletion(
+                resource=timer_row,
+                phase="coder",
+                policy="delete",
+            ),
+        ),
+        retained_resources=(),
+        warnings=(),
+    )
+    execute_uninstall_plan(
+        state_dir=state_dir,
+        raw_input=RawEnvInput(format_version=1, values={"STACK_NAME": "s"}),
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=(timer_row,)),
+        plan=plan,
+        backend=executor.ShellUninstallBackend(
+            RawEnvInput(format_version=1, values={"STACK_NAME": "s"}),
+            cloudflare_backend=None,
+        ),
+        dry_run=False,
+        traefik_dynamic_dir=tmp_path / "no-traefik",
+    )
+    # The row's branch ran first (the real timer_unit name from the ledger),
+    # then the unconditional belt-and-braces call — both through the seam, so
+    # neither touched the host's /etc.
+    assert CODER_IDENTITY_TIMER_RESOURCE_TYPE == "coder_identity_timer"
+    assert _no_real_systemd == [{"timer_unit": "dokploy-wizard-identity.timer"}, {}]
+
+
 def _run_uninstall(tmp_path: Path, mode: str) -> Any:
     state_dir = tmp_path / "state"
     state_dir.mkdir()

@@ -44,8 +44,17 @@ try {
   }
   await page.click('text="My files"');
   await page.waitForTimeout(2000);
+  const t0 = Date.now();
   await page.locator('span.fe-list__name:has-text(".docx")').first().dblclick();
-  await page.waitForTimeout(9000);
+  // The cold path is slowest: wait for a terminal condition (frame landed or
+  // the load-failure banner) and report elapsed time instead of a fixed sleep
+  // that either flakes on cold boxes or masks the real latency.
+  const settled = await page.waitForFunction(
+    () => document.querySelectorAll('iframe').length > 0
+      || /did not load|reverse proxy/i.test(document.body.innerText),
+    { timeout: 60000 },
+  ).then(() => true).catch(() => false);
+  console.log('SETTLED:', settled, 'ELAPSED_MS:', Date.now() - t0);
   const banners = await page.locator('text=/did not load|reverse proxy/i').allTextContents().catch(() => []);
   console.log('BANNERS:', JSON.stringify(banners.map((b) => b.slice(0, 120))));
   const frames = page.frames().map((f) => f.url()).filter((u) => u.includes('office'));
